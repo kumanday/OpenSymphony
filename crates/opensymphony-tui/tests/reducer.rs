@@ -230,5 +230,5 @@ fn keeps_selected_issue_visible_in_long_issue_lists() {
     let rendered = state.render_text(100, 22);
 
     assert!(rendered.contains("> COE-263 [running / In Progress]"));
-    assert!(rendered.contains("COE-263 Issue 8"));
+    assert!(rendered.contains("workspace path: workspace-8"));
 }
