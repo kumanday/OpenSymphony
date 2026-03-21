@@ -133,15 +133,13 @@ async fn handle_readiness_socket(mut socket: WebSocket) {
         .expect("ping should send");
     socket
         .send(Message::Text(
-            serde_json::to_string(&unrelated)
-                .expect("event should serialize"),
+            serde_json::to_string(&unrelated).expect("event should serialize"),
         ))
         .await
         .expect("unrelated event should send");
     socket
         .send(Message::Text(
-            serde_json::to_string(&ready)
-                .expect("event should serialize"),
+            serde_json::to_string(&ready).expect("event should serialize"),
         ))
         .await
         .expect("ready event should send");
