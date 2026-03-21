@@ -33,7 +33,7 @@ Current M1 unit suite:
 
 - `opensymphony-domain`: issue normalization and snapshot serialization
 - `opensymphony-workflow`: front matter parsing, strict rendering, env/path resolution, fail-fast unknown nested workflow keys plus fail-fast unknown top-level keys outside the supported opaque `codex` namespace, required Linear tracker credentials, fail-fast env-backed workspace roots, and OpenHands namespace validation
-- `opensymphony-orchestrator`: candidate sorting, claimed-to-running enforcement, bounded concurrency, retry/backoff, retry attempt validation, reservation-state-aware start-time capacity rechecks, reconciliation including fresh-claim grace plus stale claimed-only release even when stall detection is disabled, stall detection, and restart recovery
+- `opensymphony-orchestrator`: candidate sorting, claimed-to-running enforcement, latest dispatch-eligibility rechecks, bounded concurrency, retry/backoff, retry attempt validation, reservation-state-aware start-time capacity rechecks, reconciliation including fresh-claim grace plus stale claimed-only release even when stall detection is disabled, freshest global rate-limit retention, stall detection, and restart recovery
 - `opensymphony-testkit`: downstream compile-time smoke coverage for the public M1 interfaces
 
 ## 2.2 Contract tests
@@ -120,10 +120,12 @@ Suggested gates:
 
 - poll candidate sorting
 - claim and release transitions
+- re-check dispatch eligibility before promoting claimed work to `Running`
 - preserve fresh claimed-only reservations through the normal claim-to-start window, even when stall detection is disabled
 - release stale claimed-only reservations that never gain a backing run
 - max concurrency
 - re-check global and per-state capacity against the reservation's current state before promoting work to `Running`
+- preserve the freshest known global rate-limit snapshot when other runs finish
 - failure retry backoff
 - continuation retry at fixed delay
 - reject retry launches with mismatched attempt numbers

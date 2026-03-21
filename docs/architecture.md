@@ -183,7 +183,7 @@ The repository now exposes three stable foundation contracts that later mileston
 - `opensymphony-orchestrator`
   - deterministic candidate sorting, claim logic, and claimed-to-running enforcement
   - explicit `Claimed` / `Running` / `RetryQueued` / `Released` transitions
-  - fixed continuation retry, exponential failure backoff, stall detection, retry-start validation for `due_at`, `attempt`, and bounded global/per-state capacity using the reservation's current state, reconciliation of running, retry-queued, and claimed-only issues including a claim-to-start grace window that remains independent from disabled stall detection before stale claimed-only release, and restart recovery
+  - fixed continuation retry, exponential failure backoff, stall detection, retry-start validation for `due_at`, `attempt`, latest dispatch eligibility, and bounded global/per-state capacity using the reservation's current state, reconciliation of running, retry-queued, and claimed-only issues including a claim-to-start grace window that remains independent from disabled stall detection before stale claimed-only release, freshest global rate-limit retention, and restart recovery
 
 The other crates are already present at their final ownership boundaries, but for M1 they intentionally expose only thin re-exports or placeholders rather than premature transport logic.
 

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Duration, Utc};
 use opensymphony_domain::{
-    CONTINUATION_RETRY_DELAY_MS, Issue, OrchestrationState, OrchestratorSnapshot,
+    BlockerRef, CONTINUATION_RETRY_DELAY_MS, Issue, OrchestrationState, OrchestratorSnapshot,
     RateLimitSnapshot, RetryEntry, RetryQueueSnapshot, RunAttempt, RunningIssueSnapshot,
     RuntimeSession, RuntimeTotals, WorkerOutcome, WorkerOutcomeKind, normalize_state_name,
 };
@@ -95,6 +95,7 @@ pub struct RunningIssue {
 struct ClaimedReservation {
     state: String,
     normalized_state: String,
+    blocked_by: Vec<BlockerRef>,
     claimed_reconcile_generation: u64,
 }
 
@@ -160,6 +161,8 @@ pub enum SchedulerError {
         state: String,
         limit: usize,
     },
+    #[error("issue `{issue_id}` is no longer dispatch-eligible in state `{state}`")]
+    DispatchIneligible { issue_id: String, state: String },
 }
 
 /// Single-authority orchestrator state model.
@@ -173,6 +176,7 @@ pub struct SchedulerState {
     completed: BTreeSet<String>,
     runtime_totals: RuntimeTotals,
     rate_limits: Option<RateLimitSnapshot>,
+    rate_limits_observed_at: Option<DateTime<Utc>>,
     reconcile_generation: u64,
 }
 
@@ -187,6 +191,7 @@ impl SchedulerState {
             completed: BTreeSet::new(),
             runtime_totals: RuntimeTotals::default(),
             rate_limits: None,
+            rate_limits_observed_at: None,
             reconcile_generation: 0,
         }
     }
@@ -296,9 +301,15 @@ impl SchedulerState {
                 });
             }
         }
-        let (state, normalized_state) = self
-            .claimed_reservations
-            .get(&issue.id)
+        let reservation = self.claimed_reservations.get(&issue.id);
+        if let Err(state) = self.dispatch_ineligible_state(&issue, reservation) {
+            self.release(&issue.id);
+            return Err(SchedulerError::DispatchIneligible {
+                issue_id: issue.id.clone(),
+                state,
+            });
+        }
+        let (state, normalized_state) = reservation
             .map(|reservation| {
                 (
                     reservation.state.clone(),
@@ -368,11 +379,11 @@ impl SchedulerState {
         issue_id: &str,
         session: RuntimeSession,
     ) -> Result<(), SchedulerError> {
+        self.maybe_update_rate_limits(session.rate_limits.clone(), session.last_event_at);
         let running = self
             .running
             .get_mut(issue_id)
             .ok_or_else(|| SchedulerError::NotRunning(issue_id.to_string()))?;
-        self.rate_limits = session.rate_limits.clone();
         running.run.session = session;
         Ok(())
     }
@@ -390,7 +401,10 @@ impl SchedulerState {
             .ok_or_else(|| SchedulerError::NotRunning(issue_id.to_string()))?;
 
         self.completed.remove(issue_id);
-        self.rate_limits = running.run.session.rate_limits.clone();
+        self.maybe_update_rate_limits(
+            running.run.session.rate_limits.clone(),
+            running.run.session.last_event_at.or(Some(finished_at)),
+        );
         self.runtime_totals
             .token_usage
             .add_assign(&running.run.session.token_usage);
@@ -580,6 +594,7 @@ impl SchedulerState {
                     } else if let Some(reservation) = self.claimed_reservations.get_mut(&issue_id) {
                         reservation.state = issue.state.clone();
                         reservation.normalized_state = issue.normalized_state();
+                        reservation.blocked_by = issue.blocked_by.clone();
                     }
                 }
                 Some(_) => {
@@ -700,15 +715,7 @@ impl SchedulerState {
         if self.claimed.contains(&issue.id) || self.running.contains_key(&issue.id) {
             return false;
         }
-        if !issue.is_active(&self.config.active_states, &self.config.terminal_states) {
-            return false;
-        }
-        if issue.normalized_state() == "todo"
-            && issue.has_non_terminal_blockers(&self.config.terminal_states)
-        {
-            return false;
-        }
-        true
+        self.dispatch_state_is_eligible(&issue.normalized_state(), &issue.blocked_by)
     }
 
     fn claimed_counts_by_state(&self) -> BTreeMap<String, usize> {
@@ -758,6 +765,7 @@ impl SchedulerState {
             ClaimedReservation {
                 state: issue.state.clone(),
                 normalized_state: normalized_state.to_string(),
+                blocked_by: issue.blocked_by.clone(),
                 claimed_reconcile_generation: self.reconcile_generation,
             },
         );
@@ -779,6 +787,58 @@ impl SchedulerState {
         self.reconcile_generation
             .saturating_sub(reservation.claimed_reconcile_generation)
             >= grace_generations
+    }
+
+    fn dispatch_state_is_eligible(&self, normalized_state: &str, blocked_by: &[BlockerRef]) -> bool {
+        self.config.active_states.iter().any(|state| state == normalized_state)
+            && !self
+                .config
+                .terminal_states
+                .iter()
+                .any(|state| state == normalized_state)
+            && !(normalized_state == "todo"
+                && blocked_by
+                    .iter()
+                    .any(|blocker| !blocker.is_terminal(&self.config.terminal_states)))
+    }
+
+    fn dispatch_ineligible_state(
+        &self,
+        issue: &Issue,
+        reservation: Option<&ClaimedReservation>,
+    ) -> Result<(), String> {
+        let issue_state = issue.normalized_state();
+        if !self.dispatch_state_is_eligible(&issue_state, &issue.blocked_by) {
+            return Err(issue_state);
+        }
+        if let Some(reservation) = reservation {
+            if !self.dispatch_state_is_eligible(
+                &reservation.normalized_state,
+                &reservation.blocked_by,
+            ) {
+                return Err(reservation.normalized_state.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn maybe_update_rate_limits(
+        &mut self,
+        rate_limits: Option<RateLimitSnapshot>,
+        observed_at: Option<DateTime<Utc>>,
+    ) {
+        let Some(rate_limits) = rate_limits else {
+            return;
+        };
+        let should_replace = match (self.rate_limits_observed_at, observed_at) {
+            (None, _) => true,
+            (Some(_), None) => self.rate_limits.is_none(),
+            (Some(current), Some(candidate)) => candidate >= current,
+        };
+        if should_replace {
+            self.rate_limits = Some(rate_limits);
+            self.rate_limits_observed_at = observed_at;
+        }
     }
 
     fn enqueue_retry(
@@ -857,6 +917,16 @@ mod tests {
         scheduler
             .start_run(issue, workspace_path, attempt, started_at)
             .unwrap();
+    }
+
+    fn blocker(identifier: &str, state: &str) -> BlockerRef {
+        BlockerRef {
+            id: Some(format!("blocker-{identifier}")),
+            identifier: Some(identifier.into()),
+            state: Some(state.into()),
+            created_at: None,
+            updated_at: None,
+        }
     }
 
     #[test]
@@ -1311,6 +1381,54 @@ mod tests {
     }
 
     #[test]
+    fn start_run_releases_claims_that_become_non_active_before_launch() {
+        for terminal_or_inactive_state in ["Done", "Human Review"] {
+            let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+            let claimed_issue = issue("1", "OSYM-1", "In Progress", Some(1), millis(0));
+            let claimed = scheduler.claim_candidate_batch(std::slice::from_ref(&claimed_issue));
+
+            assert_eq!(claimed.len(), 1);
+            assert!(matches!(
+                scheduler.start_run(
+                    issue("1", "OSYM-1", terminal_or_inactive_state, Some(1), millis(1_000)),
+                    PathBuf::from("/tmp/OSYM-1"),
+                    None,
+                    millis(1_000),
+                ),
+                Err(SchedulerError::DispatchIneligible { issue_id, .. }) if issue_id == "1"
+            ));
+            assert_eq!(
+                scheduler.orchestration_state("1"),
+                OrchestrationState::Released
+            );
+        }
+    }
+
+    #[test]
+    fn start_run_releases_todo_claims_that_pick_up_non_terminal_blockers() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+        let claimed_issue = issue("1", "OSYM-1", "Todo", Some(1), millis(0));
+        let claimed = scheduler.claim_candidate_batch(std::slice::from_ref(&claimed_issue));
+
+        assert_eq!(claimed.len(), 1);
+        assert!(matches!(
+            scheduler.start_run(
+                issue("1", "OSYM-1", "Todo", Some(1), millis(1_000))
+                    .with_blockers(vec![blocker("OSYM-2", "In Progress")]),
+                PathBuf::from("/tmp/OSYM-1"),
+                None,
+                millis(1_000),
+            ),
+            Err(SchedulerError::DispatchIneligible { issue_id, state })
+                if issue_id == "1" && state == "todo"
+        ));
+        assert_eq!(
+            scheduler.orchestration_state("1"),
+            OrchestrationState::Released
+        );
+    }
+
+    #[test]
     fn start_run_uses_reserved_state_for_capacity_checks() {
         let mut scheduler = SchedulerState::new(SchedulerConfig {
             max_concurrent_agents: 2,
@@ -1528,6 +1646,95 @@ mod tests {
                 millis(250_000),
             )
             .unwrap();
+    }
+
+    #[test]
+    fn finish_run_preserves_global_rate_limits_when_other_run_has_none() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+        claim_and_start_run(
+            &mut scheduler,
+            issue("1", "OSYM-1", "In Progress", Some(1), millis(0)),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            millis(0),
+        );
+        claim_and_start_run(
+            &mut scheduler,
+            issue("2", "OSYM-2", "In Progress", Some(1), millis(1_000)),
+            PathBuf::from("/tmp/OSYM-2"),
+            None,
+            millis(1_000),
+        );
+
+        let mut fresher_session =
+            RuntimeSession::default().with_event("message", "fresh", millis(10_000));
+        let fresher_limits = RateLimitSnapshot {
+            requests_remaining: Some(12),
+            tokens_remaining: Some(2400),
+            resets_at: Some(millis(30_000)),
+        };
+        fresher_session.rate_limits = Some(fresher_limits.clone());
+        scheduler
+            .update_runtime_session("1", fresher_session)
+            .unwrap();
+
+        scheduler
+            .finish_run("2", WorkerOutcome::succeeded(), millis(11_000))
+            .unwrap();
+
+        assert_eq!(
+            scheduler.snapshot(millis(12_000)).rate_limits,
+            Some(fresher_limits)
+        );
+    }
+
+    #[test]
+    fn finish_run_preserves_newer_global_rate_limits_against_older_run_data() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+        claim_and_start_run(
+            &mut scheduler,
+            issue("1", "OSYM-1", "In Progress", Some(1), millis(0)),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            millis(0),
+        );
+        claim_and_start_run(
+            &mut scheduler,
+            issue("2", "OSYM-2", "In Progress", Some(1), millis(1_000)),
+            PathBuf::from("/tmp/OSYM-2"),
+            None,
+            millis(1_000),
+        );
+
+        let mut fresher_session =
+            RuntimeSession::default().with_event("message", "fresh", millis(10_000));
+        let fresher_limits = RateLimitSnapshot {
+            requests_remaining: Some(12),
+            tokens_remaining: Some(2400),
+            resets_at: Some(millis(30_000)),
+        };
+        fresher_session.rate_limits = Some(fresher_limits.clone());
+        scheduler
+            .update_runtime_session("1", fresher_session)
+            .unwrap();
+
+        let mut older_session =
+            RuntimeSession::default().with_event("message", "older", millis(5_000));
+        older_session.rate_limits = Some(RateLimitSnapshot {
+            requests_remaining: Some(3),
+            tokens_remaining: Some(600),
+            resets_at: Some(millis(15_000)),
+        });
+        scheduler.running.get_mut("2").unwrap().run.session = older_session;
+
+        scheduler
+            .finish_run("2", WorkerOutcome::succeeded(), millis(11_000))
+            .unwrap();
+
+        assert_eq!(
+            scheduler.snapshot(millis(12_000)).rate_limits,
+            Some(fresher_limits)
+        );
     }
 
     #[test]
