@@ -1,0 +1,37 @@
+[workspace]
+members = [
+    "crates/opensymphony-cli",
+    "crates/opensymphony-control",
+    "crates/opensymphony-domain",
+    "crates/opensymphony-linear",
+    "crates/opensymphony-linear-mcp",
+    "crates/opensymphony-openhands",
+    "crates/opensymphony-orchestrator",
+    "crates/opensymphony-testkit",
+    "crates/opensymphony-tui",
+    "crates/opensymphony-workflow",
+    "crates/opensymphony-workspace",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+async-trait = "0.1.88"
+chrono = { version = "0.4.42", features = ["clock", "serde"] }
+clap = { version = "4.5.48", features = ["derive"] }
+futures = "0.3.31"
+minijinja = "2.12.0"
+regex = "1.11.3"
+reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_yaml = "0.9.34"
+tempfile = "3.23.0"
+thiserror = "1.0.69"
+tokio = { version = "1.47.1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.41"
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
