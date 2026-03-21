@@ -28,6 +28,15 @@ Use these for:
 
 ### OpenHands SDK agent-server
 
+Pinned for the current local-MVP implementation branch:
+
+- SDK release: `v1.14.0`
+- Release date: `2026-03-13`
+- Release notes:
+  `https://github.com/OpenHands/software-agent-sdk/releases/tag/v1.14.0`
+- Local tooling pin location:
+  `tools/openhands-server/`
+
 - Local server guide:
   `https://docs.openhands.dev/sdk/guides/agent-server/local-server`
 - Agent-server architecture:
