@@ -62,7 +62,7 @@ openhands:
 
   conversation:
     reuse_policy: per_issue
-    # This path stays relative to the per-issue workspace.
+    # This path stays relative to the per-issue workspace; parent traversal is rejected.
     persistence_dir_relative: ".opensymphony/openhands"
     max_iterations: 500
     stuck_detection: true

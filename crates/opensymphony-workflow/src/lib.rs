@@ -262,6 +262,34 @@ tracker:
     }
 
     #[test]
+    fn explicit_tracker_api_key_env_reference_must_resolve() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  api_key: ${TRACKER_API_KEY}
+  project_slug: sample-project
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "fallback-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unset explicit tracker api key env should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingEnvironmentVariable {
+                field: "tracker.api_key",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn resolves_env_substitution_and_path_rules() {
         let workflow = WorkflowDefinition::parse(
             r#"---
@@ -333,6 +361,36 @@ openhands:
                 .as_deref(),
             Some("gpt-4.1-mini")
         );
+    }
+
+    #[test]
+    fn rejects_persistence_paths_that_escape_the_workspace() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+openhands:
+  conversation:
+    persistence_dir_relative: ../shared-state
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("parent-directory traversal should be rejected");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.persistence_dir_relative",
+                ..
+            }
+        ));
     }
 
     #[test]

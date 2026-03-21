@@ -89,9 +89,8 @@ fn resolve_tracker_api_key<E: Environment>(
     env: &E,
 ) -> Result<String, WorkflowConfigError> {
     if let Some(configured) = tracker.api_key.as_deref() {
-        if let Some(api_key) = resolve_optional_env_token(configured, env) {
-            return Ok(api_key);
-        }
+        let configured = require_literal(Some(configured), "tracker.api_key")?;
+        return resolve_string(&configured, env, "tracker.api_key");
     }
 
     env.get("LINEAR_API_KEY")
@@ -450,7 +449,15 @@ fn resolve_relative_path<E: Environment>(
         });
     }
 
-    Ok(normalize_path(&path))
+    let normalized = normalize_path(&path);
+    if !stays_within_relative_root(&path) {
+        return Err(WorkflowConfigError::InvalidField {
+            field,
+            message: "must not escape the issue workspace".to_owned(),
+        });
+    }
+
+    Ok(normalized)
 }
 
 fn resolve_string_or_default<E: Environment>(
@@ -482,14 +489,6 @@ fn resolve_string<E: Environment>(
     }
 
     Ok(value.to_owned())
-}
-
-fn resolve_optional_env_token<E: Environment>(value: &str, env: &E) -> Option<String> {
-    if let Some(variable) = parse_env_token(value) {
-        return env.get(variable).and_then(normalize_optional_owned);
-    }
-
-    normalize_optional(value)
 }
 
 fn require_literal(
@@ -613,6 +612,26 @@ fn normalize_path(path: &Path) -> PathBuf {
     } else {
         normalized
     }
+}
+
+fn stays_within_relative_root(path: &Path) -> bool {
+    let mut depth: usize = 0;
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => return false,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            Component::Normal(_) => depth += 1,
+        }
+    }
+
+    true
 }
 
 fn parse_env_token(value: &str) -> Option<&str> {
