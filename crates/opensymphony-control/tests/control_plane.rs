@@ -11,7 +11,10 @@ use tokio::net::TcpListener;
 use url::Url;
 
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {
-    let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+    let now = Utc
+        .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+        .single()
+        .expect("valid fixed test timestamp")
         + chrono::Duration::seconds(step as i64);
     DaemonSnapshot {
         generated_at: now,
@@ -57,31 +60,45 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
 #[tokio::test]
 async fn serves_snapshot_and_streams_updates() {
     let store = SnapshotStore::new(fixture_snapshot(0));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
     let server = ControlPlaneServer::new(store.clone());
-    let server_task = tokio::spawn(async move { server.serve(listener).await.unwrap() });
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test control-plane server should serve")
+    });
 
-    let client = ControlPlaneClient::new(Url::parse(&format!("http://{address}/")).unwrap());
-    let current = client.fetch_snapshot().await.unwrap();
+    let client = ControlPlaneClient::new(
+        Url::parse(&format!("http://{address}/")).expect("valid root control-plane base url"),
+    );
+    let current = client
+        .fetch_snapshot()
+        .await
+        .expect("fetch current snapshot from test server");
     assert_eq!(current.sequence, 1);
     assert_eq!(current.snapshot.issues[0].identifier, "COE-255");
 
-    let mut stream = client.stream_updates().unwrap();
+    let mut stream = client
+        .stream_updates()
+        .expect("open control-plane event stream");
     let initial: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("timed out waiting for initial snapshot")
+        .expect("stream should yield an initial snapshot item")
+        .expect("initial snapshot should decode");
     assert_eq!(initial.sequence, 1);
 
     let expected = store.publish(fixture_snapshot(1)).await;
 
     let streamed: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("timed out waiting for streamed snapshot")
+        .expect("stream should yield an updated snapshot item")
+        .expect("updated snapshot should decode");
 
     assert_eq!(streamed.sequence, expected.sequence);
     assert_eq!(
@@ -96,26 +113,41 @@ async fn serves_snapshot_and_streams_updates() {
 #[tokio::test]
 async fn client_handles_path_prefixed_base_url_without_trailing_slash() {
     let store = SnapshotStore::new(fixture_snapshot(0));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind prefixed test listener");
+    let address = listener
+        .local_addr()
+        .expect("prefixed test listener address");
     let app = Router::new().nest(
         "/opensymphony",
         ControlPlaneServer::new(store.clone()).router(),
     );
-    let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("prefixed test server should serve")
+    });
 
-    let client =
-        ControlPlaneClient::new(Url::parse(&format!("http://{address}/opensymphony")).unwrap());
-    let current = client.fetch_snapshot().await.unwrap();
+    let client = ControlPlaneClient::new(
+        Url::parse(&format!("http://{address}/opensymphony"))
+            .expect("valid prefixed control-plane base url"),
+    );
+    let current = client
+        .fetch_snapshot()
+        .await
+        .expect("fetch current snapshot from prefixed test server");
     assert_eq!(current.sequence, 1);
     assert_eq!(current.snapshot.issues[0].identifier, "COE-255");
 
-    let mut stream = client.stream_updates().unwrap();
+    let mut stream = client
+        .stream_updates()
+        .expect("open prefixed control-plane event stream");
     let initial: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("timed out waiting for prefixed initial snapshot")
+        .expect("prefixed stream should yield an initial snapshot item")
+        .expect("prefixed initial snapshot should decode");
     assert_eq!(initial.sequence, 1);
 
     stream.close();

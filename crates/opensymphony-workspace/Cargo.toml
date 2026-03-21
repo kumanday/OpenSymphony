@@ -1,5 +1,5 @@
 [package]
-name = "opensymphony-domain"
+name = "opensymphony-workspace"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -9,10 +9,3 @@ version.workspace = true
 
 [lints]
 workspace = true
-
-[dependencies]
-chrono.workspace = true
-serde.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true

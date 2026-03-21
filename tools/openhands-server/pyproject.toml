@@ -1,0 +1,20 @@
+[project]
+name = "opensymphony-openhands-server"
+version = "0.0.0"
+description = "Bootstrap placeholder for the pinned local OpenHands agent-server environment."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+agent-server = [
+  "openhands-agent-server-placeholder==0+bootstrap.placeholder",
+]
+
+[tool.opensymphony.openhands_server]
+module = "openhands.agent_server"
+runtime_env = "RUNTIME"
+runtime = "process"
+host = "127.0.0.1"
+default_port = 8000
+port_env = "OPENHANDS_SERVER_PORT"
+launcher = "RUNTIME=process uv run --directory . --locked --extra agent-server --module openhands.agent_server --host 127.0.0.1 --port 8000"
