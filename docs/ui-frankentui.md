@@ -125,6 +125,7 @@ Current inline-mode guarantees in the implemented client:
 
 - the bottom events or metrics pane keeps reserved rows in the default 22-line inline layout
 - the narrow stacked layout also reserves rows for selected issue and workspace detail instead of letting the issue list consume the whole frame
+- long issue lists render as a moving window so the active selection stays visible instead of scrolling off the visible pane
 
 ## 6. Interaction model
 
@@ -148,6 +149,8 @@ Current key map in the implemented client:
 The rendered status line and pane headers explicitly show the active focus target so inline-mode navigation stays understandable without a mouse or alternate screen.
 
 The selected issue should stay anchored by identifier across live snapshot reordering so the detail pane does not jump to a different issue just because the list order changed.
+
+When the issue list is taller than the visible pane, the rendered list should follow the active row so keyboard navigation always leaves a visible `>` marker in the issue pane.
 
 Do not start with in-UI mutation commands unless the control plane already defines them cleanly.
 
@@ -207,7 +210,7 @@ Current reconnect behavior:
 - fetch the latest snapshot over HTTP on startup
 - subscribe to the SSE stream
 - if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible
-- ignore reconnect snapshots that regress the rendered sequence
+- ignore reconnect snapshots that regress the rendered sequence unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
 - refetch the current snapshot before resubscribing
 
 ## 11. Dependency strategy
