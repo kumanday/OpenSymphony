@@ -6,6 +6,7 @@ pyproject="${script_dir}/pyproject.toml"
 lockfile="${script_dir}/uv.lock"
 version="$(tr -d '[:space:]' < "${script_dir}/version.txt")"
 placeholder_requirement='openhands-agent-server-placeholder==0+bootstrap.placeholder'
+runtime_sandbox="process"
 server_host="127.0.0.1"
 server_port="${OPENHANDS_SERVER_PORT:-8000}"
 
@@ -51,7 +52,9 @@ if (( $# > 0 )); then
   exit 1
 fi
 
-echo "Launching pinned OpenHands agent-server ${version} from ${script_dir} on ${server_host}:${server_port}." >&2
+export RUNTIME="${runtime_sandbox}"
+
+echo "Launching pinned OpenHands agent-server ${version} from ${script_dir} on ${server_host}:${server_port} with RUNTIME=${RUNTIME}." >&2
 exec uv run \
   --directory "${script_dir}" \
   --locked \

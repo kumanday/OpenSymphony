@@ -12,7 +12,9 @@ agent-server = [
 
 [tool.opensymphony.openhands_server]
 module = "openhands.agent_server"
+runtime_env = "RUNTIME"
+runtime = "process"
 host = "127.0.0.1"
 default_port = 8000
 port_env = "OPENHANDS_SERVER_PORT"
-launcher = "uv run --directory . --locked --extra agent-server --module openhands.agent_server --host 127.0.0.1 --port 8000"
+launcher = "RUNTIME=process uv run --directory . --locked --extra agent-server --module openhands.agent_server --host 127.0.0.1 --port 8000"
