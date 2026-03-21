@@ -55,6 +55,8 @@ Key properties:
 - many issue-specific workspaces via conversation `working_dir`
 - no per-issue Docker in the MVP
 - host-local execution assumptions documented explicitly
+- the repo-local quick-run wrapper rejects user-supplied agent-server CLI flags
+  so smoke runs cannot diverge from the daemon-managed single-server topology
 
 ## 4. Server lifecycle model
 

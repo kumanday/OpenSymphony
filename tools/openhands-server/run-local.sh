@@ -45,15 +45,11 @@ if ! [[ "${server_port}" =~ ^[0-9]+$ ]] || (( 10#${server_port} < 1 || 10#${serv
   exit 1
 fi
 
-for arg in "$@"; do
-  case "${arg}" in
-    --host|--host=*|--port|--port=*)
-      echo "run-local.sh owns --host and --port for loopback-only supervised mode." >&2
-      echo "Use OPENHANDS_SERVER_PORT to change the local port if needed." >&2
-      exit 1
-      ;;
-  esac
-done
+if (( $# > 0 )); then
+  echo "run-local.sh does not accept extra agent-server CLI flags in supervised mode." >&2
+  echo "Use OPENHANDS_SERVER_PORT to change the local port if needed." >&2
+  exit 1
+fi
 
 echo "Launching pinned OpenHands agent-server ${version} from ${script_dir} on ${server_host}:${server_port}." >&2
 exec uv run \
@@ -62,5 +58,4 @@ exec uv run \
   --extra agent-server \
   --module openhands.agent_server \
   --host "${server_host}" \
-  --port "${server_port}" \
-  "$@"
+  --port "${server_port}"
