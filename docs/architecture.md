@@ -269,9 +269,11 @@ The current repository implements the first read-only control-plane and FrankenT
   - `GET /healthz`
   - `GET /api/v1/snapshot`
   - `GET /api/v1/events` using Server-Sent Events
+  - monotonic snapshot delivery for lagging SSE clients by collapsing back to the latest published sequence
 - `opensymphony-tui`
   - reducer-owned TUI state
   - REST bootstrap plus SSE reconnect loop
+  - reconnect indicator that preserves the last good snapshot while the bridge resubscribes
   - inline-mode rendering over immutable view text
 - `opensymphony-cli`
   - `daemon` and `tui` entrypoints used for local attach and detach validation
@@ -327,8 +329,9 @@ The implemented local observability flow is narrower than the full future daemon
 2. A snapshot store publishes immutable `SnapshotEnvelope` values.
 3. `opensymphony-cli tui` fetches `/api/v1/snapshot`.
 4. The TUI opens `/api/v1/events` and listens for SSE updates.
-5. On stream failure, the TUI refetches the current snapshot before resubscribing.
-6. Detaching the UI leaves the daemon process and snapshot publication unaffected.
+5. If the SSE client lags, the control plane emits the latest published snapshot and suppresses older retained sequences so reducers never regress.
+6. On stream failure, the TUI keeps rendering the last good snapshot, marks the connection as reconnecting, then refetches the current snapshot before resubscribing.
+7. Detaching the UI leaves the daemon process and snapshot publication unaffected.
 
 ## 8. Recovery model
 

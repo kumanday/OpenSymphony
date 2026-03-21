@@ -116,10 +116,12 @@ impl TuiState {
                 width,
             ));
         } else {
-            let mut stacked = self.issue_lines(width);
-            stacked.push("-".repeat(width));
-            stacked.extend(self.detail_lines(width));
-            lines.extend(fit_section(stacked, body_rows, width));
+            let (issue_rows, detail_rows) = stacked_body_layout(body_rows);
+            lines.extend(fit_section(self.issue_lines(width), issue_rows, width));
+            if detail_rows > 0 {
+                lines.push("-".repeat(width));
+                lines.extend(fit_section(self.detail_lines(width), detail_rows, width));
+            }
         }
 
         if timeline_rows > 0 {
@@ -328,16 +330,17 @@ impl BridgeMailbox {
     }
 
     fn push_connection_loss(&mut self, reason: String) {
-        self.latest_snapshot = None;
         self.latest_connection_loss = Some(reason);
     }
 
     fn take_action(&mut self) -> Option<TuiAction> {
-        if let Some(reason) = self.latest_connection_loss.take() {
-            return Some(TuiAction::ConnectionLost(reason));
+        if let Some(snapshot) = self.latest_snapshot.take() {
+            return Some(TuiAction::SnapshotReceived(snapshot));
         }
 
-        self.latest_snapshot.take().map(TuiAction::SnapshotReceived)
+        self.latest_connection_loss
+            .take()
+            .map(TuiAction::ConnectionLost)
     }
 }
 
@@ -612,6 +615,28 @@ fn section_layout(height: usize) -> (usize, usize) {
     (body_rows, timeline_rows)
 }
 
+fn stacked_body_layout(body_rows: usize) -> (usize, usize) {
+    const DETAIL_SEPARATOR_ROWS: usize = 1;
+    const MIN_ISSUE_ROWS: usize = 4;
+    const MIN_DETAIL_ROWS: usize = 8;
+
+    if body_rows <= DETAIL_SEPARATOR_ROWS {
+        return (body_rows, 0);
+    }
+
+    let available = body_rows.saturating_sub(DETAIL_SEPARATOR_ROWS);
+    if available < MIN_ISSUE_ROWS + 2 {
+        return (available, 0);
+    }
+
+    let detail_rows = min(
+        max(MIN_DETAIL_ROWS, available / 2),
+        available.saturating_sub(MIN_ISSUE_ROWS),
+    );
+    let issue_rows = available.saturating_sub(detail_rows);
+    (issue_rows, detail_rows)
+}
+
 fn fit_section(mut lines: Vec<String>, max_rows: usize, width: usize) -> Vec<String> {
     if max_rows == 0 {
         return Vec::new();
@@ -703,7 +728,7 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{section_layout, BridgeMailbox, TuiState};
+    use super::{section_layout, stacked_body_layout, BridgeMailbox, TuiState};
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
@@ -790,8 +815,48 @@ mod tests {
     }
 
     #[test]
+    fn preserves_last_snapshot_when_disconnect_follows_a_fresh_update() {
+        let mut mailbox = BridgeMailbox::default();
+        let snapshot = fixture(2);
+
+        mailbox.push_snapshot(snapshot.clone());
+        mailbox.push_connection_loss("control-plane stream closed".to_owned());
+
+        match mailbox.take_action() {
+            Some(super::TuiAction::SnapshotReceived(actual)) => {
+                assert_eq!(*actual, snapshot);
+            }
+            other => panic!("expected latest snapshot before disconnect, got {other:?}"),
+        }
+
+        match mailbox.take_action() {
+            Some(super::TuiAction::ConnectionLost(reason)) => {
+                assert_eq!(reason, "control-plane stream closed");
+            }
+            other => panic!("expected disconnect status after snapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keeps_detail_visible_in_narrow_layouts() {
+        let mut state = TuiState::default();
+        state.reduce(super::TuiAction::SnapshotReceived(Box::new(fixture(12))));
+
+        let rendered = state.render_text(72, 22);
+        assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
+        assert!(rendered.contains("workspace path: workspace-0"));
+        assert!(rendered.contains("RECENT EVENTS"));
+    }
+
+    #[test]
     fn reserves_rows_for_the_timeline_section() {
         let (body_rows, timeline_rows) = section_layout(22);
         assert_eq!((body_rows, timeline_rows), (13, 6));
+    }
+
+    #[test]
+    fn reserves_detail_rows_in_the_stacked_layout() {
+        let (issue_rows, detail_rows) = stacked_body_layout(13);
+        assert_eq!((issue_rows, detail_rows), (4, 8));
     }
 }

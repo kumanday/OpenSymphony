@@ -198,8 +198,9 @@ Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
 - subscribe to the SSE stream
-- if the stream closes or fails, mark the connection as reconnecting
+- if the stream closes or fails, keep the last good snapshot visible and mark the connection as reconnecting
 - refetch the current snapshot before resubscribing
+- if the SSE consumer lags, accept the latest published snapshot and ignore any older retained sequence that would roll the UI backward
 
 ## 11. Dependency strategy
 
@@ -221,6 +222,7 @@ Current automated coverage:
 - reducer selection and mode-switch tests
 - render smoke tests against serialized snapshots, including visible focus markers
 - control-plane snapshot plus SSE round-trip tests
+- TUI reconnect retention and narrow-layout detail visibility tests
 
 Manual:
 
