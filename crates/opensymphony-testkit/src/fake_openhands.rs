@@ -389,15 +389,24 @@ impl Drop for FakeOpenHandsServer {
     }
 }
 
-async fn health() -> &'static str {
-    "OK"
+async fn health(State(app): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&app.state, &headers, None).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    "OK".into_response()
 }
 
-async fn ready() -> Json<Value> {
-    Json(serde_json::json!({ "status": "ready" }))
+async fn ready(State(app): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&app.state, &headers, None).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(serde_json::json!({ "status": "ready" })).into_response()
 }
 
-async fn server_info() -> Json<ServerInfo> {
+async fn server_info(State(app): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&app.state, &headers, None).await {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     Json(ServerInfo {
         version: Some("fake-1.14.0".to_string()),
         sdk_version: Some("fake-sdk-1.14.0".to_string()),
@@ -405,6 +414,7 @@ async fn server_info() -> Json<ServerInfo> {
         uptime: Some(1),
         idle_time: Some(0),
     })
+    .into_response()
 }
 
 async fn start_conversation(
@@ -908,6 +918,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn client_root_probes_honor_session_api_key() -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        server.set_session_api_key(Some("secret")).await;
+        let client = server.client();
+
+        client.health().await?;
+        client.ready().await?;
+        let info = client.server_info().await?;
+
+        assert_eq!(info.title.as_deref(), Some("Fake OpenHands Server"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn attached_stream_reconciles_disconnect_window() -> Result<(), Box<dyn std::error::Error>>
     {
         let server = FakeOpenHandsServer::start().await?;
@@ -1259,6 +1283,59 @@ mod tests {
         )
         .await?;
         client.run_conversation("conv-post-terminal").await?;
+        let final_info = attached.wait_for_terminal(Duration::from_secs(2)).await?;
+        assert_eq!(
+            final_info.execution_status,
+            Some(RemoteExecutionStatus::Finished)
+        );
+        tokio::time::timeout(Duration::from_secs(1), attached.close()).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attached_stream_tolerates_terminal_reconcile_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: "/tmp/test".to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some("conv-terminal-reconcile".to_string()),
+                persistence_dir: Some("/tmp/test/.opensymphony/openhands".to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+
+        let mut attached = AttachedConversation::attach(
+            client.clone(),
+            "conv-terminal-reconcile",
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .await?;
+
+        server
+            .fail_next_event_searches("conv-terminal-reconcile", 1)
+            .await?;
+        client.run_conversation("conv-terminal-reconcile").await?;
+
         let final_info = attached.wait_for_terminal(Duration::from_secs(2)).await?;
         assert_eq!(
             final_info.execution_status,

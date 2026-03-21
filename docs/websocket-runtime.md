@@ -179,6 +179,8 @@ Wire-level compatibility note:
 
 - the pinned source may emit both full-state snapshots and single-key state updates
 - the Rust client should support both without depending on undocumented fields leaking into orchestrator code
+- per-field ordering should compare parsed RFC3339 timestamps, not raw strings, so equivalent
+  offset spellings such as `Z` and `+01:00` do not rewind newer state
 
 ## 7. Run lifecycle over REST plus WebSocket
 
@@ -206,7 +208,8 @@ Primary mechanism:
 Fallback mechanism:
 
 - refresh `GET /api/conversations/{id}` if stream health is uncertain
-- reconcile events after refresh
+- reconcile events after refresh, but treat that final reconcile as best-effort once the
+  authoritative REST snapshot has already confirmed a terminal state
 - classify the worker if the authoritative state is terminal
 
 ## 7.3 Terminal state queue

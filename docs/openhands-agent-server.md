@@ -105,7 +105,8 @@ Readiness probing rule:
 - prefer the documented `GET /ready` endpoint on the pinned server
 - fall back to `GET /health` and then `GET /openapi.json` only if readiness is unavailable
 - never rely on sleep-only startup delays
-- run readiness probes through the shared HTTP client deadlines rather than unbounded requests
+- run readiness probes through the shared HTTP client auth and deadline path rather than issuing
+  bespoke unauthenticated requests
 
 ## 4.3 Shutdown contract
 
