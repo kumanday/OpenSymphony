@@ -88,6 +88,7 @@ Suggested gates:
 
 - sanitize issue identifiers
 - refuse path escape
+- canonicalize the configured workspace root before containment checks when possible
 - create and reuse workspace
 - rerun `after_create` after partial bootstrap failure without rerunning it after successful bootstrap
 - hook timeout
@@ -115,8 +116,10 @@ Suggested gates:
 - failure retry backoff
 - continuation retry at fixed delay
 - deferred retry entries suppress fresh redispatch until their scheduled time
+- startup failure in one candidate does not block later dispatches in the same tick
 - stall detection
 - active-state refresh
+- post-run retries only occur while the tracker still reports the issue active
 - terminal cleanup
 - retained terminal workspaces still clear stale retry manifests
 - restart recovery from manifests

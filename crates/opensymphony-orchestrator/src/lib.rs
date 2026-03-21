@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use opensymphony_domain::{
     continuation_retry_at, failure_retry_delay, sort_candidates, AttemptContext, Issue,
-    IssueTracker, OrchestratorSnapshot, RetryEntry, RetryReason, SchedulerConfig, WorkerOutcome,
-    WorkerOutcomeKind,
+    IssueStateSnapshot, IssueTracker, OrchestratorSnapshot, RetryEntry, RetryReason,
+    SchedulerConfig, WorkerOutcome, WorkerOutcomeKind,
 };
 use opensymphony_openhands::{
     IssueRunRequest, IssueRunResult, IssueSessionError, IssueSessionRunner, PromptMode,
@@ -240,13 +240,21 @@ impl Scheduler {
     async fn drain_reports(&mut self) -> Result<(), SchedulerError> {
         while let Ok(report) = self.reports_rx.try_recv() {
             self.running.remove(&report.issue.id);
+            let tracker_state = self.current_issue_state(&report.issue.id).await?;
+            let issue = issue_with_state(
+                &report.issue,
+                tracker_state.as_ref().map(|state| state.state.as_str()),
+            );
+            let issue_is_active = tracker_state.as_ref().is_some_and(|state| state.is_active);
+            let issue_is_terminal = tracker_state
+                .as_ref()
+                .is_some_and(|state| state.is_terminal);
             let (outcome, conversation_id) = match report.result {
                 Ok(result) => {
                     self.workspace
                         .save_conversation_manifest(
-                            &report.issue,
-                            &self
-                                .workspace_context(&report.issue, report.workspace_path.clone())?,
+                            &issue,
+                            &self.workspace_context(&issue, report.workspace_path.clone())?,
                             &result.conversation_id,
                             matches!(result.prompt_mode, PromptMode::Fresh),
                             None,
@@ -258,15 +266,16 @@ impl Scheduler {
             };
 
             let retry_reason = match outcome.kind {
-                WorkerOutcomeKind::Success => Some(RetryReason::Continuation),
-                WorkerOutcomeKind::Failure => Some(RetryReason::Failure),
-                WorkerOutcomeKind::Stalled => Some(RetryReason::Stall),
+                WorkerOutcomeKind::Success if issue_is_active => Some(RetryReason::Continuation),
+                WorkerOutcomeKind::Failure if issue_is_active => Some(RetryReason::Failure),
+                WorkerOutcomeKind::Stalled if issue_is_active => Some(RetryReason::Stall),
                 WorkerOutcomeKind::Cancelled | WorkerOutcomeKind::Released => None,
+                _ => None,
             };
 
             self.workspace
                 .finish_attempt(
-                    &report.issue,
+                    &issue,
                     report.attempt,
                     &outcome,
                     conversation_id.as_deref(),
@@ -275,33 +284,44 @@ impl Scheduler {
                 .await
                 .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
 
-            match outcome.kind {
-                WorkerOutcomeKind::Success => {
-                    self.enqueue_retry(
-                        report.issue,
-                        report.attempt + 1,
-                        RetryReason::Continuation,
-                        continuation_retry_at(Utc::now()),
-                    )?;
+            if issue_is_active {
+                match outcome.kind {
+                    WorkerOutcomeKind::Success => {
+                        self.enqueue_retry(
+                            issue,
+                            report.attempt + 1,
+                            RetryReason::Continuation,
+                            continuation_retry_at(Utc::now()),
+                        )?;
+                    }
+                    WorkerOutcomeKind::Failure | WorkerOutcomeKind::Stalled => {
+                        let scheduled_at = Utc::now()
+                            + failure_retry_delay(report.attempt, self.config.max_retry_backoff_ms);
+                        self.enqueue_retry(
+                            issue,
+                            report.attempt + 1,
+                            match outcome.kind {
+                                WorkerOutcomeKind::Stalled => RetryReason::Stall,
+                                _ => RetryReason::Failure,
+                            },
+                            scheduled_at,
+                        )?;
+                    }
+                    WorkerOutcomeKind::Cancelled | WorkerOutcomeKind::Released => {
+                        self.workspace
+                            .clear_retry_manifest(&issue.identifier)
+                            .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
+                    }
                 }
-                WorkerOutcomeKind::Failure | WorkerOutcomeKind::Stalled => {
-                    let scheduled_at = Utc::now()
-                        + failure_retry_delay(report.attempt, self.config.max_retry_backoff_ms);
-                    self.enqueue_retry(
-                        report.issue,
-                        report.attempt + 1,
-                        match outcome.kind {
-                            WorkerOutcomeKind::Stalled => RetryReason::Stall,
-                            _ => RetryReason::Failure,
-                        },
-                        scheduled_at,
-                    )?;
-                }
-                WorkerOutcomeKind::Cancelled | WorkerOutcomeKind::Released => {
-                    self.workspace
-                        .clear_retry_manifest(&report.issue.identifier)
-                        .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
-                }
+            } else if issue_is_terminal {
+                self.workspace
+                    .cleanup_terminal_workspace(&issue)
+                    .await
+                    .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
+            } else {
+                self.workspace
+                    .clear_retry_manifest(&issue.identifier)
+                    .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
             }
         }
         Ok(())
@@ -398,33 +418,48 @@ impl Scheduler {
             .await
         {
             Ok(context) => context,
-            Err(error) => {
-                let scheduled_at =
-                    Utc::now() + failure_retry_delay(attempt, self.config.max_retry_backoff_ms);
-                self.enqueue_retry(issue, attempt + 1, RetryReason::Failure, scheduled_at)?;
-                return Err(SchedulerError::Workspace(error.to_string()));
+            Err(_error) => {
+                self.enqueue_dispatch_retry(issue, attempt)?;
+                return Ok(());
             }
         };
 
-        let prompt_mode = if self
+        let prompt_mode = match self
             .workspace
             .load_conversation_manifest(&issue.identifier)
-            .map_err(|error| SchedulerError::Workspace(error.to_string()))?
-            .is_some()
+            .map_err(|error| SchedulerError::Workspace(error.to_string()))
         {
-            PromptMode::Continuation
-        } else {
-            PromptMode::Fresh
+            Ok(Some(_)) => PromptMode::Continuation,
+            Ok(None) => PromptMode::Fresh,
+            Err(_error) => {
+                self.enqueue_dispatch_retry(issue, attempt)?;
+                return Ok(());
+            }
         };
 
-        let rendered = render_prompt(&context.workspace_path, &issue, attempt, &prompt_mode)
-            .map_err(|error| SchedulerError::Workflow(error.to_string()))?;
-        self.workspace
+        let rendered = match render_prompt(&context.workspace_path, &issue, attempt, &prompt_mode) {
+            Ok(rendered) => rendered,
+            Err(_error) => {
+                self.enqueue_dispatch_retry(issue, attempt)?;
+                return Ok(());
+            }
+        };
+        if let Err(_error) = self
+            .workspace
             .write_prompt(&context, prompt_mode.clone(), &rendered.prompt)
-            .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
-        self.workspace
+            .map_err(|error| SchedulerError::Workspace(error.to_string()))
+        {
+            self.enqueue_dispatch_retry(issue, attempt)?;
+            return Ok(());
+        }
+        if let Err(_error) = self
+            .workspace
             .clear_retry_manifest(&issue.identifier)
-            .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
+            .map_err(|error| SchedulerError::Workspace(error.to_string()))
+        {
+            self.enqueue_dispatch_retry(issue, attempt)?;
+            return Ok(());
+        }
 
         let request = IssueRunRequest {
             issue: issue.clone(),
@@ -460,6 +495,12 @@ impl Scheduler {
         );
 
         Ok(())
+    }
+
+    fn enqueue_dispatch_retry(&mut self, issue: Issue, attempt: u32) -> Result<(), SchedulerError> {
+        let scheduled_at =
+            Utc::now() + failure_retry_delay(attempt, self.config.max_retry_backoff_ms);
+        self.enqueue_retry(issue, attempt + 1, RetryReason::Failure, scheduled_at)
     }
 
     fn next_attempt(&self, issue: &Issue) -> Result<u32, SchedulerError> {
@@ -513,6 +554,18 @@ impl Scheduler {
                 ),
             created: false,
         })
+    }
+
+    async fn current_issue_state(
+        &self,
+        issue_id: &str,
+    ) -> Result<Option<IssueStateSnapshot>, SchedulerError> {
+        let states = self
+            .tracker
+            .fetch_states_by_issue_ids(&[issue_id.to_string()])
+            .await
+            .map_err(|error| SchedulerError::Tracker(error.to_string()))?;
+        Ok(states.into_iter().next())
     }
 }
 
@@ -585,6 +638,14 @@ fn issue_from_manifest(manifest: &IssueManifest, state: &str) -> Issue {
         created_at: manifest.created_at,
         updated_at: manifest.updated_at,
     }
+}
+
+fn issue_with_state(issue: &Issue, state: Option<&str>) -> Issue {
+    let mut refreshed = issue.clone();
+    if let Some(state) = state {
+        refreshed.state = state.to_string();
+    }
+    refreshed
 }
 
 #[cfg(test)]
@@ -852,6 +913,118 @@ mod tests {
             .workspace_path
             .join(".opensymphony/retry.json")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn keeps_dispatching_other_candidates_after_prompt_render_failure() {
+        let first_issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let second_issue = make_issue("2", "ABC-2", "Todo", Some(2), timestamp(1));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![first_issue.clone(), second_issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&second_issue.id, vec![ScriptedRun::success(0)]);
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let after_create =
+            "if [ \"$(basename \"$PWD\")\" = \"ABC-1\" ]; then printf '# nope' > WORKFLOW.md; fi"
+                .to_string();
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            tempdir.path().to_path_buf(),
+            false,
+            Some(after_create),
+        );
+
+        scheduler
+            .tick()
+            .await
+            .expect("tick should continue past per-issue startup failures");
+        sleep(Duration::from_millis(10)).await;
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].issue.id, second_issue.id);
+        assert_eq!(scheduler.retry_queue.len(), 1);
+        assert_eq!(scheduler.retry_queue[0].issue.id, first_issue.id);
+        assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Failure);
+    }
+
+    #[tokio::test]
+    async fn keeps_dispatching_other_candidates_after_workspace_prepare_failure() {
+        let first_issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let second_issue = make_issue("2", "ABC-2", "Todo", Some(2), timestamp(1));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![first_issue.clone(), second_issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&second_issue.id, vec![ScriptedRun::success(0)]);
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let after_create =
+            "if [ \"$(basename \"$PWD\")\" = \"ABC-1\" ]; then echo broken >&2; exit 1; fi"
+                .to_string();
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            tempdir.path().to_path_buf(),
+            false,
+            Some(after_create),
+        );
+
+        scheduler
+            .tick()
+            .await
+            .expect("tick should continue past workspace preparation failures");
+        sleep(Duration::from_millis(10)).await;
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].issue.id, second_issue.id);
+        assert_eq!(scheduler.retry_queue.len(), 1);
+        assert_eq!(scheduler.retry_queue[0].issue.id, first_issue.id);
+        assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Failure);
+    }
+
+    #[tokio::test]
+    async fn does_not_queue_continuation_retry_after_success_when_issue_is_terminal() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(0)]);
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace_root = tempdir.path().to_path_buf();
+        let mut scheduler = scheduler(tracker.clone(), runner, workspace_root.clone(), false, None);
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        tracker
+            .transition_issue(&issue.id, "Done")
+            .expect("transition should succeed");
+        sleep(Duration::from_millis(10)).await;
+        scheduler.tick().await.expect("completion should reconcile");
+
+        assert!(scheduler.retry_queue.is_empty());
+        assert!(workspace_root.join("ABC-1").exists());
+        assert!(!workspace_root
+            .join("ABC-1/.opensymphony/retry.json")
+            .exists());
+        let issue_manifest =
+            fs::read_to_string(workspace_root.join("ABC-1/.opensymphony/issue.json"))
+                .expect("issue manifest should exist");
+        assert!(issue_manifest.contains("\"current_state\": \"Done\""));
     }
 
     #[tokio::test]

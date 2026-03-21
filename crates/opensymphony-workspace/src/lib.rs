@@ -175,11 +175,9 @@ impl WorkspaceManager {
 
     pub fn workspace_path(&self, identifier: &str) -> Result<PathBuf, WorkspaceError> {
         let sanitized = Self::sanitize_issue_identifier(identifier);
-        let candidate = self.config.root.join(&sanitized);
-        if candidate
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
-        {
+        let root = self.resolved_root()?;
+        let candidate = root.join(&sanitized);
+        if candidate.parent() != Some(root.as_path()) {
             return Err(WorkspaceError::PathEscape(candidate.display().to_string()));
         }
         Ok(candidate)
@@ -537,6 +535,32 @@ impl WorkspaceManager {
         fs::write(metadata_dir.join("bootstrap.ok"), b"ok")
             .map_err(|error| WorkspaceError::Io(error.to_string()))
     }
+
+    fn resolved_root(&self) -> Result<PathBuf, WorkspaceError> {
+        if self.config.root.exists() {
+            return self
+                .config
+                .root
+                .canonicalize()
+                .map_err(|error| WorkspaceError::Io(error.to_string()));
+        }
+
+        for ancestor in self.config.root.ancestors() {
+            if ancestor.exists() {
+                let canonical_ancestor = ancestor
+                    .canonicalize()
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+                let suffix = self
+                    .config
+                    .root
+                    .strip_prefix(ancestor)
+                    .map_err(|error| WorkspaceError::PathEscape(error.to_string()))?;
+                return Ok(canonical_ancestor.join(suffix));
+            }
+        }
+
+        Ok(self.config.root.clone())
+    }
 }
 
 fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<(), WorkspaceError> {
@@ -595,11 +619,51 @@ mod tests {
         let path = manager
             .workspace_path("../Bug: weird path")
             .expect("path should resolve");
-        assert!(path.starts_with(root.path()));
+        let resolved_root = root
+            .path()
+            .canonicalize()
+            .expect("root should canonicalize");
+        assert!(path.starts_with(&resolved_root));
         assert_eq!(
             path.file_name().expect("filename exists").to_string_lossy(),
             ".._Bug__weird_path"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn canonicalizes_workspace_root_before_resolving_issue_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("tempdir should exist");
+        let real_root = root.path().join("real-root");
+        fs::create_dir_all(&real_root).expect("real root should exist");
+        let symlink_root = root.path().join("root-link");
+        symlink(&real_root, &symlink_root).expect("symlink should exist");
+
+        let manager = WorkspaceManager::new(WorkspaceConfig {
+            root: symlink_root,
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig::default(),
+        });
+
+        let context = manager
+            .ensure_workspace(&issue("ABC-1"))
+            .await
+            .expect("workspace should resolve");
+
+        assert_eq!(
+            context.workspace_path,
+            real_root
+                .canonicalize()
+                .expect("real root should canonicalize")
+                .join("ABC-1")
+        );
+        assert!(context.workspace_path.starts_with(
+            real_root
+                .canonicalize()
+                .expect("real root should canonicalize")
+        ));
     }
 
     #[tokio::test]

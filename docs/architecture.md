@@ -214,7 +214,9 @@ For each issue:
 3. Attach WebSocket stream and reconcile events.
 4. Execute one or more turns on the same conversation up to `agent.max_turns`, loaded from the issue workspace `WORKFLOW.md` for that dispatch.
 5. Exit worker normally or abnormally.
-6. Let the orchestrator decide continuation retry, failure retry, release, or cancellation.
+6. Refresh tracker state for the issue, then let the orchestrator decide continuation retry, failure retry, release, or cancellation.
+   - startup failures such as workspace bootstrap or prompt render failures persist retry state for that issue without aborting later dispatches in the same tick
+   - post-run retries are only scheduled while the tracker still reports the issue as active
 
 ### 5.4 Prompt policy
 
@@ -279,7 +281,8 @@ The snapshot is not just a projection of OpenHands state. It is a Symphony-speci
 12. Runtime events stream back over WebSocket and are mirrored into state and logs.
 13. Worker decides whether to do another in-process turn.
 14. Worker exits and reports success, failure, timeout, stall, or cancellation.
-15. Orchestrator schedules a continuation retry, failure retry, release, or cleanup.
+15. Orchestrator refreshes tracker state, then schedules a continuation retry, failure retry, release, or cleanup.
+16. If one issue fails before the worker starts, the scheduler records retry state for that issue and keeps dispatching later eligible candidates in the same tick.
 
 ## 7.2 ASCII sequence
 
