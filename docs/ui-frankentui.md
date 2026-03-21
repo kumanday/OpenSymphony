@@ -139,6 +139,8 @@ Current key map in the implemented client:
 - `e`: switch the bottom pane between recent events and metrics
 - `q`: quit cleanly
 
+The rendered status line and pane headers explicitly show the active focus target so inline-mode navigation stays understandable without a mouse or alternate screen.
+
 Do not start with in-UI mutation commands unless the control plane already defines them cleanly.
 
 ## 7. Inline mode vs alternate screen
@@ -217,7 +219,7 @@ Automated:
 Current automated coverage:
 
 - reducer selection and mode-switch tests
-- render smoke tests against serialized snapshots
+- render smoke tests against serialized snapshots, including visible focus markers
 - control-plane snapshot plus SSE round-trip tests
 
 Manual:
