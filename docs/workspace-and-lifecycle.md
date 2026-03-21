@@ -32,6 +32,7 @@ Examples:
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
 - Resolve `workspace.root` through existing ancestors and symlinks when possible before joining the sanitized workspace key.
+- If the resolved issue-workspace leaf already exists, canonicalize that leaf before reuse and reject it if it escapes `workspace.root` through a symlink target.
 
 ## 4. Workspace directory layout
 

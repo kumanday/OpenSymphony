@@ -121,6 +121,8 @@ The local server guide shows that a remote `Workspace` can be created with both 
 
 OpenSymphony therefore sets `workspace.working_dir` to the deterministic issue workspace path on every conversation creation request.
 
+The runtime adapter must also surface progress heartbeats from the WebSocket event stream back to the orchestrator so stall detection is based on time since the last observed runtime event, not just time since the worker launched.
+
 ## 6. Conversation model
 
 ## 6.1 Stable conversation identity

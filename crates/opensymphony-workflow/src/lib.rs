@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TrackerConfig {
     pub kind: Option<String>,
     pub project_slug: String,
@@ -16,6 +17,7 @@ pub struct TrackerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PollingConfig {
     #[serde(default = "default_poll_interval_ms")]
     pub interval_ms: u64,
@@ -30,11 +32,13 @@ impl Default for PollingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceConfig {
     pub root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct HooksConfig {
     pub after_create: Option<String>,
     pub before_run: Option<String>,
@@ -57,6 +61,7 @@ impl Default for HooksConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     #[serde(default = "default_max_concurrent_agents")]
     pub max_concurrent_agents: usize,
@@ -80,6 +85,7 @@ impl Default for AgentConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct OpenHandsConfig {
     #[serde(default)]
     pub conversation: serde_json::Value,
@@ -94,6 +100,7 @@ pub struct OpenHandsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowFrontMatter {
     pub tracker: TrackerConfig,
     #[serde(default)]
@@ -306,6 +313,24 @@ mod tests {
         let error =
             WorkflowDocument::load_from_str("# nope").expect_err("front matter should be required");
         assert!(matches!(error, WorkflowError::MissingFrontMatter));
+    }
+
+    #[test]
+    fn fails_on_unknown_front_matter_keys() {
+        let error = WorkflowDocument::load_from_str(
+            "---\ntracker:\n  project_slug: demo\n  active_states: [Todo]\n  terminal_states: [Done]\nagent:\n  max_turn: 3\n---\n# Assignment",
+        )
+        .expect_err("unknown front-matter keys should fail");
+        assert!(matches!(error, WorkflowError::InvalidFrontMatter(_)));
+    }
+
+    #[test]
+    fn fails_on_unknown_openhands_front_matter_keys() {
+        let error = WorkflowDocument::load_from_str(
+            "---\ntracker:\n  project_slug: demo\n  active_states: [Todo]\n  terminal_states: [Done]\nopenhands:\n  websockett: {}\n---\n# Assignment",
+        )
+        .expect_err("unknown openhands keys should fail");
+        assert!(matches!(error, WorkflowError::InvalidFrontMatter(_)));
     }
 
     #[test]

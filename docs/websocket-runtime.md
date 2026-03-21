@@ -194,6 +194,7 @@ For each turn:
    - `run=false`
 3. `POST /api/conversations/{id}/run`
 4. Observe progress through the WebSocket event stream
+   - forward each observed progress event or state update to the orchestrator so stall detection resets on real runtime activity
 
 ## 7.2 Waiting for completion
 
@@ -201,6 +202,7 @@ Primary mechanism:
 
 - watch `ConversationStateUpdateEvent`
 - detect `execution_status` entering a terminal state
+- emit scheduler heartbeats from observed runtime progress so the orchestrator tracks `last_progress_at`
 
 Fallback mechanism:
 
