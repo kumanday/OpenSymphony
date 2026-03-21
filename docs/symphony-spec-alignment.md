@@ -53,12 +53,13 @@ OpenSymphony preserves the major Symphony runtime entities:
 - normalized issue record
 - run attempt
 - retry entry
-- orchestrator runtime state
+- issue execution state and transition rules
 - workspace record
 - runtime snapshot
 
 Implementation note:
 
+- the shared scheduler state machine lives in `opensymphony-domain` so downstream crates can consume one stable model
 - the agent-specific fields refer to OpenHands concepts instead of Codex fields
 - OpenSymphony adds conversation metadata such as `conversation_id`, `server_base_url`, `stream_state`, and `last_event_id`
 
