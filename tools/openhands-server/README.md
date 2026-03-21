@@ -14,7 +14,9 @@ Bootstrap state in M1:
   8000`
 
 The wrapper owns the loopback bind host and uses `OPENHANDS_SERVER_PORT` to set
-an explicit port when the default `8000` needs to change.
+an explicit port when the default `8000` needs to change. It rejects all extra
+agent-server CLI arguments so local smoke runs preserve the same single-server
+supervised topology as the daemon-managed path.
 
 The local MVP must eventually pin the exact OpenHands package version used for:
 

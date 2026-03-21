@@ -276,6 +276,9 @@ the exact package version, uv dependency pin, and resolved lockfile are
 committed. Once they are replaced, the quick run script should launch the
 pinned server through the local `uv` environment and its `agent-server` extra,
 explicitly passing `--host 127.0.0.1` and a configured `--port`.
+The wrapper should reject extra agent-server CLI flags so local smoke runs stay
+aligned with the daemon-managed single-server topology; `OPENHANDS_SERVER_PORT`
+is the only supported runtime override.
 
 Do not rely on a random globally installed `openhands` binary.
 
