@@ -37,6 +37,7 @@ Recommended layout inside each issue workspace:
 ```text
 <issue_workspace>/
   .opensymphony/
+    bootstrap.ok
     issue.json
     conversation.json
     retry.json
@@ -79,7 +80,7 @@ Preserve the Symphony hook model.
 
 ## 6.1 `after_create`
 
-Runs once after a brand-new issue workspace is created.
+Runs once after a workspace has been bootstrapped successfully.
 
 Use for:
 
@@ -89,6 +90,7 @@ Use for:
 - creating ignored helper files
 
 Do not rerun it on every worker attempt.
+If the first bootstrap attempt fails after the directory already exists, the next attempt must rerun `after_create` until bootstrap completes. A successful bootstrap should persist a local marker under `.opensymphony/` so later worker attempts can reuse the workspace without replaying creation hooks.
 
 ## 6.2 `before_run`
 
