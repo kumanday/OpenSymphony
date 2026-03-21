@@ -208,6 +208,11 @@ Current validation commands for the implemented observability slice:
 - `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
 - `curl http://127.0.0.1:4010/healthz`
 
+When validating reconnect behavior, confirm that a newer post-restart snapshot
+is accepted even if the reducer never saw an explicit `ConnectionLost`, and
+that the TUI does not report `live control-plane stream` until the SSE stream
+has actually begun delivering updates.
+
 ## 7. Doctor checks
 
 `opensymphony doctor` should be a serious preflight tool, not a superficial version printer.
