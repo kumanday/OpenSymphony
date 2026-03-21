@@ -114,6 +114,11 @@ This keeps:
 
 The control-plane stream must preserve monotonically advancing snapshot sequences for slow or reconnecting consumers so the UI never rolls back to stale state after it has already rendered a newer snapshot.
 
+The control-plane snapshot contract should remain additive for read-only clients:
+unknown summarized event kinds must not invalidate the whole snapshot payload,
+and bootstrap snapshot fetches should fail fast enough that reconnect logic can
+retry instead of wedging the UI behind a hung HTTP request.
+
 ## 4. Runtime component model
 
 ## 4.1 Core crates
@@ -329,8 +334,9 @@ The implemented local observability flow is narrower than the full future daemon
 2. A snapshot store publishes immutable `SnapshotEnvelope` values.
 3. `opensymphony-cli tui` fetches `/api/v1/snapshot`.
 4. The TUI opens `/api/v1/events` and listens for SSE updates.
-5. On stream failure, the TUI refetches the current snapshot before resubscribing.
-6. Detaching the UI leaves the daemon process and snapshot publication unaffected.
+5. Snapshot fetches use a bounded timeout so reconnect can retry if the HTTP endpoint hangs.
+6. On stream failure, the TUI refetches the current snapshot before resubscribing.
+7. Detaching the UI leaves the daemon process and snapshot publication unaffected.
 
 ## 8. Recovery model
 
