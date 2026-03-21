@@ -1,0 +1,9 @@
+[package]
+name = "opensymphony-domain"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true

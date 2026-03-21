@@ -1,0 +1,15 @@
+[package]
+name = "opensymphony-tui"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+ftui.workspace = true
+opensymphony-control = { path = "../opensymphony-control" }
+opensymphony-domain = { path = "../opensymphony-domain" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
