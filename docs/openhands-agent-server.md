@@ -46,7 +46,7 @@ opensymphony daemon
   ├─ openhands WS client
   ├─ control-plane API
   └─ local server supervisor
-       └─ python -m openhands.agent_server --host 127.0.0.1 --port 8000
+       └─ uv run --project tools/openhands-server agent-server --host 127.0.0.1 --port 8000
 ```
 
 Key properties:
@@ -96,8 +96,8 @@ In supervised mode:
 
 Readiness probing rule:
 
-- prefer a documented health endpoint if the pinned version exposes one
-- otherwise use a conservative FastAPI probe such as `GET /openapi.json`
+- prefer the documented `GET /ready` endpoint on the pinned server
+- fall back to `GET /health` and then `GET /openapi.json` only if readiness is unavailable
 - never rely on sleep-only startup delays
 
 ## 4.3 Shutdown contract
@@ -197,7 +197,7 @@ Required fields:
 - `conversation_id`
 - `workspace`
   - `working_dir`
-  - `kind`
+  - optional `kind`
 - `persistence_dir`
 - `max_iterations`
 - `stuck_detection`
@@ -228,11 +228,16 @@ Default local mode:
 The Rust client should still support:
 
 - no auth
-- session API key for HTTP
+- session API key for HTTP through `X-Session-API-Key`
 - session API key for WebSocket query-param fallback
 - optional header-based WebSocket auth for versions that support it
 
 Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
+
+Pinned `v1.14.0` note:
+
+- REST auth uses `X-Session-API-Key`
+- WebSocket auth accepts the same header or `session_api_key` as a query parameter
 
 ## 10. OpenHands hooks vs Symphony hooks
 

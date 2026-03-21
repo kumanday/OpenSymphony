@@ -72,6 +72,12 @@ Suggested gates:
 - `OPENSYMPHONY_LIVE_OPENHANDS=1`
 - `OPENSYMPHONY_LIVE_LINEAR=1`
 
+Current live OpenHands inputs:
+
+- `OPENHANDS_MODEL`
+- `OPENHANDS_LLM_API_KEY`
+- optional `OPENHANDS_LLM_BASE_URL`
+
 ## 3. Minimum required test coverage by subsystem
 
 ## 3.1 Workflow and config
@@ -206,6 +212,7 @@ Required checks:
 - Python environment for pinned OpenHands can be resolved
 - supervised server command can start
 - server responds on the expected base URL
+- `GET /ready` succeeds for the pinned local server environment
 - a test conversation can be created with a temp `working_dir`
 - WebSocket can attach and reach readiness
 - a reconcile call succeeds
@@ -268,6 +275,13 @@ Include:
 - install instructions
 - quick run script
 - note about the exact WebSocket assumptions pinned by this repo
+
+Current pin:
+
+- `openhands-agent-server==1.14.0`
+- `openhands-sdk==1.14.0`
+- `openhands-tools==1.14.0`
+- `openhands-workspace==1.14.0`
 
 Do not rely on a random globally installed `openhands` binary.
 

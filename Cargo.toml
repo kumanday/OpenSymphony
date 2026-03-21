@@ -1,0 +1,36 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/kumanday/OpenSymphony"
+rust-version = "1.85"
+
+[workspace.dependencies]
+axum = { version = "0.8", features = ["json", "macros", "ws"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+futures = "0.3"
+http = "1.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.19"
+thiserror = "2.0"
+tokio = { version = "1.44", features = ["fs", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = { version = "2.5", features = ["serde"] }
+uuid = { version = "1.16", features = ["serde", "v4"] }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"

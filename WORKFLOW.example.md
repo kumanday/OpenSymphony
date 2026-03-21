@@ -45,17 +45,20 @@ openhands:
   local_server:
     enabled: true
     command:
-      - python
-      - -m
-      - openhands.agent_server
+      - uv
+      - run
+      - --project
+      - tools/openhands-server
+      - agent-server
       - --host
       - 127.0.0.1
       - --port
       - "8000"
     startup_timeout_ms: 30000
-    readiness_probe_path: "/openapi.json"
+    readiness_probe_path: "/ready"
     env:
       LOG_JSON: "true"
+      OH_SECRET_KEY: "opensymphony-local-dev"
       RUNTIME: process
 
   conversation:

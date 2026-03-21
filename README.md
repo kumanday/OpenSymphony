@@ -67,6 +67,8 @@ OpenHands owns:
 
 The integration targets the SDK agent-server surface, not `openhands serve` and not the web app Socket.IO protocol. Operations are HTTP REST. Real-time updates are a plain WebSocket event stream.
 
+The current local pin is `OpenHands/software-agent-sdk` `v1.14.0`, provisioned through `tools/openhands-server/`.
+
 ### 3. Go WebSocket-first for agent updates
 
 Symphony still polls Linear because the specification requires it. The change here is narrower: OpenHands agent-session updates use WebSockets first, with REST used for creation, command operations, recovery, and event reconciliation.
