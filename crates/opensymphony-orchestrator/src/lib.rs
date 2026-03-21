@@ -7,7 +7,7 @@ use opensymphony_domain::{
 use opensymphony_openhands::{
     IssueRunRequest, IssueRunResult, IssueSessionError, IssueSessionRunner, PromptMode,
 };
-use opensymphony_workflow::{WorkflowDocument, WorkflowError};
+use opensymphony_workflow::{AgentConfig, WorkflowDocument, WorkflowError};
 use opensymphony_workspace::{IssueManifest, WorkspaceManager};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -49,6 +49,11 @@ struct WorkerReport {
     attempt: u32,
     workspace_path: PathBuf,
     result: Result<IssueRunResult, IssueSessionError>,
+}
+
+struct RenderedPrompt {
+    prompt: String,
+    max_turns: u32,
 }
 
 impl Scheduler {
@@ -404,10 +409,10 @@ impl Scheduler {
             PromptMode::Fresh
         };
 
-        let prompt = render_prompt(&context.workspace_path, &issue, attempt, &prompt_mode)
+        let rendered = render_prompt(&context.workspace_path, &issue, attempt, &prompt_mode)
             .map_err(|error| SchedulerError::Workflow(error.to_string()))?;
         self.workspace
-            .write_prompt(&context, prompt_mode.clone(), &prompt)
+            .write_prompt(&context, prompt_mode.clone(), &rendered.prompt)
             .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
         self.workspace
             .clear_retry_manifest(&issue.identifier)
@@ -418,8 +423,8 @@ impl Scheduler {
             attempt,
             workspace_path: context.workspace_path.clone(),
             prompt_mode: prompt_mode.clone(),
-            prompt,
-            max_turns: 3,
+            prompt: rendered.prompt,
+            max_turns: rendered.max_turns,
         };
 
         let reports_tx = self.reports_tx.clone();
@@ -508,28 +513,35 @@ fn render_prompt(
     issue: &Issue,
     attempt: u32,
     prompt_mode: &PromptMode,
-) -> Result<String, WorkflowError> {
+) -> Result<RenderedPrompt, WorkflowError> {
     let workflow_path = workspace_path.join("WORKFLOW.md");
     if workflow_path.exists() {
         let workflow = WorkflowDocument::load_from_path(&workflow_path)?;
-        return workflow.render_prompt(
+        let prompt = workflow.render_prompt(
             issue,
             Some(&AttemptContext {
                 number: attempt,
                 continuation: matches!(prompt_mode, PromptMode::Continuation),
             }),
-        );
+        )?;
+        return Ok(RenderedPrompt {
+            prompt,
+            max_turns: workflow.front_matter.agent.max_turns,
+        });
     }
 
-    Ok(match prompt_mode {
-        PromptMode::Fresh => format!(
-            "You are working on issue {}: {}",
-            issue.identifier, issue.title
-        ),
-        PromptMode::Continuation => format!(
-            "Continue working on issue {} after attempt {}",
-            issue.identifier, attempt
-        ),
+    Ok(RenderedPrompt {
+        prompt: match prompt_mode {
+            PromptMode::Fresh => format!(
+                "You are working on issue {}: {}",
+                issue.identifier, issue.title
+            ),
+            PromptMode::Continuation => format!(
+                "Continue working on issue {} after attempt {}",
+                issue.identifier, attempt
+            ),
+        },
+        max_turns: AgentConfig::default().max_turns,
     })
 }
 
@@ -738,6 +750,61 @@ mod tests {
         assert_eq!(recovered, 1);
         assert_eq!(scheduler.retry_queue.len(), 1);
         assert_eq!(scheduler.retry_queue[0].attempt, 2);
+    }
+
+    #[tokio::test]
+    async fn honors_workflow_max_turns_when_dispatching() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(0)]);
+
+        let workspace_dir = tempdir().expect("tempdir should exist");
+        let fixture_repo = tempdir().expect("fixture tempdir should exist");
+        fs::write(
+            fixture_repo.path().join("WORKFLOW.md"),
+            r#"---
+tracker:
+  project_slug: "example-project"
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+agent:
+  max_turns: 7
+---
+
+# Assignment
+
+Issue {{ issue.identifier }}
+"#,
+        )
+        .expect("workflow fixture should write");
+
+        let after_create = format!(
+            "cp {} {}",
+            fixture_repo.path().join("WORKFLOW.md").display(),
+            "./WORKFLOW.md"
+        );
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            workspace_dir.path().to_path_buf(),
+            false,
+            Some(after_create),
+        );
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        sleep(Duration::from_millis(10)).await;
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].max_turns, 7);
     }
 
     #[tokio::test]

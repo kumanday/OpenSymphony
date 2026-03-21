@@ -213,6 +213,7 @@ Required checks:
 ### External services
 
 - Linear API key present when Linear mode is enabled
+- optional `OPENSYMPHONY_LINEAR_API_URL` override is valid when provided
 - MCP child process can start when enabled
 
 ### Environment quality
@@ -241,6 +242,8 @@ Write logs to:
 
 - stdout for normal operation
 - optional rotating local file for debug mode
+
+For the Linear MCP server specifically, failed tool calls must surface as JSON-RPC error responses while keeping the stdio process alive for subsequent requests.
 
 ## 9. Snapshot and manifest inspection
 

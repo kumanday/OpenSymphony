@@ -210,7 +210,7 @@ For each issue:
 1. Ensure workspace exists.
 2. Load or create stable conversation metadata.
 3. Attach WebSocket stream and reconcile events.
-4. Execute one or more turns on the same conversation up to `agent.max_turns`.
+4. Execute one or more turns on the same conversation up to `agent.max_turns`, loaded from the issue workspace `WORKFLOW.md` for that dispatch.
 5. Exit worker normally or abnormally.
 6. Let the orchestrator decide continuation retry, failure retry, release, or cancellation.
 
