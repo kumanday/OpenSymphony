@@ -46,7 +46,7 @@ Support these modes in the Rust client:
 
 - none
 - query-param session API key fallback
-- optional header-based auth for versions that support it
+- `X-Session-API-Key` header auth for non-browser clients
 
 Default local MVP behavior: none.
 
@@ -114,7 +114,7 @@ This is why the Rust runtime should intentionally copy the high-level behavior o
 
 ## 5. Readiness barrier
 
-The current SDK client treats the first `ConversationStateUpdateEvent` received after subscription as proof that the subscription is ready.
+The current SDK client treats the first `ConversationStateUpdateEvent` received after subscription as proof that the subscription is ready. On the pinned `v1.14.0` server this is a full-state snapshot with `key == "full_state"`.
 
 Implement the same rule.
 
@@ -238,6 +238,7 @@ On reconnect:
 1. refresh conversation info with REST
 2. reconnect WebSocket
 3. wait for readiness
+4. reconcile `events/search` again before trusting the resumed stream
 4. reconcile events
 5. resume streaming
 

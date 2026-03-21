@@ -174,7 +174,7 @@ Local MVP process graph:
 - `opensymphony daemon`
   - owns orchestrator and control plane
   - may spawn:
-    - `python -m openhands.agent_server`
+    - `uv run --project tools/openhands-server agent-server --host 127.0.0.1 --port 8000`
 - `opensymphony tui`
   - separate process
   - reads control-plane APIs only

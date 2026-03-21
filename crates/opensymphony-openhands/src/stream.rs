@@ -1,0 +1,545 @@
+//! WebSocket-first attachment, event reconciliation, and state mirroring.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use tokio::net::TcpStream;
+use tokio::sync::{Mutex, watch};
+use tokio::task::JoinHandle;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tracing::{debug, warn};
+
+use crate::cache::EventCache;
+use crate::client::OpenHandsClient;
+use crate::config::WebSocketConfig;
+use crate::error::{OpenHandsError, Result};
+use crate::wire::{
+    ConversationInfo, RemoteExecutionStatus, RuntimeEventEnvelope, RuntimeEventPayload,
+};
+
+type EventSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StreamControl {
+    Reconnect,
+    Stop,
+}
+
+/// Cached conversation state derived from WebSocket events plus REST refreshes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ConversationStateMirror {
+    /// Latest execution status observed by the adapter.
+    pub execution_status: Option<RemoteExecutionStatus>,
+    /// Forward-compatible field map derived from full snapshots and keyed updates.
+    pub fields: Map<String, Value>,
+}
+
+impl ConversationStateMirror {
+    /// Replaces the mirror from an authoritative REST response.
+    pub fn refresh_from_conversation(&mut self, info: &ConversationInfo) {
+        if let Some(status) = info.execution_status {
+            self.execution_status = Some(status);
+            self.fields.insert(
+                "execution_status".to_string(),
+                serde_json::to_value(status).unwrap_or(Value::Null),
+            );
+        }
+        if let Some(title) = &info.title {
+            self.fields
+                .insert("title".to_string(), Value::String(title.clone()));
+        }
+        self.fields.insert(
+            "workspace".to_string(),
+            serde_json::to_value(&info.workspace).unwrap_or(Value::Null),
+        );
+        if let Some(agent) = &info.agent {
+            self.fields.insert("agent".to_string(), agent.clone());
+        }
+        if let Some(persistence_dir) = &info.persistence_dir {
+            self.fields.insert(
+                "persistence_dir".to_string(),
+                Value::String(persistence_dir.clone()),
+            );
+        }
+    }
+
+    /// Applies a streamed state-update event to the mirror.
+    pub fn apply_event(&mut self, event: &RuntimeEventEnvelope) {
+        let RuntimeEventPayload::ConversationStateUpdate(update) = &event.payload else {
+            return;
+        };
+        if update.key == "full_state" {
+            if let Some(map) = update.value.as_object() {
+                for (key, value) in map {
+                    self.fields.insert(key.clone(), value.clone());
+                }
+                self.execution_status = map
+                    .get("execution_status")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok());
+            }
+            return;
+        }
+        self.fields.insert(update.key.clone(), update.value.clone());
+        if update.key == "execution_status" {
+            self.execution_status = serde_json::from_value(update.value.clone()).ok();
+        }
+    }
+}
+
+/// Attached runtime stream that owns the event cache, state mirror, and reconnect loop.
+#[derive(Debug)]
+pub struct AttachedConversation {
+    conversation_id: String,
+    client: OpenHandsClient,
+    cache: Arc<Mutex<EventCache>>,
+    state: Arc<Mutex<ConversationStateMirror>>,
+    status_rx: watch::Receiver<Option<RemoteExecutionStatus>>,
+    stop_tx: Option<watch::Sender<bool>>,
+    task: Option<JoinHandle<()>>,
+    websocket: WebSocketConfig,
+}
+
+impl AttachedConversation {
+    /// Attaches to a conversation using initial sync, readiness barrier, and post-ready reconcile.
+    pub async fn attach(
+        client: OpenHandsClient,
+        conversation_id: impl Into<String>,
+        websocket: WebSocketConfig,
+    ) -> Result<Self> {
+        let conversation_id = conversation_id.into();
+        let conversation = client
+            .get_conversation(&conversation_id)
+            .await?
+            .ok_or_else(|| OpenHandsError::ConversationNotFound {
+                conversation_id: conversation_id.clone(),
+            })?;
+
+        let cache = Arc::new(Mutex::new(EventCache::default()));
+        let state = Arc::new(Mutex::new(ConversationStateMirror::default()));
+        {
+            let mut mirror = state.lock().await;
+            mirror.refresh_from_conversation(&conversation);
+        }
+
+        let initial_events = client.search_events_all(&conversation_id).await?;
+        merge_events(&cache, &state, initial_events).await;
+
+        let (socket_url, request) = client.websocket_request(&conversation_id)?;
+        let (mut stream, _) =
+            connect_async(request)
+                .await
+                .map_err(|source| OpenHandsError::WebSocket {
+                    url: socket_url.to_string(),
+                    source,
+                })?;
+        wait_for_ready(
+            &mut stream,
+            &socket_url,
+            websocket.ready_timeout(),
+            &cache,
+            &state,
+        )
+        .await?;
+
+        reconcile_and_refresh(&client, &conversation_id, &cache, &state).await?;
+
+        let initial_status = state.lock().await.execution_status;
+        let (status_tx, status_rx) = watch::channel(initial_status);
+        let (stop_tx, stop_rx) = watch::channel(false);
+
+        let task = tokio::spawn(
+            StreamRuntime {
+                client: client.clone(),
+                conversation_id: conversation_id.clone(),
+                websocket: websocket.clone(),
+                cache: cache.clone(),
+                state: state.clone(),
+                status_tx,
+                stop_rx,
+                socket_url,
+                stream,
+            }
+            .run(),
+        );
+
+        Ok(Self {
+            conversation_id,
+            client,
+            cache,
+            state,
+            status_rx,
+            stop_tx: Some(stop_tx),
+            task: Some(task),
+            websocket,
+        })
+    }
+
+    /// Returns the conversation identifier associated with this stream.
+    #[must_use]
+    pub fn conversation_id(&self) -> &str {
+        &self.conversation_id
+    }
+
+    /// Returns the cached event count.
+    pub async fn event_count(&self) -> usize {
+        self.cache.lock().await.len()
+    }
+
+    /// Returns a cloned ordered snapshot of the current cache.
+    pub async fn cached_events(&self) -> Vec<RuntimeEventEnvelope> {
+        self.cache.lock().await.events().to_vec()
+    }
+
+    /// Returns a cloned copy of the current state mirror.
+    pub async fn state(&self) -> ConversationStateMirror {
+        self.state.lock().await.clone()
+    }
+
+    /// Forces an immediate reconcile pass and returns how many new events were added.
+    pub async fn reconcile_now(&self) -> Result<usize> {
+        let events = self.client.search_events_all(&self.conversation_id).await?;
+        Ok(merge_events(&self.cache, &self.state, events).await)
+    }
+
+    /// Waits for a terminal execution status using WebSocket updates plus REST fallback.
+    pub async fn wait_for_terminal(&mut self, timeout: Duration) -> Result<ConversationInfo> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(status) = *self.status_rx.borrow() {
+                if status.is_terminal() {
+                    let info =
+                        refresh_and_snapshot(&self.client, &self.conversation_id, &self.state)
+                            .await?;
+                    self.reconcile_now().await?;
+                    return Ok(info);
+                }
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Err(OpenHandsError::Timeout {
+                    operation: "terminal execution status",
+                    timeout,
+                });
+            }
+            let sleep_for = std::cmp::min(self.websocket.poll_interval(), deadline - now);
+
+            tokio::select! {
+                changed = self.status_rx.changed() => {
+                    if changed.is_err() {
+                        debug!(conversation_id = %self.conversation_id, "status channel closed; relying on REST fallback");
+                    }
+                }
+                _ = tokio::time::sleep(sleep_for) => {
+                    let info = refresh_and_snapshot(&self.client, &self.conversation_id, &self.state).await?;
+                    if info.execution_status.map(RemoteExecutionStatus::is_terminal).unwrap_or(false) {
+                        self.reconcile_now().await?;
+                        return Ok(info);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stops the background reconnect loop and waits for it to exit.
+    pub async fn close(mut self) -> Result<()> {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(true);
+        }
+        if let Some(task) = self.task.take() {
+            task.await.map_err(|error| OpenHandsError::Join {
+                message: error.to_string(),
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for AttachedConversation {
+    fn drop(&mut self) {
+        if let Some(stop_tx) = self.stop_tx.take() {
+            let _ = stop_tx.send(true);
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+struct StreamRuntime {
+    client: OpenHandsClient,
+    conversation_id: String,
+    websocket: WebSocketConfig,
+    cache: Arc<Mutex<EventCache>>,
+    state: Arc<Mutex<ConversationStateMirror>>,
+    status_tx: watch::Sender<Option<RemoteExecutionStatus>>,
+    stop_rx: watch::Receiver<bool>,
+    socket_url: url::Url,
+    stream: EventSocket,
+}
+
+impl StreamRuntime {
+    async fn run(mut self) {
+        let mut delay = self.websocket.reconnect_initial();
+        loop {
+            match read_until_disconnect(
+                &mut self.stream,
+                &self.socket_url,
+                &self.cache,
+                &self.state,
+                &self.status_tx,
+                &mut self.stop_rx,
+            )
+            .await
+            {
+                StreamControl::Reconnect => {}
+                StreamControl::Stop => return,
+            }
+
+            loop {
+                tokio::select! {
+                    changed = self.stop_rx.changed() => {
+                        if changed.is_err() || *self.stop_rx.borrow() {
+                            return;
+                        }
+                    }
+                    _ = tokio::time::sleep(delay) => {}
+                }
+
+                let (next_url, request) = match self.client.websocket_request(&self.conversation_id)
+                {
+                    Ok(result) => result,
+                    Err(error) => {
+                        warn!(conversation_id = %self.conversation_id, error = %error, "failed to build websocket reconnect request");
+                        delay =
+                            std::cmp::min(delay.saturating_mul(2), self.websocket.reconnect_max());
+                        continue;
+                    }
+                };
+                self.socket_url = next_url;
+
+                match connect_async(request).await {
+                    Ok((mut next_stream, _)) => {
+                        match wait_for_ready(
+                            &mut next_stream,
+                            &self.socket_url,
+                            self.websocket.ready_timeout(),
+                            &self.cache,
+                            &self.state,
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                if let Err(error) = reconcile_and_refresh(
+                                    &self.client,
+                                    &self.conversation_id,
+                                    &self.cache,
+                                    &self.state,
+                                )
+                                .await
+                                {
+                                    warn!(conversation_id = %self.conversation_id, error = %error, "reconcile-after-reconnect failed");
+                                } else {
+                                    let _ = self
+                                        .status_tx
+                                        .send(self.state.lock().await.execution_status);
+                                }
+                                self.stream = next_stream;
+                                delay = self.websocket.reconnect_initial();
+                                break;
+                            }
+                            Err(error) => {
+                                warn!(conversation_id = %self.conversation_id, error = %error, "websocket reconnect readiness failed");
+                            }
+                        }
+                    }
+                    Err(source) => {
+                        warn!(
+                            conversation_id = %self.conversation_id,
+                            error = %OpenHandsError::WebSocket { url: self.socket_url.to_string(), source },
+                            "websocket reconnect attempt failed",
+                        );
+                    }
+                }
+
+                delay = std::cmp::min(delay.saturating_mul(2), self.websocket.reconnect_max());
+            }
+        }
+    }
+}
+
+async fn wait_for_ready(
+    stream: &mut EventSocket,
+    socket_url: &url::Url,
+    timeout: Duration,
+    cache: &Arc<Mutex<EventCache>>,
+    state: &Arc<Mutex<ConversationStateMirror>>,
+) -> Result<()> {
+    let ready = tokio::time::timeout(timeout, async {
+        loop {
+            match stream.next().await {
+                Some(Ok(message)) => {
+                    if let Some(event) = decode_message(message, socket_url).await? {
+                        let is_ready_event = matches!(
+                            event.payload,
+                            RuntimeEventPayload::ConversationStateUpdate(_)
+                        );
+                        apply_event(cache, state, &event).await;
+                        if is_ready_event {
+                            return Ok(());
+                        }
+                    }
+                }
+                Some(Err(source)) => {
+                    return Err(OpenHandsError::WebSocket {
+                        url: socket_url.to_string(),
+                        source,
+                    });
+                }
+                None => {
+                    return Err(OpenHandsError::Protocol {
+                        message: "websocket closed before readiness event".to_string(),
+                    });
+                }
+            }
+        }
+    })
+    .await;
+
+    match ready {
+        Ok(result) => result,
+        Err(_) => Err(OpenHandsError::Timeout {
+            operation: "websocket readiness barrier",
+            timeout,
+        }),
+    }
+}
+
+async fn read_until_disconnect(
+    stream: &mut EventSocket,
+    socket_url: &url::Url,
+    cache: &Arc<Mutex<EventCache>>,
+    state: &Arc<Mutex<ConversationStateMirror>>,
+    status_tx: &watch::Sender<Option<RemoteExecutionStatus>>,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> StreamControl {
+    loop {
+        tokio::select! {
+            changed = stop_rx.changed() => {
+                if changed.is_err() || *stop_rx.borrow() {
+                    return StreamControl::Stop;
+                }
+            }
+            next = stream.next() => {
+                match next {
+                    Some(Ok(message)) => {
+                        match decode_message(message, socket_url).await {
+                            Ok(Some(event)) => {
+                                apply_event(cache, state, &event).await;
+                                let _ = status_tx.send(state.lock().await.execution_status);
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                warn!(error = %error, "dropping malformed websocket event");
+                            }
+                        }
+                    }
+                    Some(Err(source)) => {
+                        warn!(
+                            error = %OpenHandsError::WebSocket { url: socket_url.to_string(), source },
+                            "websocket stream disconnected",
+                        );
+                        return StreamControl::Reconnect;
+                    }
+                    None => return StreamControl::Reconnect,
+                }
+            }
+        }
+    }
+}
+
+async fn decode_message(
+    message: tokio_tungstenite::tungstenite::Message,
+    socket_url: &url::Url,
+) -> Result<Option<RuntimeEventEnvelope>> {
+    match message {
+        tokio_tungstenite::tungstenite::Message::Text(text) => {
+            let raw_json: Value = serde_json::from_str(&text)?;
+            Ok(Some(RuntimeEventEnvelope::from_json(raw_json)?))
+        }
+        tokio_tungstenite::tungstenite::Message::Binary(binary) => {
+            let raw_json: Value = serde_json::from_slice(&binary)?;
+            Ok(Some(RuntimeEventEnvelope::from_json(raw_json)?))
+        }
+        tokio_tungstenite::tungstenite::Message::Close(_) => Err(OpenHandsError::Protocol {
+            message: format!("websocket {socket_url} closed"),
+        }),
+        tokio_tungstenite::tungstenite::Message::Ping(_)
+        | tokio_tungstenite::tungstenite::Message::Pong(_)
+        | tokio_tungstenite::tungstenite::Message::Frame(_) => Ok(None),
+    }
+}
+
+async fn merge_events(
+    cache: &Arc<Mutex<EventCache>>,
+    state: &Arc<Mutex<ConversationStateMirror>>,
+    events: Vec<RuntimeEventEnvelope>,
+) -> usize {
+    let mut added = 0;
+    for event in events {
+        if apply_event(cache, state, &event).await {
+            added += 1;
+        }
+    }
+    added
+}
+
+async fn apply_event(
+    cache: &Arc<Mutex<EventCache>>,
+    state: &Arc<Mutex<ConversationStateMirror>>,
+    event: &RuntimeEventEnvelope,
+) -> bool {
+    let inserted = {
+        let mut cache = cache.lock().await;
+        cache.insert(event.clone())
+    };
+    if inserted {
+        let mut mirror = state.lock().await;
+        mirror.apply_event(event);
+    }
+    inserted
+}
+
+async fn reconcile_and_refresh(
+    client: &OpenHandsClient,
+    conversation_id: &str,
+    cache: &Arc<Mutex<EventCache>>,
+    state: &Arc<Mutex<ConversationStateMirror>>,
+) -> Result<()> {
+    let events = client.search_events_all(conversation_id).await?;
+    let _ = merge_events(cache, state, events).await;
+    let _ = refresh_and_snapshot(client, conversation_id, state).await?;
+    Ok(())
+}
+
+async fn refresh_and_snapshot(
+    client: &OpenHandsClient,
+    conversation_id: &str,
+    state: &Arc<Mutex<ConversationStateMirror>>,
+) -> Result<ConversationInfo> {
+    let info = client
+        .get_conversation(conversation_id)
+        .await?
+        .ok_or_else(|| OpenHandsError::ConversationNotFound {
+            conversation_id: conversation_id.to_string(),
+        })?;
+    {
+        let mut mirror = state.lock().await;
+        mirror.refresh_from_conversation(&info);
+    }
+    Ok(info)
+}

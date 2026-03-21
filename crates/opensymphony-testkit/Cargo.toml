@@ -1,0 +1,26 @@
+[package]
+name = "opensymphony-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+futures.workspace = true
+opensymphony-domain = { path = "../opensymphony-domain" }
+opensymphony-openhands = { path = "../opensymphony-openhands" }
+opensymphony-workspace = { path = "../opensymphony-workspace" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
