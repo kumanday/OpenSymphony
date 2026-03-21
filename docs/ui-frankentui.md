@@ -36,6 +36,12 @@ FrankenTUI should talk only to the local OpenSymphony control plane.
 - control-plane WebSocket or SSE stream for updates
 - optional log-file tail view through the daemon, not by opening private files directly
 
+Current implemented local contract:
+
+- `GET /api/v1/snapshot`
+- `GET /api/v1/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
+- `GET /healthz` for daemon liveness
+
 ### Explicitly out of scope
 
 - direct connection to OpenHands WebSocket streams
@@ -121,12 +127,17 @@ MVP interaction should remain intentionally small.
 Recommended commands:
 
 - move selection
-- filter by runtime state
-- filter by tracker state
-- toggle issue-detail sections
-- switch between events and logs
-- refresh snapshot
+- cycle focus
+- switch between events and metrics
 - quit cleanly
+
+Current key map in the implemented client:
+
+- `j` or down arrow: move selection down
+- `k` or up arrow: move selection up
+- `tab`: cycle focus between issue list, detail, and timeline panes
+- `e`: switch the bottom pane between recent events and metrics
+- `q`: quit cleanly
 
 Do not start with in-UI mutation commands unless the control plane already defines them cleanly.
 
@@ -181,9 +192,18 @@ UI requirements:
 - never panic the terminal session on missing fields
 - degrade gracefully if optional metrics are absent
 
+Current reconnect behavior:
+
+- fetch the latest snapshot over HTTP on startup
+- subscribe to the SSE stream
+- if the stream closes or fails, mark the connection as reconnecting
+- refetch the current snapshot before resubscribing
+
 ## 11. Dependency strategy
 
-FrankenTUI currently appears to be easiest to consume through workspace or path dependencies for the full stack. Reflect that reality in repository setup and CI until the full crate set is readily published and stable.
+The current implementation uses the published `ftui` facade from crates.io with the `crossterm` feature enabled.
+
+This keeps the OpenSymphony workspace self-contained while preserving the option to move to a path dependency later if a future FrankenTUI feature requires unpublished workspace crates.
 
 ## 12. Testing approach
 
@@ -193,6 +213,12 @@ Automated:
 - snapshot-to-view-model tests
 - simple rendering smoke tests
 - control-plane client reconnection tests
+
+Current automated coverage:
+
+- reducer selection and mode-switch tests
+- render smoke tests against serialized snapshots
+- control-plane snapshot plus SSE round-trip tests
 
 Manual:
 
