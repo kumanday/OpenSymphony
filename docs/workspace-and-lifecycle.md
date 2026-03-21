@@ -17,6 +17,10 @@ Sanitization rule:
 - keep `[A-Za-z0-9._-]`
 - replace every other character with `_`
 
+Configuration rule:
+
+- if `workspace.root` is provided through env indirection such as `$WORKSPACE_ROOT`, that env var must resolve during workflow loading; OpenSymphony must not silently fall back to the default workspace root for an explicit operator-supplied path
+
 Examples:
 
 - `ABC-123` -> `ABC-123`

@@ -178,7 +178,7 @@ The repository now exposes three stable foundation contracts that later mileston
   - serialized orchestrator snapshot types
 - `opensymphony-workflow`
   - raw `WORKFLOW.md` parsing into `{config, prompt_template}`
-  - typed config resolution with defaults, env indirection, path normalization, required Linear project slugs, and strict `openhands` extension validation
+  - typed config resolution with defaults, env indirection, path normalization, required Linear tracker credentials, explicit env-backed workspace roots, and strict `openhands` extension validation
   - strict prompt rendering over `{issue, attempt}`
 - `opensymphony-orchestrator`
   - deterministic candidate sorting, claim logic, and claimed-to-running enforcement
