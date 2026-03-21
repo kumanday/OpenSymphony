@@ -1,6 +1,6 @@
 use std::{
     cmp::{max, min},
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -83,6 +83,7 @@ impl TuiState {
             return String::new();
         }
 
+        let (body_rows, timeline_rows) = section_layout(height);
         let mut lines = Vec::new();
         let snapshot = self.latest_snapshot.as_ref();
         let issue_count = snapshot
@@ -109,15 +110,26 @@ impl TuiState {
             let right_width = width.saturating_sub(left_width + 3);
             let left = self.issue_lines(left_width);
             let right = self.detail_lines(right_width);
-            lines.extend(two_column_block(&left, &right, left_width, right_width));
+            lines.extend(fit_section(
+                two_column_block(&left, &right, left_width, right_width),
+                body_rows,
+                width,
+            ));
         } else {
-            lines.extend(self.issue_lines(width));
-            lines.push("-".repeat(width));
-            lines.extend(self.detail_lines(width));
+            let mut stacked = self.issue_lines(width);
+            stacked.push("-".repeat(width));
+            stacked.extend(self.detail_lines(width));
+            lines.extend(fit_section(stacked, body_rows, width));
         }
 
-        lines.push("=".repeat(width));
-        lines.extend(self.timeline_lines(width));
+        if timeline_rows > 0 {
+            lines.push("=".repeat(width));
+            lines.extend(fit_section(
+                self.timeline_lines(width),
+                timeline_rows,
+                width,
+            ));
+        }
 
         if lines.len() > height {
             lines.truncate(height);
@@ -303,10 +315,30 @@ pub enum TuiAction {
     ToggleTimelineMode,
 }
 
-#[derive(Debug)]
-enum BridgeMessage {
-    Snapshot(Box<SnapshotEnvelope>),
-    ConnectionLost(String),
+#[derive(Debug, Default)]
+struct BridgeMailbox {
+    latest_snapshot: Option<Box<SnapshotEnvelope>>,
+    latest_connection_loss: Option<String>,
+}
+
+impl BridgeMailbox {
+    fn push_snapshot(&mut self, snapshot: SnapshotEnvelope) {
+        self.latest_connection_loss = None;
+        self.latest_snapshot = Some(Box::new(snapshot));
+    }
+
+    fn push_connection_loss(&mut self, reason: String) {
+        self.latest_snapshot = None;
+        self.latest_connection_loss = Some(reason);
+    }
+
+    fn take_action(&mut self) -> Option<TuiAction> {
+        if let Some(reason) = self.latest_connection_loss.take() {
+            return Some(TuiAction::ConnectionLost(reason));
+        }
+
+        self.latest_snapshot.take().map(TuiAction::SnapshotReceived)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -336,9 +368,9 @@ impl From<Event> for AppMessage {
 }
 
 pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), TuiError> {
-    let (sender, receiver) = mpsc::channel();
-    spawn_bridge(base_url, sender);
-    let app = OperatorApp::new(receiver, exit_after);
+    let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+    spawn_bridge(base_url, Arc::clone(&bridge));
+    let app = OperatorApp::new(bridge, exit_after);
     App::new(app)
         .screen_mode(ScreenMode::Inline { ui_height: 22 })
         .run()
@@ -348,34 +380,91 @@ pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), T
 #[derive(Debug)]
 struct OperatorApp {
     state: TuiState,
-    receiver: Receiver<BridgeMessage>,
+    bridge: Arc<Mutex<BridgeMailbox>>,
     exit_after: Option<Duration>,
     started_at: Instant,
 }
 
 impl OperatorApp {
-    fn new(receiver: Receiver<BridgeMessage>, exit_after: Option<Duration>) -> Self {
+    fn new(bridge: Arc<Mutex<BridgeMailbox>>, exit_after: Option<Duration>) -> Self {
         Self {
             state: TuiState::default(),
-            receiver,
+            bridge,
             exit_after,
             started_at: Instant::now(),
         }
     }
 
     fn drain_bridge(&mut self) {
-        loop {
-            match self.receiver.try_recv() {
-                Ok(BridgeMessage::Snapshot(snapshot)) => {
-                    self.state.reduce(TuiAction::SnapshotReceived(snapshot));
-                }
-                Ok(BridgeMessage::ConnectionLost(reason)) => {
-                    self.state.reduce(TuiAction::ConnectionLost(reason));
-                }
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-            }
+        let mut bridge = self
+            .bridge
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(action) = bridge.take_action() {
+            self.state.reduce(action);
         }
     }
+}
+
+fn spawn_bridge(base_url: Url, bridge: Arc<Mutex<BridgeMailbox>>) {
+    thread::spawn(move || {
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                push_connection_loss(&bridge, error.to_string());
+                return;
+            }
+        };
+
+        runtime.block_on(async move {
+            let retry_delay = Duration::from_millis(750);
+            let client = ControlPlaneClient::new(base_url);
+            loop {
+                match client.fetch_snapshot().await {
+                    Ok(snapshot) => {
+                        push_snapshot(&bridge, snapshot);
+                    }
+                    Err(error) => {
+                        push_connection_loss(&bridge, error.to_string());
+                        tokio::time::sleep(retry_delay).await;
+                        continue;
+                    }
+                }
+
+                let mut stream = match client.stream_updates() {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        push_connection_loss(&bridge, error.to_string());
+                        tokio::time::sleep(retry_delay).await;
+                        continue;
+                    }
+                };
+
+                let mut should_retry = false;
+                while let Some(update) = stream.next().await {
+                    match update {
+                        Ok(snapshot) => {
+                            push_snapshot(&bridge, snapshot);
+                        }
+                        Err(error) => {
+                            handle_bridge_error(&bridge, &error);
+                            should_retry = true;
+                            break;
+                        }
+                    }
+                }
+
+                stream.close();
+                if !should_retry {
+                    push_connection_loss(&bridge, "control-plane stream closed".to_owned());
+                }
+                tokio::time::sleep(retry_delay).await;
+            }
+        });
+    });
 }
 
 impl Model for OperatorApp {
@@ -422,72 +511,9 @@ pub enum TuiError {
     Runtime(std::io::Error),
 }
 
-fn spawn_bridge(base_url: Url, sender: Sender<BridgeMessage>) {
-    thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                let _ = sender.send(BridgeMessage::ConnectionLost(error.to_string()));
-                return;
-            }
-        };
-
-        runtime.block_on(async move {
-            let retry_delay = Duration::from_millis(750);
-            let client = ControlPlaneClient::new(base_url);
-            loop {
-                match client.fetch_snapshot().await {
-                    Ok(snapshot) => {
-                        let _ = sender.send(BridgeMessage::Snapshot(Box::new(snapshot)));
-                    }
-                    Err(error) => {
-                        let _ = sender.send(BridgeMessage::ConnectionLost(error.to_string()));
-                        tokio::time::sleep(retry_delay).await;
-                        continue;
-                    }
-                }
-
-                let mut stream = match client.stream_updates() {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        let _ = sender.send(BridgeMessage::ConnectionLost(error.to_string()));
-                        tokio::time::sleep(retry_delay).await;
-                        continue;
-                    }
-                };
-
-                let mut should_retry = false;
-                while let Some(update) = stream.next().await {
-                    match update {
-                        Ok(snapshot) => {
-                            let _ = sender.send(BridgeMessage::Snapshot(Box::new(snapshot)));
-                        }
-                        Err(error) => {
-                            handle_bridge_error(&sender, &error);
-                            should_retry = true;
-                            break;
-                        }
-                    }
-                }
-
-                stream.close();
-                if !should_retry {
-                    let _ = sender.send(BridgeMessage::ConnectionLost(
-                        "control-plane stream closed".to_owned(),
-                    ));
-                }
-                tokio::time::sleep(retry_delay).await;
-            }
-        });
-    });
-}
-
-fn handle_bridge_error(sender: &Sender<BridgeMessage>, error: &ControlPlaneClientError) {
+fn handle_bridge_error(bridge: &Arc<Mutex<BridgeMailbox>>, error: &ControlPlaneClientError) {
     log_stream_error(error);
-    let _ = sender.send(BridgeMessage::ConnectionLost(error.to_string()));
+    push_connection_loss(bridge, error.to_string());
 }
 
 fn format_timestamp(timestamp: DateTime<Utc>) -> String {
@@ -566,6 +592,59 @@ fn two_column_block(
         .collect()
 }
 
+fn section_layout(height: usize) -> (usize, usize) {
+    const HEADER_ROWS: usize = 2;
+    const TIMELINE_SEPARATOR_ROWS: usize = 1;
+    const MIN_TIMELINE_ROWS: usize = 4;
+
+    if height <= HEADER_ROWS {
+        return (0, 0);
+    }
+
+    let available = height.saturating_sub(HEADER_ROWS);
+    if available <= TIMELINE_SEPARATOR_ROWS {
+        return (available, 0);
+    }
+
+    let max_timeline_rows = available.saturating_sub(TIMELINE_SEPARATOR_ROWS + 1);
+    let timeline_rows = min(max(MIN_TIMELINE_ROWS, available / 3), max_timeline_rows);
+    let body_rows = available.saturating_sub(TIMELINE_SEPARATOR_ROWS + timeline_rows);
+    (body_rows, timeline_rows)
+}
+
+fn fit_section(mut lines: Vec<String>, max_rows: usize, width: usize) -> Vec<String> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+
+    if lines.len() > max_rows {
+        lines.truncate(max_rows);
+        if let Some(last) = lines.last_mut() {
+            *last = fit("...", width);
+        }
+    }
+
+    while lines.len() < max_rows {
+        lines.push(" ".repeat(width));
+    }
+
+    lines
+}
+
+fn push_snapshot(bridge: &Arc<Mutex<BridgeMailbox>>, snapshot: SnapshotEnvelope) {
+    let mut bridge = bridge
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    bridge.push_snapshot(snapshot);
+}
+
+fn push_connection_loss(bridge: &Arc<Mutex<BridgeMailbox>>, reason: String) {
+    let mut bridge = bridge
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    bridge.push_connection_loss(reason);
+}
+
 fn fit(value: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -619,5 +698,100 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
             opensymphony_domain::WorkerOutcome::Failed => "failed",
             opensymphony_domain::WorkerOutcome::Canceled => "canceled",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{section_layout, BridgeMailbox, TuiState};
+    use chrono::{TimeZone, Utc};
+    use opensymphony_domain::{
+        AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
+        IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope,
+        WorkerOutcome,
+    };
+
+    fn fixture(issue_count: usize) -> SnapshotEnvelope {
+        let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap();
+        SnapshotEnvelope {
+            sequence: 8,
+            published_at: now,
+            snapshot: DaemonSnapshot {
+                generated_at: now,
+                daemon: DaemonStatus {
+                    state: DaemonState::Ready,
+                    last_poll_at: now,
+                    workspace_root: "/tmp/opensymphony".to_owned(),
+                    status_line: "ready".to_owned(),
+                },
+                agent_server: AgentServerStatus {
+                    reachable: true,
+                    base_url: "http://127.0.0.1:3000".to_owned(),
+                    conversation_count: issue_count as u32,
+                    status_line: "healthy".to_owned(),
+                },
+                metrics: MetricsSnapshot {
+                    running_issues: 1,
+                    retry_queue_depth: 0,
+                    total_tokens: 1024,
+                    total_cost_micros: 50_000,
+                },
+                issues: (0..issue_count)
+                    .map(|index| IssueSnapshot {
+                        identifier: format!("COE-{}", 255 + index),
+                        title: format!("Issue {index}"),
+                        tracker_state: "In Progress".to_owned(),
+                        runtime_state: IssueRuntimeState::Running,
+                        last_outcome: WorkerOutcome::Running,
+                        last_event_at: now,
+                        conversation_id_suffix: format!("conv-{index}"),
+                        workspace_path_suffix: format!("workspace-{index}"),
+                        retry_count: index as u32,
+                        blocked: false,
+                    })
+                    .collect(),
+                recent_events: vec![RecentEvent {
+                    happened_at: now,
+                    issue_identifier: Some("COE-255".to_owned()),
+                    kind: RecentEventKind::SnapshotPublished,
+                    summary: "snapshot updated".to_owned(),
+                }],
+            },
+        }
+    }
+
+    #[test]
+    fn reserves_bottom_pane_space_for_timeline() {
+        let mut state = TuiState::default();
+        state.reduce(super::TuiAction::SnapshotReceived(Box::new(fixture(12))));
+
+        let rendered = state.render_text(100, 22);
+        assert!(rendered.contains("RECENT EVENTS"));
+        assert!(rendered.contains("snapshot updated"));
+        assert_eq!(rendered.lines().count(), 22);
+    }
+
+    #[test]
+    fn coalesces_bridge_snapshots_to_latest_value() {
+        let mut mailbox = BridgeMailbox::default();
+        let first = fixture(1);
+        let second = fixture(3);
+
+        mailbox.push_snapshot(first);
+        mailbox.push_snapshot(second.clone());
+
+        match mailbox.take_action() {
+            Some(super::TuiAction::SnapshotReceived(snapshot)) => {
+                assert_eq!(*snapshot, second);
+            }
+            other => panic!("expected latest snapshot, got {other:?}"),
+        }
+        assert!(mailbox.take_action().is_none());
+    }
+
+    #[test]
+    fn reserves_rows_for_the_timeline_section() {
+        let (body_rows, timeline_rows) = section_layout(22);
+        assert_eq!((body_rows, timeline_rows), (13, 6));
     }
 }
