@@ -116,7 +116,7 @@ This keeps:
 
 ## 4.1 Core crates
 
-Recommended crate boundaries:
+Current crate boundaries:
 
 - `opensymphony-domain`
   - issue model
@@ -166,6 +166,26 @@ Recommended crate boundaries:
   - fake Linear server helpers
   - fake OpenHands agent-server
   - shared fixtures
+
+## 4.1.1 M1 public contract surface
+
+The repository now exposes three stable foundation contracts that later milestones build on:
+
+- `opensymphony-domain`
+  - normalized tracker issue model
+  - blocker references
+  - run-attempt, retry-entry, runtime-session, and worker-outcome models
+  - serialized orchestrator snapshot types
+- `opensymphony-workflow`
+  - raw `WORKFLOW.md` parsing into `{config, prompt_template}`
+  - typed config resolution with defaults, env indirection, path normalization, and `openhands` extension validation
+  - strict prompt rendering over `{issue, attempt}`
+- `opensymphony-orchestrator`
+  - deterministic candidate sorting and claim logic
+  - explicit `Running` / `RetryQueued` / `Released` transitions
+  - fixed continuation retry, exponential failure backoff, stall detection, reconciliation, and restart recovery
+
+The other crates are already present at their final ownership boundaries, but for M1 they intentionally expose only thin re-exports or placeholders rather than premature transport logic.
 
 ## 4.2 External processes
 
