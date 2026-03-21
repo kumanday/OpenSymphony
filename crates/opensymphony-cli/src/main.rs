@@ -115,6 +115,64 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
     } else {
         DaemonState::Ready
     };
+    let issues = vec![
+        IssueSnapshot {
+            identifier: "COE-255".to_owned(),
+            title: "Observability and FrankenTUI".to_owned(),
+            tracker_state: "In Progress".to_owned(),
+            runtime_state: runtime,
+            last_outcome: outcome,
+            last_event_at: now,
+            conversation_id_suffix: "255-live".to_owned(),
+            workspace_path_suffix: "COE-255".to_owned(),
+            retry_count: if matches!(runtime, IssueRuntimeState::RetryQueued) {
+                1
+            } else {
+                0
+            },
+            blocked: false,
+        },
+        IssueSnapshot {
+            identifier: "OSYM-401".to_owned(),
+            title: "Control-plane API and snapshot store".to_owned(),
+            tracker_state: "Done".to_owned(),
+            runtime_state: IssueRuntimeState::Completed,
+            last_outcome: WorkerOutcome::Completed,
+            last_event_at: now - ChronoDuration::seconds(45),
+            conversation_id_suffix: "401-done".to_owned(),
+            workspace_path_suffix: "OSYM-401".to_owned(),
+            retry_count: 0,
+            blocked: false,
+        },
+        IssueSnapshot {
+            identifier: "OSYM-402".to_owned(),
+            title: "FrankenTUI operator client".to_owned(),
+            tracker_state: "In Progress".to_owned(),
+            runtime_state: if step.is_multiple_of(2) {
+                IssueRuntimeState::Running
+            } else {
+                IssueRuntimeState::Idle
+            },
+            last_outcome: if step.is_multiple_of(2) {
+                WorkerOutcome::Running
+            } else {
+                WorkerOutcome::Unknown
+            },
+            last_event_at: now - ChronoDuration::seconds(10),
+            conversation_id_suffix: "402-ui".to_owned(),
+            workspace_path_suffix: "OSYM-402".to_owned(),
+            retry_count: 0,
+            blocked: false,
+        },
+    ];
+    let running_issues = issues
+        .iter()
+        .filter(|issue| matches!(issue.runtime_state, IssueRuntimeState::Running))
+        .count() as u32;
+    let retry_queue_depth = issues
+        .iter()
+        .filter(|issue| matches!(issue.runtime_state, IssueRuntimeState::RetryQueued))
+        .count() as u32;
 
     DaemonSnapshot {
         generated_at: now,
@@ -131,69 +189,12 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             status_line: "local agent-server healthy".to_owned(),
         },
         metrics: MetricsSnapshot {
-            running_issues: if matches!(runtime, IssueRuntimeState::Completed) {
-                0
-            } else {
-                1
-            },
-            retry_queue_depth: if matches!(runtime, IssueRuntimeState::RetryQueued) {
-                1
-            } else {
-                0
-            },
+            running_issues,
+            retry_queue_depth,
             total_tokens: 8_000 + (step * 240),
             total_cost_micros: 340_000 + (step * 9_500),
         },
-        issues: vec![
-            IssueSnapshot {
-                identifier: "COE-255".to_owned(),
-                title: "Observability and FrankenTUI".to_owned(),
-                tracker_state: "In Progress".to_owned(),
-                runtime_state: runtime,
-                last_outcome: outcome,
-                last_event_at: now,
-                conversation_id_suffix: "255-live".to_owned(),
-                workspace_path_suffix: "COE-255".to_owned(),
-                retry_count: if matches!(runtime, IssueRuntimeState::RetryQueued) {
-                    1
-                } else {
-                    0
-                },
-                blocked: false,
-            },
-            IssueSnapshot {
-                identifier: "OSYM-401".to_owned(),
-                title: "Control-plane API and snapshot store".to_owned(),
-                tracker_state: "Done".to_owned(),
-                runtime_state: IssueRuntimeState::Completed,
-                last_outcome: WorkerOutcome::Completed,
-                last_event_at: now - ChronoDuration::seconds(45),
-                conversation_id_suffix: "401-done".to_owned(),
-                workspace_path_suffix: "OSYM-401".to_owned(),
-                retry_count: 0,
-                blocked: false,
-            },
-            IssueSnapshot {
-                identifier: "OSYM-402".to_owned(),
-                title: "FrankenTUI operator client".to_owned(),
-                tracker_state: "In Progress".to_owned(),
-                runtime_state: if step.is_multiple_of(2) {
-                    IssueRuntimeState::Running
-                } else {
-                    IssueRuntimeState::Idle
-                },
-                last_outcome: if step.is_multiple_of(2) {
-                    WorkerOutcome::Running
-                } else {
-                    WorkerOutcome::Unknown
-                },
-                last_event_at: now - ChronoDuration::seconds(10),
-                conversation_id_suffix: "402-ui".to_owned(),
-                workspace_path_suffix: "OSYM-402".to_owned(),
-                retry_count: 0,
-                blocked: false,
-            },
-        ],
+        issues,
         recent_events: vec![
             RecentEvent {
                 happened_at: now,
@@ -235,8 +236,9 @@ enum CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use super::{sample_snapshot, Cli, Command};
     use clap::{error::ErrorKind, Parser};
+    use opensymphony_domain::IssueRuntimeState;
 
     #[test]
     fn daemon_rejects_zero_sample_interval() {
@@ -258,6 +260,26 @@ mod tests {
                 assert_eq!(sample_interval_ms.get(), 250);
             }
             Command::Tui { .. } => panic!("expected daemon command"),
+        }
+    }
+
+    #[test]
+    fn sample_snapshot_metrics_match_rendered_issue_states() {
+        for step in 0..8 {
+            let snapshot = sample_snapshot(step);
+            let running_issues = snapshot
+                .issues
+                .iter()
+                .filter(|issue| matches!(issue.runtime_state, IssueRuntimeState::Running))
+                .count() as u32;
+            let retry_queue_depth = snapshot
+                .issues
+                .iter()
+                .filter(|issue| matches!(issue.runtime_state, IssueRuntimeState::RetryQueued))
+                .count() as u32;
+
+            assert_eq!(snapshot.metrics.running_issues, running_issues);
+            assert_eq!(snapshot.metrics.retry_queue_depth, retry_queue_depth);
         }
     }
 }

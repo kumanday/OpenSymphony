@@ -198,6 +198,10 @@ Current workspace commands:
 - `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
 - `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
 
+The TUI treats `--url` as a control-plane service root. Path-prefixed deployments such as
+`http://proxy/opensymphony` and `http://proxy/opensymphony/` both resolve API requests beneath
+that prefix.
+
 Possible helper commands later:
 
 - `opensymphony debug openhands`
@@ -220,6 +224,8 @@ leave a background thread behind.
 When validating long issue queues, also confirm that moving the selection keeps
 the highlighted row visible and that snapshot reordering preserves focus on the
 same issue identifier.
+When validating the sample daemon payload, also confirm that `metrics.running_issues`
+and `metrics.retry_queue_depth` match the runtime states shown in the rendered issue list.
 
 ## 7. Doctor checks
 
