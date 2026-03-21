@@ -2411,7 +2411,9 @@ wheels = [
 name = "opensymphony-openhands-server"
 version = "0.1.0"
 source = { virtual = "." }
-dependencies = [
+
+[package.optional-dependencies]
+agent-server = [
     { name = "openhands-agent-server" },
     { name = "openhands-sdk" },
     { name = "openhands-tools" },
@@ -2420,11 +2422,12 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "openhands-agent-server", specifier = "==1.14.0" },
-    { name = "openhands-sdk", specifier = "==1.14.0" },
-    { name = "openhands-tools", specifier = "==1.14.0" },
-    { name = "openhands-workspace", specifier = "==1.14.0" },
+    { name = "openhands-agent-server", marker = "extra == 'agent-server'", specifier = "==1.14.0" },
+    { name = "openhands-sdk", marker = "extra == 'agent-server'", specifier = "==1.14.0" },
+    { name = "openhands-tools", marker = "extra == 'agent-server'", specifier = "==1.14.0" },
+    { name = "openhands-workspace", marker = "extra == 'agent-server'", specifier = "==1.14.0" },
 ]
+provides-extras = ["agent-server"]
 
 [[package]]
 name = "opentelemetry-api"

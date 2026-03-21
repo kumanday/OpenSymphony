@@ -24,13 +24,13 @@ Verified contract assumptions for this pin:
 Install and sync the pinned environment:
 
 ```bash
-uv sync --project tools/openhands-server
+uv sync --project tools/openhands-server --extra agent-server
 ```
 
 Run the server on loopback:
 
 ```bash
-tools/openhands-server/run-local.sh --port 8000
+OPENHANDS_SERVER_PORT=8000 tools/openhands-server/run-local.sh
 ```
 
 Probe readiness:
@@ -38,3 +38,7 @@ Probe readiness:
 ```bash
 curl http://127.0.0.1:8000/ready
 ```
+
+The wrapper always launches the pinned server in host-process mode with `RUNTIME=process`,
+binds to loopback, and rejects extra agent-server CLI arguments so local smoke runs match the
+daemon-managed topology.

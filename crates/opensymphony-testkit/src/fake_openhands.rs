@@ -961,7 +961,7 @@ mod tests {
             )
             .await?;
 
-        let mut attached = opensymphony_openhands::AttachedConversation::attach(
+        let mut attached = AttachedConversation::attach(
             client.clone(),
             "conv-reconnect",
             WebSocketConfig {
@@ -1036,7 +1036,7 @@ mod tests {
             )
             .await?;
 
-        let attached = opensymphony_openhands::AttachedConversation::attach(
+        let attached = AttachedConversation::attach(
             client.clone(),
             "conv-reconnect-retry",
             WebSocketConfig {
@@ -1247,7 +1247,7 @@ mod tests {
             )
             .await?;
 
-        let mut attached = opensymphony_openhands::AttachedConversation::attach(
+        let mut attached = AttachedConversation::attach(
             client.clone(),
             "conv-post-terminal",
             WebSocketConfig {
