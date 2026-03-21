@@ -115,6 +115,7 @@ struct FakeState {
     conversation_get_delay: Duration,
     event_search_failures: HashMap<String, usize>,
     message_post_failures: usize,
+    ready_event_delays: HashMap<String, VecDeque<Duration>>,
     websocket_handshake_delays: HashMap<String, VecDeque<Duration>>,
     conversations: HashMap<String, ConversationEntry>,
 }
@@ -265,6 +266,26 @@ impl FakeOpenHandsServer {
         };
         state
             .websocket_handshake_delays
+            .entry(conversation_id.to_string())
+            .or_default()
+            .push_back(delay);
+        Ok(())
+    }
+
+    /// Delays the next initial ready snapshot after the WebSocket handshake succeeds.
+    pub async fn enqueue_ready_event_delay(
+        &self,
+        conversation_id: &str,
+        delay: Duration,
+    ) -> Result<(), TestkitError> {
+        let mut state = self.state.lock().await;
+        let Some(_) = state.conversations.get(conversation_id) else {
+            return Err(TestkitError::MissingConversation {
+                conversation_id: conversation_id.to_string(),
+            });
+        };
+        state
+            .ready_event_delays
             .entry(conversation_id.to_string())
             .or_default()
             .push_back(delay);
@@ -595,7 +616,7 @@ async fn events_socket(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let Some((snapshot, receiver, handshake_delay)) =
+    let Some((snapshot, receiver, handshake_delay, ready_delay)) =
         prepare_socket(&app.state, &conversation_id).await
     else {
         return StatusCode::NOT_FOUND.into_response();
@@ -603,7 +624,7 @@ async fn events_socket(
     if let Some(delay) = handshake_delay {
         tokio::time::sleep(delay).await;
     }
-    ws.on_upgrade(move |socket| socket_task(socket, snapshot, receiver))
+    ws.on_upgrade(move |socket| socket_task(socket, snapshot, receiver, ready_delay))
 }
 
 async fn prepare_socket(
@@ -612,6 +633,7 @@ async fn prepare_socket(
 ) -> Option<(
     Value,
     broadcast::Receiver<WsServerMessage>,
+    Option<Duration>,
     Option<Duration>,
 )> {
     let mut state = state.lock().await;
@@ -626,14 +648,22 @@ async fn prepare_socket(
         .websocket_handshake_delays
         .get_mut(conversation_id)
         .and_then(VecDeque::pop_front);
-    Some((snapshot, receiver, handshake_delay))
+    let ready_delay = state
+        .ready_event_delays
+        .get_mut(conversation_id)
+        .and_then(VecDeque::pop_front);
+    Some((snapshot, receiver, handshake_delay, ready_delay))
 }
 
 async fn socket_task(
     mut socket: WebSocket,
     snapshot: Value,
     mut receiver: broadcast::Receiver<WsServerMessage>,
+    ready_delay: Option<Duration>,
 ) {
+    if let Some(delay) = ready_delay {
+        tokio::time::sleep(delay).await;
+    }
     if socket
         .send(Message::Text(snapshot.to_string().into()))
         .await
@@ -1579,6 +1609,126 @@ mod tests {
             .collect();
         assert_eq!(texts, vec!["full prompt"]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn issue_session_runner_resets_corrupted_manifest()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        let temp_dir = TempDir::new()?;
+        let workspace = opensymphony_workspace::WorkspaceLayout::new(temp_dir.path(), "COE-253")?;
+        workspace.create()?;
+        std::fs::write(&workspace.conversation_manifest_path, "{not json")?;
+
+        let runner = IssueSessionRunner::new(
+            client.clone(),
+            opensymphony_openhands::ConversationConfig {
+                runtime_contract_version: "openhands-sdk-v1.14.0".to_string(),
+                persistence_dir_relative: ".opensymphony/openhands".to_string(),
+                agent: agent(),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+            },
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .with_run_timeout(Duration::from_secs(2));
+
+        let outcome = runner
+            .execute(&IssueSessionRequest {
+                issue: IssueRef {
+                    issue_id: "issue-1".to_string(),
+                    identifier: "COE-253".to_string(),
+                    title: "Runtime adapter".to_string(),
+                },
+                workspace: workspace.clone(),
+                prompts: PromptSet {
+                    full_prompt: "full prompt".to_string(),
+                    continuation_prompt: "continue prompt".to_string(),
+                },
+            })
+            .await?;
+
+        assert_eq!(outcome.prompt_kind, opensymphony_domain::PromptKind::Fresh);
+        let manifest = ConversationManifest::load(&workspace.conversation_manifest_path)?
+            .expect("corrupted manifest should be replaced");
+        assert_eq!(manifest.reset_reason.as_deref(), Some("corrupted_manifest"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attached_stream_close_interrupts_reconnect_readiness_wait()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: "/tmp/test".to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some("conv-ready-blackhole".to_string()),
+                persistence_dir: Some("/tmp/test/.opensymphony/openhands".to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+
+        server
+            .enqueue_run(
+                "conv-ready-blackhole",
+                ScriptedRun::new(vec![
+                    RunStep::Emit {
+                        event: execution_status_event(RemoteExecutionStatus::Running),
+                        delay: Duration::from_millis(5),
+                    },
+                    RunStep::Disconnect {
+                        delay: Duration::from_millis(5),
+                    },
+                ]),
+            )
+            .await?;
+
+        let attached = AttachedConversation::attach(
+            client.clone(),
+            "conv-ready-blackhole",
+            WebSocketConfig {
+                ready_timeout_ms: 200,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .await?;
+
+        server
+            .enqueue_ready_event_delay("conv-ready-blackhole", Duration::from_secs(1))
+            .await?;
+        client.run_conversation("conv-ready-blackhole").await?;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_millis(150), attached.close()).await??;
         Ok(())
     }
 }

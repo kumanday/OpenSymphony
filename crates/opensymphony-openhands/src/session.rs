@@ -8,7 +8,9 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use opensymphony_domain::{IssueRef, PromptKind, PromptSet, SessionOutcome};
-use opensymphony_workspace::{ConversationManifest, WorkspaceLayout, write_prompt_artifact};
+use opensymphony_workspace::{
+    ConversationManifest, WorkspaceError, WorkspaceLayout, write_prompt_artifact,
+};
 
 use crate::client::OpenHandsClient;
 use crate::config::{ConversationConfig, WebSocketConfig};
@@ -146,7 +148,11 @@ impl IssueSessionRunner {
     ) -> Result<PreparedConversation> {
         let now = Utc::now();
         let manifest_path = &request.workspace.conversation_manifest_path;
-        let existing = ConversationManifest::load(manifest_path)?;
+        let (existing, corrupted_manifest) = match ConversationManifest::load(manifest_path) {
+            Ok(existing) => (existing, false),
+            Err(WorkspaceError::Json { .. }) => (None, true),
+            Err(error) => return Err(error.into()),
+        };
         let persistence_dir = request.workspace.openhands_dir.display().to_string();
         let server_base_url = self.client.transport().base_url.to_string();
 
@@ -243,7 +249,7 @@ impl IssueSessionRunner {
                         created_at: now,
                         last_attached_at: now,
                         fresh_conversation: true,
-                        reset_reason: None,
+                        reset_reason: corrupted_manifest.then(|| "corrupted_manifest".to_string()),
                         runtime_contract_version: self
                             .conversation
                             .runtime_contract_version

@@ -96,14 +96,16 @@ impl WorkspaceLayout {
 
     /// Creates the issue workspace plus owned metadata directories.
     pub fn create(&self) -> Result<(), WorkspaceError> {
+        let issue_workspace = ensure_dir(&self.issue_workspace)?;
+        ensure_contained(&issue_workspace, &self.workspace_root)?;
         for path in [
-            &self.issue_workspace,
             &self.metadata_dir,
             &self.prompts_dir,
             &self.logs_dir,
             &self.openhands_dir,
         ] {
-            ensure_dir(path)?;
+            let resolved = ensure_dir(path)?;
+            ensure_contained(&resolved, &issue_workspace)?;
         }
         Ok(())
     }
@@ -219,6 +221,14 @@ fn workspace_key_is_normal_component(key: &str) -> bool {
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
+fn ensure_contained(path: &Path, root: &Path) -> Result<(), WorkspaceError> {
+    path.strip_prefix(root)
+        .map_err(|_| WorkspaceError::PathEscape {
+            path: path.display().to_string(),
+        })?;
+    Ok(())
+}
+
 fn ensure_dir(path: &Path) -> Result<PathBuf, WorkspaceError> {
     fs::create_dir_all(path).map_err(|source| WorkspaceError::Io {
         path: path.display().to_string(),
@@ -233,6 +243,9 @@ fn ensure_dir(path: &Path) -> Result<PathBuf, WorkspaceError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    use tempfile::TempDir;
 
     #[test]
     fn sanitize_replaces_unsafe_characters() {
@@ -248,5 +261,23 @@ mod tests {
         assert_eq!(sanitize_issue_identifier(".."), "__");
         assert_eq!(sanitize_issue_identifier(""), "_");
         assert_eq!(sanitize_issue_identifier("..."), "...");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_rejects_metadata_symlink_escape() {
+        let temp_dir = TempDir::new().expect("temp dir should exist");
+        let workspace = WorkspaceLayout::new(temp_dir.path(), "COE-253")
+            .expect("workspace layout should build");
+        std::fs::create_dir_all(&workspace.issue_workspace)
+            .expect("issue workspace should be creatable");
+        let escape = temp_dir.path().join("escape");
+        std::fs::create_dir_all(&escape).expect("escape dir should be creatable");
+        symlink(&escape, &workspace.metadata_dir).expect("metadata symlink should be creatable");
+
+        let error = workspace
+            .create()
+            .expect_err("metadata symlink escaping the workspace must be rejected");
+        assert!(matches!(error, WorkspaceError::PathEscape { .. }));
     }
 }
