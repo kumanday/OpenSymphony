@@ -87,12 +87,14 @@ Suggested gates:
 
 ## 3.2 Workspace manager
 
-- sanitize issue identifiers
+- sanitize stable workspace keys
 - refuse path escape
 - canonicalize the configured workspace root before containment checks when possible
 - create and reuse workspace
+- migrate identifier-keyed legacy workspaces onto stable issue-ID paths
 - rerun `after_create` after partial bootstrap failure without rerunning it after successful bootstrap
 - hook timeout
+- timed-out hook processes are terminated before the timeout returns
 - hook stderr capture
 - cleanup on terminal issue state
 
@@ -125,6 +127,8 @@ Suggested gates:
 - post-run retries only occur while the tracker still reports the issue active
 - transient tracker refresh failures do not drop completed worker reports before retry or cleanup bookkeeping
 - worker failures after conversation attach still preserve conversation metadata for the next retry
+- releasing an already-known stalled conversation still records the persisted conversation ID in `last-run.json`
+- scheduler metadata lookups use stable issue IDs so identifier changes do not orphan existing workspaces
 - invalid persisted conversation metadata resets to a fresh dispatch instead of getting stuck in retry
 - terminal cleanup
 - retained terminal workspaces still clear stale retry manifests

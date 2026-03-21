@@ -9,8 +9,10 @@ Preserve the Symphony workspace contract while adapting it to OpenHands conversa
 Each issue maps to exactly one workspace path:
 
 ```text
-<workspace.root>/<sanitized_issue_identifier>
+<workspace.root>/<sanitized_issue_id>
 ```
+
+The directory key comes from the stable tracker `issue.id`, not the mutable human-facing `identifier`. If older workspaces were keyed by identifier, the workspace manager should locate them by persisted `issue_id` metadata and migrate them onto the stable-ID path before reuse.
 
 Sanitization rule:
 
@@ -19,7 +21,7 @@ Sanitization rule:
 
 Examples:
 
-- `ABC-123` -> `ABC-123`
+- `1a2b3c` -> `1a2b3c`
 - `feature/42` -> `feature_42`
 - `Bug: weird path` -> `Bug__weird_path`
 
@@ -131,6 +133,7 @@ Retained terminal workspaces should not run `before_remove`; that hook is only f
 
 - Hooks execute inside the issue workspace unless explicitly documented otherwise.
 - Hook timeouts use the configured `hooks.timeout_ms`.
+- Timed-out hook subprocesses are terminated before the timeout error is returned.
 - Hook failures are categorized and surfaced with issue context.
 - `after_run` and `before_remove` are best effort by default.
 - `after_create` and `before_run` failures fail the current worker attempt.
@@ -302,7 +305,7 @@ A future hosted mode can keep the same workspace ownership model while moving ac
 
 ```rust
 trait WorkspaceManager {
-    fn workspace_path_for(&self, issue_identifier: &str) -> Result<PathBuf>;
+    fn workspace_path_for(&self, issue_id: &str) -> Result<PathBuf>;
     async fn ensure(&self, issue: &Issue) -> Result<WorkspaceHandle>;
     async fn run_hook(&self, hook: HookKind, workspace: &WorkspaceHandle) -> Result<()>;
     async fn remove(&self, workspace: &WorkspaceHandle) -> Result<()>;
@@ -319,13 +322,15 @@ trait WorkspaceManager {
 
 ## 16. Tests required
 
-- sanitize identifier edge cases
+- sanitize workspace-key edge cases
 - canonical path containment
 - create vs reuse
+- stable-ID workspace reuse even when the tracker identifier changes
 - `after_create` only once
 - `before_run` every worker lifetime
 - startup failure does not starve later dispatch candidates
 - timeout on hook
+- timed-out hook subprocesses are terminated before the timeout returns
 - no continuation retry after worker exit if tracker state is no longer active
 - transient tracker refresh failure after worker exit preserves the completion report for a later retry
 - terminal cleanup

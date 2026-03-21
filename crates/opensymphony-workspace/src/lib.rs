@@ -2,10 +2,13 @@ use chrono::{DateTime, Utc};
 use opensymphony_domain::{Issue, RetryEntry, RetryReason, WorkerOutcome};
 use opensymphony_openhands::PromptMode;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
@@ -190,7 +193,7 @@ impl WorkspaceManager {
         fs::create_dir_all(&self.config.root)
             .map_err(|error| WorkspaceError::Io(error.to_string()))?;
 
-        let workspace_path = self.workspace_path(&issue.identifier)?;
+        let workspace_path = self.workspace_path_for_issue(issue)?;
         let created = !workspace_path.exists();
         fs::create_dir_all(&workspace_path)
             .map_err(|error| WorkspaceError::Io(error.to_string()))?;
@@ -209,7 +212,7 @@ impl WorkspaceManager {
         let context = WorkspaceContext {
             workspace_path,
             metadata_dir,
-            sanitized_workspace_key: Self::sanitize_issue_identifier(&issue.identifier),
+            sanitized_workspace_key: Self::sanitize_issue_identifier(&issue.id),
             created,
         };
 
@@ -276,20 +279,17 @@ impl WorkspaceManager {
 
     pub fn load_conversation_manifest(
         &self,
-        issue_identifier: &str,
+        issue_id: &str,
     ) -> Result<Option<ConversationManifest>, WorkspaceError> {
         let path = self
-            .workspace_path(issue_identifier)?
+            .workspace_path_for_issue_id(issue_id)?
             .join(".opensymphony/conversation.json");
         read_optional_json(path)
     }
 
-    pub fn clear_conversation_manifest(
-        &self,
-        issue_identifier: &str,
-    ) -> Result<(), WorkspaceError> {
+    pub fn clear_conversation_manifest(&self, issue_id: &str) -> Result<(), WorkspaceError> {
         let path = self
-            .workspace_path(issue_identifier)?
+            .workspace_path_for_issue_id(issue_id)?
             .join(".opensymphony/conversation.json");
         if path.exists() {
             fs::remove_file(path).map_err(|error| WorkspaceError::Io(error.to_string()))?;
@@ -298,7 +298,7 @@ impl WorkspaceManager {
     }
 
     pub fn persist_retry(&self, entry: &RetryEntry) -> Result<(), WorkspaceError> {
-        let workspace_path = self.workspace_path(&entry.issue.identifier)?;
+        let workspace_path = self.workspace_path_for_issue(&entry.issue)?;
         fs::create_dir_all(workspace_path.join(".opensymphony"))
             .map_err(|error| WorkspaceError::Io(error.to_string()))?;
         let manifest = RetryManifest {
@@ -313,17 +313,17 @@ impl WorkspaceManager {
 
     pub fn load_retry_manifest(
         &self,
-        issue_identifier: &str,
+        issue_id: &str,
     ) -> Result<Option<RetryManifest>, WorkspaceError> {
         let path = self
-            .workspace_path(issue_identifier)?
+            .workspace_path_for_issue_id(issue_id)?
             .join(".opensymphony/retry.json");
         read_optional_json(path)
     }
 
-    pub fn clear_retry_manifest(&self, issue_identifier: &str) -> Result<(), WorkspaceError> {
+    pub fn clear_retry_manifest(&self, issue_id: &str) -> Result<(), WorkspaceError> {
         let path = self
-            .workspace_path(issue_identifier)?
+            .workspace_path_for_issue_id(issue_id)?
             .join(".opensymphony/retry.json");
         if path.exists() {
             fs::remove_file(path).map_err(|error| WorkspaceError::Io(error.to_string()))?;
@@ -363,11 +363,11 @@ impl WorkspaceManager {
     }
 
     pub async fn cleanup_terminal_workspace(&self, issue: &Issue) -> Result<(), WorkspaceError> {
-        let workspace_path = self.workspace_path(&issue.identifier)?;
+        let workspace_path = self.workspace_path_for_issue(issue)?;
         if !workspace_path.exists() {
             return Ok(());
         }
-        self.clear_retry_manifest(&issue.identifier)?;
+        self.clear_retry_manifest(&issue.id)?;
         if self.config.cleanup_terminal_workspaces {
             self.run_hook(HookStage::BeforeRemove, &workspace_path, true)
                 .await?;
@@ -378,9 +378,9 @@ impl WorkspaceManager {
     }
 
     pub fn list_issue_manifests(&self) -> Result<Vec<IssueManifest>, WorkspaceError> {
-        let mut manifests = Vec::new();
+        let mut manifests: HashMap<String, IssueManifest> = HashMap::new();
         if !self.config.root.exists() {
-            return Ok(manifests);
+            return Ok(vec![]);
         }
 
         for entry in fs::read_dir(&self.config.root)
@@ -389,11 +389,34 @@ impl WorkspaceManager {
             let entry = entry.map_err(|error| WorkspaceError::Io(error.to_string()))?;
             let path = entry.path().join(".opensymphony/issue.json");
             if let Some(manifest) = read_optional_json::<IssueManifest>(path)? {
-                manifests.push(manifest);
+                let primary_workspace_path = self.workspace_path(&manifest.issue_id)?;
+                let replace = match manifests.get(&manifest.issue_id) {
+                    None => true,
+                    Some(current)
+                        if manifest.last_seen_tracker_refresh_at
+                            > current.last_seen_tracker_refresh_at =>
+                    {
+                        true
+                    }
+                    Some(current)
+                        if manifest.last_seen_tracker_refresh_at
+                            == current.last_seen_tracker_refresh_at
+                            && manifest.workspace_path
+                                == primary_workspace_path.display().to_string()
+                            && current.workspace_path
+                                != primary_workspace_path.display().to_string() =>
+                    {
+                        true
+                    }
+                    _ => false,
+                };
+                if replace {
+                    manifests.insert(manifest.issue_id.clone(), manifest);
+                }
             }
         }
 
-        Ok(manifests)
+        Ok(manifests.into_values().collect())
     }
 
     fn write_generated_artifacts(
@@ -474,18 +497,34 @@ impl WorkspaceManager {
         let mut command = Command::new("/bin/sh");
         command.arg("-lc").arg(script);
         command.current_dir(workspace_path);
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
 
         let timeout_ms = self.config.hooks.timeout_ms;
-        let result = timeout(Duration::from_millis(timeout_ms), command.output()).await;
+        let mut child = command
+            .spawn()
+            .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        let stdout_task = tokio::spawn(read_pipe_to_end(child.stdout.take()));
+        let stderr_task = tokio::spawn(read_pipe_to_end(child.stderr.take()));
+
+        let result = timeout(Duration::from_millis(timeout_ms), child.wait()).await;
         match result {
-            Ok(Ok(output)) => {
-                self.append_hook_log(workspace_path, stage, &output.stdout, &output.stderr)?;
-                if output.status.success() {
+            Ok(Ok(status)) => {
+                let stdout = stdout_task
+                    .await
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+                let stderr = stderr_task
+                    .await
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+                self.append_hook_log(workspace_path, stage, &stdout, &stderr)?;
+                if status.success() {
                     Ok(())
                 } else {
                     let error = WorkspaceError::HookFailed {
                         stage: stage.label(),
-                        stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+                        stderr: String::from_utf8_lossy(&stderr).trim().to_string(),
                     };
                     if best_effort {
                         Ok(())
@@ -495,6 +534,8 @@ impl WorkspaceManager {
                 }
             }
             Ok(Err(error)) => {
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
                 if best_effort {
                     Ok(())
                 } else {
@@ -502,6 +543,17 @@ impl WorkspaceManager {
                 }
             }
             Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let stdout = stdout_task
+                    .await
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+                let stderr = stderr_task
+                    .await
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+                self.append_hook_log(workspace_path, stage, &stdout, &stderr)?;
                 if best_effort {
                     Ok(())
                 } else {
@@ -574,12 +626,78 @@ impl WorkspaceManager {
 
         Ok(self.config.root.clone())
     }
+
+    fn workspace_path_for_issue(&self, issue: &Issue) -> Result<PathBuf, WorkspaceError> {
+        let primary = self.workspace_path(&issue.id)?;
+        if primary.exists() {
+            return Ok(primary);
+        }
+
+        let Some(existing) = self.find_workspace_path_by_issue_id(&issue.id)? else {
+            return Ok(primary);
+        };
+        if existing == primary {
+            return Ok(primary);
+        }
+
+        fs::rename(&existing, &primary).map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        Ok(primary)
+    }
+
+    fn workspace_path_for_issue_id(&self, issue_id: &str) -> Result<PathBuf, WorkspaceError> {
+        let primary = self.workspace_path(issue_id)?;
+        if primary.exists() {
+            return Ok(primary);
+        }
+
+        Ok(self
+            .find_workspace_path_by_issue_id(issue_id)?
+            .unwrap_or(primary))
+    }
+
+    fn find_workspace_path_by_issue_id(
+        &self,
+        issue_id: &str,
+    ) -> Result<Option<PathBuf>, WorkspaceError> {
+        if !self.config.root.exists() {
+            return Ok(None);
+        }
+
+        for entry in fs::read_dir(&self.config.root)
+            .map_err(|error| WorkspaceError::Io(error.to_string()))?
+        {
+            let entry = entry.map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            let path = entry.path();
+            let manifest_path = path.join(".opensymphony/issue.json");
+            let Some(manifest) = read_optional_json::<IssueManifest>(manifest_path)? else {
+                continue;
+            };
+            if manifest.issue_id == issue_id {
+                return Ok(Some(path));
+            }
+        }
+
+        Ok(None)
+    }
 }
 
 fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<(), WorkspaceError> {
     let json = serde_json::to_vec_pretty(value)
         .map_err(|error| WorkspaceError::Json(error.to_string()))?;
     fs::write(path, json).map_err(|error| WorkspaceError::Io(error.to_string()))
+}
+
+async fn read_pipe_to_end<T>(pipe: Option<T>) -> Result<Vec<u8>, std::io::Error>
+where
+    T: tokio::io::AsyncRead + Unpin,
+{
+    let Some(mut pipe) = pipe else {
+        return Ok(vec![]);
+    };
+
+    let mut buffer = Vec::new();
+    pipe.read_to_end(&mut buffer).await?;
+    Ok(buffer)
 }
 
 fn read_optional_json<T: for<'de> Deserialize<'de>>(
@@ -775,7 +893,9 @@ mod tests {
             root: root.path().to_path_buf(),
             cleanup_terminal_workspaces: false,
             hooks: HookConfig {
-                before_run: Some("sleep 1".to_string()),
+                before_run: Some(
+                    "sleep 0.2; printf leaked > .opensymphony/generated/late.txt".to_string(),
+                ),
                 timeout_ms: 10,
                 ..HookConfig::default()
             },
@@ -787,6 +907,85 @@ mod tests {
             .expect_err("timeout should fail");
 
         assert!(matches!(error, WorkspaceError::HookTimeout { .. }));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!root
+            .path()
+            .join("ABC-3/.opensymphony/generated/late.txt")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn migrates_legacy_identifier_workspace_to_stable_issue_id_key() {
+        let root = tempdir().expect("tempdir should exist");
+        let manager = WorkspaceManager::new(WorkspaceConfig {
+            root: root.path().to_path_buf(),
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig::default(),
+        });
+        let legacy_issue = Issue {
+            id: "1".to_string(),
+            identifier: "ABC-1".to_string(),
+            title: "Workspace".to_string(),
+            description: None,
+            priority: Some(1),
+            state: "Todo".to_string(),
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap(),
+        };
+
+        let legacy_workspace = root.path().join("ABC-1");
+        let legacy_metadata = legacy_workspace.join(".opensymphony");
+        fs::create_dir_all(&legacy_metadata).expect("legacy metadata should exist");
+        fs::write(legacy_metadata.join("bootstrap.ok"), b"ok")
+            .expect("bootstrap marker should exist");
+        fs::write(
+            legacy_metadata.join("conversation.json"),
+            b"{\"issue_id\":\"1\"}",
+        )
+        .expect("legacy conversation placeholder should exist");
+        write_json(
+            legacy_metadata.join("issue.json"),
+            &IssueManifest {
+                issue_id: legacy_issue.id.clone(),
+                identifier: legacy_issue.identifier.clone(),
+                title: legacy_issue.title.clone(),
+                current_state: legacy_issue.state.clone(),
+                sanitized_workspace_key: "ABC-1".to_string(),
+                workspace_path: legacy_workspace.display().to_string(),
+                created_at: legacy_issue.created_at,
+                updated_at: legacy_issue.updated_at,
+                last_seen_tracker_refresh_at: legacy_issue.updated_at,
+                last_attempt: 1,
+            },
+        )
+        .expect("legacy issue manifest should persist");
+
+        let renamed_issue = Issue {
+            identifier: "ABC-99".to_string(),
+            ..legacy_issue
+        };
+        let context = manager
+            .ensure_workspace(&renamed_issue)
+            .await
+            .expect("workspace should migrate to stable issue id key");
+
+        assert_eq!(
+            context.workspace_path,
+            manager
+                .workspace_path("1")
+                .expect("stable workspace path should resolve")
+        );
+        assert!(!legacy_workspace.exists());
+        assert!(context.metadata_dir.join("conversation.json").exists());
+
+        let issue_manifest: IssueManifest =
+            read_optional_json(context.metadata_dir.join("issue.json"))
+                .expect("issue manifest load should succeed")
+                .expect("issue manifest should exist");
+        assert_eq!(issue_manifest.identifier, "ABC-99");
+        assert_eq!(issue_manifest.sanitized_workspace_key, "1");
     }
 
     #[tokio::test]

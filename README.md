@@ -6,7 +6,7 @@ The first target is a local MVP for trusted developer machines:
 
 - one Rust daemon owns Symphony orchestration
 - one local OpenHands agent-server subprocess provides agent execution
-- each issue gets its own deterministic workspace path and OpenHands `working_dir`
+- each issue gets its own deterministic stable-ID workspace path and OpenHands `working_dir`
 - OpenHands runtime events are consumed through a WebSocket-first client from day one
 - Linear polling, retries, reconciliation, and workspace lifecycle remain Symphony responsibilities
 - FrankenTUI is an observer over a local control plane, not the source of truth
