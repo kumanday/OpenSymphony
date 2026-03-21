@@ -18,9 +18,11 @@ The Rust Linear adapter must implement the minimum read surface Symphony require
 
 Fetch issues that:
 
-- belong to the configured project slug
+- belong to the configured project slug value, which maps to Linear's `Project.slugId`
 - are in configured active states
 - include enough fields to normalize issue data and eligibility
+
+Use Linear relation fields, not deprecated shortcut fields, when deriving blockers. In practice this means mapping inverse issue relations of type `blocks` into `blocked_by`.
 
 ## 2.2 State refresh by IDs
 
@@ -79,7 +81,7 @@ Eligibility reminders:
 Required:
 
 - `LINEAR_API_KEY`
-- workflow `tracker.project_slug`
+- workflow `tracker.project_slug` mapped to Linear `Project.slugId`
 - workflow `tracker.active_states`
 - workflow `tracker.terminal_states`
 
@@ -132,7 +134,14 @@ opensymphony linear-mcp --stdio
 Input dependencies:
 
 - `LINEAR_API_KEY`
+- optional `OPENSYMPHONY_LINEAR_API_URL` override for non-default Linear GraphQL endpoints
 - optional config file for org or project defaults
+
+Test-only fallback:
+
+- `OPENSYMPHONY_LINEAR_FIXTURE`
+  - only for fixture-backed local tests
+  - do not use as the default unattended write backend
 
 ## 6. Tool design guidelines
 
@@ -140,6 +149,7 @@ Input dependencies:
 - avoid free-form giant mutation tools
 - return normalized issue snapshots after mutation when possible
 - surface permission and validation errors clearly
+- return JSON-RPC/MCP error responses for failed tool calls without terminating the stdio server
 - keep tool outputs concise enough for agent context
 
 ## 7. Relationship with repository context
@@ -205,6 +215,7 @@ These categories should be shared by the read adapter and the MCP server where s
 - happy-path state transition
 - invalid state name
 - auth failure
+- backend/tool failure returns a JSON-RPC error and the server remains available for later requests
 - concise error surfaces
 
 ### End-to-end

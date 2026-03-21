@@ -96,9 +96,9 @@ where
         ]
     }
 
-    fn handle_json_rpc(&self, request: JsonRpcRequest) -> Result<Option<Value>, LinearMcpError> {
+    fn handle_json_rpc(&self, request: JsonRpcRequest) -> Option<Value> {
         let id = request.id.unwrap_or(Value::Null);
-        let response = match request.method.as_str() {
+        match request.method.as_str() {
             "initialize" => Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -117,24 +117,29 @@ where
                 "id": id,
                 "result": { "tools": self.list_tools() }
             })),
-            "tools/call" => {
-                let params = request
-                    .params
-                    .ok_or_else(|| LinearMcpError::JsonRpc("missing params".to_string()))?;
-                let tool_name = params
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| LinearMcpError::JsonRpc("missing tool name".to_string()))?;
-                let arguments = params
-                    .get("arguments")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": self.call_tool(tool_name, arguments)?
-                }))
-            }
+            "tools/call" => Some(
+                match (|| -> Result<Value, LinearMcpError> {
+                    let params = request
+                        .params
+                        .ok_or_else(|| LinearMcpError::JsonRpc("missing params".to_string()))?;
+                    let tool_name = params
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| LinearMcpError::JsonRpc("missing tool name".to_string()))?;
+                    let arguments = params
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    self.call_tool(tool_name, arguments)
+                })() {
+                    Ok(result) => json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result
+                    }),
+                    Err(error) => json_rpc_error_response(id, error),
+                },
+            ),
             _ => Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -143,8 +148,7 @@ where
                     "message": format!("unsupported method `{}`", request.method)
                 }
             })),
-        };
-        Ok(response)
+        }
     }
 
     pub fn call_tool(&self, tool_name: &str, arguments: Value) -> Result<Value, LinearMcpError> {
@@ -204,9 +208,18 @@ where
     W: Write,
 {
     while let Some(message) = read_frame(reader)? {
-        let request = serde_json::from_slice::<JsonRpcRequest>(&message)
-            .map_err(|error| LinearMcpError::JsonRpc(error.to_string()))?;
-        if let Some(response) = server.handle_json_rpc(request)? {
+        let response = match serde_json::from_slice::<JsonRpcRequest>(&message) {
+            Ok(request) => server.handle_json_rpc(request),
+            Err(error) => Some(json!({
+                "jsonrpc": "2.0",
+                "id": Value::Null,
+                "error": {
+                    "code": -32700,
+                    "message": format!("invalid JSON-RPC payload: {error}")
+                }
+            })),
+        };
+        if let Some(response) = response {
             write_frame(writer, &response)?;
         }
     }
@@ -349,6 +362,37 @@ impl From<LinearError> for LinearMcpError {
     }
 }
 
+fn json_rpc_error_response(id: Value, error: LinearMcpError) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": json_rpc_error_code(&error),
+            "message": json_rpc_error_message(&error)
+        }
+    })
+}
+
+fn json_rpc_error_code(error: &LinearMcpError) -> i32 {
+    match error {
+        LinearMcpError::JsonRpc(_) => -32602,
+        LinearMcpError::Backend(_) => -32000,
+        LinearMcpError::Framing(_) | LinearMcpError::Serialization(_) | LinearMcpError::Io(_) => {
+            -32603
+        }
+    }
+}
+
+fn json_rpc_error_message(error: &LinearMcpError) -> String {
+    match error {
+        LinearMcpError::Framing(message)
+        | LinearMcpError::JsonRpc(message)
+        | LinearMcpError::Backend(message)
+        | LinearMcpError::Serialization(message)
+        | LinearMcpError::Io(message) => message.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,12 +427,13 @@ mod tests {
         framed
     }
 
-    fn read_single_response(bytes: &[u8]) -> Value {
+    fn read_all_responses(bytes: &[u8]) -> Vec<Value> {
         let mut reader = BufReader::new(Cursor::new(bytes.to_vec()));
-        let body = read_frame(&mut reader)
-            .expect("response frame should parse")
-            .expect("frame should exist");
-        serde_json::from_slice(&body).expect("response should be valid json")
+        let mut responses = Vec::new();
+        while let Some(body) = read_frame(&mut reader).expect("response frame should parse") {
+            responses.push(serde_json::from_slice(&body).expect("response should be valid json"));
+        }
+        responses
     }
 
     #[test]
@@ -422,10 +467,15 @@ mod tests {
         )
         .expect("stdio server should succeed");
 
-        let first = read_single_response(&output);
+        let responses = read_all_responses(&output);
+        let first = &responses[0];
         assert_eq!(
             first["result"]["serverInfo"]["name"],
             "opensymphony-linear-mcp"
+        );
+        assert_eq!(
+            responses[1]["result"]["tools"][0]["name"],
+            "linear_get_issue"
         );
     }
 
@@ -452,10 +502,58 @@ mod tests {
         )
         .expect("stdio call should succeed");
 
-        let response = read_single_response(&output);
+        let responses = read_all_responses(&output);
+        let response = &responses[0];
         let text = response["result"]["content"][0]["text"]
             .as_str()
             .expect("tool response should be text");
         assert!(text.contains("In Progress"));
+    }
+
+    #[test]
+    fn returns_json_rpc_errors_without_terminating_stdio() {
+        let input = [
+            frame(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "linear_transition_issue",
+                    "arguments": {
+                        "issue_id": "1",
+                        "state": "Unknown"
+                    }
+                }
+            })),
+            frame(json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "linear_get_issue",
+                    "arguments": {
+                        "query": "1"
+                    }
+                }
+            })),
+        ]
+        .concat();
+
+        let mut output = Vec::new();
+        serve_stdio(
+            &server(),
+            &mut BufReader::new(Cursor::new(input)),
+            &mut output,
+        )
+        .expect("stdio server should survive backend tool errors");
+
+        let responses = read_all_responses(&output);
+        assert_eq!(responses.len(), 2);
+        assert_eq!(responses[0]["error"]["code"], -32000);
+        assert!(responses[0]["error"]["message"]
+            .as_str()
+            .expect("error message should be text")
+            .contains("Unknown"));
+        assert_eq!(responses[1]["result"]["content"][0]["type"], "text");
     }
 }
