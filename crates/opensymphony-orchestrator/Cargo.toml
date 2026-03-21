@@ -1,0 +1,20 @@
+[package]
+name = "opensymphony-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+opensymphony-domain = { path = "../opensymphony-domain" }
+opensymphony-openhands = { path = "../opensymphony-openhands" }
+opensymphony-workflow = { path = "../opensymphony-workflow" }
+opensymphony-workspace = { path = "../opensymphony-workspace" }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+opensymphony-linear = { path = "../opensymphony-linear" }
+opensymphony-testkit = { path = "../opensymphony-testkit" }
+tempfile.workspace = true

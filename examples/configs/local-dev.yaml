@@ -1,0 +1,3 @@
+workspace_root: "./tmp/workspaces"
+target_repo: "./examples/target-repo"
+linear_fixture: "./examples/configs/linear-fixture.json"

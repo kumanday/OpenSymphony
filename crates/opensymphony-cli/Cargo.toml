@@ -1,0 +1,15 @@
+[package]
+name = "opensymphony-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opensymphony"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+opensymphony-linear-mcp = { path = "../opensymphony-linear-mcp" }
+opensymphony-testkit = { path = "../opensymphony-testkit" }
+serde_json.workspace = true
