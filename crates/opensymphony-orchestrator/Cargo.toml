@@ -9,3 +9,6 @@ version.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+opensymphony-domain = { path = "../opensymphony-domain" }
