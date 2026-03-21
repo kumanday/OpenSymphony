@@ -81,6 +81,7 @@ Suggested gates:
 - fail on invalid front matter
 - fail on unknown template variables
 - omit `attempt` template context from fresh renders while preserving it for continuation renders
+- fail dispatch when `WORKFLOW.md` is missing from the prepared issue workspace
 - resolve defaults and env vars
 - validate `openhands` extension namespace
 
@@ -124,6 +125,7 @@ Suggested gates:
 - post-run retries only occur while the tracker still reports the issue active
 - transient tracker refresh failures do not drop completed worker reports before retry or cleanup bookkeeping
 - worker failures after conversation attach still preserve conversation metadata for the next retry
+- invalid persisted conversation metadata resets to a fresh dispatch instead of getting stuck in retry
 - terminal cleanup
 - retained terminal workspaces still clear stale retry manifests
 - retained terminal workspaces skip `before_remove` hooks unless the workspace will actually be deleted

@@ -160,6 +160,7 @@ Default policy:
 - reuse the conversation for the same issue across worker lifetimes
 - when reusing a conversation, send continuation-only guidance instead of replaying the full assignment body
 - if a run fails after attach, preserve the known `conversation_id` in workspace metadata so the next retry can resume the same conversation instead of forcing a fresh thread
+- if persisted conversation metadata is invalid locally, clear it and treat the next dispatch as a fresh reset instead of retrying the corrupt manifest forever
 - reset only when:
   - conversation metadata is missing or invalid
   - the server reports the conversation cannot be attached

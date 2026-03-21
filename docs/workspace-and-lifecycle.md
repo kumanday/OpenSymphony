@@ -225,6 +225,7 @@ Store at minimum:
 - timestamp metadata
 
 Fresh prompt renders should omit continuation-only template context, while continuation renders should preserve enough attempt context for repo-owned `WORKFLOW.md` templates to emit resume-only guidance without replaying the original assignment.
+Every runnable issue workspace must contain a valid repo-owned `WORKFLOW.md`; if it is missing at dispatch time, OpenSymphony fails that attempt instead of inventing a fallback prompt.
 
 ## 11. Conversation lifetime policy inside the workspace
 
@@ -233,6 +234,7 @@ Default policy:
 - one conversation per issue
 - conversation persistence is stored under the issue workspace
 - reused across worker lifetimes
+- invalid persisted conversation metadata is cleared and treated as a fresh reset on the next dispatch
 - reset only on explicit error or incompatible-version policy
 
 Reset handling:

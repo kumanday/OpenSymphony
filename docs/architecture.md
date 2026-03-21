@@ -211,8 +211,10 @@ For each issue:
 1. Ensure workspace exists.
    - treat workspace bootstrap as incomplete until `after_create` succeeds, so a transient bootstrap failure reruns `after_create` on the next attempt instead of reusing a half-initialized workspace silently
 2. Load or create stable conversation metadata.
+   - invalid persisted conversation metadata is cleared and treated as a fresh reset instead of retrying the same corrupt manifest forever
 3. Attach WebSocket stream and reconcile events.
 4. Execute one or more turns on the same conversation up to `agent.max_turns`, loaded from the issue workspace `WORKFLOW.md` for that dispatch.
+   - if `WORKFLOW.md` is missing, fail only that dispatch attempt and retry later instead of inventing a generic fallback prompt
 5. Exit worker normally or abnormally.
 6. Refresh tracker state for the issue, then let the orchestrator decide continuation retry, failure retry, release, or cancellation.
    - startup failures such as workspace bootstrap or prompt render failures persist retry state for that issue without aborting later dispatches in the same tick

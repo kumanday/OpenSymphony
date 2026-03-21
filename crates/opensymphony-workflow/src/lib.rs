@@ -118,6 +118,8 @@ pub struct WorkflowDocument {
 pub enum WorkflowError {
     #[error("workflow front matter is required")]
     MissingFrontMatter,
+    #[error("workflow file is required: {0}")]
+    MissingWorkflow(String),
     #[error("workflow front matter is invalid: {0}")]
     InvalidFrontMatter(String),
     #[error("workflow template failed to render: {0}")]
@@ -182,9 +184,14 @@ impl WorkflowDocument {
             .get_template("workflow")
             .map_err(|error| WorkflowError::Render(error.to_string()))?;
 
-        template
-            .render(minijinja::context! { issue => issue, attempt => attempt })
-            .map_err(|error| WorkflowError::Render(error.to_string()))
+        let rendered = match attempt {
+            Some(attempt) => {
+                template.render(minijinja::context! { issue => issue, attempt => attempt })
+            }
+            None => template.render(minijinja::context! { issue => issue }),
+        };
+
+        rendered.map_err(|error| WorkflowError::Render(error.to_string()))
     }
 
     pub fn resolve_workspace_root(
@@ -304,7 +311,7 @@ mod tests {
     #[test]
     fn renders_distinct_fresh_and_continuation_prompts() {
         let workflow = WorkflowDocument::load_from_str(
-            "---\ntracker:\n  project_slug: demo\n  active_states: [Todo]\n  terminal_states: [Done]\n---\n{% if attempt %}Continue {{ issue.identifier }} attempt {{ attempt.number }}{% else %}Start {{ issue.identifier }}{% endif %}",
+            "---\ntracker:\n  project_slug: demo\n  active_states: [Todo]\n  terminal_states: [Done]\n---\n{% if attempt is defined and attempt %}Continue {{ issue.identifier }} attempt {{ attempt.number }}{% else %}Start {{ issue.identifier }}{% endif %}",
         )
         .expect("workflow should parse");
 
@@ -323,6 +330,30 @@ mod tests {
 
         assert_eq!(fresh, "Start ABC-123");
         assert_eq!(continuation, "Continue ABC-123 attempt 2");
+    }
+
+    #[test]
+    fn fresh_prompts_omit_attempt_from_template_context() {
+        let workflow = WorkflowDocument::load_from_str(
+            "---\ntracker:\n  project_slug: demo\n  active_states: [Todo]\n  terminal_states: [Done]\n---\n{% if attempt is defined %}defined{% else %}missing{% endif %}",
+        )
+        .expect("workflow should parse");
+
+        let fresh = workflow
+            .render_fresh_prompt(&issue())
+            .expect("fresh template should render");
+        let continuation = workflow
+            .render_continuation_prompt(
+                &issue(),
+                &AttemptContext {
+                    number: 2,
+                    continuation: true,
+                },
+            )
+            .expect("continuation template should render");
+
+        assert_eq!(fresh, "missing");
+        assert_eq!(continuation, "defined");
     }
 
     #[test]

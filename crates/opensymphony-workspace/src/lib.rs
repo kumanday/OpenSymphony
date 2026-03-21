@@ -284,6 +284,19 @@ impl WorkspaceManager {
         read_optional_json(path)
     }
 
+    pub fn clear_conversation_manifest(
+        &self,
+        issue_identifier: &str,
+    ) -> Result<(), WorkspaceError> {
+        let path = self
+            .workspace_path(issue_identifier)?
+            .join(".opensymphony/conversation.json");
+        if path.exists() {
+            fs::remove_file(path).map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub fn persist_retry(&self, entry: &RetryEntry) -> Result<(), WorkspaceError> {
         let workspace_path = self.workspace_path(&entry.issue.identifier)?;
         fs::create_dir_all(workspace_path.join(".opensymphony"))
