@@ -116,10 +116,12 @@ impl TuiState {
                 width,
             ));
         } else {
-            let mut stacked = self.issue_lines(width);
-            stacked.push("-".repeat(width));
-            stacked.extend(self.detail_lines(width));
-            lines.extend(fit_section(stacked, body_rows, width));
+            let (issue_rows, detail_rows) = stacked_section_layout(body_rows);
+            lines.extend(fit_section(self.issue_lines(width), issue_rows, width));
+            if detail_rows > 0 {
+                lines.push("-".repeat(width));
+                lines.extend(fit_section(self.detail_lines(width), detail_rows, width));
+            }
         }
 
         if timeline_rows > 0 {
@@ -181,19 +183,6 @@ impl TuiState {
         match self.selected_issue() {
             Some(issue) => {
                 lines.push(fit(&format!("{} {}", issue.identifier, issue.title), width));
-                lines.push(fit(&format!("tracker: {}", issue.tracker_state), width));
-                lines.push(fit(
-                    &format!("runtime: {}", issue.runtime_state.as_str()),
-                    width,
-                ));
-                lines.push(fit(
-                    &format!("last outcome: {}", issue.last_outcome.as_str()),
-                    width,
-                ));
-                lines.push(fit(
-                    &format!("last event: {}", format_timestamp(issue.last_event_at)),
-                    width,
-                ));
                 lines.push(fit(
                     &format!("workspace path: {}", issue.workspace_path_suffix),
                     width,
@@ -202,8 +191,27 @@ impl TuiState {
                     &format!("conversation id: {}", issue.conversation_id_suffix),
                     width,
                 ));
-                lines.push(fit(&format!("retry count: {}", issue.retry_count), width));
-                lines.push(fit(&format!("blocked: {}", issue.blocked), width));
+                lines.push(fit(
+                    &format!(
+                        "tracker: {} | runtime: {}",
+                        issue.tracker_state,
+                        issue.runtime_state.as_str()
+                    ),
+                    width,
+                ));
+                lines.push(fit(
+                    &format!(
+                        "outcome: {} | retries: {} | blocked: {}",
+                        issue.last_outcome.as_str(),
+                        issue.retry_count,
+                        issue.blocked
+                    ),
+                    width,
+                ));
+                lines.push(fit(
+                    &format!("last event: {}", format_timestamp(issue.last_event_at)),
+                    width,
+                ));
             }
             None => {
                 lines.push(fit("no selected issue", width));
@@ -328,16 +336,17 @@ impl BridgeMailbox {
     }
 
     fn push_connection_loss(&mut self, reason: String) {
-        self.latest_snapshot = None;
         self.latest_connection_loss = Some(reason);
     }
 
     fn take_action(&mut self) -> Option<TuiAction> {
-        if let Some(reason) = self.latest_connection_loss.take() {
-            return Some(TuiAction::ConnectionLost(reason));
+        if let Some(snapshot) = self.latest_snapshot.take() {
+            return Some(TuiAction::SnapshotReceived(snapshot));
         }
 
-        self.latest_snapshot.take().map(TuiAction::SnapshotReceived)
+        self.latest_connection_loss
+            .take()
+            .map(TuiAction::ConnectionLost)
     }
 }
 
@@ -612,6 +621,24 @@ fn section_layout(height: usize) -> (usize, usize) {
     (body_rows, timeline_rows)
 }
 
+fn stacked_section_layout(body_rows: usize) -> (usize, usize) {
+    const DETAIL_SEPARATOR_ROWS: usize = 1;
+    const MIN_DETAIL_ROWS: usize = 6;
+
+    if body_rows <= DETAIL_SEPARATOR_ROWS {
+        return (body_rows, 0);
+    }
+
+    let max_detail_rows = body_rows.saturating_sub(DETAIL_SEPARATOR_ROWS + 1);
+    if max_detail_rows == 0 {
+        return (body_rows, 0);
+    }
+
+    let detail_rows = min(max(MIN_DETAIL_ROWS, body_rows / 2), max_detail_rows);
+    let issue_rows = body_rows.saturating_sub(DETAIL_SEPARATOR_ROWS + detail_rows);
+    (issue_rows, detail_rows)
+}
+
 fn fit_section(mut lines: Vec<String>, max_rows: usize, width: usize) -> Vec<String> {
     if max_rows == 0 {
         return Vec::new();
@@ -703,7 +730,7 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{section_layout, BridgeMailbox, TuiState};
+    use super::{section_layout, stacked_section_layout, BridgeMailbox, ConnectionState, TuiState};
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
@@ -790,8 +817,41 @@ mod tests {
     }
 
     #[test]
+    fn keeps_latest_snapshot_visible_across_disconnects() {
+        let mut mailbox = BridgeMailbox::default();
+        let latest = fixture(5);
+        mailbox.push_snapshot(latest.clone());
+        mailbox.push_connection_loss("stream closed".to_owned());
+
+        let mut state = TuiState::default();
+        while let Some(action) = mailbox.take_action() {
+            state.reduce(action);
+        }
+
+        assert_eq!(state.latest_snapshot, Some(latest));
+        assert_eq!(
+            state.connection,
+            ConnectionState::Reconnecting("stream closed".to_owned())
+        );
+    }
+
+    #[test]
     fn reserves_rows_for_the_timeline_section() {
         let (body_rows, timeline_rows) = section_layout(22);
         assert_eq!((body_rows, timeline_rows), (13, 6));
+    }
+
+    #[test]
+    fn reserves_detail_rows_in_narrow_layout() {
+        let (issue_rows, detail_rows) = stacked_section_layout(13);
+        assert_eq!((issue_rows, detail_rows), (6, 6));
+
+        let mut state = TuiState::default();
+        state.reduce(super::TuiAction::SnapshotReceived(Box::new(fixture(6))));
+
+        let rendered = state.render_text(60, 22);
+        assert!(rendered.contains("ISSUE + WORKSPACE DETAIL"));
+        assert!(rendered.contains("workspace path: workspace-0"));
+        assert_eq!(rendered.lines().count(), 22);
     }
 }

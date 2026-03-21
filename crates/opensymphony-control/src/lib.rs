@@ -119,23 +119,19 @@ async fn events(
     let mut receiver = store.subscribe();
     let initial = store.current().await;
     let stream = stream! {
+        let mut last_sequence = initial.sequence;
         if let Some(event) = snapshot_event(&initial) {
             yield Ok(event);
         }
         loop {
-            match receiver.recv().await {
-                Ok(envelope) => {
-                    if let Some(event) = snapshot_event(&envelope) {
-                        yield Ok(event);
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let envelope = store.current().await;
-                    if let Some(event) = snapshot_event(&envelope) {
-                        yield Ok(event);
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
+            let Some(envelope) =
+                recv_monotonic_snapshot(&store, &mut receiver, &mut last_sequence).await
+            else {
+                break;
+            };
+
+            if let Some(event) = snapshot_event(&envelope) {
+                yield Ok(event);
             }
         }
     };
@@ -145,6 +141,30 @@ async fn events(
             .interval(Duration::from_secs(15))
             .text("keepalive"),
     )
+}
+
+async fn recv_monotonic_snapshot(
+    store: &SnapshotStore,
+    receiver: &mut broadcast::Receiver<SnapshotEnvelope>,
+    last_sequence: &mut u64,
+) -> Option<SnapshotEnvelope> {
+    loop {
+        match receiver.recv().await {
+            Ok(envelope) if envelope.sequence > *last_sequence => {
+                *last_sequence = envelope.sequence;
+                return Some(envelope);
+            }
+            Ok(_) => continue,
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                let envelope = store.current().await;
+                if envelope.sequence > *last_sequence {
+                    *last_sequence = envelope.sequence;
+                    return Some(envelope);
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => return None,
+        }
+    }
 }
 
 fn snapshot_event(envelope: &SnapshotEnvelope) -> Option<Event> {
@@ -248,4 +268,94 @@ impl From<reqwest_eventsource::Error> for ControlPlaneClientError {
 
 pub fn log_stream_error(error: &ControlPlaneClientError) {
     warn!(error = %error, "control-plane stream error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recv_monotonic_snapshot, SnapshotStore};
+    use chrono::{TimeZone, Utc};
+    use opensymphony_domain::{
+        AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
+        IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
+    };
+    use std::time::Duration;
+
+    fn fixture_snapshot(step: u64) -> DaemonSnapshot {
+        let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+            + chrono::Duration::seconds(step as i64);
+        DaemonSnapshot {
+            generated_at: now,
+            daemon: DaemonStatus {
+                state: DaemonState::Ready,
+                last_poll_at: now,
+                workspace_root: "/tmp/opensymphony".to_owned(),
+                status_line: "ready".to_owned(),
+            },
+            agent_server: AgentServerStatus {
+                reachable: true,
+                base_url: "http://127.0.0.1:3000".to_owned(),
+                conversation_count: 1,
+                status_line: "healthy".to_owned(),
+            },
+            metrics: MetricsSnapshot {
+                running_issues: 1,
+                retry_queue_depth: 0,
+                total_tokens: 4096 + step,
+                total_cost_micros: 120_000,
+            },
+            issues: vec![IssueSnapshot {
+                identifier: "COE-271".to_owned(),
+                title: "FrankenTUI operator client".to_owned(),
+                tracker_state: "In Progress".to_owned(),
+                runtime_state: IssueRuntimeState::Running,
+                last_outcome: WorkerOutcome::Running,
+                last_event_at: now,
+                conversation_id_suffix: "c0e271".to_owned(),
+                workspace_path_suffix: "COE-271".to_owned(),
+                retry_count: 0,
+                blocked: false,
+            }],
+            recent_events: vec![RecentEvent {
+                happened_at: now,
+                issue_identifier: Some("COE-271".to_owned()),
+                kind: RecentEventKind::SnapshotPublished,
+                summary: format!("published step {step}"),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn lagged_receivers_resume_with_monotonic_sequences() {
+        let store = SnapshotStore::new(fixture_snapshot(0));
+        let mut receiver = store.subscribe();
+        let mut last_sequence = 1;
+
+        for step in 1..=80 {
+            store.publish(fixture_snapshot(step)).await;
+        }
+
+        let latest = store.current().await;
+        let recovered = tokio::time::timeout(
+            Duration::from_secs(1),
+            recv_monotonic_snapshot(&store, &mut receiver, &mut last_sequence),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(recovered.sequence, latest.sequence);
+        assert_eq!(last_sequence, latest.sequence);
+
+        let next = store.publish(fixture_snapshot(81)).await;
+        let resumed = tokio::time::timeout(
+            Duration::from_secs(1),
+            recv_monotonic_snapshot(&store, &mut receiver, &mut last_sequence),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(resumed.sequence, next.sequence);
+        assert!(resumed.sequence > recovered.sequence);
+    }
 }
