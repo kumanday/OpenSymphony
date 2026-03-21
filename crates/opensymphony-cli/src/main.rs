@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, num::NonZeroU64, time::Duration};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::{Parser, Subcommand};
@@ -28,8 +28,8 @@ enum Command {
     Daemon {
         #[arg(long, default_value = "127.0.0.1:3000")]
         bind: SocketAddr,
-        #[arg(long, default_value_t = 1200)]
-        sample_interval_ms: u64,
+        #[arg(long, default_value = "1200")]
+        sample_interval_ms: NonZeroU64,
     },
     Tui {
         #[arg(long, default_value = "http://127.0.0.1:3000/")]
@@ -53,9 +53,12 @@ async fn main() -> Result<(), CliError> {
     }
 }
 
-async fn run_daemon(bind: SocketAddr, sample_interval_ms: u64) -> Result<(), CliError> {
+async fn run_daemon(bind: SocketAddr, sample_interval_ms: NonZeroU64) -> Result<(), CliError> {
     let store = SnapshotStore::new(sample_snapshot(0));
-    spawn_demo_updates(store.clone(), Duration::from_millis(sample_interval_ms));
+    spawn_demo_updates(
+        store.clone(),
+        Duration::from_millis(sample_interval_ms.get()),
+    );
     let server = ControlPlaneServer::new(store);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!(%bind, "control plane listening");
@@ -228,4 +231,33 @@ enum CliError {
     Join(#[from] tokio::task::JoinError),
     #[error("FrankenTUI failed: {0}")]
     Tui(#[from] TuiError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command};
+    use clap::{error::ErrorKind, Parser};
+
+    #[test]
+    fn daemon_rejects_zero_sample_interval() {
+        let error = Cli::try_parse_from(["opensymphony", "daemon", "--sample-interval-ms", "0"])
+            .unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn daemon_accepts_positive_sample_interval() {
+        let cli =
+            Cli::try_parse_from(["opensymphony", "daemon", "--sample-interval-ms", "250"]).unwrap();
+
+        match cli.command {
+            Command::Daemon {
+                sample_interval_ms, ..
+            } => {
+                assert_eq!(sample_interval_ms.get(), 250);
+            }
+            Command::Tui { .. } => panic!("expected daemon command"),
+        }
+    }
 }
