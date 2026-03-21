@@ -64,6 +64,7 @@ Eligibility reminders:
 - active state only
 - `Todo` issues with non-terminal blockers are ineligible
 - due retries for already-active issues remain eligible even if blockers are still open
+- due retries that are no longer returned as active candidates still refresh tracker state once before they are discarded, so terminal cleanup and stale retry-manifest removal do not wait for daemon restart
 - terminal blockers should not prevent eligibility
 - currently-running or claimed issues are not redispatched
 

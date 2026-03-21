@@ -117,6 +117,7 @@ Suggested gates:
 - continuation retry at fixed delay
 - deferred retry entries suppress fresh redispatch until their scheduled time
 - blocked `Todo` retries stay queued until blockers clear, but retries for already-active issues still dispatch
+- queued due retries that become terminal or inactive before dispatch still reconcile cleanup or stale retry-manifest removal instead of being dropped
 - startup failure in one candidate does not block later dispatches in the same tick
 - stall detection
 - active-state refresh
