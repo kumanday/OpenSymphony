@@ -2,7 +2,17 @@
 name = "opensymphony-cli"
 edition.workspace = true
 license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
 version.workspace = true
+
+[[bin]]
+name = "opensymphony"
+path = "src/main.rs"
+
+[lints]
+workspace = true
 
 [dependencies]
 chrono.workspace = true

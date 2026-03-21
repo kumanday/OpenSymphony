@@ -2,10 +2,10 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use async_stream::stream;
 use axum::{
+    Json, Router,
     extract::State,
     response::sse::{Event, KeepAlive, Sse},
     routing::get,
-    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
-    sync::{broadcast, RwLock},
+    sync::{RwLock, broadcast},
 };
 use tracing::warn;
 use url::Url;
@@ -285,7 +285,7 @@ pub fn log_stream_error(error: &ControlPlaneClientError) {
 
 #[cfg(test)]
 mod tests {
-    use super::{recv_monotonic_snapshot, SnapshotStore};
+    use super::{SnapshotStore, recv_monotonic_snapshot};
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
@@ -294,7 +294,10 @@ mod tests {
     use std::time::Duration;
 
     fn fixture_snapshot(step: u64) -> DaemonSnapshot {
-        let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+            .single()
+            .expect("fixture timestamp should be valid")
             + chrono::Duration::seconds(step as i64);
         DaemonSnapshot {
             generated_at: now,
@@ -353,8 +356,8 @@ mod tests {
             recv_monotonic_snapshot(&store, &mut receiver, &mut last_sequence),
         )
         .await
-        .unwrap()
-        .unwrap();
+        .expect("lagged receiver should recover within timeout")
+        .expect("lagged receiver should yield the latest snapshot");
 
         assert_eq!(recovered.sequence, latest.sequence);
         assert_eq!(last_sequence, latest.sequence);
@@ -365,8 +368,8 @@ mod tests {
             recv_monotonic_snapshot(&store, &mut receiver, &mut last_sequence),
         )
         .await
-        .unwrap()
-        .unwrap();
+        .expect("receiver should resume within timeout")
+        .expect("receiver should yield the next snapshot");
 
         assert_eq!(resumed.sequence, next.sequence);
         assert!(resumed.sequence > recovered.sequence);

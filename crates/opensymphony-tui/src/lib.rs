@@ -10,9 +10,9 @@ use ftui::{
     core::geometry::Rect,
     prelude::{App, Cmd, Event, Frame, KeyCode, Model, ScreenMode},
     runtime::{Every, Subscription},
-    widgets::{paragraph::Paragraph, Widget},
+    widgets::{Widget, paragraph::Paragraph},
 };
-use opensymphony_control::{log_stream_error, ControlPlaneClient, ControlPlaneClientError};
+use opensymphony_control::{ControlPlaneClient, ControlPlaneClientError, log_stream_error};
 use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope};
 use thiserror::Error;
 use url::Url;
@@ -574,7 +574,7 @@ impl Model for OperatorApp {
         Cmd::none()
     }
 
-    fn view(&self, frame: &mut Frame) {
+    fn view(&self, frame: &mut Frame<'_>) {
         let content = self
             .state
             .render_text(frame.width() as usize, frame.height() as usize);
@@ -826,7 +826,7 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{section_layout, stacked_section_layout, BridgeMailbox, ConnectionState, TuiState};
+    use super::{BridgeMailbox, ConnectionState, TuiState, section_layout, stacked_section_layout};
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
@@ -835,7 +835,10 @@ mod tests {
     };
 
     fn fixture(issue_count: usize) -> SnapshotEnvelope {
-        let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap();
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+            .single()
+            .expect("fixture timestamp should be valid");
         SnapshotEnvelope {
             sequence: 8,
             published_at: now,

@@ -236,20 +236,20 @@ enum CliError {
 #[cfg(test)]
 mod tests {
     use super::{Cli, Command};
-    use clap::{error::ErrorKind, Parser};
+    use clap::{Parser, error::ErrorKind};
 
     #[test]
     fn daemon_rejects_zero_sample_interval() {
         let error = Cli::try_parse_from(["opensymphony", "daemon", "--sample-interval-ms", "0"])
-            .unwrap_err();
+            .expect_err("zero sample interval should be rejected");
 
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
     }
 
     #[test]
     fn daemon_accepts_positive_sample_interval() {
-        let cli =
-            Cli::try_parse_from(["opensymphony", "daemon", "--sample-interval-ms", "250"]).unwrap();
+        let cli = Cli::try_parse_from(["opensymphony", "daemon", "--sample-interval-ms", "250"])
+            .expect("CLI fixture should parse");
 
         match cli.command {
             Command::Daemon {

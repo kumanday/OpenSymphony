@@ -6,7 +6,10 @@ use opensymphony_domain::{
 use opensymphony_tui::{ConnectionState, FocusPane, TimelineMode, TuiAction, TuiState};
 
 fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
-    let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+    let now = Utc
+        .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+        .single()
+        .expect("fixture timestamp should be valid")
         + chrono::Duration::seconds(sequence as i64);
     SnapshotEnvelope {
         sequence,
@@ -56,7 +59,10 @@ fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
 }
 
 fn fixture_with_identifiers(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
-    let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+    let now = Utc
+        .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+        .single()
+        .expect("fixture timestamp should be valid")
         + chrono::Duration::seconds(sequence as i64);
     SnapshotEnvelope {
         sequence,
@@ -108,7 +114,10 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[&str]) -> SnapshotEnve
 }
 
 fn retime(mut envelope: SnapshotEnvelope, seconds_from_base: i64) -> SnapshotEnvelope {
-    let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+    let now = Utc
+        .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+        .single()
+        .expect("fixture timestamp should be valid")
         + chrono::Duration::seconds(seconds_from_base);
     envelope.published_at = now;
     envelope.snapshot.generated_at = now;
