@@ -126,6 +126,8 @@ Use pane-based layout so future views can expand without redesign.
 
 The implemented inline layout budgets rows per pane instead of truncating one giant body block.
 That keeps the bottom timeline visible under long issue lists, preserves the selected issue when snapshot ordering changes, and windows the issue pane around the current selection so narrower split terminals still keep the selected row and detail visible.
+Rendered pane text is normalized to a single visual line before fitting so
+newline-bearing snapshot fields do not silently spill past the row budget.
 
 ## 6. Interaction model
 
@@ -235,6 +237,7 @@ Current automated coverage:
 
 - reducer selection and mode-switch tests
 - render smoke tests against serialized snapshots, including visible focus markers, selection persistence across snapshot reordering, selected-row visibility in truncated issue panes, narrow-layout detail preservation, and persistent bottom-pane visibility
+- newline-normalization coverage for externally sourced event text so pane row counts stay accurate
 - control-plane snapshot plus SSE round-trip tests
 - TUI reconnect retention and narrow-layout detail visibility tests
 - bridge and control-plane catch-up tests for snapshot coalescing, disconnect handling, and lagged SSE recovery

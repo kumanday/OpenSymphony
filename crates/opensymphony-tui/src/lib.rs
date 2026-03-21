@@ -845,9 +845,10 @@ fn fit(value: &str, width: usize) -> String {
         return String::new();
     }
 
+    let value = single_line(value);
     let value_length = value.chars().count();
     if value_length == width {
-        return value.to_owned();
+        return value;
     }
     if value_length < width {
         return format!("{value:<width$}");
@@ -860,6 +861,10 @@ fn fit(value: &str, width: usize) -> String {
     let mut shortened = value.chars().take(width - 1).collect::<String>();
     shortened.push('~');
     shortened
+}
+
+fn single_line(value: &str) -> String {
+    value.lines().collect::<Vec<_>>().join(" ")
 }
 
 trait RuntimeStateLabel {
@@ -899,7 +904,7 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
 #[cfg(test)]
 mod tests {
     use super::{
-        BridgeHandle, BridgeMailbox, TuiAction, TuiState, issue_window, section_layout,
+        BridgeHandle, BridgeMailbox, TuiAction, TuiState, fit, issue_window, section_layout,
         stacked_body_layout, visible_issue_count,
     };
     use chrono::{TimeZone, Utc};
@@ -1037,6 +1042,25 @@ mod tests {
         assert_eq!(issue_window(12, 0, 6), (0, 6));
         assert_eq!(issue_window(12, 7, 6), (4, 10));
         assert_eq!(issue_window(12, 11, 6), (6, 12));
+    }
+
+    #[test]
+    fn fit_collapses_embedded_newlines_before_padding() {
+        assert_eq!(fit("a\nb", 4), "a b ");
+        assert_eq!(fit("a\r\nb", 4), "a b ");
+    }
+
+    #[test]
+    fn multiline_event_text_does_not_expand_the_frame_row_budget() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 12);
+        snapshot.snapshot.recent_events[0].summary = "first line\nsecond line".to_owned();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.render_text(100, 22);
+        assert_eq!(rendered.lines().count(), 22);
+        assert!(rendered.contains("first line second line"));
+        assert!(!rendered.contains("first line\nsecond line"));
     }
 
     #[test]
