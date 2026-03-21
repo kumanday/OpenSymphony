@@ -129,7 +129,7 @@ Current implemented checks:
 
 - snapshot serialization in `opensymphony-domain`
 - control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
-- TUI reducer and render smoke tests in `opensymphony-tui/tests/reducer.rs`
+- TUI reducer, visible-focus rendering, and render smoke tests in `opensymphony-tui/tests/reducer.rs`
 
 ## 4. Fake OpenHands server requirements
 
