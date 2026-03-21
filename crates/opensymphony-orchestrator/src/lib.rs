@@ -186,22 +186,22 @@ impl SchedulerState {
             .collect::<Vec<_>>();
         eligible.sort_by(issue_sort_key);
 
+        let current_claimed = self.claimed.len();
+        let claimed_by_state = self.claimed_counts_by_state(issues);
         let mut reserved_global = 0usize;
         let mut reserved_by_state: BTreeMap<String, usize> = BTreeMap::new();
-        let current_running = self.running.len();
-        let running_by_state = self.running_counts_by_state();
 
         let mut claimed_batch = Vec::new();
         for issue in eligible {
             let normalized_state = issue.normalized_state();
             let global_limit_reached =
-                current_running + reserved_global >= self.config.max_concurrent_agents;
+                current_claimed + reserved_global >= self.config.max_concurrent_agents;
             if global_limit_reached {
                 break;
             }
 
             let per_state_limit = self.config.per_state_limit(&issue);
-            let already_running_in_state = running_by_state
+            let already_claimed_in_state = claimed_by_state
                 .get(&normalized_state)
                 .copied()
                 .unwrap_or(0);
@@ -209,7 +209,7 @@ impl SchedulerState {
                 .get(&normalized_state)
                 .copied()
                 .unwrap_or(0);
-            if already_running_in_state + already_reserved_in_state >= per_state_limit {
+            if already_claimed_in_state + already_reserved_in_state >= per_state_limit {
                 continue;
             }
 
@@ -234,6 +234,7 @@ impl SchedulerState {
             return Err(SchedulerError::AlreadyRunning(issue.id));
         }
 
+        self.completed.remove(&issue.id);
         self.claimed.insert(issue.id.clone());
         self.retry_attempts.remove(&issue.id);
         self.running.insert(
@@ -255,6 +256,7 @@ impl SchedulerState {
 
     /// Restore a running entry during daemon restart recovery.
     pub fn recover_running(&mut self, running_issue: RunningIssue) {
+        self.completed.remove(&running_issue.issue.id);
         self.claimed.insert(running_issue.issue.id.clone());
         self.running
             .insert(running_issue.issue.id.clone(), running_issue);
@@ -262,6 +264,7 @@ impl SchedulerState {
 
     /// Restore a retry entry during daemon restart recovery.
     pub fn recover_retry(&mut self, retry: RetryEntry) {
+        self.completed.remove(&retry.issue_id);
         self.claimed.insert(retry.issue_id.clone());
         self.retry_attempts.insert(retry.issue_id.clone(), retry);
     }
@@ -293,7 +296,7 @@ impl SchedulerState {
             .remove(issue_id)
             .ok_or_else(|| SchedulerError::NotRunning(issue_id.to_string()))?;
 
-        self.completed.insert(issue_id.to_string());
+        self.completed.remove(issue_id);
         self.rate_limits = running.run.session.rate_limits.clone();
         self.runtime_totals
             .token_usage
@@ -347,6 +350,7 @@ impl SchedulerState {
         self.claimed.remove(issue_id);
         self.retry_attempts.remove(issue_id);
         self.running.remove(issue_id);
+        self.completed.insert(issue_id.to_string());
     }
 
     /// Return retry entries whose timers are due at or before `now`.
@@ -366,6 +370,7 @@ impl SchedulerState {
             .map(|issue| (issue.id.clone(), issue))
             .collect::<BTreeMap<_, _>>();
         let running_ids = self.running.keys().cloned().collect::<Vec<_>>();
+        let retry_ids = self.retry_attempts.keys().cloned().collect::<Vec<_>>();
 
         let mut outcomes = Vec::new();
         for issue_id in running_ids {
@@ -375,10 +380,7 @@ impl SchedulerState {
 
             match refreshed.get(&issue_id) {
                 Some(issue) if issue.is_terminal(&self.config.terminal_states) => {
-                    self.running.remove(&issue_id);
-                    self.claimed.remove(&issue_id);
-                    self.retry_attempts.remove(&issue_id);
-                    self.completed.insert(issue_id.clone());
+                    self.release(&issue_id);
                     outcomes.push(ReconciliationOutcome {
                         issue_id,
                         reason: ReleaseReason::Terminal,
@@ -392,10 +394,7 @@ impl SchedulerState {
                     current.issue = issue.clone();
                 }
                 Some(_) => {
-                    self.running.remove(&issue_id);
-                    self.claimed.remove(&issue_id);
-                    self.retry_attempts.remove(&issue_id);
-                    self.completed.insert(issue_id.clone());
+                    self.release(&issue_id);
                     outcomes.push(ReconciliationOutcome {
                         issue_id,
                         reason: ReleaseReason::Inactive,
@@ -403,10 +402,44 @@ impl SchedulerState {
                     });
                 }
                 None => {
-                    self.running.remove(&issue_id);
-                    self.claimed.remove(&issue_id);
-                    self.retry_attempts.remove(&issue_id);
-                    self.completed.insert(issue_id.clone());
+                    self.release(&issue_id);
+                    outcomes.push(ReconciliationOutcome {
+                        issue_id,
+                        reason: ReleaseReason::Missing,
+                        cleanup_workspace: false,
+                    });
+                }
+            }
+        }
+
+        for issue_id in retry_ids {
+            if self.running.contains_key(&issue_id) || !self.retry_attempts.contains_key(&issue_id)
+            {
+                continue;
+            }
+
+            match refreshed.get(&issue_id) {
+                Some(issue) if issue.is_terminal(&self.config.terminal_states) => {
+                    self.release(&issue_id);
+                    outcomes.push(ReconciliationOutcome {
+                        issue_id,
+                        reason: ReleaseReason::Terminal,
+                        cleanup_workspace: true,
+                    });
+                }
+                Some(issue)
+                    if issue
+                        .is_active(&self.config.active_states, &self.config.terminal_states) => {}
+                Some(_) => {
+                    self.release(&issue_id);
+                    outcomes.push(ReconciliationOutcome {
+                        issue_id,
+                        reason: ReleaseReason::Inactive,
+                        cleanup_workspace: false,
+                    });
+                }
+                None => {
+                    self.release(&issue_id);
                     outcomes.push(ReconciliationOutcome {
                         issue_id,
                         reason: ReleaseReason::Missing,
@@ -525,10 +558,15 @@ impl SchedulerState {
         true
     }
 
-    fn running_counts_by_state(&self) -> BTreeMap<String, usize> {
+    fn claimed_counts_by_state(&self, issues: &[Issue]) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
         for running in self.running.values() {
             *counts.entry(running.issue.normalized_state()).or_default() += 1;
+        }
+        for issue in issues {
+            if self.claimed.contains(&issue.id) && !self.running.contains_key(&issue.id) {
+                *counts.entry(issue.normalized_state()).or_default() += 1;
+            }
         }
         counts
     }
@@ -546,6 +584,7 @@ impl SchedulerState {
             due_at,
             error,
         };
+        self.completed.remove(&running.issue.id);
         self.retry_attempts
             .insert(running.issue.id.clone(), retry.clone());
         self.claimed.insert(running.issue.id.clone());
@@ -651,6 +690,33 @@ mod tests {
     }
 
     #[test]
+    fn claimed_capacity_is_reserved_across_poll_ticks() {
+        let config = SchedulerConfig {
+            max_concurrent_agents: 1,
+            ..SchedulerConfig::default()
+        };
+        let mut scheduler = SchedulerState::new(config);
+
+        let first = scheduler.claim_candidate_batch(&[issue(
+            "1",
+            "OSYM-1",
+            "In Progress",
+            Some(1),
+            timestamp(1),
+        )]);
+        let second = scheduler.claim_candidate_batch(&[issue(
+            "2",
+            "OSYM-2",
+            "In Progress",
+            Some(1),
+            timestamp(2),
+        )]);
+
+        assert_eq!(first.len(), 1);
+        assert!(second.is_empty());
+    }
+
+    #[test]
     fn normal_completion_schedules_fixed_continuation_retry() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
         let issue = issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1));
@@ -678,6 +744,29 @@ mod tests {
             scheduler.orchestration_state("1"),
             OrchestrationState::RetryQueued
         );
+    }
+
+    #[test]
+    fn retry_queued_issues_do_not_appear_completed_in_snapshot() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+        let issue = issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1));
+        scheduler
+            .start_run(
+                issue.clone(),
+                PathBuf::from("/tmp/OSYM-1"),
+                None,
+                timestamp(10),
+            )
+            .unwrap();
+
+        scheduler
+            .finish_run("1", WorkerOutcome::succeeded(), timestamp(20))
+            .unwrap();
+
+        let snapshot = scheduler.snapshot(timestamp(21));
+
+        assert!(snapshot.completed_issue_ids.is_empty());
+        assert_eq!(snapshot.retry_queue.len(), 1);
     }
 
     #[test]
@@ -754,6 +843,40 @@ mod tests {
             scheduler.orchestration_state("2"),
             OrchestrationState::Released
         );
+    }
+
+    #[test]
+    fn reconciliation_releases_retry_queued_terminal_issues_before_due_dispatch() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+        scheduler
+            .start_run(
+                issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1)),
+                PathBuf::from("/tmp/OSYM-1"),
+                None,
+                timestamp(10),
+            )
+            .unwrap();
+        scheduler
+            .finish_run("1", WorkerOutcome::succeeded(), timestamp(20))
+            .unwrap();
+
+        let outcomes = scheduler.reconcile_tracker_states(&[issue(
+            "1",
+            "OSYM-1",
+            "Done",
+            Some(1),
+            timestamp(30),
+        )]);
+
+        assert_eq!(
+            outcomes,
+            vec![ReconciliationOutcome {
+                issue_id: "1".into(),
+                reason: ReleaseReason::Terminal,
+                cleanup_workspace: true,
+            }]
+        );
+        assert!(scheduler.due_retries(timestamp(21)).is_empty());
     }
 
     #[test]
