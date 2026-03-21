@@ -69,15 +69,9 @@ impl OpenHandsClient {
     /// Probes a root-relative path and returns success on any 2xx status.
     pub async fn probe_path(&self, path: &str) -> Result<()> {
         let url = self.transport.join_root_path(path)?;
-        let request = self.http.request(reqwest::Method::GET, url.clone());
-        let response = request
-            .send()
-            .await
-            .map_err(|source| OpenHandsError::HttpTransport {
-                method: "GET".to_string(),
-                url: url.to_string(),
-                source,
-            })?;
+        let response = self
+            .send_request(reqwest::Method::GET, url.clone(), None::<&()>)
+            .await?;
         if response.status().is_success() {
             return Ok(());
         }

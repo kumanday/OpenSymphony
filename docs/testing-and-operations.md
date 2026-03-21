@@ -105,6 +105,7 @@ Current live OpenHands inputs:
 - HTTP client auth modes
 - HTTP connect and request deadlines
 - root-endpoint normalization when `base_url` is configured with an `/api` suffix
+- root probes honor the configured REST auth mode
 - conversation creation
 - initial REST sync
 - WebSocket handshake timeout
@@ -114,7 +115,9 @@ Current live OpenHands inputs:
 - reconnect cancellation during an in-flight handshake
 - reconnect cancellation during an in-flight readiness wait
 - out-of-order event insertion
+- timestamp comparison across mixed RFC3339 offset spellings
 - terminal state detection
+- terminal completion does not fail solely because the final best-effort reconcile call errors
 - conversation reuse
 - conversation reset when a reused server-side workspace binding no longer matches the current issue
   workspace

@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::{DateTime, FixedOffset};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -39,6 +40,30 @@ enum ReadyControl {
     Stop,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FieldTimestamp {
+    raw: String,
+    parsed: Option<DateTime<FixedOffset>>,
+}
+
+impl FieldTimestamp {
+    fn parse(timestamp: &str) -> Self {
+        Self {
+            raw: timestamp.to_string(),
+            parsed: DateTime::parse_from_rfc3339(timestamp).ok(),
+        }
+    }
+
+    fn is_newer_or_equal_than(&self, current: &Self) -> bool {
+        match (&current.parsed, &self.parsed) {
+            (Some(current), Some(incoming)) => current <= incoming,
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (None, None) => current.raw <= self.raw,
+        }
+    }
+}
+
 /// Cached conversation state derived from WebSocket events plus REST refreshes.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConversationStateMirror {
@@ -47,7 +72,7 @@ pub struct ConversationStateMirror {
     /// Forward-compatible field map derived from full snapshots and keyed updates.
     pub fields: Map<String, Value>,
     #[serde(skip, default)]
-    field_timestamps: HashMap<String, String>,
+    field_timestamps: HashMap<String, FieldTimestamp>,
 }
 
 impl ConversationStateMirror {
@@ -106,27 +131,27 @@ impl ConversationStateMirror {
     }
 
     fn apply_field_update(&mut self, key: &str, value: Value, timestamp: &str) {
-        if !self.should_apply(key, timestamp) {
+        let timestamp = FieldTimestamp::parse(timestamp);
+        if !self.should_apply(key, &timestamp) {
             return;
         }
         self.fields.insert(key.to_string(), value.clone());
-        self.field_timestamps
-            .insert(key.to_string(), timestamp.to_string());
+        self.field_timestamps.insert(key.to_string(), timestamp);
         if key == "execution_status" {
             self.execution_status = serde_json::from_value(value).ok();
         }
     }
 
-    fn should_apply(&self, key: &str, timestamp: &str) -> bool {
+    fn should_apply(&self, key: &str, timestamp: &FieldTimestamp) -> bool {
         self.field_timestamps
             .get(key)
-            .is_none_or(|current| current.as_str() <= timestamp)
+            .is_none_or(|current| timestamp.is_newer_or_equal_than(current))
     }
 
     fn record_timestamp(&mut self, key: &str, timestamp: Option<&str>) {
         if let Some(timestamp) = timestamp {
             self.field_timestamps
-                .insert(key.to_string(), timestamp.to_string());
+                .insert(key.to_string(), FieldTimestamp::parse(timestamp));
         }
     }
 }
@@ -253,7 +278,7 @@ impl AttachedConversation {
                     let info =
                         refresh_and_snapshot(&self.client, &self.conversation_id, &self.state)
                             .await?;
-                    self.reconcile_now().await?;
+                    self.best_effort_reconcile_after_terminal().await;
                     return Ok(info);
                 }
             }
@@ -276,7 +301,7 @@ impl AttachedConversation {
                 _ = tokio::time::sleep(sleep_for) => {
                     let info = refresh_and_snapshot(&self.client, &self.conversation_id, &self.state).await?;
                     if info.execution_status.map(RemoteExecutionStatus::is_terminal).unwrap_or(false) {
-                        self.reconcile_now().await?;
+                        self.best_effort_reconcile_after_terminal().await;
                         return Ok(info);
                     }
                 }
@@ -295,6 +320,16 @@ impl AttachedConversation {
             })?;
         }
         Ok(())
+    }
+
+    async fn best_effort_reconcile_after_terminal(&self) {
+        if let Err(error) = self.reconcile_now().await {
+            warn!(
+                conversation_id = %self.conversation_id,
+                error = %error,
+                "terminal reconcile failed after authoritative terminal refresh",
+            );
+        }
     }
 }
 
@@ -735,6 +770,34 @@ mod tests {
         let running = state_update_event(
             "running",
             "2026-03-21T15:00:01Z",
+            "execution_status",
+            json!(RemoteExecutionStatus::Running),
+        );
+
+        assert!(apply_event(&cache, &state, &finished).await);
+        assert!(apply_event(&cache, &state, &running).await);
+
+        let mirror = state.lock().await.clone();
+        assert_eq!(
+            mirror.execution_status,
+            Some(RemoteExecutionStatus::Finished)
+        );
+    }
+
+    #[tokio::test]
+    async fn offset_timestamps_do_not_rewind_the_mirror() {
+        let cache = Arc::new(Mutex::new(EventCache::default()));
+        let state = Arc::new(Mutex::new(ConversationStateMirror::default()));
+
+        let finished = state_update_event(
+            "finished",
+            "2026-03-21T15:00:02Z",
+            "execution_status",
+            json!(RemoteExecutionStatus::Finished),
+        );
+        let running = state_update_event(
+            "running",
+            "2026-03-21T16:00:01+01:00",
             "execution_status",
             json!(RemoteExecutionStatus::Running),
         );
