@@ -19,6 +19,45 @@ pub struct ToolConfig {
     pub params: Map<String, Value>,
 }
 
+impl ToolConfig {
+    /// Returns the canonical tool name expected by the pinned server registry.
+    #[must_use]
+    pub fn registry_name(&self) -> String {
+        registry_name_for_tool_name(&self.name)
+            .unwrap_or(self.name.as_str())
+            .to_string()
+    }
+
+    /// Returns the pinned server module qualname needed for dynamic registration.
+    #[must_use]
+    pub fn module_qualname(&self) -> Option<&'static str> {
+        let registry_name = self.registry_name();
+        module_qualname_for_tool_name(&registry_name)
+    }
+}
+
+fn registry_name_for_tool_name(name: &str) -> Option<&'static str> {
+    match name {
+        "TerminalTool" | "terminal" => Some("terminal"),
+        "FileEditorTool" | "file_editor" => Some("file_editor"),
+        "ApplyPatchTool" | "apply_patch" => Some("apply_patch"),
+        "TaskTrackerTool" | "task_tracker" => Some("task_tracker"),
+        "BrowserToolSet" | "browser_tool_set" => Some("browser_tool_set"),
+        _ => None,
+    }
+}
+
+fn module_qualname_for_tool_name(name: &str) -> Option<&'static str> {
+    match name {
+        "terminal" => Some("openhands.tools.terminal.definition"),
+        "file_editor" => Some("openhands.tools.file_editor.definition"),
+        "apply_patch" => Some("openhands.tools.apply_patch.definition"),
+        "task_tracker" => Some("openhands.tools.task_tracker.definition"),
+        "browser_tool_set" => Some("openhands.tools.browser_use.definition"),
+        _ => None,
+    }
+}
+
 /// Minimal LLM configuration mirrored into the agent payload.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LlmConfig {
@@ -194,6 +233,9 @@ pub struct CreateConversationRequest {
     /// Optional secrets passed to the conversation.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub secrets: BTreeMap<String, Value>,
+    /// Tool module qualnames imported by the server to register requested tools.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_module_qualnames: BTreeMap<String, String>,
 }
 
 /// Minimal conversation snapshot returned by the REST API.
@@ -463,7 +505,7 @@ mod tests {
                     extra: Map::new(),
                 },
                 tools: vec![ToolConfig {
-                    name: "TerminalTool".to_string(),
+                    name: "terminal".to_string(),
                     params: Map::new(),
                 }],
                 include_default_tools: Vec::new(),
@@ -486,6 +528,16 @@ mod tests {
             hook_config: None,
             plugins: Vec::new(),
             secrets: BTreeMap::new(),
+            tool_module_qualnames: BTreeMap::from([
+                (
+                    "file_editor".to_string(),
+                    "openhands.tools.file_editor.definition".to_string(),
+                ),
+                (
+                    "terminal".to_string(),
+                    "openhands.tools.terminal.definition".to_string(),
+                ),
+            ]),
         };
 
         let json = serde_json::to_value(request).expect("request should serialize");
@@ -497,6 +549,10 @@ mod tests {
         assert_eq!(json["persistence_dir"], ".opensymphony/openhands");
         assert_eq!(json["confirmation_policy"]["kind"], "NeverConfirm");
         assert_eq!(json["initial_message"]["run"], false);
+        assert_eq!(
+            json["tool_module_qualnames"]["terminal"],
+            "openhands.tools.terminal.definition"
+        );
     }
 
     #[test]
@@ -513,6 +569,19 @@ mod tests {
         assert_eq!(
             event.execution_status(),
             Some(RemoteExecutionStatus::Finished)
+        );
+    }
+
+    #[test]
+    fn tool_config_accepts_class_style_aliases() {
+        let tool = ToolConfig {
+            name: "TerminalTool".to_string(),
+            params: Map::new(),
+        };
+        assert_eq!(tool.registry_name(), "terminal");
+        assert_eq!(
+            tool.module_qualname(),
+            Some("openhands.tools.terminal.definition")
         );
     }
 }

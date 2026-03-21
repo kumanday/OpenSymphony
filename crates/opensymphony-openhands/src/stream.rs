@@ -209,7 +209,11 @@ impl AttachedConversation {
     pub async fn wait_for_terminal(&mut self, timeout: Duration) -> Result<ConversationInfo> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if let Some(status) = *self.status_rx.borrow() {
+            let current_status = {
+                let status = self.status_rx.borrow();
+                *status
+            };
+            if let Some(status) = current_status {
                 if status.is_terminal() {
                     let info =
                         refresh_and_snapshot(&self.client, &self.conversation_id, &self.state)

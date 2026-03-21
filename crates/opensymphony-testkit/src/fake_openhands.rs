@@ -112,6 +112,7 @@ enum WsServerMessage {
 #[derive(Debug, Default)]
 struct FakeState {
     session_api_key: Option<String>,
+    conversation_get_delay: Duration,
     conversations: HashMap<String, ConversationEntry>,
 }
 
@@ -238,6 +239,11 @@ impl FakeOpenHandsServer {
     /// Sets the optional session API key required for subsequent REST and WebSocket requests.
     pub async fn set_session_api_key(&self, api_key: Option<&str>) {
         self.state.lock().await.session_api_key = api_key.map(ToString::to_string);
+    }
+
+    /// Delays `GET /api/conversations/{id}` responses to widen timing-sensitive contract tests.
+    pub async fn set_conversation_get_delay(&self, delay: Duration) {
+        self.state.lock().await.conversation_get_delay = delay;
     }
 
     /// Enqueues a scripted run for the named conversation.
@@ -385,9 +391,21 @@ async fn get_conversation(
     if !authorized(&app.state, &headers, None).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let state = app.state.lock().await;
-    match state.conversations.get(&conversation_id) {
-        Some(entry) => (StatusCode::OK, Json(entry.info.clone())).into_response(),
+    let (delay, info) = {
+        let state = app.state.lock().await;
+        (
+            state.conversation_get_delay,
+            state
+                .conversations
+                .get(&conversation_id)
+                .map(|entry| entry.info.clone()),
+        )
+    };
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    match info {
+        Some(entry) => (StatusCode::OK, Json(entry)).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -736,6 +754,7 @@ mod tests {
             hook_config: None,
             plugins: Vec::new(),
             secrets: HashMap::new().into_iter().collect(),
+            tool_module_qualnames: HashMap::new().into_iter().collect(),
         };
 
         let conversation = client.create_conversation(&request).await?;
@@ -786,6 +805,7 @@ mod tests {
                 hook_config: None,
                 plugins: Vec::new(),
                 secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
             })
             .await?;
 
@@ -838,6 +858,81 @@ mod tests {
             event.raw_json.get("body") == Some(&Value::String("after disconnect".to_string()))
         }));
         attached.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attached_stream_closes_after_post_terminal_event()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        server
+            .set_conversation_get_delay(Duration::from_millis(25))
+            .await;
+        let client = server.client();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: "/tmp/test".to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some("conv-post-terminal".to_string()),
+                persistence_dir: Some("/tmp/test/.opensymphony/openhands".to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+
+        server
+            .enqueue_run(
+                "conv-post-terminal",
+                ScriptedRun::new(vec![
+                    RunStep::Emit {
+                        event: execution_status_event(RemoteExecutionStatus::Running),
+                        delay: Duration::from_millis(5),
+                    },
+                    RunStep::Emit {
+                        event: execution_status_event(RemoteExecutionStatus::Finished),
+                        delay: Duration::from_millis(5),
+                    },
+                    RunStep::Emit {
+                        event: generic_event(
+                            "MessageEvent",
+                            "agent",
+                            serde_json::json!({"body": "after finish"}),
+                        ),
+                        delay: Duration::from_millis(1),
+                    },
+                ]),
+            )
+            .await?;
+
+        let mut attached = opensymphony_openhands::AttachedConversation::attach(
+            client.clone(),
+            "conv-post-terminal",
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .await?;
+        client.run_conversation("conv-post-terminal").await?;
+        let final_info = attached.wait_for_terminal(Duration::from_secs(2)).await?;
+        assert_eq!(
+            final_info.execution_status,
+            Some(RemoteExecutionStatus::Finished)
+        );
+        tokio::time::timeout(Duration::from_secs(1), attached.close()).await??;
         Ok(())
     }
 
