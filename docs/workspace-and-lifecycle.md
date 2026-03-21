@@ -220,6 +220,8 @@ Store at minimum:
 - last continuation prompt
 - timestamp metadata
 
+Fresh prompt renders should omit continuation-only template context, while continuation renders should preserve enough attempt context for repo-owned `WORKFLOW.md` templates to emit resume-only guidance without replaying the original assignment.
+
 ## 11. Conversation lifetime policy inside the workspace
 
 Default policy:
@@ -254,6 +256,7 @@ When the tracker says an issue is terminal:
 
 - cancel any active worker
 - run `before_remove` best effort
+- clear stale retry metadata even if the workspace directory is retained for debugging
 - delete the workspace if configured to do so
 
 Keep cleanup policy configurable enough to allow retention during debugging.

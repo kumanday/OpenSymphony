@@ -80,6 +80,7 @@ Suggested gates:
 - parse valid `WORKFLOW.md`
 - fail on invalid front matter
 - fail on unknown template variables
+- omit `attempt` template context from fresh renders while preserving it for continuation renders
 - resolve defaults and env vars
 - validate `openhands` extension namespace
 
@@ -117,6 +118,7 @@ Suggested gates:
 - stall detection
 - active-state refresh
 - terminal cleanup
+- retained terminal workspaces still clear stale retry manifests
 - restart recovery from manifests
 
 ## 3.5 Control plane and TUI

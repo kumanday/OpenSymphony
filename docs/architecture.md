@@ -222,8 +222,10 @@ Use different prompt shapes for different moments:
 
 - Fresh conversation, first turn:
   - full rendered workflow prompt
+  - omit `attempt` template context so workflow templates can keep fresh-only sections separate from continuation sections
 - Existing conversation, first turn of a new worker lifetime:
   - continuation guidance only
+  - provide `attempt` template context only for this continuation render
 - Existing conversation, in-process turn 2..N:
   - continuation guidance only
 - Conversation reset after corruption or incompatible version:

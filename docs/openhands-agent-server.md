@@ -158,6 +158,7 @@ This keeps execution state co-located with the workspace and simplifies recovery
 Default policy:
 
 - reuse the conversation for the same issue across worker lifetimes
+- when reusing a conversation, send continuation-only guidance instead of replaying the full assignment body
 - reset only when:
   - conversation metadata is missing or invalid
   - the server reports the conversation cannot be attached
