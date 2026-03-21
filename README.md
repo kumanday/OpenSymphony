@@ -126,6 +126,33 @@ Remote agent-server mode, auth hardening, centralized deployment docs.
 5. Keep the control-plane API stable before starting the TUI.
 6. Use the task files in `docs/tasks/` as the Linear issue source of truth.
 
+## Current local validation entrypoints
+
+This repository now includes the local validation scaffolding for M5:
+
+- a Rust workspace with the documented crate boundaries
+- `opensymphony-openhands` for minimal conversation, search, and WebSocket readiness probes
+- `opensymphony-testkit` with an in-memory fake OpenHands server
+- `opensymphony` CLI with a meaningful `doctor` command
+- pinned OpenHands tooling under `tools/openhands-server/`
+- example config and target-repo fixtures under `examples/`
+- smoke and live validation scripts under `scripts/`
+
+Useful commands:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml
+./scripts/smoke_local.sh
+OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
+```
+
+Current note:
+
+- `daemon`, `tui`, and `linear-mcp` subcommands are present so the CLI shape is stable, but they remain scaffolds until the corresponding runtime and control-plane milestones land.
+
 ## Non-negotiable implementation rules
 
 - Do not collapse Symphony orchestration into OpenHands conversation state.

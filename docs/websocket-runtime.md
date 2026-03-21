@@ -134,6 +134,12 @@ Configurable timeout:
 
 If readiness is not achieved, fail the attach attempt and surface a transport error.
 
+Current repository implementation:
+
+- `opensymphony-openhands::OpenHandsClient::wait_for_readiness` treats the first `ConversationStateUpdateEvent` from `/sockets/events/{conversation_id}` as the readiness barrier
+- `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
+- `crates/opensymphony-openhands/tests/fake_server_contract.rs` and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness and reconcile path
+
 ## 6. Event cache and reconciliation
 
 ## 6.1 Required behavior
@@ -163,6 +169,12 @@ The reconcile pass should:
 - update ordering
 - return the number of new events added
 - tolerate partial failure by preserving already-cached events
+
+Current repository implementation:
+
+- `OpenHandsClient::search_all_events` paginates until `next_page_id` is absent
+- `EventCache` deduplicates by event ID and inserts by timestamp order
+- the contract suite includes a multi-page reconciliation test and an out-of-order insertion test
 
 ## 6.4 Conversation state mirror
 
