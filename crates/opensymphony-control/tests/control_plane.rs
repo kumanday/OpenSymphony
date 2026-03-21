@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use axum::{routing::get, Json, Router};
+use axum::{Json, Router, routing::get};
 use chrono::{TimeZone, Utc};
 use opensymphony_control::{
     ControlPlaneClient, ControlPlaneClientError, ControlPlaneServer, SnapshotStore,
@@ -13,7 +13,10 @@ use tokio::net::TcpListener;
 use url::Url;
 
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {
-    let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+    let now = Utc
+        .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+        .single()
+        .expect("fixture timestamp should be valid")
         + chrono::Duration::seconds(step as i64);
     DaemonSnapshot {
         generated_at: now,
@@ -59,31 +62,47 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
 #[tokio::test]
 async fn serves_snapshot_and_streams_updates() {
     let store = SnapshotStore::new(fixture_snapshot(0));
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should expose an address");
     let server = ControlPlaneServer::new(store.clone());
-    let server_task = tokio::spawn(async move { server.serve(listener).await.unwrap() });
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("control-plane server should run");
+    });
 
-    let client = ControlPlaneClient::new(Url::parse(&format!("http://{address}/")).unwrap());
-    let current = client.fetch_snapshot().await.unwrap();
+    let client = ControlPlaneClient::new(
+        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
+    );
+    let current = client
+        .fetch_snapshot()
+        .await
+        .expect("client should fetch the current snapshot");
     assert_eq!(current.sequence, 1);
     assert_eq!(current.snapshot.issues[0].identifier, "COE-255");
 
-    let mut stream = client.stream_updates().unwrap();
+    let mut stream = client
+        .stream_updates()
+        .expect("client should open the update stream");
     let initial: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("initial stream event should arrive")
+        .expect("stream should not end before the initial snapshot")
+        .expect("initial stream event should decode");
     assert_eq!(initial.sequence, 1);
 
     let expected = store.publish(fixture_snapshot(1)).await;
 
     let streamed: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
+        .expect("streamed update should arrive")
+        .expect("stream should stay open for the published update")
+        .expect("streamed update should decode");
 
     assert_eq!(streamed.sequence, expected.sequence);
     assert_eq!(
@@ -106,17 +125,28 @@ async fn fetch_snapshot_times_out_when_snapshot_endpoint_hangs() {
         })
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should expose an address");
     let server = Router::new().route("/api/v1/snapshot", get(stalled_snapshot));
-    let server_task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+    let server_task = tokio::spawn(async move {
+        axum::serve(listener, server)
+            .await
+            .expect("stalled test server should run");
+    });
 
     let client = ControlPlaneClient::with_snapshot_timeout(
-        Url::parse(&format!("http://{address}/")).unwrap(),
+        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
         Duration::from_millis(50),
     );
     let started = tokio::time::Instant::now();
-    let error = client.fetch_snapshot().await.unwrap_err();
+    let error = client
+        .fetch_snapshot()
+        .await
+        .expect_err("hung snapshot endpoint should time out");
 
     match error {
         ControlPlaneClientError::Request(source) => assert!(source.is_timeout()),

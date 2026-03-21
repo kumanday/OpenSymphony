@@ -2,7 +2,13 @@
 name = "opensymphony-control"
 edition.workspace = true
 license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
 version.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 async-stream.workspace = true

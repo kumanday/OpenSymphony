@@ -5,7 +5,10 @@ use opensymphony_domain::{
 };
 
 fn fixture() -> SnapshotEnvelope {
-    let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap();
+    let now = Utc
+        .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+        .single()
+        .expect("fixture timestamp should be valid");
     SnapshotEnvelope {
         sequence: 7,
         published_at: now,
@@ -55,7 +58,7 @@ fn fixture() -> SnapshotEnvelope {
 fn snapshot_envelope_round_trips_through_json() {
     let envelope = fixture();
 
-    let encoded = serde_json::to_value(&envelope).unwrap();
+    let encoded = serde_json::to_value(&envelope).expect("fixture should serialize");
     assert_eq!(encoded["snapshot"]["daemon"]["state"], "ready");
     assert_eq!(
         encoded["snapshot"]["issues"][0]["runtime_state"],
@@ -70,23 +73,25 @@ fn snapshot_envelope_round_trips_through_json() {
         "snapshot_published"
     );
 
-    let decoded: SnapshotEnvelope = serde_json::from_value(encoded).unwrap();
+    let decoded: SnapshotEnvelope =
+        serde_json::from_value(encoded).expect("encoded fixture should deserialize");
     assert_eq!(decoded, envelope);
 }
 
 #[test]
 fn snapshot_envelope_decodes_unknown_recent_event_kinds() {
-    let mut encoded = serde_json::to_value(fixture()).unwrap();
+    let mut encoded = serde_json::to_value(fixture()).expect("fixture should serialize");
     encoded["snapshot"]["recent_events"][0]["kind"] =
         serde_json::Value::String("tool_call_summary".to_owned());
 
-    let decoded: SnapshotEnvelope = serde_json::from_value(encoded).unwrap();
+    let decoded: SnapshotEnvelope =
+        serde_json::from_value(encoded).expect("unknown event kind should still deserialize");
     assert_eq!(
         decoded.snapshot.recent_events[0].kind,
         RecentEventKind::Other("tool_call_summary".to_owned())
     );
 
-    let reencoded = serde_json::to_value(decoded).unwrap();
+    let reencoded = serde_json::to_value(decoded).expect("decoded snapshot should reserialize");
     assert_eq!(
         reencoded["snapshot"]["recent_events"][0]["kind"],
         "tool_call_summary"

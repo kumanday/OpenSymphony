@@ -1146,6 +1146,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensymphony-linear"
+version = "0.1.0"
+
+[[package]]
+name = "opensymphony-linear-mcp"
+version = "0.1.0"
+
+[[package]]
+name = "opensymphony-openhands"
+version = "0.1.0"
+
+[[package]]
+name = "opensymphony-orchestrator"
+version = "0.1.0"
+
+[[package]]
+name = "opensymphony-testkit"
+version = "0.1.0"
+
+[[package]]
 name = "opensymphony-tui"
 version = "0.1.0"
 dependencies = [
@@ -1158,6 +1178,14 @@ dependencies = [
  "tracing",
  "url",
 ]
+
+[[package]]
+name = "opensymphony-workflow"
+version = "0.1.0"
+
+[[package]]
+name = "opensymphony-workspace"
+version = "0.1.0"
 
 [[package]]
 name = "parking_lot"
