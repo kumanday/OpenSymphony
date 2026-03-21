@@ -17,6 +17,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/kumanday/OpenSymphony"
 rust-version = "1.85"
 version = "0.1.0"
 
