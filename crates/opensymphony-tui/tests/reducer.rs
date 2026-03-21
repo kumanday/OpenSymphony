@@ -62,6 +62,9 @@ fn applies_snapshot_and_renders_selected_issue() {
 
     assert_eq!(state.connection, ConnectionState::Live);
     let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("focus=issues"));
+    assert!(rendered.contains("[x] ISSUES"));
+    assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
     assert!(rendered.contains("COE-255"));
     assert!(rendered.contains("Issue 0"));
     assert!(rendered.contains("RECENT EVENTS"));
@@ -88,4 +91,9 @@ fn cycles_focus_and_timeline_mode() {
 
     assert_eq!(state.focus, FocusPane::Timeline);
     assert_eq!(state.timeline_mode, TimelineMode::Metrics);
+
+    let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("focus=timeline"));
+    assert!(rendered.contains("bottom=metrics"));
+    assert!(rendered.contains("[x] METRICS"));
 }

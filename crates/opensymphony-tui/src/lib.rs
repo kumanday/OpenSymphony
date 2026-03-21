@@ -93,8 +93,10 @@ impl TuiState {
             .map(|value| format_timestamp(value.snapshot.generated_at))
             .unwrap_or_else(|| "--:--:--".to_owned());
         let status = format!(
-            "OpenSymphony | conn={} | seq={} | issues={} | updated={} | q quit  tab focus  e toggle",
+            "OpenSymphony | conn={} | focus={} | bottom={} | seq={} | issues={} | updated={} | q quit  tab focus  e toggle",
             self.connection.label(),
+            self.focus.label(),
+            self.timeline_mode.label(),
             sequence,
             issue_count,
             generated
@@ -127,7 +129,10 @@ impl TuiState {
     }
 
     fn issue_lines(&self, width: usize) -> Vec<String> {
-        let mut lines = vec![fit("ISSUES", width)];
+        let mut lines = vec![fit(
+            &pane_title("ISSUES", self.focus == FocusPane::Issues),
+            width,
+        )];
         match &self.latest_snapshot {
             Some(snapshot) if snapshot.snapshot.issues.is_empty() => {
                 lines.push(fit("no issues in snapshot", width));
@@ -157,7 +162,10 @@ impl TuiState {
     }
 
     fn detail_lines(&self, width: usize) -> Vec<String> {
-        let mut lines = vec![fit("DETAIL", width)];
+        let mut lines = vec![fit(
+            &pane_title("ISSUE + WORKSPACE DETAIL", self.focus == FocusPane::Detail),
+            width,
+        )];
         match self.selected_issue() {
             Some(issue) => {
                 lines.push(fit(&format!("{} {}", issue.identifier, issue.title), width));
@@ -175,11 +183,11 @@ impl TuiState {
                     width,
                 ));
                 lines.push(fit(
-                    &format!("workspace: {}", issue.workspace_path_suffix),
+                    &format!("workspace path: {}", issue.workspace_path_suffix),
                     width,
                 ));
                 lines.push(fit(
-                    &format!("conversation: {}", issue.conversation_id_suffix),
+                    &format!("conversation id: {}", issue.conversation_id_suffix),
                     width,
                 ));
                 lines.push(fit(&format!("retry count: {}", issue.retry_count), width));
@@ -197,7 +205,10 @@ impl TuiState {
             TimelineMode::Events => "RECENT EVENTS",
             TimelineMode::Metrics => "METRICS",
         };
-        let mut lines = vec![fit(title, width)];
+        let mut lines = vec![fit(
+            &pane_title(title, self.focus == FocusPane::Timeline),
+            width,
+        )];
         match (&self.timeline_mode, &self.latest_snapshot) {
             (_, None) => lines.push(fit("waiting for stream data", width)),
             (TimelineMode::Events, Some(snapshot)) => {
@@ -240,10 +251,29 @@ pub enum FocusPane {
     Timeline,
 }
 
+impl FocusPane {
+    fn label(&self) -> &'static str {
+        match self {
+            FocusPane::Issues => "issues",
+            FocusPane::Detail => "detail",
+            FocusPane::Timeline => "timeline",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineMode {
     Events,
     Metrics,
+}
+
+impl TimelineMode {
+    fn label(&self) -> &'static str {
+        match self {
+            TimelineMode::Events => "events",
+            TimelineMode::Metrics => "metrics",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -462,6 +492,11 @@ fn handle_bridge_error(sender: &Sender<BridgeMessage>, error: &ControlPlaneClien
 
 fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.format("%H:%M:%S").to_string()
+}
+
+fn pane_title(title: &str, focused: bool) -> String {
+    let marker = if focused { "[x]" } else { "[ ]" };
+    format!("{marker} {title}")
 }
 
 fn event_lines(events: &[RecentEvent], width: usize) -> Vec<String> {
