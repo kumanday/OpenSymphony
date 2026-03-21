@@ -95,6 +95,13 @@ Use for:
 
 Local MVP work starts with supervised mode, but the trait boundary must support both.
 
+Current repository implementation:
+
+- `tools/openhands-server/pyproject.toml` pins the local server environment and `tools/openhands-server/run-local.sh` starts it via `uv`
+- `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
+- `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
+- `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
+
 ## 4.2 Startup contract
 
 In supervised mode:
@@ -111,6 +118,8 @@ Readiness probing rule:
 - prefer a documented health endpoint if the pinned version exposes one
 - otherwise use a conservative FastAPI probe such as `GET /openapi.json`
 - never rely on sleep-only startup delays
+
+The current doctor and live-validation path uses `GET /openapi.json` as the conservative readiness probe.
 
 ## 4.3 Shutdown contract
 
@@ -193,6 +202,8 @@ Use the smallest necessary subset of the agent-server API.
 - `GET /api/conversations/{conversation_id}/events/search`
   - sync and reconcile events
 
+The current fake-server coverage and CLI doctor implementation exercise this exact subset.
+
 ### Optional, diagnostic, or future
 
 - model and provider discovery endpoints
@@ -243,6 +254,13 @@ The Rust client should still support:
 - session API key for HTTP
 - session API key for WebSocket query-param fallback
 - optional header-based WebSocket auth for versions that support it
+
+Current repository implementation:
+
+- `TransportConfig.session_api_key` is appended to REST endpoint URLs as well as the WebSocket URL so one auth knob covers create, get, send-message, run, search, and attach flows
+- `crates/opensymphony-openhands/tests/client_resilience.rs` covers both authenticated REST operations and the readiness path when non-readiness frames arrive before the first state update
+- the doctor probe now exercises a real `POST /events` plus `POST /run` path and only reports the runtime healthy after a successful terminal `execution_status` of `finished`
+- failure-only probe streams such as `ConversationErrorEvent` or terminal `execution_status` values like `error` and `stuck` are treated as unhealthy instead of silently passing
 
 Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
 
