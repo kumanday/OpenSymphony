@@ -950,6 +950,8 @@ struct RawWorkflowConfig {
     agent: Option<RawAgentConfig>,
     #[serde(default)]
     openhands: Option<RawOpenHandsConfig>,
+    #[serde(default, rename = "codex")]
+    _codex: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1243,6 +1245,24 @@ Hello
 
         assert!(
             matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "openhands.conversation.agent.llm.model")
+        );
+    }
+
+    #[test]
+    fn accepts_checked_in_workflow_codex_namespace() {
+        let mut env = env();
+        env.insert("LINEAR_API_KEY".into(), "process-linear-key".into());
+
+        let workflow_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WORKFLOW.md");
+        let workflow = Workflow::load_from_path_with_env(workflow_path, &env).unwrap();
+
+        assert!(workflow.definition.config.contains_key("codex"));
+        assert!(
+            workflow
+                .definition
+                .prompt_template
+                .contains("You are working on a Linear ticket")
         );
     }
 

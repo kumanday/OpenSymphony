@@ -72,8 +72,12 @@ impl SchedulerConfig {
     }
 
     fn per_state_limit(&self, issue: &Issue) -> usize {
+        self.per_state_limit_for_state(&issue.normalized_state())
+    }
+
+    fn per_state_limit_for_state(&self, normalized_state: &str) -> usize {
         self.max_concurrent_agents_by_state
-            .get(&issue.normalized_state())
+            .get(normalized_state)
             .copied()
             .unwrap_or(self.max_concurrent_agents)
     }
@@ -89,6 +93,7 @@ pub struct RunningIssue {
 /// Claim-only reservation metadata retained until a run actually starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct ClaimedReservation {
+    state: String,
     normalized_state: String,
     claimed_reconcile_generation: u64,
 }
@@ -252,7 +257,7 @@ impl SchedulerState {
                 continue;
             }
 
-            self.reserve_claim(&issue.id, &normalized_state);
+            self.reserve_claim(&issue, &normalized_state);
             reserved_global += 1;
             *reserved_by_state.entry(normalized_state).or_default() += 1;
             claimed_batch.push(issue);
@@ -264,7 +269,7 @@ impl SchedulerState {
     /// Start a run for a claimed issue.
     pub fn start_run(
         &mut self,
-        issue: Issue,
+        mut issue: Issue,
         workspace_path: PathBuf,
         attempt: Option<u32>,
         started_at: DateTime<Utc>,
@@ -291,7 +296,16 @@ impl SchedulerState {
                 });
             }
         }
-        let normalized_state = issue.normalized_state();
+        let (state, normalized_state) = self
+            .claimed_reservations
+            .get(&issue.id)
+            .map(|reservation| {
+                (
+                    reservation.state.clone(),
+                    reservation.normalized_state.clone(),
+                )
+            })
+            .unwrap_or_else(|| (issue.state.clone(), issue.normalized_state()));
         let reserved_global = self.reserved_capacity_excluding(&issue.id);
         if reserved_global >= self.config.max_concurrent_agents {
             return Err(SchedulerError::GlobalCapacityReached {
@@ -299,7 +313,7 @@ impl SchedulerState {
                 limit: self.config.max_concurrent_agents,
             });
         }
-        let per_state_limit = self.config.per_state_limit(&issue);
+        let per_state_limit = self.config.per_state_limit_for_state(&normalized_state);
         let reserved_in_state =
             self.reserved_state_capacity_excluding(&issue.id, &normalized_state);
         if reserved_in_state >= per_state_limit {
@@ -310,6 +324,7 @@ impl SchedulerState {
             });
         }
 
+        issue.state = state;
         self.completed.remove(&issue.id);
         self.claimed_reservations.remove(&issue.id);
         self.retry_attempts.remove(&issue.id);
@@ -563,6 +578,7 @@ impl SchedulerState {
                             cleanup_workspace: false,
                         });
                     } else if let Some(reservation) = self.claimed_reservations.get_mut(&issue_id) {
+                        reservation.state = issue.state.clone();
                         reservation.normalized_state = issue.normalized_state();
                     }
                 }
@@ -735,11 +751,12 @@ impl SchedulerState {
         running_in_state + claimed_only_in_state
     }
 
-    fn reserve_claim(&mut self, issue_id: &str, normalized_state: &str) {
-        self.claimed.insert(issue_id.to_string());
+    fn reserve_claim(&mut self, issue: &Issue, normalized_state: &str) {
+        self.claimed.insert(issue.id.clone());
         self.claimed_reservations.insert(
-            issue_id.to_string(),
+            issue.id.clone(),
             ClaimedReservation {
+                state: issue.state.clone(),
                 normalized_state: normalized_state.to_string(),
                 claimed_reconcile_generation: self.reconcile_generation,
             },
@@ -754,7 +771,7 @@ impl SchedulerState {
         let grace_timeout_ms = self
             .config
             .stall_timeout_ms
-            .unwrap_or(self.config.poll_interval_ms)
+            .unwrap_or(DEFAULT_STALL_TIMEOUT_MS)
             .max(poll_interval_ms);
         let grace_generations =
             (grace_timeout_ms.saturating_add(poll_interval_ms - 1)) / poll_interval_ms;
@@ -1294,6 +1311,43 @@ mod tests {
     }
 
     #[test]
+    fn start_run_uses_reserved_state_for_capacity_checks() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig {
+            max_concurrent_agents: 2,
+            max_concurrent_agents_by_state: BTreeMap::from([("in progress".into(), 1)]),
+            ..SchedulerConfig::default()
+        });
+        let stale_claim = issue("1", "OSYM-1", "Todo", Some(1), millis(0));
+        let claimed = scheduler.claim_candidate_batch(std::slice::from_ref(&stale_claim));
+        assert_eq!(claimed.len(), 1);
+
+        claim_and_start_run(
+            &mut scheduler,
+            issue("2", "OSYM-2", "In Progress", Some(1), millis(1_000)),
+            PathBuf::from("/tmp/OSYM-2"),
+            None,
+            millis(1_000),
+        );
+
+        let outcomes = scheduler.reconcile_tracker_states(&[
+            issue("1", "OSYM-1", "In Progress", Some(1), millis(2_000)),
+            issue("2", "OSYM-2", "In Progress", Some(1), millis(2_000)),
+        ]);
+        assert!(outcomes.is_empty());
+
+        assert!(matches!(
+            scheduler.start_run(
+                stale_claim,
+                PathBuf::from("/tmp/OSYM-1"),
+                None,
+                millis(3_000),
+            ),
+            Err(SchedulerError::StateCapacityReached { issue_id, state, limit })
+                if issue_id == "1" && state == "in progress" && limit == 1
+        ));
+    }
+
+    #[test]
     fn reconciliation_releases_terminal_and_non_active_issues() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
         claim_and_start_run(
@@ -1434,6 +1488,46 @@ mod tests {
             scheduler.orchestration_state("3"),
             OrchestrationState::Released
         );
+    }
+
+    #[test]
+    fn disabled_stall_detection_does_not_collapse_claim_grace_to_one_poll_tick() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig {
+            max_concurrent_agents: 1,
+            poll_interval_ms: 100_000,
+            stall_timeout_ms: None,
+            ..SchedulerConfig::default()
+        });
+        let claimed_issue = issue("1", "OSYM-1", "In Progress", Some(1), millis(0));
+        let claimed = scheduler.claim_candidate_batch(std::slice::from_ref(&claimed_issue));
+
+        assert_eq!(claimed.len(), 1);
+
+        let first_outcomes = scheduler.reconcile_tracker_states(std::slice::from_ref(&issue(
+            "1",
+            "OSYM-1",
+            "In Progress",
+            Some(1),
+            millis(100_000),
+        )));
+        let second_outcomes = scheduler.reconcile_tracker_states(std::slice::from_ref(&issue(
+            "1",
+            "OSYM-1",
+            "In Progress",
+            Some(1),
+            millis(200_000),
+        )));
+
+        assert!(first_outcomes.is_empty());
+        assert!(second_outcomes.is_empty());
+        scheduler
+            .start_run(
+                claimed_issue,
+                PathBuf::from("/tmp/OSYM-1"),
+                None,
+                millis(250_000),
+            )
+            .unwrap();
     }
 
     #[test]
