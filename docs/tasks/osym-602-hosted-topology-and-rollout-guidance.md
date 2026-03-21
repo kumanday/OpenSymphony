@@ -21,6 +21,7 @@ repo_paths:
 definition_of_ready:
   - OSYM-503 and OSYM-601 are merged
   - Hosted architecture decisions are reviewed
+  - The runtime and operations paths referenced by the task already exist in the working branch
 ---
 
 # OSYM-602: Document hosted topology and rollout guidance

@@ -25,6 +25,7 @@ repo_paths:
 definition_of_ready:
   - Dependencies are merged
   - Hosted auth expectations are documented
+  - `crates/opensymphony-openhands/` and `crates/opensymphony-control/` exist in the working branch
 ---
 
 # OSYM-601: Add remote agent-server mode and auth hardening

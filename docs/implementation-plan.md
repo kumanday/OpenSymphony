@@ -148,6 +148,7 @@ A task is ready when:
 - its dependencies are merged or available in the working branch
 - the docs referenced in `project_context` exist and are current
 - target repository paths are identified
+- target repository paths that the task must edit already exist in the working branch when the task requires code or test changes
 - required test fixtures are available
 - required secrets or local services for live tests are documented
 
