@@ -122,6 +122,12 @@ pub enum SchedulerError {
     NotClaimed(String),
     #[error("issue `{0}` is not running")]
     NotRunning(String),
+    #[error("issue `{issue_id}` retry is not due until {due_at} (attempted start at {started_at})")]
+    RetryNotDue {
+        issue_id: String,
+        due_at: DateTime<Utc>,
+        started_at: DateTime<Utc>,
+    },
 }
 
 /// Single-authority orchestrator state model.
@@ -188,7 +194,7 @@ impl SchedulerState {
             .collect::<Vec<_>>();
         eligible.sort_by(issue_sort_key);
 
-        let current_claimed = self.claimed.len();
+        let current_claimed = self.claimed_capacity_count();
         let claimed_by_state = self.claimed_counts_by_state(issues);
         let mut reserved_global = 0usize;
         let mut reserved_by_state: BTreeMap<String, usize> = BTreeMap::new();
@@ -237,6 +243,15 @@ impl SchedulerState {
         }
         if !self.claimed.contains(&issue.id) {
             return Err(SchedulerError::NotClaimed(issue.id));
+        }
+        if let Some(retry) = self.retry_attempts.get(&issue.id) {
+            if started_at < retry.due_at {
+                return Err(SchedulerError::RetryNotDue {
+                    issue_id: issue.id.clone(),
+                    due_at: retry.due_at,
+                    started_at,
+                });
+            }
         }
 
         self.completed.remove(&issue.id);
@@ -613,11 +628,21 @@ impl SchedulerState {
             *counts.entry(running.issue.normalized_state()).or_default() += 1;
         }
         for issue in issues {
-            if self.claimed.contains(&issue.id) && !self.running.contains_key(&issue.id) {
+            if self.claimed.contains(&issue.id)
+                && !self.running.contains_key(&issue.id)
+                && !self.retry_attempts.contains_key(&issue.id)
+            {
                 *counts.entry(issue.normalized_state()).or_default() += 1;
             }
         }
         counts
+    }
+
+    fn claimed_capacity_count(&self) -> usize {
+        self.claimed
+            .iter()
+            .filter(|issue_id| !self.retry_attempts.contains_key(*issue_id))
+            .count()
     }
 
     fn enqueue_retry(
@@ -846,6 +871,45 @@ mod tests {
     }
 
     #[test]
+    fn retry_queued_issues_do_not_consume_dispatch_capacity_or_state_slots() {
+        let config = SchedulerConfig {
+            max_concurrent_agents: 1,
+            max_concurrent_agents_by_state: BTreeMap::from([("in progress".into(), 1usize)]),
+            ..SchedulerConfig::default()
+        };
+        let mut scheduler = SchedulerState::new(config);
+        claim_and_start_run(
+            &mut scheduler,
+            issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1)),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            timestamp(10),
+        );
+        scheduler
+            .finish_run("1", WorkerOutcome::succeeded(), timestamp(20))
+            .unwrap();
+
+        let claimed = scheduler.claim_candidate_batch(&[issue(
+            "2",
+            "OSYM-2",
+            "In Progress",
+            Some(1),
+            timestamp(30),
+        )]);
+
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, "2");
+        assert_eq!(
+            scheduler.orchestration_state("1"),
+            OrchestrationState::RetryQueued
+        );
+        assert_eq!(
+            scheduler.orchestration_state("2"),
+            OrchestrationState::Claimed
+        );
+    }
+
+    #[test]
     fn failure_backoff_is_exponential_and_capped() {
         let config = SchedulerConfig {
             max_retry_backoff_ms: 15_000,
@@ -868,6 +932,48 @@ mod tests {
         let retry = transition.retry.unwrap();
         assert_eq!(retry.attempt, 3);
         assert_eq!(retry.due_at, millis(20_000 + 15_000));
+    }
+
+    #[test]
+    fn start_run_rejects_retry_attempts_before_due_time() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+        let issue = issue("1", "OSYM-1", "In Progress", Some(1), millis(0));
+        claim_and_start_run(
+            &mut scheduler,
+            issue.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            millis(0),
+        );
+
+        let retry = scheduler
+            .finish_run("1", WorkerOutcome::succeeded(), millis(1_000))
+            .unwrap()
+            .retry
+            .unwrap();
+
+        assert!(matches!(
+            scheduler.start_run(
+                issue.clone(),
+                PathBuf::from("/tmp/OSYM-1"),
+                Some(retry.attempt),
+                retry.due_at - Duration::milliseconds(1),
+            ),
+            Err(SchedulerError::RetryNotDue { issue_id, due_at, .. })
+                if issue_id == "1" && due_at == retry.due_at
+        ));
+
+        scheduler
+            .start_run(
+                issue,
+                PathBuf::from("/tmp/OSYM-1"),
+                Some(retry.attempt),
+                retry.due_at,
+            )
+            .unwrap();
+
+        assert_eq!(scheduler.running.len(), 1);
+        assert!(scheduler.retry_attempts().is_empty());
     }
 
     #[test]

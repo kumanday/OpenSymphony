@@ -507,7 +507,7 @@ impl OpenHandsAgentProfile {
     ) -> Result<Self, WorkflowError> {
         Ok(Self {
             kind: raw.kind.unwrap_or_else(|| DEFAULT_AGENT_KIND.to_string()),
-            llm: OpenHandsLlmConfig::from_raw(raw.llm.unwrap_or_default(), env),
+            llm: OpenHandsLlmConfig::from_raw(raw.llm.unwrap_or_default(), env)?,
             log_completions: raw.log_completions.unwrap_or(false),
         })
     }
@@ -521,15 +521,16 @@ pub struct OpenHandsLlmConfig {
 }
 
 impl OpenHandsLlmConfig {
-    fn from_raw(raw: RawOpenHandsLlmConfig, env: &impl EnvProvider) -> Self {
-        Self {
-            model: raw
-                .model
-                .as_deref()
-                .and_then(|value| resolve_env_token(value, env)),
+    fn from_raw(raw: RawOpenHandsLlmConfig, env: &impl EnvProvider) -> Result<Self, WorkflowError> {
+        Ok(Self {
+            model: resolve_optional_explicit_config_value(
+                raw.model.as_deref(),
+                env,
+                "openhands.conversation.agent.llm.model",
+            )?,
             api_key_env: raw.api_key_env,
             base_url_env: raw.base_url_env,
-        }
+        })
     }
 }
 
@@ -861,12 +862,6 @@ fn normalize_command(
     Ok(command)
 }
 
-fn resolve_env_token(raw: &str, env: &impl EnvProvider) -> Option<String> {
-    parse_env_token(raw)
-        .map(|name| env.get_var(name))
-        .unwrap_or_else(|| Some(raw.to_string()))
-}
-
 fn resolve_explicit_config_value(
     raw: &str,
     env: &impl EnvProvider,
@@ -881,6 +876,15 @@ fn resolve_explicit_config_value(
         });
     }
     Ok(raw.to_string())
+}
+
+fn resolve_optional_explicit_config_value(
+    raw: Option<&str>,
+    env: &impl EnvProvider,
+    field: &'static str,
+) -> Result<Option<String>, WorkflowError> {
+    raw.map(|value| resolve_explicit_config_value(value, env, field))
+        .transpose()
 }
 
 fn parse_env_token(raw: &str) -> Option<&str> {
@@ -1205,6 +1209,34 @@ Hello
                 .model
                 .as_deref(),
             Some("gpt-5.4")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_openhands_model_env_reference() {
+        let mut env = env();
+        env.remove("OPENHANDS_MODEL");
+
+        let error = Workflow::load_from_str_with_env(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: opensymphony
+  api_key: $LINEAR_KEY
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: ${OPENHANDS_MODEL}
+---
+Hello
+"#,
+            &env,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "openhands.conversation.agent.llm.model")
         );
     }
 
