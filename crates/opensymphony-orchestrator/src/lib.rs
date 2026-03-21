@@ -86,6 +86,13 @@ pub struct RunningIssue {
     pub run: RunAttempt,
 }
 
+/// Claim-only reservation metadata retained until a run actually starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ClaimedReservation {
+    normalized_state: String,
+    claimed_reconcile_generation: u64,
+}
+
 /// Why an issue was released out of the claimed/running set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReleaseReason {
@@ -136,6 +143,18 @@ pub enum SchedulerError {
         expected_attempt: u32,
         actual_attempt: Option<u32>,
     },
+    #[error(
+        "issue `{issue_id}` cannot start because max_concurrent_agents={limit} is fully reserved"
+    )]
+    GlobalCapacityReached { issue_id: String, limit: usize },
+    #[error(
+        "issue `{issue_id}` cannot start in state `{state}` because the state limit {limit} is fully reserved"
+    )]
+    StateCapacityReached {
+        issue_id: String,
+        state: String,
+        limit: usize,
+    },
 }
 
 /// Single-authority orchestrator state model.
@@ -144,10 +163,12 @@ pub struct SchedulerState {
     config: SchedulerConfig,
     running: BTreeMap<String, RunningIssue>,
     claimed: BTreeSet<String>,
+    claimed_reservations: BTreeMap<String, ClaimedReservation>,
     retry_attempts: BTreeMap<String, RetryEntry>,
     completed: BTreeSet<String>,
     runtime_totals: RuntimeTotals,
     rate_limits: Option<RateLimitSnapshot>,
+    reconcile_generation: u64,
 }
 
 impl SchedulerState {
@@ -156,10 +177,12 @@ impl SchedulerState {
             config: config.normalized(),
             running: BTreeMap::new(),
             claimed: BTreeSet::new(),
+            claimed_reservations: BTreeMap::new(),
             retry_attempts: BTreeMap::new(),
             completed: BTreeSet::new(),
             runtime_totals: RuntimeTotals::default(),
             rate_limits: None,
+            reconcile_generation: 0,
         }
     }
 
@@ -203,7 +226,7 @@ impl SchedulerState {
         eligible.sort_by(issue_sort_key);
 
         let current_claimed = self.claimed_capacity_count();
-        let claimed_by_state = self.claimed_counts_by_state(issues);
+        let claimed_by_state = self.claimed_counts_by_state();
         let mut reserved_global = 0usize;
         let mut reserved_by_state: BTreeMap<String, usize> = BTreeMap::new();
 
@@ -229,7 +252,7 @@ impl SchedulerState {
                 continue;
             }
 
-            self.claimed.insert(issue.id.clone());
+            self.reserve_claim(&issue.id, &normalized_state);
             reserved_global += 1;
             *reserved_by_state.entry(normalized_state).or_default() += 1;
             claimed_batch.push(issue);
@@ -268,8 +291,27 @@ impl SchedulerState {
                 });
             }
         }
+        let normalized_state = issue.normalized_state();
+        let reserved_global = self.reserved_capacity_excluding(&issue.id);
+        if reserved_global >= self.config.max_concurrent_agents {
+            return Err(SchedulerError::GlobalCapacityReached {
+                issue_id: issue.id.clone(),
+                limit: self.config.max_concurrent_agents,
+            });
+        }
+        let per_state_limit = self.config.per_state_limit(&issue);
+        let reserved_in_state =
+            self.reserved_state_capacity_excluding(&issue.id, &normalized_state);
+        if reserved_in_state >= per_state_limit {
+            return Err(SchedulerError::StateCapacityReached {
+                issue_id: issue.id.clone(),
+                state: normalized_state,
+                limit: per_state_limit,
+            });
+        }
 
         self.completed.remove(&issue.id);
+        self.claimed_reservations.remove(&issue.id);
         self.retry_attempts.remove(&issue.id);
         self.running.insert(
             issue.id.clone(),
@@ -291,6 +333,7 @@ impl SchedulerState {
     /// Restore a running entry during daemon restart recovery.
     pub fn recover_running(&mut self, running_issue: RunningIssue) {
         self.completed.remove(&running_issue.issue.id);
+        self.claimed_reservations.remove(&running_issue.issue.id);
         self.claimed.insert(running_issue.issue.id.clone());
         self.running
             .insert(running_issue.issue.id.clone(), running_issue);
@@ -299,6 +342,7 @@ impl SchedulerState {
     /// Restore a retry entry during daemon restart recovery.
     pub fn recover_retry(&mut self, retry: RetryEntry) {
         self.completed.remove(&retry.issue_id);
+        self.claimed_reservations.remove(&retry.issue_id);
         self.claimed.insert(retry.issue_id.clone());
         self.retry_attempts.insert(retry.issue_id.clone(), retry);
     }
@@ -382,6 +426,7 @@ impl SchedulerState {
     /// Release retry state when the retry target is no longer eligible.
     pub fn release(&mut self, issue_id: &str) {
         self.claimed.remove(issue_id);
+        self.claimed_reservations.remove(issue_id);
         self.retry_attempts.remove(issue_id);
         self.running.remove(issue_id);
         self.completed.insert(issue_id.to_string());
@@ -510,12 +555,16 @@ impl SchedulerState {
                     if issue
                         .is_active(&self.config.active_states, &self.config.terminal_states) =>
                 {
-                    self.release(&issue_id);
-                    outcomes.push(ReconciliationOutcome {
-                        issue_id,
-                        reason: ReleaseReason::CanceledByReconciliation,
-                        cleanup_workspace: false,
-                    });
+                    if self.claimed_reservation_is_stale(&issue_id) {
+                        self.release(&issue_id);
+                        outcomes.push(ReconciliationOutcome {
+                            issue_id,
+                            reason: ReleaseReason::CanceledByReconciliation,
+                            cleanup_workspace: false,
+                        });
+                    } else if let Some(reservation) = self.claimed_reservations.get_mut(&issue_id) {
+                        reservation.normalized_state = issue.normalized_state();
+                    }
                 }
                 Some(_) => {
                     self.release(&issue_id);
@@ -536,6 +585,7 @@ impl SchedulerState {
             }
         }
 
+        self.reconcile_generation = self.reconcile_generation.saturating_add(1);
         outcomes
     }
 
@@ -645,27 +695,73 @@ impl SchedulerState {
         true
     }
 
-    fn claimed_counts_by_state(&self, issues: &[Issue]) -> BTreeMap<String, usize> {
+    fn claimed_counts_by_state(&self) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
         for running in self.running.values() {
             *counts.entry(running.issue.normalized_state()).or_default() += 1;
         }
-        for issue in issues {
-            if self.claimed.contains(&issue.id)
-                && !self.running.contains_key(&issue.id)
-                && !self.retry_attempts.contains_key(&issue.id)
-            {
-                *counts.entry(issue.normalized_state()).or_default() += 1;
-            }
+        for reservation in self.claimed_reservations.values() {
+            *counts
+                .entry(reservation.normalized_state.clone())
+                .or_default() += 1;
         }
         counts
     }
 
     fn claimed_capacity_count(&self) -> usize {
-        self.claimed
+        self.running.len() + self.claimed_reservations.len()
+    }
+
+    fn reserved_capacity_excluding(&self, issue_id: &str) -> usize {
+        self.claimed_capacity_count().saturating_sub(usize::from(
+            self.claimed_reservations.contains_key(issue_id),
+        ))
+    }
+
+    fn reserved_state_capacity_excluding(&self, issue_id: &str, normalized_state: &str) -> usize {
+        let running_in_state = self
+            .running
+            .values()
+            .filter(|running| running.issue.normalized_state() == normalized_state)
+            .count();
+        let claimed_only_in_state = self
+            .claimed_reservations
             .iter()
-            .filter(|issue_id| !self.retry_attempts.contains_key(*issue_id))
-            .count()
+            .filter(|(claimed_issue_id, reservation)| {
+                claimed_issue_id.as_str() != issue_id
+                    && reservation.normalized_state == normalized_state
+            })
+            .count();
+        running_in_state + claimed_only_in_state
+    }
+
+    fn reserve_claim(&mut self, issue_id: &str, normalized_state: &str) {
+        self.claimed.insert(issue_id.to_string());
+        self.claimed_reservations.insert(
+            issue_id.to_string(),
+            ClaimedReservation {
+                normalized_state: normalized_state.to_string(),
+                claimed_reconcile_generation: self.reconcile_generation,
+            },
+        );
+    }
+
+    fn claimed_reservation_is_stale(&self, issue_id: &str) -> bool {
+        let Some(reservation) = self.claimed_reservations.get(issue_id) else {
+            return false;
+        };
+        let poll_interval_ms = self.config.poll_interval_ms.max(1);
+        let grace_timeout_ms = self
+            .config
+            .stall_timeout_ms
+            .unwrap_or(self.config.poll_interval_ms)
+            .max(poll_interval_ms);
+        let grace_generations =
+            (grace_timeout_ms.saturating_add(poll_interval_ms - 1)) / poll_interval_ms;
+
+        self.reconcile_generation
+            .saturating_sub(reservation.claimed_reconcile_generation)
+            >= grace_generations
     }
 
     fn enqueue_retry(
@@ -682,6 +778,7 @@ impl SchedulerState {
             error,
         };
         self.completed.remove(&running.issue.id);
+        self.claimed_reservations.remove(&running.issue.id);
         self.retry_attempts
             .insert(running.issue.id.clone(), retry.clone());
         self.claimed.insert(running.issue.id.clone());
@@ -831,6 +928,8 @@ mod tests {
     fn reconciliation_releases_active_claimed_only_reservations_without_backing_runs() {
         let config = SchedulerConfig {
             max_concurrent_agents: 1,
+            poll_interval_ms: 10,
+            stall_timeout_ms: Some(10),
             ..SchedulerConfig::default()
         };
         let mut scheduler = SchedulerState::new(config);
@@ -850,6 +949,20 @@ mod tests {
             "In Progress",
             Some(1),
             timestamp(2),
+        )]);
+
+        assert!(outcomes.is_empty());
+        assert_eq!(
+            scheduler.orchestration_state("1"),
+            OrchestrationState::Claimed
+        );
+
+        let outcomes = scheduler.reconcile_tracker_states(&[issue(
+            "1",
+            "OSYM-1",
+            "In Progress",
+            Some(1),
+            timestamp(3),
         )]);
 
         assert_eq!(
@@ -1095,6 +1208,89 @@ mod tests {
                 && expected_attempt == retry.attempt
                 && actual_attempt == Some(retry.attempt.saturating_sub(1))
         ));
+    }
+
+    #[test]
+    fn start_run_rejects_retry_when_global_capacity_is_already_running() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig {
+            max_concurrent_agents: 1,
+            ..SchedulerConfig::default()
+        });
+        let retry_issue = issue("1", "OSYM-1", "In Progress", Some(1), millis(0));
+        claim_and_start_run(
+            &mut scheduler,
+            retry_issue.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            millis(0),
+        );
+
+        let retry = scheduler
+            .finish_run("1", WorkerOutcome::succeeded(), millis(1_000))
+            .unwrap()
+            .retry
+            .unwrap();
+
+        claim_and_start_run(
+            &mut scheduler,
+            issue("2", "OSYM-2", "In Progress", Some(1), millis(2_000)),
+            PathBuf::from("/tmp/OSYM-2"),
+            None,
+            millis(2_000),
+        );
+
+        assert!(
+            scheduler
+                .start_run(
+                    retry_issue,
+                    PathBuf::from("/tmp/OSYM-1"),
+                    Some(retry.attempt),
+                    retry.due_at,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn start_run_rejects_retry_when_state_capacity_is_already_running() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig {
+            max_concurrent_agents: 2,
+            max_concurrent_agents_by_state: BTreeMap::from([("in progress".into(), 1)]),
+            ..SchedulerConfig::default()
+        });
+        let retry_issue = issue("1", "OSYM-1", "In Progress", Some(1), millis(0));
+        claim_and_start_run(
+            &mut scheduler,
+            retry_issue.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            millis(0),
+        );
+
+        let retry = scheduler
+            .finish_run("1", WorkerOutcome::succeeded(), millis(1_000))
+            .unwrap()
+            .retry
+            .unwrap();
+
+        claim_and_start_run(
+            &mut scheduler,
+            issue("2", "OSYM-2", "In Progress", Some(1), millis(2_000)),
+            PathBuf::from("/tmp/OSYM-2"),
+            None,
+            millis(2_000),
+        );
+
+        assert!(
+            scheduler
+                .start_run(
+                    retry_issue,
+                    PathBuf::from("/tmp/OSYM-1"),
+                    Some(retry.attempt),
+                    retry.due_at,
+                )
+                .is_err()
+        );
     }
 
     #[test]

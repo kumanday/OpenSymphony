@@ -953,6 +953,7 @@ struct RawWorkflowConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawTrackerConfig {
     kind: Option<String>,
     endpoint: Option<String>,
@@ -963,16 +964,19 @@ struct RawTrackerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawPollingConfig {
     interval_ms: Option<IntLike>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawWorkspaceConfig {
     root: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawHooksConfig {
     after_create: Option<String>,
     before_run: Option<String>,
@@ -982,6 +986,7 @@ struct RawHooksConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawAgentConfig {
     max_concurrent_agents: Option<IntLike>,
     max_turns: Option<IntLike>,
@@ -1259,6 +1264,48 @@ Hello
         .unwrap_err();
 
         assert!(matches!(error, WorkflowError::WorkflowParseError(_)));
+    }
+
+    #[test]
+    fn rejects_unknown_nested_workflow_keys() {
+        for workflow in [
+            r#"---
+tracker:
+  kind: linear
+  project_slug: opensymphony
+  api_key: $LINEAR_KEY
+  project_sulg: typo
+---
+Hello
+"#,
+            r#"---
+polling:
+  intervl_ms: 1000
+---
+Hello
+"#,
+            r#"---
+workspace:
+  rooot: ~/wrong
+---
+Hello
+"#,
+            r#"---
+hooks:
+  before_rn: echo nope
+---
+Hello
+"#,
+            r#"---
+agent:
+  max_concurent_agents: 2
+---
+Hello
+"#,
+        ] {
+            let error = Workflow::load_from_str_with_env(workflow, &env()).unwrap_err();
+            assert!(matches!(error, WorkflowError::WorkflowParseError(_)));
+        }
     }
 
     #[test]
