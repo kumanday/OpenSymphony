@@ -83,7 +83,7 @@ Required:
 - workflow `tracker.active_states`
 - workflow `tracker.terminal_states`
 
-Workflow loading should fail fast when a Linear-backed workflow omits any required tracker input instead of deferring the error to later candidate-fetch logic.
+Workflow loading should fail fast when a Linear-backed workflow omits any required tracker input or references an unset credential env var instead of deferring the error to later candidate-fetch logic.
 
 Optional:
 

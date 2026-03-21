@@ -199,7 +199,12 @@ impl TrackerConfig {
         let api_key = raw
             .api_key
             .as_deref()
-            .and_then(|value| resolve_env_token(value, env));
+            .map(|value| resolve_explicit_config_value(value, env, "tracker.api_key"))
+            .transpose()?
+            .and_then(|value| {
+                let trimmed = value.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            });
         let project_slug = raw.project_slug.and_then(|slug| {
             let trimmed = slug.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -208,6 +213,12 @@ impl TrackerConfig {
         if matches!(kind, Some(TrackerKind::Linear)) && project_slug.is_none() {
             return Err(WorkflowError::invalid_config(
                 "tracker.project_slug",
+                "must be set for the Linear tracker",
+            ));
+        }
+        if matches!(kind, Some(TrackerKind::Linear)) && api_key.is_none() {
+            return Err(WorkflowError::invalid_config(
+                "tracker.api_key",
                 "must be set for the Linear tracker",
             ));
         }
@@ -847,6 +858,22 @@ fn resolve_env_token(raw: &str, env: &impl EnvProvider) -> Option<String> {
         .unwrap_or_else(|| Some(raw.to_string()))
 }
 
+fn resolve_explicit_config_value(
+    raw: &str,
+    env: &impl EnvProvider,
+    field: &'static str,
+) -> Result<String, WorkflowError> {
+    if let Some(name) = parse_env_token(raw) {
+        return env.get_var(name).ok_or_else(|| {
+            WorkflowError::invalid_config(
+                field,
+                format!("environment variable `{name}` is required"),
+            )
+        });
+    }
+    Ok(raw.to_string())
+}
+
 fn parse_env_token(raw: &str) -> Option<&str> {
     if let Some(stripped) = raw
         .strip_prefix("${")
@@ -863,9 +890,10 @@ fn resolve_path_like(
     env: &impl EnvProvider,
     field: &'static str,
 ) -> Result<PathBuf, WorkflowError> {
-    let raw = raw
-        .and_then(|value| resolve_env_token(value, env))
-        .unwrap_or_else(|| default.to_string());
+    let raw = match raw {
+        Some(value) => resolve_explicit_config_value(value, env, field)?,
+        None => default.to_string(),
+    };
     let expanded = if raw == "~" {
         env.get_var("HOME")
             .ok_or_else(|| WorkflowError::invalid_config(field, "HOME is required to expand `~`"))?
@@ -1072,6 +1100,7 @@ mod tests {
 tracker:
   kind: linear
   project_slug: opensymphony
+  api_key: $LINEAR_KEY
 ---
 
 # Assignment
@@ -1221,12 +1250,74 @@ Hello
     }
 
     #[test]
+    fn rejects_linear_tracker_without_api_key() {
+        let error = Workflow::load_from_str_with_env(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: opensymphony
+---
+Hello
+"#,
+            &env(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "tracker.api_key")
+        );
+    }
+
+    #[test]
+    fn rejects_linear_tracker_with_unresolved_api_key_env() {
+        let error = Workflow::load_from_str_with_env(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: opensymphony
+  api_key: $MISSING_LINEAR_KEY
+---
+Hello
+"#,
+            &env(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "tracker.api_key")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_env_backed_workspace_root() {
+        let error = Workflow::load_from_str_with_env(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: opensymphony
+  api_key: $LINEAR_KEY
+workspace:
+  root: $WORKSPACE_ROOT
+---
+Hello
+"#,
+            &env(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "workspace.root")
+        );
+    }
+
+    #[test]
     fn rejects_unknown_openhands_keys() {
         let error = Workflow::load_from_str_with_env(
             r#"---
 tracker:
   kind: linear
   project_slug: opensymphony
+  api_key: $LINEAR_KEY
 openhands:
   websocket:
     reconnect_inital_ms: 1000
