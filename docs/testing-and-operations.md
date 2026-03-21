@@ -274,7 +274,8 @@ for those files so the repository boundary exists before the local supervisor
 lands. Those placeholders must fail closed and must not start a server until
 the exact package version, uv dependency pin, and resolved lockfile are
 committed. Once they are replaced, the quick run script should launch the
-pinned server through the local `uv` environment and its `agent-server` extra.
+pinned server through the local `uv` environment and its `agent-server` extra,
+explicitly passing `--host 127.0.0.1` and a configured `--port`.
 
 Do not rely on a random globally installed `openhands` binary.
 
