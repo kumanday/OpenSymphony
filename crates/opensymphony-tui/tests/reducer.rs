@@ -55,6 +55,58 @@ fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
     }
 }
 
+fn fixture_with_identifiers(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
+    let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+        + chrono::Duration::seconds(sequence as i64);
+    SnapshotEnvelope {
+        sequence,
+        published_at: now,
+        snapshot: DaemonSnapshot {
+            generated_at: now,
+            daemon: DaemonStatus {
+                state: DaemonState::Ready,
+                last_poll_at: now,
+                workspace_root: "/tmp/opensymphony".to_owned(),
+                status_line: "ready".to_owned(),
+            },
+            agent_server: AgentServerStatus {
+                reachable: true,
+                base_url: "http://127.0.0.1:3000".to_owned(),
+                conversation_count: identifiers.len() as u32,
+                status_line: "healthy".to_owned(),
+            },
+            metrics: MetricsSnapshot {
+                running_issues: 1,
+                retry_queue_depth: 0,
+                total_tokens: 1024,
+                total_cost_micros: 50_000,
+            },
+            issues: identifiers
+                .iter()
+                .enumerate()
+                .map(|(index, identifier)| IssueSnapshot {
+                    identifier: (*identifier).to_owned(),
+                    title: format!("Issue {index}"),
+                    tracker_state: "In Progress".to_owned(),
+                    runtime_state: IssueRuntimeState::Running,
+                    last_outcome: WorkerOutcome::Running,
+                    last_event_at: now,
+                    conversation_id_suffix: format!("conv-{index}"),
+                    workspace_path_suffix: format!("workspace-{index}"),
+                    retry_count: index as u32,
+                    blocked: false,
+                })
+                .collect(),
+            recent_events: vec![RecentEvent {
+                happened_at: now,
+                issue_identifier: identifiers.first().map(|value| (*value).to_owned()),
+                kind: RecentEventKind::SnapshotPublished,
+                summary: "snapshot updated".to_owned(),
+            }],
+        },
+    }
+}
+
 #[test]
 fn applies_snapshot_and_renders_selected_issue() {
     let mut state = TuiState::default();
@@ -96,4 +148,48 @@ fn cycles_focus_and_timeline_mode() {
     assert!(rendered.contains("focus=timeline"));
     assert!(rendered.contains("bottom=metrics"));
     assert!(rendered.contains("[x] METRICS"));
+}
+
+#[test]
+fn preserves_selected_issue_when_snapshot_order_changes() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(
+        fixture_with_identifiers(1, &["COE-255", "COE-256", "COE-257"]),
+    )));
+    state.reduce(TuiAction::MoveSelectionDown);
+
+    state.reduce(TuiAction::SnapshotReceived(Box::new(
+        fixture_with_identifiers(2, &["COE-257", "COE-256", "COE-255"]),
+    )));
+
+    assert_eq!(state.selected_issue, 1);
+    let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("COE-256 Issue 1"));
+}
+
+#[test]
+fn ignores_regressing_snapshot_sequences() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(
+        fixture_with_identifiers(5, &["COE-255", "COE-256"]),
+    )));
+    state.reduce(TuiAction::MoveSelectionDown);
+    state.reduce(TuiAction::ConnectionLost("stream closed".to_owned()));
+
+    state.reduce(TuiAction::SnapshotReceived(Box::new(
+        fixture_with_identifiers(4, &["COE-256", "COE-255"]),
+    )));
+
+    assert_eq!(
+        state.connection,
+        ConnectionState::Reconnecting("stream closed".to_owned())
+    );
+    assert_eq!(state.selected_issue, 1);
+    assert_eq!(
+        state
+            .latest_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.sequence),
+        Some(5)
+    );
 }
