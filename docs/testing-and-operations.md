@@ -293,6 +293,19 @@ Include:
 - quick run script
 - note about the exact WebSocket assumptions pinned by this repo
 
+During the M1 bootstrap task, the directory may contain explicit placeholders
+for those files so the repository boundary exists before the local supervisor
+lands. Those placeholders must fail closed and must not start a server until
+the exact package version, uv dependency pin, and resolved lockfile are
+committed. Once they are replaced, the quick run script should launch the
+pinned server through the local `uv` environment and its `agent-server` extra,
+explicitly setting `RUNTIME=process`, passing `--host 127.0.0.1`, and using a
+configured `--port`.
+The wrapper should reject extra agent-server CLI flags so local smoke runs stay
+aligned with the daemon-managed single-server topology; `OPENHANDS_SERVER_PORT`
+is the only supported runtime override, and the sandbox selection stays fixed to
+host-process mode.
+
 Do not rely on a random globally installed `openhands` binary.
 
 ## 11. CI strategy
@@ -304,6 +317,10 @@ Recommended CI stages:
 3. contract tests with fakes
 4. selected integration tests
 5. optional nightly live tests on a controlled runner
+
+The bootstrap repository baseline is smaller: every PR should at least run
+`cargo fmt --check`, `cargo clippy --workspace --all-targets`, and
+`cargo test --workspace`.
 
 ## 12. Failure triage guidelines
 

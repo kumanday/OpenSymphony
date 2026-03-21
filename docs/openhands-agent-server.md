@@ -46,7 +46,7 @@ opensymphony daemon
   ├─ openhands WS client
   ├─ control-plane API
   └─ local server supervisor
-       └─ python -m openhands.agent_server --host 127.0.0.1 --port 8000
+       └─ RUNTIME=process python -m openhands.agent_server --host 127.0.0.1 --port 8000
 ```
 
 Key properties:
@@ -55,6 +55,10 @@ Key properties:
 - many issue-specific workspaces via conversation `working_dir`
 - no per-issue Docker in the MVP
 - host-local execution assumptions documented explicitly
+- the local supervised launch path forces OpenHands process-sandbox mode via
+  `RUNTIME=process`
+- the repo-local quick-run wrapper rejects user-supplied agent-server CLI flags
+  so smoke runs cannot diverge from the daemon-managed single-server topology
 
 ## 4. Server lifecycle model
 
@@ -71,6 +75,13 @@ Use for:
 - single developer setup
 - local experimentation
 - CI smoke environments with trusted repos
+
+Repository ownership note:
+
+- `tools/openhands-server/` owns the local packaging and version pin
+- M1 bootstrap creates fail-closed placeholders only
+- OSYM-201 must replace those placeholders with the validated package version
+  and lockfile before supervised mode is treated as implemented
 
 ### External server mode
 
@@ -89,7 +100,8 @@ Local MVP work starts with supervised mode, but the trait boundary must support 
 In supervised mode:
 
 1. Resolve the configured command and environment.
-2. Start the subprocess bound to `127.0.0.1`.
+2. Start the subprocess bound to `127.0.0.1` with `RUNTIME=process` so the
+   local MVP stays on the documented host-process execution path.
 3. Wait for readiness by probing a known HTTP endpoint.
 4. Record server metadata in memory and logs.
 5. Reuse the server for all issue runs.

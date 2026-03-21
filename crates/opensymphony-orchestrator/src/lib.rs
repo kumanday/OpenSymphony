@@ -789,8 +789,15 @@ impl SchedulerState {
             >= grace_generations
     }
 
-    fn dispatch_state_is_eligible(&self, normalized_state: &str, blocked_by: &[BlockerRef]) -> bool {
-        self.config.active_states.iter().any(|state| state == normalized_state)
+    fn dispatch_state_is_eligible(
+        &self,
+        normalized_state: &str,
+        blocked_by: &[BlockerRef],
+    ) -> bool {
+        self.config
+            .active_states
+            .iter()
+            .any(|state| state == normalized_state)
             && !self
                 .config
                 .terminal_states
@@ -812,10 +819,9 @@ impl SchedulerState {
             return Err(issue_state);
         }
         if let Some(reservation) = reservation {
-            if !self.dispatch_state_is_eligible(
-                &reservation.normalized_state,
-                &reservation.blocked_by,
-            ) {
+            if !self
+                .dispatch_state_is_eligible(&reservation.normalized_state, &reservation.blocked_by)
+            {
                 return Err(reservation.normalized_state.clone());
             }
         }
