@@ -125,6 +125,12 @@ Suggested gates:
 - pane layout persistence
 - event log rendering
 
+Current implemented checks:
+
+- snapshot serialization in `opensymphony-domain`
+- control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
+- TUI reducer and render smoke tests in `opensymphony-tui/tests/reducer.rs`
+
 ## 4. Fake OpenHands server requirements
 
 The fake server in `opensymphony-testkit` should emulate the minimum runtime contract:
@@ -181,11 +187,25 @@ Recommended CLI commands for the repo:
 - `opensymphony doctor`
 - `opensymphony linear-mcp`
 
+Current workspace commands:
+
+- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
+- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
+
 Possible helper commands later:
 
 - `opensymphony debug openhands`
 - `opensymphony inspect workspace <issue-id>`
 - `opensymphony inspect conversation <issue-id>`
+
+Current validation commands for the implemented observability slice:
+
+- `cargo test`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:4010 --sample-interval-ms 250`
+- `curl http://127.0.0.1:4010/api/v1/snapshot`
+- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
+- `curl http://127.0.0.1:4010/healthz`
 
 ## 7. Doctor checks
 
