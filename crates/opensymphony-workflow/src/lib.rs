@@ -936,6 +936,7 @@ fn default_terminal_states() -> Vec<String> {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawWorkflowConfig {
     #[serde(default)]
     tracker: Option<RawTrackerConfig>,
@@ -1238,6 +1239,26 @@ Hello
         assert!(
             matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "openhands.conversation.agent.llm.model")
         );
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_workflow_sections() {
+        let error = Workflow::load_from_str_with_env(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: opensymphony
+  api_key: $LINEAR_KEY
+workpace:
+  root: ~/wrong
+---
+Hello
+"#,
+            &env(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, WorkflowError::WorkflowParseError(_)));
     }
 
     #[test]

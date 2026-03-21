@@ -128,6 +128,14 @@ pub enum SchedulerError {
         due_at: DateTime<Utc>,
         started_at: DateTime<Utc>,
     },
+    #[error(
+        "issue `{issue_id}` retry attempt mismatch: expected {expected_attempt}, got {actual_attempt:?}"
+    )]
+    RetryAttemptMismatch {
+        issue_id: String,
+        expected_attempt: u32,
+        actual_attempt: Option<u32>,
+    },
 }
 
 /// Single-authority orchestrator state model.
@@ -250,6 +258,13 @@ impl SchedulerState {
                     issue_id: issue.id.clone(),
                     due_at: retry.due_at,
                     started_at,
+                });
+            }
+            if attempt != Some(retry.attempt) {
+                return Err(SchedulerError::RetryAttemptMismatch {
+                    issue_id: issue.id.clone(),
+                    expected_attempt: retry.attempt,
+                    actual_attempt: attempt,
                 });
             }
         }
@@ -493,7 +508,15 @@ impl SchedulerState {
                 }
                 Some(issue)
                     if issue
-                        .is_active(&self.config.active_states, &self.config.terminal_states) => {}
+                        .is_active(&self.config.active_states, &self.config.terminal_states) =>
+                {
+                    self.release(&issue_id);
+                    outcomes.push(ReconciliationOutcome {
+                        issue_id,
+                        reason: ReleaseReason::CanceledByReconciliation,
+                        cleanup_workspace: false,
+                    });
+                }
                 Some(_) => {
                     self.release(&issue_id);
                     outcomes.push(ReconciliationOutcome {
@@ -805,6 +828,55 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_releases_active_claimed_only_reservations_without_backing_runs() {
+        let config = SchedulerConfig {
+            max_concurrent_agents: 1,
+            ..SchedulerConfig::default()
+        };
+        let mut scheduler = SchedulerState::new(config);
+
+        let first = scheduler.claim_candidate_batch(&[issue(
+            "1",
+            "OSYM-1",
+            "In Progress",
+            Some(1),
+            timestamp(1),
+        )]);
+        assert_eq!(first.len(), 1);
+
+        let outcomes = scheduler.reconcile_tracker_states(&[issue(
+            "1",
+            "OSYM-1",
+            "In Progress",
+            Some(1),
+            timestamp(2),
+        )]);
+
+        assert_eq!(
+            outcomes,
+            vec![ReconciliationOutcome {
+                issue_id: "1".into(),
+                reason: ReleaseReason::CanceledByReconciliation,
+                cleanup_workspace: false,
+            }]
+        );
+        assert_eq!(
+            scheduler.orchestration_state("1"),
+            OrchestrationState::Released
+        );
+
+        let second = scheduler.claim_candidate_batch(&[issue(
+            "2",
+            "OSYM-2",
+            "In Progress",
+            Some(1),
+            timestamp(3),
+        )]);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, "2");
+    }
+
+    #[test]
     fn start_run_requires_a_preclaimed_issue() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
 
@@ -974,6 +1046,55 @@ mod tests {
 
         assert_eq!(scheduler.running.len(), 1);
         assert!(scheduler.retry_attempts().is_empty());
+    }
+
+    #[test]
+    fn start_run_rejects_retry_attempt_mismatch() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+        let issue = issue("1", "OSYM-1", "In Progress", Some(1), millis(0));
+        claim_and_start_run(
+            &mut scheduler,
+            issue.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            millis(0),
+        );
+
+        let retry = scheduler
+            .finish_run("1", WorkerOutcome::succeeded(), millis(1_000))
+            .unwrap()
+            .retry
+            .unwrap();
+
+        assert!(matches!(
+            scheduler.start_run(
+                issue.clone(),
+                PathBuf::from("/tmp/OSYM-1"),
+                None,
+                retry.due_at,
+            ),
+            Err(SchedulerError::RetryAttemptMismatch {
+                issue_id,
+                expected_attempt,
+                actual_attempt,
+            }) if issue_id == "1" && expected_attempt == retry.attempt && actual_attempt.is_none()
+        ));
+
+        assert!(matches!(
+            scheduler.start_run(
+                issue,
+                PathBuf::from("/tmp/OSYM-1"),
+                Some(retry.attempt.saturating_sub(1)),
+                retry.due_at,
+            ),
+            Err(SchedulerError::RetryAttemptMismatch {
+                issue_id,
+                expected_attempt,
+                actual_attempt,
+            }) if issue_id == "1"
+                && expected_attempt == retry.attempt
+                && actual_attempt == Some(retry.attempt.saturating_sub(1))
+        ));
     }
 
     #[test]

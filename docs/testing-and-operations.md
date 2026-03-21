@@ -32,8 +32,8 @@ Examples:
 Current M1 unit suite:
 
 - `opensymphony-domain`: issue normalization and snapshot serialization
-- `opensymphony-workflow`: front matter parsing, strict rendering, env/path resolution, required Linear tracker credentials, fail-fast env-backed workspace roots, and OpenHands namespace validation
-- `opensymphony-orchestrator`: candidate sorting, claimed-to-running enforcement, bounded concurrency, retry/backoff, reconciliation, stall detection, and restart recovery
+- `opensymphony-workflow`: front matter parsing, strict rendering, env/path resolution, fail-fast unknown top-level workflow sections, required Linear tracker credentials, fail-fast env-backed workspace roots, and OpenHands namespace validation
+- `opensymphony-orchestrator`: candidate sorting, claimed-to-running enforcement, bounded concurrency, retry/backoff, retry attempt validation, reconciliation including stale claimed-only release, stall detection, and restart recovery
 - `opensymphony-testkit`: downstream compile-time smoke coverage for the public M1 interfaces
 
 ## 2.2 Contract tests
@@ -85,6 +85,7 @@ Suggested gates:
 
 - parse valid `WORKFLOW.md`
 - fail on invalid front matter
+- fail on unknown top-level workflow sections
 - fail on unknown template variables
 - resolve defaults and env vars
 - require `tracker.project_slug` for Linear-backed workflows
@@ -119,9 +120,11 @@ Suggested gates:
 
 - poll candidate sorting
 - claim and release transitions
+- release stale claimed-only reservations that never gain a backing run
 - max concurrency
 - failure retry backoff
 - continuation retry at fixed delay
+- reject retry launches with mismatched attempt numbers
 - stall detection
 - active-state refresh
 - terminal cleanup
