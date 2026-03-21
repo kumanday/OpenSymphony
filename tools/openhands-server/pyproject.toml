@@ -5,8 +5,11 @@ description = "Bootstrap placeholder for the pinned local OpenHands agent-server
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+agent-server = [
+  "openhands-agent-server-placeholder==0+bootstrap.placeholder",
+]
+
 [tool.opensymphony.openhands_server]
-package_name = "TODO"
-package_version = "TODO-openhands-sdk-version"
 module = "openhands.agent_server"
-launcher = "python -m openhands.agent_server"
+launcher = "uv run --directory . --locked --extra agent-server --module openhands.agent_server"
