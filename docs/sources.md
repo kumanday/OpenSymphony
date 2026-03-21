@@ -70,6 +70,7 @@ Use this source only for details that are underspecified or absent in the docs, 
 - dedupe and ordering strategy
 - reconnect backoff pattern
 - current query-param auth fallback
+- current `tool_module_qualnames` and `agent_definitions` forwarding in the start-conversation payload
 
 Pinned implementation source:
 

@@ -208,6 +208,15 @@ Required fields:
 - optional `secrets`
 - optional `plugins`
 - optional `mcp_config`
+- `tool_module_qualnames` for every non-builtin tool sent in `agent.tools`
+
+Pinned `v1.14.0` note:
+
+- the server dynamically imports `tool_module_qualnames` on conversation creation and resume
+- the server registry names are lower-case identifiers such as `terminal`, `file_editor`, `apply_patch`, `task_tracker`, and `browser_tool_set`
+- OpenSymphony may accept class-style aliases such as `TerminalTool` in its own config, but must normalize outbound `agent.tools[*].name` to the server registry names above
+- omitting `tool_module_qualnames` causes non-builtin tools to fail with `ToolDefinition '<name>' is not registered`
+- builtins such as `FinishTool` and `ThinkTool` remain server-local and do not need module-qualname forwarding
 
 Implementation rule:
 

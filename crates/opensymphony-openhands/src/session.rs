@@ -242,8 +242,12 @@ impl IssueSessionRunner {
         workspace: &WorkspaceLayout,
         conversation_id: Option<String>,
     ) -> CreateConversationRequest {
+        let mut agent = self.conversation.agent.clone();
+        for tool in &mut agent.tools {
+            tool.name = tool.registry_name();
+        }
         CreateConversationRequest {
-            agent: self.conversation.agent.clone(),
+            agent,
             workspace: OpenHandsWorkspace {
                 working_dir: workspace.issue_workspace.display().to_string(),
                 kind: None,
@@ -263,6 +267,16 @@ impl IssueSessionRunner {
             hook_config: self.conversation.hook_config.clone(),
             plugins: self.conversation.plugins.clone(),
             secrets: self.conversation.secrets.clone(),
+            tool_module_qualnames: self
+                .conversation
+                .agent
+                .tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.module_qualname()
+                        .map(|module| (tool.registry_name(), module.to_string()))
+                })
+                .collect(),
         }
     }
 }
