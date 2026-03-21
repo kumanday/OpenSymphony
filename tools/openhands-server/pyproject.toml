@@ -1,0 +1,12 @@
+[project]
+name = "opensymphony-openhands-server"
+version = "0.0.0"
+description = "Bootstrap placeholder for the pinned local OpenHands agent-server environment."
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.opensymphony.openhands_server]
+package_name = "TODO"
+package_version = "TODO-openhands-sdk-version"
+module = "openhands.agent_server"
+launcher = "python -m openhands.agent_server"
