@@ -32,7 +32,7 @@ Examples:
 Current M1 unit suite:
 
 - `opensymphony-domain`: issue normalization and snapshot serialization
-- `opensymphony-workflow`: front matter parsing, strict rendering, env/path resolution, required Linear tracker config, and OpenHands namespace validation
+- `opensymphony-workflow`: front matter parsing, strict rendering, env/path resolution, required Linear tracker credentials, fail-fast env-backed workspace roots, and OpenHands namespace validation
 - `opensymphony-orchestrator`: candidate sorting, claimed-to-running enforcement, bounded concurrency, retry/backoff, reconciliation, stall detection, and restart recovery
 - `opensymphony-testkit`: downstream compile-time smoke coverage for the public M1 interfaces
 
@@ -88,6 +88,8 @@ Suggested gates:
 - fail on unknown template variables
 - resolve defaults and env vars
 - require `tracker.project_slug` for Linear-backed workflows
+- require `tracker.api_key` for Linear-backed workflows
+- fail when explicit env-backed path settings reference missing env vars
 - validate `openhands` extension namespace
 
 ## 3.2 Workspace manager
