@@ -112,6 +112,8 @@ This keeps:
 - UI crashes from affecting execution
 - future hosted deployment options open
 
+The control-plane stream must preserve monotonically advancing snapshot sequences for slow or reconnecting consumers so the UI never rolls back to stale state after it has already rendered a newer snapshot.
+
 ## 4. Runtime component model
 
 ## 4.1 Core crates
@@ -154,7 +156,7 @@ Recommended crate boundaries:
   - reconciliation
 - `opensymphony-control`
   - snapshot store
-  - local HTTP and WebSocket control-plane API
+  - local HTTP and SSE control-plane API
 - `opensymphony-cli`
   - daemon startup
   - doctor command

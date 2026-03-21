@@ -40,6 +40,7 @@ Current implemented local contract:
 
 - `GET /api/v1/snapshot`
 - `GET /api/v1/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
+  - lagged consumers are snapped forward to the latest published sequence instead of replaying stale snapshots out of order
 - `GET /healthz` for daemon liveness
 
 ### Explicitly out of scope
@@ -120,6 +121,11 @@ Recommended first layout:
 
 Use pane-based layout so future views can expand without redesign.
 
+Current inline-mode guarantees in the implemented client:
+
+- the bottom events or metrics pane keeps reserved rows in the default 22-line inline layout
+- the narrow stacked layout also reserves rows for selected issue and workspace detail instead of letting the issue list consume the whole frame
+
 ## 6. Interaction model
 
 MVP interaction should remain intentionally small.
@@ -198,7 +204,7 @@ Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
 - subscribe to the SSE stream
-- if the stream closes or fails, mark the connection as reconnecting
+- if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible
 - refetch the current snapshot before resubscribing
 
 ## 11. Dependency strategy
@@ -219,8 +225,10 @@ Automated:
 Current automated coverage:
 
 - reducer selection and mode-switch tests
-- render smoke tests against serialized snapshots, including visible focus markers
+- render smoke tests against serialized snapshots, including visible focus markers and narrow-layout detail preservation
+- mailbox tests for snapshot coalescing and last-good-snapshot retention across disconnects
 - control-plane snapshot plus SSE round-trip tests
+- monotonic SSE lag-recovery tests for slow consumers
 
 Manual:
 
