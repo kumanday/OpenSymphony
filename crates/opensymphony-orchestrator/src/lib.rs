@@ -118,6 +118,8 @@ pub enum SchedulerError {
     AlreadyClaimed(String),
     #[error("issue `{0}` is already running")]
     AlreadyRunning(String),
+    #[error("issue `{0}` is not claimed")]
+    NotClaimed(String),
     #[error("issue `{0}` is not running")]
     NotRunning(String),
 }
@@ -233,9 +235,11 @@ impl SchedulerState {
         if self.running.contains_key(&issue.id) {
             return Err(SchedulerError::AlreadyRunning(issue.id));
         }
+        if !self.claimed.contains(&issue.id) {
+            return Err(SchedulerError::NotClaimed(issue.id));
+        }
 
         self.completed.remove(&issue.id);
-        self.claimed.insert(issue.id.clone());
         self.retry_attempts.remove(&issue.id);
         self.running.insert(
             issue.id.clone(),
@@ -633,6 +637,21 @@ mod tests {
         }
     }
 
+    fn claim_and_start_run(
+        scheduler: &mut SchedulerState,
+        issue: Issue,
+        workspace_path: PathBuf,
+        attempt: Option<u32>,
+        started_at: DateTime<Utc>,
+    ) {
+        let claimed = scheduler.claim_candidate_batch(std::slice::from_ref(&issue));
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, issue.id);
+        scheduler
+            .start_run(issue, workspace_path, attempt, started_at)
+            .unwrap();
+    }
+
     #[test]
     fn candidate_sorting_obeys_priority_age_and_blockers() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
@@ -671,14 +690,13 @@ mod tests {
         let mut scheduler = SchedulerState::new(config);
 
         let existing = issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1));
-        scheduler
-            .start_run(
-                existing.clone(),
-                PathBuf::from("/tmp/OSYM-1"),
-                None,
-                timestamp(1),
-            )
-            .unwrap();
+        claim_and_start_run(
+            &mut scheduler,
+            existing.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            timestamp(1),
+        );
 
         let claimed = scheduler.claim_candidate_batch(&[
             issue("2", "OSYM-2", "In Progress", Some(1), timestamp(2)),
@@ -717,17 +735,31 @@ mod tests {
     }
 
     #[test]
+    fn start_run_requires_a_preclaimed_issue() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+
+        assert!(matches!(
+            scheduler.start_run(
+                issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1)),
+                PathBuf::from("/tmp/OSYM-1"),
+                None,
+                timestamp(1),
+            ),
+            Err(SchedulerError::NotClaimed(id)) if id == "1"
+        ));
+    }
+
+    #[test]
     fn normal_completion_schedules_fixed_continuation_retry() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
         let issue = issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1));
-        scheduler
-            .start_run(
-                issue.clone(),
-                PathBuf::from("/tmp/OSYM-1"),
-                None,
-                timestamp(10),
-            )
-            .unwrap();
+        claim_and_start_run(
+            &mut scheduler,
+            issue.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            timestamp(10),
+        );
 
         let transition = scheduler
             .finish_run("1", WorkerOutcome::succeeded(), timestamp(20))
@@ -750,14 +782,13 @@ mod tests {
     fn retry_queued_issues_do_not_appear_completed_in_snapshot() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
         let issue = issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1));
-        scheduler
-            .start_run(
-                issue.clone(),
-                PathBuf::from("/tmp/OSYM-1"),
-                None,
-                timestamp(10),
-            )
-            .unwrap();
+        claim_and_start_run(
+            &mut scheduler,
+            issue.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            timestamp(10),
+        );
 
         scheduler
             .finish_run("1", WorkerOutcome::succeeded(), timestamp(20))
@@ -777,14 +808,13 @@ mod tests {
         };
         let mut scheduler = SchedulerState::new(config);
         let issue = issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1));
-        scheduler
-            .start_run(
-                issue.clone(),
-                PathBuf::from("/tmp/OSYM-1"),
-                Some(2),
-                timestamp(10),
-            )
-            .unwrap();
+        claim_and_start_run(
+            &mut scheduler,
+            issue.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            Some(2),
+            timestamp(10),
+        );
 
         let transition = scheduler
             .finish_run("1", WorkerOutcome::failed("boom"), timestamp(20))
@@ -798,22 +828,20 @@ mod tests {
     #[test]
     fn reconciliation_releases_terminal_and_non_active_issues() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
-        scheduler
-            .start_run(
-                issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1)),
-                PathBuf::from("/tmp/OSYM-1"),
-                None,
-                timestamp(1),
-            )
-            .unwrap();
-        scheduler
-            .start_run(
-                issue("2", "OSYM-2", "In Progress", Some(1), timestamp(2)),
-                PathBuf::from("/tmp/OSYM-2"),
-                None,
-                timestamp(2),
-            )
-            .unwrap();
+        claim_and_start_run(
+            &mut scheduler,
+            issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1)),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            timestamp(1),
+        );
+        claim_and_start_run(
+            &mut scheduler,
+            issue("2", "OSYM-2", "In Progress", Some(1), timestamp(2)),
+            PathBuf::from("/tmp/OSYM-2"),
+            None,
+            timestamp(2),
+        );
 
         let outcomes = scheduler.reconcile_tracker_states(&[
             issue("1", "OSYM-1", "Done", Some(1), timestamp(3)),
@@ -848,14 +876,13 @@ mod tests {
     #[test]
     fn reconciliation_releases_retry_queued_terminal_issues_before_due_dispatch() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
-        scheduler
-            .start_run(
-                issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1)),
-                PathBuf::from("/tmp/OSYM-1"),
-                None,
-                timestamp(10),
-            )
-            .unwrap();
+        claim_and_start_run(
+            &mut scheduler,
+            issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1)),
+            PathBuf::from("/tmp/OSYM-1"),
+            None,
+            timestamp(10),
+        );
         scheduler
             .finish_run("1", WorkerOutcome::succeeded(), timestamp(20))
             .unwrap();
@@ -883,14 +910,13 @@ mod tests {
     fn stall_detection_schedules_retry_from_last_activity() {
         let mut scheduler = SchedulerState::new(SchedulerConfig::default());
         let issue = issue("1", "OSYM-1", "In Progress", Some(1), millis(0));
-        scheduler
-            .start_run(
-                issue.clone(),
-                PathBuf::from("/tmp/OSYM-1"),
-                Some(1),
-                millis(0),
-            )
-            .unwrap();
+        claim_and_start_run(
+            &mut scheduler,
+            issue.clone(),
+            PathBuf::from("/tmp/OSYM-1"),
+            Some(1),
+            millis(0),
+        );
         scheduler
             .update_runtime_session(
                 "1",
