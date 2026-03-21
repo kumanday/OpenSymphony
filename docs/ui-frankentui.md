@@ -122,6 +122,9 @@ Use pane-based layout so future views can expand without redesign.
 
 The implemented inline layout budgets rows per pane instead of truncating one giant body block.
 That keeps the bottom timeline visible under long issue lists and still reserves rows for selected issue detail in narrower split terminals.
+The reducer also preserves the selected issue by identifier across snapshot
+reordering, and the issue pane windows long queues so the selected row stays
+visible while the detail pane tracks the same issue.
 
 ## 6. Interaction model
 

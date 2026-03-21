@@ -49,10 +49,12 @@ impl TuiState {
     pub fn reduce(&mut self, action: TuiAction) {
         match action {
             TuiAction::SnapshotReceived(envelope) => {
+                let selected_issue_identifier =
+                    self.selected_issue().map(|issue| issue.identifier.clone());
                 self.latest_snapshot = Some(*envelope);
                 self.connection = ConnectionState::Live;
                 self.status_line = "live control-plane stream".to_owned();
-                self.clamp_selection();
+                self.restore_selection(selected_issue_identifier.as_deref());
             }
             TuiAction::ConnectionLost(reason) => {
                 self.connection = ConnectionState::Reconnecting(reason.clone());
@@ -113,7 +115,7 @@ impl TuiState {
         if width >= 80 {
             let left_width = max(26, width * 2 / 5);
             let right_width = width.saturating_sub(left_width + 3);
-            let left = self.issue_lines(left_width);
+            let left = self.issue_lines(left_width, body_rows);
             let right = self.detail_lines(right_width);
             lines.extend(fit_section(
                 two_column_block(&left, &right, left_width, right_width),
@@ -122,7 +124,11 @@ impl TuiState {
             ));
         } else {
             let (issue_rows, detail_rows) = stacked_body_layout(body_rows);
-            lines.extend(fit_section(self.issue_lines(width), issue_rows, width));
+            lines.extend(fit_section(
+                self.issue_lines(width, issue_rows),
+                issue_rows,
+                width,
+            ));
             if detail_rows > 0 {
                 lines.push("-".repeat(width));
                 lines.extend(fit_section(self.detail_lines(width), detail_rows, width));
@@ -147,7 +153,7 @@ impl TuiState {
         lines.join("\n")
     }
 
-    fn issue_lines(&self, width: usize) -> Vec<String> {
+    fn issue_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         let mut lines = vec![fit(
             &pane_title("ISSUES", self.focus == FocusPane::Issues),
             width,
@@ -157,8 +163,14 @@ impl TuiState {
                 lines.push(fit("no issues in snapshot", width));
             }
             Some(snapshot) => {
-                for (index, issue) in snapshot.snapshot.issues.iter().enumerate() {
-                    let marker = if index == self.selected_issue {
+                let (start, end) = issue_window(
+                    snapshot.snapshot.issues.len(),
+                    self.selected_issue,
+                    visible_issue_count(max_rows),
+                );
+                for (index, issue) in snapshot.snapshot.issues[start..end].iter().enumerate() {
+                    let global_index = start + index;
+                    let marker = if global_index == self.selected_issue {
                         ">"
                     } else {
                         " "
@@ -253,13 +265,27 @@ impl TuiState {
             .unwrap_or_default()
     }
 
-    fn clamp_selection(&mut self) {
+    fn restore_selection(&mut self, selected_issue_identifier: Option<&str>) {
         let count = self.issue_count();
         if count == 0 {
             self.selected_issue = 0;
-        } else {
-            self.selected_issue = min(self.selected_issue, count - 1);
+            return;
         }
+
+        if let Some(identifier) = selected_issue_identifier {
+            if let Some(selected_issue) = self.latest_snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .snapshot
+                    .issues
+                    .iter()
+                    .position(|issue| issue.identifier == identifier)
+            }) {
+                self.selected_issue = selected_issue;
+                return;
+            }
+        }
+
+        self.selected_issue = min(self.selected_issue, count - 1);
     }
 }
 
@@ -777,6 +803,29 @@ fn fit_section(mut lines: Vec<String>, max_rows: usize, width: usize) -> Vec<Str
     lines
 }
 
+fn visible_issue_count(max_rows: usize) -> usize {
+    max(1, max_rows.saturating_sub(1) / 2)
+}
+
+fn issue_window(
+    issue_count: usize,
+    selected_issue: usize,
+    visible_issue_count: usize,
+) -> (usize, usize) {
+    if issue_count == 0 {
+        return (0, 0);
+    }
+
+    let visible_issue_count = min(max(1, visible_issue_count), issue_count);
+    let last_start = issue_count.saturating_sub(visible_issue_count);
+    let start = min(
+        selected_issue.saturating_sub(visible_issue_count / 2),
+        last_start,
+    );
+    let end = min(start + visible_issue_count, issue_count);
+    (start, end)
+}
+
 fn push_snapshot(bridge: &Arc<Mutex<BridgeMailbox>>, snapshot: SnapshotEnvelope) {
     let mut bridge = bridge
         .lock()
@@ -850,7 +899,8 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
 #[cfg(test)]
 mod tests {
     use super::{
-        section_layout, stacked_body_layout, BridgeHandle, BridgeMailbox, TuiAction, TuiState,
+        issue_window, section_layout, stacked_body_layout, visible_issue_count, BridgeHandle,
+        BridgeMailbox, TuiAction, TuiState,
     };
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
@@ -970,6 +1020,20 @@ mod tests {
         assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
         assert!(rendered.contains("workspace path: workspace-0"));
         assert!(rendered.contains("RECENT EVENTS"));
+    }
+
+    #[test]
+    fn visible_issue_count_reserves_header_row() {
+        assert_eq!(visible_issue_count(0), 1);
+        assert_eq!(visible_issue_count(4), 1);
+        assert_eq!(visible_issue_count(13), 6);
+    }
+
+    #[test]
+    fn issue_window_keeps_selected_issue_inside_the_visible_slice() {
+        assert_eq!(issue_window(12, 0, 6), (0, 6));
+        assert_eq!(issue_window(12, 7, 6), (4, 10));
+        assert_eq!(issue_window(12, 11, 6), (6, 12));
     }
 
     #[test]

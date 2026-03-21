@@ -216,6 +216,9 @@ When validating the control-plane stream locally, confirm that a reconnecting cl
 When validating `opensymphony-cli tui --exit-after-ms ...`, also confirm the
 control-plane bridge stops polling when the UI exits so the harness does not
 leave a background thread behind.
+When validating long issue queues, also confirm that moving the selection keeps
+the highlighted row visible and that snapshot reordering preserves focus on the
+same issue identifier.
 
 ## 7. Doctor checks
 
