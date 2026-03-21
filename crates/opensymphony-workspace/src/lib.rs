@@ -358,6 +358,7 @@ impl WorkspaceManager {
         }
         self.run_hook(HookStage::BeforeRemove, &workspace_path, true)
             .await?;
+        self.clear_retry_manifest(&issue.identifier)?;
         if self.config.cleanup_terminal_workspaces {
             fs::remove_dir_all(&workspace_path)
                 .map_err(|error| WorkspaceError::Io(error.to_string()))?;
@@ -731,5 +732,36 @@ mod tests {
             .expect("cleanup should succeed");
 
         assert!(!root.path().join("ABC-4").exists());
+    }
+
+    #[tokio::test]
+    async fn clears_retry_manifest_when_retaining_terminal_workspace() {
+        let root = tempdir().expect("tempdir should exist");
+        let manager = WorkspaceManager::new(WorkspaceConfig {
+            root: root.path().to_path_buf(),
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig::default(),
+        });
+        let issue = issue("ABC-5");
+        manager
+            .ensure_workspace(&issue)
+            .await
+            .expect("workspace should exist");
+        manager
+            .persist_retry(&RetryEntry {
+                issue: issue.clone(),
+                attempt: 2,
+                reason: RetryReason::Continuation,
+                scheduled_at: Utc::now(),
+            })
+            .expect("retry should persist");
+
+        manager
+            .cleanup_terminal_workspace(&issue)
+            .await
+            .expect("cleanup should succeed");
+
+        assert!(root.path().join("ABC-5").exists());
+        assert!(!root.path().join("ABC-5/.opensymphony/retry.json").exists());
     }
 }

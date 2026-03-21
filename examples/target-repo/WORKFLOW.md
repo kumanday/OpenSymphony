@@ -15,6 +15,13 @@ openhands:
     max_iterations: 32
 ---
 
+{% if attempt and attempt.continuation %}
+## Continuation
+
+You are continuing issue `{{ issue.identifier }}` after attempt {{ attempt.number }}.
+Resume from the current workspace state and prior conversation history.
+Do not restate the original assignment unless the workspace indicates it is missing.
+{% else %}
 # Assignment
 
 You are working on issue `{{ issue.identifier }}`.
@@ -27,8 +34,4 @@ You are working on issue `{{ issue.identifier }}`.
 ## Description
 {{ issue.description }}
 {% endif %}
-
-{% if attempt %}
-## Continuation
-Resume from attempt {{ attempt.number }} using the current workspace state.
 {% endif %}

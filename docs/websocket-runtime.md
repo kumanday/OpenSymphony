@@ -187,6 +187,7 @@ For each turn:
 1. Select prompt shape:
    - full prompt on fresh conversation
    - continuation guidance on resumed conversation or later turns
+   - fresh workflow renders omit `attempt` template context, while continuation renders include it so repo-owned templates can branch cleanly between full-assignment and continuation-only text
 2. `POST /api/conversations/{id}/events`
    - user role
    - prompt content

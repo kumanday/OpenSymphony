@@ -155,7 +155,19 @@ impl WorkflowDocument {
         })
     }
 
-    pub fn render_prompt(
+    pub fn render_fresh_prompt(&self, issue: &Issue) -> Result<String, WorkflowError> {
+        self.render_template(issue, None)
+    }
+
+    pub fn render_continuation_prompt(
+        &self,
+        issue: &Issue,
+        attempt: &AttemptContext,
+    ) -> Result<String, WorkflowError> {
+        self.render_template(issue, Some(attempt))
+    }
+
+    fn render_template(
         &self,
         issue: &Issue,
         attempt: Option<&AttemptContext>,
@@ -290,23 +302,27 @@ mod tests {
     }
 
     #[test]
-    fn renders_strict_templates() {
+    fn renders_distinct_fresh_and_continuation_prompts() {
         let workflow = WorkflowDocument::load_from_str(
-            "---\ntracker:\n  project_slug: demo\n  active_states: [Todo]\n  terminal_states: [Done]\n---\nIssue {{ issue.identifier }} attempt {{ attempt.number }}",
+            "---\ntracker:\n  project_slug: demo\n  active_states: [Todo]\n  terminal_states: [Done]\n---\n{% if attempt %}Continue {{ issue.identifier }} attempt {{ attempt.number }}{% else %}Start {{ issue.identifier }}{% endif %}",
         )
         .expect("workflow should parse");
 
-        let rendered = workflow
-            .render_prompt(
+        let fresh = workflow
+            .render_fresh_prompt(&issue())
+            .expect("fresh template should render");
+        let continuation = workflow
+            .render_continuation_prompt(
                 &issue(),
-                Some(&AttemptContext {
+                &AttemptContext {
                     number: 2,
                     continuation: true,
-                }),
+                },
             )
-            .expect("template should render");
+            .expect("continuation template should render");
 
-        assert_eq!(rendered, "Issue ABC-123 attempt 2");
+        assert_eq!(fresh, "Start ABC-123");
+        assert_eq!(continuation, "Continue ABC-123 attempt 2");
     }
 
     #[test]
@@ -317,7 +333,7 @@ mod tests {
         .expect("workflow should parse");
 
         let error = workflow
-            .render_prompt(&issue(), None)
+            .render_fresh_prompt(&issue())
             .expect_err("unknown vars should fail");
         assert!(matches!(error, WorkflowError::Render(_)));
     }

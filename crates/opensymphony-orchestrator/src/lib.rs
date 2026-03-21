@@ -525,13 +525,16 @@ fn render_prompt(
     let workflow_path = workspace_path.join("WORKFLOW.md");
     if workflow_path.exists() {
         let workflow = WorkflowDocument::load_from_path(&workflow_path)?;
-        let prompt = workflow.render_prompt(
-            issue,
-            Some(&AttemptContext {
-                number: attempt,
-                continuation: matches!(prompt_mode, PromptMode::Continuation),
-            }),
-        )?;
+        let prompt = match prompt_mode {
+            PromptMode::Fresh => workflow.render_fresh_prompt(issue)?,
+            PromptMode::Continuation => workflow.render_continuation_prompt(
+                issue,
+                &AttemptContext {
+                    number: attempt,
+                    continuation: true,
+                },
+            )?,
+        };
         return Ok(RenderedPrompt {
             prompt,
             max_turns: workflow.front_matter.agent.max_turns,
@@ -761,6 +764,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clears_retry_manifest_for_terminal_issue_during_recovery_when_workspace_is_retained() {
+        let issue = make_issue("1", "ABC-1", "Done", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace = Arc::new(WorkspaceManager::new(WorkspaceConfig {
+            root: tempdir.path().to_path_buf(),
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig::default(),
+        }));
+
+        let context = workspace
+            .prepare_issue_workspace(&issue, 1)
+            .await
+            .expect("workspace should prepare");
+        workspace
+            .persist_retry(&RetryEntry {
+                issue: issue.clone(),
+                attempt: 2,
+                reason: RetryReason::Continuation,
+                scheduled_at: Utc::now(),
+            })
+            .expect("retry should persist");
+
+        let mut scheduler = Scheduler::new(SchedulerConfig::default(), tracker, runner, workspace);
+        let recovered = scheduler.recover().await.expect("recovery should succeed");
+
+        assert_eq!(recovered, 0);
+        assert!(context.workspace_path.exists());
+        assert!(!context
+            .workspace_path
+            .join(".opensymphony/retry.json")
+            .exists());
+    }
+
+    #[tokio::test]
     async fn does_not_redispatch_issue_with_deferred_retry() {
         let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
         let tracker = Arc::new(MemoryTracker::new(
@@ -808,6 +852,102 @@ mod tests {
             .workspace_path
             .join(".opensymphony/retry.json")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn renders_fresh_workflow_prompt_without_continuation_guidance() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(0)]);
+
+        let workspace_dir = tempdir().expect("tempdir should exist");
+        let fixture_repo = tempdir().expect("fixture tempdir should exist");
+        fs::write(
+            fixture_repo.path().join("WORKFLOW.md"),
+            include_str!("../../../examples/target-repo/WORKFLOW.md"),
+        )
+        .expect("workflow fixture should write");
+
+        let after_create = format!(
+            "cp {} {}",
+            fixture_repo.path().join("WORKFLOW.md").display(),
+            "./WORKFLOW.md"
+        );
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            workspace_dir.path().to_path_buf(),
+            false,
+            Some(after_create),
+        );
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        sleep(Duration::from_millis(10)).await;
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].prompt_mode, PromptMode::Fresh);
+        assert!(requests[0].prompt.contains("# Assignment"));
+        assert!(!requests[0].prompt.contains("## Continuation"));
+    }
+
+    #[tokio::test]
+    async fn renders_continuation_guidance_without_replaying_full_assignment() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(0)]);
+
+        let workspace_dir = tempdir().expect("tempdir should exist");
+        let fixture_repo = tempdir().expect("fixture tempdir should exist");
+        fs::write(
+            fixture_repo.path().join("WORKFLOW.md"),
+            include_str!("../../../examples/target-repo/WORKFLOW.md"),
+        )
+        .expect("workflow fixture should write");
+
+        let after_create = format!(
+            "cp {} {}",
+            fixture_repo.path().join("WORKFLOW.md").display(),
+            "./WORKFLOW.md"
+        );
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            workspace_dir.path().to_path_buf(),
+            false,
+            Some(after_create),
+        );
+        let context = scheduler
+            .workspace
+            .prepare_issue_workspace(&issue, 1)
+            .await
+            .expect("workspace should prepare");
+        scheduler
+            .workspace
+            .save_conversation_manifest(&issue, &context, "conversation-ABC-1", false, None)
+            .expect("conversation should persist");
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        sleep(Duration::from_millis(10)).await;
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].prompt_mode, PromptMode::Continuation);
+        assert!(requests[0].prompt.contains("## Continuation"));
+        assert!(!requests[0].prompt.contains("# Assignment"));
+        assert!(requests[0].prompt.contains("attempt 2"));
     }
 
     #[tokio::test]
@@ -863,6 +1003,8 @@ Issue {{ issue.identifier }}
         let requests = runner.requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].max_turns, 7);
+        assert!(requests[0].prompt.contains("# Assignment"));
+        assert!(!requests[0].prompt.contains("## Continuation"));
     }
 
     #[tokio::test]
