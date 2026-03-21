@@ -63,6 +63,7 @@ Eligibility reminders:
 
 - active state only
 - `Todo` issues with non-terminal blockers are ineligible
+- due retries for already-active issues remain eligible even if blockers are still open
 - terminal blockers should not prevent eligibility
 - currently-running or claimed issues are not redispatched
 
