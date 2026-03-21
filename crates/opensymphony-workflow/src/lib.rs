@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 
 use opensymphony_domain::Issue;
@@ -429,7 +430,14 @@ impl OpenHandsConversationConfig {
             raw.persistence_dir_relative
                 .unwrap_or_else(|| DEFAULT_PERSISTENCE_DIR_RELATIVE.to_string()),
         );
-        if persistence_dir_relative.is_absolute() {
+        if persistence_dir_relative.is_absolute()
+            || persistence_dir_relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
             return Err(WorkflowError::invalid_config(
                 "openhands.conversation.persistence_dir_relative",
                 "must remain relative to the issue workspace",
@@ -1199,6 +1207,25 @@ Hello
 openhands:
   conversation:
     persistence_dir_relative: /tmp/absolute
+---
+Hello
+"#,
+            &env(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "openhands.conversation.persistence_dir_relative")
+        );
+    }
+
+    #[test]
+    fn rejects_parent_directory_escape_in_persistence_path() {
+        let error = Workflow::load_from_str_with_env(
+            r#"---
+openhands:
+  conversation:
+    persistence_dir_relative: ../shared
 ---
 Hello
 "#,
