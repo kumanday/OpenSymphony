@@ -130,7 +130,7 @@ Current implemented checks:
 - snapshot serialization in `opensymphony-domain`
 - control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane monotonic lag-recovery coverage in `opensymphony-control/src/lib.rs`
-- TUI reducer, visible-focus rendering, selection preservation across reorder, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, and disconnect retention coverage in `opensymphony-tui`
+- TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, and disconnect retention coverage in `opensymphony-tui`
 
 ## 4. Fake OpenHands server requirements
 

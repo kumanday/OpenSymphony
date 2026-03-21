@@ -45,11 +45,7 @@ impl TuiState {
         match action {
             TuiAction::SnapshotReceived(envelope) => {
                 let envelope = *envelope;
-                if self
-                    .latest_snapshot
-                    .as_ref()
-                    .is_some_and(|current| envelope.sequence < current.sequence)
-                {
+                if !self.should_accept_snapshot(&envelope) {
                     return;
                 }
 
@@ -119,7 +115,7 @@ impl TuiState {
         if width >= 80 {
             let left_width = max(26, width * 2 / 5);
             let right_width = width.saturating_sub(left_width + 3);
-            let left = self.issue_lines(left_width);
+            let left = self.issue_lines(left_width, body_rows);
             let right = self.detail_lines(right_width);
             lines.extend(fit_section(
                 two_column_block(&left, &right, left_width, right_width),
@@ -128,7 +124,11 @@ impl TuiState {
             ));
         } else {
             let (issue_rows, detail_rows) = stacked_section_layout(body_rows);
-            lines.extend(fit_section(self.issue_lines(width), issue_rows, width));
+            lines.extend(fit_section(
+                self.issue_lines(width, issue_rows),
+                issue_rows,
+                width,
+            ));
             if detail_rows > 0 {
                 lines.push("-".repeat(width));
                 lines.extend(fit_section(self.detail_lines(width), detail_rows, width));
@@ -153,7 +153,11 @@ impl TuiState {
         lines.join("\n")
     }
 
-    fn issue_lines(&self, width: usize) -> Vec<String> {
+    fn issue_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
+        if max_rows == 0 {
+            return Vec::new();
+        }
+
         let mut lines = vec![fit(
             &pane_title("ISSUES", self.focus == FocusPane::Issues),
             width,
@@ -163,8 +167,19 @@ impl TuiState {
                 lines.push(fit("no issues in snapshot", width));
             }
             Some(snapshot) => {
-                for (index, issue) in snapshot.snapshot.issues.iter().enumerate() {
-                    let marker = if index == self.selected_issue {
+                let visible_issues = max_rows.saturating_sub(1) / 2;
+                if visible_issues == 0 {
+                    return lines;
+                }
+
+                let (start, end) = visible_issue_window(
+                    snapshot.snapshot.issues.len(),
+                    visible_issues,
+                    self.selected_issue,
+                );
+                for (index, issue) in snapshot.snapshot.issues[start..end].iter().enumerate() {
+                    let absolute_index = start + index;
+                    let marker = if absolute_index == self.selected_issue {
                         ">"
                     } else {
                         " "
@@ -288,6 +303,20 @@ impl TuiState {
         } else {
             self.clamp_selection();
         }
+    }
+
+    fn should_accept_snapshot(&self, incoming: &SnapshotEnvelope) -> bool {
+        let Some(current) = self.latest_snapshot.as_ref() else {
+            return true;
+        };
+
+        if incoming.sequence >= current.sequence {
+            return true;
+        }
+
+        matches!(self.connection, ConnectionState::Reconnecting(_))
+            && incoming.published_at > current.published_at
+            && incoming.snapshot.generated_at > current.snapshot.generated_at
     }
 }
 
@@ -719,6 +748,21 @@ fn fit(value: &str, width: usize) -> String {
     let mut shortened = value.chars().take(width - 1).collect::<String>();
     shortened.push('~');
     shortened
+}
+
+fn visible_issue_window(
+    total_issues: usize,
+    visible_issues: usize,
+    selected_issue: usize,
+) -> (usize, usize) {
+    if total_issues <= visible_issues {
+        return (0, total_issues);
+    }
+
+    let max_start = total_issues.saturating_sub(visible_issues);
+    let start = min(selected_issue.saturating_sub(visible_issues / 2), max_start);
+    let end = min(start + visible_issues, total_issues);
+    (start, end)
 }
 
 trait RuntimeStateLabel {
