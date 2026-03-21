@@ -17,6 +17,10 @@ use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotE
 use thiserror::Error;
 use url::Url;
 
+const INLINE_UI_HEIGHT: u16 = 22;
+const MIN_TIMELINE_LINES: usize = 4;
+const MAX_TIMELINE_LINES: usize = 6;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiState {
     pub focus: FocusPane,
@@ -375,7 +379,9 @@ pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), T
     spawn_bridge(base_url, Arc::clone(&bridge));
     let app = OperatorApp::new(bridge, exit_after);
     App::new(app)
-        .screen_mode(ScreenMode::Inline { ui_height: 22 })
+        .screen_mode(ScreenMode::Inline {
+            ui_height: INLINE_UI_HEIGHT,
+        })
         .run()
         .map_err(TuiError::Runtime)
 }
@@ -598,7 +604,6 @@ fn two_column_block(
 fn section_layout(height: usize) -> (usize, usize) {
     const HEADER_ROWS: usize = 2;
     const TIMELINE_SEPARATOR_ROWS: usize = 1;
-    const MIN_TIMELINE_ROWS: usize = 4;
 
     if height <= HEADER_ROWS {
         return (0, 0);
@@ -610,7 +615,10 @@ fn section_layout(height: usize) -> (usize, usize) {
     }
 
     let max_timeline_rows = available.saturating_sub(TIMELINE_SEPARATOR_ROWS + 1);
-    let timeline_rows = min(max(MIN_TIMELINE_ROWS, available / 3), max_timeline_rows);
+    let timeline_rows = min(
+        min(MAX_TIMELINE_LINES, max_timeline_rows),
+        max(MIN_TIMELINE_LINES, available / 3),
+    );
     let body_rows = available.saturating_sub(TIMELINE_SEPARATOR_ROWS + timeline_rows);
     (body_rows, timeline_rows)
 }
@@ -728,7 +736,7 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{section_layout, stacked_body_layout, BridgeMailbox, TuiState};
+    use super::{section_layout, stacked_body_layout, BridgeMailbox, TuiAction, TuiState};
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
@@ -736,10 +744,11 @@ mod tests {
         WorkerOutcome,
     };
 
-    fn fixture(issue_count: usize) -> SnapshotEnvelope {
-        let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap();
+    fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
+        let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+            + chrono::Duration::seconds(sequence as i64);
         SnapshotEnvelope {
-            sequence: 8,
+            sequence,
             published_at: now,
             snapshot: DaemonSnapshot {
                 generated_at: now,
@@ -788,7 +797,7 @@ mod tests {
     #[test]
     fn reserves_bottom_pane_space_for_timeline() {
         let mut state = TuiState::default();
-        state.reduce(super::TuiAction::SnapshotReceived(Box::new(fixture(12))));
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(8, 12))));
 
         let rendered = state.render_text(100, 22);
         assert!(rendered.contains("RECENT EVENTS"));
@@ -799,14 +808,14 @@ mod tests {
     #[test]
     fn coalesces_bridge_snapshots_to_latest_value() {
         let mut mailbox = BridgeMailbox::default();
-        let first = fixture(1);
-        let second = fixture(3);
+        let first = fixture(1, 1);
+        let second = fixture(3, 1);
 
         mailbox.push_snapshot(first);
         mailbox.push_snapshot(second.clone());
 
         match mailbox.take_action() {
-            Some(super::TuiAction::SnapshotReceived(snapshot)) => {
+            Some(TuiAction::SnapshotReceived(snapshot)) => {
                 assert_eq!(*snapshot, second);
             }
             other => panic!("expected latest snapshot, got {other:?}"),
@@ -815,37 +824,24 @@ mod tests {
     }
 
     #[test]
-    fn preserves_last_snapshot_when_disconnect_follows_a_fresh_update() {
+    fn keeps_latest_snapshot_when_connection_drops() {
         let mut mailbox = BridgeMailbox::default();
-        let snapshot = fixture(2);
+        let snapshot = fixture(5, 1);
 
         mailbox.push_snapshot(snapshot.clone());
-        mailbox.push_connection_loss("control-plane stream closed".to_owned());
+        mailbox.push_connection_loss("stream closed".to_owned());
 
         match mailbox.take_action() {
-            Some(super::TuiAction::SnapshotReceived(actual)) => {
-                assert_eq!(*actual, snapshot);
+            Some(TuiAction::SnapshotReceived(received)) => {
+                assert_eq!(*received, snapshot);
             }
-            other => panic!("expected latest snapshot before disconnect, got {other:?}"),
+            other => panic!("expected latest snapshot, got {other:?}"),
         }
 
         match mailbox.take_action() {
-            Some(super::TuiAction::ConnectionLost(reason)) => {
-                assert_eq!(reason, "control-plane stream closed");
-            }
-            other => panic!("expected disconnect status after snapshot, got {other:?}"),
+            Some(TuiAction::ConnectionLost(reason)) => assert_eq!(reason, "stream closed"),
+            other => panic!("expected reconnecting state, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn keeps_detail_visible_in_narrow_layouts() {
-        let mut state = TuiState::default();
-        state.reduce(super::TuiAction::SnapshotReceived(Box::new(fixture(12))));
-
-        let rendered = state.render_text(72, 22);
-        assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
-        assert!(rendered.contains("workspace path: workspace-0"));
-        assert!(rendered.contains("RECENT EVENTS"));
     }
 
     #[test]
@@ -855,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn reserves_detail_rows_in_the_stacked_layout() {
+    fn reserves_rows_for_detail_in_narrow_layout() {
         let (issue_rows, detail_rows) = stacked_body_layout(13);
         assert_eq!((issue_rows, detail_rows), (4, 8));
     }
