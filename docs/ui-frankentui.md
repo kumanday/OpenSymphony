@@ -206,7 +206,7 @@ UI requirements:
 - show stale-data indicator
 - reconnect to control plane when possible
 - never panic the terminal session on missing fields
-- degrade gracefully if optional metrics are absent
+- degrade gracefully if future metric fields are unavailable; the MVP snapshot always includes the `metrics` object
 
 Current reconnect behavior:
 
