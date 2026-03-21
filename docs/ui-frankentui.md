@@ -120,6 +120,9 @@ Recommended first layout:
 
 Use pane-based layout so future views can expand without redesign.
 
+The implemented inline layout budgets rows per pane instead of truncating one giant body block.
+That keeps the bottom timeline visible under long issue lists and still reserves rows for selected issue detail in narrower split terminals.
+
 ## 6. Interaction model
 
 MVP interaction should remain intentionally small.
@@ -202,6 +205,8 @@ Current reconnect behavior:
 - refetch the current snapshot before resubscribing
 - if the SSE consumer lags, accept the latest published snapshot and ignore any older retained sequence that would roll the UI backward
 
+The implemented bridge between the SSE client and the FTUI reducer coalesces bursty snapshot traffic down to the latest value so inline-mode polling does not accumulate an unbounded backlog of stale snapshots.
+
 ## 11. Dependency strategy
 
 The current implementation uses the published `ftui` facade from crates.io with the `crossterm` feature enabled.
@@ -220,9 +225,10 @@ Automated:
 Current automated coverage:
 
 - reducer selection and mode-switch tests
-- render smoke tests against serialized snapshots, including visible focus markers
+- render smoke tests against serialized snapshots, including visible focus markers, narrow-layout detail preservation, and persistent bottom-pane visibility
 - control-plane snapshot plus SSE round-trip tests
 - TUI reconnect retention and narrow-layout detail visibility tests
+- bridge and control-plane catch-up tests for snapshot coalescing, disconnect handling, and lagged SSE recovery
 
 Manual:
 

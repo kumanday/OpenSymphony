@@ -164,14 +164,34 @@ async fn next_snapshot_envelope(
                 return Some(envelope);
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                let envelope = store.current().await;
-                if envelope.sequence <= *last_sent_sequence {
-                    continue;
+                if let Some(envelope) =
+                    catch_up_lagged_receiver(store, receiver, *last_sent_sequence).await
+                {
+                    *last_sent_sequence = envelope.sequence;
+                    return Some(envelope);
                 }
-                *last_sent_sequence = envelope.sequence;
-                return Some(envelope);
             }
             Err(broadcast::error::RecvError::Closed) => return None,
+        }
+    }
+}
+
+async fn catch_up_lagged_receiver(
+    store: &SnapshotStore,
+    receiver: &mut broadcast::Receiver<SnapshotEnvelope>,
+    last_sent_sequence: u64,
+) -> Option<SnapshotEnvelope> {
+    let mut latest = store.current().await;
+    loop {
+        match receiver.try_recv() {
+            Ok(envelope) => latest = envelope,
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {
+                latest = store.current().await;
+            }
+            Err(broadcast::error::TryRecvError::Empty) => {
+                return (latest.sequence > last_sent_sequence).then_some(latest);
+            }
+            Err(broadcast::error::TryRecvError::Closed) => return None,
         }
     }
 }
@@ -271,13 +291,12 @@ pub fn log_stream_error(error: &ControlPlaneClientError) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
         IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
     };
+    use std::time::Duration;
     use tokio::time::timeout;
 
     use super::{next_snapshot_envelope, SnapshotStore};

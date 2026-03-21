@@ -97,3 +97,38 @@ fn cycles_focus_and_timeline_mode() {
     assert!(rendered.contains("bottom=metrics"));
     assert!(rendered.contains("[x] METRICS"));
 }
+
+#[test]
+fn keeps_timeline_visible_with_many_issues_in_inline_layout() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 12))));
+
+    let rendered = state.render_text(100, 22);
+
+    assert!(rendered.contains("RECENT EVENTS"));
+    assert!(rendered.contains("snapshot updated"));
+}
+
+#[test]
+fn keeps_selected_detail_visible_in_narrow_layout() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 6))));
+
+    let rendered = state.render_text(70, 22);
+
+    assert!(rendered.contains("ISSUE + WORKSPACE DETAIL"));
+    assert!(rendered.contains("workspace path: workspace-0"));
+}
+
+#[test]
+fn keeps_rendering_latest_snapshot_while_reconnecting() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 2))));
+    state.reduce(TuiAction::ConnectionLost("stream closed".to_owned()));
+
+    let rendered = state.render_text(100, 20);
+
+    assert!(rendered.contains("conn=reconnecting"));
+    assert!(rendered.contains("COE-255"));
+    assert!(rendered.contains("workspace path: workspace-0"));
+}
