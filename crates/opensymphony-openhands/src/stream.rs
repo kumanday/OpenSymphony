@@ -1,5 +1,6 @@
 //! WebSocket-first attachment, event reconciliation, and state mirroring.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,34 +36,46 @@ pub struct ConversationStateMirror {
     pub execution_status: Option<RemoteExecutionStatus>,
     /// Forward-compatible field map derived from full snapshots and keyed updates.
     pub fields: Map<String, Value>,
+    #[serde(skip, default)]
+    field_timestamps: HashMap<String, String>,
 }
 
 impl ConversationStateMirror {
     /// Replaces the mirror from an authoritative REST response.
     pub fn refresh_from_conversation(&mut self, info: &ConversationInfo) {
+        let snapshot_timestamp = info
+            .updated_at
+            .as_deref()
+            .or(info.created_at.as_deref())
+            .map(ToOwned::to_owned);
         if let Some(status) = info.execution_status {
             self.execution_status = Some(status);
             self.fields.insert(
                 "execution_status".to_string(),
                 serde_json::to_value(status).unwrap_or(Value::Null),
             );
+            self.record_timestamp("execution_status", snapshot_timestamp.as_deref());
         }
         if let Some(title) = &info.title {
             self.fields
                 .insert("title".to_string(), Value::String(title.clone()));
+            self.record_timestamp("title", snapshot_timestamp.as_deref());
         }
         self.fields.insert(
             "workspace".to_string(),
             serde_json::to_value(&info.workspace).unwrap_or(Value::Null),
         );
+        self.record_timestamp("workspace", snapshot_timestamp.as_deref());
         if let Some(agent) = &info.agent {
             self.fields.insert("agent".to_string(), agent.clone());
+            self.record_timestamp("agent", snapshot_timestamp.as_deref());
         }
         if let Some(persistence_dir) = &info.persistence_dir {
             self.fields.insert(
                 "persistence_dir".to_string(),
                 Value::String(persistence_dir.clone()),
             );
+            self.record_timestamp("persistence_dir", snapshot_timestamp.as_deref());
         }
     }
 
@@ -74,18 +87,36 @@ impl ConversationStateMirror {
         if update.key == "full_state" {
             if let Some(map) = update.value.as_object() {
                 for (key, value) in map {
-                    self.fields.insert(key.clone(), value.clone());
+                    self.apply_field_update(key, value.clone(), &event.timestamp);
                 }
-                self.execution_status = map
-                    .get("execution_status")
-                    .cloned()
-                    .and_then(|value| serde_json::from_value(value).ok());
             }
             return;
         }
-        self.fields.insert(update.key.clone(), update.value.clone());
-        if update.key == "execution_status" {
-            self.execution_status = serde_json::from_value(update.value.clone()).ok();
+        self.apply_field_update(&update.key, update.value.clone(), &event.timestamp);
+    }
+
+    fn apply_field_update(&mut self, key: &str, value: Value, timestamp: &str) {
+        if !self.should_apply(key, timestamp) {
+            return;
+        }
+        self.fields.insert(key.to_string(), value.clone());
+        self.field_timestamps
+            .insert(key.to_string(), timestamp.to_string());
+        if key == "execution_status" {
+            self.execution_status = serde_json::from_value(value).ok();
+        }
+    }
+
+    fn should_apply(&self, key: &str, timestamp: &str) -> bool {
+        self.field_timestamps
+            .get(key)
+            .is_none_or(|current| current.as_str() <= timestamp)
+    }
+
+    fn record_timestamp(&mut self, key: &str, timestamp: Option<&str>) {
+        if let Some(timestamp) = timestamp {
+            self.field_timestamps
+                .insert(key.to_string(), timestamp.to_string());
         }
     }
 }
@@ -338,7 +369,7 @@ impl StreamRuntime {
                         .await
                         {
                             Ok(()) => {
-                                if let Err(error) = reconcile_and_refresh(
+                                match reconcile_and_refresh(
                                     &self.client,
                                     &self.conversation_id,
                                     &self.cache,
@@ -346,15 +377,18 @@ impl StreamRuntime {
                                 )
                                 .await
                                 {
-                                    warn!(conversation_id = %self.conversation_id, error = %error, "reconcile-after-reconnect failed");
-                                } else {
-                                    let _ = self
-                                        .status_tx
-                                        .send(self.state.lock().await.execution_status);
+                                    Ok(()) => {
+                                        let _ = self
+                                            .status_tx
+                                            .send(self.state.lock().await.execution_status);
+                                        self.stream = next_stream;
+                                        delay = self.websocket.reconnect_initial();
+                                        break;
+                                    }
+                                    Err(error) => {
+                                        warn!(conversation_id = %self.conversation_id, error = %error, "reconcile-after-reconnect failed");
+                                    }
                                 }
-                                self.stream = next_stream;
-                                delay = self.websocket.reconnect_initial();
-                                break;
                             }
                             Err(error) => {
                                 warn!(conversation_id = %self.conversation_id, error = %error, "websocket reconnect readiness failed");
@@ -546,4 +580,55 @@ async fn refresh_and_snapshot(
         mirror.refresh_from_conversation(&info);
     }
     Ok(info)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn state_update_event(
+        id: &str,
+        timestamp: &str,
+        key: &str,
+        value: Value,
+    ) -> RuntimeEventEnvelope {
+        RuntimeEventEnvelope::from_json(json!({
+            "id": id,
+            "timestamp": timestamp,
+            "source": "environment",
+            "kind": "ConversationStateUpdateEvent",
+            "key": key,
+            "value": value,
+        }))
+        .expect("state update event should decode")
+    }
+
+    #[tokio::test]
+    async fn out_of_order_execution_status_does_not_rewind_the_mirror() {
+        let cache = Arc::new(Mutex::new(EventCache::default()));
+        let state = Arc::new(Mutex::new(ConversationStateMirror::default()));
+
+        let finished = state_update_event(
+            "finished",
+            "2026-03-21T15:00:02Z",
+            "execution_status",
+            json!(RemoteExecutionStatus::Finished),
+        );
+        let running = state_update_event(
+            "running",
+            "2026-03-21T15:00:01Z",
+            "execution_status",
+            json!(RemoteExecutionStatus::Running),
+        );
+
+        assert!(apply_event(&cache, &state, &finished).await);
+        assert!(apply_event(&cache, &state, &running).await);
+
+        let mirror = state.lock().await.clone();
+        assert_eq!(
+            mirror.execution_status,
+            Some(RemoteExecutionStatus::Finished)
+        );
+    }
 }
