@@ -55,6 +55,27 @@ fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
     }
 }
 
+fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
+    let mut snapshot = fixture(sequence, identifiers.len());
+    snapshot.snapshot.issues = identifiers
+        .iter()
+        .enumerate()
+        .map(|(index, identifier)| IssueSnapshot {
+            identifier: (*identifier).to_owned(),
+            title: format!("Issue {index}"),
+            tracker_state: "In Progress".to_owned(),
+            runtime_state: IssueRuntimeState::Running,
+            last_outcome: WorkerOutcome::Running,
+            last_event_at: snapshot.snapshot.generated_at,
+            conversation_id_suffix: format!("conv-{index}"),
+            workspace_path_suffix: format!("workspace-{index}"),
+            retry_count: index as u32,
+            blocked: false,
+        })
+        .collect();
+    snapshot
+}
+
 #[test]
 fn applies_snapshot_and_renders_selected_issue() {
     let mut state = TuiState::default();
@@ -131,4 +152,37 @@ fn keeps_rendering_latest_snapshot_while_reconnecting() {
     assert!(rendered.contains("conn=reconnecting"));
     assert!(rendered.contains("COE-255"));
     assert!(rendered.contains("workspace path: workspace-0"));
+}
+
+#[test]
+fn preserves_selected_issue_when_snapshots_reorder() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(reordered_fixture(
+        1,
+        &["COE-255", "COE-256", "COE-257"],
+    ))));
+    state.reduce(TuiAction::MoveSelectionDown);
+
+    state.reduce(TuiAction::SnapshotReceived(Box::new(reordered_fixture(
+        2,
+        &["COE-257", "COE-255", "COE-256", "COE-258"],
+    ))));
+
+    assert_eq!(state.selected_issue, 2);
+    let rendered = state.render_text(100, 22);
+    assert!(rendered.contains("COE-256 Issue 2"));
+}
+
+#[test]
+fn keeps_selected_issue_visible_in_long_issue_lists() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 12))));
+    for _ in 0..8 {
+        state.reduce(TuiAction::MoveSelectionDown);
+    }
+
+    let rendered = state.render_text(100, 22);
+
+    assert!(rendered.contains("> COE-263 [running / In Progress]"));
+    assert!(rendered.contains("COE-263 Issue 8"));
 }
