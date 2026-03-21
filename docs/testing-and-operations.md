@@ -51,6 +51,7 @@ Components to fake:
 
 - OpenHands agent-server
 - Linear GraphQL responses
+- transient non-JSON `429` and `5xx` Linear responses
 - local control-plane API consumer
 
 Why fakes matter:
@@ -87,6 +88,7 @@ Suggested gates:
 - sanitize issue identifiers
 - refuse path escape
 - create and reuse workspace
+- rerun `after_create` after partial bootstrap failure without rerunning it after successful bootstrap
 - hook timeout
 - hook stderr capture
 - cleanup on terminal issue state
@@ -111,6 +113,7 @@ Suggested gates:
 - max concurrency
 - failure retry backoff
 - continuation retry at fixed delay
+- deferred retry entries suppress fresh redispatch until their scheduled time
 - stall detection
 - active-state refresh
 - terminal cleanup

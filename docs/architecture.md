@@ -55,6 +55,7 @@ The Rust daemon owns all scheduler semantics that Symphony specifies:
 - operator snapshots
 
 OpenHands conversation state is informative, not authoritative for scheduling.
+Once a retry is queued, that schedule remains authoritative until it becomes due; candidate polling must not redispatch the same issue ahead of the queued retry window.
 
 ### 3.2 OpenHands agent-server is an execution adapter
 
@@ -208,6 +209,7 @@ Mapping them separately preserves both models:
 For each issue:
 
 1. Ensure workspace exists.
+   - treat workspace bootstrap as incomplete until `after_create` succeeds, so a transient bootstrap failure reruns `after_create` on the next attempt instead of reusing a half-initialized workspace silently
 2. Load or create stable conversation metadata.
 3. Attach WebSocket stream and reconcile events.
 4. Execute one or more turns on the same conversation up to `agent.max_turns`, loaded from the issue workspace `WORKFLOW.md` for that dispatch.

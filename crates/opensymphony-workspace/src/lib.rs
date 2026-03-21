@@ -206,6 +206,7 @@ impl WorkspaceManager {
             .map_err(|error| WorkspaceError::Io(error.to_string()))?;
         fs::create_dir_all(metadata_dir.join("prompts"))
             .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+        let needs_bootstrap = !self.workspace_bootstrap_complete(&metadata_dir);
 
         let context = WorkspaceContext {
             workspace_path,
@@ -216,9 +217,10 @@ impl WorkspaceManager {
 
         self.write_issue_manifest(issue, &context, 0)?;
 
-        if created {
+        if needs_bootstrap {
             self.run_hook(HookStage::AfterCreate, &context.workspace_path, false)
                 .await?;
+            self.mark_workspace_bootstrapped(&context.metadata_dir)?;
         }
 
         Ok(context)
@@ -525,6 +527,15 @@ impl WorkspaceManager {
         }
         Ok(())
     }
+
+    fn workspace_bootstrap_complete(&self, metadata_dir: &Path) -> bool {
+        metadata_dir.join("bootstrap.ok").exists()
+    }
+
+    fn mark_workspace_bootstrapped(&self, metadata_dir: &Path) -> Result<(), WorkspaceError> {
+        fs::write(metadata_dir.join("bootstrap.ok"), b"ok")
+            .map_err(|error| WorkspaceError::Io(error.to_string()))
+    }
 }
 
 fn write_json<T: Serialize>(path: PathBuf, value: &T) -> Result<(), WorkspaceError> {
@@ -617,6 +628,43 @@ mod tests {
         let marker =
             fs::read_to_string(root.path().join("ABC-1/.opensymphony/generated/marker.txt"))
                 .expect("marker should exist");
+        assert_eq!(marker, "created");
+    }
+
+    #[tokio::test]
+    async fn reruns_after_create_until_bootstrap_succeeds() {
+        let root = tempdir().expect("tempdir should exist");
+        let manager = WorkspaceManager::new(WorkspaceConfig {
+            root: root.path().to_path_buf(),
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig {
+                after_create: Some(
+                    "if [ ! -f .opensymphony/generated/fail-once ]; then touch .opensymphony/generated/fail-once; echo transient >&2; exit 1; fi; printf created >> .opensymphony/generated/marker.txt".to_string(),
+                ),
+                ..HookConfig::default()
+            },
+        });
+
+        let issue = issue("ABC-1A");
+        let error = manager
+            .ensure_workspace(&issue)
+            .await
+            .expect_err("first bootstrap attempt should fail");
+        assert!(matches!(error, WorkspaceError::HookFailed { .. }));
+
+        manager
+            .ensure_workspace(&issue)
+            .await
+            .expect("workspace bootstrap should retry successfully");
+        manager
+            .ensure_workspace(&issue)
+            .await
+            .expect("successful bootstrap should not rerun");
+
+        let metadata_dir = root.path().join("ABC-1A/.opensymphony");
+        assert!(metadata_dir.join("bootstrap.ok").exists());
+        let marker = fs::read_to_string(metadata_dir.join("generated/marker.txt"))
+            .expect("marker should exist");
         assert_eq!(marker, "created");
     }
 
