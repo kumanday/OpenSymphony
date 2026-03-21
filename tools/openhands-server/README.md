@@ -1,15 +1,20 @@
-# OpenHands Server Pin Placeholder
+# OpenHands Server Pin
 
-This directory reserves ownership of the local OpenHands agent-server packaging
-for OpenSymphony.
+This directory owns the pinned local OpenHands agent-server packaging for
+OpenSymphony.
 
-Bootstrap state in M1:
+Current pin:
 
-- `version.txt` carries the unresolved version placeholder
-- `pyproject.toml` records the future package pin in `project.optional-dependencies.agent-server`
-- `uv.lock` is a placeholder that must be replaced by a resolved lockfile
-- `run-local.sh` fails closed until the version, uv extra, and lockfile are all
-  resolved, then launches the pinned server via `RUNTIME=process uv run
+- `version.txt` pins the OpenHands SDK bundle to `1.14.0`
+- `pyproject.toml` records the direct dependency pin in
+  `project.optional-dependencies.agent-server`:
+  - `openhands-agent-server==1.14.0`
+  - `openhands-sdk==1.14.0`
+  - `openhands-tools==1.14.0`
+  - `openhands-workspace==1.14.0`
+- `uv.lock` records the fully resolved Python dependency graph for the local
+  server launcher
+- `run-local.sh` launches the pinned server via `RUNTIME=process uv run
   --directory . --locked --extra agent-server --module
   openhands.agent_server --host 127.0.0.1 --port 8000`
 
@@ -19,12 +24,16 @@ default `8000` needs to change. It rejects all extra agent-server CLI arguments
 so local smoke runs preserve the same single-server supervised topology and
 host-process execution mode as the daemon-managed path.
 
-The local MVP must eventually pin the exact OpenHands package version used for:
+The local MVP uses this exact pin for:
 
 - the local supervised server command
 - HTTP and WebSocket contract verification
 - doctor checks
 - live local integration tests
+
+The repo currently constrains this environment to Python `3.12.x` via
+`requires-python = \">=3.12,<3.13\"` because the pinned OpenHands package line
+requires Python 3.12 or newer.
 
 Do not rely on a globally installed moving-target `openhands` binary for this
 repository.
