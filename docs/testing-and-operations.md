@@ -91,6 +91,7 @@ Current live OpenHands inputs:
 ## 3.2 Workspace manager
 
 - sanitize issue identifiers
+- reject dot-only workspace keys
 - refuse path escape
 - create and reuse workspace
 - hook timeout
@@ -115,6 +116,7 @@ Current live OpenHands inputs:
 - conversation reuse
 - conversation reset when a reused server-side workspace binding no longer matches the current issue
   workspace
+- fresh-run retry keeps the full prompt when the first prompt submission fails before reaching the runtime
 
 ## 3.4 Orchestrator
 

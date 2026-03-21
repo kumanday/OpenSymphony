@@ -114,6 +114,7 @@ struct FakeState {
     session_api_key: Option<String>,
     conversation_get_delay: Duration,
     event_search_failures: HashMap<String, usize>,
+    message_post_failures: usize,
     websocket_handshake_delays: HashMap<String, VecDeque<Duration>>,
     conversations: HashMap<String, ConversationEntry>,
 }
@@ -309,6 +310,11 @@ impl FakeOpenHandsServer {
         Ok(())
     }
 
+    /// Fails the next `POST /events` calls regardless of conversation.
+    pub async fn fail_next_message_posts(&self, count: usize) {
+        self.state.lock().await.message_post_failures = count;
+    }
+
     /// Pushes one event into the fake server store and broadcasts it to subscribers.
     pub async fn push_event(
         &self,
@@ -467,6 +473,10 @@ async fn post_event(
     }
     let maybe_sender = {
         let mut state = app.state.lock().await;
+        if state.message_post_failures > 0 {
+            state.message_post_failures -= 1;
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
         let Some(entry) = state.conversations.get_mut(&conversation_id) else {
             return StatusCode::NOT_FOUND.into_response();
         };
@@ -1490,6 +1500,84 @@ mod tests {
             manifest.reset_reason.as_deref(),
             Some("workspace_binding_changed")
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn issue_session_runner_retries_full_prompt_after_initial_send_failure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        let temp_dir = TempDir::new()?;
+        let workspace = opensymphony_workspace::WorkspaceLayout::new(temp_dir.path(), "COE-253")?;
+        workspace.create()?;
+
+        let runner = IssueSessionRunner::new(
+            client.clone(),
+            opensymphony_openhands::ConversationConfig {
+                runtime_contract_version: "openhands-sdk-v1.14.0".to_string(),
+                persistence_dir_relative: ".opensymphony/openhands".to_string(),
+                agent: agent(),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+            },
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .with_run_timeout(Duration::from_secs(2));
+
+        let request = IssueSessionRequest {
+            issue: IssueRef {
+                issue_id: "issue-1".to_string(),
+                identifier: "COE-253".to_string(),
+                title: "Runtime adapter".to_string(),
+            },
+            workspace: workspace.clone(),
+            prompts: PromptSet {
+                full_prompt: "full prompt".to_string(),
+                continuation_prompt: "continue prompt".to_string(),
+            },
+        };
+
+        server.fail_next_message_posts(1).await;
+        let error = runner
+            .execute(&request)
+            .await
+            .expect_err("first prompt submission should fail");
+        assert!(matches!(error, OpenHandsError::HttpStatus { .. }));
+        assert!(
+            ConversationManifest::load(&workspace.conversation_manifest_path)?.is_none(),
+            "fresh manifests should not persist before the first prompt is accepted"
+        );
+
+        let outcome = runner.execute(&request).await?;
+        assert_eq!(outcome.prompt_kind, opensymphony_domain::PromptKind::Fresh);
+
+        let manifest = ConversationManifest::load(&workspace.conversation_manifest_path)?
+            .expect("successful retry should persist the fresh manifest");
+        assert_eq!(manifest.conversation_id, outcome.conversation_id);
+
+        let record = server.conversation_record(&outcome.conversation_id).await?;
+        let texts: Vec<_> = record
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["full prompt"]);
 
         Ok(())
     }

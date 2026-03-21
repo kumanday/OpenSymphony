@@ -1,7 +1,7 @@
 //! Workspace ownership helpers and persistent manifests.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -60,7 +60,12 @@ impl WorkspaceLayout {
     pub fn new(workspace_root: impl AsRef<Path>, identifier: &str) -> Result<Self, WorkspaceError> {
         let workspace_root = ensure_dir(workspace_root.as_ref())?;
         let sanitized = sanitize_issue_identifier(identifier);
-        let issue_workspace = workspace_root.join(sanitized);
+        if !workspace_key_is_normal_component(&sanitized) {
+            return Err(WorkspaceError::PathEscape {
+                path: workspace_root.join(&sanitized).display().to_string(),
+            });
+        }
+        let issue_workspace = workspace_root.join(&sanitized);
         let metadata_dir = issue_workspace.join(".opensymphony");
         let prompts_dir = metadata_dir.join("prompts");
         let logs_dir = metadata_dir.join("logs");
@@ -180,7 +185,7 @@ pub fn write_prompt_artifact(path: impl AsRef<Path>, prompt: &str) -> Result<(),
 /// Sanitizes an issue identifier into a stable workspace key.
 #[must_use]
 pub fn sanitize_issue_identifier(identifier: &str) -> String {
-    identifier
+    let sanitized: String = identifier
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
@@ -189,7 +194,29 @@ pub fn sanitize_issue_identifier(identifier: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+    normalize_workspace_key(sanitized)
+}
+
+fn normalize_workspace_key(key: String) -> String {
+    if workspace_key_is_normal_component(&key) {
+        return key;
+    }
+
+    let normalized: String = key
+        .chars()
+        .map(|ch| if ch == '.' { '_' } else { ch })
+        .collect();
+    if workspace_key_is_normal_component(&normalized) {
+        normalized
+    } else {
+        "_".to_string()
+    }
+}
+
+fn workspace_key_is_normal_component(key: &str) -> bool {
+    let mut components = Path::new(key).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn ensure_dir(path: &Path) -> Result<PathBuf, WorkspaceError> {
@@ -213,5 +240,13 @@ mod tests {
             sanitize_issue_identifier("Bug: weird/path"),
             "Bug__weird_path"
         );
+    }
+
+    #[test]
+    fn sanitize_rewrites_dot_only_identifiers() {
+        assert_eq!(sanitize_issue_identifier("."), "_");
+        assert_eq!(sanitize_issue_identifier(".."), "__");
+        assert_eq!(sanitize_issue_identifier(""), "_");
+        assert_eq!(sanitize_issue_identifier("..."), "...");
     }
 }

@@ -16,6 +16,8 @@ Sanitization rule:
 
 - keep `[A-Za-z0-9._-]`
 - replace every other character with `_`
+- if the sanitized result is not one normal path component such as `.` or `..`, rewrite it so the
+  final workspace key cannot resolve to `workspace.root` or a parent path
 
 Examples:
 
@@ -170,6 +172,9 @@ Suggested fields:
 - `runtime_contract_version`
 
 This file is the bridge between Symphony issue ownership and OpenHands conversation reuse.
+Persist or rewrite it only after the selected prompt has been accepted by the runtime. A fresh
+conversation that fails before the first prompt is posted must not flip the next retry into
+continuation mode.
 
 ## 9. Generated context artifacts
 

@@ -103,7 +103,8 @@ Implementation note:
 Preserved exactly:
 
 - path shape `<workspace.root>/<sanitized_issue_identifier>`
-- sanitized identifier replaces non `[A-Za-z0-9._-]` with `_`
+- sanitized identifier replaces non `[A-Za-z0-9._-]` with `_` and rewrites dot-only results so the
+  final workspace key remains one normal path component
 - `cwd == workspace_path` invariant
 - workspace path must remain under workspace root
 - create or reuse semantics
