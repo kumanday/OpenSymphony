@@ -29,6 +29,7 @@ Examples:
 - `cwd` for all hook commands and all OpenHands runs must equal the resolved issue workspace path unless an explicit per-command `cwd` override inside the same workspace is required.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
+- Resolve `workspace.root` through existing ancestors and symlinks when possible before joining the sanitized workspace key.
 
 ## 4. Workspace directory layout
 
@@ -131,6 +132,7 @@ Use for:
 - Hook failures are categorized and surfaced with issue context.
 - `after_run` and `before_remove` are best effort by default.
 - `after_create` and `before_run` failures fail the current worker attempt.
+- A failed `after_create`, `before_run`, or prompt render must not abort later eligible dispatches in the same scheduler tick.
 
 ## 7. Issue metadata manifest
 
@@ -244,7 +246,7 @@ Symphony requires a short continuation retry after normal worker exit.
 OpenSymphony implementation:
 
 - worker may already have run multiple in-process turns on the same conversation
-- when the worker finally exits cleanly, the orchestrator schedules the short retry
+- when the worker finally exits cleanly, the orchestrator refreshes tracker state and schedules the short retry only if the issue remains active
 - the next worker reattaches to the same workspace and usually the same conversation
 - because the conversation already contains the original assignment, the next worker sends continuation guidance instead of replaying the full prompt
 
@@ -260,6 +262,8 @@ When the tracker says an issue is terminal:
 - delete the workspace if configured to do so
 
 Keep cleanup policy configurable enough to allow retention during debugging.
+
+After any worker report, OpenSymphony refreshes tracker state before scheduling retries. Inactive issues do not receive continuation or failure retries, and terminal issues run the same cleanup path even if the worker exited normally before the next reconcile loop.
 
 ## 13.2 Non-active, non-terminal issues
 
@@ -312,7 +316,9 @@ trait WorkspaceManager {
 - create vs reuse
 - `after_create` only once
 - `before_run` every worker lifetime
+- startup failure does not starve later dispatch candidates
 - timeout on hook
+- no continuation retry after worker exit if tracker state is no longer active
 - terminal cleanup
 - metadata file write and reload
 - conversation reset path preserves workspace safety
