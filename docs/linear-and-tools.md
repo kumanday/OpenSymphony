@@ -49,6 +49,11 @@ Normalize tracker payloads into a stable issue model with fields such as:
 
 Keep the orchestrator independent of raw GraphQL response shape.
 
+Normalization contract:
+
+- `id` is the stable tracker primary key and the workspace plus manifest lookup key
+- `identifier` is human-facing display text for prompts, logs, and tie-breaks
+
 ## 3. Candidate sorting and eligibility
 
 The orchestrator should receive normalized issues and apply Symphony sorting and eligibility rules.

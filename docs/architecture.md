@@ -8,7 +8,7 @@ The architecture must preserve the Symphony boundaries:
 
 - the orchestrator is the source of truth for scheduling state
 - the tracker is polled and reconciled by the orchestrator
-- each issue executes in its own workspace path
+- each issue executes in its own stable-ID workspace path
 - `WORKFLOW.md` remains the repo-owned policy and prompt contract
 - UI is optional and must not affect correctness
 
@@ -210,6 +210,7 @@ For each issue:
 
 1. Ensure workspace exists.
    - treat workspace bootstrap as incomplete until `after_create` succeeds, so a transient bootstrap failure reruns `after_create` on the next attempt instead of reusing a half-initialized workspace silently
+   - derive the workspace directory from the stable tracker `issue.id`; if an older identifier-keyed workspace already exists for that `issue_id`, migrate it onto the stable-ID path before reuse
 2. Load or create stable conversation metadata.
    - invalid persisted conversation metadata is cleared and treated as a fresh reset instead of retrying the same corrupt manifest forever
 3. Attach WebSocket stream and reconcile events.
@@ -223,6 +224,7 @@ For each issue:
    - post-run retries are only scheduled while the tracker still reports the issue as active
    - if the tracker refresh itself fails before completion bookkeeping, keep the worker report pending and retry that bookkeeping on the next tick instead of dropping it
    - if a worker fails after attaching to a known conversation, preserve that `conversation_id` in workspace metadata so the next retry continues the same thread
+   - if a worker is released or stalled after reattaching to an existing conversation, carry the persisted `conversation_id` into `last-run.json` so later retries do not lose continuity
 
 ### 5.4 Prompt policy
 

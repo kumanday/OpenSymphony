@@ -118,7 +118,7 @@ impl Scheduler {
 
             if let Some(retry) = self
                 .workspace
-                .load_retry_manifest(&manifest.identifier)
+                .load_retry_manifest(&manifest.issue_id)
                 .map_err(|error| SchedulerError::Workspace(error.to_string()))?
             {
                 self.retry_queue.push(RetryEntry {
@@ -335,7 +335,7 @@ impl Scheduler {
                     }
                     WorkerOutcomeKind::Cancelled | WorkerOutcomeKind::Released => {
                         self.workspace
-                            .clear_retry_manifest(&issue.identifier)
+                            .clear_retry_manifest(&issue.id)
                             .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
                     }
                 }
@@ -346,7 +346,7 @@ impl Scheduler {
                     .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
             } else {
                 self.workspace
-                    .clear_retry_manifest(&issue.identifier)
+                    .clear_retry_manifest(&issue.id)
                     .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
             }
         }
@@ -414,8 +414,12 @@ impl Scheduler {
             } else {
                 WorkerOutcome::cancelled(detail)
             };
+            let conversation_id = match self.workspace.load_conversation_manifest(&issue.id) {
+                Ok(Some(manifest)) => Some(manifest.conversation_id),
+                _ => None,
+            };
             self.workspace
-                .finish_attempt(&issue, attempt, &outcome, None, None)
+                .finish_attempt(&issue, attempt, &outcome, conversation_id.as_deref(), None)
                 .await
                 .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
 
@@ -425,7 +429,7 @@ impl Scheduler {
                     .await
                     .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
                 self.workspace
-                    .clear_retry_manifest(&issue.identifier)
+                    .clear_retry_manifest(&issue.id)
                     .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
             } else if matches!(outcome.kind, WorkerOutcomeKind::Stalled) {
                 let scheduled_at =
@@ -451,13 +455,13 @@ impl Scheduler {
         };
 
         let (prompt_mode, conversation_id_hint) =
-            match self.workspace.load_conversation_manifest(&issue.identifier) {
+            match self.workspace.load_conversation_manifest(&issue.id) {
                 Ok(Some(manifest)) => (PromptMode::Continuation, Some(manifest.conversation_id)),
                 Ok(None) => (PromptMode::Fresh, None),
                 Err(opensymphony_workspace::WorkspaceError::Json(_)) => {
                     if let Err(_error) = self
                         .workspace
-                        .clear_conversation_manifest(&issue.identifier)
+                        .clear_conversation_manifest(&issue.id)
                         .map_err(|error| SchedulerError::Workspace(error.to_string()))
                     {
                         self.enqueue_dispatch_retry(issue, attempt)?;
@@ -488,7 +492,7 @@ impl Scheduler {
         }
         if let Err(_error) = self
             .workspace
-            .clear_retry_manifest(&issue.identifier)
+            .clear_retry_manifest(&issue.id)
             .map_err(|error| SchedulerError::Workspace(error.to_string()))
         {
             self.enqueue_dispatch_retry(issue, attempt)?;
@@ -576,7 +580,7 @@ impl Scheduler {
             }
             Some(_) | None => {
                 self.workspace
-                    .clear_retry_manifest(&retry.issue.identifier)
+                    .clear_retry_manifest(&retry.issue.id)
                     .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
             }
         }
@@ -623,16 +627,10 @@ impl Scheduler {
         workspace_path: PathBuf,
     ) -> Result<opensymphony_workspace::WorkspaceContext, SchedulerError> {
         Ok(opensymphony_workspace::WorkspaceContext {
+            metadata_dir: workspace_path.join(".opensymphony"),
             workspace_path,
-            metadata_dir: self
-                .workspace
-                .workspace_path(&issue.identifier)
-                .map_err(|error| SchedulerError::Workspace(error.to_string()))?
-                .join(".opensymphony"),
             sanitized_workspace_key:
-                opensymphony_workspace::WorkspaceManager::sanitize_issue_identifier(
-                    &issue.identifier,
-                ),
+                opensymphony_workspace::WorkspaceManager::sanitize_issue_identifier(&issue.id),
             created: false,
         })
     }
@@ -927,7 +925,7 @@ EOF"#
             .expect("transition should succeed");
         scheduler.tick().await.expect("reconcile should succeed");
 
-        assert!(!workspace_root.join("ABC-1").exists());
+        assert!(!workspace_root.join("1").exists());
     }
 
     #[tokio::test]
@@ -1167,10 +1165,8 @@ EOF"#
 
         assert!(runner.requests().is_empty());
         assert!(scheduler.retry_queue.is_empty());
-        assert!(workspace_root.join("ABC-1").exists());
-        assert!(!workspace_root
-            .join("ABC-1/.opensymphony/retry.json")
-            .exists());
+        assert!(workspace_root.join("1").exists());
+        assert!(!workspace_root.join("1/.opensymphony/retry.json").exists());
     }
 
     #[tokio::test]
@@ -1226,10 +1222,8 @@ EOF"#
 
         assert!(runner.requests().is_empty());
         assert!(scheduler.retry_queue.is_empty());
-        assert!(workspace_root.join("ABC-1").exists());
-        assert!(!workspace_root
-            .join("ABC-1/.opensymphony/retry.json")
-            .exists());
+        assert!(workspace_root.join("1").exists());
+        assert!(!workspace_root.join("1/.opensymphony/retry.json").exists());
     }
 
     #[tokio::test]
@@ -1296,7 +1290,7 @@ EOF"#
 
         let tempdir = tempdir().expect("tempdir should exist");
         let after_create =
-            "if [ \"$(basename \"$PWD\")\" = \"ABC-1\" ]; then printf '# nope' > WORKFLOW.md; fi"
+            "if [ \"$(basename \"$PWD\")\" = \"1\" ]; then printf '# nope' > WORKFLOW.md; fi"
                 .to_string();
         let mut scheduler = scheduler(
             tracker,
@@ -1335,8 +1329,7 @@ EOF"#
 
         let tempdir = tempdir().expect("tempdir should exist");
         let after_create =
-            "if [ \"$(basename \"$PWD\")\" = \"ABC-1\" ]; then echo broken >&2; exit 1; fi"
-                .to_string();
+            "if [ \"$(basename \"$PWD\")\" = \"1\" ]; then echo broken >&2; exit 1; fi".to_string();
         let mut scheduler = scheduler(
             tracker,
             runner.clone(),
@@ -1448,13 +1441,47 @@ EOF"#
 
         let conversation = scheduler
             .workspace
-            .load_conversation_manifest(&issue.identifier)
+            .load_conversation_manifest(&issue.id)
             .expect("conversation load should succeed")
             .expect("conversation should still exist");
         assert_eq!(conversation.conversation_id, "conversation-ABC-1");
         assert!(!conversation.fresh_conversation);
 
-        let last_run = fs::read_to_string(workspace_root.join("ABC-1/.opensymphony/last-run.json"))
+        let last_run = fs::read_to_string(workspace_root.join("1/.opensymphony/last-run.json"))
+            .expect("last run manifest should exist");
+        assert!(last_run.contains("\"conversation_id\": \"conversation-ABC-1\""));
+    }
+
+    #[tokio::test]
+    async fn preserves_existing_conversation_when_releasing_stalled_worker() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(200)]);
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace_root = tempdir.path().to_path_buf();
+        let mut scheduler = scheduler(tracker, runner, workspace_root.clone(), false, None);
+        let context = scheduler
+            .workspace
+            .prepare_issue_workspace(&issue, 1)
+            .await
+            .expect("workspace should prepare");
+        scheduler
+            .workspace
+            .save_conversation_manifest(&issue, &context, "conversation-ABC-1", false, None)
+            .expect("conversation should persist");
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        sleep(Duration::from_millis(100)).await;
+        scheduler.tick().await.expect("stall should reconcile");
+
+        let last_run = fs::read_to_string(workspace_root.join("1/.opensymphony/last-run.json"))
             .expect("last run manifest should exist");
         assert!(last_run.contains("\"conversation_id\": \"conversation-ABC-1\""));
     }
@@ -1500,7 +1527,7 @@ EOF"#
 
         let conversation = scheduler
             .workspace
-            .load_conversation_manifest(&issue.identifier)
+            .load_conversation_manifest(&issue.id)
             .expect("conversation load should succeed")
             .expect("conversation should be rewritten");
         assert!(conversation.fresh_conversation);
@@ -1539,7 +1566,7 @@ EOF"#
 
         let conversation = scheduler
             .workspace
-            .load_conversation_manifest(&issue.identifier)
+            .load_conversation_manifest(&issue.id)
             .expect("conversation load should succeed")
             .expect("conversation should be persisted from the failed run");
         assert_eq!(conversation.conversation_id, "conversation-ABC-1");
@@ -1612,13 +1639,10 @@ EOF"#
         scheduler.tick().await.expect("completion should reconcile");
 
         assert!(scheduler.retry_queue.is_empty());
-        assert!(workspace_root.join("ABC-1").exists());
-        assert!(!workspace_root
-            .join("ABC-1/.opensymphony/retry.json")
-            .exists());
-        let issue_manifest =
-            fs::read_to_string(workspace_root.join("ABC-1/.opensymphony/issue.json"))
-                .expect("issue manifest should exist");
+        assert!(workspace_root.join("1").exists());
+        assert!(!workspace_root.join("1/.opensymphony/retry.json").exists());
+        let issue_manifest = fs::read_to_string(workspace_root.join("1/.opensymphony/issue.json"))
+            .expect("issue manifest should exist");
         assert!(issue_manifest.contains("\"current_state\": \"Done\""));
     }
 
@@ -1812,7 +1836,7 @@ Issue {{ issue.identifier }}
         sleep(Duration::from_millis(10)).await;
         scheduler.tick().await.expect("completion should reconcile");
 
-        let workspace_path = workspace_dir.path().join("ABC-1");
+        let workspace_path = workspace_dir.path().join("1");
         assert!(workspace_path
             .join(".opensymphony/generated/issue-context.md")
             .exists());
