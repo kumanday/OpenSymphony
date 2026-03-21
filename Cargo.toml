@@ -1,0 +1,42 @@
+[workspace]
+members = [
+    "crates/opensymphony-cli",
+    "crates/opensymphony-control",
+    "crates/opensymphony-domain",
+    "crates/opensymphony-linear",
+    "crates/opensymphony-linear-mcp",
+    "crates/opensymphony-openhands",
+    "crates/opensymphony-orchestrator",
+    "crates/opensymphony-testkit",
+    "crates/opensymphony-tui",
+    "crates/opensymphony-workflow",
+    "crates/opensymphony-workspace",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+version = "0.1.0"
+
+[workspace.dependencies]
+chrono = { version = "0.4.40", features = ["serde"] }
+opensymphony-control = { path = "crates/opensymphony-control" }
+opensymphony-domain = { path = "crates/opensymphony-domain" }
+opensymphony-orchestrator = { path = "crates/opensymphony-orchestrator" }
+opensymphony-workflow = { path = "crates/opensymphony-workflow" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+serde_yaml = "0.9.34"
+tempfile = "3.19.1"
+tera = "1.20.0"
+thiserror = "2.0.12"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

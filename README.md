@@ -41,6 +41,15 @@ Not in MVP:
 - replacing Symphony tracker polling with push webhooks
 - implementing against the OpenHands web-app Socket.IO API
 
+## Current foundation surface
+
+Milestone M1 is the contract baseline that later milestones build on:
+
+- `opensymphony-domain` defines normalized issue, blocker, run-attempt, retry, and snapshot models
+- `opensymphony-workflow` loads `WORKFLOW.md`, applies defaults and env/path resolution, and renders prompts with strict template failures
+- `opensymphony-orchestrator` owns the deterministic scheduler state machine for candidate selection, retries, reconciliation, stall detection, and snapshot derivation
+- the remaining crates already exist at their final boundaries and compile against these public interfaces without reaching into implementation details
+
 ## Core design decisions
 
 ### 1. Keep Symphony orchestration in Rust
@@ -125,6 +134,16 @@ Remote agent-server mode, auth hardening, centralized deployment docs.
 4. Build the OpenHands runtime adapter against a pinned server version.
 5. Keep the control-plane API stable before starting the TUI.
 6. Use the task files in `docs/tasks/` as the Linear issue source of truth.
+
+## M1 validation
+
+The CI-equivalent local validation for the foundation milestone is:
+
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace`
+
+The workspace test suite includes a downstream compile-time smoke test in `opensymphony-testkit` so later crates can depend on the M1 public contracts without touching private implementation details.
 
 ## Non-negotiable implementation rules
 

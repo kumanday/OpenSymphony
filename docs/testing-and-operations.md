@@ -29,6 +29,13 @@ Examples:
 - snapshot reducers
 - TUI reducers and formatting helpers
 
+Current M1 unit suite:
+
+- `opensymphony-domain`: issue normalization and snapshot serialization
+- `opensymphony-workflow`: front matter parsing, strict rendering, env/path resolution, and OpenHands namespace validation
+- `opensymphony-orchestrator`: candidate sorting, bounded concurrency, retry/backoff, reconciliation, stall detection, and restart recovery
+- `opensymphony-testkit`: downstream compile-time smoke coverage for the public M1 interfaces
+
 ## 2.2 Contract tests
 
 Use `opensymphony-testkit` for protocol-level checks against stable fixtures.
@@ -186,6 +193,12 @@ Possible helper commands later:
 - `opensymphony debug openhands`
 - `opensymphony inspect workspace <issue-id>`
 - `opensymphony inspect conversation <issue-id>`
+
+Current M1 validation commands:
+
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test --workspace`
 
 ## 7. Doctor checks
 

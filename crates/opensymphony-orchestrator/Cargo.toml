@@ -1,0 +1,15 @@
+[package]
+name = "opensymphony-orchestrator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono.workspace = true
+opensymphony-domain.workspace = true
+serde.workspace = true
+thiserror.workspace = true
