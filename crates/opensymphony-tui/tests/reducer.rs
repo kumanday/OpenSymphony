@@ -6,6 +6,13 @@ use opensymphony_domain::{
 use opensymphony_tui::{ConnectionState, FocusPane, TimelineMode, TuiAction, TuiState};
 
 fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
+    let identifiers = (0..issue_count)
+        .map(|index| format!("COE-{}", 255 + index))
+        .collect::<Vec<_>>();
+    fixture_with_identifiers(sequence, &identifiers)
+}
+
+fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEnvelope {
     let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
         + chrono::Duration::seconds(sequence as i64);
     SnapshotEnvelope {
@@ -22,7 +29,7 @@ fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
             agent_server: AgentServerStatus {
                 reachable: true,
                 base_url: "http://127.0.0.1:3000".to_owned(),
-                conversation_count: issue_count as u32,
+                conversation_count: identifiers.len() as u32,
                 status_line: "healthy".to_owned(),
             },
             metrics: MetricsSnapshot {
@@ -31,15 +38,17 @@ fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
                 total_tokens: 1024,
                 total_cost_micros: 50_000,
             },
-            issues: (0..issue_count)
-                .map(|index| IssueSnapshot {
-                    identifier: format!("COE-{}", 255 + index),
-                    title: format!("Issue {index}"),
+            issues: identifiers
+                .iter()
+                .enumerate()
+                .map(|(index, identifier)| IssueSnapshot {
+                    identifier: identifier.clone(),
+                    title: format!("Issue {identifier}"),
                     tracker_state: "In Progress".to_owned(),
                     runtime_state: IssueRuntimeState::Running,
                     last_outcome: WorkerOutcome::Running,
                     last_event_at: now,
-                    conversation_id_suffix: format!("conv-{index}"),
+                    conversation_id_suffix: format!("conv-{identifier}"),
                     workspace_path_suffix: format!("workspace-{index}"),
                     retry_count: index as u32,
                     blocked: false,
@@ -87,7 +96,7 @@ fn applies_snapshot_and_renders_selected_issue() {
     assert!(rendered.contains("[x] ISSUES"));
     assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
     assert!(rendered.contains("COE-255"));
-    assert!(rendered.contains("Issue 0"));
+    assert!(rendered.contains("Issue COE-255"));
     assert!(rendered.contains("RECENT EVENTS"));
 }
 
@@ -101,6 +110,28 @@ fn clamps_selection_when_new_snapshot_has_fewer_issues() {
     state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(2, 1))));
 
     assert_eq!(state.selected_issue, 0);
+}
+
+#[test]
+fn preserves_selected_issue_when_snapshot_reorders() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(1, 3))));
+    state.reduce(TuiAction::MoveSelectionDown);
+
+    let reordered = vec![
+        "COE-257".to_owned(),
+        "COE-255".to_owned(),
+        "COE-256".to_owned(),
+    ];
+    state.reduce(TuiAction::SnapshotReceived(Box::new(
+        fixture_with_identifiers(2, &reordered),
+    )));
+
+    assert_eq!(state.selected_issue, 2);
+
+    let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("> COE-256 [running / In Progress]"));
+    assert!(rendered.contains("conversation id: conv-COE-256"));
 }
 
 #[test]
@@ -139,6 +170,21 @@ fn keeps_selected_detail_visible_in_narrow_layout() {
 
     assert!(rendered.contains("ISSUE + WORKSPACE DETAIL"));
     assert!(rendered.contains("workspace path: workspace-0"));
+}
+
+#[test]
+fn keeps_selected_issue_visible_when_issue_list_is_windowed() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 12))));
+    for _ in 0..9 {
+        state.reduce(TuiAction::MoveSelectionDown);
+    }
+
+    let rendered = state.render_text(70, 22);
+
+    assert!(rendered.contains("> COE-264 [running / In Progress]"));
+    assert!(rendered.contains("workspace path: workspace-9"));
+    assert!(!rendered.contains("> COE-255 [running / In Progress]"));
 }
 
 #[test]
