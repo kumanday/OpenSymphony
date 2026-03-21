@@ -242,6 +242,11 @@ The Rust client should still support:
 - session API key for WebSocket query-param fallback
 - optional header-based WebSocket auth for versions that support it
 
+Current repository implementation:
+
+- `TransportConfig.session_api_key` is appended to REST endpoint URLs as well as the WebSocket URL so one auth knob covers create, get, send-message, run, search, and attach flows
+- `crates/opensymphony-openhands/tests/client_resilience.rs` covers both authenticated REST operations and the readiness path when non-readiness frames arrive before the first state update
+
 Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
 
 ## 10. OpenHands hooks vs Symphony hooks
