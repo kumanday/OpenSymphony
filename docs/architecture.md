@@ -257,6 +257,27 @@ The control plane exposes a summarized runtime snapshot derived from:
 
 The snapshot is not just a projection of OpenHands state. It is a Symphony-specific view.
 
+## 6.3 Implemented observability slice
+
+The current repository implements the first read-only control-plane and FrankenTUI slice with these concrete boundaries:
+
+- `opensymphony-domain`
+  - `SnapshotEnvelope`
+  - daemon, issue, metrics, and recent-event serialization models
+- `opensymphony-control`
+  - in-memory snapshot store
+  - `GET /healthz`
+  - `GET /api/v1/snapshot`
+  - `GET /api/v1/events` using Server-Sent Events
+- `opensymphony-tui`
+  - reducer-owned TUI state
+  - REST bootstrap plus SSE reconnect loop
+  - inline-mode rendering over immutable view text
+- `opensymphony-cli`
+  - `daemon` and `tui` entrypoints used for local attach and detach validation
+
+This slice deliberately keeps the UI on a stable read-only contract while the orchestration crates continue to mature behind it.
+
 ## 7. Local MVP data flow
 
 ## 7.1 Dispatch path
@@ -297,6 +318,17 @@ PollTick
   -> Orchestrator.schedule_next_state()
   -> SnapshotPublisher.publish()
 ```
+
+## 7.3 Current local attach path
+
+The implemented local observability flow is narrower than the full future daemon path, but it already preserves the same boundary:
+
+1. `opensymphony-cli daemon` starts a local control-plane server.
+2. A snapshot store publishes immutable `SnapshotEnvelope` values.
+3. `opensymphony-cli tui` fetches `/api/v1/snapshot`.
+4. The TUI opens `/api/v1/events` and listens for SSE updates.
+5. On stream failure, the TUI refetches the current snapshot before resubscribing.
+6. Detaching the UI leaves the daemon process and snapshot publication unaffected.
 
 ## 8. Recovery model
 

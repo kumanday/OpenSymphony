@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/opensymphony-cli",
+    "crates/opensymphony-control",
+    "crates/opensymphony-domain",
+    "crates/opensymphony-tui",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+async-stream = "0.3"
+axum = "0.8"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+clap = { version = "4.5", features = ["derive"] }
+ftui = { version = "0.2.1", features = ["crossterm"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest-eventsource = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2"
