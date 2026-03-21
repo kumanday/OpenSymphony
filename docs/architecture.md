@@ -178,12 +178,12 @@ The repository now exposes three stable foundation contracts that later mileston
   - serialized orchestrator snapshot types
 - `opensymphony-workflow`
   - raw `WORKFLOW.md` parsing into `{config, prompt_template}`
-  - typed config resolution with defaults, env indirection, path normalization, required Linear tracker credentials via either explicit `tracker.api_key` or process-level `LINEAR_API_KEY`, explicit env-backed workspace roots, and strict `openhands` extension validation
+  - typed config resolution with fail-fast unknown top-level workflow sections, defaults, env indirection, path normalization, required Linear tracker credentials via either explicit `tracker.api_key` or process-level `LINEAR_API_KEY`, explicit env-backed workspace roots, and strict `openhands` extension validation
   - strict prompt rendering over `{issue, attempt}`
 - `opensymphony-orchestrator`
   - deterministic candidate sorting, claim logic, and claimed-to-running enforcement
   - explicit `Claimed` / `Running` / `RetryQueued` / `Released` transitions
-  - fixed continuation retry, exponential failure backoff, stall detection, reconciliation of running, retry-queued, and claimed-only issues, and restart recovery
+  - fixed continuation retry, exponential failure backoff, stall detection, retry-start validation for both `due_at` and `attempt`, reconciliation of running, retry-queued, and claimed-only issues including stale claimed-only release, and restart recovery
 
 The other crates are already present at their final ownership boundaries, but for M1 they intentionally expose only thin re-exports or placeholders rather than premature transport logic.
 
