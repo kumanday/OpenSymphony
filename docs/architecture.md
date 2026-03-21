@@ -219,6 +219,7 @@ For each issue:
    - blocker gating applies to fresh `Todo` claims; due retries for already-active issues remain eligible even if blockers are still open
    - post-run retries are only scheduled while the tracker still reports the issue as active
    - if the tracker refresh itself fails before completion bookkeeping, keep the worker report pending and retry that bookkeeping on the next tick instead of dropping it
+   - if a worker fails after attaching to a known conversation, preserve that `conversation_id` in workspace metadata so the next retry continues the same thread
 
 ### 5.4 Prompt policy
 

@@ -125,6 +125,8 @@ Use for:
 - archiving evidence
 - safe cleanup steps
 
+Retained terminal workspaces should not run `before_remove`; that hook is only for actual workspace deletion.
+
 ## 6.5 Hook execution rules
 
 - Hooks execute inside the issue workspace unless explicitly documented otherwise.
@@ -247,6 +249,7 @@ OpenSymphony implementation:
 
 - worker may already have run multiple in-process turns on the same conversation
 - when the worker finally exits cleanly, the orchestrator refreshes tracker state and schedules the short retry only if the issue remains active
+- if the worker fails after attaching to a known conversation, preserve that `conversation_id` so the next retry resumes the same thread instead of forcing a fresh prompt
 - if that tracker refresh fails transiently, the completed worker report stays pending until the next tick can finish the bookkeeping path
 - the next worker reattaches to the same workspace and usually the same conversation
 - because the conversation already contains the original assignment, the next worker sends continuation guidance instead of replaying the full prompt
@@ -258,7 +261,7 @@ OpenSymphony implementation:
 When the tracker says an issue is terminal:
 
 - cancel any active worker
-- run `before_remove` best effort
+- run `before_remove` best effort only when the workspace will actually be deleted
 - clear stale retry metadata even if the workspace directory is retained for debugging
 - delete the workspace if configured to do so
 

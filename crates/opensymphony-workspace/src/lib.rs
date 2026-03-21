@@ -354,10 +354,10 @@ impl WorkspaceManager {
         if !workspace_path.exists() {
             return Ok(());
         }
-        self.run_hook(HookStage::BeforeRemove, &workspace_path, true)
-            .await?;
         self.clear_retry_manifest(&issue.identifier)?;
         if self.config.cleanup_terminal_workspaces {
+            self.run_hook(HookStage::BeforeRemove, &workspace_path, true)
+                .await?;
             fs::remove_dir_all(&workspace_path)
                 .map_err(|error| WorkspaceError::Io(error.to_string()))?;
         }
@@ -827,5 +827,36 @@ mod tests {
 
         assert!(root.path().join("ABC-5").exists());
         assert!(!root.path().join("ABC-5/.opensymphony/retry.json").exists());
+    }
+
+    #[tokio::test]
+    async fn does_not_run_before_remove_when_retaining_terminal_workspace() {
+        let root = tempdir().expect("tempdir should exist");
+        let manager = WorkspaceManager::new(WorkspaceConfig {
+            root: root.path().to_path_buf(),
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig {
+                before_remove: Some(
+                    "printf removed > .opensymphony/generated/before-remove.txt".to_string(),
+                ),
+                ..HookConfig::default()
+            },
+        });
+        let issue = issue("ABC-6");
+        manager
+            .ensure_workspace(&issue)
+            .await
+            .expect("workspace should exist");
+
+        manager
+            .cleanup_terminal_workspace(&issue)
+            .await
+            .expect("cleanup should succeed");
+
+        assert!(root.path().join("ABC-6").exists());
+        assert!(!root
+            .path()
+            .join("ABC-6/.opensymphony/generated/before-remove.txt")
+            .exists());
     }
 }

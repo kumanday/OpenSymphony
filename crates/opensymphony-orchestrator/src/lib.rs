@@ -48,6 +48,8 @@ struct WorkerReport {
     issue: Issue,
     attempt: u32,
     workspace_path: PathBuf,
+    prompt_mode: PromptMode,
+    conversation_id_hint: Option<String>,
     result: Result<IssueRunResult, IssueSessionError>,
 }
 
@@ -267,7 +269,24 @@ impl Scheduler {
                         .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
                     (result.outcome, Some(result.conversation_id))
                 }
-                Err(error) => (WorkerOutcome::failure(error.to_string()), None),
+                Err(error) => {
+                    let conversation_id = error
+                        .conversation_id()
+                        .or(report.conversation_id_hint.as_deref())
+                        .map(str::to_owned);
+                    if let Some(conversation_id) = conversation_id.as_deref() {
+                        self.workspace
+                            .save_conversation_manifest(
+                                &issue,
+                                &self.workspace_context(&issue, report.workspace_path.clone())?,
+                                conversation_id,
+                                matches!(report.prompt_mode, PromptMode::Fresh),
+                                None,
+                            )
+                            .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
+                    }
+                    (WorkerOutcome::failure(error.to_string()), conversation_id)
+                }
             };
 
             let retry_reason = match outcome.kind {
@@ -429,13 +448,13 @@ impl Scheduler {
             }
         };
 
-        let prompt_mode = match self
+        let (prompt_mode, conversation_id_hint) = match self
             .workspace
             .load_conversation_manifest(&issue.identifier)
             .map_err(|error| SchedulerError::Workspace(error.to_string()))
         {
-            Ok(Some(_)) => PromptMode::Continuation,
-            Ok(None) => PromptMode::Fresh,
+            Ok(Some(manifest)) => (PromptMode::Continuation, Some(manifest.conversation_id)),
+            Ok(None) => (PromptMode::Fresh, None),
             Err(_error) => {
                 self.enqueue_dispatch_retry(issue, attempt)?;
                 return Ok(());
@@ -485,6 +504,8 @@ impl Scheduler {
                 issue: issue_for_task,
                 attempt,
                 workspace_path,
+                prompt_mode,
+                conversation_id_hint,
                 result,
             });
         });
@@ -1208,6 +1229,100 @@ mod tests {
         assert_eq!(scheduler.retry_queue.len(), 1);
         assert_eq!(scheduler.retry_queue[0].issue.id, issue.id);
         assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Continuation);
+    }
+
+    #[tokio::test]
+    async fn preserves_existing_conversation_after_worker_transport_error() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(
+            &issue.id,
+            vec![ScriptedRun::transport_error(0, "transport dropped")],
+        );
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace_root = tempdir.path().to_path_buf();
+        let mut scheduler = scheduler(tracker, runner, workspace_root.clone(), false, None);
+        let context = scheduler
+            .workspace
+            .prepare_issue_workspace(&issue, 1)
+            .await
+            .expect("workspace should prepare");
+        scheduler
+            .workspace
+            .save_conversation_manifest(&issue, &context, "conversation-ABC-1", false, None)
+            .expect("conversation should persist");
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        sleep(Duration::from_millis(10)).await;
+        scheduler.tick().await.expect("failure should reconcile");
+
+        let conversation = scheduler
+            .workspace
+            .load_conversation_manifest(&issue.identifier)
+            .expect("conversation load should succeed")
+            .expect("conversation should still exist");
+        assert_eq!(conversation.conversation_id, "conversation-ABC-1");
+        assert!(!conversation.fresh_conversation);
+
+        let last_run = fs::read_to_string(workspace_root.join("ABC-1/.opensymphony/last-run.json"))
+            .expect("last run manifest should exist");
+        assert!(last_run.contains("\"conversation_id\": \"conversation-ABC-1\""));
+    }
+
+    #[tokio::test]
+    async fn preserves_new_conversation_after_fresh_worker_transport_error() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(
+            &issue.id,
+            vec![
+                ScriptedRun::transport_error_with_conversation(
+                    0,
+                    "transport dropped",
+                    "conversation-ABC-1",
+                ),
+                ScriptedRun::success(0),
+            ],
+        );
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace_root = tempdir.path().to_path_buf();
+        let mut scheduler = scheduler(tracker, runner.clone(), workspace_root.clone(), false, None);
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        sleep(Duration::from_millis(10)).await;
+        scheduler.tick().await.expect("failure should reconcile");
+
+        let conversation = scheduler
+            .workspace
+            .load_conversation_manifest(&issue.identifier)
+            .expect("conversation load should succeed")
+            .expect("conversation should be persisted from the failed run");
+        assert_eq!(conversation.conversation_id, "conversation-ABC-1");
+        assert!(conversation.fresh_conversation);
+        assert_eq!(scheduler.retry_queue.len(), 1);
+        scheduler.retry_queue[0].scheduled_at = Utc::now();
+
+        scheduler.tick().await.expect("retry should dispatch");
+        sleep(Duration::from_millis(10)).await;
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].prompt_mode, PromptMode::Fresh);
+        assert_eq!(requests[1].prompt_mode, PromptMode::Continuation);
     }
 
     #[tokio::test]
