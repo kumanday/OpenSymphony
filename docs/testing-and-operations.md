@@ -213,6 +213,9 @@ Current validation commands for the implemented observability slice:
 - `curl http://127.0.0.1:4010/healthz`
 
 When validating the control-plane stream locally, confirm that a reconnecting client still shows the last successful snapshot and that lagged consumers only advance to newer snapshot sequences.
+When validating `opensymphony-cli tui --exit-after-ms ...`, also confirm the
+control-plane bridge stops polling when the UI exits so the harness does not
+leave a background thread behind.
 
 ## 7. Doctor checks
 

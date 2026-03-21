@@ -15,6 +15,7 @@ use ftui::{
 use opensymphony_control::{log_stream_error, ControlPlaneClient, ControlPlaneClientError};
 use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope};
 use thiserror::Error;
+use tokio::sync::watch;
 use url::Url;
 
 const INLINE_UI_HEIGHT: u16 = 22;
@@ -348,6 +349,43 @@ impl BridgeMailbox {
     }
 }
 
+#[derive(Debug)]
+struct BridgeHandle {
+    mailbox: Arc<Mutex<BridgeMailbox>>,
+    shutdown: watch::Sender<bool>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl BridgeHandle {
+    fn spawn(base_url: Url) -> Self {
+        let mailbox = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let join_handle = thread::spawn({
+            let mailbox = Arc::clone(&mailbox);
+            move || run_bridge_thread(base_url, mailbox, shutdown_rx)
+        });
+        Self {
+            mailbox,
+            shutdown,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    fn mailbox(&self) -> Arc<Mutex<BridgeMailbox>> {
+        Arc::clone(&self.mailbox)
+    }
+
+    fn shutdown(mut self) -> Result<(), TuiError> {
+        let _ = self.shutdown.send(true);
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle
+                .join()
+                .map_err(|_| TuiError::BridgeThreadPanicked)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum AppMessage {
     Tick,
@@ -375,15 +413,21 @@ impl From<Event> for AppMessage {
 }
 
 pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), TuiError> {
-    let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
-    spawn_bridge(base_url, Arc::clone(&bridge));
-    let app = OperatorApp::new(bridge, exit_after);
-    App::new(app)
+    let bridge = BridgeHandle::spawn(base_url);
+    let app = OperatorApp::new(bridge.mailbox(), exit_after);
+    let run_result = App::new(app)
         .screen_mode(ScreenMode::Inline {
             ui_height: INLINE_UI_HEIGHT,
         })
         .run()
-        .map_err(TuiError::Runtime)
+        .map_err(TuiError::Runtime);
+    let shutdown_result = bridge.shutdown();
+
+    match (run_result, shutdown_result) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(())) => Ok(()),
+    }
 }
 
 #[derive(Debug)]
@@ -415,65 +459,132 @@ impl OperatorApp {
     }
 }
 
-fn spawn_bridge(base_url: Url, bridge: Arc<Mutex<BridgeMailbox>>) {
-    thread::spawn(move || {
-        let runtime = match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(runtime) => runtime,
+fn run_bridge_thread(
+    base_url: Url,
+    bridge: Arc<Mutex<BridgeMailbox>>,
+    shutdown: watch::Receiver<bool>,
+) {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            push_connection_loss(&bridge, error.to_string());
+            return;
+        }
+    };
+
+    runtime.block_on(run_bridge_loop(base_url, bridge, shutdown));
+}
+
+async fn run_bridge_loop(
+    base_url: Url,
+    bridge: Arc<Mutex<BridgeMailbox>>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let retry_delay = Duration::from_millis(750);
+    let client = ControlPlaneClient::new(base_url);
+
+    loop {
+        let snapshot_result = match fetch_snapshot_or_shutdown(&client, &mut shutdown).await {
+            Some(result) => result,
+            None => return,
+        };
+        match snapshot_result {
+            Ok(snapshot) => push_snapshot(&bridge, snapshot),
             Err(error) => {
                 push_connection_loss(&bridge, error.to_string());
-                return;
+                if !sleep_or_shutdown(&mut shutdown, retry_delay).await {
+                    return;
+                }
+                continue;
+            }
+        }
+
+        let mut stream = match client.stream_updates() {
+            Ok(stream) => stream,
+            Err(error) => {
+                push_connection_loss(&bridge, error.to_string());
+                if !sleep_or_shutdown(&mut shutdown, retry_delay).await {
+                    return;
+                }
+                continue;
             }
         };
 
-        runtime.block_on(async move {
-            let retry_delay = Duration::from_millis(750);
-            let client = ControlPlaneClient::new(base_url);
-            loop {
-                match client.fetch_snapshot().await {
-                    Ok(snapshot) => {
-                        push_snapshot(&bridge, snapshot);
-                    }
-                    Err(error) => {
-                        push_connection_loss(&bridge, error.to_string());
-                        tokio::time::sleep(retry_delay).await;
-                        continue;
-                    }
+        let mut should_retry = false;
+        loop {
+            let update = match next_update_or_shutdown(&mut stream, &mut shutdown).await {
+                Some(update) => update,
+                None => {
+                    stream.close();
+                    return;
                 }
+            };
 
-                let mut stream = match client.stream_updates() {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        push_connection_loss(&bridge, error.to_string());
-                        tokio::time::sleep(retry_delay).await;
-                        continue;
-                    }
-                };
-
-                let mut should_retry = false;
-                while let Some(update) = stream.next().await {
-                    match update {
-                        Ok(snapshot) => {
-                            push_snapshot(&bridge, snapshot);
-                        }
-                        Err(error) => {
-                            handle_bridge_error(&bridge, &error);
-                            should_retry = true;
-                            break;
-                        }
-                    }
+            match update {
+                Some(Ok(snapshot)) => push_snapshot(&bridge, snapshot),
+                Some(Err(error)) => {
+                    handle_bridge_error(&bridge, &error);
+                    should_retry = true;
+                    break;
                 }
-
-                stream.close();
-                if !should_retry {
-                    push_connection_loss(&bridge, "control-plane stream closed".to_owned());
-                }
-                tokio::time::sleep(retry_delay).await;
+                None => break,
             }
-        });
-    });
+        }
+
+        stream.close();
+        if !should_retry {
+            push_connection_loss(&bridge, "control-plane stream closed".to_owned());
+        }
+        if !sleep_or_shutdown(&mut shutdown, retry_delay).await {
+            return;
+        }
+    }
+}
+
+async fn fetch_snapshot_or_shutdown(
+    client: &ControlPlaneClient,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Option<Result<SnapshotEnvelope, ControlPlaneClientError>> {
+    if shutdown_requested(shutdown) {
+        return None;
+    }
+
+    tokio::select! {
+        _ = shutdown.changed() => None,
+        result = client.fetch_snapshot() => Some(result),
+    }
+}
+
+async fn next_update_or_shutdown(
+    stream: &mut opensymphony_control::ControlPlaneEventStream,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Option<Option<Result<SnapshotEnvelope, ControlPlaneClientError>>> {
+    if shutdown_requested(shutdown) {
+        return None;
+    }
+
+    tokio::select! {
+        _ = shutdown.changed() => None,
+        update = stream.next() => Some(update),
+    }
+}
+
+async fn sleep_or_shutdown(shutdown: &mut watch::Receiver<bool>, delay: Duration) -> bool {
+    if shutdown_requested(shutdown) {
+        return false;
+    }
+
+    tokio::select! {
+        _ = shutdown.changed() => false,
+        _ = tokio::time::sleep(delay) => true,
+    }
+}
+
+fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
+    *shutdown.borrow()
 }
 
 impl Model for OperatorApp {
@@ -518,6 +629,8 @@ impl Model for OperatorApp {
 pub enum TuiError {
     #[error("failed to render FrankenTUI runtime: {0}")]
     Runtime(std::io::Error),
+    #[error("background control-plane bridge thread panicked during shutdown")]
+    BridgeThreadPanicked,
 }
 
 fn handle_bridge_error(bridge: &Arc<Mutex<BridgeMailbox>>, error: &ControlPlaneClientError) {
@@ -736,13 +849,17 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{section_layout, stacked_body_layout, BridgeMailbox, TuiAction, TuiState};
+    use super::{
+        section_layout, stacked_body_layout, BridgeHandle, BridgeMailbox, TuiAction, TuiState,
+    };
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
         IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope,
         WorkerOutcome,
     };
+    use std::{sync::mpsc, thread, time::Duration};
+    use url::Url;
 
     fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
         let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
@@ -841,6 +958,33 @@ mod tests {
         match mailbox.take_action() {
             Some(TuiAction::ConnectionLost(reason)) => assert_eq!(reason, "stream closed"),
             other => panic!("expected reconnecting state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn keeps_detail_visible_in_narrow_layouts() {
+        let mut state = TuiState::default();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(8, 12))));
+
+        let rendered = state.render_text(72, 22);
+        assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
+        assert!(rendered.contains("workspace path: workspace-0"));
+        assert!(rendered.contains("RECENT EVENTS"));
+    }
+
+    #[test]
+    fn shutdown_joins_the_background_bridge_thread() {
+        let bridge = BridgeHandle::spawn(Url::parse("http://127.0.0.1:9/").unwrap());
+        let (done_tx, done_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let _ = done_tx.send(bridge.shutdown());
+        });
+
+        match done_rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => panic!("expected clean bridge shutdown, got {error}"),
+            Err(_) => panic!("bridge shutdown did not complete promptly"),
         }
     }
 

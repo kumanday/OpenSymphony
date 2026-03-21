@@ -169,6 +169,11 @@ Pipeline:
 
 Avoid embedding business logic in widget code.
 
+The control-plane bridge should follow the UI lifecycle. If inline mode exits
+early, including `--exit-after-ms` harness runs or terminal startup failures
+after bridge startup, the background bridge must stop polling and tear down
+cleanly with the app.
+
 ## 9. Suggested Rust crate boundary
 
 `opensymphony-tui` should contain:
