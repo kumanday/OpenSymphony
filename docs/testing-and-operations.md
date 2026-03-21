@@ -122,8 +122,10 @@ Suggested gates:
 - active-state refresh
 - post-run retries only occur while the tracker still reports the issue active
 - transient tracker refresh failures do not drop completed worker reports before retry or cleanup bookkeeping
+- worker failures after conversation attach still preserve conversation metadata for the next retry
 - terminal cleanup
 - retained terminal workspaces still clear stale retry manifests
+- retained terminal workspaces skip `before_remove` hooks unless the workspace will actually be deleted
 - restart recovery from manifests
 
 ## 3.5 Control plane and TUI

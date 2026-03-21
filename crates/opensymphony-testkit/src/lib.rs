@@ -212,6 +212,7 @@ pub struct ScriptedRun {
     pub outcome_kind: WorkerOutcomeKind,
     pub detail: Option<String>,
     pub conversation_id: Option<String>,
+    pub session_error: Option<IssueSessionError>,
 }
 
 impl ScriptedRun {
@@ -221,6 +222,7 @@ impl ScriptedRun {
             outcome_kind: WorkerOutcomeKind::Success,
             detail: None,
             conversation_id: None,
+            session_error: None,
         }
     }
 
@@ -230,6 +232,7 @@ impl ScriptedRun {
             outcome_kind: WorkerOutcomeKind::Failure,
             detail: Some(detail.into()),
             conversation_id: None,
+            session_error: None,
         }
     }
 
@@ -239,6 +242,33 @@ impl ScriptedRun {
             outcome_kind: WorkerOutcomeKind::Stalled,
             detail: Some(detail.into()),
             conversation_id: None,
+            session_error: None,
+        }
+    }
+
+    pub fn transport_error(delay_ms: u64, detail: impl Into<String>) -> Self {
+        Self {
+            delay_ms,
+            outcome_kind: WorkerOutcomeKind::Failure,
+            detail: None,
+            conversation_id: None,
+            session_error: Some(IssueSessionError::transport(detail)),
+        }
+    }
+
+    pub fn transport_error_with_conversation(
+        delay_ms: u64,
+        detail: impl Into<String>,
+        conversation_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            delay_ms,
+            outcome_kind: WorkerOutcomeKind::Failure,
+            detail: None,
+            conversation_id: None,
+            session_error: Some(
+                IssueSessionError::transport(detail).with_conversation_id(conversation_id),
+            ),
         }
     }
 }
@@ -281,6 +311,10 @@ impl IssueSessionRunner for ScriptedRunner {
         };
 
         sleep(Duration::from_millis(scripted.delay_ms)).await;
+
+        if let Some(error) = scripted.session_error {
+            return Err(error);
+        }
 
         let outcome = match scripted.outcome_kind {
             WorkerOutcomeKind::Success => WorkerOutcome::success(),
