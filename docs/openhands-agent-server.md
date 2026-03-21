@@ -72,6 +72,13 @@ Use for:
 - local experimentation
 - CI smoke environments with trusted repos
 
+Repository ownership note:
+
+- `tools/openhands-server/` owns the local packaging and version pin
+- M1 bootstrap creates fail-closed placeholders only
+- OSYM-201 must replace those placeholders with the validated package version
+  and lockfile before supervised mode is treated as implemented
+
 ### External server mode
 
 The daemon connects to a pre-existing agent-server at `openhands.transport.base_url`.

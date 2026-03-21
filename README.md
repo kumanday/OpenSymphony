@@ -117,6 +117,22 @@ Fake agent-server, live local E2E suite, doctor command, packaging.
 ### M6 Hosted deployment follow-on
 Remote agent-server mode, auth hardening, centralized deployment docs.
 
+## Current bootstrap checks
+
+The repository bootstrap keeps a compiling Rust workspace in place before the
+runtime crates gain real behavior.
+
+Current required checks:
+
+- `cargo fmt --check`
+- `cargo clippy --workspace --all-targets`
+- `cargo test --workspace`
+
+The local OpenHands tooling boundary lives in `tools/openhands-server/`. During
+M1 it is intentionally fail-closed: the directory exists, the pin files are
+reserved, and the launcher refuses to run until a validated package version and
+lockfile are committed.
+
 ## Local MVP quick-start for implementers
 
 1. Read `AGENTS.md`.
