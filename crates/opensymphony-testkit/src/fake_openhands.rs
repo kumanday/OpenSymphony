@@ -113,6 +113,7 @@ enum WsServerMessage {
 struct FakeState {
     session_api_key: Option<String>,
     conversation_get_delay: Duration,
+    event_search_failures: HashMap<String, usize>,
     conversations: HashMap<String, ConversationEntry>,
 }
 
@@ -260,6 +261,28 @@ impl FakeOpenHandsServer {
                 conversation_id: conversation_id.to_string(),
             })?;
         entry.runs.push_back(run);
+        Ok(())
+    }
+
+    /// Fails the next `GET /events/search` requests for one conversation.
+    pub async fn fail_next_event_searches(
+        &self,
+        conversation_id: &str,
+        count: usize,
+    ) -> Result<(), TestkitError> {
+        let mut state = self.state.lock().await;
+        if !state.conversations.contains_key(conversation_id) {
+            return Err(TestkitError::MissingConversation {
+                conversation_id: conversation_id.to_string(),
+            });
+        }
+        if count == 0 {
+            state.event_search_failures.remove(conversation_id);
+        } else {
+            state
+                .event_search_failures
+                .insert(conversation_id.to_string(), count);
+        }
         Ok(())
     }
 
@@ -452,24 +475,44 @@ async fn search_events(
     if !authorized(&app.state, &headers, None).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let state = app.state.lock().await;
-    let Some(entry) = state.conversations.get(&conversation_id) else {
-        return StatusCode::NOT_FOUND.into_response();
+    let (events, search_failure) = {
+        let mut state = app.state.lock().await;
+        let search_failure = match state.event_search_failures.get_mut(&conversation_id) {
+            Some(remaining) if *remaining > 0 => {
+                *remaining -= 1;
+                true
+            }
+            _ => false,
+        };
+        if search_failure {
+            if state
+                .event_search_failures
+                .get(&conversation_id)
+                .copied()
+                .unwrap_or_default()
+                == 0
+            {
+                state.event_search_failures.remove(&conversation_id);
+            }
+            (Vec::new(), true)
+        } else {
+            let Some(entry) = state.conversations.get(&conversation_id) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            (entry.events.clone(), false)
+        }
     };
+    if search_failure {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
     let offset = query
         .page_id
         .as_deref()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(0);
     let limit = query.limit.unwrap_or(100);
-    let items: Vec<_> = entry
-        .events
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .cloned()
-        .collect();
-    let next_page_id = if offset + items.len() < entry.events.len() {
+    let items: Vec<_> = events.iter().skip(offset).take(limit).cloned().collect();
+    let next_page_id = if offset + items.len() < events.len() {
         Some((offset + items.len()).to_string())
     } else {
         None
@@ -857,6 +900,93 @@ mod tests {
         assert!(events.iter().any(|event| {
             event.raw_json.get("body") == Some(&Value::String("after disconnect".to_string()))
         }));
+        attached.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attached_stream_retries_reconnect_until_reconcile_succeeds()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: "/tmp/test".to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some("conv-reconnect-retry".to_string()),
+                persistence_dir: Some("/tmp/test/.opensymphony/openhands".to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+
+        server
+            .enqueue_run(
+                "conv-reconnect-retry",
+                ScriptedRun::new(vec![
+                    RunStep::Emit {
+                        event: execution_status_event(RemoteExecutionStatus::Running),
+                        delay: Duration::from_millis(5),
+                    },
+                    RunStep::Disconnect {
+                        delay: Duration::from_millis(5),
+                    },
+                    RunStep::Emit {
+                        event: generic_event(
+                            "MessageEvent",
+                            "agent",
+                            serde_json::json!({"body": "after failed reconcile"}),
+                        ),
+                        delay: Duration::from_millis(5),
+                    },
+                ]),
+            )
+            .await?;
+
+        let attached = opensymphony_openhands::AttachedConversation::attach(
+            client.clone(),
+            "conv-reconnect-retry",
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .await?;
+
+        server
+            .fail_next_event_searches("conv-reconnect-retry", 1)
+            .await?;
+        client.run_conversation("conv-reconnect-retry").await?;
+
+        let message = Value::String("after failed reconcile".to_string());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let events = attached.cached_events().await;
+                if events
+                    .iter()
+                    .any(|event| event.raw_json.get("body") == Some(&message))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("disconnect-window message should be reconciled after retry");
+
         attached.close().await?;
         Ok(())
     }
