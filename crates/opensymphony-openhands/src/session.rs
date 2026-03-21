@@ -71,9 +71,6 @@ impl IssueSessionRunner {
         request.workspace.create()?;
 
         let prepared = self.prepare_conversation(request).await?;
-        prepared
-            .manifest
-            .save(&request.workspace.conversation_manifest_path)?;
 
         if let Some(create_request) = &prepared.create_request {
             write_json_artifact(
@@ -113,6 +110,11 @@ impl IssueSessionRunner {
                 &crate::wire::SendMessageRequest::user_text(prompt),
             )
             .await?;
+        // Persist only after the prompt is accepted so retries keep using the full prompt if the
+        // first transport attempt fails before the conversation actually contains it.
+        prepared
+            .manifest
+            .save(&request.workspace.conversation_manifest_path)?;
         let _ = self
             .client
             .run_conversation(&prepared.manifest.conversation_id)
