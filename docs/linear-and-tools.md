@@ -74,6 +74,7 @@ Eligibility reminders:
 - explicit pagination support
 - rate-limit aware retries where appropriate
 - structured error classification
+- transient HTTP status classification even when the response body is not valid JSON
 - redaction of tokens in logs
 
 ## 4.2 Configuration inputs
@@ -196,6 +197,7 @@ Recommended Linear error categories:
 - permission_denied
 
 These categories should be shared by the read adapter and the MCP server where sensible.
+For retryable failures, status-based classification must win even when the response body is plain text or HTML. In practice this means `429` stays `rate_limited`, gateway timeouts stay `timeout`, and `5xx` responses stay `transport` instead of degrading into `invalid_response`.
 
 ## 10. Testing plan
 

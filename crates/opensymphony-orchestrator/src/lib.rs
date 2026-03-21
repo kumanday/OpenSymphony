@@ -156,6 +156,11 @@ impl Scheduler {
         let (mut due_retries, deferred_retries) =
             partition_due_retries(std::mem::take(&mut self.retry_queue), now);
         self.retry_queue = deferred_retries;
+        let mut retry_queued_ids = self
+            .retry_queue
+            .iter()
+            .map(|entry| entry.issue.id.clone())
+            .collect::<HashSet<_>>();
 
         let mut candidates = self
             .tracker
@@ -179,10 +184,12 @@ impl Scheduler {
         due_retries.sort_by_key(|entry| entry.scheduled_at);
         for retry in due_retries.drain(..) {
             if dispatch_queue.len() >= available_slots {
+                retry_queued_ids.insert(retry.issue.id.clone());
                 self.retry_queue.push(retry);
                 continue;
             }
             if self.running.contains_key(&retry.issue.id) {
+                retry_queued_ids.insert(retry.issue.id.clone());
                 self.retry_queue.push(retry);
                 continue;
             }
@@ -202,6 +209,7 @@ impl Scheduler {
             }
             if self.running.contains_key(&issue.id)
                 || reserved_ids.contains(&issue.id)
+                || retry_queued_ids.contains(&issue.id)
                 || issue.is_blocked_by_active_issue()
             {
                 continue;
@@ -750,6 +758,56 @@ mod tests {
         assert_eq!(recovered, 1);
         assert_eq!(scheduler.retry_queue.len(), 1);
         assert_eq!(scheduler.retry_queue[0].attempt, 2);
+    }
+
+    #[tokio::test]
+    async fn does_not_redispatch_issue_with_deferred_retry() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            tempdir.path().to_path_buf(),
+            false,
+            None,
+        );
+        let retry = RetryEntry {
+            issue: issue.clone(),
+            attempt: 2,
+            reason: RetryReason::Failure,
+            scheduled_at: Utc::now() + chrono::Duration::seconds(60),
+        };
+
+        let context = scheduler
+            .workspace
+            .prepare_issue_workspace(&issue, 1)
+            .await
+            .expect("workspace should prepare");
+        scheduler
+            .workspace
+            .persist_retry(&retry)
+            .expect("retry should persist");
+        scheduler.retry_queue.push(retry);
+
+        scheduler
+            .tick()
+            .await
+            .expect("deferred retry should remain queued");
+
+        assert!(runner.requests().is_empty());
+        assert_eq!(scheduler.retry_queue.len(), 1);
+        assert!(context
+            .workspace_path
+            .join(".opensymphony/retry.json")
+            .exists());
     }
 
     #[tokio::test]

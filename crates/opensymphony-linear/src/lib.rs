@@ -704,8 +704,15 @@ where
 }
 
 fn decode_graphql_value(status: StatusCode, body: &str) -> Result<Value, LinearError> {
-    let response = serde_json::from_str::<Value>(body)
-        .map_err(|error| LinearError::InvalidResponse(error.to_string()))?;
+    let response = match serde_json::from_str::<Value>(body) {
+        Ok(response) => response,
+        Err(error) => {
+            if !status.is_success() {
+                return Err(classify_status_error(status, body));
+            }
+            return Err(LinearError::InvalidResponse(error.to_string()));
+        }
+    };
 
     let errors = response
         .get("errors")
@@ -1389,5 +1396,19 @@ mod tests {
         assert!(QUERY_CANDIDATE_ISSUES.contains("slugId"));
         assert!(QUERY_CANDIDATE_ISSUES.contains("inverseRelations"));
         assert!(!QUERY_CANDIDATE_ISSUES.contains("blockedByIssues"));
+    }
+
+    #[test]
+    fn classifies_non_json_rate_limits_as_retryable() {
+        let error = decode_graphql_value(StatusCode::TOO_MANY_REQUESTS, "slow down")
+            .expect_err("429 should be retryable even without JSON");
+        assert!(matches!(error, LinearError::RateLimited(detail) if detail == "slow down"));
+    }
+
+    #[test]
+    fn classifies_non_json_server_errors_as_transport() {
+        let error = decode_graphql_value(StatusCode::SERVICE_UNAVAILABLE, "<html>retry</html>")
+            .expect_err("5xx should be retryable even without JSON");
+        assert!(matches!(error, LinearError::Transport(detail) if detail == "<html>retry</html>"));
     }
 }
