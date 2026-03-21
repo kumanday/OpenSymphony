@@ -19,5 +19,6 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 opensymphony-testkit = { path = "../opensymphony-testkit" }
 tokio.workspace = true
