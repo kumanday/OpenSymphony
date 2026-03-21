@@ -147,6 +147,8 @@ Current key map in the implemented client:
 
 The rendered status line and pane headers explicitly show the active focus target so inline-mode navigation stays understandable without a mouse or alternate screen.
 
+The selected issue should stay anchored by identifier across live snapshot reordering so the detail pane does not jump to a different issue just because the list order changed.
+
 Do not start with in-UI mutation commands unless the control plane already defines them cleanly.
 
 ## 7. Inline mode vs alternate screen
@@ -205,6 +207,7 @@ Current reconnect behavior:
 - fetch the latest snapshot over HTTP on startup
 - subscribe to the SSE stream
 - if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible
+- ignore reconnect snapshots that regress the rendered sequence
 - refetch the current snapshot before resubscribing
 
 ## 11. Dependency strategy

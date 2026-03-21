@@ -44,10 +44,21 @@ impl TuiState {
     pub fn reduce(&mut self, action: TuiAction) {
         match action {
             TuiAction::SnapshotReceived(envelope) => {
-                self.latest_snapshot = Some(*envelope);
+                let envelope = *envelope;
+                if self
+                    .latest_snapshot
+                    .as_ref()
+                    .is_some_and(|current| envelope.sequence < current.sequence)
+                {
+                    return;
+                }
+
+                let selected_identifier =
+                    self.selected_issue().map(|issue| issue.identifier.clone());
+                self.latest_snapshot = Some(envelope);
                 self.connection = ConnectionState::Live;
                 self.status_line = "live control-plane stream".to_owned();
-                self.clamp_selection();
+                self.restore_selection(selected_identifier.as_deref());
             }
             TuiAction::ConnectionLost(reason) => {
                 self.connection = ConnectionState::Reconnecting(reason.clone());
@@ -260,6 +271,22 @@ impl TuiState {
             self.selected_issue = 0;
         } else {
             self.selected_issue = min(self.selected_issue, count - 1);
+        }
+    }
+
+    fn restore_selection(&mut self, selected_identifier: Option<&str>) {
+        if let Some(index) = selected_identifier.and_then(|identifier| {
+            self.latest_snapshot.as_ref().and_then(|snapshot| {
+                snapshot
+                    .snapshot
+                    .issues
+                    .iter()
+                    .position(|issue| issue.identifier == identifier)
+            })
+        }) {
+            self.selected_issue = index;
+        } else {
+            self.clamp_selection();
         }
     }
 }
