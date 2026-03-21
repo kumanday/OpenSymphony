@@ -55,7 +55,8 @@ Available today:
 - a FrankenTUI client that:
   - fetches the initial snapshot over HTTP
   - reconnects to the SSE stream after disconnect
-  - renders issue list, issue detail, and recent event or metrics panes in inline mode
+  - renders focused issue/workspace detail plus recent event or metrics panes in inline mode
+  - shows the active focus pane in the status line and pane headers for keyboard-driven navigation
 - a small `opensymphony-cli` demo path so the control plane and UI can be validated without coupling the TUI to orchestrator internals
 
 Local commands:
