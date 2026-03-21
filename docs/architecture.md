@@ -217,6 +217,7 @@ For each issue:
 6. Refresh tracker state for the issue, then let the orchestrator decide continuation retry, failure retry, release, or cancellation.
    - startup failures such as workspace bootstrap or prompt render failures persist retry state for that issue without aborting later dispatches in the same tick
    - blocker gating applies to fresh `Todo` claims; due retries for already-active issues remain eligible even if blockers are still open
+   - due retries that fall out of the active candidate set refresh tracker state directly so terminal issues still run cleanup and inactive issues clear stale retry manifests instead of waiting for daemon recovery
    - post-run retries are only scheduled while the tracker still reports the issue as active
    - if the tracker refresh itself fails before completion bookkeeping, keep the worker report pending and retry that bookkeeping on the next tick instead of dropping it
    - if a worker fails after attaching to a known conversation, preserve that `conversation_id` in workspace metadata so the next retry continues the same thread

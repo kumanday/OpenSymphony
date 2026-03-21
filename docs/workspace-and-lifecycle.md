@@ -265,6 +265,8 @@ When the tracker says an issue is terminal:
 - clear stale retry metadata even if the workspace directory is retained for debugging
 - delete the workspace if configured to do so
 
+This same terminal cleanup path also applies when a queued retry ages out but the tracker has already moved the issue to a terminal state before dispatch.
+
 Keep cleanup policy configurable enough to allow retention during debugging.
 
 After any worker report, OpenSymphony refreshes tracker state before scheduling retries. Inactive issues do not receive continuation or failure retries, and terminal issues run the same cleanup path even if the worker exited normally before the next reconcile loop. If the tracker refresh fails transiently, OpenSymphony keeps that worker report pending and retries the bookkeeping path on the next tick instead of dropping completion state.

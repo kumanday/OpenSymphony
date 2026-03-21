@@ -194,6 +194,8 @@ impl Scheduler {
                 continue;
             }
             let Some(current_issue) = candidates_by_id.remove(&retry.issue.id) else {
+                self.reconcile_missing_retry_candidate(retry, &mut retry_queued_ids)
+                    .await?;
                 continue;
             };
             if blocks_fresh_claim(&current_issue) {
@@ -533,6 +535,45 @@ impl Scheduler {
         retry_queued_ids.insert(retry.issue.id.clone());
         self.retry_queue.push(retry);
         self.retry_queue.sort_by_key(|entry| entry.scheduled_at);
+    }
+
+    async fn reconcile_missing_retry_candidate(
+        &mut self,
+        retry: RetryEntry,
+        retry_queued_ids: &mut HashSet<String>,
+    ) -> Result<(), SchedulerError> {
+        let tracker_state = match self.current_issue_state(&retry.issue.id).await {
+            Ok(state) => state,
+            Err(error) => {
+                self.defer_retry(retry, retry_queued_ids);
+                return Err(error);
+            }
+        };
+
+        match tracker_state {
+            Some(state) if state.is_terminal => {
+                self.workspace
+                    .cleanup_terminal_workspace(&issue_with_state(&retry.issue, Some(&state.state)))
+                    .await
+                    .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
+            }
+            Some(state) if state.is_active => {
+                self.defer_retry(
+                    RetryEntry {
+                        issue: issue_with_state(&retry.issue, Some(&state.state)),
+                        ..retry
+                    },
+                    retry_queued_ids,
+                );
+            }
+            Some(_) | None => {
+                self.workspace
+                    .clear_retry_manifest(&retry.issue.identifier)
+                    .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
+            }
+        }
+
+        Ok(())
     }
 
     fn next_attempt(&self, issue: &Issue) -> Result<u32, SchedulerError> {
@@ -1050,6 +1091,123 @@ mod tests {
         assert_eq!(scheduler.retry_queue.len(), 1);
         assert_eq!(scheduler.retry_queue[0].issue.id, issue.id);
         assert_eq!(scheduler.retry_queue[0].attempt, 2);
+    }
+
+    #[tokio::test]
+    async fn cleans_up_due_retry_when_issue_becomes_terminal_before_dispatch() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string(), "In Progress".to_string()],
+            vec!["Done".to_string()],
+            vec![
+                "Todo".to_string(),
+                "In Progress".to_string(),
+                "Done".to_string(),
+            ],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace_root = tempdir.path().to_path_buf();
+        let mut scheduler = scheduler(
+            tracker.clone(),
+            runner.clone(),
+            workspace_root.clone(),
+            false,
+            None,
+        );
+        let retry = RetryEntry {
+            issue: issue.clone(),
+            attempt: 2,
+            reason: RetryReason::Continuation,
+            scheduled_at: Utc::now(),
+        };
+
+        scheduler
+            .workspace
+            .prepare_issue_workspace(&issue, 1)
+            .await
+            .expect("workspace should prepare");
+        scheduler
+            .workspace
+            .persist_retry(&retry)
+            .expect("retry should persist");
+        scheduler.retry_queue.push(retry);
+        tracker
+            .transition_issue("1", "Done")
+            .expect("transition should succeed");
+
+        scheduler
+            .tick()
+            .await
+            .expect("terminal retry should reconcile");
+
+        assert!(runner.requests().is_empty());
+        assert!(scheduler.retry_queue.is_empty());
+        assert!(workspace_root.join("ABC-1").exists());
+        assert!(!workspace_root
+            .join("ABC-1/.opensymphony/retry.json")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn clears_due_retry_manifest_when_issue_becomes_inactive_before_dispatch() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string(), "In Progress".to_string()],
+            vec!["Done".to_string()],
+            vec![
+                "Todo".to_string(),
+                "In Progress".to_string(),
+                "Paused".to_string(),
+                "Done".to_string(),
+            ],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace_root = tempdir.path().to_path_buf();
+        let mut scheduler = scheduler(
+            tracker.clone(),
+            runner.clone(),
+            workspace_root.clone(),
+            false,
+            None,
+        );
+        let retry = RetryEntry {
+            issue: issue.clone(),
+            attempt: 2,
+            reason: RetryReason::Continuation,
+            scheduled_at: Utc::now(),
+        };
+
+        scheduler
+            .workspace
+            .prepare_issue_workspace(&issue, 1)
+            .await
+            .expect("workspace should prepare");
+        scheduler
+            .workspace
+            .persist_retry(&retry)
+            .expect("retry should persist");
+        scheduler.retry_queue.push(retry);
+        tracker
+            .transition_issue("1", "Paused")
+            .expect("transition should succeed");
+
+        scheduler
+            .tick()
+            .await
+            .expect("inactive retry should reconcile");
+
+        assert!(runner.requests().is_empty());
+        assert!(scheduler.retry_queue.is_empty());
+        assert!(workspace_root.join("ABC-1").exists());
+        assert!(!workspace_root
+            .join("ABC-1/.opensymphony/retry.json")
+            .exists());
     }
 
     #[tokio::test]
