@@ -24,6 +24,7 @@ definition_of_ready:
   - M5 is stable
   - Local MVP is validated
   - Hosted security requirements are documented
+  - The foundational Cargo workspace and referenced runtime paths exist in the working branch
 ---
 
 # OSYM-600: Hosted Deployment Follow-on
@@ -47,10 +48,16 @@ Add the first hosted-mode capability and documentation without destabilizing the
 - Remote mode transport config
 - Auth test coverage
 - Hosted deployment guidance
+- Hosted rollout checklist tied to the existing OpenHands transport config surface
 
 ## Acceptance criteria
 - All child issues are merged
 - The same orchestrator can target a remote agent-server with configuration changes rather than architectural changes
+- Hosted documentation clearly separates first-pilot rollout guidance from later fleet automation work
 
 ## Test plan
 - Remote-mode integration tests against a pinned external server
+- Docs walkthrough for the migration from local supervised mode to `local_server.enabled=false`
+
+## Notes
+This parent task assumes the implementation paths referenced in child tasks already exist. If the repository is still at a docs-only planning snapshot, finish the prerequisite implementation milestones before treating M6 as executable work.

@@ -281,6 +281,12 @@ Implications:
 
 A future hosted mode can keep the same workspace ownership model while moving actual execution into a remote or container-backed environment.
 
+Hosted follow-on constraint:
+
+- the workspace key and logical issue workspace path stay Symphony-owned
+- only the backing implementation behind that logical path changes
+- transport configuration must not leak local host-path assumptions into non-workspace crates
+
 ## 15. Suggested implementation API
 
 ```rust

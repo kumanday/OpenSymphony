@@ -190,7 +190,40 @@ Requirements:
 - version pinning required
 - structured audit logging required
 
-The MVP code should already expose the auth configuration hooks needed later.
+Hosted mode should reuse the same workflow config surface as local and external mode rather than introducing a hosted-only runtime architecture.
+
+Hosted starter profile:
+
+```yaml
+openhands:
+  transport:
+    base_url: "https://agent-server.example.internal"
+    session_api_key_env: OPENHANDS_SESSION_API_KEY
+  local_server:
+    enabled: false
+  websocket:
+    enabled: true
+    auth_mode: auto
+    query_param_name: session_api_key
+```
+
+Hosted transport rules:
+
+- `openhands.transport.base_url` must be explicit and use `https://`
+- `openhands.local_server.enabled` must be `false`
+- `openhands.transport.session_api_key_env` must resolve at startup
+- `openhands.websocket.auth_mode` must be pinned or proven by integration tests for the selected OpenHands version
+- the same daemon process should continue to own orchestration and workspace identity even when execution moves remote
+
+## 7.4 First hosted rollout checklist
+
+For the first hosted deployment, keep rollout narrow and reversible:
+
+- pin one OpenHands version and record the tested HTTP plus WebSocket auth behavior
+- start with one remote server or a small fixed pool before thinking about autoscaling
+- validate REST auth, WebSocket readiness, reconcile-after-ready, and reconnect against the remote base URL
+- expose redacted troubleshooting metadata through structured logs or the control plane
+- keep workspace isolation ownership inside the workspace layer instead of scattering local-path assumptions into other crates
 
 ## 8. What the code should abstract now
 
@@ -213,10 +246,10 @@ Deliver local supervised mode only.
 
 ### Phase 2
 
-Support external local server mode for debugging and CI.
+Support external local server mode for debugging, CI, and auth-path validation against the same config surface used later in hosted mode.
 
 ### Phase 3
 
-Add hosted remote mode with hardened auth and stronger workspace isolation.
+Add hosted remote mode with hardened auth, stronger workspace isolation, and rollout guidance for a small pilot deployment.
 
 This sequencing gives the project the fastest path to a working developer-focused MVP while preserving the right long-term boundaries.

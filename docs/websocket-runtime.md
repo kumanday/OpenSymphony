@@ -42,13 +42,22 @@ If the host contains a base path, preserve it.
 
 ## 2.3 Auth modes
 
-Support these modes in the Rust client:
+Support config-driven strategies equivalent to these modes in the Rust client:
 
 - none
 - query-param session API key fallback
 - optional header-based auth for versions that support it
+- an auto mode that resolves to one of the above using the pinned server behavior
+
+Relevant workflow fields:
+
+- `openhands.transport.session_api_key_env`
+- `openhands.websocket.auth_mode`
+- `openhands.websocket.query_param_name`
 
 Default local MVP behavior: none.
+
+Hosted expectation: auth must be configured, and the pinned version must prove whether `auto` resolves to header-based auth or query-param fallback.
 
 ## 3. Event model
 
@@ -224,6 +233,7 @@ Implementation recommendation:
 - idle timeout
 - daemon reconnect after a transient failure
 - temporary auth mismatch
+- wrong WebSocket auth strategy for the pinned server version
 - event decode failure for one message
 
 ## 8.2 Reconnect policy

@@ -148,6 +148,7 @@ A task is ready when:
 - its dependencies are merged or available in the working branch
 - the docs referenced in `project_context` exist and are current
 - target repository paths are identified
+- target repository paths that the task must edit already exist in the working branch when the task requires code or test changes
 - required test fixtures are available
 - required secrets or local services for live tests are documented
 
@@ -176,6 +177,12 @@ Do not block M1 through M5 on:
 - multi-tenant auth provider integration
 - production-grade hosted deployment manifests
 - organization-wide onboarding automation
+
+M6 documentation can be refined against the existing `WORKFLOW.example.md` transport surface before the runtime code lands, but do not treat the milestone as complete until all of the following are true:
+
+- OSYM-601 remote transport and auth work is merged
+- OSYM-602 hosted rollout documentation is validated against that implementation
+- remote-mode integration evidence exists against a pinned external server
 
 ## 10. Parent issue strategy
 

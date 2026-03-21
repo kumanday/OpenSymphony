@@ -214,16 +214,38 @@ Implementation rule:
 - keep the orchestrator core independent of the raw OpenHands JSON model
 - all payload shaping belongs in `opensymphony-openhands`
 
-## 9. Authentication
+## 9. Authentication and transport profile
+
+The auth surface should hang off the existing `WORKFLOW.md` OpenHands config instead of introducing a second hosted-only config path.
+
+Relevant fields:
+
+- `openhands.transport.base_url`
+- `openhands.transport.session_api_key_env`
+- `openhands.local_server.enabled`
+- `openhands.websocket.auth_mode`
+- `openhands.websocket.query_param_name`
 
 ## 9.1 Local MVP
 
 Default local mode:
 
+- `base_url` points at loopback
+- `local_server.enabled` is `true`
 - bind to loopback only
 - no mandatory session API key
 
-## 9.2 Future-proofing
+## 9.2 External or hosted server mode
+
+When the daemon targets an externally managed or hosted server:
+
+- `base_url` must be explicit
+- `local_server.enabled` must be `false`
+- hosted deployments should require `https://`
+- `session_api_key_env` should resolve at startup
+- `websocket.auth_mode` must be pinned or validated against the selected OpenHands version
+
+## 9.3 Supported auth strategies
 
 The Rust client should still support:
 
@@ -232,7 +254,7 @@ The Rust client should still support:
 - session API key for WebSocket query-param fallback
 - optional header-based WebSocket auth for versions that support it
 
-Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
+Do not assume one auth method forever. Keep it configurable, prefer the most secure strategy the pinned version supports, and cover the exact HTTP plus WebSocket behavior with integration tests.
 
 ## 10. OpenHands hooks vs Symphony hooks
 
@@ -276,6 +298,14 @@ Future hosted mode changes:
 - auth becomes mandatory
 - local subprocess supervisor is disabled
 - stronger sandbox and tenancy rules apply
+
+Hosted troubleshooting expectations:
+
+- expose the remote base URL host and scheme through structured logs or the control plane
+- expose whether `local_server.enabled` is on or off
+- expose the selected WebSocket auth mode and readiness timeout
+- record the pinned server version when it can be discovered safely
+- never expose session API keys, raw auth headers, or raw query parameters
 
 What does not change:
 

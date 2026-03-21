@@ -115,7 +115,7 @@ Snapshot/control plane, FrankenTUI client, workspace-generated context artifacts
 Fake agent-server, live local E2E suite, doctor command, packaging.
 
 ### M6 Hosted deployment follow-on
-Remote agent-server mode, auth hardening, centralized deployment docs.
+Remote agent-server mode, auth hardening, and hosted rollout guidance built on the same `openhands.transport`, `openhands.local_server`, and `openhands.websocket` config surface used in local and external modes.
 
 ## Local MVP quick-start for implementers
 

@@ -251,5 +251,6 @@ When hosted mode is added, prefer adding small focused crates or modules such as
 - remote auth helpers
 - deployment manifests
 - hosted control-plane adapters
+- remote transport diagnostics
 
 Do not contaminate the local MVP crates with speculative hosted-only branching if a clean boundary exists.

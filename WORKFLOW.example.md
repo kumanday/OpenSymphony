@@ -39,11 +39,11 @@ agent:
 
 openhands:
   transport:
-    base_url: "http://127.0.0.1:8000"
-    session_api_key_env: null
+    base_url: "http://127.0.0.1:8000" # external or hosted mode uses an explicit remote https:// base URL here
+    session_api_key_env: null # set this for external or hosted servers that require session auth
 
   local_server:
-    enabled: true
+    enabled: true # set false when targeting an external or hosted agent-server
     command:
       - python
       - -m
@@ -78,8 +78,8 @@ openhands:
     ready_timeout_ms: 30000
     reconnect_initial_ms: 1000
     reconnect_max_ms: 30000
-    auth_mode: auto
-    query_param_name: session_api_key
+    auth_mode: auto # keep this pinned by integration tests for the selected OpenHands version
+    query_param_name: session_api_key # used when the pinned server requires query-param WebSocket auth fallback
 
   mcp:
     stdio_servers:
