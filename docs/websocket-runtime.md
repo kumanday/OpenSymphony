@@ -96,7 +96,7 @@ Use this sequence whenever attaching to a conversation, both fresh and existing.
 
 1. Ensure `conversation_id` is known.
 2. Perform an initial full event sync with `GET /api/conversations/{id}/events/search`.
-3. Start the WebSocket connection.
+3. Start the WebSocket connection with the configured handshake timeout.
 4. Wait for the readiness barrier.
 5. Reconcile events again with `GET /events/search`.
 6. Only after readiness and reconcile is the stream considered attached.
@@ -133,6 +133,8 @@ Configurable timeout:
 - default `30000 ms`
 
 If readiness is not achieved, fail the attach attempt and surface a transport error.
+Apply the same timeout budget to the WebSocket handshake itself so a blackholed socket does not
+wait on kernel TCP timeouts.
 
 ## 6. Event cache and reconciliation
 
@@ -236,13 +238,15 @@ Use bounded exponential backoff:
 On reconnect:
 
 1. refresh conversation info with REST
-2. reconnect WebSocket
+2. reconnect WebSocket with the configured handshake timeout
 3. wait for readiness
 4. reconcile `events/search` again before trusting the resumed stream
 4. reconcile events
 5. resume streaming
 
 If reconnection exhausts policy limits or the worker deadline, fail the worker and let the orchestrator schedule retry.
+If shutdown or cancellation arrives during a reconnect handshake, abort that attempt immediately
+instead of waiting for the transport timeout to expire.
 
 ## 8.3 Decode failures
 

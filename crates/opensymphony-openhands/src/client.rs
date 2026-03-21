@@ -32,10 +32,12 @@ impl OpenHandsClient {
     /// Builds a new client around the provided transport configuration.
     #[must_use]
     pub fn new(transport: TransportConfig) -> Self {
-        Self {
-            http: reqwest::Client::new(),
-            transport,
-        }
+        let http = reqwest::Client::builder()
+            .connect_timeout(transport.http_connect_timeout())
+            .timeout(transport.http_request_timeout())
+            .build()
+            .expect("OpenHands HTTP client should build from validated transport config");
+        Self { http, transport }
     }
 
     /// Returns the immutable transport configuration.
@@ -352,8 +354,11 @@ impl OpenHandsClient {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::config::{HttpAuth, TransportConfig, WebSocketAuthMode};
+    use tokio::net::TcpListener;
 
     #[test]
     fn websocket_request_uses_server_root_when_base_url_contains_api() {
@@ -361,6 +366,8 @@ mod tests {
             base_url: Url::parse("https://example.com/runtime/456/api")
                 .expect("static test URL must parse"),
             http_auth: HttpAuth::SessionApiKey("secret".to_string()),
+            http_connect_timeout_ms: 5_000,
+            http_request_timeout_ms: 30_000,
             websocket_auth: WebSocketAuthMode::Header,
             websocket_query_param_name: "session_api_key".to_string(),
         });
@@ -385,6 +392,8 @@ mod tests {
         let client = OpenHandsClient::new(TransportConfig {
             base_url: Url::parse("http://127.0.0.1:8000").expect("static test URL must parse"),
             http_auth: HttpAuth::SessionApiKey("secret".to_string()),
+            http_connect_timeout_ms: 5_000,
+            http_request_timeout_ms: 30_000,
             websocket_auth: WebSocketAuthMode::QueryParam,
             websocket_query_param_name: "session_api_key".to_string(),
         });
@@ -396,5 +405,39 @@ mod tests {
             "ws://127.0.0.1:8000/sockets/events/abc?session_api_key=secret"
         );
         assert!(request.headers().get(SESSION_API_KEY_HEADER).is_none());
+    }
+
+    #[tokio::test]
+    async fn client_request_timeout_fails_fast_on_unresponsive_server() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener address should resolve");
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("client should connect");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let client = OpenHandsClient::new(TransportConfig {
+            base_url: Url::parse(&format!("http://{address}")).expect("base URL should parse"),
+            http_auth: HttpAuth::None,
+            http_connect_timeout_ms: 50,
+            http_request_timeout_ms: 50,
+            websocket_auth: WebSocketAuthMode::Auto,
+            websocket_query_param_name: "session_api_key".to_string(),
+        });
+
+        let error = tokio::time::timeout(Duration::from_millis(200), client.probe_path("/health"))
+            .await
+            .expect("probe should obey the internal request timeout")
+            .expect_err("unresponsive server should time out");
+        match error {
+            OpenHandsError::HttpTransport { source, .. } => assert!(source.is_timeout()),
+            other => panic!("expected transport timeout, got {other:?}"),
+        }
+
+        server.abort();
     }
 }

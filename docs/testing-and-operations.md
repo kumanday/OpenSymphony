@@ -101,12 +101,15 @@ Current live OpenHands inputs:
 
 - supervised server startup and shutdown
 - HTTP client auth modes
+- HTTP connect and request deadlines
 - root-endpoint normalization when `base_url` is configured with an `/api` suffix
 - conversation creation
 - initial REST sync
+- WebSocket handshake timeout
 - WebSocket readiness barrier
 - post-ready reconcile
 - reconnect with backoff
+- reconnect cancellation during an in-flight handshake
 - out-of-order event insertion
 - terminal state detection
 - conversation reuse
@@ -181,6 +184,7 @@ Suggested scenarios:
 
 - interrupt the WebSocket connection
 - verify backoff, reattach, reconcile, and continued completion detection
+- blackhole one reconnect handshake and verify timeout plus prompt shutdown cancellation
 
 ## 6. Operational commands
 
