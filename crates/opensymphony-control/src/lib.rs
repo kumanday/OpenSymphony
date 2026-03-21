@@ -119,23 +119,15 @@ async fn events(
     let mut receiver = store.subscribe();
     let initial = store.current().await;
     let stream = stream! {
+        let mut last_sent_sequence = initial.sequence;
         if let Some(event) = snapshot_event(&initial) {
             yield Ok(event);
         }
-        loop {
-            match receiver.recv().await {
-                Ok(envelope) => {
-                    if let Some(event) = snapshot_event(&envelope) {
-                        yield Ok(event);
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    let envelope = store.current().await;
-                    if let Some(event) = snapshot_event(&envelope) {
-                        yield Ok(event);
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => break,
+        while let Some(envelope) =
+            next_snapshot_envelope(&store, &mut receiver, &mut last_sent_sequence).await
+        {
+            if let Some(event) = snapshot_event(&envelope) {
+                yield Ok(event);
             }
         }
     };
@@ -155,6 +147,33 @@ fn snapshot_event(envelope: &SnapshotEnvelope) -> Option<Event> {
             .id(envelope.sequence.to_string())
             .data(payload),
     )
+}
+
+async fn next_snapshot_envelope(
+    store: &SnapshotStore,
+    receiver: &mut broadcast::Receiver<SnapshotEnvelope>,
+    last_sent_sequence: &mut u64,
+) -> Option<SnapshotEnvelope> {
+    loop {
+        match receiver.recv().await {
+            Ok(envelope) => {
+                if envelope.sequence <= *last_sent_sequence {
+                    continue;
+                }
+                *last_sent_sequence = envelope.sequence;
+                return Some(envelope);
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                let envelope = store.current().await;
+                if envelope.sequence <= *last_sent_sequence {
+                    continue;
+                }
+                *last_sent_sequence = envelope.sequence;
+                return Some(envelope);
+            }
+            Err(broadcast::error::RecvError::Closed) => return None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -248,4 +267,93 @@ impl From<reqwest_eventsource::Error> for ControlPlaneClientError {
 
 pub fn log_stream_error(error: &ControlPlaneClientError) {
     warn!(error = %error, "control-plane stream error");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use chrono::{TimeZone, Utc};
+    use opensymphony_domain::{
+        AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
+        IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
+    };
+    use tokio::time::timeout;
+
+    use super::{next_snapshot_envelope, SnapshotStore};
+
+    fn fixture_snapshot(step: u64) -> DaemonSnapshot {
+        let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+            + chrono::Duration::seconds(step as i64);
+        DaemonSnapshot {
+            generated_at: now,
+            daemon: DaemonStatus {
+                state: DaemonState::Ready,
+                last_poll_at: now,
+                workspace_root: "/tmp/opensymphony".to_owned(),
+                status_line: "ready".to_owned(),
+            },
+            agent_server: AgentServerStatus {
+                reachable: true,
+                base_url: "http://127.0.0.1:3000".to_owned(),
+                conversation_count: 2,
+                status_line: "healthy".to_owned(),
+            },
+            metrics: MetricsSnapshot {
+                running_issues: 1,
+                retry_queue_depth: 0,
+                total_tokens: 4096 + step,
+                total_cost_micros: 120_000,
+            },
+            issues: vec![IssueSnapshot {
+                identifier: "COE-255".to_owned(),
+                title: "Observability and FrankenTUI".to_owned(),
+                tracker_state: "In Progress".to_owned(),
+                runtime_state: IssueRuntimeState::Running,
+                last_outcome: WorkerOutcome::Running,
+                last_event_at: now,
+                conversation_id_suffix: "c0e255".to_owned(),
+                workspace_path_suffix: "COE-255".to_owned(),
+                retry_count: 0,
+                blocked: false,
+            }],
+            recent_events: vec![RecentEvent {
+                happened_at: now,
+                issue_identifier: Some("COE-255".to_owned()),
+                kind: RecentEventKind::SnapshotPublished,
+                summary: format!("published step {step}"),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn lagged_receivers_resume_from_the_latest_snapshot_without_regressing() {
+        let store = SnapshotStore::new(fixture_snapshot(0));
+        let mut receiver = store.subscribe();
+        let mut last_sent_sequence = store.current().await.sequence;
+
+        for step in 1..=80 {
+            store.publish(fixture_snapshot(step)).await;
+        }
+
+        let latest = next_snapshot_envelope(&store, &mut receiver, &mut last_sent_sequence)
+            .await
+            .expect("latest snapshot after lag");
+        assert_eq!(latest.sequence, 81);
+
+        let expected = store.publish(fixture_snapshot(81)).await;
+        let resumed = timeout(
+            Duration::from_secs(1),
+            next_snapshot_envelope(&store, &mut receiver, &mut last_sent_sequence),
+        )
+        .await
+        .expect("resumed snapshot")
+        .expect("open stream");
+
+        assert_eq!(resumed.sequence, expected.sequence);
+        assert_eq!(
+            resumed.snapshot.recent_events[0].summary,
+            "published step 81"
+        );
+    }
 }

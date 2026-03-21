@@ -121,15 +121,20 @@ Suggested gates:
 - snapshot derivation
 - JSON serialization
 - streaming update fanout
+- monotonic SSE delivery after lagged receivers
 - read-only client invariants
+- reconnect state that preserves the last good snapshot
 - pane layout persistence
+- narrow inline rendering that keeps issue detail visible
 - event log rendering
 
 Current implemented checks:
 
 - snapshot serialization in `opensymphony-domain`
 - control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
+- control-plane lag-recovery monotonicity coverage in `opensymphony-control/src/lib.rs`
 - TUI reducer, visible-focus rendering, and render smoke tests in `opensymphony-tui/tests/reducer.rs`
+- TUI mailbox reconnect retention and narrow-layout detail coverage in `opensymphony-tui/src/lib.rs`
 
 ## 4. Fake OpenHands server requirements
 
@@ -206,6 +211,8 @@ Current validation commands for the implemented observability slice:
 - `curl http://127.0.0.1:4010/api/v1/snapshot`
 - `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
 - `curl http://127.0.0.1:4010/healthz`
+
+When validating the control-plane stream locally, confirm that a reconnecting client still shows the last successful snapshot and that lagged consumers only advance to newer snapshot sequences.
 
 ## 7. Doctor checks
 
