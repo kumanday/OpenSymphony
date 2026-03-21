@@ -30,6 +30,7 @@ const DEFAULT_PERSISTENCE_DIR_RELATIVE: &str = ".opensymphony/openhands";
 const DEFAULT_MAX_ITERATIONS: u32 = 500;
 const DEFAULT_CONFIRMATION_POLICY_KIND: &str = "NeverConfirm";
 const DEFAULT_AGENT_KIND: &str = "Agent";
+const DEFAULT_LINEAR_API_KEY_ENV: &str = "LINEAR_API_KEY";
 const DEFAULT_READY_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_RECONNECT_INITIAL_MS: u64 = 1_000;
 const DEFAULT_RECONNECT_MAX_MS: u64 = 30_000;
@@ -196,15 +197,21 @@ impl TrackerConfig {
             }
         };
 
-        let api_key = raw
-            .api_key
-            .as_deref()
-            .map(|value| resolve_explicit_config_value(value, env, "tracker.api_key"))
-            .transpose()?
-            .and_then(|value| {
-                let trimmed = value.trim();
-                (!trimmed.is_empty()).then(|| trimmed.to_string())
-            });
+        let api_key = match raw.api_key.as_deref() {
+            Some(value) => Some(resolve_explicit_config_value(
+                value,
+                env,
+                "tracker.api_key",
+            )?),
+            None if matches!(kind, Some(TrackerKind::Linear)) => {
+                env.get_var(DEFAULT_LINEAR_API_KEY_ENV)
+            }
+            None => None,
+        }
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
         let project_slug = raw.project_slug.and_then(|slug| {
             let trimmed = slug.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -219,7 +226,9 @@ impl TrackerConfig {
         if matches!(kind, Some(TrackerKind::Linear)) && api_key.is_none() {
             return Err(WorkflowError::invalid_config(
                 "tracker.api_key",
-                "must be set for the Linear tracker",
+                format!(
+                    "must be set for the Linear tracker via `tracker.api_key` or `{DEFAULT_LINEAR_API_KEY_ENV}`"
+                ),
             ));
         }
 
@@ -1250,8 +1259,11 @@ Hello
     }
 
     #[test]
-    fn rejects_linear_tracker_without_api_key() {
-        let error = Workflow::load_from_str_with_env(
+    fn accepts_linear_tracker_with_process_env_api_key() {
+        let mut env = env();
+        env.insert("LINEAR_API_KEY".into(), "process-linear-key".into());
+
+        let workflow = Workflow::load_from_str_with_env(
             r#"---
 tracker:
   kind: linear
@@ -1259,12 +1271,13 @@ tracker:
 ---
 Hello
 "#,
-            &env(),
+            &env,
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(
-            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "tracker.api_key")
+        assert_eq!(
+            workflow.config.tracker.api_key.as_deref(),
+            Some("process-linear-key")
         );
     }
 

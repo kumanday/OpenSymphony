@@ -375,6 +375,15 @@ impl SchedulerState {
             .collect::<BTreeMap<_, _>>();
         let running_ids = self.running.keys().cloned().collect::<Vec<_>>();
         let retry_ids = self.retry_attempts.keys().cloned().collect::<Vec<_>>();
+        let claimed_only_ids = self
+            .claimed
+            .iter()
+            .filter(|issue_id| {
+                !self.running.contains_key(*issue_id)
+                    && !self.retry_attempts.contains_key(*issue_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
 
         let mut outcomes = Vec::new();
         for issue_id in running_ids {
@@ -419,6 +428,42 @@ impl SchedulerState {
         for issue_id in retry_ids {
             if self.running.contains_key(&issue_id) || !self.retry_attempts.contains_key(&issue_id)
             {
+                continue;
+            }
+
+            match refreshed.get(&issue_id) {
+                Some(issue) if issue.is_terminal(&self.config.terminal_states) => {
+                    self.release(&issue_id);
+                    outcomes.push(ReconciliationOutcome {
+                        issue_id,
+                        reason: ReleaseReason::Terminal,
+                        cleanup_workspace: true,
+                    });
+                }
+                Some(issue)
+                    if issue
+                        .is_active(&self.config.active_states, &self.config.terminal_states) => {}
+                Some(_) => {
+                    self.release(&issue_id);
+                    outcomes.push(ReconciliationOutcome {
+                        issue_id,
+                        reason: ReleaseReason::Inactive,
+                        cleanup_workspace: false,
+                    });
+                }
+                None => {
+                    self.release(&issue_id);
+                    outcomes.push(ReconciliationOutcome {
+                        issue_id,
+                        reason: ReleaseReason::Missing,
+                        cleanup_workspace: false,
+                    });
+                }
+            }
+        }
+
+        for issue_id in claimed_only_ids {
+            if self.running.contains_key(&issue_id) || self.retry_attempts.contains_key(&issue_id) {
                 continue;
             }
 
@@ -904,6 +949,68 @@ mod tests {
             }]
         );
         assert!(scheduler.due_retries(timestamp(21)).is_empty());
+    }
+
+    #[test]
+    fn reconciliation_releases_claimed_only_issues_that_never_start_running() {
+        let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+        let claimed = scheduler.claim_candidate_batch(&[
+            issue("1", "OSYM-1", "In Progress", Some(1), timestamp(1)),
+            issue("2", "OSYM-2", "Todo", Some(1), timestamp(2)),
+            issue("3", "OSYM-3", "Todo", Some(1), timestamp(3)),
+        ]);
+
+        assert_eq!(claimed.len(), 3);
+        assert_eq!(
+            scheduler.orchestration_state("1"),
+            OrchestrationState::Claimed
+        );
+        assert_eq!(
+            scheduler.orchestration_state("2"),
+            OrchestrationState::Claimed
+        );
+        assert_eq!(
+            scheduler.orchestration_state("3"),
+            OrchestrationState::Claimed
+        );
+
+        let outcomes = scheduler.reconcile_tracker_states(&[
+            issue("1", "OSYM-1", "Done", Some(1), timestamp(4)),
+            issue("2", "OSYM-2", "Human Review", Some(1), timestamp(5)),
+        ]);
+
+        assert_eq!(
+            outcomes,
+            vec![
+                ReconciliationOutcome {
+                    issue_id: "1".into(),
+                    reason: ReleaseReason::Terminal,
+                    cleanup_workspace: true,
+                },
+                ReconciliationOutcome {
+                    issue_id: "2".into(),
+                    reason: ReleaseReason::Inactive,
+                    cleanup_workspace: false,
+                },
+                ReconciliationOutcome {
+                    issue_id: "3".into(),
+                    reason: ReleaseReason::Missing,
+                    cleanup_workspace: false,
+                },
+            ]
+        );
+        assert_eq!(
+            scheduler.orchestration_state("1"),
+            OrchestrationState::Released
+        );
+        assert_eq!(
+            scheduler.orchestration_state("2"),
+            OrchestrationState::Released
+        );
+        assert_eq!(
+            scheduler.orchestration_state("3"),
+            OrchestrationState::Released
+        );
     }
 
     #[test]

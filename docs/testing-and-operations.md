@@ -88,7 +88,8 @@ Suggested gates:
 - fail on unknown template variables
 - resolve defaults and env vars
 - require `tracker.project_slug` for Linear-backed workflows
-- require `tracker.api_key` for Linear-backed workflows
+- require Linear API credentials for Linear-backed workflows via explicit `tracker.api_key` or process-level `LINEAR_API_KEY`
+- fail when explicit env-backed tracker credentials reference missing env vars
 - fail when explicit env-backed path settings reference missing env vars
 - validate `openhands` extension namespace
 
