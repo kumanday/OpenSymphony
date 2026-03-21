@@ -108,7 +108,7 @@ async fn reconciliation_walks_multiple_pages() {
         .await
         .expect("state update should be recorded");
     server
-        .emit_state_update(conversation.conversation_id, "completed")
+        .emit_state_update(conversation.conversation_id, "finished")
         .await
         .expect("second state update should be recorded");
 
@@ -118,4 +118,33 @@ async fn reconciliation_walks_multiple_pages() {
         .expect("reconcile should read all pages");
 
     assert_eq!(cache.items().len(), 3);
+}
+
+#[tokio::test]
+async fn fake_server_run_finishes_with_documented_terminal_status() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    client
+        .run_conversation(conversation.conversation_id)
+        .await
+        .expect("run should succeed");
+
+    let conversation = client
+        .get_conversation(conversation.conversation_id)
+        .await
+        .expect("conversation fetch should succeed");
+    assert_eq!(conversation.execution_status, "finished");
 }

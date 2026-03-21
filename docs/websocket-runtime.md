@@ -319,7 +319,7 @@ The runtime stream informs, but does not define, Symphony outcomes.
 
 Mapping examples:
 
-- terminal `execution_status` with clean completion:
+- terminal `execution_status` `finished` with clean completion:
   - worker may continue another in-process turn or exit normally
 - transport failure:
   - abnormal worker exit, schedule backoff retry
@@ -348,6 +348,7 @@ Required automated scenarios:
 - disconnect before terminal status
 - reconnect plus reconcile catches missed events
 - terminal `execution_status` observed over WebSocket
+- failure-only events such as `ConversationErrorEvent` do not count as successful completion
 - REST fallback after stream uncertainty
 - unknown event kind does not crash the stream
 

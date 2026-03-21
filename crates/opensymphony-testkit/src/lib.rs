@@ -287,15 +287,15 @@ async fn run_conversation(
             "tokens": 42,
         }),
     );
-    let completed_event = EventEnvelope::new(
+    let finished_event = EventEnvelope::new(
         next_event_id(&mut inner),
         Utc::now(),
         "runtime",
         "ConversationStateUpdateEvent",
         json!({
-            "execution_status": "completed",
+            "execution_status": "finished",
             "state_delta": {
-                "execution_status": "completed",
+                "execution_status": "finished",
             },
         }),
     );
@@ -306,7 +306,7 @@ async fn run_conversation(
         .ok_or(StatusCode::NOT_FOUND)?;
     apply_event_to_conversation(conversation, running_event);
     apply_event_to_conversation(conversation, completion_event);
-    apply_event_to_conversation(conversation, completed_event);
+    apply_event_to_conversation(conversation, finished_event);
     Ok(Json(json!({ "success": true })))
 }
 
