@@ -8,7 +8,9 @@ Bootstrap state in M1:
 - `version.txt` carries the unresolved version placeholder
 - `pyproject.toml` records the future package pin location
 - `uv.lock` is a placeholder that must be replaced by a resolved lockfile
-- `run-local.sh` fails closed until the package version is pinned and installed
+- `run-local.sh` fails closed until the version, package pin, and lockfile are
+  all resolved, then launches the pinned server via `uv run --locked -m
+  openhands.agent_server`
 
 The local MVP must eventually pin the exact OpenHands package version used for:
 

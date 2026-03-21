@@ -131,7 +131,8 @@ Current required checks:
 The local OpenHands tooling boundary lives in `tools/openhands-server/`. During
 M1 it is intentionally fail-closed: the directory exists, the pin files are
 reserved, and the launcher refuses to run until a validated package version and
-lockfile are committed.
+lockfile are committed. Once those placeholders are replaced, the launcher uses
+the pinned local `uv` environment instead of a global `openhands` install.
 
 ## Local MVP quick-start for implementers
 
