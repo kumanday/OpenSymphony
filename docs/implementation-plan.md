@@ -8,7 +8,7 @@ This document is the planning index for OpenSymphony. It is designed to be direc
 - keep the OpenHands adapter isolated behind one crate boundary
 - go WebSocket-first for runtime updates
 - local supervised mode is the MVP
-- hosted mode is a follow-on milestone, not an MVP blocker
+- hosted mode is a follow-on milestone, not an MVP blocker, so it will be built in the future
 - every task should be independently implementable by a coding agent with only repository and task context
 
 ## 2. Milestones
@@ -20,7 +20,6 @@ This document is the planning index for OpenSymphony. It is designed to be direc
 | M3 Symphony orchestration core | workspace lifecycle, Linear adapter, scheduler, MCP writes | issue-driven autonomous execution |
 | M4 Operator UX and repo harness | control plane, FrankenTUI, generated context artifacts | usable local operator experience |
 | M5 Validation and local packaging | fake server, live tests, doctor, packaging | reliable local MVP |
-| M6 Hosted deployment follow-on | remote mode, auth hardening, rollout docs | upgrade path for central infrastructure |
 
 ## 3. Issue hierarchy
 
@@ -51,10 +50,6 @@ OSYM-500 Validation and Local Ops
   ├─ OSYM-501 Fake OpenHands server and contract suite
   ├─ OSYM-502 Live local end-to-end suite
   └─ OSYM-503 CLI packaging, doctor, and operations docs
-
-OSYM-600 Hosted Follow-on
-  ├─ OSYM-601 Remote agent-server mode and auth hardening
-  └─ OSYM-602 Hosted topology and rollout guidance
 ```
 
 ## 4. Recommended execution order
@@ -70,7 +65,6 @@ OSYM-600 Hosted Follow-on
 9. OSYM-305 and OSYM-402
 10. OSYM-501
 11. OSYM-502 and OSYM-503
-12. OSYM-601 and OSYM-602
 
 ## 5. Dependency graph
 
@@ -115,12 +109,6 @@ OSYM-201 + OSYM-204 + OSYM-303 + OSYM-304 + OSYM-305 + OSYM-501
 
 OSYM-401 + OSYM-402 + OSYM-502
   └─ OSYM-503
-
-OSYM-202 + OSYM-203 + OSYM-204 + OSYM-401
-  └─ OSYM-601
-
-OSYM-601 + OSYM-503
-  └─ OSYM-602
 ```
 
 ## 6. Linear conversion guidance
@@ -166,18 +154,7 @@ The local MVP is done when all of the following are true:
 - live local end-to-end tests pass on a controlled machine
 - `opensymphony doctor` validates a machine well enough to run the MVP
 
-## 9. Scope boundary for M6
-
-M6 is explicitly post-MVP.
-
-Do not block M1 through M5 on:
-
-- remote cluster autoscaling
-- multi-tenant auth provider integration
-- production-grade hosted deployment manifests
-- organization-wide onboarding automation
-
-## 10. Parent issue strategy
+## 9. Parent issue strategy
 
 Create the parent issues first in Linear, attach the relevant milestone, then create the child issues and link them under the parent.
 
@@ -188,7 +165,7 @@ Recommended parent issue purpose:
 - aggregate child acceptance notes
 - reduce duplication in child issue descriptions
 
-## 11. Suggested first milestone review gate
+## 10. Suggested first milestone review gate
 
 At the end of M2, run a formal adapter review.
 
