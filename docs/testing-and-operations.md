@@ -124,8 +124,9 @@ Suggested gates:
 - monotonic SSE delivery after lagged receivers
 - read-only client invariants
 - reconnect state that preserves the last good snapshot
+- selection stability across snapshot reordering
 - pane layout persistence
-- narrow inline rendering that keeps issue detail visible
+- narrow inline rendering that keeps the selected issue row and detail visible
 - event log rendering
 
 Current implemented checks:
@@ -133,7 +134,7 @@ Current implemented checks:
 - snapshot serialization in `opensymphony-domain`
 - control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane lag-recovery monotonicity coverage in `opensymphony-control/src/lib.rs`
-- TUI reducer, visible-focus rendering, reconnect-state retention, and render smoke tests in `opensymphony-tui/tests/reducer.rs`
+- TUI reducer, visible-focus rendering, reconnect-state retention, stable selection across snapshot reordering, and render smoke tests in `opensymphony-tui/tests/reducer.rs`
 - TUI bridge mailbox coverage for snapshot coalescing, preserving the last good snapshot across disconnects, and narrow-layout detail coverage in `opensymphony-tui/src/lib.rs`
 
 ## 4. Fake OpenHands server requirements
