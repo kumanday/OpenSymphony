@@ -1078,4 +1078,127 @@ mod tests {
         assert_eq!(texts, vec!["full prompt", "continue prompt"]);
         Ok(())
     }
+
+    #[tokio::test]
+    async fn issue_session_runner_resets_stale_workspace_binding()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        let temp_dir = TempDir::new()?;
+        let workspace = opensymphony_workspace::WorkspaceLayout::new(temp_dir.path(), "COE-253")?;
+        workspace.create()?;
+
+        let stale_conversation_id = "stale-workspace-conv".to_string();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: "/tmp/old-workspace".to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some(stale_conversation_id.clone()),
+                persistence_dir: Some("/tmp/old-workspace/.opensymphony/openhands".to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+
+        ConversationManifest {
+            issue_id: "issue-1".to_string(),
+            identifier: "COE-253".to_string(),
+            conversation_id: stale_conversation_id.clone(),
+            server_base_url: client.transport().base_url.to_string(),
+            persistence_dir: workspace.openhands_dir.display().to_string(),
+            created_at: Utc::now(),
+            last_attached_at: Utc::now(),
+            fresh_conversation: false,
+            reset_reason: None,
+            runtime_contract_version: "openhands-sdk-v1.14.0".to_string(),
+        }
+        .save(&workspace.conversation_manifest_path)?;
+
+        let runner = IssueSessionRunner::new(
+            client.clone(),
+            opensymphony_openhands::ConversationConfig {
+                runtime_contract_version: "openhands-sdk-v1.14.0".to_string(),
+                persistence_dir_relative: ".opensymphony/openhands".to_string(),
+                agent: agent(),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+            },
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .with_run_timeout(Duration::from_secs(2));
+
+        let outcome = runner
+            .execute(&IssueSessionRequest {
+                issue: IssueRef {
+                    issue_id: "issue-1".to_string(),
+                    identifier: "COE-253".to_string(),
+                    title: "Runtime adapter".to_string(),
+                },
+                workspace: workspace.clone(),
+                prompts: PromptSet {
+                    full_prompt: "full prompt".to_string(),
+                    continuation_prompt: "continue prompt".to_string(),
+                },
+            })
+            .await?;
+
+        assert_eq!(outcome.prompt_kind, opensymphony_domain::PromptKind::Fresh);
+        assert_ne!(outcome.conversation_id, stale_conversation_id);
+
+        let stale_record = server.conversation_record(&stale_conversation_id).await?;
+        assert!(stale_record.messages.is_empty());
+        assert_eq!(stale_record.run_count, 0);
+
+        let fresh_record = server.conversation_record(&outcome.conversation_id).await?;
+        let expected_working_dir = workspace.issue_workspace.display().to_string();
+        let expected_persistence_dir = workspace.openhands_dir.display().to_string();
+        assert_eq!(
+            fresh_record.info.workspace.working_dir,
+            expected_working_dir
+        );
+        assert_eq!(
+            fresh_record.info.persistence_dir.as_deref(),
+            Some(expected_persistence_dir.as_str())
+        );
+        let texts: Vec<_> = fresh_record
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["full prompt"]);
+
+        let manifest = ConversationManifest::load(&workspace.conversation_manifest_path)?
+            .expect("conversation manifest should be rewritten");
+        assert_eq!(
+            manifest.reset_reason.as_deref(),
+            Some("workspace_binding_changed")
+        );
+
+        Ok(())
+    }
 }

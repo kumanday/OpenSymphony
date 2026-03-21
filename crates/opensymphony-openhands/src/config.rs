@@ -71,6 +71,15 @@ pub struct TransportConfig {
 }
 
 impl TransportConfig {
+    /// Builds the public server root URL, stripping a trailing `/api` when present.
+    fn root_base_url(&self) -> Result<Url> {
+        if base_path_has_api_suffix(&self.base_url) {
+            strip_path_suffix(&self.base_url, "/api")
+        } else {
+            Ok(self.base_url.clone())
+        }
+    }
+
     /// Returns the configured session API key when one exists.
     #[must_use]
     pub fn session_api_key(&self) -> Option<&str> {
@@ -82,16 +91,12 @@ impl TransportConfig {
 
     /// Builds the REST base URL, preserving any configured path prefix.
     pub fn rest_base_url(&self) -> Result<Url> {
-        if self.base_url.path().trim_end_matches('/').ends_with("/api") {
-            Ok(self.base_url.clone())
-        } else {
-            self.join_root_path("/api")
-        }
+        join_url(&self.root_base_url()?, "/api")
     }
 
     /// Joins a path fragment onto the public root URL.
     pub fn join_root_path(&self, suffix: &str) -> Result<Url> {
-        join_url(&self.base_url, suffix)
+        join_url(&self.root_base_url()?, suffix)
     }
 
     /// Joins a path fragment onto the REST base URL.
@@ -232,6 +237,22 @@ fn join_url(base: &Url, suffix: &str) -> Result<Url> {
     Ok(url)
 }
 
+fn base_path_has_api_suffix(base: &Url) -> bool {
+    base.path().trim_end_matches('/').ends_with("/api")
+}
+
+fn strip_path_suffix(base: &Url, suffix: &str) -> Result<Url> {
+    let mut url = base.clone();
+    let path = url.path().trim_end_matches('/').to_string();
+    let stripped = path
+        .strip_suffix(suffix)
+        .ok_or_else(|| OpenHandsError::InvalidConfig {
+            message: format!("URL path does not end with expected suffix {suffix}: {path}"),
+        })?;
+    url.set_path(if stripped.is_empty() { "/" } else { stripped });
+    Ok(url)
+}
+
 fn default_session_api_key_query_param() -> String {
     "session_api_key".to_string()
 }
@@ -299,6 +320,32 @@ mod tests {
                 .expect("REST base URL should preserve existing /api")
                 .as_str(),
             "https://example.com/runtime/123/api"
+        );
+    }
+
+    #[test]
+    fn join_root_path_strips_api_suffix_for_root_endpoints() {
+        let transport = TransportConfig {
+            base_url: Url::parse("https://example.com/runtime/123/api")
+                .expect("static test URL must parse"),
+            http_auth: HttpAuth::None,
+            websocket_auth: WebSocketAuthMode::Auto,
+            websocket_query_param_name: default_session_api_key_query_param(),
+        };
+
+        assert_eq!(
+            transport
+                .join_root_path("/ready")
+                .expect("root endpoint should strip /api")
+                .as_str(),
+            "https://example.com/runtime/123/ready"
+        );
+        assert_eq!(
+            transport
+                .join_root_path("/server_info")
+                .expect("diagnostic endpoint should strip /api")
+                .as_str(),
+            "https://example.com/runtime/123/server_info"
         );
     }
 }

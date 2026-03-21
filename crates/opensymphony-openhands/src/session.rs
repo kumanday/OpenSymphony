@@ -14,7 +14,9 @@ use crate::client::OpenHandsClient;
 use crate::config::{ConversationConfig, WebSocketConfig};
 use crate::error::Result;
 use crate::stream::AttachedConversation;
-use crate::wire::{ConfirmationPolicy, CreateConversationRequest, OpenHandsWorkspace};
+use crate::wire::{
+    ConfirmationPolicy, ConversationInfo, CreateConversationRequest, OpenHandsWorkspace,
+};
 
 const CREATE_REQUEST_ARTIFACT: &str = "create-conversation-request.json";
 const LAST_STATE_ARTIFACT: &str = "last-conversation-state.json";
@@ -153,21 +155,36 @@ impl IssueSessionRunner {
                     && manifest.runtime_contract_version
                         == self.conversation.runtime_contract_version =>
             {
-                if self
+                if let Some(conversation) = self
                     .client
                     .get_conversation(&manifest.conversation_id)
                     .await?
-                    .is_some()
                 {
+                    if conversation_matches_workspace(&conversation, &request.workspace) {
+                        manifest.last_attached_at = now;
+                        manifest.fresh_conversation = false;
+                        manifest.server_base_url = server_base_url;
+                        manifest.persistence_dir = persistence_dir;
+                        manifest.reset_reason = None;
+                        return Ok(PreparedConversation {
+                            manifest,
+                            prompt_kind: PromptKind::Continuation,
+                            create_request: None,
+                        });
+                    }
+
+                    let create_request = self.build_create_request(&request.workspace, None);
+                    let conversation = self.client.create_conversation(&create_request).await?;
                     manifest.last_attached_at = now;
-                    manifest.fresh_conversation = false;
+                    manifest.fresh_conversation = true;
                     manifest.server_base_url = server_base_url;
                     manifest.persistence_dir = persistence_dir;
-                    manifest.reset_reason = None;
+                    manifest.reset_reason = Some("workspace_binding_changed".to_string());
+                    manifest.conversation_id = conversation.id;
                     return Ok(PreparedConversation {
                         manifest,
-                        prompt_kind: PromptKind::Continuation,
-                        create_request: None,
+                        prompt_kind: PromptKind::Fresh,
+                        create_request: Some(create_request),
                     });
                 }
 
@@ -296,6 +313,17 @@ fn write_json_artifact(path: impl AsRef<Path>, value: &impl serde::Serialize) ->
     let data = serde_json::to_vec_pretty(value)?;
     fs::write(path, data)?;
     Ok(())
+}
+
+fn conversation_matches_workspace(
+    conversation: &ConversationInfo,
+    workspace: &WorkspaceLayout,
+) -> bool {
+    let expected_working_dir = workspace.issue_workspace.display().to_string();
+    let expected_persistence_dir = workspace.openhands_dir.display().to_string();
+
+    conversation.workspace.working_dir == expected_working_dir
+        && conversation.persistence_dir.as_deref() == Some(expected_persistence_dir.as_str())
 }
 
 fn reset_reason(manifest: &ConversationManifest) -> String {
