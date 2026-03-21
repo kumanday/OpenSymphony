@@ -1,0 +1,214 @@
+# FrankenTUI Operator UI
+
+## 1. Role of the UI
+
+FrankenTUI is the optional human-readable status surface for OpenSymphony.
+
+It must not be required for:
+
+- orchestration correctness
+- worker lifecycle
+- retries
+- reconciliation
+- recovery
+
+The daemon stays authoritative. FrankenTUI observes and renders.
+
+## 2. Why FrankenTUI fits this project
+
+FrankenTUI is a strong match for OpenSymphony because it emphasizes:
+
+- diff-based deterministic rendering
+- inline mode that preserves terminal scrollback
+- one-writer terminal discipline
+- RAII cleanup
+- pane workspace layouts
+
+Those qualities map well to a long-running orchestration dashboard with concurrent issue runs and live logs.
+
+## 3. UI data source
+
+FrankenTUI should talk only to the local OpenSymphony control plane.
+
+### Read-only MVP channels
+
+- HTTP snapshot endpoint for initial state
+- control-plane WebSocket or SSE stream for updates
+- optional log-file tail view through the daemon, not by opening private files directly
+
+### Explicitly out of scope
+
+- direct connection to OpenHands WebSocket streams
+- direct access to orchestrator internals
+- sending mutations into daemon internals without a versioned API
+
+## 4. MVP screens
+
+Recommended initial screens:
+
+## 4.1 Dashboard
+
+Shows:
+
+- daemon health
+- local agent-server health
+- running issue count
+- retry queue count
+- last poll tick
+- aggregated token and cost metrics if available
+
+## 4.2 Issue list
+
+Columns:
+
+- issue identifier
+- title
+- tracker state
+- orchestrator runtime state
+- last worker outcome
+- last event time
+- active conversation ID suffix
+- workspace path suffix
+
+## 4.3 Issue detail
+
+Shows selected issue:
+
+- normalized issue snapshot
+- workspace metadata
+- conversation metadata
+- retry metadata
+- recent worker outcomes
+- recent validation commands if recorded
+
+## 4.4 Event timeline
+
+Shows recent summarized runtime events such as:
+
+- worker started
+- workspace created
+- WebSocket attached
+- run started
+- tool call summary
+- completion or failure
+- retry scheduled
+
+## 4.5 Log pane
+
+Shows structured log excerpts for the selected issue or subsystem.
+
+## 5. Layout model
+
+Recommended first layout:
+
+```text
++---------------------------------------------------------------+
+| Status bar                                                    |
++------------------------+--------------------------------------+
+| Issue list             | Selected issue detail                |
+|                        |                                      |
++------------------------+--------------------------------------+
+| Recent events / logs                                          |
++---------------------------------------------------------------+
+```
+
+Use pane-based layout so future views can expand without redesign.
+
+## 6. Interaction model
+
+MVP interaction should remain intentionally small.
+
+Recommended commands:
+
+- move selection
+- filter by runtime state
+- filter by tracker state
+- toggle issue-detail sections
+- switch between events and logs
+- refresh snapshot
+- quit cleanly
+
+Do not start with in-UI mutation commands unless the control plane already defines them cleanly.
+
+## 7. Inline mode vs alternate screen
+
+Default recommendation:
+
+- use inline mode for day-to-day local monitoring
+- support alternate screen as an option later if needed
+
+Inline mode fits OpenSymphony because developers may want logs and UI to coexist in the same terminal session.
+
+## 8. Rendering model
+
+FrankenTUI should render from immutable view models produced by the control-plane client layer.
+
+Pipeline:
+
+1. fetch or receive new snapshot/event
+2. reduce into TUI state
+3. derive view model
+4. render frame
+5. let FrankenTUI diff and present
+
+Avoid embedding business logic in widget code.
+
+## 9. Suggested Rust crate boundary
+
+`opensymphony-tui` should contain:
+
+- control-plane client
+- TUI app state
+- reducers
+- view model conversion
+- FrankenTUI widget composition
+- keybinding map
+
+It should not contain:
+
+- tracker client
+- workspace manager
+- direct OpenHands client
+- orchestrator state structs with private mutation access
+
+## 10. Error handling
+
+UI requirements:
+
+- survive daemon disconnects
+- show stale-data indicator
+- reconnect to control plane when possible
+- never panic the terminal session on missing fields
+- degrade gracefully if optional metrics are absent
+
+## 11. Dependency strategy
+
+FrankenTUI currently appears to be easiest to consume through workspace or path dependencies for the full stack. Reflect that reality in repository setup and CI until the full crate set is readily published and stable.
+
+## 12. Testing approach
+
+Automated:
+
+- reducer tests
+- snapshot-to-view-model tests
+- simple rendering smoke tests
+- control-plane client reconnection tests
+
+Manual:
+
+- dashboard on multiple concurrent issues
+- long log output with inline mode
+- terminal resize handling
+- clean shutdown and terminal restoration
+
+## 13. Future extensions
+
+Possible later additions:
+
+- issue search box
+- richer grouping and sorting
+- keyboard-driven inspection of workspace artifacts
+- control-plane mutation commands
+- hosted dashboard mode using the same snapshot model
+
+Keep the MVP read-only and reliable first.
