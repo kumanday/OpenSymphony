@@ -70,6 +70,27 @@ async fn session_api_key_authenticates_rest_operations() {
         .expect("search should carry auth");
 }
 
+#[tokio::test]
+async fn run_probe_exercises_message_and_run_endpoints() {
+    let state = ProbeState::default();
+    let server = TestServer::start(probe_router(state.clone())).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        Some("fake-model".to_string()),
+        Some("fake-key".to_string()),
+    );
+
+    client
+        .run_probe(&request, Duration::from_secs(2))
+        .await
+        .expect("probe should succeed");
+
+    assert_eq!(*state.send_count.lock().await, 1);
+    assert_eq!(*state.run_count.lock().await, 1);
+}
+
 struct TestServer {
     base_url: String,
     task: JoinHandle<()>,
@@ -180,6 +201,37 @@ fn auth_router(expected_key: &str) -> Router {
         .with_state(state)
 }
 
+#[derive(Clone, Default)]
+struct ProbeState {
+    conversation: Arc<Mutex<Option<Conversation>>>,
+    events: Arc<Mutex<Vec<EventEnvelope>>>,
+    send_count: Arc<Mutex<usize>>,
+    run_count: Arc<Mutex<usize>>,
+}
+
+fn probe_router(state: ProbeState) -> Router {
+    Router::new()
+        .route("/api/conversations", post(probe_create_conversation))
+        .route(
+            "/api/conversations/:conversation_id",
+            get(probe_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events",
+            post(probe_send_message),
+        )
+        .route(
+            "/api/conversations/:conversation_id/run",
+            post(probe_run_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(probe_search_events),
+        )
+        .route("/sockets/events/:conversation_id", get(probe_events_socket))
+        .with_state(state)
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct AuthQuery {
     session_api_key: Option<String>,
@@ -271,4 +323,98 @@ fn ensure_auth(state: &AuthState, query: &AuthQuery) -> Result<(), StatusCode> {
         Some(value) if value == state.expected_key => Ok(()),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+async fn probe_create_conversation(
+    State(state): State<ProbeState>,
+    Json(request): Json<ConversationCreateRequest>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = Conversation {
+        conversation_id: request.conversation_id,
+        workspace: request.workspace,
+        persistence_dir: request.persistence_dir,
+        max_iterations: request.max_iterations,
+        stuck_detection: request.stuck_detection,
+        execution_status: "idle".to_string(),
+        confirmation_policy: request.confirmation_policy,
+        agent: request.agent,
+    };
+    *state.conversation.lock().await = Some(conversation.clone());
+    *state.events.lock().await = vec![EventEnvelope::state_update("evt-ready", "idle")];
+    Ok(Json(conversation))
+}
+
+async fn probe_get_conversation(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = state
+        .conversation
+        .lock()
+        .await
+        .clone()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(conversation))
+}
+
+async fn probe_send_message(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+    Json(request): Json<SendMessageRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    *state.send_count.lock().await += 1;
+    state.events.lock().await.push(EventEnvelope::new(
+        "evt-message",
+        Utc::now(),
+        "user",
+        "MessageEvent",
+        serde_json::to_value(request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    ));
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn probe_run_conversation(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    *state.run_count.lock().await += 1;
+    state.events.lock().await.push(EventEnvelope::new(
+        "evt-complete",
+        Utc::now(),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        json!({
+            "execution_status": "completed",
+            "state_delta": {
+                "execution_status": "completed",
+            },
+        }),
+    ));
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn probe_search_events(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    let events = state.events.lock().await.clone();
+    Ok(Json(SearchConversationEventsResponse {
+        events,
+        next_page_id: None,
+    }))
+}
+
+async fn probe_events_socket(
+    websocket: WebSocketUpgrade,
+    Path(_conversation_id): Path<Uuid>,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
+                    .expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+    })
 }

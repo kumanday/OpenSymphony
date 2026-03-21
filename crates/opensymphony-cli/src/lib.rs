@@ -151,13 +151,11 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
 
     let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
     let repo_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let target_repo = resolve_path(
-        config_root,
-        config
-            .target_repo
-            .as_deref()
-            .unwrap_or("./examples/target-repo"),
-    );
+    let target_repo = config
+        .target_repo
+        .as_deref()
+        .map(|target_repo| resolve_path(config_root, target_repo))
+        .unwrap_or_else(|| repo_root.join("examples/target-repo"));
     let workspace_root = resolve_path(config_root, &config.workspace_root);
     let tool_dir = resolve_path(config_root, &config.openhands.tool_dir);
 
