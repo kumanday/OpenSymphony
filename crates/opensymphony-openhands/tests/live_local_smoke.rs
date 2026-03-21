@@ -89,6 +89,8 @@ async fn live_local_smoke() -> Result<(), Box<dyn std::error::Error>> {
     let transport = TransportConfig {
         base_url: Url::parse(&format!("http://127.0.0.1:{port}"))?,
         http_auth: HttpAuth::None,
+        http_connect_timeout_ms: 5_000,
+        http_request_timeout_ms: 30_000,
         websocket_auth: WebSocketAuthMode::Auto,
         websocket_query_param_name: "session_api_key".to_string(),
     };

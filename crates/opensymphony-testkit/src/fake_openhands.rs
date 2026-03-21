@@ -114,6 +114,7 @@ struct FakeState {
     session_api_key: Option<String>,
     conversation_get_delay: Duration,
     event_search_failures: HashMap<String, usize>,
+    websocket_handshake_delays: HashMap<String, VecDeque<Duration>>,
     conversations: HashMap<String, ConversationEntry>,
 }
 
@@ -232,6 +233,8 @@ impl FakeOpenHandsServer {
                 Some(key) => opensymphony_openhands::HttpAuth::SessionApiKey(key),
                 None => opensymphony_openhands::HttpAuth::None,
             },
+            http_connect_timeout_ms: 5_000,
+            http_request_timeout_ms: 30_000,
             websocket_auth: opensymphony_openhands::WebSocketAuthMode::Auto,
             websocket_query_param_name: "session_api_key".to_string(),
         })
@@ -245,6 +248,26 @@ impl FakeOpenHandsServer {
     /// Delays `GET /api/conversations/{id}` responses to widen timing-sensitive contract tests.
     pub async fn set_conversation_get_delay(&self, delay: Duration) {
         self.state.lock().await.conversation_get_delay = delay;
+    }
+
+    /// Delays the next WebSocket handshake for the named conversation.
+    pub async fn enqueue_websocket_handshake_delay(
+        &self,
+        conversation_id: &str,
+        delay: Duration,
+    ) -> Result<(), TestkitError> {
+        let mut state = self.state.lock().await;
+        let Some(_) = state.conversations.get(conversation_id) else {
+            return Err(TestkitError::MissingConversation {
+                conversation_id: conversation_id.to_string(),
+            });
+        };
+        state
+            .websocket_handshake_delays
+            .entry(conversation_id.to_string())
+            .or_default()
+            .push_back(delay);
+        Ok(())
     }
 
     /// Enqueues a scripted run for the named conversation.
@@ -562,20 +585,38 @@ async fn events_socket(
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    let Some((snapshot, receiver)) = prepare_socket(&app.state, &conversation_id).await else {
+    let Some((snapshot, receiver, handshake_delay)) =
+        prepare_socket(&app.state, &conversation_id).await
+    else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if let Some(delay) = handshake_delay {
+        tokio::time::sleep(delay).await;
+    }
     ws.on_upgrade(move |socket| socket_task(socket, snapshot, receiver))
 }
 
 async fn prepare_socket(
     state: &Arc<Mutex<FakeState>>,
     conversation_id: &str,
-) -> Option<(Value, broadcast::Receiver<WsServerMessage>)> {
-    let state = state.lock().await;
-    let entry = state.conversations.get(conversation_id)?;
-    let snapshot = full_state_event_from_info(&entry.info);
-    Some((snapshot, entry.stream.subscribe()))
+) -> Option<(
+    Value,
+    broadcast::Receiver<WsServerMessage>,
+    Option<Duration>,
+)> {
+    let mut state = state.lock().await;
+    let (snapshot, receiver) = {
+        let entry = state.conversations.get(conversation_id)?;
+        (
+            full_state_event_from_info(&entry.info),
+            entry.stream.subscribe(),
+        )
+    };
+    let handshake_delay = state
+        .websocket_handshake_delays
+        .get_mut(conversation_id)
+        .and_then(VecDeque::pop_front);
+    Some((snapshot, receiver, handshake_delay))
 }
 
 async fn socket_task(
@@ -747,8 +788,9 @@ mod tests {
     use super::*;
     use opensymphony_domain::{IssueRef, PromptSet};
     use opensymphony_openhands::{
-        AgentConfig, ConfirmationPolicy, ContentBlock, IssueSessionRequest, IssueSessionRunner,
-        OpenHandsWorkspace, WebSocketConfig,
+        AgentConfig, AttachedConversation, ConfirmationPolicy, ContentBlock, IssueSessionRequest,
+        IssueSessionRunner, OpenHandsError, OpenHandsWorkspace, RemoteExecutionStatus,
+        WebSocketConfig,
     };
     use opensymphony_workspace::ConversationManifest;
     use tempfile::TempDir;
@@ -988,6 +1030,126 @@ mod tests {
         .expect("disconnect-window message should be reconciled after retry");
 
         attached.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attached_stream_times_out_blackholed_handshake()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: "/tmp/test".to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some("conv-blackhole-handshake".to_string()),
+                persistence_dir: Some("/tmp/test/.opensymphony/openhands".to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+
+        server
+            .enqueue_websocket_handshake_delay(
+                "conv-blackhole-handshake",
+                Duration::from_millis(200),
+            )
+            .await?;
+
+        let error = AttachedConversation::attach(
+            client,
+            "conv-blackhole-handshake",
+            WebSocketConfig {
+                ready_timeout_ms: 50,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .await
+        .expect_err("handshake should time out");
+        match error {
+            OpenHandsError::Timeout { operation, .. } => {
+                assert_eq!(operation, "websocket handshake");
+            }
+            other => panic!("expected websocket handshake timeout, got {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attached_stream_close_interrupts_blackholed_reconnect()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: "/tmp/test".to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some("conv-reconnect-blackhole".to_string()),
+                persistence_dir: Some("/tmp/test/.opensymphony/openhands".to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+
+        server
+            .enqueue_run(
+                "conv-reconnect-blackhole",
+                ScriptedRun::new(vec![
+                    RunStep::Emit {
+                        event: execution_status_event(RemoteExecutionStatus::Running),
+                        delay: Duration::from_millis(5),
+                    },
+                    RunStep::Disconnect {
+                        delay: Duration::from_millis(5),
+                    },
+                ]),
+            )
+            .await?;
+
+        let attached = AttachedConversation::attach(
+            client.clone(),
+            "conv-reconnect-blackhole",
+            WebSocketConfig {
+                ready_timeout_ms: 50,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .await?;
+
+        server
+            .enqueue_websocket_handshake_delay("conv-reconnect-blackhole", Duration::from_secs(1))
+            .await?;
+        client.run_conversation("conv-reconnect-blackhole").await?;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_millis(150), attached.close()).await??;
         Ok(())
     }
 

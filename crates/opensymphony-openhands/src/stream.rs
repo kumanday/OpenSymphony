@@ -29,6 +29,11 @@ enum StreamControl {
     Stop,
 }
 
+enum ConnectControl {
+    Connected(EventSocket),
+    Stop,
+}
+
 /// Cached conversation state derived from WebSocket events plus REST refreshes.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConversationStateMirror {
@@ -160,13 +165,7 @@ impl AttachedConversation {
         merge_events(&cache, &state, initial_events).await;
 
         let (socket_url, request) = client.websocket_request(&conversation_id)?;
-        let (mut stream, _) =
-            connect_async(request)
-                .await
-                .map_err(|source| OpenHandsError::WebSocket {
-                    url: socket_url.to_string(),
-                    source,
-                })?;
+        let mut stream = connect_socket(request, &socket_url, websocket.ready_timeout()).await?;
         wait_for_ready(
             &mut stream,
             &socket_url,
@@ -357,8 +356,15 @@ impl StreamRuntime {
                 };
                 self.socket_url = next_url;
 
-                match connect_async(request).await {
-                    Ok((mut next_stream, _)) => {
+                match connect_socket_until_stopped(
+                    request,
+                    &self.socket_url,
+                    self.websocket.ready_timeout(),
+                    &mut self.stop_rx,
+                )
+                .await
+                {
+                    Ok(ConnectControl::Connected(mut next_stream)) => {
                         match wait_for_ready(
                             &mut next_stream,
                             &self.socket_url,
@@ -395,10 +401,11 @@ impl StreamRuntime {
                             }
                         }
                     }
-                    Err(source) => {
+                    Ok(ConnectControl::Stop) => return,
+                    Err(error) => {
                         warn!(
                             conversation_id = %self.conversation_id,
-                            error = %OpenHandsError::WebSocket { url: self.socket_url.to_string(), source },
+                            error = %error,
                             "websocket reconnect attempt failed",
                         );
                     }
@@ -406,6 +413,47 @@ impl StreamRuntime {
 
                 delay = std::cmp::min(delay.saturating_mul(2), self.websocket.reconnect_max());
             }
+        }
+    }
+}
+
+async fn connect_socket(
+    request: tokio_tungstenite::tungstenite::http::Request<()>,
+    socket_url: &url::Url,
+    timeout: Duration,
+) -> Result<EventSocket> {
+    match tokio::time::timeout(timeout, connect_async(request)).await {
+        Ok(Ok((stream, _))) => Ok(stream),
+        Ok(Err(source)) => Err(OpenHandsError::WebSocket {
+            url: socket_url.to_string(),
+            source,
+        }),
+        Err(_) => Err(OpenHandsError::Timeout {
+            operation: "websocket handshake",
+            timeout,
+        }),
+    }
+}
+
+async fn connect_socket_until_stopped(
+    request: tokio_tungstenite::tungstenite::http::Request<()>,
+    socket_url: &url::Url,
+    timeout: Duration,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> Result<ConnectControl> {
+    let reconnect_request = request.clone();
+    tokio::select! {
+        changed = stop_rx.changed() => {
+            if changed.is_err() || *stop_rx.borrow() {
+                Ok(ConnectControl::Stop)
+            } else {
+                connect_socket(request, socket_url, timeout)
+                    .await
+                    .map(ConnectControl::Connected)
+            }
+        }
+        result = connect_socket(reconnect_request, socket_url, timeout) => {
+            result.map(ConnectControl::Connected)
         }
     }
 }

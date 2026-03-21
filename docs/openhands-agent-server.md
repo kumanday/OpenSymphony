@@ -79,6 +79,8 @@ The daemon connects to a pre-existing agent-server at `openhands.transport.base_
 `openhands.transport.base_url` may point either at the server root or at the REST-scoped `/api`
 prefix. OpenSymphony must normalize root-only probes and WebSocket endpoints back to the server
 root in both cases.
+All REST calls from this transport must also use bounded connect and request deadlines so a
+non-responsive server fails the worker instead of wedging it indefinitely.
 
 Use for:
 
@@ -103,6 +105,7 @@ Readiness probing rule:
 - prefer the documented `GET /ready` endpoint on the pinned server
 - fall back to `GET /health` and then `GET /openapi.json` only if readiness is unavailable
 - never rely on sleep-only startup delays
+- run readiness probes through the shared HTTP client deadlines rather than unbounded requests
 
 ## 4.3 Shutdown contract
 

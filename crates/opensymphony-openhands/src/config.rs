@@ -14,6 +14,8 @@ const DEFAULT_RECONNECT_INITIAL_MS: u64 = 1_000;
 const DEFAULT_RECONNECT_MAX_MS: u64 = 30_000;
 const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
 const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_HTTP_CONNECT_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_HTTP_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 /// Top-level runtime configuration grouped by transport, supervision, and conversation policy.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -62,6 +64,12 @@ pub struct TransportConfig {
     /// REST authentication behavior.
     #[serde(default)]
     pub http_auth: HttpAuth,
+    /// Connect timeout applied to every REST request.
+    #[serde(default = "default_http_connect_timeout_ms")]
+    pub http_connect_timeout_ms: u64,
+    /// End-to-end timeout applied to every REST request.
+    #[serde(default = "default_http_request_timeout_ms")]
+    pub http_request_timeout_ms: u64,
     /// WebSocket authentication behavior.
     #[serde(default)]
     pub websocket_auth: WebSocketAuthMode,
@@ -87,6 +95,18 @@ impl TransportConfig {
             HttpAuth::None => None,
             HttpAuth::SessionApiKey(key) => Some(key.as_str()),
         }
+    }
+
+    /// Returns the configured HTTP connect timeout as a duration.
+    #[must_use]
+    pub fn http_connect_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.http_connect_timeout_ms)
+    }
+
+    /// Returns the configured HTTP request timeout as a duration.
+    #[must_use]
+    pub fn http_request_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.http_request_timeout_ms)
     }
 
     /// Builds the REST base URL, preserving any configured path prefix.
@@ -261,6 +281,14 @@ fn default_startup_timeout_ms() -> u64 {
     DEFAULT_STARTUP_TIMEOUT_MS
 }
 
+fn default_http_connect_timeout_ms() -> u64 {
+    DEFAULT_HTTP_CONNECT_TIMEOUT_MS
+}
+
+fn default_http_request_timeout_ms() -> u64 {
+    DEFAULT_HTTP_REQUEST_TIMEOUT_MS
+}
+
 fn default_readiness_probe_path() -> String {
     "/ready".to_string()
 }
@@ -299,6 +327,8 @@ mod tests {
             base_url: Url::parse("https://example.com/runtime/123")
                 .expect("static test URL must parse"),
             http_auth: HttpAuth::None,
+            http_connect_timeout_ms: 5_000,
+            http_request_timeout_ms: 30_000,
             websocket_auth: WebSocketAuthMode::Auto,
             websocket_query_param_name: default_session_api_key_query_param(),
         };
@@ -329,6 +359,8 @@ mod tests {
             base_url: Url::parse("https://example.com/runtime/123/api")
                 .expect("static test URL must parse"),
             http_auth: HttpAuth::None,
+            http_connect_timeout_ms: 5_000,
+            http_request_timeout_ms: 30_000,
             websocket_auth: WebSocketAuthMode::Auto,
             websocket_query_param_name: default_session_api_key_query_param(),
         };

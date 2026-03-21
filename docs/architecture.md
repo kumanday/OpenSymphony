@@ -85,6 +85,8 @@ REST remains necessary for:
 - recovery after missed events or process restarts
 
 This avoids a throwaway polling-only runtime client, while still being robust to dropped WebSocket connections.
+REST requests and WebSocket handshakes must both run under explicit deadlines so workers can fail fast
+on blackholed transports and cancellation can stop reconnect loops promptly.
 
 ### 3.4 One local server, many issue workspaces
 
@@ -324,7 +326,7 @@ On disconnect:
 - mark runtime stream as degraded
 - start bounded reconnect backoff
 - refresh authoritative conversation state with REST
-- reconnect WebSocket
+- reconnect WebSocket with a bounded handshake timeout
 - wait for readiness barrier
 - reconcile event backlog
 - resume live processing
