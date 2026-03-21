@@ -100,6 +100,10 @@ OpenSymphony creates a stable OpenHands `conversation_id` per issue and persists
 - normal continuation retries after a worker exits
 - restart recovery after daemon restarts
 
+Reuse is conditional on the authoritative server-side `working_dir` and `persistence_dir`
+continuing to match the current issue workspace. A copied or stale manifest must trigger a fresh
+conversation instead of reusing execution state in the wrong checkout.
+
 This is stricter than the minimum Symphony requirement and intentionally optimizes continuity.
 
 ### 3.6 The UI only sees the control plane

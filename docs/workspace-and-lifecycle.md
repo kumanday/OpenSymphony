@@ -225,7 +225,9 @@ Default policy:
 - one conversation per issue
 - conversation persistence is stored under the issue workspace
 - reused across worker lifetimes
-- reset only on explicit error or incompatible-version policy
+- reset when the server-side conversation binding no longer points at the current
+  `issue_workspace`/`.opensymphony/openhands` paths
+- reset on explicit error or incompatible-version policy
 
 Reset handling:
 

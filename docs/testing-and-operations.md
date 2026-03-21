@@ -101,6 +101,7 @@ Current live OpenHands inputs:
 
 - supervised server startup and shutdown
 - HTTP client auth modes
+- root-endpoint normalization when `base_url` is configured with an `/api` suffix
 - conversation creation
 - initial REST sync
 - WebSocket readiness barrier
@@ -109,6 +110,8 @@ Current live OpenHands inputs:
 - out-of-order event insertion
 - terminal state detection
 - conversation reuse
+- conversation reset when a reused server-side workspace binding no longer matches the current issue
+  workspace
 
 ## 3.4 Orchestrator
 
@@ -172,6 +175,7 @@ Suggested scenarios:
 - run the same issue twice
 - verify the same `conversation_id` is reused
 - verify continuation guidance is used instead of the full first-turn prompt
+- corrupt the server-side workspace binding and verify the next run creates a fresh conversation
 
 ### Scenario C: WebSocket reconnect
 

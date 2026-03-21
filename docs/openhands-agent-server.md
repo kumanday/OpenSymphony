@@ -76,6 +76,10 @@ Use for:
 
 The daemon connects to a pre-existing agent-server at `openhands.transport.base_url`.
 
+`openhands.transport.base_url` may point either at the server root or at the REST-scoped `/api`
+prefix. OpenSymphony must normalize root-only probes and WebSocket endpoints back to the server
+root in both cases.
+
 Use for:
 
 - integration tests against a pinned external server
@@ -161,6 +165,8 @@ Default policy:
 - reset only when:
   - conversation metadata is missing or invalid
   - the server reports the conversation cannot be attached
+  - the authoritative conversation `workspace.working_dir` or `persistence_dir` no longer matches
+    the current issue workspace
   - an incompatible protocol version is detected
   - an explicit reset policy is configured
 

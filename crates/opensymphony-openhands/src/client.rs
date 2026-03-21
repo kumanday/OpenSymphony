@@ -356,7 +356,7 @@ mod tests {
     use crate::config::{HttpAuth, TransportConfig, WebSocketAuthMode};
 
     #[test]
-    fn websocket_request_preserves_base_path_and_header_auth() {
+    fn websocket_request_uses_server_root_when_base_url_contains_api() {
         let client = OpenHandsClient::new(TransportConfig {
             base_url: Url::parse("https://example.com/runtime/456/api")
                 .expect("static test URL must parse"),
@@ -369,7 +369,7 @@ mod tests {
             .expect("websocket request should build");
         assert_eq!(
             url.as_str(),
-            "wss://example.com/runtime/456/api/sockets/events/abc"
+            "wss://example.com/runtime/456/sockets/events/abc"
         );
         assert_eq!(
             request
