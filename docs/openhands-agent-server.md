@@ -57,6 +57,9 @@ Key properties:
 - host-local execution assumptions documented explicitly
 - the local supervised launch path forces OpenHands process-sandbox mode via
   `RUNTIME=process`
+- the current implementation resolves supervised-mode metadata from
+  `tools/openhands-server/{pyproject.toml,version.txt,uv.lock,run-local.sh}`
+  with a repo-owned package and lockfile pin
 - the repo-local quick-run wrapper rejects user-supplied agent-server CLI flags
   so smoke runs cannot diverge from the daemon-managed single-server topology
 
@@ -79,9 +82,9 @@ Use for:
 Repository ownership note:
 
 - `tools/openhands-server/` owns the local packaging and version pin
-- M1 bootstrap creates fail-closed placeholders only
-- OSYM-201 must replace those placeholders with the validated package version
-  and lockfile before supervised mode is treated as implemented
+- the current repository pin is the OpenHands `1.14.0` SDK bundle
+- the lockfile is resolved under the repo-local `uv` environment
+- update `docs/sources.md` whenever this version pin changes
 
 ### External server mode
 
@@ -112,6 +115,13 @@ Readiness probing rule:
 - otherwise use a conservative FastAPI probe such as `GET /openapi.json`
 - never rely on sleep-only startup delays
 
+Current implementation detail:
+
+- supervised mode launches `bash tools/openhands-server/run-local.sh`
+- the supervisor sets `OPENHANDS_SERVER_PORT` and `RUNTIME=process` explicitly
+- diagnostics record the launcher summary, resolved base URL, pinned version,
+  and launched PID for doctor output and future daemon logs
+
 ## 4.3 Shutdown contract
 
 On daemon shutdown:
@@ -122,6 +132,12 @@ On daemon shutdown:
 - stop the supervised agent-server subprocess if this daemon launched it
 
 If the daemon is using an external server, never attempt to terminate that server.
+
+Current implementation detail:
+
+- child ownership is tracked by the Rust supervisor instance
+- `stop()` only kills a `Child` handle created by `start()`
+- external mode may probe health, but stop remains a no-op
 
 ## 5. Workspace model
 
@@ -234,6 +250,7 @@ Default local mode:
 
 - bind to loopback only
 - no mandatory session API key
+- the current repository pin is the OpenHands `1.14.0` SDK bundle
 
 ## 9.2 Future-proofing
 

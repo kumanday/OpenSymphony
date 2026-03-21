@@ -191,6 +191,17 @@ Possible helper commands later:
 
 `opensymphony doctor` should be a serious preflight tool, not a superficial version printer.
 
+Current implemented scope for OSYM-201:
+
+- resolve the repo-local OpenHands wrapper metadata from `tools/openhands-server/`
+- report pin readiness from `version.txt`, `pyproject.toml`, and `uv.lock`
+- start the supervised local server when the pin is valid
+- verify HTTP readiness on the expected loopback base URL
+- stop the supervised child and report launch metadata
+
+Future doctor milestones should add conversation creation, WebSocket attach, and
+reconcile coverage once those runtime surfaces land.
+
 Required checks:
 
 ### Repository and config
@@ -206,9 +217,9 @@ Required checks:
 - Python environment for pinned OpenHands can be resolved
 - supervised server command can start
 - server responds on the expected base URL
-- a test conversation can be created with a temp `working_dir`
-- WebSocket can attach and reach readiness
-- a reconcile call succeeds
+- conversation creation with a temp `working_dir` is a future doctor check
+- WebSocket attach and readiness are a future doctor check
+- reconcile verification is a future doctor check
 
 ### External services
 
@@ -281,6 +292,18 @@ The wrapper should reject extra agent-server CLI flags so local smoke runs stay
 aligned with the daemon-managed single-server topology; `OPENHANDS_SERVER_PORT`
 is the only supported runtime override, and the sandbox selection stays fixed to
 host-process mode.
+
+The current implementation follows that fail-closed rule: doctor and the local
+supervisor validate the repo-owned pin files before launch and refuse to start
+if the version file, direct dependency pin, and resolved lockfile drift apart.
+
+Current repository pin:
+
+- `openhands-agent-server==1.14.0`
+- `openhands-sdk==1.14.0`
+- `openhands-tools==1.14.0`
+- `openhands-workspace==1.14.0`
+- Python `3.12.x`
 
 Do not rely on a random globally installed `openhands` binary.
 
