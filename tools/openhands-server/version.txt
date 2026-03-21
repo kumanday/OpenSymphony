@@ -1,1 +1,1 @@
-TODO-openhands-sdk-version
+0+bootstrap.placeholder
