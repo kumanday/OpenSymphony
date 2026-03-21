@@ -1,16 +1,568 @@
+mod error;
+mod loader;
+mod model;
+mod resolve;
+mod template;
+
+use std::path::Path;
+
+use serde::Serialize;
+
+pub use error::{PromptTemplateError, WorkflowConfigError, WorkflowLoadError};
+pub use model::{
+    AgentConfig, AgentFrontMatter, DEFAULT_PROMPT_TEMPLATE, Environment, HooksConfig,
+    HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
+    OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
+    OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsFrontMatter,
+    OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
+    OpenHandsLocalServerFrontMatter, OpenHandsMcpConfig, OpenHandsMcpFrontMatter,
+    OpenHandsStdioServerConfig, OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig,
+    OpenHandsTransportFrontMatter, OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter,
+    PollingConfig, PollingFrontMatter, ProcessEnvironment, PromptContext, ResolvedWorkflow,
+    TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition,
+    WorkflowExtensions, WorkflowFrontMatter, WorkspaceConfig, WorkspaceFrontMatter,
+};
+
 pub const CRATE_NAME: &str = "opensymphony-workflow";
 
-pub fn placeholder_summary() -> &'static str {
-    "WORKFLOW.md loading, front matter parsing, strict prompt rendering, openhands config schema, and env/path resolution helpers"
+impl WorkflowDefinition {
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, WorkflowLoadError> {
+        loader::load_workflow_from_path(path.as_ref())
+    }
+
+    pub fn parse(source: &str) -> Result<Self, WorkflowLoadError> {
+        loader::parse_workflow(source)
+    }
+
+    pub fn effective_prompt_template(&self) -> &str {
+        if self.prompt_template.is_empty() {
+            DEFAULT_PROMPT_TEMPLATE
+        } else {
+            &self.prompt_template
+        }
+    }
+
+    pub fn resolve<E: Environment>(
+        &self,
+        base_dir: &Path,
+        env: &E,
+    ) -> Result<ResolvedWorkflow, WorkflowConfigError> {
+        resolve::resolve_workflow(self, base_dir, env)
+    }
+
+    pub fn resolve_with_process_env(
+        &self,
+        base_dir: &Path,
+    ) -> Result<ResolvedWorkflow, WorkflowConfigError> {
+        self.resolve(base_dir, &ProcessEnvironment)
+    }
+
+    pub fn render_prompt<T: Serialize>(
+        &self,
+        issue: &T,
+        attempt: Option<u32>,
+    ) -> Result<String, PromptTemplateError> {
+        template::render_prompt(self.effective_prompt_template(), issue, attempt)
+    }
+}
+
+impl std::str::FromStr for WorkflowDefinition {
+    type Err = WorkflowLoadError;
+
+    fn from_str(source: &str) -> Result<Self, Self::Err> {
+        Self::parse(source)
+    }
+}
+
+impl ResolvedWorkflow {
+    pub fn effective_prompt_template(&self) -> &str {
+        if self.prompt_template.is_empty() {
+            DEFAULT_PROMPT_TEMPLATE
+        } else {
+            &self.prompt_template
+        }
+    }
+
+    pub fn render_prompt<T: Serialize>(
+        &self,
+        issue: &T,
+        attempt: Option<u32>,
+    ) -> Result<String, PromptTemplateError> {
+        template::render_prompt(self.effective_prompt_template(), issue, attempt)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CRATE_NAME, placeholder_summary};
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+    };
+
+    use serde::Serialize;
+
+    use super::{
+        PromptTemplateError, TrackerKind, WorkflowConfigError, WorkflowDefinition,
+        WorkflowLoadError,
+        model::{
+            DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
+            DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_BASE_URL,
+            DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
+            DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
+            DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_PROMPT_TEMPLATE,
+            DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT,
+        },
+    };
+
+    #[derive(Debug, Serialize)]
+    struct TestIssue<'a> {
+        identifier: &'a str,
+        title: &'a str,
+        state: &'a str,
+        description: Option<&'a str>,
+        labels: Vec<&'a str>,
+    }
 
     #[test]
-    fn reports_its_boundary() {
-        assert_eq!(CRATE_NAME, "opensymphony-workflow");
-        assert!(placeholder_summary().contains("WORKFLOW.md"));
+    fn parses_valid_front_matter_and_prompt_body() {
+        let workflow =
+            WorkflowDefinition::parse(sample_workflow()).expect("sample workflow should parse");
+
+        assert_eq!(
+            workflow.front_matter.tracker.kind.as_deref(),
+            Some("linear")
+        );
+        assert_eq!(
+            workflow.front_matter.agent.max_turns,
+            Some(super::IntegerLike::Integer(8))
+        );
+        assert_eq!(
+            workflow.prompt_template,
+            "# Assignment\n\nTicket: {{ issue.identifier }}"
+        );
+    }
+
+    #[test]
+    fn parses_workflow_without_front_matter() {
+        let workflow = WorkflowDefinition::parse("\n\nPrompt only\n")
+            .expect("prompt-only workflow should parse");
+
+        assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
+        assert_eq!(workflow.prompt_template, "Prompt only");
+    }
+
+    #[test]
+    fn rejects_non_map_front_matter() {
+        let error = WorkflowDefinition::parse("---\n- nope\n---\nbody")
+            .expect_err("list front matter should be rejected");
+
+        assert!(matches!(
+            error,
+            WorkflowLoadError::WorkflowFrontMatterNotAMap
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_front_matter_terminator() {
+        let error = WorkflowDefinition::parse("---\ntracker:\n  kind: linear\nbody")
+            .expect_err("unterminated front matter should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowLoadError::MissingFrontMatterTerminator
+        ));
+    }
+
+    #[test]
+    fn reports_missing_workflow_file() {
+        let path = Path::new("/definitely/missing/WORKFLOW.md");
+        let error = WorkflowDefinition::load_from_path(path)
+            .expect_err("missing workflow file should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowLoadError::MissingWorkflowFile { path: missing } if missing == path
+        ));
+    }
+
+    #[test]
+    fn resolves_defaults_and_openhands_extension() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("HOME", "/Users/tester"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+
+        assert!(matches!(resolved.config.tracker.kind, TrackerKind::Linear));
+        assert_eq!(resolved.config.tracker.endpoint, DEFAULT_LINEAR_ENDPOINT);
+        assert_eq!(resolved.config.tracker.api_key, "linear-token");
+        assert_eq!(
+            resolved.config.polling.interval_ms,
+            DEFAULT_POLL_INTERVAL_MS
+        );
+        assert_eq!(
+            resolved.config.workspace.root,
+            PathBuf::from(DEFAULT_WORKSPACE_ROOT)
+        );
+        assert_eq!(resolved.config.hooks.timeout_ms, DEFAULT_HOOK_TIMEOUT_MS);
+        assert_eq!(
+            resolved.config.agent.max_concurrent_agents,
+            DEFAULT_MAX_CONCURRENT_AGENTS
+        );
+        assert_eq!(resolved.config.agent.max_turns, DEFAULT_MAX_TURNS);
+        assert_eq!(
+            resolved.config.agent.max_retry_backoff_ms,
+            DEFAULT_MAX_RETRY_BACKOFF_MS
+        );
+        assert_eq!(
+            resolved.config.agent.stall_timeout_ms,
+            Some(DEFAULT_STALL_TIMEOUT_MS)
+        );
+        assert_eq!(
+            resolved.extensions.openhands.transport.base_url,
+            DEFAULT_OPENHANDS_BASE_URL
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .persistence_dir_relative,
+            PathBuf::from(DEFAULT_OPENHANDS_PERSISTENCE_DIR)
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.ready_timeout_ms,
+            DEFAULT_OPENHANDS_READY_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.reconnect_initial_ms,
+            DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.reconnect_max_ms,
+            DEFAULT_OPENHANDS_RECONNECT_MAX_MS
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.query_param_name,
+            DEFAULT_OPENHANDS_QUERY_PARAM_NAME
+        );
+    }
+
+    #[test]
+    fn resolves_env_substitution_and_path_rules() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+workspace:
+  root: ${WORKSPACE_ROOT}
+hooks:
+  timeout_ms: 0
+agent:
+  max_turns: "5"
+  stall_timeout_ms: 0
+openhands:
+  transport:
+    base_url: ${OPENHANDS_BASE_URL}
+  conversation:
+    persistence_dir_relative: .cache/openhands
+    agent:
+      llm:
+        model: ${OPENHANDS_MODEL}
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("WORKSPACE_ROOT", "/tmp/workspaces"),
+            ("OPENHANDS_BASE_URL", "http://localhost:8000"),
+            ("OPENHANDS_MODEL", "gpt-4.1-mini"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo/config"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(
+            resolved.config.workspace.root,
+            PathBuf::from("/tmp/workspaces")
+        );
+        assert_eq!(resolved.config.hooks.timeout_ms, DEFAULT_HOOK_TIMEOUT_MS);
+        assert_eq!(resolved.config.agent.max_turns, 5);
+        assert_eq!(resolved.config.agent.stall_timeout_ms, None);
+        assert_eq!(
+            resolved.extensions.openhands.transport.base_url,
+            "http://localhost:8000"
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .persistence_dir_relative,
+            PathBuf::from(".cache/openhands")
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .as_ref()
+                .expect("agent config should exist")
+                .llm
+                .as_ref()
+                .expect("llm config should exist")
+                .model
+                .as_deref(),
+            Some("gpt-4.1-mini")
+        );
+    }
+
+    #[test]
+    fn resolves_relative_workspace_paths_against_workflow_directory() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+workspace:
+  root: ./nested/workspaces
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo/config"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(
+            resolved.config.workspace.root,
+            PathBuf::from("/repo/config/nested/workspaces")
+        );
+    }
+
+    #[test]
+    fn preserves_bare_workspace_roots_without_path_separators() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+workspace:
+  root: workspaces
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo/config"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(resolved.config.workspace.root, PathBuf::from("workspaces"));
+    }
+
+    #[test]
+    fn renders_prompt_for_first_run_and_continuation() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+Ticket {{ issue.identifier }}
+{% if attempt %}
+Attempt {{ attempt }}
+{% endif %}
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: Some("Implement the workflow crate"),
+            labels: vec!["rust", "workflow"],
+        };
+
+        let first = workflow
+            .render_prompt(&issue, None)
+            .expect("first run render should succeed");
+        let continuation = workflow
+            .render_prompt(&issue, Some(2))
+            .expect("continuation render should succeed");
+
+        assert!(first.contains("Ticket COE-259"));
+        assert!(!first.contains("Attempt"));
+        assert!(continuation.contains("Attempt 2"));
+    }
+
+    #[test]
+    fn rejects_unknown_template_variables() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+{{ issue.missing_field }}
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: None,
+            labels: vec![],
+        };
+
+        let error = workflow
+            .render_prompt(&issue, None)
+            .expect_err("missing template variables should fail");
+
+        assert!(matches!(error, PromptTemplateError::Render { .. }));
+    }
+
+    #[test]
+    fn rejects_unknown_template_filters() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+{{ issue.title | missing_filter }}
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: None,
+            labels: vec![],
+        };
+
+        let error = workflow
+            .render_prompt(&issue, None)
+            .expect_err("unknown filters should fail");
+
+        assert!(matches!(error, PromptTemplateError::Parse { .. }));
+    }
+
+    #[test]
+    fn uses_default_prompt_when_body_is_empty() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: None,
+            labels: vec![],
+        };
+
+        let rendered = workflow
+            .render_prompt(&issue, None)
+            .expect("default prompt render should succeed");
+
+        assert_eq!(rendered, DEFAULT_PROMPT_TEMPLATE);
+    }
+
+    #[test]
+    fn errors_on_missing_required_tracker_config() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("missing project slug should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingRequiredField {
+                field: "tracker.project_slug"
+            }
+        ));
+    }
+
+    fn env<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> {
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    fn sample_workflow() -> &'static str {
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+polling:
+  interval_ms: 5000
+workspace:
+  root: ~/workspaces
+hooks:
+  timeout_ms: 60000
+agent:
+  max_concurrent_agents: 4
+  max_turns: 8
+  max_retry_backoff_ms: 120000
+  stall_timeout_ms: 90000
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+  conversation:
+    persistence_dir_relative: .opensymphony/openhands
+    agent:
+      llm:
+        model: ${OPENHANDS_MODEL}
+  websocket:
+    auth_mode: auto
+---
+
+# Assignment
+
+Ticket: {{ issue.identifier }}
+"#
     }
 }

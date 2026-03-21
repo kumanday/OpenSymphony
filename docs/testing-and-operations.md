@@ -80,6 +80,8 @@ Suggested gates:
 - fail on invalid front matter
 - fail on unknown template variables
 - resolve defaults and env vars
+- fall back to `LINEAR_API_KEY` when `tracker.api_key` is omitted
+- resolve workflow-relative workspace paths and relative OpenHands persistence paths
 - validate `openhands` extension namespace
 
 ## 3.2 Workspace manager

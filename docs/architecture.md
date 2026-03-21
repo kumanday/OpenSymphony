@@ -127,7 +127,8 @@ Recommended crate boundaries:
   - `WORKFLOW.md` loader
   - YAML front matter parsing
   - strict prompt rendering
-  - config validation
+  - config validation plus defaults/env/path resolution
+  - OpenHands extension config kept separate from core workflow config
 - `opensymphony-workspace`
   - workspace mapping
   - sanitization and containment

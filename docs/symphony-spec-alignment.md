@@ -189,6 +189,7 @@ The workflow schema adds an `openhands` namespace for:
 - WebSocket settings
 - MCP server definitions
 - minimal agent payload settings
+- extension settings resolved separately from the core workflow config so non-runtime code can stay OpenHands-agnostic
 
 ### 3.2 Persistent conversation per issue
 

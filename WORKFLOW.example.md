@@ -2,6 +2,7 @@
 tracker:
   kind: linear
   project_slug: "example-project-slug"
+  # tracker.api_key is optional here; the loader falls back to LINEAR_API_KEY.
   active_states:
     - Todo
     - In Progress
@@ -18,6 +19,7 @@ polling:
   interval_ms: 5000
 
 workspace:
+  # `~` and exact $VAR/${VAR} tokens are expanded during config resolution.
   root: ~/.opensymphony/workspaces
 
 hooks:
@@ -60,6 +62,7 @@ openhands:
 
   conversation:
     reuse_policy: per_issue
+    # This path stays relative to the per-issue workspace.
     persistence_dir_relative: ".opensymphony/openhands"
     max_iterations: 500
     stuck_detection: true
@@ -68,6 +71,7 @@ openhands:
     agent:
       kind: Agent
       llm:
+        # Exact $VAR/${VAR} tokens are resolved before runtime launch.
         model: ${OPENHANDS_MODEL}
         api_key_env: OPENHANDS_LLM_API_KEY
         base_url_env: OPENHANDS_LLM_BASE_URL
