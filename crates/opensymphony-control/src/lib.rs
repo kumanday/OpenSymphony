@@ -391,7 +391,6 @@ mod tests {
     #[test]
     fn control_plane_client_preserves_path_prefixes_without_trailing_slashes() {
         let client = ControlPlaneClient::new(Url::parse("http://proxy/opensymphony").unwrap());
-
         let snapshot_url = client.join_path("api/v1/snapshot").unwrap();
         let events_url = client.join_path("api/v1/events").unwrap();
 
