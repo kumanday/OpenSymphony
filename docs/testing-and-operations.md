@@ -222,7 +222,8 @@ Required checks:
 - server responds on the expected base URL
 - a test conversation can be created with a temp `working_dir`
 - WebSocket can attach and reach readiness
-- a reconcile call succeeds
+- the doctor probe sends a real message and triggers `/run`
+- a reconcile call succeeds after the probe run starts
 
 ### External services
 
@@ -238,8 +239,9 @@ Required checks:
 Current implementation notes:
 
 - the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, and pinned-tooling files
-- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, and runs a reconcile call
+- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for post-run activity before reconciling events
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
+- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback and the pinned launcher `cwd` behavior
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials
 
 ## 8. Logging and diagnostics

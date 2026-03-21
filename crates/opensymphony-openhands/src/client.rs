@@ -92,6 +92,8 @@ pub enum OpenHandsError {
     HttpStatus { status: StatusCode, body: String },
     #[error("websocket readiness timed out after {0:?}")]
     ReadinessTimeout(Duration),
+    #[error("probe run activity was not observed after {0:?}")]
+    ProbeActivityTimeout(Duration),
     #[error("websocket closed before readiness")]
     WebSocketClosed,
     #[error("unsupported base URL scheme: {0}")]
@@ -314,7 +316,18 @@ impl OpenHandsClient {
         let ready_event = self
             .wait_for_readiness(conversation.conversation_id, wait_timeout)
             .await?;
-        let event_cache = self.search_all_events(conversation.conversation_id).await?;
+        self.send_message(
+            conversation.conversation_id,
+            &SendMessageRequest::user_text(
+                "Reply with the exact text `OpenSymphony doctor probe OK` and then finish.",
+            ),
+        )
+        .await?;
+        self.run_conversation(conversation.conversation_id).await?;
+
+        let (conversation, event_cache) = self
+            .wait_for_probe_activity(conversation.conversation_id, wait_timeout)
+            .await?;
         let mut state_mirror = ConversationStateMirror::default();
         state_mirror.apply_conversation(&conversation);
         for event in event_cache.items() {
@@ -327,6 +340,28 @@ impl OpenHandsClient {
             event_cache,
             state_mirror,
         })
+    }
+
+    async fn wait_for_probe_activity(
+        &self,
+        conversation_id: Uuid,
+        wait_timeout: Duration,
+    ) -> Result<(Conversation, EventCache), OpenHandsError> {
+        let deadline = Instant::now() + wait_timeout;
+
+        loop {
+            let conversation = self.get_conversation(conversation_id).await?;
+            let event_cache = self.search_all_events(conversation_id).await?;
+            if probe_activity_observed(&conversation, &event_cache) {
+                return Ok((conversation, event_cache));
+            }
+
+            if Instant::now() >= deadline {
+                return Err(OpenHandsError::ProbeActivityTimeout(wait_timeout));
+            }
+
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 }
 
@@ -359,5 +394,26 @@ fn parse_binary_event(payload: &[u8]) -> Result<EventEnvelope, OpenHandsError> {
     serde_json::from_slice(payload).map_err(|error| OpenHandsError::MalformedWebSocketEvent {
         error: Box::new(error),
         snippet: String::from_utf8_lossy(payload).chars().take(160).collect(),
+    })
+}
+
+fn probe_activity_observed(conversation: &Conversation, event_cache: &EventCache) -> bool {
+    if conversation.execution_status != "idle" {
+        return true;
+    }
+
+    event_cache.items().iter().any(|event| {
+        if event.kind == "MessageEvent" {
+            return false;
+        }
+
+        match KnownEvent::from_envelope(event) {
+            KnownEvent::ConversationStateUpdate(payload) => payload
+                .execution_status
+                .as_deref()
+                .map(|execution_status| execution_status != "idle")
+                .unwrap_or(false),
+            _ => true,
+        }
     })
 }

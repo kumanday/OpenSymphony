@@ -19,7 +19,7 @@ uv sync
 ## Run locally
 
 ```bash
-./run-local.sh
+./tools/openhands-server/run-local.sh
 ```
 
 The default bind is loopback-only at `127.0.0.1:8000`.

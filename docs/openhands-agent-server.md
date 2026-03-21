@@ -89,6 +89,7 @@ Current repository implementation:
 - `tools/openhands-server/pyproject.toml` pins the local server environment and `tools/openhands-server/run-local.sh` starts it via `uv`
 - `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
+- `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
 
 ## 4.2 Startup contract
 
@@ -246,6 +247,7 @@ Current repository implementation:
 
 - `TransportConfig.session_api_key` is appended to REST endpoint URLs as well as the WebSocket URL so one auth knob covers create, get, send-message, run, search, and attach flows
 - `crates/opensymphony-openhands/tests/client_resilience.rs` covers both authenticated REST operations and the readiness path when non-readiness frames arrive before the first state update
+- the doctor probe now exercises a real `POST /events` plus `POST /run` path before it reports the runtime healthy
 
 Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
 
