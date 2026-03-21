@@ -200,6 +200,17 @@ impl TrackerConfig {
             .api_key
             .as_deref()
             .and_then(|value| resolve_env_token(value, env));
+        let project_slug = raw.project_slug.and_then(|slug| {
+            let trimmed = slug.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        });
+
+        if matches!(kind, Some(TrackerKind::Linear)) && project_slug.is_none() {
+            return Err(WorkflowError::invalid_config(
+                "tracker.project_slug",
+                "must be set for the Linear tracker",
+            ));
+        }
 
         Ok(Self {
             kind,
@@ -207,7 +218,7 @@ impl TrackerConfig {
                 .endpoint
                 .unwrap_or_else(|| DEFAULT_TRACKER_ENDPOINT.to_string()),
             api_key,
-            project_slug: raw.project_slug,
+            project_slug,
             active_states: normalize_states(
                 raw.active_states.unwrap_or_else(default_active_states),
             ),
@@ -938,6 +949,7 @@ struct RawAgentConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawOpenHandsConfig {
     transport: Option<RawOpenHandsTransportConfig>,
     local_server: Option<RawOpenHandsLocalServerConfig>,
@@ -947,12 +959,14 @@ struct RawOpenHandsConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawOpenHandsTransportConfig {
     base_url: Option<String>,
     session_api_key_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawOpenHandsLocalServerConfig {
     enabled: Option<bool>,
     command: Option<Vec<String>>,
@@ -962,6 +976,7 @@ struct RawOpenHandsLocalServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawOpenHandsConversationConfig {
     reuse_policy: Option<String>,
     persistence_dir_relative: Option<String>,
@@ -972,11 +987,13 @@ struct RawOpenHandsConversationConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawConfirmationPolicy {
     kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawOpenHandsAgentProfile {
     kind: Option<String>,
     llm: Option<RawOpenHandsLlmConfig>,
@@ -984,6 +1001,7 @@ struct RawOpenHandsAgentProfile {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawOpenHandsLlmConfig {
     model: Option<String>,
     api_key_env: Option<String>,
@@ -991,6 +1009,7 @@ struct RawOpenHandsLlmConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawOpenHandsWebSocketConfig {
     enabled: Option<bool>,
     ready_timeout_ms: Option<IntLike>,
@@ -1001,11 +1020,13 @@ struct RawOpenHandsWebSocketConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct RawOpenHandsMcpConfig {
     stdio_servers: Option<Vec<RawStdioMcpServerConfig>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawStdioMcpServerConfig {
     name: String,
     command: Vec<String>,
@@ -1103,6 +1124,7 @@ body
             r#"---
 tracker:
   kind: linear
+  project_slug: opensymphony
   api_key: $LINEAR_KEY
 workspace:
   root: ~/opensymphony/workspaces
@@ -1178,6 +1200,47 @@ Hello
         let rendered = workflow.render_prompt(&issue(), Some(2)).unwrap();
 
         assert_eq!(rendered, "attempt=2 OSYM-1");
+    }
+
+    #[test]
+    fn rejects_linear_tracker_without_project_slug() {
+        let error = Workflow::load_from_str_with_env(
+            r#"---
+tracker:
+  kind: linear
+---
+Hello
+"#,
+            &env(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "tracker.project_slug")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_openhands_keys() {
+        let error = Workflow::load_from_str_with_env(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: opensymphony
+openhands:
+  websocket:
+    reconnect_inital_ms: 1000
+---
+Hello
+"#,
+            &env(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, WorkflowError::WorkflowParseError(_))
+                || matches!(error, WorkflowError::InvalidConfig { .. })
+        );
     }
 
     #[test]
