@@ -46,8 +46,8 @@ Not in MVP:
 Milestone M1 is the contract baseline that later milestones build on:
 
 - `opensymphony-domain` defines normalized issue, blocker, run-attempt, retry, and snapshot models
-- `opensymphony-workflow` loads `WORKFLOW.md`, rejects unknown top-level and nested config keys, applies defaults and env/path resolution, and renders prompts with strict template failures
-- `opensymphony-orchestrator` owns the deterministic scheduler state machine for candidate selection, reservation-aware start gating, retries, reconciliation, stall detection, and snapshot derivation
+- `opensymphony-workflow` loads `WORKFLOW.md`, rejects unknown nested config keys and unknown top-level keys outside the supported opaque `codex` namespace, applies defaults and env/path resolution, and renders prompts with strict template failures
+- `opensymphony-orchestrator` owns the deterministic scheduler state machine for candidate selection, reservation-aware start gating against current reservation state, retries, reconciliation, stall detection, and snapshot derivation
 - the remaining crates already exist at their final boundaries and compile against these public interfaces without reaching into implementation details
 
 ## Core design decisions
