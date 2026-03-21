@@ -1,0 +1,13 @@
+[package]
+name = "opensymphony-openhands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+opensymphony-domain = { path = "../opensymphony-domain" }
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
