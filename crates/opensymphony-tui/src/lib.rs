@@ -43,18 +43,15 @@ impl Default for TuiState {
 impl TuiState {
     pub fn reduce(&mut self, action: TuiAction) {
         match action {
+            TuiAction::BootstrapSnapshotReceived(envelope) => {
+                self.apply_snapshot(*envelope);
+            }
             TuiAction::SnapshotReceived(envelope) => {
-                let envelope = *envelope;
-                if !self.should_accept_snapshot(&envelope) {
+                if !self.apply_snapshot(*envelope) {
                     return;
                 }
-
-                let selected_identifier =
-                    self.selected_issue().map(|issue| issue.identifier.clone());
-                self.latest_snapshot = Some(envelope);
                 self.connection = ConnectionState::Live;
                 self.status_line = "live control-plane stream".to_owned();
-                self.restore_selection(selected_identifier.as_deref());
             }
             TuiAction::ConnectionLost(reason) => {
                 self.connection = ConnectionState::Reconnecting(reason.clone());
@@ -305,6 +302,17 @@ impl TuiState {
         }
     }
 
+    fn apply_snapshot(&mut self, envelope: SnapshotEnvelope) -> bool {
+        if !self.should_accept_snapshot(&envelope) {
+            return false;
+        }
+
+        let selected_identifier = self.selected_issue().map(|issue| issue.identifier.clone());
+        self.latest_snapshot = Some(envelope);
+        self.restore_selection(selected_identifier.as_deref());
+        true
+    }
+
     fn should_accept_snapshot(&self, incoming: &SnapshotEnvelope) -> bool {
         let Some(current) = self.latest_snapshot.as_ref() else {
             return true;
@@ -314,8 +322,7 @@ impl TuiState {
             return true;
         }
 
-        matches!(self.connection, ConnectionState::Reconnecting(_))
-            && incoming.published_at > current.published_at
+        incoming.published_at > current.published_at
             && incoming.snapshot.generated_at > current.snapshot.generated_at
     }
 }
@@ -371,6 +378,7 @@ impl ConnectionState {
 
 #[derive(Debug, Clone)]
 pub enum TuiAction {
+    BootstrapSnapshotReceived(Box<SnapshotEnvelope>),
     SnapshotReceived(Box<SnapshotEnvelope>),
     ConnectionLost(String),
     MoveSelectionUp,
@@ -381,12 +389,18 @@ pub enum TuiAction {
 
 #[derive(Debug, Default)]
 struct BridgeMailbox {
+    latest_bootstrap_snapshot: Option<Box<SnapshotEnvelope>>,
     latest_snapshot: Option<Box<SnapshotEnvelope>>,
     latest_connection_loss: Option<String>,
 }
 
 impl BridgeMailbox {
+    fn push_bootstrap_snapshot(&mut self, snapshot: SnapshotEnvelope) {
+        self.latest_bootstrap_snapshot = Some(Box::new(snapshot));
+    }
+
     fn push_snapshot(&mut self, snapshot: SnapshotEnvelope) {
+        self.latest_bootstrap_snapshot = None;
         self.latest_connection_loss = None;
         self.latest_snapshot = Some(Box::new(snapshot));
     }
@@ -398,6 +412,10 @@ impl BridgeMailbox {
     fn take_action(&mut self) -> Option<TuiAction> {
         if let Some(snapshot) = self.latest_snapshot.take() {
             return Some(TuiAction::SnapshotReceived(snapshot));
+        }
+
+        if let Some(snapshot) = self.latest_bootstrap_snapshot.take() {
+            return Some(TuiAction::BootstrapSnapshotReceived(snapshot));
         }
 
         self.latest_connection_loss
@@ -490,7 +508,7 @@ fn spawn_bridge(base_url: Url, bridge: Arc<Mutex<BridgeMailbox>>) {
             loop {
                 match client.fetch_snapshot().await {
                     Ok(snapshot) => {
-                        push_snapshot(&bridge, snapshot);
+                        push_bootstrap_snapshot(&bridge, snapshot);
                     }
                     Err(error) => {
                         push_connection_loss(&bridge, error.to_string());
@@ -721,6 +739,13 @@ fn push_snapshot(bridge: &Arc<Mutex<BridgeMailbox>>, snapshot: SnapshotEnvelope)
     bridge.push_snapshot(snapshot);
 }
 
+fn push_bootstrap_snapshot(bridge: &Arc<Mutex<BridgeMailbox>>, snapshot: SnapshotEnvelope) {
+    let mut bridge = bridge
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    bridge.push_bootstrap_snapshot(snapshot);
+}
+
 fn push_connection_loss(bridge: &Arc<Mutex<BridgeMailbox>>, reason: String) {
     let mut bridge = bridge
         .lock()
@@ -883,6 +908,24 @@ mod tests {
                 assert_eq!(*snapshot, second);
             }
             other => panic!("expected latest snapshot, got {other:?}"),
+        }
+        assert!(mailbox.take_action().is_none());
+    }
+
+    #[test]
+    fn live_snapshot_supersedes_pending_bootstrap_snapshot() {
+        let mut mailbox = BridgeMailbox::default();
+        let bootstrap = fixture(2);
+        let live = fixture(3);
+
+        mailbox.push_bootstrap_snapshot(bootstrap);
+        mailbox.push_snapshot(live.clone());
+
+        match mailbox.take_action() {
+            Some(super::TuiAction::SnapshotReceived(snapshot)) => {
+                assert_eq!(*snapshot, live);
+            }
+            other => panic!("expected live snapshot, got {other:?}"),
         }
         assert!(mailbox.take_action().is_none());
     }

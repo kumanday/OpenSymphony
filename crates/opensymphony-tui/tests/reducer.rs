@@ -138,6 +138,30 @@ fn applies_snapshot_and_renders_selected_issue() {
 }
 
 #[test]
+fn bootstrap_snapshot_keeps_connecting_status_until_stream_updates_arrive() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::BootstrapSnapshotReceived(Box::new(fixture(
+        3, 2,
+    ))));
+
+    assert_eq!(state.connection, ConnectionState::Connecting);
+    assert_eq!(
+        state
+            .latest_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.sequence),
+        Some(3)
+    );
+    let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("conn=connecting"));
+    assert!(rendered.contains("COE-255"));
+
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 2))));
+
+    assert_eq!(state.connection, ConnectionState::Live);
+}
+
+#[test]
 fn clamps_selection_when_new_snapshot_has_fewer_issues() {
     let mut state = TuiState::default();
     state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(1, 3))));
@@ -230,6 +254,28 @@ fn accepts_lower_sequence_after_reconnect_when_snapshot_is_newer() {
     );
     let rendered = state.render_text(100, 20);
     assert!(rendered.contains("COE-301"));
+}
+
+#[test]
+fn accepts_lower_sequence_after_restart_without_connection_loss_transition() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(
+        fixture_with_identifiers(5, &["COE-255", "COE-256"]),
+    )));
+
+    let restarted = retime(fixture_with_identifiers(1, &["COE-401", "COE-402"]), 30);
+    state.reduce(TuiAction::SnapshotReceived(Box::new(restarted.clone())));
+
+    assert_eq!(state.connection, ConnectionState::Live);
+    assert_eq!(
+        state
+            .latest_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.sequence),
+        Some(1)
+    );
+    let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("COE-401"));
 }
 
 #[test]

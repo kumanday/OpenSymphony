@@ -208,9 +208,10 @@ UI requirements:
 Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
-- subscribe to the SSE stream
+- keep that bootstrap snapshot visible while the client is still connecting or reconnecting
+- only report `live control-plane stream` after the SSE subscription is actually yielding stream data
 - if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible
-- ignore reconnect snapshots that regress the rendered sequence unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
+- ignore regressing snapshots unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
 - refetch the current snapshot before resubscribing
 
 ## 11. Dependency strategy
