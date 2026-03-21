@@ -177,6 +177,12 @@ Do not block M1 through M5 on:
 - production-grade hosted deployment manifests
 - organization-wide onboarding automation
 
+M6 documentation can be refined against the existing `WORKFLOW.example.md` transport surface before the runtime code lands, but do not treat the milestone as complete until all of the following are true:
+
+- OSYM-601 remote transport and auth work is merged
+- OSYM-602 hosted rollout documentation is validated against that implementation
+- remote-mode integration evidence exists against a pinned external server
+
 ## 10. Parent issue strategy
 
 Create the parent issues first in Linear, attach the relevant milestone, then create the child issues and link them under the parent.

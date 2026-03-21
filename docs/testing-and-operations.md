@@ -72,6 +72,25 @@ Suggested gates:
 - `OPENSYMPHONY_LIVE_OPENHANDS=1`
 - `OPENSYMPHONY_LIVE_LINEAR=1`
 
+## 2.5 Live remote-mode tests
+
+Hosted follow-on work also needs an opt-in suite against a pinned external or hosted agent-server.
+
+Required inputs:
+
+- explicit `openhands.transport.base_url`
+- `openhands.local_server.enabled=false`
+- a resolved session API key when the remote server requires auth
+- the expected WebSocket auth behavior for the pinned server version
+
+Minimum validation goals:
+
+- HTTP auth success and failure cases
+- WebSocket readiness with the configured auth mode
+- reconcile-after-ready against the remote base URL
+- reconnect behavior after a forced disconnect
+- proof that local supervised mode remains unaffected by the remote-mode config path
+
 ## 3. Minimum required test coverage by subsystem
 
 ## 3.1 Workflow and config
@@ -94,7 +113,9 @@ Suggested gates:
 ## 3.3 OpenHands adapter
 
 - supervised server startup and shutdown
+- external or hosted base URL switching without architectural changes
 - HTTP client auth modes
+- HTTP and WebSocket auth parity for the pinned version
 - conversation creation
 - initial REST sync
 - WebSocket readiness barrier
@@ -209,6 +230,15 @@ Required checks:
 - a test conversation can be created with a temp `working_dir`
 - WebSocket can attach and reach readiness
 - a reconcile call succeeds
+
+### External or hosted runtime
+
+- explicit `base_url` is configured when `local_server.enabled` is `false`
+- warn or fail if a hosted target uses plaintext `http://`
+- session API key env resolves when auth is required
+- REST conversation create succeeds against the external server
+- WebSocket reaches readiness with the configured auth mode
+- reconcile-after-ready succeeds against the remote server
 
 ### External services
 
