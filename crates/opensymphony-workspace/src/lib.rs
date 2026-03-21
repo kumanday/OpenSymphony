@@ -180,6 +180,19 @@ impl WorkspaceManager {
         let sanitized = Self::sanitize_issue_identifier(identifier);
         let root = self.resolved_root()?;
         let candidate = root.join(&sanitized);
+        if let Ok(metadata) = fs::symlink_metadata(&candidate) {
+            if metadata.file_type().is_symlink() || candidate.exists() {
+                let resolved_candidate = candidate
+                    .canonicalize()
+                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+                if !resolved_candidate.starts_with(&root) {
+                    return Err(WorkspaceError::PathEscape(
+                        resolved_candidate.display().to_string(),
+                    ));
+                }
+                return Ok(resolved_candidate);
+            }
+        }
         if candidate.parent() != Some(root.as_path()) {
             return Err(WorkspaceError::PathEscape(candidate.display().to_string()));
         }
@@ -795,6 +808,40 @@ mod tests {
                 .canonicalize()
                 .expect("real root should canonicalize")
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_existing_workspace_leaf_symlink_that_escapes_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("tempdir should exist");
+        let outside = tempdir().expect("outside tempdir should exist");
+        symlink(outside.path(), root.path().join("1")).expect("leaf symlink should exist");
+
+        let manager = WorkspaceManager::new(WorkspaceConfig {
+            root: root.path().to_path_buf(),
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig::default(),
+        });
+        let issue = Issue {
+            id: "1".to_string(),
+            identifier: "ABC-1".to_string(),
+            title: "Workspace".to_string(),
+            description: None,
+            priority: Some(1),
+            state: "Todo".to_string(),
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap(),
+        };
+
+        let error = manager
+            .ensure_workspace(&issue)
+            .await
+            .expect_err("escaped leaf symlink should be rejected");
+        assert!(matches!(error, WorkspaceError::PathEscape(_)));
     }
 
     #[tokio::test]

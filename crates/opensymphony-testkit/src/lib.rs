@@ -6,7 +6,7 @@ use opensymphony_domain::{
 };
 use opensymphony_linear::{LinearError, LinearWriteOperations};
 use opensymphony_openhands::{
-    IssueRunRequest, IssueRunResult, IssueSessionError, IssueSessionRunner,
+    IssueRunProgress, IssueRunRequest, IssueRunResult, IssueSessionError, IssueSessionRunner,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -209,6 +209,7 @@ impl LinearWriteOperations for MemoryTracker {
 #[derive(Debug, Clone)]
 pub struct ScriptedRun {
     pub delay_ms: u64,
+    pub progress_every_ms: Option<u64>,
     pub outcome_kind: WorkerOutcomeKind,
     pub detail: Option<String>,
     pub conversation_id: Option<String>,
@@ -219,6 +220,7 @@ impl ScriptedRun {
     pub fn success(delay_ms: u64) -> Self {
         Self {
             delay_ms,
+            progress_every_ms: None,
             outcome_kind: WorkerOutcomeKind::Success,
             detail: None,
             conversation_id: None,
@@ -229,6 +231,7 @@ impl ScriptedRun {
     pub fn failure(delay_ms: u64, detail: impl Into<String>) -> Self {
         Self {
             delay_ms,
+            progress_every_ms: None,
             outcome_kind: WorkerOutcomeKind::Failure,
             detail: Some(detail.into()),
             conversation_id: None,
@@ -239,6 +242,7 @@ impl ScriptedRun {
     pub fn stalled(delay_ms: u64, detail: impl Into<String>) -> Self {
         Self {
             delay_ms,
+            progress_every_ms: None,
             outcome_kind: WorkerOutcomeKind::Stalled,
             detail: Some(detail.into()),
             conversation_id: None,
@@ -249,6 +253,7 @@ impl ScriptedRun {
     pub fn transport_error(delay_ms: u64, detail: impl Into<String>) -> Self {
         Self {
             delay_ms,
+            progress_every_ms: None,
             outcome_kind: WorkerOutcomeKind::Failure,
             detail: None,
             conversation_id: None,
@@ -263,6 +268,7 @@ impl ScriptedRun {
     ) -> Self {
         Self {
             delay_ms,
+            progress_every_ms: None,
             outcome_kind: WorkerOutcomeKind::Failure,
             detail: None,
             conversation_id: None,
@@ -270,6 +276,11 @@ impl ScriptedRun {
                 IssueSessionError::transport(detail).with_conversation_id(conversation_id),
             ),
         }
+    }
+
+    pub fn with_progress_every(mut self, progress_every_ms: u64) -> Self {
+        self.progress_every_ms = Some(progress_every_ms);
+        self
     }
 }
 
@@ -295,6 +306,7 @@ impl IssueSessionRunner for ScriptedRunner {
     async fn run_issue(
         &self,
         request: IssueRunRequest,
+        progress_tx: tokio::sync::mpsc::UnboundedSender<IssueRunProgress>,
     ) -> Result<IssueRunResult, IssueSessionError> {
         self.requests
             .lock()
@@ -310,7 +322,18 @@ impl IssueSessionRunner for ScriptedRunner {
                 .unwrap_or_else(|| ScriptedRun::success(0))
         };
 
-        sleep(Duration::from_millis(scripted.delay_ms)).await;
+        let mut remaining_ms = scripted.delay_ms;
+        if let Some(progress_every_ms) = scripted.progress_every_ms.filter(|value| *value > 0) {
+            while remaining_ms > progress_every_ms {
+                sleep(Duration::from_millis(progress_every_ms)).await;
+                remaining_ms -= progress_every_ms;
+                let _ = progress_tx.send(IssueRunProgress {
+                    issue_id: request.issue.id.clone(),
+                    conversation_id: scripted.conversation_id.clone(),
+                });
+            }
+        }
+        sleep(Duration::from_millis(remaining_ms)).await;
 
         if let Some(error) = scripted.session_error {
             return Err(error);

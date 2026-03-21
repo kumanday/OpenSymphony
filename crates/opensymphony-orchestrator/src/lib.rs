@@ -5,7 +5,8 @@ use opensymphony_domain::{
     SchedulerConfig, WorkerOutcome, WorkerOutcomeKind,
 };
 use opensymphony_openhands::{
-    IssueRunRequest, IssueRunResult, IssueSessionError, IssueSessionRunner, PromptMode,
+    IssueRunProgress, IssueRunRequest, IssueRunResult, IssueSessionError, IssueSessionRunner,
+    PromptMode,
 };
 use opensymphony_workflow::{WorkflowDocument, WorkflowError};
 use opensymphony_workspace::{IssueManifest, WorkspaceManager};
@@ -35,12 +36,16 @@ pub struct Scheduler {
     retry_queue: Vec<RetryEntry>,
     reports_tx: mpsc::UnboundedSender<WorkerReport>,
     reports_rx: mpsc::UnboundedReceiver<WorkerReport>,
+    progress_tx: mpsc::UnboundedSender<IssueRunProgress>,
+    progress_rx: mpsc::UnboundedReceiver<IssueRunProgress>,
 }
 
 struct RunningWorker {
     issue: Issue,
     attempt: u32,
-    started_at: DateTime<Utc>,
+    last_progress_at: DateTime<Utc>,
+    workspace_path: PathBuf,
+    prompt_mode: PromptMode,
     task: JoinHandle<()>,
 }
 
@@ -66,6 +71,7 @@ impl Scheduler {
         workspace: Arc<WorkspaceManager>,
     ) -> Self {
         let (reports_tx, reports_rx) = mpsc::unbounded_channel();
+        let (progress_tx, progress_rx) = mpsc::unbounded_channel();
         Self {
             config,
             tracker,
@@ -75,6 +81,8 @@ impl Scheduler {
             retry_queue: vec![],
             reports_tx,
             reports_rx,
+            progress_tx,
+            progress_rx,
         }
     }
 
@@ -148,6 +156,7 @@ impl Scheduler {
 
     pub async fn tick(&mut self) -> Result<(), SchedulerError> {
         self.drain_reports().await?;
+        self.drain_progress()?;
         self.reconcile_running().await?;
 
         if self.running.len() >= self.config.max_concurrency {
@@ -224,6 +233,33 @@ impl Scheduler {
 
         for (issue, attempt) in dispatch_queue {
             self.dispatch_issue(issue, attempt).await?;
+        }
+
+        Ok(())
+    }
+
+    fn drain_progress(&mut self) -> Result<(), SchedulerError> {
+        while let Ok(progress) = self.progress_rx.try_recv() {
+            let Some(worker) = self.running.get_mut(&progress.issue_id) else {
+                continue;
+            };
+            worker.last_progress_at = Utc::now();
+
+            let Some(conversation_id) = progress.conversation_id.as_deref() else {
+                continue;
+            };
+            let issue = worker.issue.clone();
+            let workspace_path = worker.workspace_path.clone();
+            let prompt_mode = worker.prompt_mode.clone();
+            self.workspace
+                .save_conversation_manifest(
+                    &issue,
+                    &self.workspace_context(&issue, workspace_path)?,
+                    conversation_id,
+                    matches!(prompt_mode, PromptMode::Fresh),
+                    None,
+                )
+                .map_err(|error| SchedulerError::Workspace(error.to_string()))?;
         }
 
         Ok(())
@@ -393,7 +429,7 @@ impl Scheduler {
                 }
             }
 
-            if (now - worker.started_at).num_milliseconds() > self.config.stall_timeout_ms {
+            if (now - worker.last_progress_at).num_milliseconds() > self.config.stall_timeout_ms {
                 releases.push((
                     worker.issue.clone(),
                     worker.attempt,
@@ -509,16 +545,19 @@ impl Scheduler {
         };
 
         let reports_tx = self.reports_tx.clone();
+        let progress_tx = self.progress_tx.clone();
         let runner = self.runner.clone();
         let issue_for_task = issue.clone();
         let workspace_path = context.workspace_path.clone();
+        let prompt_mode_for_task = prompt_mode.clone();
+        let prompt_mode_for_worker = prompt_mode.clone();
         let task = tokio::spawn(async move {
-            let result = runner.run_issue(request).await;
+            let result = runner.run_issue(request, progress_tx).await;
             let _ = reports_tx.send(WorkerReport {
                 issue: issue_for_task,
                 attempt,
                 workspace_path,
-                prompt_mode,
+                prompt_mode: prompt_mode_for_task,
                 conversation_id_hint,
                 result,
             });
@@ -529,7 +568,9 @@ impl Scheduler {
             RunningWorker {
                 issue,
                 attempt,
-                started_at: Utc::now(),
+                last_progress_at: Utc::now(),
+                workspace_path: context.workspace_path,
+                prompt_mode: prompt_mode_for_worker,
                 task,
             },
         );
@@ -901,6 +942,42 @@ EOF"#
 
         assert_eq!(scheduler.retry_queue.len(), 1);
         assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Stall);
+    }
+
+    #[tokio::test]
+    async fn does_not_stall_worker_while_progress_updates_continue() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(
+            &issue.id,
+            vec![ScriptedRun::success(120).with_progress_every(10)],
+        );
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let mut scheduler = scheduler(tracker, runner, tempdir.path().to_path_buf(), false, None);
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        sleep(Duration::from_millis(80)).await;
+        scheduler
+            .tick()
+            .await
+            .expect("progress updates should suppress stall classification");
+
+        assert!(scheduler.running.contains_key(&issue.id));
+        assert!(scheduler.retry_queue.is_empty());
+
+        sleep(Duration::from_millis(60)).await;
+        scheduler.tick().await.expect("completion should reconcile");
+
+        assert!(!scheduler.running.contains_key(&issue.id));
+        assert_eq!(scheduler.retry_queue.len(), 1);
+        assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Continuation);
     }
 
     #[tokio::test]

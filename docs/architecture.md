@@ -211,9 +211,11 @@ For each issue:
 1. Ensure workspace exists.
    - treat workspace bootstrap as incomplete until `after_create` succeeds, so a transient bootstrap failure reruns `after_create` on the next attempt instead of reusing a half-initialized workspace silently
    - derive the workspace directory from the stable tracker `issue.id`; if an older identifier-keyed workspace already exists for that `issue_id`, migrate it onto the stable-ID path before reuse
+   - if the resolved workspace leaf already exists, canonicalize it before reuse and reject any symlink that escapes `workspace.root`
 2. Load or create stable conversation metadata.
    - invalid persisted conversation metadata is cleared and treated as a fresh reset instead of retrying the same corrupt manifest forever
 3. Attach WebSocket stream and reconcile events.
+   - propagate runtime progress heartbeats into the scheduler so stall detection measures time since the last observed event, not just wall-clock time since dispatch
 4. Execute one or more turns on the same conversation up to `agent.max_turns`, loaded from the issue workspace `WORKFLOW.md` for that dispatch.
    - if `WORKFLOW.md` is missing, fail only that dispatch attempt and retry later instead of inventing a generic fallback prompt
 5. Exit worker normally or abnormally.

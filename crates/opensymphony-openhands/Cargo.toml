@@ -10,4 +10,5 @@ chrono.workspace = true
 opensymphony-domain = { path = "../opensymphony-domain" }
 serde.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 uuid.workspace = true

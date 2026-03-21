@@ -3,6 +3,7 @@ use opensymphony_domain::{Issue, WorkerOutcome};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PromptMode {
@@ -25,6 +26,12 @@ pub struct IssueRunResult {
     pub outcome: WorkerOutcome,
     pub conversation_id: String,
     pub prompt_mode: PromptMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IssueRunProgress {
+    pub issue_id: String,
+    pub conversation_id: Option<String>,
 }
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
@@ -126,5 +133,6 @@ pub trait IssueSessionRunner: Send + Sync {
     async fn run_issue(
         &self,
         request: IssueRunRequest,
+        progress_tx: mpsc::UnboundedSender<IssueRunProgress>,
     ) -> Result<IssueRunResult, IssueSessionError>;
 }
