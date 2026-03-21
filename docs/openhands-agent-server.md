@@ -84,6 +84,12 @@ Use for:
 
 Local MVP work starts with supervised mode, but the trait boundary must support both.
 
+Current repository implementation:
+
+- `tools/openhands-server/pyproject.toml` pins the local server environment and `tools/openhands-server/run-local.sh` starts it via `uv`
+- `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
+- `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
+
 ## 4.2 Startup contract
 
 In supervised mode:
@@ -99,6 +105,8 @@ Readiness probing rule:
 - prefer a documented health endpoint if the pinned version exposes one
 - otherwise use a conservative FastAPI probe such as `GET /openapi.json`
 - never rely on sleep-only startup delays
+
+The current doctor and live-validation path uses `GET /openapi.json` as the conservative readiness probe.
 
 ## 4.3 Shutdown contract
 
@@ -180,6 +188,8 @@ Use the smallest necessary subset of the agent-server API.
   - start background execution
 - `GET /api/conversations/{conversation_id}/events/search`
   - sync and reconcile events
+
+The current fake-server coverage and CLI doctor implementation exercise this exact subset.
 
 ### Optional, diagnostic, or future
 
