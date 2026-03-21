@@ -327,7 +327,7 @@ On disconnect:
 - start bounded reconnect backoff
 - refresh authoritative conversation state with REST
 - reconnect WebSocket with a bounded handshake timeout
-- wait for readiness barrier
+- wait for readiness barrier, but abort that wait immediately if the worker is shutting down
 - reconcile event backlog
 - resume live processing
 

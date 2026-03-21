@@ -34,6 +34,11 @@ enum ConnectControl {
     Stop,
 }
 
+enum ReadyControl {
+    Ready,
+    Stop,
+}
+
 /// Cached conversation state derived from WebSocket events plus REST refreshes.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ConversationStateMirror {
@@ -365,16 +370,17 @@ impl StreamRuntime {
                 .await
                 {
                     Ok(ConnectControl::Connected(mut next_stream)) => {
-                        match wait_for_ready(
+                        match wait_for_ready_until_stopped(
                             &mut next_stream,
                             &self.socket_url,
                             self.websocket.ready_timeout(),
                             &self.cache,
                             &self.state,
+                            &mut self.stop_rx,
                         )
                         .await
                         {
-                            Ok(()) => {
+                            Ok(ReadyControl::Ready) => {
                                 match reconcile_and_refresh(
                                     &self.client,
                                     &self.conversation_id,
@@ -396,6 +402,7 @@ impl StreamRuntime {
                                     }
                                 }
                             }
+                            Ok(ReadyControl::Stop) => return,
                             Err(error) => {
                                 warn!(conversation_id = %self.conversation_id, error = %error, "websocket reconnect readiness failed");
                             }
@@ -502,6 +509,68 @@ async fn wait_for_ready(
             operation: "websocket readiness barrier",
             timeout,
         }),
+    }
+}
+
+async fn wait_for_ready_until_stopped(
+    stream: &mut EventSocket,
+    socket_url: &url::Url,
+    timeout: Duration,
+    cache: &Arc<Mutex<EventCache>>,
+    state: &Arc<Mutex<ConversationStateMirror>>,
+    stop_rx: &mut watch::Receiver<bool>,
+) -> Result<ReadyControl> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(OpenHandsError::Timeout {
+                operation: "websocket readiness barrier",
+                timeout,
+            });
+        }
+        let remaining = deadline - now;
+
+        tokio::select! {
+            changed = stop_rx.changed() => {
+                if changed.is_err() || *stop_rx.borrow() {
+                    return Ok(ReadyControl::Stop);
+                }
+            }
+            next = stream.next() => {
+                match next {
+                    Some(Ok(message)) => {
+                        if let Some(event) = decode_message(message, socket_url).await? {
+                            let is_ready_event = matches!(
+                                event.payload,
+                                RuntimeEventPayload::ConversationStateUpdate(_)
+                            );
+                            apply_event(cache, state, &event).await;
+                            if is_ready_event {
+                                return Ok(ReadyControl::Ready);
+                            }
+                        }
+                    }
+                    Some(Err(source)) => {
+                        return Err(OpenHandsError::WebSocket {
+                            url: socket_url.to_string(),
+                            source,
+                        });
+                    }
+                    None => {
+                        return Err(OpenHandsError::Protocol {
+                            message: "websocket closed before readiness event".to_string(),
+                        });
+                    }
+                }
+            }
+            _ = tokio::time::sleep(remaining) => {
+                return Err(OpenHandsError::Timeout {
+                    operation: "websocket readiness barrier",
+                    timeout,
+                });
+            }
+        }
     }
 }
 

@@ -92,6 +92,7 @@ Current live OpenHands inputs:
 
 - sanitize issue identifiers
 - reject dot-only workspace keys
+- reject metadata symlink escapes
 - refuse path escape
 - create and reuse workspace
 - hook timeout
@@ -111,12 +112,14 @@ Current live OpenHands inputs:
 - post-ready reconcile
 - reconnect with backoff
 - reconnect cancellation during an in-flight handshake
+- reconnect cancellation during an in-flight readiness wait
 - out-of-order event insertion
 - terminal state detection
 - conversation reuse
 - conversation reset when a reused server-side workspace binding no longer matches the current issue
   workspace
 - fresh-run retry keeps the full prompt when the first prompt submission fails before reaching the runtime
+- corrupted conversation manifests reset to a fresh run instead of wedging the issue
 
 ## 3.4 Orchestrator
 

@@ -28,6 +28,7 @@ Examples:
 ## 3. Hard safety invariants
 
 - The resolved workspace path must stay under `workspace.root`.
+- Symlinked OpenSymphony metadata directories must not escape the resolved issue workspace.
 - `cwd` for all hook commands and all OpenHands runs must equal the resolved issue workspace path unless an explicit per-command `cwd` override inside the same workspace is required.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
@@ -175,6 +176,8 @@ This file is the bridge between Symphony issue ownership and OpenHands conversat
 Persist or rewrite it only after the selected prompt has been accepted by the runtime. A fresh
 conversation that fails before the first prompt is posted must not flip the next retry into
 continuation mode.
+If the manifest is unreadable or corrupted, treat it as a fresh-reset condition and overwrite it on
+the next successful run instead of wedging the issue until manual cleanup.
 
 ## 9. Generated context artifacts
 

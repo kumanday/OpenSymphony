@@ -247,6 +247,8 @@ On reconnect:
 If reconnection exhausts policy limits or the worker deadline, fail the worker and let the orchestrator schedule retry.
 If shutdown or cancellation arrives during a reconnect handshake, abort that attempt immediately
 instead of waiting for the transport timeout to expire.
+Apply the same stop-aware behavior after the socket is accepted but before the first readiness event
+arrives, so reconnect shutdown does not wait for `ready_timeout_ms` to expire.
 
 ## 8.3 Decode failures
 
