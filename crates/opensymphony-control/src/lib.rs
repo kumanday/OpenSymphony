@@ -224,7 +224,7 @@ impl ControlPlaneClient {
     }
 
     fn join_path(&self, path: &'static str) -> Result<Url, ControlPlaneClientError> {
-        self.base_url
+        normalized_base_url(&self.base_url)
             .join(path)
             .map_err(|source| ControlPlaneClientError::InvalidBaseUrl {
                 base_url: self.base_url.to_string(),
@@ -232,6 +232,17 @@ impl ControlPlaneClient {
                 source,
             })
     }
+}
+
+fn normalized_base_url(base_url: &Url) -> Url {
+    let mut normalized = base_url.clone();
+    let path = normalized.path();
+    if path.is_empty() || path.ends_with('/') {
+        return normalized;
+    }
+
+    normalized.set_path(&format!("{path}/"));
+    normalized
 }
 
 pub struct ControlPlaneEventStream {
@@ -298,8 +309,9 @@ mod tests {
     };
     use std::time::Duration;
     use tokio::time::timeout;
+    use url::Url;
 
-    use super::{next_snapshot_envelope, SnapshotStore};
+    use super::{next_snapshot_envelope, ControlPlaneClient, SnapshotStore};
 
     fn fixture_snapshot(step: u64) -> DaemonSnapshot {
         let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
@@ -373,6 +385,23 @@ mod tests {
         assert_eq!(
             resumed.snapshot.recent_events[0].summary,
             "published step 81"
+        );
+    }
+
+    #[test]
+    fn control_plane_client_preserves_path_prefixes_without_trailing_slashes() {
+        let client = ControlPlaneClient::new(Url::parse("http://proxy/opensymphony").unwrap());
+
+        let snapshot_url = client.join_path("api/v1/snapshot").unwrap();
+        let events_url = client.join_path("api/v1/events").unwrap();
+
+        assert_eq!(
+            snapshot_url.as_str(),
+            "http://proxy/opensymphony/api/v1/snapshot"
+        );
+        assert_eq!(
+            events_url.as_str(),
+            "http://proxy/opensymphony/api/v1/events"
         );
     }
 }

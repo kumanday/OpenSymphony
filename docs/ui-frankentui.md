@@ -42,6 +42,10 @@ Current implemented local contract:
 - `GET /api/v1/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
 - `GET /healthz` for daemon liveness
 
+The implemented client treats the configured base URL as a service-root prefix, so
+`http://proxy/opensymphony` and `http://proxy/opensymphony/` both resolve API requests under
+`/opensymphony/...` instead of silently dropping the prefix.
+
 ### Explicitly out of scope
 
 - direct connection to OpenHands WebSocket streams
