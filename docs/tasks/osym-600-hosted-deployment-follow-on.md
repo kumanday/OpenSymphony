@@ -47,10 +47,13 @@ Add the first hosted-mode capability and documentation without destabilizing the
 - Remote mode transport config
 - Auth test coverage
 - Hosted deployment guidance
+- Hosted rollout checklist tied to the existing OpenHands transport config surface
 
 ## Acceptance criteria
 - All child issues are merged
 - The same orchestrator can target a remote agent-server with configuration changes rather than architectural changes
+- Hosted documentation clearly separates first-pilot rollout guidance from later fleet automation work
 
 ## Test plan
 - Remote-mode integration tests against a pinned external server
+- Docs walkthrough for the migration from local supervised mode to `local_server.enabled=false`

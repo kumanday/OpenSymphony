@@ -112,6 +112,8 @@ This keeps:
 - UI crashes from affecting execution
 - future hosted deployment options open
 
+For hosted follow-on mode, the same control-plane boundary should remain intact even when OpenHands runs remotely. Hosted rollout should add remote troubleshooting metadata to the control plane rather than bypassing it.
+
 ## 4. Runtime component model
 
 ## 4.1 Core crates
@@ -350,6 +352,12 @@ Tradeoffs:
 - stronger need for clear documentation and safe defaults
 
 Hosted and hardened modes are described in `docs/deployment-modes.md` but are not the critical path for the MVP.
+
+Hosted follow-on design constraint:
+
+- keep the runtime transport switch config-driven through the existing `WORKFLOW.md` OpenHands fields
+- keep workspace ownership in the workspace layer even when execution moves to remote infrastructure
+- keep the control plane as the only UI-facing surface for local and hosted deployments
 
 ## 10. Non-goals for the architecture phase
 

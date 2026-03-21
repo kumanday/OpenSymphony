@@ -221,3 +221,8 @@ The same Linear MCP server can run:
 - centrally as a network-accessible MCP service later if needed
 
 Start with stdio for simplicity and local reliability.
+
+Hosted follow-on note:
+
+- remote OpenHands transport changes should not require changing the orchestrator-to-Linear ownership split
+- agent-side Linear writes remain optional for scheduler correctness in both local and hosted modes
