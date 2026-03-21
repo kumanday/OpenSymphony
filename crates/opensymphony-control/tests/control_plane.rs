@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use axum::Router;
 use chrono::{TimeZone, Utc};
 use opensymphony_control::{ControlPlaneClient, ControlPlaneServer, SnapshotStore};
 use opensymphony_domain::{
@@ -87,6 +88,35 @@ async fn serves_snapshot_and_streams_updates() {
         streamed.snapshot.recent_events[0].summary,
         "published step 1"
     );
+
+    stream.close();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn client_handles_path_prefixed_base_url_without_trailing_slash() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new().nest(
+        "/opensymphony",
+        ControlPlaneServer::new(store.clone()).router(),
+    );
+    let server_task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let client =
+        ControlPlaneClient::new(Url::parse(&format!("http://{address}/opensymphony")).unwrap());
+    let current = client.fetch_snapshot().await.unwrap();
+    assert_eq!(current.sequence, 1);
+    assert_eq!(current.snapshot.issues[0].identifier, "COE-255");
+
+    let mut stream = client.stream_updates().unwrap();
+    let initial: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(initial.sequence, 1);
 
     stream.close();
     server_task.abort();
