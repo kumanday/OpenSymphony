@@ -15,7 +15,7 @@ openhands:
     max_iterations: 32
 ---
 
-{% if attempt and attempt.continuation %}
+{% if attempt is defined and attempt and attempt.continuation %}
 ## Continuation
 
 You are continuing issue `{{ issue.identifier }}` after attempt {{ attempt.number }}.

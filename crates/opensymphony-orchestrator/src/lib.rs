@@ -7,7 +7,7 @@ use opensymphony_domain::{
 use opensymphony_openhands::{
     IssueRunRequest, IssueRunResult, IssueSessionError, IssueSessionRunner, PromptMode,
 };
-use opensymphony_workflow::{AgentConfig, WorkflowDocument, WorkflowError};
+use opensymphony_workflow::{WorkflowDocument, WorkflowError};
 use opensymphony_workspace::{IssueManifest, WorkspaceManager};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -450,18 +450,26 @@ impl Scheduler {
             }
         };
 
-        let (prompt_mode, conversation_id_hint) = match self
-            .workspace
-            .load_conversation_manifest(&issue.identifier)
-            .map_err(|error| SchedulerError::Workspace(error.to_string()))
-        {
-            Ok(Some(manifest)) => (PromptMode::Continuation, Some(manifest.conversation_id)),
-            Ok(None) => (PromptMode::Fresh, None),
-            Err(_error) => {
-                self.enqueue_dispatch_retry(issue, attempt)?;
-                return Ok(());
-            }
-        };
+        let (prompt_mode, conversation_id_hint) =
+            match self.workspace.load_conversation_manifest(&issue.identifier) {
+                Ok(Some(manifest)) => (PromptMode::Continuation, Some(manifest.conversation_id)),
+                Ok(None) => (PromptMode::Fresh, None),
+                Err(opensymphony_workspace::WorkspaceError::Json(_)) => {
+                    if let Err(_error) = self
+                        .workspace
+                        .clear_conversation_manifest(&issue.identifier)
+                        .map_err(|error| SchedulerError::Workspace(error.to_string()))
+                    {
+                        self.enqueue_dispatch_retry(issue, attempt)?;
+                        return Ok(());
+                    }
+                    (PromptMode::Fresh, None)
+                }
+                Err(_error) => {
+                    self.enqueue_dispatch_retry(issue, attempt)?;
+                    return Ok(());
+                }
+            };
 
         let rendered = match render_prompt(&context.workspace_path, &issue, attempt, &prompt_mode) {
             Ok(rendered) => rendered,
@@ -649,36 +657,25 @@ fn render_prompt(
     prompt_mode: &PromptMode,
 ) -> Result<RenderedPrompt, WorkflowError> {
     let workflow_path = workspace_path.join("WORKFLOW.md");
-    if workflow_path.exists() {
-        let workflow = WorkflowDocument::load_from_path(&workflow_path)?;
-        let prompt = match prompt_mode {
-            PromptMode::Fresh => workflow.render_fresh_prompt(issue)?,
-            PromptMode::Continuation => workflow.render_continuation_prompt(
-                issue,
-                &AttemptContext {
-                    number: attempt,
-                    continuation: true,
-                },
-            )?,
-        };
-        return Ok(RenderedPrompt {
-            prompt,
-            max_turns: workflow.front_matter.agent.max_turns,
-        });
+    if !workflow_path.exists() {
+        return Err(WorkflowError::MissingWorkflow(
+            workflow_path.display().to_string(),
+        ));
     }
-
+    let workflow = WorkflowDocument::load_from_path(&workflow_path)?;
+    let prompt = match prompt_mode {
+        PromptMode::Fresh => workflow.render_fresh_prompt(issue)?,
+        PromptMode::Continuation => workflow.render_continuation_prompt(
+            issue,
+            &AttemptContext {
+                number: attempt,
+                continuation: true,
+            },
+        )?,
+    };
     Ok(RenderedPrompt {
-        prompt: match prompt_mode {
-            PromptMode::Fresh => format!(
-                "You are working on issue {}: {}",
-                issue.identifier, issue.title
-            ),
-            PromptMode::Continuation => format!(
-                "Continue working on issue {} after attempt {}",
-                issue.identifier, attempt
-            ),
-        },
-        max_turns: AgentConfig::default().max_turns,
+        prompt,
+        max_turns: workflow.front_matter.agent.max_turns,
     })
 }
 
@@ -743,6 +740,21 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, seconds).unwrap()
     }
 
+    fn default_after_create_hook() -> String {
+        r#"cat <<'EOF' > WORKFLOW.md
+---
+tracker:
+  project_slug: demo
+  active_states: [Todo, In Progress]
+  terminal_states: [Done]
+agent:
+  max_turns: 3
+---
+Start {{ issue.identifier }}
+EOF"#
+            .to_string()
+    }
+
     fn scheduler(
         tracker: Arc<MemoryTracker>,
         runner: Arc<ScriptedRunner>,
@@ -750,6 +762,10 @@ mod tests {
         cleanup_terminal_workspaces: bool,
         after_create: Option<String>,
     ) -> Scheduler {
+        let after_create = Some(match after_create {
+            Some(after_create) => format!("{}\n{after_create}", default_after_create_hook()),
+            None => default_after_create_hook(),
+        });
         Scheduler::new(
             SchedulerConfig {
                 max_concurrency: 2,
@@ -928,7 +944,10 @@ mod tests {
         let workspace = Arc::new(WorkspaceManager::new(WorkspaceConfig {
             root: tempdir.path().to_path_buf(),
             cleanup_terminal_workspaces: false,
-            hooks: HookConfig::default(),
+            hooks: HookConfig {
+                after_create: Some(default_after_create_hook()),
+                ..HookConfig::default()
+            },
         }));
 
         let context = workspace
@@ -969,7 +988,10 @@ mod tests {
         let workspace = Arc::new(WorkspaceManager::new(WorkspaceConfig {
             root: tempdir.path().to_path_buf(),
             cleanup_terminal_workspaces: false,
-            hooks: HookConfig::default(),
+            hooks: HookConfig {
+                after_create: Some(default_after_create_hook()),
+                ..HookConfig::default()
+            },
         }));
 
         let context = workspace
@@ -1354,7 +1376,10 @@ mod tests {
         let workspace = Arc::new(WorkspaceManager::new(WorkspaceConfig {
             root: tempdir.path().to_path_buf(),
             cleanup_terminal_workspaces: false,
-            hooks: HookConfig::default(),
+            hooks: HookConfig {
+                after_create: Some(default_after_create_hook()),
+                ..HookConfig::default()
+            },
         }));
         let mut scheduler = Scheduler::new(
             SchedulerConfig {
@@ -1435,6 +1460,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resets_invalid_conversation_manifest_and_dispatches_fresh() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(0)]);
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            tempdir.path().to_path_buf(),
+            false,
+            None,
+        );
+        let context = scheduler
+            .workspace
+            .prepare_issue_workspace(&issue, 1)
+            .await
+            .expect("workspace should prepare");
+        fs::write(context.metadata_dir.join("conversation.json"), "{ nope")
+            .expect("invalid manifest should write");
+
+        scheduler
+            .tick()
+            .await
+            .expect("invalid manifest should reset to a fresh dispatch");
+        sleep(Duration::from_millis(10)).await;
+        scheduler.tick().await.expect("completion should reconcile");
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].prompt_mode, PromptMode::Fresh);
+
+        let conversation = scheduler
+            .workspace
+            .load_conversation_manifest(&issue.identifier)
+            .expect("conversation load should succeed")
+            .expect("conversation should be rewritten");
+        assert!(conversation.fresh_conversation);
+        assert_eq!(conversation.conversation_id, "conversation-ABC-1");
+    }
+
+    #[tokio::test]
     async fn preserves_new_conversation_after_fresh_worker_transport_error() {
         let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
         let tracker = Arc::new(MemoryTracker::new(
@@ -1481,6 +1554,38 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].prompt_mode, PromptMode::Fresh);
         assert_eq!(requests[1].prompt_mode, PromptMode::Continuation);
+    }
+
+    #[tokio::test]
+    async fn queues_retry_when_workspace_workflow_is_missing() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let after_create = "rm -f WORKFLOW.md".to_string();
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            tempdir.path().to_path_buf(),
+            false,
+            Some(after_create),
+        );
+
+        scheduler
+            .tick()
+            .await
+            .expect("missing workflow should only fail the current attempt");
+
+        assert!(runner.requests().is_empty());
+        assert_eq!(scheduler.retry_queue.len(), 1);
+        assert_eq!(scheduler.retry_queue[0].issue.id, issue.id);
+        assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Failure);
     }
 
     #[tokio::test]
