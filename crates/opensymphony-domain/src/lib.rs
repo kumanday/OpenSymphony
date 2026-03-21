@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotEnvelope {
@@ -101,8 +101,7 @@ pub struct RecentEvent {
     pub summary: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecentEventKind {
     WorkerStarted,
     WorkspacePrepared,
@@ -113,4 +112,56 @@ pub enum RecentEventKind {
     ClientAttached,
     ClientDetached,
     Warning,
+    Other(String),
+}
+
+impl RecentEventKind {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::WorkerStarted => "worker_started",
+            Self::WorkspacePrepared => "workspace_prepared",
+            Self::StreamAttached => "stream_attached",
+            Self::SnapshotPublished => "snapshot_published",
+            Self::WorkerCompleted => "worker_completed",
+            Self::RetryScheduled => "retry_scheduled",
+            Self::ClientAttached => "client_attached",
+            Self::ClientDetached => "client_detached",
+            Self::Warning => "warning",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "worker_started" => Self::WorkerStarted,
+            "workspace_prepared" => Self::WorkspacePrepared,
+            "stream_attached" => Self::StreamAttached,
+            "snapshot_published" => Self::SnapshotPublished,
+            "worker_completed" => Self::WorkerCompleted,
+            "retry_scheduled" => Self::RetryScheduled,
+            "client_attached" => Self::ClientAttached,
+            "client_detached" => Self::ClientDetached,
+            "warning" => Self::Warning,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl Serialize for RecentEventKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RecentEventKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&value))
+    }
 }

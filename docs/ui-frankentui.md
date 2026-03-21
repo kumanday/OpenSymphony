@@ -208,11 +208,13 @@ UI requirements:
 Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
+- bound each bootstrap snapshot fetch so a hung `/api/v1/snapshot` cannot stall reconnect forever
 - keep that bootstrap snapshot visible while the client is still connecting or reconnecting
 - only report `live control-plane stream` after the SSE subscription is actually yielding stream data
 - if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible
 - ignore regressing snapshots unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
 - refetch the current snapshot before resubscribing
+- tolerate additive `recent_events[].kind` values by preserving unknown kinds instead of rejecting the whole snapshot payload
 
 ## 11. Dependency strategy
 
@@ -235,7 +237,9 @@ Current automated coverage:
 - render smoke tests against serialized snapshots, including visible focus markers and narrow-layout detail preservation
 - mailbox tests for snapshot coalescing and last-good-snapshot retention across disconnects
 - control-plane snapshot plus SSE round-trip tests
+- control-plane bootstrap snapshot timeout coverage
 - monotonic SSE lag-recovery tests for slow consumers
+- snapshot decoding coverage for unknown additive recent event kinds
 
 Manual:
 

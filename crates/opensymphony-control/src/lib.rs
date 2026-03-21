@@ -181,19 +181,32 @@ fn snapshot_event(envelope: &SnapshotEnvelope) -> Option<Event> {
 pub struct ControlPlaneClient {
     base_url: Url,
     http: reqwest::Client,
+    snapshot_timeout: Duration,
 }
 
 impl ControlPlaneClient {
+    const DEFAULT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+
     pub fn new(base_url: Url) -> Self {
+        Self::with_snapshot_timeout(base_url, Self::DEFAULT_SNAPSHOT_TIMEOUT)
+    }
+
+    pub fn with_snapshot_timeout(base_url: Url, snapshot_timeout: Duration) -> Self {
         Self {
             base_url,
             http: reqwest::Client::new(),
+            snapshot_timeout,
         }
     }
 
     pub async fn fetch_snapshot(&self) -> Result<SnapshotEnvelope, ControlPlaneClientError> {
         let snapshot_url = self.join_path("api/v1/snapshot")?;
-        let response = self.http.get(snapshot_url).send().await?;
+        let response = self
+            .http
+            .get(snapshot_url)
+            .timeout(self.snapshot_timeout)
+            .send()
+            .await?;
         Ok(response.error_for_status()?.json().await?)
     }
 

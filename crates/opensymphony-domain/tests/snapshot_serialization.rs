@@ -73,3 +73,22 @@ fn snapshot_envelope_round_trips_through_json() {
     let decoded: SnapshotEnvelope = serde_json::from_value(encoded).unwrap();
     assert_eq!(decoded, envelope);
 }
+
+#[test]
+fn snapshot_envelope_decodes_unknown_recent_event_kinds() {
+    let mut encoded = serde_json::to_value(fixture()).unwrap();
+    encoded["snapshot"]["recent_events"][0]["kind"] =
+        serde_json::Value::String("tool_call_summary".to_owned());
+
+    let decoded: SnapshotEnvelope = serde_json::from_value(encoded).unwrap();
+    assert_eq!(
+        decoded.snapshot.recent_events[0].kind,
+        RecentEventKind::Other("tool_call_summary".to_owned())
+    );
+
+    let reencoded = serde_json::to_value(decoded).unwrap();
+    assert_eq!(
+        reencoded["snapshot"]["recent_events"][0]["kind"],
+        "tool_call_summary"
+    );
+}

@@ -128,7 +128,9 @@ Suggested gates:
 Current implemented checks:
 
 - snapshot serialization in `opensymphony-domain`
+- forward-compatible snapshot decoding for unknown additive recent event kinds in `opensymphony-domain`
 - control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
+- control-plane bootstrap snapshot timeout coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane monotonic lag-recovery coverage in `opensymphony-control/src/lib.rs`
 - TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, and disconnect retention coverage in `opensymphony-tui`
 
@@ -211,7 +213,10 @@ Current validation commands for the implemented observability slice:
 When validating reconnect behavior, confirm that a newer post-restart snapshot
 is accepted even if the reducer never saw an explicit `ConnectionLost`, and
 that the TUI does not report `live control-plane stream` until the SSE stream
-has actually begun delivering updates.
+has actually begun delivering updates. Also confirm that a hung
+`/api/v1/snapshot` request times out instead of stalling the bridge forever,
+and that additive `recent_events[].kind` values still decode into a usable
+snapshot for the UI.
 
 ## 7. Doctor checks
 

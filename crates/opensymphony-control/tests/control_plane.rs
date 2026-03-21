@@ -1,7 +1,10 @@
 use std::time::Duration;
 
+use axum::{routing::get, Json, Router};
 use chrono::{TimeZone, Utc};
-use opensymphony_control::{ControlPlaneClient, ControlPlaneServer, SnapshotStore};
+use opensymphony_control::{
+    ControlPlaneClient, ControlPlaneClientError, ControlPlaneServer, SnapshotStore,
+};
 use opensymphony_domain::{
     AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot,
     MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope, WorkerOutcome,
@@ -89,5 +92,37 @@ async fn serves_snapshot_and_streams_updates() {
     );
 
     stream.close();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn fetch_snapshot_times_out_when_snapshot_endpoint_hangs() {
+    async fn stalled_snapshot() -> Json<SnapshotEnvelope> {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Json(SnapshotEnvelope {
+            sequence: 99,
+            published_at: Utc::now(),
+            snapshot: fixture_snapshot(99),
+        })
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = Router::new().route("/api/v1/snapshot", get(stalled_snapshot));
+    let server_task = tokio::spawn(async move { axum::serve(listener, server).await.unwrap() });
+
+    let client = ControlPlaneClient::with_snapshot_timeout(
+        Url::parse(&format!("http://{address}/")).unwrap(),
+        Duration::from_millis(50),
+    );
+    let started = tokio::time::Instant::now();
+    let error = client.fetch_snapshot().await.unwrap_err();
+
+    match error {
+        ControlPlaneClientError::Request(source) => assert!(source.is_timeout()),
+        other => panic!("expected request timeout error, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(1));
+
     server_task.abort();
 }
