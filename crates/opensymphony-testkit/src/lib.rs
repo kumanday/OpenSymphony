@@ -13,6 +13,12 @@ pub fn public_api_smoke(
 ) -> (Workflow, OrchestratorSnapshot, String) {
     let workflow = Workflow::load_from_str(workflow_markdown).expect("workflow should parse");
     let mut scheduler = SchedulerState::new(SchedulerConfig::default());
+    let claimed = scheduler.claim_candidate_batch(std::slice::from_ref(&issue));
+    assert_eq!(
+        claimed.len(),
+        1,
+        "issue should be claimable before start_run"
+    );
     scheduler
         .start_run(
             issue.clone(),
