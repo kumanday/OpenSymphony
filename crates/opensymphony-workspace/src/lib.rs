@@ -269,10 +269,10 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir should exist");
         let workspace = WorkspaceLayout::new(temp_dir.path(), "COE-253")
             .expect("workspace layout should build");
-        std::fs::create_dir_all(&workspace.issue_workspace)
+        fs::create_dir_all(&workspace.issue_workspace)
             .expect("issue workspace should be creatable");
         let escape = temp_dir.path().join("escape");
-        std::fs::create_dir_all(&escape).expect("escape dir should be creatable");
+        fs::create_dir_all(&escape).expect("escape dir should be creatable");
         symlink(&escape, &workspace.metadata_dir).expect("metadata symlink should be creatable");
 
         let error = workspace

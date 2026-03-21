@@ -111,17 +111,17 @@ impl TransportConfig {
 
     /// Builds the REST base URL, preserving any configured path prefix.
     pub fn rest_base_url(&self) -> Result<Url> {
-        join_url(&self.root_base_url()?, "/api")
+        Ok(join_url(&self.root_base_url()?, "/api"))
     }
 
     /// Joins a path fragment onto the public root URL.
     pub fn join_root_path(&self, suffix: &str) -> Result<Url> {
-        join_url(&self.root_base_url()?, suffix)
+        Ok(join_url(&self.root_base_url()?, suffix))
     }
 
     /// Joins a path fragment onto the REST base URL.
     pub fn join_rest_path(&self, suffix: &str) -> Result<Url> {
-        join_url(&self.rest_base_url()?, suffix)
+        Ok(join_url(&self.rest_base_url()?, suffix))
     }
 }
 
@@ -242,7 +242,7 @@ impl WebSocketConfig {
     }
 }
 
-fn join_url(base: &Url, suffix: &str) -> Result<Url> {
+fn join_url(base: &Url, suffix: &str) -> Url {
     let mut url = base.clone();
     let prefix = url.path().trim_end_matches('/');
     let suffix = suffix.trim_start_matches('/');
@@ -254,7 +254,7 @@ fn join_url(base: &Url, suffix: &str) -> Result<Url> {
         format!("{prefix}/{suffix}")
     };
     url.set_path(&path);
-    Ok(url)
+    url
 }
 
 fn base_path_has_api_suffix(base: &Url) -> bool {
