@@ -238,7 +238,8 @@ Required checks:
 Current implementation notes:
 
 - the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, and pinned-tooling files
-- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits for the WebSocket readiness barrier, and runs a reconcile call
+- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, and runs a reconcile call
+- `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials
 
 ## 8. Logging and diagnostics

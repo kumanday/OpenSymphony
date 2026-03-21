@@ -4,8 +4,9 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::debug;
 use url::Url;
 use uuid::Uuid;
 
@@ -39,6 +40,10 @@ impl TransportConfig {
             path
         };
         url.set_path(&normalized);
+        if let Some(session_api_key) = &self.session_api_key {
+            url.query_pairs_mut()
+                .append_pair("session_api_key", session_api_key);
+        }
         Ok(url)
     }
 
@@ -247,44 +252,55 @@ impl OpenHandsClient {
     ) -> Result<EventEnvelope, OpenHandsError> {
         let ws_url = self.transport.ws_url(conversation_id)?;
         let (mut stream, _) = connect_async(ws_url.as_str()).await?;
-        let next_message = timeout(wait_timeout, stream.next())
-            .await
-            .map_err(|_| OpenHandsError::ReadinessTimeout(wait_timeout))?;
+        let deadline = Instant::now() + wait_timeout;
 
-        match next_message {
-            Some(Ok(Message::Text(payload))) => {
-                let event: EventEnvelope = serde_json::from_str(&payload).map_err(|error| {
-                    OpenHandsError::MalformedWebSocketEvent {
-                        error: Box::new(error),
-                        snippet: payload.chars().take(160).collect(),
+        loop {
+            let next_message = timeout_at(deadline, stream.next())
+                .await
+                .map_err(|_| OpenHandsError::ReadinessTimeout(wait_timeout))?;
+
+            match next_message {
+                Some(Ok(Message::Text(payload))) => match parse_text_event(&payload) {
+                    Ok(event)
+                        if matches!(
+                            KnownEvent::from_envelope(&event),
+                            KnownEvent::ConversationStateUpdate(_)
+                        ) =>
+                    {
+                        return Ok(event);
                     }
-                })?;
-                match KnownEvent::from_envelope(&event) {
-                    KnownEvent::ConversationStateUpdate(_) => Ok(event),
-                    _ => Err(OpenHandsError::WebSocketClosed),
-                }
-            }
-            Some(Ok(Message::Binary(payload))) => {
-                let event: EventEnvelope = serde_json::from_slice(&payload).map_err(|error| {
-                    OpenHandsError::MalformedWebSocketEvent {
-                        error: Box::new(error),
-                        snippet: String::from_utf8_lossy(&payload)
-                            .chars()
-                            .take(160)
-                            .collect(),
+                    Ok(event) => {
+                        debug!(event_kind = %event.kind, "ignoring non-readiness websocket event");
                     }
-                })?;
-                match KnownEvent::from_envelope(&event) {
-                    KnownEvent::ConversationStateUpdate(_) => Ok(event),
-                    _ => Err(OpenHandsError::WebSocketClosed),
+                    Err(error) => {
+                        debug!(error = %error, "ignoring undecodable websocket text frame before readiness");
+                    }
+                },
+                Some(Ok(Message::Binary(payload))) => match parse_binary_event(&payload) {
+                    Ok(event)
+                        if matches!(
+                            KnownEvent::from_envelope(&event),
+                            KnownEvent::ConversationStateUpdate(_)
+                        ) =>
+                    {
+                        return Ok(event);
+                    }
+                    Ok(event) => {
+                        debug!(event_kind = %event.kind, "ignoring non-readiness websocket event");
+                    }
+                    Err(error) => {
+                        debug!(error = %error, "ignoring undecodable websocket binary frame before readiness");
+                    }
+                },
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                    debug!("ignoring websocket control frame before readiness");
                 }
+                Some(Ok(Message::Frame(_))) => {
+                    debug!("ignoring raw websocket frame before readiness");
+                }
+                Some(Ok(Message::Close(_))) | None => return Err(OpenHandsError::WebSocketClosed),
+                Some(Err(error)) => return Err(OpenHandsError::WebSocket(Box::new(error))),
             }
-            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
-                Err(OpenHandsError::WebSocketClosed)
-            }
-            Some(Ok(Message::Close(_))) | None => Err(OpenHandsError::WebSocketClosed),
-            Some(Err(error)) => Err(OpenHandsError::WebSocket(Box::new(error))),
-            Some(Ok(Message::Frame(_))) => Err(OpenHandsError::WebSocketClosed),
         }
     }
 
@@ -330,4 +346,18 @@ where
 {
     let value = ensure_success(response).await?;
     serde_json::from_value(value).map_err(OpenHandsError::from)
+}
+
+fn parse_text_event(payload: &str) -> Result<EventEnvelope, OpenHandsError> {
+    serde_json::from_str(payload).map_err(|error| OpenHandsError::MalformedWebSocketEvent {
+        error: Box::new(error),
+        snippet: payload.chars().take(160).collect(),
+    })
+}
+
+fn parse_binary_event(payload: &[u8]) -> Result<EventEnvelope, OpenHandsError> {
+    serde_json::from_slice(payload).map_err(|error| OpenHandsError::MalformedWebSocketEvent {
+        error: Box::new(error),
+        snippet: String::from_utf8_lossy(payload).chars().take(160).collect(),
+    })
 }
