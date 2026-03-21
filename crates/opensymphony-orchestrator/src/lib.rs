@@ -184,19 +184,18 @@ impl Scheduler {
         due_retries.sort_by_key(|entry| entry.scheduled_at);
         for retry in due_retries.drain(..) {
             if dispatch_queue.len() >= available_slots {
-                retry_queued_ids.insert(retry.issue.id.clone());
-                self.retry_queue.push(retry);
+                self.defer_retry(retry, &mut retry_queued_ids);
                 continue;
             }
             if self.running.contains_key(&retry.issue.id) {
-                retry_queued_ids.insert(retry.issue.id.clone());
-                self.retry_queue.push(retry);
+                self.defer_retry(retry, &mut retry_queued_ids);
                 continue;
             }
             let Some(current_issue) = candidates_by_id.remove(&retry.issue.id) else {
                 continue;
             };
-            if current_issue.is_blocked_by_active_issue() {
+            if blocks_fresh_claim(&current_issue) {
+                self.defer_retry(retry, &mut retry_queued_ids);
                 continue;
             }
             reserved_ids.insert(current_issue.id.clone());
@@ -210,7 +209,7 @@ impl Scheduler {
             if self.running.contains_key(&issue.id)
                 || reserved_ids.contains(&issue.id)
                 || retry_queued_ids.contains(&issue.id)
-                || issue.is_blocked_by_active_issue()
+                || blocks_fresh_claim(&issue)
             {
                 continue;
             }
@@ -239,8 +238,14 @@ impl Scheduler {
 
     async fn drain_reports(&mut self) -> Result<(), SchedulerError> {
         while let Ok(report) = self.reports_rx.try_recv() {
+            let tracker_state = match self.current_issue_state(&report.issue.id).await {
+                Ok(state) => state,
+                Err(error) => {
+                    let _ = self.reports_tx.send(report);
+                    return Err(error);
+                }
+            };
             self.running.remove(&report.issue.id);
-            let tracker_state = self.current_issue_state(&report.issue.id).await?;
             let issue = issue_with_state(
                 &report.issue,
                 tracker_state.as_ref().map(|state| state.state.as_str()),
@@ -503,6 +508,12 @@ impl Scheduler {
         self.enqueue_retry(issue, attempt + 1, RetryReason::Failure, scheduled_at)
     }
 
+    fn defer_retry(&mut self, retry: RetryEntry, retry_queued_ids: &mut HashSet<String>) {
+        retry_queued_ids.insert(retry.issue.id.clone());
+        self.retry_queue.push(retry);
+        self.retry_queue.sort_by_key(|entry| entry.scheduled_at);
+    }
+
     fn next_attempt(&self, issue: &Issue) -> Result<u32, SchedulerError> {
         let manifests = self
             .workspace
@@ -648,14 +659,21 @@ fn issue_with_state(issue: &Issue, state: Option<&str>) -> Issue {
     refreshed
 }
 
+fn blocks_fresh_claim(issue: &Issue) -> bool {
+    issue.state == "Todo" && issue.is_blocked_by_active_issue()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use chrono::TimeZone;
+    use opensymphony_domain::{IssueBlocker, TrackerError};
     use opensymphony_linear::LinearWriteOperations;
     use opensymphony_testkit::{make_issue, MemoryTracker, ScriptedRun, ScriptedRunner};
     use opensymphony_workspace::{HookConfig, WorkspaceConfig};
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio::time::{sleep, Duration};
 
@@ -687,6 +705,57 @@ mod tests {
                 },
             })),
         )
+    }
+
+    #[derive(Clone)]
+    struct FlakyStateTracker {
+        inner: Arc<MemoryTracker>,
+        remaining_state_failures: Arc<Mutex<usize>>,
+    }
+
+    impl FlakyStateTracker {
+        fn new(inner: Arc<MemoryTracker>, remaining_state_failures: usize) -> Self {
+            Self {
+                inner,
+                remaining_state_failures: Arc::new(Mutex::new(remaining_state_failures)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for FlakyStateTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            self.inner.fetch_candidate_issues().await
+        }
+
+        async fn fetch_states_by_issue_ids(
+            &self,
+            issue_ids: &[String],
+        ) -> Result<Vec<IssueStateSnapshot>, TrackerError> {
+            let should_fail = {
+                let mut remaining = self
+                    .remaining_state_failures
+                    .lock()
+                    .expect("lock should succeed");
+                if *remaining == 0 {
+                    false
+                } else {
+                    *remaining -= 1;
+                    true
+                }
+            };
+            if should_fail {
+                return Err(TrackerError::Transport(
+                    "scripted tracker refresh failure".to_string(),
+                ));
+            }
+
+            self.inner.fetch_states_by_issue_ids(issue_ids).await
+        }
+
+        async fn fetch_terminal_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            self.inner.fetch_terminal_issues().await
+        }
     }
 
     #[tokio::test]
@@ -916,6 +985,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn keeps_blocked_todo_retry_queued_until_blocker_clears() {
+        let mut issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        issue.blocked_by.push(IssueBlocker {
+            id: "2".to_string(),
+            identifier: "ABC-2".to_string(),
+            state: "Todo".to_string(),
+            is_terminal: false,
+        });
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string(), "In Progress".to_string()],
+            vec!["Done".to_string()],
+            vec![
+                "Todo".to_string(),
+                "In Progress".to_string(),
+                "Done".to_string(),
+            ],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            tempdir.path().to_path_buf(),
+            false,
+            None,
+        );
+        scheduler.retry_queue.push(RetryEntry {
+            issue: issue.clone(),
+            attempt: 2,
+            reason: RetryReason::Continuation,
+            scheduled_at: Utc::now(),
+        });
+
+        scheduler
+            .tick()
+            .await
+            .expect("blocked todo retry should stay queued");
+
+        assert!(runner.requests().is_empty());
+        assert_eq!(scheduler.retry_queue.len(), 1);
+        assert_eq!(scheduler.retry_queue[0].issue.id, issue.id);
+        assert_eq!(scheduler.retry_queue[0].attempt, 2);
+    }
+
+    #[tokio::test]
+    async fn allows_due_retry_for_active_issue_even_when_blocked() {
+        let mut issue = make_issue("1", "ABC-1", "In Progress", Some(1), timestamp(0));
+        issue.blocked_by.push(IssueBlocker {
+            id: "2".to_string(),
+            identifier: "ABC-2".to_string(),
+            state: "Todo".to_string(),
+            is_terminal: false,
+        });
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string(), "In Progress".to_string()],
+            vec!["Done".to_string()],
+            vec![
+                "Todo".to_string(),
+                "In Progress".to_string(),
+                "Done".to_string(),
+            ],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(0)]);
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let mut scheduler = scheduler(
+            tracker,
+            runner.clone(),
+            tempdir.path().to_path_buf(),
+            false,
+            None,
+        );
+        scheduler.retry_queue.push(RetryEntry {
+            issue: issue.clone(),
+            attempt: 2,
+            reason: RetryReason::Continuation,
+            scheduled_at: Utc::now(),
+        });
+
+        scheduler
+            .tick()
+            .await
+            .expect("active retry should still dispatch");
+        sleep(Duration::from_millis(10)).await;
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].issue.id, issue.id);
+        assert_eq!(requests[0].attempt, 2);
+    }
+
+    #[tokio::test]
     async fn keeps_dispatching_other_candidates_after_prompt_render_failure() {
         let first_issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
         let second_issue = make_issue("2", "ABC-2", "Todo", Some(2), timestamp(1));
@@ -991,6 +1156,58 @@ mod tests {
         assert_eq!(scheduler.retry_queue.len(), 1);
         assert_eq!(scheduler.retry_queue[0].issue.id, first_issue.id);
         assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Failure);
+    }
+
+    #[tokio::test]
+    async fn preserves_worker_report_when_tracker_refresh_temporarily_fails() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let base_tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let tracker = Arc::new(FlakyStateTracker::new(base_tracker, 1));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(0)]);
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace = Arc::new(WorkspaceManager::new(WorkspaceConfig {
+            root: tempdir.path().to_path_buf(),
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig::default(),
+        }));
+        let mut scheduler = Scheduler::new(
+            SchedulerConfig {
+                max_concurrency: 2,
+                max_retry_backoff_ms: 120_000,
+                stall_timeout_ms: 50,
+            },
+            tracker,
+            runner,
+            workspace,
+        );
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        sleep(Duration::from_millis(10)).await;
+
+        let error = scheduler
+            .tick()
+            .await
+            .expect_err("transient tracker failure should bubble");
+        assert!(matches!(error, SchedulerError::Tracker(_)));
+        assert!(scheduler.running.contains_key(&issue.id));
+        assert!(scheduler.retry_queue.is_empty());
+
+        scheduler
+            .tick()
+            .await
+            .expect("completion should replay once tracker recovers");
+
+        assert!(!scheduler.running.contains_key(&issue.id));
+        assert_eq!(scheduler.retry_queue.len(), 1);
+        assert_eq!(scheduler.retry_queue[0].issue.id, issue.id);
+        assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Continuation);
     }
 
     #[tokio::test]

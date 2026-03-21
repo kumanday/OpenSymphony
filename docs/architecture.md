@@ -216,7 +216,9 @@ For each issue:
 5. Exit worker normally or abnormally.
 6. Refresh tracker state for the issue, then let the orchestrator decide continuation retry, failure retry, release, or cancellation.
    - startup failures such as workspace bootstrap or prompt render failures persist retry state for that issue without aborting later dispatches in the same tick
+   - blocker gating applies to fresh `Todo` claims; due retries for already-active issues remain eligible even if blockers are still open
    - post-run retries are only scheduled while the tracker still reports the issue as active
+   - if the tracker refresh itself fails before completion bookkeeping, keep the worker report pending and retry that bookkeeping on the next tick instead of dropping it
 
 ### 5.4 Prompt policy
 
@@ -283,6 +285,7 @@ The snapshot is not just a projection of OpenHands state. It is a Symphony-speci
 14. Worker exits and reports success, failure, timeout, stall, or cancellation.
 15. Orchestrator refreshes tracker state, then schedules a continuation retry, failure retry, release, or cleanup.
 16. If one issue fails before the worker starts, the scheduler records retry state for that issue and keeps dispatching later eligible candidates in the same tick.
+17. If tracker refresh fails after a worker exits, the scheduler preserves that completion report and retries the bookkeeping path on the next tick.
 
 ## 7.2 ASCII sequence
 

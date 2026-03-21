@@ -247,6 +247,7 @@ OpenSymphony implementation:
 
 - worker may already have run multiple in-process turns on the same conversation
 - when the worker finally exits cleanly, the orchestrator refreshes tracker state and schedules the short retry only if the issue remains active
+- if that tracker refresh fails transiently, the completed worker report stays pending until the next tick can finish the bookkeeping path
 - the next worker reattaches to the same workspace and usually the same conversation
 - because the conversation already contains the original assignment, the next worker sends continuation guidance instead of replaying the full prompt
 
@@ -263,7 +264,7 @@ When the tracker says an issue is terminal:
 
 Keep cleanup policy configurable enough to allow retention during debugging.
 
-After any worker report, OpenSymphony refreshes tracker state before scheduling retries. Inactive issues do not receive continuation or failure retries, and terminal issues run the same cleanup path even if the worker exited normally before the next reconcile loop.
+After any worker report, OpenSymphony refreshes tracker state before scheduling retries. Inactive issues do not receive continuation or failure retries, and terminal issues run the same cleanup path even if the worker exited normally before the next reconcile loop. If the tracker refresh fails transiently, OpenSymphony keeps that worker report pending and retries the bookkeeping path on the next tick instead of dropping completion state.
 
 ## 13.2 Non-active, non-terminal issues
 
@@ -319,6 +320,7 @@ trait WorkspaceManager {
 - startup failure does not starve later dispatch candidates
 - timeout on hook
 - no continuation retry after worker exit if tracker state is no longer active
+- transient tracker refresh failure after worker exit preserves the completion report for a later retry
 - terminal cleanup
 - metadata file write and reload
 - conversation reset path preserves workspace safety

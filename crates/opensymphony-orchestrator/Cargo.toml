@@ -15,6 +15,7 @@ thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 opensymphony-linear = { path = "../opensymphony-linear" }
 opensymphony-testkit = { path = "../opensymphony-testkit" }
 tempfile.workspace = true

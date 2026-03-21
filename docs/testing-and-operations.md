@@ -116,10 +116,12 @@ Suggested gates:
 - failure retry backoff
 - continuation retry at fixed delay
 - deferred retry entries suppress fresh redispatch until their scheduled time
+- blocked `Todo` retries stay queued until blockers clear, but retries for already-active issues still dispatch
 - startup failure in one candidate does not block later dispatches in the same tick
 - stall detection
 - active-state refresh
 - post-run retries only occur while the tracker still reports the issue active
+- transient tracker refresh failures do not drop completed worker reports before retry or cleanup bookkeeping
 - terminal cleanup
 - retained terminal workspaces still clear stale retry manifests
 - restart recovery from manifests
