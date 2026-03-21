@@ -148,12 +148,12 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             identifier: "OSYM-402".to_owned(),
             title: "FrankenTUI operator client".to_owned(),
             tracker_state: "In Progress".to_owned(),
-            runtime_state: if step.is_multiple_of(2) {
+            runtime_state: if step % 2 == 0 {
                 IssueRuntimeState::Running
             } else {
                 IssueRuntimeState::Idle
             },
-            last_outcome: if step.is_multiple_of(2) {
+            last_outcome: if step % 2 == 0 {
                 WorkerOutcome::Running
             } else {
                 WorkerOutcome::Unknown
@@ -236,22 +236,22 @@ enum CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::{sample_snapshot, Cli, Command};
-    use clap::{error::ErrorKind, Parser};
+    use super::{Cli, Command, sample_snapshot};
+    use clap::{Parser, error::ErrorKind};
     use opensymphony_domain::IssueRuntimeState;
 
     #[test]
     fn daemon_rejects_zero_sample_interval() {
         let error = Cli::try_parse_from(["opensymphony", "daemon", "--sample-interval-ms", "0"])
-            .unwrap_err();
+            .expect_err("zero sample interval should fail CLI parsing");
 
         assert_eq!(error.kind(), ErrorKind::ValueValidation);
     }
 
     #[test]
     fn daemon_accepts_positive_sample_interval() {
-        let cli =
-            Cli::try_parse_from(["opensymphony", "daemon", "--sample-interval-ms", "250"]).unwrap();
+        let cli = Cli::try_parse_from(["opensymphony", "daemon", "--sample-interval-ms", "250"])
+            .expect("parse positive demo sample interval");
 
         match cli.command {
             Command::Daemon {

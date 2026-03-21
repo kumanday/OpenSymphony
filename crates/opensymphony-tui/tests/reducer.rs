@@ -13,7 +13,10 @@ fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
 }
 
 fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEnvelope {
-    let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+    let now = Utc
+        .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+        .single()
+        .expect("valid fixed test timestamp")
         + chrono::Duration::seconds(sequence as i64);
     SnapshotEnvelope {
         sequence,

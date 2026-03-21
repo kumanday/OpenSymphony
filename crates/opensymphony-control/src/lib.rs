@@ -2,10 +2,10 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use async_stream::stream;
 use axum::{
+    Json, Router,
     extract::State,
     response::sse::{Event, KeepAlive, Sse},
     routing::get,
-    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
-    sync::{broadcast, RwLock},
+    sync::{RwLock, broadcast},
 };
 use tracing::warn;
 use url::Url;
@@ -311,10 +311,13 @@ mod tests {
     use tokio::time::timeout;
     use url::Url;
 
-    use super::{next_snapshot_envelope, ControlPlaneClient, SnapshotStore};
+    use super::{ControlPlaneClient, SnapshotStore, next_snapshot_envelope};
 
     fn fixture_snapshot(step: u64) -> DaemonSnapshot {
-        let now = Utc.with_ymd_and_hms(2026, 3, 21, 20, 0, 0).unwrap()
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
+            .single()
+            .expect("valid fixed test timestamp")
             + chrono::Duration::seconds(step as i64);
         DaemonSnapshot {
             generated_at: now,
@@ -390,9 +393,15 @@ mod tests {
 
     #[test]
     fn control_plane_client_preserves_path_prefixes_without_trailing_slashes() {
-        let client = ControlPlaneClient::new(Url::parse("http://proxy/opensymphony").unwrap());
-        let snapshot_url = client.join_path("api/v1/snapshot").unwrap();
-        let events_url = client.join_path("api/v1/events").unwrap();
+        let client = ControlPlaneClient::new(
+            Url::parse("http://proxy/opensymphony").expect("valid prefixed control-plane base url"),
+        );
+        let snapshot_url = client
+            .join_path("api/v1/snapshot")
+            .expect("snapshot path should resolve beneath the prefix");
+        let events_url = client
+            .join_path("api/v1/events")
+            .expect("events path should resolve beneath the prefix");
 
         assert_eq!(
             snapshot_url.as_str(),
