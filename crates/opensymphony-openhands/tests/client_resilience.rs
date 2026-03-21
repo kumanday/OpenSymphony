@@ -91,6 +91,26 @@ async fn run_probe_exercises_message_and_run_endpoints() {
     assert_eq!(*state.run_count.lock().await, 1);
 }
 
+#[tokio::test]
+async fn run_probe_rejects_failure_only_event_streams() {
+    let state = ProbeState::default();
+    let server = TestServer::start(failed_probe_router(state.clone())).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        Some("fake-model".to_string()),
+        Some("fake-key".to_string()),
+    );
+
+    let result = client.run_probe(&request, Duration::from_secs(1)).await;
+
+    assert!(
+        result.is_err(),
+        "probe should fail when the runtime only emits a ConversationErrorEvent"
+    );
+}
+
 struct TestServer {
     base_url: String,
     task: JoinHandle<()>,
@@ -223,6 +243,29 @@ fn probe_router(state: ProbeState) -> Router {
         .route(
             "/api/conversations/:conversation_id/run",
             post(probe_run_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(probe_search_events),
+        )
+        .route("/sockets/events/:conversation_id", get(probe_events_socket))
+        .with_state(state)
+}
+
+fn failed_probe_router(state: ProbeState) -> Router {
+    Router::new()
+        .route("/api/conversations", post(probe_create_conversation))
+        .route(
+            "/api/conversations/:conversation_id",
+            get(probe_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events",
+            post(probe_send_message),
+        )
+        .route(
+            "/api/conversations/:conversation_id/run",
+            post(failed_probe_run_conversation),
         )
         .route(
             "/api/conversations/:conversation_id/events/search",
@@ -384,10 +427,27 @@ async fn probe_run_conversation(
         "runtime",
         "ConversationStateUpdateEvent",
         json!({
-            "execution_status": "completed",
+            "execution_status": "finished",
             "state_delta": {
-                "execution_status": "completed",
+                "execution_status": "finished",
             },
+        }),
+    ));
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn failed_probe_run_conversation(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    *state.run_count.lock().await += 1;
+    state.events.lock().await.push(EventEnvelope::new(
+        "evt-error",
+        Utc::now(),
+        "runtime",
+        "ConversationErrorEvent",
+        json!({
+            "message": "synthetic probe failure",
         }),
     ));
     Ok(Json(json!({ "success": true })))

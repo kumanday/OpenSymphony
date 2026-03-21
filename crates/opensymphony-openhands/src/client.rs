@@ -94,6 +94,8 @@ pub enum OpenHandsError {
     ReadinessTimeout(Duration),
     #[error("probe run activity was not observed after {0:?}")]
     ProbeActivityTimeout(Duration),
+    #[error("probe run reported an unhealthy runtime: {0}")]
+    ProbeRunUnhealthy(String),
     #[error("websocket closed before readiness")]
     WebSocketClosed,
     #[error("unsupported base URL scheme: {0}")]
@@ -352,8 +354,12 @@ impl OpenHandsClient {
         loop {
             let conversation = self.get_conversation(conversation_id).await?;
             let event_cache = self.search_all_events(conversation_id).await?;
-            if probe_activity_observed(&conversation, &event_cache) {
-                return Ok((conversation, event_cache));
+            match probe_activity_observed(&conversation, &event_cache) {
+                ProbeActivity::Healthy => return Ok((conversation, event_cache)),
+                ProbeActivity::Unhealthy(detail) => {
+                    return Err(OpenHandsError::ProbeRunUnhealthy(detail));
+                }
+                ProbeActivity::Pending => {}
             }
 
             if Instant::now() >= deadline {
@@ -363,6 +369,12 @@ impl OpenHandsClient {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
+}
+
+enum ProbeActivity {
+    Pending,
+    Healthy,
+    Unhealthy(String),
 }
 
 async fn ensure_success(response: reqwest::Response) -> Result<Value, OpenHandsError> {
@@ -397,23 +409,27 @@ fn parse_binary_event(payload: &[u8]) -> Result<EventEnvelope, OpenHandsError> {
     })
 }
 
-fn probe_activity_observed(conversation: &Conversation, event_cache: &EventCache) -> bool {
-    if conversation.execution_status != "idle" {
-        return true;
+fn probe_activity_observed(conversation: &Conversation, event_cache: &EventCache) -> ProbeActivity {
+    let mut state_mirror = ConversationStateMirror::default();
+    state_mirror.apply_conversation(conversation);
+
+    for event in event_cache.items() {
+        if event.kind == "ConversationErrorEvent" {
+            return ProbeActivity::Unhealthy(format!(
+                "received {} {} before a successful terminal status",
+                event.kind, event.id
+            ));
+        }
+
+        state_mirror.apply_event(event);
     }
 
-    event_cache.items().iter().any(|event| {
-        if event.kind == "MessageEvent" {
-            return false;
-        }
-
-        match KnownEvent::from_envelope(event) {
-            KnownEvent::ConversationStateUpdate(payload) => payload
-                .execution_status
-                .as_deref()
-                .map(|execution_status| execution_status != "idle")
-                .unwrap_or(false),
-            _ => true,
-        }
-    })
+    match state_mirror.execution_status() {
+        Some("finished") => ProbeActivity::Healthy,
+        Some("error") | Some("stuck") => ProbeActivity::Unhealthy(format!(
+            "terminal execution_status `{}`",
+            state_mirror.execution_status().unwrap_or_default()
+        )),
+        _ => ProbeActivity::Pending,
+    }
 }
