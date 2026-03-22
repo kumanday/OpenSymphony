@@ -331,7 +331,7 @@ impl WorkspaceManager {
             Ok(manifest) => Ok(classify_issue_manifest_ownership(
                 issue, workspace, manifest,
             )),
-            Err(error) if !self.bootstrap_layout_exists(workspace).await? => {
+            Err(_) if !self.bootstrap_layout_exists(workspace).await? => {
                 Ok(ExistingIssueManifestState::ForeignArtifact)
             }
             Err(error) => Err(WorkspaceError::DecodeManifest {
