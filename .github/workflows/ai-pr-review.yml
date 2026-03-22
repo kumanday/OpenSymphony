@@ -1,0 +1,93 @@
+name: ai-pr-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+
+permissions: {}
+
+concurrency:
+  group: ai-pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: openhands-review
+    if: >
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      (
+        github.event.action != 'labeled' ||
+        github.event.label.name == 'review-this'
+      )
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Validate and resolve LLM configuration
+        id: llm
+        shell: bash
+        env:
+          AI_REVIEW_PROVIDER_KIND: ${{ vars.AI_REVIEW_PROVIDER_KIND }}
+          AI_REVIEW_MODEL_ID: ${{ vars.AI_REVIEW_MODEL_ID }}
+          AI_REVIEW_BASE_URL: ${{ vars.AI_REVIEW_BASE_URL }}
+          AI_REVIEW_STYLE: ${{ vars.AI_REVIEW_STYLE }}
+          AI_REVIEW_REQUIRE_EVIDENCE: ${{ vars.AI_REVIEW_REQUIRE_EVIDENCE }}
+        run: |
+          set -euo pipefail
+
+          provider_kind="${AI_REVIEW_PROVIDER_KIND:-}"
+          model_id="${AI_REVIEW_MODEL_ID:-}"
+          base_url="${AI_REVIEW_BASE_URL:-}"
+          review_style="${AI_REVIEW_STYLE:-standard}"
+          require_evidence="${AI_REVIEW_REQUIRE_EVIDENCE:-true}"
+
+          if [[ -z "$provider_kind" ]]; then
+            echo "::error::Missing repository variable AI_REVIEW_PROVIDER_KIND"
+            exit 1
+          fi
+
+          if [[ -z "$model_id" ]]; then
+            echo "::error::Missing repository variable AI_REVIEW_MODEL_ID"
+            exit 1
+          fi
+
+          case "$provider_kind" in
+            openai-compatible)
+              if [[ -z "$base_url" ]]; then
+                echo "::error::AI_REVIEW_BASE_URL is required when AI_REVIEW_PROVIDER_KIND=openai-compatible"
+                exit 1
+              fi
+              resolved_model="openai/${model_id}"
+              resolved_base_url="$base_url"
+              ;;
+            litellm-native)
+              resolved_model="$model_id"
+              resolved_base_url="$base_url"
+              ;;
+            *)
+              echo "::error::Unsupported AI_REVIEW_PROVIDER_KIND: $provider_kind"
+              echo "::error::Supported values: openai-compatible, litellm-native"
+              exit 1
+              ;;
+          esac
+
+          echo "model=$resolved_model" >> "$GITHUB_OUTPUT"
+          echo "base_url=$resolved_base_url" >> "$GITHUB_OUTPUT"
+          echo "style=$review_style" >> "$GITHUB_OUTPUT"
+          echo "require_evidence=$require_evidence" >> "$GITHUB_OUTPUT"
+
+      - name: Run OpenHands PR Review
+        uses: OpenHands/extensions/plugins/pr-review@e1c0496636c36a35e3e238f87f81dce6bbe767a2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          llm-api-key: ${{ secrets.FIREWORKS_API_KEY }}
+          llm-model: ${{ steps.llm.outputs.model }}
+          llm-base-url: ${{ steps.llm.outputs.base_url }}
+          extensions-version: e1c0496636c36a35e3e238f87f81dce6bbe767a2
+          review-style: ${{ steps.llm.outputs.style }}
+          require-evidence: ${{ steps.llm.outputs.require_evidence }}
