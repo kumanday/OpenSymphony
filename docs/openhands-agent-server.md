@@ -183,14 +183,20 @@ Each issue gets a stable `conversation_id` persisted under:
 Suggested persisted fields:
 
 - `issue_id`
-- `issue_identifier`
+- `identifier`
 - `conversation_id`
-- `created_at`
-- `last_attached_at`
 - `server_base_url`
 - `persistence_dir`
-- `conversation_contract_version`
-- `status`
+- `created_at`
+- `last_attached_at`
+- `fresh_conversation`
+- `reset_reason`
+- `runtime_contract_version`
+
+Implementation note:
+
+- `opensymphony-workspace` owns the deterministic `conversation.json` path and serialization helper
+- the OpenHands issue-session runner still decides when to create, reuse, attach, or reset the conversation
 
 ## 6.2 Persistence directory
 
