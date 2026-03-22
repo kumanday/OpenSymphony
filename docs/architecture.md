@@ -133,6 +133,8 @@ Recommended crate boundaries:
   - sanitization and containment
   - hook runner
   - issue and run metadata manifests
+  - manifest-backed workspace ownership checks for colliding sanitized keys
+  - managed metadata path safety for `.opensymphony/`
 - `opensymphony-linear`
   - Linear GraphQL client
   - issue normalization

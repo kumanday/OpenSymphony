@@ -3,7 +3,7 @@ mod manager;
 mod models;
 mod paths;
 
-pub use error::WorkspaceError;
+pub use error::{WorkspaceError, WorkspaceOwnershipConflictDetails};
 pub use manager::WorkspaceManager;
 pub use models::{
     CleanupConfig, CleanupDecision, CleanupOutcome, EnsureWorkspaceResult, HookConfig,

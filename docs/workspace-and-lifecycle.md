@@ -23,6 +23,8 @@ Examples:
 - `feature/42` -> `feature_42`
 - `Bug: weird path` -> `Bug__weird_path`
 
+Because this sanitization is not injective, workspace reuse must be gated by the persisted issue manifest for the current path. If an existing current-path manifest claims the same sanitized key for a different issue, OpenSymphony must refuse reuse instead of silently aliasing two issues onto one workspace.
+
 ## 3. Hard safety invariants
 
 - The resolved workspace path must stay under `workspace.root`.
@@ -96,6 +98,8 @@ Do not rerun it on every worker attempt.
 
 If the first `after_create` attempt fails before bootstrap completes, the next `ensure` attempt should retry `after_create` instead of treating the partially initialized workspace directory as fully reusable.
 
+Bootstrap completion is determined by an OpenSymphony-owned `issue.json` whose workspace path and sanitized key match the current workspace, not by raw file existence. Repository-provided or copied `.opensymphony/issue.json` artifacts must not suppress the retry.
+
 ## 6.2 `before_run`
 
 Runs before each worker lifetime.
@@ -133,6 +137,7 @@ Use for:
 - Hooks execute inside the issue workspace unless explicitly documented otherwise.
 - Any explicit hook `cwd` override must still resolve inside the same issue workspace.
 - Containment checks for explicit hook `cwd` overrides should use canonicalized paths so symlinked subdirectories cannot escape the workspace.
+- OpenSymphony-managed metadata paths under `.opensymphony/` must reject symlinked directories or files before any manifest read or write.
 - Unix hook commands should run via a non-login `sh -c` shell so host profile startup files cannot change `cwd` or fail the hook before the configured command runs.
 - Hook timeouts use the configured `hooks.timeout_ms`.
 - Hook failures are categorized and surfaced with issue context.
@@ -160,6 +165,7 @@ Use cases:
 - restart recovery
 - operator debugging
 - workspace introspection
+- authoritative ownership check for non-injective sanitized workspace keys
 
 ## 7.1 Run metadata manifest
 
