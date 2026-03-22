@@ -132,7 +132,7 @@ Recommended crate boundaries:
   - workspace mapping
   - sanitization and containment
   - hook runner
-  - issue metadata manifest
+  - issue and run metadata manifests
 - `opensymphony-linear`
   - Linear GraphQL client
   - issue normalization

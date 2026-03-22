@@ -38,8 +38,8 @@ Recommended layout inside each issue workspace:
 <issue_workspace>/
   .opensymphony/
     issue.json
+    run.json
     conversation.json
-    retry.json
     prompts/
       last-full-prompt.md
       last-continuation-prompt.md
@@ -57,6 +57,8 @@ Recommended layout inside each issue workspace:
 Notes:
 
 - `.opensymphony/` is OpenSymphony-owned metadata.
+- The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories on first ensure.
+- `conversation.json` remains reserved for the OpenHands session layer even though the workspace handle exposes its deterministic path.
 - The repository working tree remains otherwise untouched except by normal agent work.
 - OpenSymphony must never overwrite repository-owned `AGENTS.md`.
 
@@ -125,6 +127,7 @@ Use for:
 ## 6.5 Hook execution rules
 
 - Hooks execute inside the issue workspace unless explicitly documented otherwise.
+- Any explicit hook `cwd` override must still resolve inside the same issue workspace.
 - Hook timeouts use the configured `hooks.timeout_ms`.
 - Hook failures are categorized and surfaced with issue context.
 - `after_run` and `before_remove` are best effort by default.
@@ -151,6 +154,30 @@ Use cases:
 - restart recovery
 - operator debugging
 - workspace introspection
+
+## 7.1 Run metadata manifest
+
+Persist the latest worker-lifetime manifest under `.opensymphony/run.json`.
+
+Suggested fields:
+
+- `run_id`
+- `attempt`
+- `issue_id`
+- `identifier`
+- `sanitized_workspace_key`
+- `workspace_path`
+- `status`
+- `status_detail`
+- `hooks`
+- `created_at`
+- `updated_at`
+
+Use cases:
+
+- capture `before_run` and `after_run` hook outcomes with stdout/stderr for diagnostics
+- explain the latest worker-lifetime state during restart recovery
+- make cleanup and retry decisions inspectable without daemon memory
 
 ## 8. Conversation metadata manifest
 
@@ -286,9 +313,23 @@ A future hosted mode can keep the same workspace ownership model while moving ac
 ```rust
 trait WorkspaceManager {
     fn workspace_path_for(&self, issue_identifier: &str) -> Result<PathBuf>;
-    async fn ensure(&self, issue: &Issue) -> Result<WorkspaceHandle>;
-    async fn run_hook(&self, hook: HookKind, workspace: &WorkspaceHandle) -> Result<()>;
-    async fn remove(&self, workspace: &WorkspaceHandle) -> Result<()>;
+    async fn ensure(&self, issue: &IssueDescriptor) -> Result<EnsureWorkspaceResult>;
+    async fn start_run(
+        &self,
+        workspace: &WorkspaceHandle,
+        run: &RunDescriptor,
+    ) -> Result<RunManifest>;
+    async fn finish_run(
+        &self,
+        workspace: &WorkspaceHandle,
+        run: &mut RunManifest,
+        status: RunStatus,
+    ) -> Result<()>;
+    async fn cleanup(
+        &self,
+        workspace: &WorkspaceHandle,
+        state: IssueLifecycleState,
+    ) -> Result<CleanupOutcome>;
 }
 ```
 
@@ -298,6 +339,8 @@ trait WorkspaceManager {
 - `identifier`
 - `workspace_path`
 - `metadata_dir`
+- `issue_manifest_path`
+- `run_manifest_path`
 - `conversation_manifest_path`
 
 ## 16. Tests required
@@ -308,6 +351,7 @@ trait WorkspaceManager {
 - `after_create` only once
 - `before_run` every worker lifetime
 - timeout on hook
+- hook stderr capture
 - terminal cleanup
-- metadata file write and reload
+- issue and run metadata file write and reload
 - conversation reset path preserves workspace safety
