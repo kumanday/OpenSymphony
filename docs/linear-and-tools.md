@@ -117,7 +117,9 @@ Current adapter contract:
 Required:
 
 - `LINEAR_API_KEY`
+- workflow `tracker.kind`
 - workflow `tracker.project_slug` (the Linear `Project.slugId` value)
+- workflow `tracker.kind`
 - workflow `tracker.active_states`
 - workflow `tracker.terminal_states`
 
@@ -138,6 +140,11 @@ Optional:
 For unattended execution, the agent needs a minimal, stable write surface for Linear.
 
 OpenSymphony should provide a small stdio MCP server rather than coupling writes into the orchestrator.
+
+Current repository note:
+
+- workflow-owned OpenHands MCP stdio server declarations are rejected during workflow resolution until the current conversation-create adapter can forward `mcp_config`, so unattended sessions must provision the Linear MCP surface through the host tool environment rather than `openhands.mcp.stdio_servers`
+- `opensymphony doctor` can still resolve workflows that omit `tracker.api_key` when `linear.enabled: false`; it uses a doctor-only placeholder for the omitted fallback token so static/local runtime validation does not require live Linear credentials
 
 ## 5.1 MVP tool set
 

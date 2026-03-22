@@ -23,6 +23,7 @@ clap.workspace = true
 opensymphony-linear-mcp = { path = "../opensymphony-linear-mcp" }
 opensymphony-control = { path = "../opensymphony-control" }
 opensymphony-openhands = { path = "../opensymphony-openhands" }
+opensymphony-workflow = { path = "../opensymphony-workflow" }
 opensymphony-tui = { path = "../opensymphony-tui" }
 serde.workspace = true
 serde_yaml.workspace = true
