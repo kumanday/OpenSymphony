@@ -43,6 +43,8 @@ pub enum WorkspaceError {
     },
     #[error("path {path} escapes configured root {root}")]
     PathEscape { root: PathBuf, path: PathBuf },
+    #[error("issue workspace path may not be a symlink: {path}")]
+    WorkspacePathSymlink { path: PathBuf },
     #[error("OpenSymphony-managed metadata path may not be a symlink: {path}")]
     ManagedPathSymlink { path: PathBuf },
     #[error("failed to create directory {path}: {source}")]
