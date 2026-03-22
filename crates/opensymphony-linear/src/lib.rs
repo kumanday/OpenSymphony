@@ -1,1 +1,7 @@
-pub const CRATE_NAME: &str = "opensymphony-linear";
+mod client;
+mod error;
+mod graphql;
+mod normalize;
+
+pub use client::{LinearClient, LinearConfig, RetryPolicy};
+pub use error::{GraphqlError, LinearError};

@@ -52,6 +52,12 @@ struct FakeConversation {
     summary: Conversation,
     events: Vec<EventEnvelope>,
     sender: broadcast::Sender<EventEnvelope>,
+    control_sender: broadcast::Sender<SocketControl>,
+}
+
+#[derive(Clone, Debug)]
+enum SocketControl {
+    Close,
 }
 
 pub struct FakeOpenHandsServer {
@@ -163,6 +169,19 @@ impl FakeOpenHandsServer {
             .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
         Ok(conversation.events.len())
     }
+
+    pub async fn drop_websocket_connections(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<(), FakeServerError> {
+        let inner = self.state.inner.lock().await;
+        let conversation = inner
+            .conversations
+            .get(&conversation_id)
+            .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
+        let _ = conversation.control_sender.send(SocketControl::Close);
+        Ok(())
+    }
 }
 
 impl Drop for FakeOpenHandsServer {
@@ -204,6 +223,7 @@ async fn create_conversation(
     };
 
     let (sender, _) = broadcast::channel(32);
+    let (control_sender, _) = broadcast::channel(8);
     let ready_event = EventEnvelope::new(
         next_event_id(&mut inner),
         Utc::now(),
@@ -223,6 +243,7 @@ async fn create_conversation(
             summary: summary.clone(),
             events: vec![ready_event],
             sender,
+            control_sender,
         },
     );
 
@@ -367,7 +388,7 @@ async fn events_socket(
 }
 
 async fn handle_socket(state: AppState, conversation_id: Uuid, mut socket: WebSocket) {
-    let (mut receiver, ready_event) = {
+    let (mut receiver, mut control_receiver, ready_event) = {
         let inner = state.inner.lock().await;
         let conversation = match inner.conversations.get(&conversation_id) {
             Some(conversation) => conversation,
@@ -375,6 +396,7 @@ async fn handle_socket(state: AppState, conversation_id: Uuid, mut socket: WebSo
         };
         (
             conversation.sender.subscribe(),
+            conversation.control_sender.subscribe(),
             latest_state_event(conversation),
         )
     };
@@ -391,14 +413,33 @@ async fn handle_socket(state: AppState, conversation_id: Uuid, mut socket: WebSo
         return;
     }
 
-    while let Ok(event) = receiver.recv().await {
-        let payload = match serde_json::to_string(&event) {
-            Ok(payload) => payload,
-            Err(_) => continue,
-        };
+    loop {
+        tokio::select! {
+            received = receiver.recv() => {
+                let event = match received {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                let payload = match serde_json::to_string(&event) {
+                    Ok(payload) => payload,
+                    Err(_) => continue,
+                };
 
-        if socket.send(Message::Text(payload.into())).await.is_err() {
-            break;
+                if socket.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+            control = control_receiver.recv() => {
+                match control {
+                    Ok(SocketControl::Close) => {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
         }
     }
 }
@@ -407,8 +448,8 @@ fn latest_state_event(conversation: &FakeConversation) -> EventEnvelope {
     conversation
         .events
         .iter()
-        .rev()
-        .find(|event| event.kind == "ConversationStateUpdateEvent")
+        .filter(|event| event.kind == "ConversationStateUpdateEvent")
+        .max_by(|left, right| compare_events(left, right))
         .cloned()
         .unwrap_or_else(|| {
             EventEnvelope::state_update("ws-ready", conversation.summary.execution_status.clone())
@@ -416,16 +457,33 @@ fn latest_state_event(conversation: &FakeConversation) -> EventEnvelope {
 }
 
 fn apply_event_to_conversation(conversation: &mut FakeConversation, event: EventEnvelope) {
-    if let KnownEvent::ConversationStateUpdate(ConversationStateUpdatePayload {
-        execution_status: Some(execution_status),
-        ..
-    }) = KnownEvent::from_envelope(&event)
+    conversation.events.push(event.clone());
+    refresh_summary_state(conversation);
+    let _ = conversation.sender.send(event);
+}
+
+fn refresh_summary_state(conversation: &mut FakeConversation) {
+    if let Some(execution_status) = conversation
+        .events
+        .iter()
+        .filter_map(|event| match KnownEvent::from_envelope(event) {
+            KnownEvent::ConversationStateUpdate(ConversationStateUpdatePayload {
+                execution_status: Some(execution_status),
+                ..
+            }) => Some((event.timestamp, event.id.as_str(), execution_status)),
+            _ => None,
+        })
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
+        .map(|(_, _, execution_status)| execution_status)
     {
         conversation.summary.execution_status = execution_status;
     }
+}
 
-    conversation.events.push(event.clone());
-    let _ = conversation.sender.send(event);
+fn compare_events(left: &EventEnvelope, right: &EventEnvelope) -> std::cmp::Ordering {
+    left.timestamp
+        .cmp(&right.timestamp)
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn next_event_id(inner: &mut Inner) -> String {
