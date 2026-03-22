@@ -57,6 +57,9 @@ Key properties:
 - host-local execution assumptions documented explicitly
 - the local supervised launch path forces OpenHands process-sandbox mode via
   `RUNTIME=process`
+- the current implementation resolves supervised-mode metadata from
+  `tools/openhands-server/{pyproject.toml,version.txt,uv.lock,run-local.sh}`
+  with a repo-owned package and lockfile pin
 - the repo-local quick-run wrapper rejects user-supplied agent-server CLI flags
   so smoke runs cannot diverge from the daemon-managed single-server topology
 
@@ -79,9 +82,9 @@ Use for:
 Repository ownership note:
 
 - `tools/openhands-server/` owns the local packaging and version pin
-- M1 bootstrap creates fail-closed placeholders only
-- OSYM-201 must replace those placeholders with the validated package version
-  and lockfile before supervised mode is treated as implemented
+- the current repository pin is the OpenHands `1.14.0` SDK bundle
+- the lockfile is resolved under the repo-local `uv` environment
+- update `docs/sources.md` whenever this version pin changes
 
 ### External server mode
 
@@ -121,7 +124,16 @@ Readiness probing rule:
 - otherwise use a conservative FastAPI probe such as `GET /openapi.json`
 - never rely on sleep-only startup delays
 
-The current doctor and live-validation path uses `GET /openapi.json` as the conservative readiness probe.
+Current implementation detail:
+
+- supervised mode launches `bash tools/openhands-server/run-local.sh`
+- the supervisor sets `OPENHANDS_SERVER_PORT` and `RUNTIME=process` explicitly
+- diagnostics record the launcher summary, resolved base URL, pinned version,
+  and launched PID for doctor output and future daemon logs
+- the current doctor and live-validation path uses `GET /openapi.json` as the
+  conservative readiness probe and will temporarily start a supervised local
+  server when the configured loopback base URL is down but the repo-owned pin is
+  valid
 
 ## 4.3 Shutdown contract
 
@@ -133,6 +145,12 @@ On daemon shutdown:
 - stop the supervised agent-server subprocess if this daemon launched it
 
 If the daemon is using an external server, never attempt to terminate that server.
+
+Current implementation detail:
+
+- child ownership is tracked by the Rust supervisor instance
+- `stop()` only kills a `Child` handle created by `start()`
+- external mode may probe health, but stop remains a no-op
 
 ## 5. Workspace model
 
@@ -246,6 +264,12 @@ Implementation rule:
 - keep the orchestrator core independent of the raw OpenHands JSON model
 - all payload shaping belongs in `opensymphony-openhands`
 
+Current repository implementation:
+
+- `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
+- `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`
+- `AcceptedResponse` tolerates either an explicit JSON success body or an empty successful response for `POST /events` and `POST /run`
+
 ## 9. Authentication
 
 ## 9.1 Local MVP
@@ -254,6 +278,7 @@ Default local mode:
 
 - bind to loopback only
 - no mandatory session API key
+- the current repository pin is the OpenHands `1.14.0` SDK bundle
 
 ## 9.2 Future-proofing
 
@@ -266,8 +291,10 @@ The Rust client should still support:
 
 Current repository implementation:
 
-- `TransportConfig.session_api_key` is appended to REST endpoint URLs as well as the WebSocket URL so one auth knob covers create, get, send-message, run, search, and attach flows
-- `crates/opensymphony-openhands/tests/client_resilience.rs` covers both authenticated REST operations and the readiness path when non-readiness frames arrive before the first state update
+- `TransportConfig` now carries an `AuthConfig` with explicit no-auth, query-param API key, header API key, and header-plus-WebSocket-query-fallback modes
+- REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape
+- `OpenHandsError` now maps invalid config, transport failures, HTTP status failures, protocol failures, and WebSocket failures into stable runtime categories without exposing `reqwest::Error` or `http::StatusCode`
+- `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, and non-readiness frames before the first state update
 - the doctor probe now exercises a real `POST /events` plus `POST /run` path and only reports the runtime healthy after a successful terminal `execution_status` of `finished`
 - failure-only probe streams such as `ConversationErrorEvent` or terminal `execution_status` values like `error` and `stuck` are treated as unhealthy instead of silently passing
 

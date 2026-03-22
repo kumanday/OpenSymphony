@@ -7,3 +7,6 @@ repository.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[dependencies]
+opensymphony-domain = { path = "../opensymphony-domain" }
