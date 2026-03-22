@@ -146,7 +146,12 @@ Recommended crate boundaries:
   - workspace mapping
   - sanitization and containment
   - hook runner
-  - issue metadata manifest
+  - issue and run metadata manifests
+  - root-scoped `after_create` bootstrap receipt for post-hook recovery
+  - manifest-backed workspace ownership checks for colliding sanitized keys
+  - symlink rejection for reused workspace roots
+  - managed metadata path safety for `.opensymphony/`
+  - process-tree teardown for timed-out hooks
 - `opensymphony-linear`
   - Linear GraphQL client
   - issue normalization
