@@ -220,3 +220,46 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/deployment-modes.md`: local MVP and hosted follow-on
 - `docs/testing-and-operations.md`: tests, doctor, packaging, local ops
 - `docs/tasks/`: issue-ready implementation work items
+
+---
+
+## AI PR Review Overlay
+
+This repository uses an automated AI PR review system via OpenHands.
+
+### How it works
+
+- The `.github/workflows/ai-pr-review.yml` workflow runs on PR events
+- It uses the OpenHands PR review plugin with repository-specific guidance
+- Reviews focus on correctness, security, and maintainability
+- The AI reviewer is **advisory only** and does not count as a human approval
+
+### Repository-specific review guidance
+
+The `.agents/skills/custom-codereview-guide.md` file contains project-specific rules:
+
+- Async/concurrency safety (locks, cancellation, blocking operations)
+- Error handling patterns (explicit enums, context-rich errors)
+- Workspace safety (path containment, sanitization)
+- WebSocket resilience (reconnect, reconciliation)
+- State machine correctness
+- Forward compatibility (serde patterns)
+- Testing requirements
+
+### Evidence requirements
+
+Substantive PRs should include an `Evidence` section showing:
+- Test output for behavior changes
+- Benchmarks for performance changes
+- Usage examples for new features
+- Reproduction case and verification for bug fixes
+
+### Triggering review
+
+The AI review runs automatically on:
+- PR opened (non-draft, same-repo)
+- PR synchronized (new commits)
+- PR marked ready for review
+- `review-this` label added
+
+To manually retrigger, add the `review-this` label.
