@@ -116,7 +116,7 @@ The control-plane stream must preserve monotonically advancing snapshot sequence
 
 The control-plane snapshot contract should remain additive for read-only clients:
 unknown summarized event kinds and unknown additive snapshot enum values such as
-`runtime_state` or `last_outcome` must not invalidate the whole snapshot
+`daemon.state`, `runtime_state`, or `last_outcome` must not invalidate the whole snapshot
 payload, and bootstrap snapshot fetches should fail fast enough that reconnect
 logic can retry instead of wedging the UI behind a hung HTTP request. SSE
 subscriptions should also use bounded connection-establishment and read

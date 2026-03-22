@@ -664,7 +664,7 @@ fn handle_bridge_error(bridge: &Arc<Mutex<BridgeMailbox>>, error: &ControlPlaneC
 
 fn handle_stream_update(bridge: &Arc<Mutex<BridgeMailbox>>, update: ControlPlaneStreamUpdate) {
     match update {
-        ControlPlaneStreamUpdate::Snapshot(snapshot) => push_snapshot(bridge, snapshot),
+        ControlPlaneStreamUpdate::Snapshot(snapshot) => push_snapshot(bridge, *snapshot),
         ControlPlaneStreamUpdate::Reconnecting(error) => handle_bridge_error(bridge, &error),
     }
 }
@@ -1234,7 +1234,10 @@ mod tests {
         let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
         let mut state = TuiState::default();
 
-        super::handle_stream_update(&bridge, ControlPlaneStreamUpdate::Snapshot(fixture(1)));
+        super::handle_stream_update(
+            &bridge,
+            ControlPlaneStreamUpdate::Snapshot(Box::new(fixture(1))),
+        );
         {
             let mut mailbox = bridge
                 .lock()
@@ -1262,7 +1265,10 @@ mod tests {
         assert!(matches!(state.connection, ConnectionState::Reconnecting(_)));
         assert!(state.status_line.contains("reconnecting after:"));
 
-        super::handle_stream_update(&bridge, ControlPlaneStreamUpdate::Snapshot(fixture(2)));
+        super::handle_stream_update(
+            &bridge,
+            ControlPlaneStreamUpdate::Snapshot(Box::new(fixture(2))),
+        );
         {
             let mut mailbox = bridge
                 .lock()

@@ -147,7 +147,7 @@ Current implemented checks:
 
 - snapshot serialization in `opensymphony-domain`
 - forward-compatible snapshot decoding for unknown additive recent event kinds in `opensymphony-domain`
-- forward-compatible snapshot decoding for unknown additive `runtime_state` and `last_outcome` values in `opensymphony-control`
+- forward-compatible snapshot decoding for unknown additive `daemon.state`, `runtime_state`, and `last_outcome` values in `opensymphony-control`
 - control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane bootstrap snapshot timeout coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane SSE connect-establishment timeout coverage in `opensymphony-control/tests/control_plane.rs`

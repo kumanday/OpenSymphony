@@ -22,13 +22,14 @@ fn fixture_snapshot_with_state(step: u64, daemon_state: DaemonState) -> DaemonSn
         .single()
         .expect("fixture timestamp should be valid")
         + chrono::Duration::seconds(step as i64);
+    let status_line = daemon_status_line(&daemon_state).to_owned();
     DaemonSnapshot {
         generated_at: now,
         daemon: DaemonStatus {
             state: daemon_state,
             last_poll_at: now,
             workspace_root: "/tmp/opensymphony".to_owned(),
-            status_line: daemon_status_line(daemon_state).to_owned(),
+            status_line,
         },
         agent_server: AgentServerStatus {
             reachable: true,
@@ -63,12 +64,13 @@ fn fixture_snapshot_with_state(step: u64, daemon_state: DaemonState) -> DaemonSn
     }
 }
 
-fn daemon_status_line(state: DaemonState) -> &'static str {
+fn daemon_status_line(state: &DaemonState) -> &str {
     match state {
         DaemonState::Starting => "starting",
         DaemonState::Ready => "ready",
         DaemonState::Degraded => "degraded",
         DaemonState::Stopped => "stopped",
+        DaemonState::Other(value) => value.as_str(),
     }
 }
 
@@ -140,6 +142,10 @@ async fn health_endpoint_reflects_daemon_state() {
         (DaemonState::Ready, "ok"),
         (DaemonState::Degraded, "degraded"),
         (DaemonState::Stopped, "stopped"),
+        (
+            DaemonState::Other("paused_for_operator".to_owned()),
+            "paused_for_operator",
+        ),
     ];
 
     for (daemon_state, expected_status) in cases {
@@ -217,14 +223,14 @@ async fn fetch_snapshot_times_out_when_snapshot_endpoint_hangs() {
 }
 
 #[test]
-fn snapshot_envelopes_accept_unknown_runtime_and_outcome_values() {
+fn snapshot_envelopes_accept_unknown_daemon_runtime_and_outcome_values() {
     let value = serde_json::json!({
         "sequence": 7,
         "published_at": "2026-03-22T02:00:00Z",
         "snapshot": {
             "generated_at": "2026-03-22T02:00:00Z",
             "daemon": {
-                "state": "ready",
+                "state": "paused_for_operator",
                 "last_poll_at": "2026-03-22T02:00:00Z",
                 "workspace_root": "/tmp/opensymphony",
                 "status_line": "ready"
@@ -265,6 +271,10 @@ fn snapshot_envelopes_accept_unknown_runtime_and_outcome_values() {
     let envelope: SnapshotEnvelope =
         serde_json::from_value(value).expect("snapshot envelope should decode");
     assert_eq!(
+        envelope.snapshot.daemon.state,
+        DaemonState::Other("paused_for_operator".to_owned())
+    );
+    assert_eq!(
         envelope.snapshot.issues[0].runtime_state,
         IssueRuntimeState::Other("paused_for_operator".to_owned())
     );
@@ -274,6 +284,10 @@ fn snapshot_envelopes_accept_unknown_runtime_and_outcome_values() {
     );
 
     let encoded = serde_json::to_value(&envelope).expect("snapshot envelope should encode");
+    assert_eq!(
+        encoded["snapshot"]["daemon"]["state"],
+        serde_json::Value::String("paused_for_operator".to_owned())
+    );
     assert_eq!(
         encoded["snapshot"]["issues"][0]["runtime_state"],
         serde_json::Value::String("paused_for_operator".to_owned())

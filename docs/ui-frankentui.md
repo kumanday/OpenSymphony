@@ -41,7 +41,7 @@ Current implemented local contract:
 - `GET /api/v1/snapshot`
 - `GET /api/v1/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
   - lagged consumers are snapped forward to the latest published sequence instead of replaying stale snapshots out of order
-- `GET /healthz` for daemon liveness, with the returned `status` reflecting the daemon snapshot state (`ok`, `starting`, `degraded`, `stopped`)
+- `GET /healthz` for daemon liveness, with the returned `status` reflecting the daemon snapshot state (`ok`, `starting`, `degraded`, `stopped` for known states, while additive unknown states are preserved as-is)
 
 The inline header should always surface the reducer-owned control-plane status
 text so operators can see whether the client is still connecting, live on the
@@ -225,7 +225,7 @@ Current reconnect behavior:
 - ignore regressing snapshots unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
 - refetch the current snapshot before resubscribing
 - tolerate additive `recent_events[].kind` values by preserving unknown kinds instead of rejecting the whole snapshot payload
-- tolerate additive `issues[].runtime_state` and `issues[].last_outcome` values by preserving unknown strings instead of rejecting the whole snapshot payload
+- tolerate additive `daemon.state`, `issues[].runtime_state`, and `issues[].last_outcome` values by preserving unknown strings instead of rejecting the whole snapshot payload
 
 ## 11. Dependency strategy
 
@@ -254,7 +254,7 @@ Current automated coverage:
 - scripted CLI attach coverage for healthy and never-live `--exit-after-ms` runs
 - monotonic SSE lag-recovery tests for slow consumers
 - snapshot decoding coverage for unknown additive recent event kinds
-- snapshot decoding coverage for unknown additive `runtime_state` and `last_outcome` values
+- snapshot decoding coverage for unknown additive `daemon.state`, `runtime_state`, and `last_outcome` values
 
 Manual:
 

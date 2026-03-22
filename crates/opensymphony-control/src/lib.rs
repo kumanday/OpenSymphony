@@ -50,13 +50,54 @@ pub struct DaemonStatus {
     pub status_line: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonState {
     Starting,
     Ready,
     Degraded,
     Stopped,
+    Other(String),
+}
+
+impl DaemonState {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Stopped => "stopped",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "starting" => Self::Starting,
+            "ready" => Self::Ready,
+            "degraded" => Self::Degraded,
+            "stopped" => Self::Stopped,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl Serialize for DaemonState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DaemonState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&value))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -356,19 +397,20 @@ pub struct HealthResponse {
 async fn health(State(store): State<SnapshotStore>) -> Json<HealthResponse> {
     let envelope = store.current().await;
     Json(HealthResponse {
-        status: health_status(envelope.snapshot.daemon.state).to_owned(),
+        status: health_status(&envelope.snapshot.daemon.state).to_owned(),
         current_sequence: envelope.sequence,
         published_at: envelope.published_at,
         issue_count: envelope.snapshot.issue_count(),
     })
 }
 
-fn health_status(state: DaemonState) -> &'static str {
+fn health_status(state: &DaemonState) -> &str {
     match state {
         DaemonState::Starting => "starting",
         DaemonState::Ready => "ok",
         DaemonState::Degraded => "degraded",
         DaemonState::Stopped => "stopped",
+        DaemonState::Other(value) => value.as_str(),
     }
 }
 
@@ -530,7 +572,7 @@ pub struct ControlPlaneEventStream {
 
 #[derive(Debug)]
 pub enum ControlPlaneStreamUpdate {
-    Snapshot(SnapshotEnvelope),
+    Snapshot(Box<SnapshotEnvelope>),
     Reconnecting(ControlPlaneClientError),
 }
 
@@ -559,6 +601,7 @@ impl ControlPlaneEventStream {
                 Ok(EventSourceEvent::Open) => continue,
                 Ok(EventSourceEvent::Message(message)) => {
                     let snapshot = serde_json::from_str(&message.data)
+                        .map(Box::new)
                         .map(ControlPlaneStreamUpdate::Snapshot)
                         .map_err(ControlPlaneClientError::Decode);
                     if snapshot.is_ok() {
