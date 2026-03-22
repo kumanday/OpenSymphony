@@ -54,11 +54,13 @@ async fn fake_server_runtime_stream_attaches_reconciles_and_detects_terminal_sta
         KnownEvent::ConversationStateUpdate(_)
     ));
     assert!(stream.event_cache().items().len() >= 4);
-    assert!(stream
-        .event_cache()
-        .items()
-        .iter()
-        .any(|event| event.kind == "LLMCompletionLogEvent"));
+    assert!(
+        stream
+            .event_cache()
+            .items()
+            .iter()
+            .any(|event| event.kind == "LLMCompletionLogEvent")
+    );
     assert_eq!(
         stream.state_mirror().terminal_status(),
         Some(TerminalExecutionStatus::Finished)
@@ -462,9 +464,11 @@ async fn runtime_stream_reconnects_and_recovers_missed_events() {
         stream.state_mirror().terminal_status(),
         Some(TerminalExecutionStatus::Finished)
     );
-    assert!(stream
-        .event_cache()
-        .items()
-        .iter()
-        .any(|event| event.id == finished.id));
+    assert!(
+        stream
+            .event_cache()
+            .items()
+            .iter()
+            .any(|event| event.id == finished.id)
+    );
 }

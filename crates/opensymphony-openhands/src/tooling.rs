@@ -403,18 +403,12 @@ mod tests {
         let tooling = LocalServerTooling::load(temp_dir.path()).expect("load should succeed");
 
         assert!(!tooling.pin_status.is_ready());
-        assert!(tooling
-            .pin_status
-            .blocking_issues()
-            .iter()
-            .any(|issue| issue
-                .contains("pyproject.toml OpenHands package pins do not match version.txt")));
-        assert!(tooling
-            .pin_status
-            .blocking_issues()
-            .iter()
-            .any(|issue| issue
-                .contains("uv.lock OpenHands package versions do not match version.txt")));
+        assert!(tooling.pin_status.blocking_issues().iter().any(|issue| {
+            issue.contains("pyproject.toml OpenHands package pins do not match version.txt")
+        }));
+        assert!(tooling.pin_status.blocking_issues().iter().any(|issue| {
+            issue.contains("uv.lock OpenHands package versions do not match version.txt")
+        }));
     }
 
     fn write_tooling_fixture(

@@ -19,10 +19,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        boundary_summary, ConversationId, ConversationMetadata, DurationMs, IssueExecution,
-        IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, ReleaseReason,
-        RunAttempt, RuntimeStreamState, SchedulerStatus, TimestampMs, WorkerId, WorkspaceKey,
-        WorkspaceRecord,
+        ConversationId, ConversationMetadata, DurationMs, IssueExecution, IssueId, IssueIdentifier,
+        IssueState, IssueStateCategory, NormalizedIssue, ReleaseReason, RunAttempt,
+        RuntimeStreamState, SchedulerStatus, TimestampMs, WorkerId, WorkspaceKey, WorkspaceRecord,
+        boundary_summary,
     };
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {

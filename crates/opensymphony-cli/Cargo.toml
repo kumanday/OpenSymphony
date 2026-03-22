@@ -3,7 +3,9 @@ name = "opensymphony-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 repository.workspace = true
+rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
@@ -12,13 +14,20 @@ path = "src/lib.rs"
 name = "opensymphony"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
+chrono.workspace = true
 clap.workspace = true
+opensymphony-control = { path = "../opensymphony-control" }
 opensymphony-openhands = { path = "../opensymphony-openhands" }
 opensymphony-workflow = { path = "../opensymphony-workflow" }
+opensymphony-tui = { path = "../opensymphony-tui" }
 serde.workspace = true
 serde_yaml.workspace = true
 tempfile.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
