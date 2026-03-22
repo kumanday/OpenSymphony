@@ -428,6 +428,14 @@ impl BridgeMailbox {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+enum ScriptedExitOutcome {
+    #[default]
+    Pending,
+    Succeeded,
+    Failed(String),
+}
+
 #[derive(Debug, Clone, Copy)]
 enum AppMessage {
     Tick,
@@ -456,12 +464,24 @@ impl From<Event> for AppMessage {
 
 pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), TuiError> {
     let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+    let scripted_exit = Arc::new(Mutex::new(ScriptedExitOutcome::Pending));
     spawn_bridge(base_url, Arc::clone(&bridge));
-    let app = OperatorApp::new(bridge, exit_after);
+    let app = OperatorApp::new(bridge, exit_after, Arc::clone(&scripted_exit));
     App::new(app)
         .screen_mode(ScreenMode::Inline { ui_height: 22 })
         .run()
-        .map_err(TuiError::Runtime)
+        .map_err(TuiError::Runtime)?;
+
+    let outcome = scripted_exit
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    match outcome {
+        ScriptedExitOutcome::Pending | ScriptedExitOutcome::Succeeded => Ok(()),
+        ScriptedExitOutcome::Failed(last_status) => {
+            Err(TuiError::ControlPlaneUnavailable(last_status))
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -470,15 +490,23 @@ struct OperatorApp {
     bridge: Arc<Mutex<BridgeMailbox>>,
     exit_after: Option<Duration>,
     started_at: Instant,
+    observed_live_stream: bool,
+    scripted_exit: Arc<Mutex<ScriptedExitOutcome>>,
 }
 
 impl OperatorApp {
-    fn new(bridge: Arc<Mutex<BridgeMailbox>>, exit_after: Option<Duration>) -> Self {
+    fn new(
+        bridge: Arc<Mutex<BridgeMailbox>>,
+        exit_after: Option<Duration>,
+        scripted_exit: Arc<Mutex<ScriptedExitOutcome>>,
+    ) -> Self {
         Self {
             state: TuiState::default(),
             bridge,
             exit_after,
             started_at: Instant::now(),
+            observed_live_stream: false,
+            scripted_exit,
         }
     }
 
@@ -489,7 +517,23 @@ impl OperatorApp {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         while let Some(action) = bridge.take_action() {
             self.state.reduce(action);
+            if self.state.connection == ConnectionState::Live {
+                self.observed_live_stream = true;
+            }
         }
+    }
+
+    fn record_scripted_exit(&self) {
+        let outcome = if self.observed_live_stream {
+            ScriptedExitOutcome::Succeeded
+        } else {
+            ScriptedExitOutcome::Failed(format!("last status: {}", self.state.status_line))
+        };
+        let mut scripted_exit = self
+            .scripted_exit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *scripted_exit = outcome;
     }
 }
 
@@ -576,6 +620,7 @@ impl Model for OperatorApp {
             .exit_after
             .is_some_and(|limit| self.started_at.elapsed() >= limit)
         {
+            self.record_scripted_exit();
             return Cmd::quit();
         }
 
@@ -600,6 +645,8 @@ impl Model for OperatorApp {
 pub enum TuiError {
     #[error("failed to render FrankenTUI runtime: {0}")]
     Runtime(std::io::Error),
+    #[error("control plane never reached a live stream before --exit-after-ms elapsed ({0})")]
+    ControlPlaneUnavailable(String),
 }
 
 fn handle_bridge_error(bridge: &Arc<Mutex<BridgeMailbox>>, error: &ControlPlaneClientError) {
@@ -834,13 +881,18 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::{BridgeMailbox, ConnectionState, TuiState, section_layout, stacked_section_layout};
+    use super::{
+        BridgeMailbox, ConnectionState, OperatorApp, ScriptedExitOutcome, TuiState, section_layout,
+        stacked_section_layout,
+    };
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
         IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope,
         WorkerOutcome,
     };
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     fn fixture(issue_count: usize) -> SnapshotEnvelope {
         let now = Utc
@@ -957,6 +1009,62 @@ mod tests {
         assert_eq!(
             state.connection,
             ConnectionState::Reconnecting("stream closed".to_owned())
+        );
+    }
+
+    #[test]
+    fn scripted_exit_fails_when_live_stream_never_arrives() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_connection_loss("stream closed".to_owned());
+        }
+        let scripted_exit = Arc::new(Mutex::new(ScriptedExitOutcome::Pending));
+        let mut app = OperatorApp::new(
+            Arc::clone(&bridge),
+            Some(Duration::from_millis(250)),
+            Arc::clone(&scripted_exit),
+        );
+
+        app.drain_bridge();
+        app.record_scripted_exit();
+
+        assert_eq!(
+            *scripted_exit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ScriptedExitOutcome::Failed(
+                "last status: reconnecting after: stream closed".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn scripted_exit_succeeds_after_streamed_snapshot_becomes_live() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_snapshot(fixture(2));
+        }
+        let scripted_exit = Arc::new(Mutex::new(ScriptedExitOutcome::Pending));
+        let mut app = OperatorApp::new(
+            Arc::clone(&bridge),
+            Some(Duration::from_millis(250)),
+            Arc::clone(&scripted_exit),
+        );
+
+        app.drain_bridge();
+        app.record_scripted_exit();
+
+        assert_eq!(
+            *scripted_exit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ScriptedExitOutcome::Succeeded
         );
     }
 

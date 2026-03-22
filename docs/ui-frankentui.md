@@ -212,6 +212,7 @@ Current reconnect behavior:
 - bound SSE reads so a stalled `/api/v1/events` connection falls back into reconnect instead of hanging forever
 - keep that bootstrap snapshot visible while the client is still connecting or reconnecting
 - only report `live control-plane stream` after the SSE subscription is actually yielding stream data
+- make scripted `opensymphony tui --exit-after-ms ...` runs fail if the bridge never observes that live stream state
 - if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible
 - ignore regressing snapshots unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
 - refetch the current snapshot before resubscribing
@@ -240,6 +241,7 @@ Current automated coverage:
 - control-plane snapshot plus SSE round-trip tests
 - control-plane bootstrap snapshot timeout coverage
 - control-plane idle SSE timeout coverage
+- scripted CLI attach coverage for healthy and never-live `--exit-after-ms` runs
 - monotonic SSE lag-recovery tests for slow consumers
 - snapshot decoding coverage for unknown additive recent event kinds
 
