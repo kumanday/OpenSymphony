@@ -214,9 +214,10 @@ Current reconnect behavior:
 - fetch the latest snapshot over HTTP on startup
 - bound each bootstrap snapshot fetch so a hung `/api/v1/snapshot` cannot stall reconnect forever
 - bound SSE connection establishment so a blackholed or never-opening `/api/v1/events` attach falls back into reconnect instead of hanging forever
+- keep that short SSE attach timeout active until the first decoded bootstrap snapshot arrives, so a stream that only reaches `Open` or flushes headers cannot suppress it
 - bound SSE reads so a stalled `/api/v1/events` connection falls back into reconnect instead of hanging forever
 - treat retryable SSE transport failures as reconnecting state immediately while the same event-source object retries in the background
-- reapply the SSE attach-timeout guard after those retryable failures so a later blackholed reopen also falls back into reconnect instead of hanging forever
+- reapply that same SSE attach-timeout guard after retryable failures so a later `Open`-only or blackholed reopen also falls back into reconnect instead of hanging forever
 - keep that bootstrap snapshot visible while the client is still connecting or reconnecting
 - only report `live control-plane stream` after the SSE subscription is actually yielding stream data
 - make scripted `opensymphony tui --exit-after-ms ...` runs fail unless the final reduced control-plane state is still `live` when the timeout expires

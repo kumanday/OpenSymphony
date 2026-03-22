@@ -122,8 +122,10 @@ should also use bounded connection-establishment and read timeouts so a
 blackholed or stalled `/api/v1/events` connection fails back into reconnect,
 while normal keepalive traffic keeps healthy idle streams attached. Retryable
 SSE transport failures should surface a reconnecting state to the UI before the
-next successful snapshot arrives, and the attach-timeout guard must reapply
-after those failures so a later blackholed reopen cannot wedge the bridge.
+next successful snapshot arrives, and the attach-timeout guard must stay active
+until the first decoded snapshot arrives on each attach or retry so an
+`Open`-only or header-only stream cannot wedge the bridge before bootstrap
+data lands.
 
 ## 4. Runtime component model
 
