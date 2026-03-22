@@ -1,13 +1,13 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use axum::{
+    Json, Router,
     body::Body,
     extract::State,
     http::{HeaderMap, Response, StatusCode},
     routing::post,
-    Json, Router,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
@@ -204,7 +204,13 @@ async fn linear_mcp_stdio_server_advertises_tools_and_executes_writes() {
     let list_states = read_json(&mut stdout_lines).await;
     let states_payload = tool_payload(&list_states["result"]);
     assert_eq!(states_payload["team"]["key"], json!("COE"));
-    assert_eq!(states_payload["states"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        states_payload["states"]
+            .as_array()
+            .expect("states payload should be an array")
+            .len(),
+        3
+    );
 
     drop(stdin);
     let status = timeout(Duration::from_secs(5), child.wait())

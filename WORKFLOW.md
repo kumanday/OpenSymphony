@@ -18,6 +18,11 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/code/symphony-workspaces
+logging:
+  level: debug
+agent:
+  max_concurrent_agents: 16
+  max_turns: 50
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/kumanday/OpenSymphony .
@@ -173,6 +178,7 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 4. Update the workpad plan/checklist to include each feedback item and its resolution status.
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.
+7. After addressing initial PR review feedback, add the `review-this` label to the PR to re-trigger automated AI PR review.
 
 ## Blocked-access escape hatch (required behavior)
 
@@ -209,6 +215,7 @@ Use this only when completion is blocked by missing required tools or missing au
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
 8.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
     - Ensure the GitHub PR has label `symphony` (add it if missing).
+    - Add the `review-this` label to trigger automated AI PR review.
 9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
@@ -258,7 +265,8 @@ For most code review feedback (addressing comments, small fixes, requested tweak
    - Any items pushed back with justification
    - Validation steps re-run
 5. Re-run validation/tests to ensure changes are correct.
-6. Move the issue back to `Human Review` once all feedback is addressed.
+6. Add the `review-this` label to the PR to re-trigger automated AI PR review.
+7. Move the issue back to `Human Review` once all feedback is addressed.
 
 **Preserve review history**: Keeping the same PR preserves all discussion context, review threads, and decision history. Reviewers can see incremental changes rather than starting from scratch.
 
@@ -279,6 +287,7 @@ For major rework:
    - If current issue state is `Todo`, move it to `In Progress`; otherwise keep the current state.
    - Create a new bootstrap `## Codex Workpad` comment.
    - Build a fresh plan/checklist and execute end-to-end.
+6. After creating the new PR, add the `review-this` label to trigger automated AI PR review.
 
 **Default assumption**: Treat `Rework` as minor feedback unless there is clear evidence that the approach is fundamentally broken. Preserve PR history and discussion context as the default behavior.
 

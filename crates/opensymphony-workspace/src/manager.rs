@@ -1,21 +1,21 @@
 use std::{io, path::Path, process::Stdio};
 
 use chrono::Utc;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     fs,
     io::{AsyncRead, AsyncReadExt},
     process::Command,
-    time::{timeout, Instant},
+    time::{Instant, timeout},
 };
 
 use crate::{
-    models::AfterCreateBootstrapReceipt,
-    paths::{normalize_absolute_path, resolve_path_within_root, sanitize_workspace_key},
     CleanupDecision, CleanupOutcome, EnsureWorkspaceResult, HookDefinition, HookExecutionRecord,
     HookExecutionStatus, HookKind, IssueDescriptor, IssueLifecycleState, IssueManifest,
     RunDescriptor, RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManagerConfig,
     WorkspaceOwnershipConflictDetails,
+    models::AfterCreateBootstrapReceipt,
+    paths::{normalize_absolute_path, resolve_path_within_root, sanitize_workspace_key},
 };
 
 pub struct WorkspaceManager {
