@@ -103,6 +103,7 @@ Current repository implementation:
 - `tools/openhands-server/pyproject.toml` pins the local server environment and `tools/openhands-server/run-local.sh` starts it via `uv`
 - `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
+- `opensymphony doctor` now resolves the target repo `WORKFLOW.md` before probing OpenHands, so the live probe uses workflow-derived workspace, transport, conversation, and prompt inputs instead of only static CLI YAML fields
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
 - explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
@@ -134,6 +135,9 @@ Current implementation detail:
 - the supervisor sets `OPENHANDS_SERVER_PORT` and `RUNTIME=process` explicitly
 - diagnostics record the launcher summary, resolved base URL, pinned version,
   and launched PID for doctor output and future daemon logs
+- the doctor path renders the target repo workflow prompt with a synthetic issue
+  and sends that rendered prompt inside the probe message so prompt/template
+  regressions fail before a real issue runner lands
 - the current doctor and live-validation path uses `GET /openapi.json` as the
   conservative readiness probe and will temporarily start a supervised local
   server when the configured loopback base URL is down but the repo-owned pin is
