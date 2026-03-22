@@ -389,11 +389,7 @@ fn resolve_openhands_conversation<E: Environment>(
             "openhands.conversation.persistence_dir_relative",
             DEFAULT_OPENHANDS_PERSISTENCE_DIR,
         )?,
-        max_iterations: resolve_positive_u64(
-            conversation.max_iterations.as_ref(),
-            "openhands.conversation.max_iterations",
-            DEFAULT_OPENHANDS_MAX_ITERATIONS,
-        )?,
+        max_iterations: resolve_openhands_max_iterations(conversation.max_iterations.as_ref())?,
         stuck_detection: conversation.stuck_detection.unwrap_or(true),
         confirmation_policy,
         agent,
@@ -430,16 +426,43 @@ fn resolve_openhands_llm<E: Environment>(
     llm: &OpenHandsLlmFrontMatter,
     env: &E,
 ) -> Result<OpenHandsLlmConfig, WorkflowConfigError> {
+    let field = "openhands.conversation.agent.llm.model";
+    let model = llm
+        .model
+        .as_deref()
+        .ok_or(WorkflowConfigError::MissingRequiredField { field })?;
+    let model = resolve_string(model, env, field)?;
+    if model.trim().is_empty() {
+        return Err(WorkflowConfigError::InvalidField {
+            field,
+            message: "must not be empty".to_owned(),
+        });
+    }
+
     Ok(OpenHandsLlmConfig {
-        model: llm
-            .model
-            .as_deref()
-            .map(|value| resolve_string(value, env, "openhands.conversation.agent.llm.model"))
-            .transpose()?,
+        model: Some(model),
         api_key_env: normalize_optional_literal(&llm.api_key_env),
         base_url_env: normalize_optional_literal(&llm.base_url_env),
         options: llm.options.clone(),
     })
+}
+
+fn resolve_openhands_max_iterations(
+    value: Option<&IntegerLike>,
+) -> Result<u64, WorkflowConfigError> {
+    let max_iterations = resolve_positive_u64(
+        value,
+        "openhands.conversation.max_iterations",
+        DEFAULT_OPENHANDS_MAX_ITERATIONS,
+    )?;
+    if max_iterations > u32::MAX as u64 {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.max_iterations",
+            message: format!("must be less than or equal to {}", u32::MAX),
+        });
+    }
+
+    Ok(max_iterations)
 }
 
 fn resolve_stdio_servers(

@@ -99,6 +99,8 @@ Current implementation:
 - default `openhands.local_server.command` to the absolute pinned `<workflow-root>/tools/openhands-server/run-local.sh` launcher
 - fail on malformed or non-HTTP(S) `openhands.transport.base_url` values during workflow resolution
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`
+- fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range
+- fail when `openhands.conversation.agent.llm` is present without a non-empty `model`
 - fail on malformed `agent.max_concurrent_agents_by_state` entries
 - preserve the Markdown body exactly after the front matter terminator
 

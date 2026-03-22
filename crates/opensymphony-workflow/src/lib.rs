@@ -506,6 +506,76 @@ openhands:
     }
 
     #[test]
+    fn rejects_openhands_max_iterations_above_u32_range() {
+        let workflow = WorkflowDefinition::parse(&format!(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    max_iterations: {}
+---
+{{{{ issue.identifier }}}}
+"#,
+            u64::from(u32::MAX) + 1
+        ))
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("oversized max_iterations should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.max_iterations",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_openhands_llm_blocks_without_model() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        api_key_env: OPENHANDS_API_KEY
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("llm blocks without model should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingRequiredField {
+                field: "openhands.conversation.agent.llm.model",
+            }
+        ));
+    }
+
+    #[test]
     fn rejects_persistence_paths_that_escape_the_workspace() {
         let workflow = WorkflowDefinition::parse(
             r#"---

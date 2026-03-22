@@ -238,6 +238,8 @@ Current workflow defaulting:
 
 - `confirmation_policy.kind` defaults to `NeverConfirm` when omitted
 - `agent.kind` defaults to `Agent` when omitted
+- `max_iterations` must fit the downstream OpenHands `u32` request range
+- `agent.llm.model` is required whenever an `llm` block is present
 
 Implementation rule:
 
