@@ -145,6 +145,7 @@ If readiness is not achieved, fail the attach attempt and surface a transport er
 Current repository implementation:
 
 - `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until a `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable events before readiness
+- workflow-owned `openhands.websocket.enabled`, `ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` overrides are currently rejected during workflow resolution until the runtime attach/reconnect path consumes them; the live runtime still always opens the readiness socket and uses runtime-owned budgets
 - `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness and reconcile path
 

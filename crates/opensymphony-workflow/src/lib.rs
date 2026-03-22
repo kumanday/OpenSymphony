@@ -154,14 +154,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_map_front_matter() {
-        let error = WorkflowDefinition::parse("---\n- nope\n---\nbody")
-            .expect_err("list front matter should be rejected");
+    fn treats_non_map_delimited_block_as_prompt_body() {
+        let source = "---\n- nope\n---\nbody\n";
+        let workflow = WorkflowDefinition::parse(source)
+            .expect("non-mapping delimited blocks should fall back to prompt body");
 
-        assert!(matches!(
-            error,
-            WorkflowLoadError::WorkflowFrontMatterNotAMap
-        ));
+        assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
+        assert_eq!(workflow.prompt_template, source);
     }
 
     #[test]
@@ -169,6 +168,16 @@ mod tests {
         let source = "---\n# Assignment\n";
         let workflow = WorkflowDefinition::parse(source)
             .expect("unterminated leading delimiter should fall back to prompt body");
+
+        assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
+        assert_eq!(workflow.prompt_template, source);
+    }
+
+    #[test]
+    fn parses_leading_thematic_breaks_as_prompt_body_when_front_matter_is_not_a_map() {
+        let source = "---\n# Assignment\n---\n\nContinue.\n";
+        let workflow = WorkflowDefinition::parse(source)
+            .expect("plain markdown thematic breaks should not consume prompt content");
 
         assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
         assert_eq!(workflow.prompt_template, source);
@@ -495,6 +504,40 @@ openhands:
             error,
             WorkflowConfigError::InvalidField {
                 field: "openhands.local_server.startup_timeout_ms",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_local_server_readiness_probe_path_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    readiness_probe_path: /readyz
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported readiness probe path overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.readiness_probe_path",
                 ..
             }
         ));
@@ -1044,6 +1087,93 @@ openhands:
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_websocket_runtime_overrides() {
+        for (workflow_source, field) in [
+            (
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    enabled: false
+---
+{{ issue.identifier }}
+"#,
+                "openhands.websocket.enabled",
+            ),
+            (
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    ready_timeout_ms: 45000
+---
+{{ issue.identifier }}
+"#,
+                "openhands.websocket.ready_timeout_ms",
+            ),
+            (
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    reconnect_initial_ms: 1500
+---
+{{ issue.identifier }}
+"#,
+                "openhands.websocket.reconnect_initial_ms",
+            ),
+            (
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    reconnect_max_ms: 45000
+---
+{{ issue.identifier }}
+"#,
+                "openhands.websocket.reconnect_max_ms",
+            ),
+        ] {
+            let workflow =
+                WorkflowDefinition::parse(workflow_source).expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow.resolve(Path::new("/repo"), &env).expect_err(
+                "unsupported websocket runtime overrides should fail during resolution",
+            );
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField { field: actual, .. } if actual == field
+            ));
+        }
     }
 
     #[test]
