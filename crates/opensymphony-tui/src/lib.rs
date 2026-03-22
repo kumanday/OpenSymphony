@@ -723,8 +723,21 @@ fn connection_status_summary(state: &TuiState) -> String {
         ConnectionState::Live => {
             informative_status(&state.status_line, &["live control-plane stream"])
         }
-        ConnectionState::Reconnecting(reason) => informative_status(reason, &[])
-            .or_else(|| informative_status(&state.status_line, &["reconnecting"])),
+        ConnectionState::Reconnecting(reason) => {
+            let reconnect_status_line = format!("reconnecting after: {reason}");
+            if state
+                .status_line
+                .eq_ignore_ascii_case("snapshot refreshed; waiting for live stream")
+            {
+                Some("refreshed; stream pending")
+            } else {
+                informative_status(
+                    &state.status_line,
+                    &["reconnecting", reconnect_status_line.as_str()],
+                )
+                .or_else(|| informative_status(reason, &[]))
+            }
+        }
     };
     status_segment(format!("conn={}", state.connection.label()), detail)
 }
@@ -995,7 +1008,13 @@ fn fit(value: &str, width: usize) -> String {
 }
 
 fn single_line(value: &str) -> String {
-    value.lines().collect::<Vec<_>>().join(" ")
+    value
+        .lines()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
 }
 
 fn display_width(value: &str) -> usize {
@@ -1290,9 +1309,29 @@ mod tests {
     }
 
     #[test]
+    fn reconnecting_header_prefers_refreshed_snapshot_status_text() {
+        let mut state = TuiState::default();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(8, 3))));
+        state.reduce(TuiAction::StreamAttached);
+        state.reduce(TuiAction::ConnectionLost("sse stalled".to_owned()));
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(9, 3))));
+
+        let rendered = state.render_text(200, 22);
+        let header = rendered.lines().next().expect("header row");
+        assert!(header.contains("conn=reconnecting (refreshed; stream pending)"));
+        assert!(!header.contains("conn=reconnecting (sse stalled)"));
+    }
+
+    #[test]
     fn fit_uses_terminal_cell_width_for_padding_and_truncation() {
         assert_eq!(fit("界", 4), "界  ");
         assert_eq!(fit("界abc", 4), "界a~");
+    }
+
+    #[test]
+    fn fit_replaces_control_characters_before_padding() {
+        assert_eq!(fit("a\tb", 4), "a b ");
+        assert_eq!(fit("a\u{0007}b", 4), "a b ");
     }
 
     #[test]
@@ -1307,6 +1346,22 @@ mod tests {
         assert!(rendered.lines().all(|line| display_width(line) <= 40));
         assert!(rendered.contains("界面"));
         assert!(rendered.contains("多字节"));
+    }
+
+    #[test]
+    fn control_characters_do_not_escape_the_frame_width_budget() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 3);
+        snapshot.snapshot.issues[0].title = "tab\tseparated".to_owned();
+        snapshot.snapshot.recent_events[0].summary = "bell\u{0007}event".to_owned();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.render_text(40, 22);
+        assert!(rendered.lines().all(|line| display_width(line) <= 40));
+        assert!(!rendered.contains('\t'));
+        assert!(!rendered.contains('\u{0007}'));
+        assert!(rendered.contains("tab separated"));
+        assert!(rendered.contains("bell event"));
     }
 
     #[test]

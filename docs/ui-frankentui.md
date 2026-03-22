@@ -131,8 +131,9 @@ connection and focus metadata so degraded runtime state is visible even when the
 otherwise stable.
 Rendered pane text is normalized to a single visual line before fitting so
 newline-bearing snapshot fields do not silently spill past the row budget.
-Row fitting also uses terminal cell width instead of Unicode scalar counts so full-width tracker
-titles or event summaries do not bleed across pane separators in split layouts.
+Row fitting also uses terminal cell width instead of Unicode scalar counts and normalizes control
+characters such as tabs before measurement so externally sourced tracker titles or event summaries
+do not bleed across pane separators in split layouts.
 
 ## 6. Interaction model
 
@@ -220,6 +221,7 @@ Current reconnect behavior:
 - subscribe to the SSE stream
 - if the stream closes or fails, keep the last good snapshot visible, mark the connection as reconnecting, and surface the computed reconnect reason in the top header
 - refetch the current snapshot before resubscribing
+- if that refresh succeeds before the SSE stream reattaches, keep `conn=reconnecting` but switch the compact header detail to the current snapshot state such as `refreshed; stream pending`
 - if the SSE consumer lags, accept the latest published snapshot and ignore any older retained sequence that would roll the UI backward
 
 The implemented bridge between the SSE client and the FTUI reducer coalesces bursty snapshot traffic down to the latest value so inline-mode polling does not accumulate an unbounded backlog of stale snapshots.

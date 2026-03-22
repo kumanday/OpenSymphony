@@ -214,8 +214,11 @@ When validating the local control-plane and TUI slice, also confirm that:
 - the bootstrap snapshot stays visible with `conn=connecting` until the SSE stream actually
   attaches
 - reconnecting clients keep the last good snapshot visible instead of regressing to stale state
+- reconnecting clients switch the header detail to `refreshed; stream pending` once the HTTP
+  refresh succeeds, even before the SSE stream is live again
 - lagged SSE consumers only advance to newer snapshot sequences
-- newline-bearing or full-width tracker and event text stays within the pane row and column budget
+- newline-bearing, control-character-bearing, or full-width tracker and event text stays within
+  the pane row and column budget
 - `opensymphony daemon --sample-interval-ms ...` keeps the initial `Starting` snapshot in place
   until the configured interval elapses
 
