@@ -122,6 +122,7 @@ Recommended crate boundaries:
   - issue model
   - run-attempt model
   - retry-entry model
+  - scheduler state and transition types
   - orchestrator snapshot model
 - `opensymphony-workflow`
   - `WORKFLOW.md` loader
@@ -132,7 +133,12 @@ Recommended crate boundaries:
   - workspace mapping
   - sanitization and containment
   - hook runner
-  - issue metadata manifest
+  - issue and run metadata manifests
+  - root-scoped `after_create` bootstrap receipt for post-hook recovery
+  - manifest-backed workspace ownership checks for colliding sanitized keys
+  - symlink rejection for reused workspace roots
+  - managed metadata path safety for `.opensymphony/`
+  - process-tree teardown for timed-out hooks
 - `opensymphony-linear`
   - Linear GraphQL client
   - issue normalization
@@ -149,7 +155,7 @@ Recommended crate boundaries:
   - issue session runner
 - `opensymphony-orchestrator`
   - poll tick
-  - runtime state machine
+  - scheduler actor and policy decisions over the shared state machine
   - worker supervision
   - retry timers
   - reconciliation
