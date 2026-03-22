@@ -272,6 +272,22 @@ struct ActiveSession {
     prompt_path: Option<PathBuf>,
 }
 
+enum Step<T> {
+    Continue(T),
+    EarlyResult(Box<IssueSessionResult>),
+}
+
+enum ReuseSession {
+    Active(Box<ActiveSession>),
+    Reset(String),
+}
+
+struct PreparedTurn {
+    conversation_id: Uuid,
+    prompt: String,
+    baseline_event_ids: HashSet<String>,
+}
+
 #[derive(Default)]
 struct LoadedManifest {
     manifest: Option<IssueConversationManifest>,
@@ -306,7 +322,7 @@ impl IssueSessionRunner {
         workflow: &ResolvedWorkflow,
     ) -> Result<IssueSessionResult, IssueSessionError> {
         let observed_run = observed_run_for_turn(run);
-        let mut active_session = match self
+        let active_session = match self
             .initialize_session(
                 workspace_manager,
                 workspace,
@@ -317,157 +333,47 @@ impl IssueSessionRunner {
             )
             .await?
         {
-            Ok(session) => session,
-            Err(result) => return Ok(result),
+            Step::Continue(session) => session,
+            Step::EarlyResult(result) => return Ok(*result),
         };
 
-        let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind) {
-            Ok(prompt) => prompt,
-            Err(detail) => {
-                let outcome = NormalizedOutcome {
-                    kind: WorkerOutcomeKind::Failed,
-                    summary: format!(
-                        "failed to render {} prompt",
-                        active_session.prompt_kind.as_str()
-                    ),
-                    error: Some(detail),
-                };
-                return self
-                    .finalize_active_session(
-                        workspace_manager,
-                        workspace,
-                        run_manifest,
-                        &observed_run,
-                        active_session,
-                        outcome,
-                    )
-                    .await;
-            }
-        };
-
-        let prompt_path = active_session.prompt_kind.artifact_path(workspace);
-        workspace_manager
-            .write_text_artifact(workspace, &prompt_path, &prompt)
-            .await?;
-        let prompt_recorded_at = Utc::now();
-        active_session.manifest.record_prompt(
-            active_session.prompt_kind,
-            prompt_path.clone(),
-            prompt_recorded_at,
-        );
-        active_session.prompt_path = Some(prompt_path);
-        workspace_manager
-            .write_json_artifact(
+        let (mut active_session, prepared_turn) = match self
+            .prepare_turn(
+                workspace_manager,
                 workspace,
-                &workspace.conversation_manifest_path(),
-                &active_session.manifest,
+                run_manifest,
+                &observed_run,
+                workflow,
+                issue,
+                run,
+                active_session,
             )
-            .await?;
-
-        let conversation_id = parse_uuid(active_session.manifest.conversation_id.as_str());
-        let conversation_id = match conversation_id {
-            Ok(conversation_id) => conversation_id,
-            Err(detail) => {
-                let outcome = NormalizedOutcome {
-                    kind: WorkerOutcomeKind::Failed,
-                    summary: "conversation manifest contained an invalid conversation ID"
-                        .to_string(),
-                    error: Some(detail),
-                };
-                return self
-                    .finalize_active_session(
-                        workspace_manager,
-                        workspace,
-                        run_manifest,
-                        &observed_run,
-                        active_session,
-                        outcome,
-                    )
-                    .await;
-            }
-        };
-
-        let baseline_event_ids = active_session
-            .stream
-            .event_cache()
-            .items()
-            .iter()
-            .map(|event| event.id.clone())
-            .collect::<HashSet<_>>();
-
-        if let Err(error) = self
-            .client
-            .send_message(conversation_id, &SendMessageRequest::user_text(prompt))
-            .await
+            .await?
         {
-            let outcome = NormalizedOutcome {
-                kind: WorkerOutcomeKind::Failed,
-                summary: format!(
-                    "failed to send {} prompt event",
-                    active_session.prompt_kind.as_str()
-                ),
-                error: Some(error.to_string()),
-            };
-            return self
-                .finalize_active_session(
-                    workspace_manager,
-                    workspace,
-                    run_manifest,
-                    &observed_run,
-                    active_session,
-                    outcome,
-                )
-                .await;
-        }
+            Step::Continue(state) => state,
+            Step::EarlyResult(result) => return Ok(*result),
+        };
 
-        if active_session.prompt_kind == IssueSessionPromptKind::Full {
-            active_session.manifest.workflow_prompt_seeded = true;
-        }
-
-        if let Err(error) = self.client.run_conversation(conversation_id).await {
-            let outcome = NormalizedOutcome {
-                kind: WorkerOutcomeKind::Failed,
-                summary: "failed to trigger OpenHands run".to_string(),
-                error: Some(error.to_string()),
-            };
-            return self
-                .finalize_active_session(
-                    workspace_manager,
-                    workspace,
-                    run_manifest,
-                    &observed_run,
-                    active_session,
-                    outcome,
-                )
-                .await;
-        }
-
-        run_manifest.status = RunStatus::Running;
-        run_manifest.status_detail = Some(format!(
-            "{} prompt sent to conversation {}",
-            active_session.prompt_kind.as_str(),
-            active_session.manifest.conversation_id
-        ));
-        workspace_manager
-            .write_run_manifest(workspace, run_manifest)
-            .await?;
-        workspace_manager
-            .write_json_artifact(
+        active_session = match self
+            .start_turn(
+                workspace_manager,
                 workspace,
-                &session_context_path(workspace),
-                &build_session_context(
-                    run_manifest,
-                    &observed_run,
-                    &active_session.manifest,
-                    active_session.prompt_kind,
-                    active_session.prompt_path.clone(),
-                    None,
-                ),
+                run_manifest,
+                &observed_run,
+                active_session,
+                &prepared_turn,
             )
-            .await?;
+            .await?
+        {
+            Step::Continue(session) => session,
+            Step::EarlyResult(result) => return Ok(*result),
+        };
 
         let outcome = self
-            .await_terminal_outcome(&mut active_session.stream, &baseline_event_ids)
+            .await_terminal_outcome(
+                &mut active_session.stream,
+                &prepared_turn.baseline_event_ids,
+            )
             .await;
         self.finalize_active_session(
             workspace_manager,
@@ -488,7 +394,7 @@ impl IssueSessionRunner {
         observed_run: &RunAttempt,
         issue: &NormalizedIssue,
         workflow: &ResolvedWorkflow,
-    ) -> Result<Result<ActiveSession, IssueSessionResult>, IssueSessionError> {
+    ) -> Result<Step<ActiveSession>, IssueSessionError> {
         let loaded = self
             .load_existing_conversation_manifest(workspace_manager, workspace, issue)
             .await?;
@@ -498,8 +404,8 @@ impl IssueSessionRunner {
                 .try_reuse_session(workspace_manager, workspace, manifest)
                 .await?
             {
-                Ok(session) => Ok(Ok(session)),
-                Err(reason) => {
+                ReuseSession::Active(session) => Ok(Step::Continue(*session)),
+                ReuseSession::Reset(reason) => {
                     self.create_fresh_session(
                         workspace_manager,
                         workspace,
@@ -525,6 +431,183 @@ impl IssueSessionRunner {
                 .await
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_turn(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        observed_run: &RunAttempt,
+        workflow: &ResolvedWorkflow,
+        issue: &NormalizedIssue,
+        run: &RunAttempt,
+        mut active_session: ActiveSession,
+    ) -> Result<Step<(ActiveSession, PreparedTurn)>, IssueSessionError> {
+        let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind) {
+            Ok(prompt) => prompt,
+            Err(detail) => {
+                let summary = format!(
+                    "failed to render {} prompt",
+                    active_session.prompt_kind.as_str()
+                );
+                return self
+                    .finalize_active_session(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        observed_run,
+                        active_session,
+                        failed_outcome(summary, detail),
+                    )
+                    .await
+                    .map(Box::new)
+                    .map(Step::EarlyResult);
+            }
+        };
+
+        let prompt_path = active_session.prompt_kind.artifact_path(workspace);
+        workspace_manager
+            .write_text_artifact(workspace, &prompt_path, &prompt)
+            .await?;
+        let prompt_recorded_at = Utc::now();
+        active_session.manifest.record_prompt(
+            active_session.prompt_kind,
+            prompt_path.clone(),
+            prompt_recorded_at,
+        );
+        active_session.prompt_path = Some(prompt_path);
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &active_session.manifest,
+            )
+            .await?;
+
+        let conversation_id = match parse_uuid(active_session.manifest.conversation_id.as_str()) {
+            Ok(conversation_id) => conversation_id,
+            Err(detail) => {
+                return self
+                    .finalize_active_session(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        observed_run,
+                        active_session,
+                        failed_outcome(
+                            "conversation manifest contained an invalid conversation ID",
+                            detail,
+                        ),
+                    )
+                    .await
+                    .map(Box::new)
+                    .map(Step::EarlyResult);
+            }
+        };
+
+        let baseline_event_ids = active_session
+            .stream
+            .event_cache()
+            .items()
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
+
+        Ok(Step::Continue((
+            active_session,
+            PreparedTurn {
+                conversation_id,
+                prompt,
+                baseline_event_ids,
+            },
+        )))
+    }
+
+    async fn start_turn(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        observed_run: &RunAttempt,
+        mut active_session: ActiveSession,
+        prepared_turn: &PreparedTurn,
+    ) -> Result<Step<ActiveSession>, IssueSessionError> {
+        if let Err(error) = self
+            .client
+            .send_message(
+                prepared_turn.conversation_id,
+                &SendMessageRequest::user_text(prepared_turn.prompt.clone()),
+            )
+            .await
+        {
+            let summary = format!(
+                "failed to send {} prompt event",
+                active_session.prompt_kind.as_str()
+            );
+            return self
+                .finalize_active_session(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    observed_run,
+                    active_session,
+                    failed_outcome(summary, error.to_string()),
+                )
+                .await
+                .map(Box::new)
+                .map(Step::EarlyResult);
+        }
+
+        if active_session.prompt_kind == IssueSessionPromptKind::Full {
+            active_session.manifest.workflow_prompt_seeded = true;
+        }
+
+        if let Err(error) = self
+            .client
+            .run_conversation(prepared_turn.conversation_id)
+            .await
+        {
+            return self
+                .finalize_active_session(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    observed_run,
+                    active_session,
+                    failed_outcome("failed to trigger OpenHands run", error.to_string()),
+                )
+                .await
+                .map(Box::new)
+                .map(Step::EarlyResult);
+        }
+
+        run_manifest.status = RunStatus::Running;
+        run_manifest.status_detail = Some(format!(
+            "{} prompt sent to conversation {}",
+            active_session.prompt_kind.as_str(),
+            active_session.manifest.conversation_id
+        ));
+        workspace_manager
+            .write_run_manifest(workspace, run_manifest)
+            .await?;
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &session_context_path(workspace),
+                &build_session_context(
+                    run_manifest,
+                    observed_run,
+                    &active_session.manifest,
+                    active_session.prompt_kind,
+                    active_session.prompt_path.clone(),
+                    None,
+                ),
+            )
+            .await?;
+
+        Ok(Step::Continue(active_session))
     }
 
     async fn load_existing_conversation_manifest(
@@ -571,10 +654,10 @@ impl IssueSessionRunner {
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
         mut manifest: IssueConversationManifest,
-    ) -> Result<Result<ActiveSession, String>, IssueSessionError> {
+    ) -> Result<ReuseSession, IssueSessionError> {
         let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
             Ok(conversation_id) => conversation_id,
-            Err(error) => return Ok(Err(error)),
+            Err(error) => return Ok(ReuseSession::Reset(error)),
         };
         let stream = match self
             .client
@@ -583,7 +666,7 @@ impl IssueSessionRunner {
         {
             Ok(stream) => stream,
             Err(error) => {
-                return Ok(Err(format!(
+                return Ok(ReuseSession::Reset(format!(
                     "failed to attach existing conversation {}: {error}",
                     manifest.conversation_id
                 )));
@@ -613,12 +696,12 @@ impl IssueSessionRunner {
             )
             .await?;
 
-        Ok(Ok(ActiveSession {
+        Ok(ReuseSession::Active(Box::new(ActiveSession {
             prompt_kind: manifest.prompt_kind(),
             stream,
             manifest,
             prompt_path: None,
-        }))
+        })))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -631,7 +714,7 @@ impl IssueSessionRunner {
         issue: &NormalizedIssue,
         workflow: &ResolvedWorkflow,
         reset_reason: Option<String>,
-    ) -> Result<Result<ActiveSession, IssueSessionResult>, IssueSessionError> {
+    ) -> Result<Step<ActiveSession>, IssueSessionError> {
         let request = match build_conversation_create_request(workflow, workspace) {
             Ok(request) => request,
             Err(detail) => {
@@ -650,7 +733,8 @@ impl IssueSessionRunner {
                         },
                     )
                     .await
-                    .map(Err);
+                    .map(Box::new)
+                    .map(Step::EarlyResult);
             }
         };
         workspace_manager
@@ -679,7 +763,8 @@ impl IssueSessionRunner {
                         },
                     )
                     .await
-                    .map(Err);
+                    .map(Box::new)
+                    .map(Step::EarlyResult);
             }
         };
 
@@ -713,7 +798,8 @@ impl IssueSessionRunner {
                         },
                     )
                     .await
-                    .map(Err);
+                    .map(Box::new)
+                    .map(Step::EarlyResult);
             }
         };
 
@@ -744,7 +830,7 @@ impl IssueSessionRunner {
             )
             .await?;
 
-        Ok(Ok(ActiveSession {
+        Ok(Step::Continue(ActiveSession {
             prompt_kind: manifest.prompt_kind(),
             stream,
             manifest,
@@ -1120,6 +1206,14 @@ fn build_summary_metadata(
         last_event_kind: None,
         last_event_at: None,
         last_event_summary: None,
+    }
+}
+
+fn failed_outcome(summary: impl Into<String>, error: impl Into<String>) -> NormalizedOutcome {
+    NormalizedOutcome {
+        kind: WorkerOutcomeKind::Failed,
+        summary: summary.into(),
+        error: Some(error.into()),
     }
 }
 
