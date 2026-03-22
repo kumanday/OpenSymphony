@@ -488,6 +488,53 @@ async fn attach_runtime_stream_applies_newer_reused_conversation_readiness_snaps
 }
 
 #[tokio::test]
+async fn runtime_stream_preserves_newer_ready_barrier_state_after_later_out_of_order_state_update()
+{
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(ready_barrier_rebuild_regression_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    assert_eq!(
+        stream.state_mirror().execution_status(),
+        Some("running"),
+        "the ready barrier should make the mirror reflect the newest running state after attach"
+    );
+
+    let stale = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("stale queued event should arrive")
+        .expect("stream read should succeed")
+        .expect("stale queued event should exist");
+    assert_eq!(stale.id, "evt-stale-queued");
+    assert_eq!(
+        stream.state_mirror().execution_status(),
+        Some("running"),
+        "later mirror rebuilds should keep the newer ready barrier state instead of regressing to stale queued data"
+    );
+}
+
+#[tokio::test]
 async fn runtime_stream_replays_initial_snapshot_when_post_ready_reconcile_is_empty() {
     let state = InitialReplayState::default();
     let server = TestServer::start(initial_replay_router(state)).await;
@@ -864,6 +911,27 @@ fn reused_conversation_readiness_mirror_router(state: ReadinessMirrorState) -> R
         .with_state(state)
 }
 
+fn ready_barrier_rebuild_regression_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(readiness_mirror_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(ready_barrier_rebuild_regression_events_socket),
+        )
+        .with_state(state)
+}
+
 async fn readiness_mirror_create_conversation(
     State(state): State<ReadinessMirrorState>,
     Json(request): Json<ConversationCreateRequest>,
@@ -974,6 +1042,52 @@ async fn forward_compatible_readiness_mirror_events_socket(
             ))
             .await
             .expect("ready event should send");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
+}
+
+async fn ready_barrier_rebuild_regression_events_socket(
+    Path(_conversation_id): Path<Uuid>,
+    websocket: WebSocketUpgrade,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        let ready = EventEnvelope::new(
+            "evt-ready-running",
+            Utc::now(),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": "running",
+                "state_delta": {
+                    "execution_status": "running",
+                },
+            }),
+        );
+        let stale_queued = EventEnvelope::new(
+            "evt-stale-queued",
+            ready.timestamp - chrono::Duration::seconds(1),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": "queued",
+                "state_delta": {
+                    "execution_status": "queued",
+                },
+            }),
+        );
+
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&ready).expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&stale_queued).expect("stale queued event should serialize"),
+            ))
+            .await
+            .expect("stale queued event should send");
         tokio::time::sleep(Duration::from_secs(1)).await;
     })
 }

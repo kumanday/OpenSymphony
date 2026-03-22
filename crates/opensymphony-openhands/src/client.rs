@@ -9,7 +9,8 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use tokio::{
     net::TcpStream,
-    time::{sleep, timeout, timeout_at, Instant},
+    task::yield_now,
+    time::{sleep, timeout_at, Instant},
 };
 use tokio_tungstenite::{
     connect_async,
@@ -310,7 +311,6 @@ impl OpenHandsError {
 }
 
 type RuntimeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
-const STREAM_READ_AHEAD_WINDOW: Duration = Duration::from_millis(5);
 const CONVERSATION_STATE_UPDATE_EVENT_KIND: &str = "ConversationStateUpdateEvent";
 const UNREADY_EVENT_ID: &str = "runtime-stream-unready";
 
@@ -428,7 +428,7 @@ impl RuntimeEventStream {
                 self.push_new_events(drained_events, true);
                 self.handle_reconnect_signal(reconnect_signal).await?;
 
-                Ok(self.pending_events.pop_front())
+                Ok(None)
             }
             StreamRead::Closed => {
                 self.handle_reconnect_signal(Some(StreamRead::Closed))
@@ -464,7 +464,7 @@ impl RuntimeEventStream {
                     .socket
                     .as_mut()
                     .expect("socket should be present while draining buffered events");
-                read_buffered_socket_event(socket, STREAM_READ_AHEAD_WINDOW).await
+                read_buffered_socket_event(socket).await
             };
 
             match next {
@@ -513,6 +513,7 @@ impl RuntimeEventStream {
     }
 
     pub async fn close(&mut self) -> Result<(), OpenHandsError> {
+        self.clear_ready_event();
         self.reconnect_pending = false;
         self.pending_events.clear();
         if let Some(mut socket) = self.socket.take() {
@@ -538,6 +539,7 @@ impl RuntimeEventStream {
     }
 
     async fn reconnect(&mut self) -> Result<(), OpenHandsError> {
+        self.clear_ready_event();
         let mut attempts = 0usize;
         let mut delay = self.config.reconnect_initial_backoff;
 
@@ -577,7 +579,6 @@ impl RuntimeEventStream {
         let reconciled = self.client.search_all_events(self.conversation_id).await?;
         self.push_new_events(reconciled.items().iter().cloned(), true);
         self.rebuild_state_mirror();
-        self.apply_ready_event_to_state_mirror();
         Ok(())
     }
 
@@ -619,6 +620,11 @@ impl RuntimeEventStream {
         self.state_mirror
             .rebuild_from(&self.conversation, self.event_cache.items());
         self.apply_terminal_conversation_fallback();
+        self.apply_ready_event_to_state_mirror();
+    }
+
+    fn clear_ready_event(&mut self) {
+        self.ready_event = EventEnvelope::state_update(UNREADY_EVENT_ID, "idle");
     }
 
     fn apply_ready_event_to_state_mirror(&mut self) {
@@ -1090,13 +1096,49 @@ async fn read_next_socket_event(stream: &mut RuntimeSocket) -> StreamRead {
     }
 }
 
-async fn read_buffered_socket_event(
-    stream: &mut RuntimeSocket,
-    read_ahead_window: Duration,
-) -> Option<StreamRead> {
-    timeout(read_ahead_window, read_next_socket_event(stream))
-        .await
-        .ok()
+async fn read_buffered_socket_event(stream: &mut RuntimeSocket) -> Option<StreamRead> {
+    loop {
+        let next_message = tokio::select! {
+            biased;
+            message = stream.next() => Some(message),
+            () = yield_now() => None,
+        };
+
+        match next_message {
+            None => return None,
+            Some(Some(Ok(Message::Text(payload)))) => match parse_text_event(&payload) {
+                Ok(event) => return Some(StreamRead::Event(event)),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "ignoring undecodable websocket text frame while draining buffered events"
+                    );
+                }
+            },
+            Some(Some(Ok(Message::Binary(payload)))) => match parse_binary_event(&payload) {
+                Ok(event) => return Some(StreamRead::Event(event)),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "ignoring undecodable websocket binary frame while draining buffered events"
+                    );
+                }
+            },
+            Some(Some(Ok(Message::Ping(_)))) | Some(Some(Ok(Message::Pong(_)))) => {
+                debug!("ignoring websocket control frame while draining buffered events");
+            }
+            Some(Some(Ok(Message::Frame(_)))) => {
+                debug!("ignoring raw websocket frame while draining buffered events");
+            }
+            Some(Some(Ok(Message::Close(_)))) | Some(None) => return Some(StreamRead::Closed),
+            Some(Some(Err(error))) => {
+                return Some(StreamRead::Transport(OpenHandsError::websocket_transport(
+                    "read runtime event",
+                    error,
+                )));
+            }
+        }
+    }
 }
 
 async fn wait_for_probe_terminal_state(
