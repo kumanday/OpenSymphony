@@ -6,9 +6,12 @@ mod tooling;
 
 pub use client::{
     ApiKeyAuth, AuthConfig, HttpAuth, OpenHandsClient, OpenHandsError, OpenHandsProbeResult,
-    TransportConfig, WebSocketAuth,
+    RuntimeEventStream, RuntimeStreamConfig, TransportConfig, WebSocketAuth,
 };
-pub use events::{ConversationStateMirror, EventCache, KnownEvent};
+pub use events::{
+    ConversationErrorEvent, ConversationStateMirror, EventCache, KnownEvent, LlmCompletionLogEvent,
+    TerminalExecutionStatus, UnknownEvent,
+};
 pub use models::{
     AcceptedResponse, AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
     ConversationRunRequest, ConversationStateUpdatePayload, EventEnvelope, LlmConfig,

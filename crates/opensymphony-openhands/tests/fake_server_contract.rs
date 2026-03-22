@@ -3,12 +3,12 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Utc};
 use opensymphony_openhands::{
     ConversationCreateRequest, EventCache, EventEnvelope, KnownEvent, OpenHandsClient,
-    TransportConfig,
+    RuntimeStreamConfig, TerminalExecutionStatus, TransportConfig,
 };
 use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 
 #[tokio::test]
-async fn fake_server_supports_create_ready_and_reconcile() {
+async fn fake_server_runtime_stream_attaches_reconciles_and_detects_terminal_state() {
     let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
         search_page_size: 2,
     })
@@ -38,24 +38,31 @@ async fn fake_server_supports_create_ready_and_reconcile() {
         .await
         .expect("run should succeed");
 
-    let ready_event = client
-        .wait_for_readiness(conversation.conversation_id, Duration::from_secs(2))
+    let stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
         .await
-        .expect("websocket readiness should succeed");
-    let event_cache = client
-        .search_all_events(conversation.conversation_id)
-        .await
-        .expect("event reconciliation should succeed");
+        .expect("runtime stream attach should succeed");
 
     assert!(matches!(
-        KnownEvent::from_envelope(&ready_event),
+        KnownEvent::from_envelope(stream.ready_event()),
         KnownEvent::ConversationStateUpdate(_)
     ));
-    assert!(event_cache.items().len() >= 4);
-    assert!(event_cache
+    assert!(stream.event_cache().items().len() >= 4);
+    assert!(stream
+        .event_cache()
         .items()
         .iter()
         .any(|event| event.kind == "LLMCompletionLogEvent"));
+    assert_eq!(
+        stream.state_mirror().terminal_status(),
+        Some(TerminalExecutionStatus::Finished)
+    );
 }
 
 #[tokio::test]
@@ -121,7 +128,7 @@ async fn reconciliation_walks_multiple_pages() {
 }
 
 #[tokio::test]
-async fn fake_server_run_finishes_with_documented_terminal_status() {
+async fn runtime_stream_keeps_latest_state_when_out_of_order_events_arrive() {
     let server = FakeOpenHandsServer::start()
         .await
         .expect("fake server should start");
@@ -137,14 +144,148 @@ async fn fake_server_run_finishes_with_documented_terminal_status() {
         .await
         .expect("conversation create should succeed");
 
-    client
-        .run_conversation(conversation.conversation_id)
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
         .await
-        .expect("run should succeed");
+        .expect("runtime stream attach should succeed");
+    let running = EventEnvelope::new(
+        "evt-running",
+        Utc::now(),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        serde_json::json!({
+            "execution_status": "running",
+            "state_delta": {
+                "execution_status": "running",
+            },
+        }),
+    );
+    let queued = EventEnvelope::new(
+        "evt-queued",
+        running.timestamp - ChronoDuration::seconds(5),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        serde_json::json!({
+            "execution_status": "queued",
+            "state_delta": {
+                "execution_status": "queued",
+            },
+        }),
+    );
 
-    let conversation = client
-        .get_conversation(conversation.conversation_id)
+    server
+        .insert_event(conversation.conversation_id, running.clone())
         .await
-        .expect("conversation fetch should succeed");
-    assert_eq!(conversation.execution_status, "finished");
+        .expect("running event should be recorded");
+    server
+        .insert_event(conversation.conversation_id, queued.clone())
+        .await
+        .expect("queued event should be recorded");
+
+    let first = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("first stream event should arrive")
+        .expect("stream read should succeed")
+        .expect("first stream event should exist");
+    let second = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("second stream event should arrive")
+        .expect("stream read should succeed")
+        .expect("second stream event should exist");
+
+    assert_eq!(first.id, running.id);
+    assert_eq!(second.id, queued.id);
+    let ordered_ids = stream
+        .event_cache()
+        .items()
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ordered_ids.first().copied(), Some("evt-queued"));
+    assert_eq!(ordered_ids.last().copied(), Some("evt-running"));
+    assert_eq!(stream.state_mirror().execution_status(), Some("running"));
+}
+
+#[tokio::test]
+async fn runtime_stream_reconnects_and_recovers_missed_events() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                reconnect_initial_backoff: Duration::from_millis(25),
+                reconnect_max_backoff: Duration::from_millis(100),
+                max_reconnect_attempts: 4,
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+    let finished = EventEnvelope::new(
+        "evt-finished",
+        Utc::now() + ChronoDuration::seconds(1),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        serde_json::json!({
+            "execution_status": "finished",
+            "state_delta": {
+                "execution_status": "finished",
+            },
+        }),
+    );
+
+    server
+        .drop_websocket_connections(conversation.conversation_id)
+        .await
+        .expect("existing websocket should drop");
+    server
+        .insert_event(conversation.conversation_id, finished.clone())
+        .await
+        .expect("missed event should be persisted for reconcile");
+
+    let recovered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let next = stream
+                .next_event()
+                .await
+                .expect("stream read should succeed")
+                .expect("recovered event should exist");
+            if next.id == finished.id {
+                break next;
+            }
+        }
+    })
+    .await
+    .expect("recovered event should arrive after reconnect");
+
+    assert_eq!(recovered.id, finished.id);
+    assert_eq!(
+        stream.state_mirror().terminal_status(),
+        Some(TerminalExecutionStatus::Finished)
+    );
+    assert!(stream
+        .event_cache()
+        .items()
+        .iter()
+        .any(|event| event.id == finished.id));
 }
