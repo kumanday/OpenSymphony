@@ -94,6 +94,7 @@ Current implementation:
 - sanitize issue identifiers
 - refuse path escape
 - create and reuse workspace
+- persist issue and run manifests
 - hook timeout
 - hook stderr capture
 - cleanup on terminal issue state
@@ -273,13 +274,13 @@ Each issue workspace should expose enough local artifacts to debug recovery:
 ```text
 <issue_workspace>/.opensymphony/
   issue.json
+  run.json
   conversation.json
-  last-run.json
   prompts/
   logs/
 ```
 
-These files should make restart recovery explainable without scraping daemon memory.
+These files should make restart recovery explainable without scraping daemon memory, and `run.json` should retain the latest hook/status evidence for the worker lifetime.
 
 ## 10. Version pinning
 
