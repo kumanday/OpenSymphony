@@ -399,6 +399,8 @@ impl RuntimeEventStream {
     }
 
     async fn poll_next_event_once(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
+        self.absorb_buffered_socket_events().await?;
+
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(Some(event));
         }
@@ -424,48 +426,32 @@ impl RuntimeEventStream {
                 let mut drained_events = vec![event];
                 let reconnect_signal = self.drain_buffered_socket_events(&mut drained_events).await;
                 self.push_new_events(drained_events, true);
-
-                match reconnect_signal {
-                    Some(StreamRead::Closed) => {
-                        self.socket.take();
-                        if self.pending_events.is_empty() {
-                            self.reconnect().await?;
-                        } else {
-                            self.reconnect_pending = true;
-                        }
-                    }
-                    Some(StreamRead::Transport(error)) => {
-                        debug!(
-                            error = %error,
-                            "runtime websocket read failed while draining buffered events; attempting reconnect"
-                        );
-                        self.socket.take();
-                        if self.pending_events.is_empty() {
-                            self.reconnect().await?;
-                        } else {
-                            self.reconnect_pending = true;
-                        }
-                    }
-                    Some(StreamRead::Event(_)) => unreachable!(
-                        "draining buffered events should not return nested stream events"
-                    ),
-                    None => {}
-                }
+                self.handle_reconnect_signal(reconnect_signal).await?;
 
                 Ok(self.pending_events.pop_front())
             }
             StreamRead::Closed => {
-                self.socket.take();
-                self.reconnect().await?;
+                self.handle_reconnect_signal(Some(StreamRead::Closed))
+                    .await?;
                 Ok(self.pending_events.pop_front())
             }
             StreamRead::Transport(error) => {
-                debug!(error = %error, "runtime websocket read failed; attempting reconnect");
-                self.socket.take();
-                self.reconnect().await?;
+                self.handle_reconnect_signal(Some(StreamRead::Transport(error)))
+                    .await?;
                 Ok(self.pending_events.pop_front())
             }
         }
+    }
+
+    async fn absorb_buffered_socket_events(&mut self) -> Result<(), OpenHandsError> {
+        if self.socket.is_none() {
+            return Ok(());
+        }
+
+        let mut drained_events = Vec::new();
+        let reconnect_signal = self.drain_buffered_socket_events(&mut drained_events).await;
+        self.push_new_events(drained_events, true);
+        self.handle_reconnect_signal(reconnect_signal).await
     }
 
     async fn drain_buffered_socket_events(
@@ -492,7 +478,43 @@ impl RuntimeEventStream {
         }
     }
 
+    async fn handle_reconnect_signal(
+        &mut self,
+        reconnect_signal: Option<StreamRead>,
+    ) -> Result<(), OpenHandsError> {
+        match reconnect_signal {
+            Some(StreamRead::Closed) => {
+                self.socket.take();
+                if self.pending_events.is_empty() {
+                    self.reconnect().await?;
+                } else {
+                    self.reconnect_pending = true;
+                }
+            }
+            Some(StreamRead::Transport(error)) => {
+                debug!(
+                    error = %error,
+                    "runtime websocket read failed while draining buffered events; attempting reconnect"
+                );
+                self.socket.take();
+                if self.pending_events.is_empty() {
+                    self.reconnect().await?;
+                } else {
+                    self.reconnect_pending = true;
+                }
+            }
+            Some(StreamRead::Event(_)) => {
+                unreachable!("buffered socket draining should not return nested stream events")
+            }
+            None => {}
+        }
+
+        Ok(())
+    }
+
     pub async fn close(&mut self) -> Result<(), OpenHandsError> {
+        self.reconnect_pending = false;
+        self.pending_events.clear();
         if let Some(mut socket) = self.socket.take() {
             socket.close(None).await.map_err(|error| {
                 OpenHandsError::websocket_transport("close runtime stream", error)
