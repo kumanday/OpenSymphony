@@ -150,7 +150,8 @@ Recommended crate boundaries:
   - workspace mapping
   - sanitization and containment
   - hook runner
-  - issue and run metadata manifests
+  - issue, run, and conversation manifests
+  - prompt capture helpers and generated issue/session context artifacts
   - root-scoped `after_create` bootstrap receipt for post-hook recovery
   - manifest-backed workspace ownership checks for colliding sanitized keys
   - symlink rejection for reused workspace roots
