@@ -57,7 +57,7 @@ Recommended layout inside each issue workspace:
 Notes:
 
 - `.opensymphony/` is OpenSymphony-owned metadata.
-- The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories on first ensure.
+- The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
 - `conversation.json` remains reserved for the OpenHands session layer even though the workspace handle exposes its deterministic path.
 - The repository working tree remains otherwise untouched except by normal agent work.
 - OpenSymphony must never overwrite repository-owned `AGENTS.md`.
@@ -83,6 +83,8 @@ Preserve the Symphony hook model.
 
 Runs once after a brand-new issue workspace is created.
 
+On first bootstrap, this hook runs before OpenSymphony creates `.opensymphony/` so repository bootstrap commands such as `git clone <repo> .` or `git worktree add <path>` can target an otherwise empty workspace directory.
+
 Use for:
 
 - cloning the repo
@@ -91,6 +93,8 @@ Use for:
 - creating ignored helper files
 
 Do not rerun it on every worker attempt.
+
+If the first `after_create` attempt fails before bootstrap completes, the next `ensure` attempt should retry `after_create` instead of treating the partially initialized workspace directory as fully reusable.
 
 ## 6.2 `before_run`
 
@@ -128,6 +132,7 @@ Use for:
 
 - Hooks execute inside the issue workspace unless explicitly documented otherwise.
 - Any explicit hook `cwd` override must still resolve inside the same issue workspace.
+- Containment checks for explicit hook `cwd` overrides should use canonicalized paths so symlinked subdirectories cannot escape the workspace.
 - Hook timeouts use the configured `hooks.timeout_ms`.
 - Hook failures are categorized and surfaced with issue context.
 - `after_run` and `before_remove` are best effort by default.
@@ -349,9 +354,12 @@ trait WorkspaceManager {
 - canonical path containment
 - create vs reuse
 - `after_create` only once
+- clone/worktree-compatible fresh bootstrap before `.opensymphony/` exists
+- retry `after_create` after a failed first bootstrap
 - `before_run` every worker lifetime
 - timeout on hook
 - hook stderr capture
+- canonical `cwd` containment for symlinked subdirectories
 - terminal cleanup
 - issue and run metadata file write and reload
 - conversation reset path preserves workspace safety

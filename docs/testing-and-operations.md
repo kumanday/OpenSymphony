@@ -95,8 +95,11 @@ Current implementation:
 - refuse path escape
 - create and reuse workspace
 - persist issue and run manifests
+- allow fresh `after_create` hooks to bootstrap clone/worktree flows before `.opensymphony/` exists
+- retry failed first-time `after_create` hooks on the next `ensure`
 - hook timeout
 - hook stderr capture
+- reject symlink-based `cwd` escapes for hooks
 - cleanup on terminal issue state
 
 ## 3.3 OpenHands adapter

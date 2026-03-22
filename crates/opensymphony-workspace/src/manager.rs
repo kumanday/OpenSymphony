@@ -49,7 +49,6 @@ impl WorkspaceManager {
         let canonical_root = self.canonicalize_path(&self.config.root).await?;
         let workspace_key = sanitize_workspace_key(&issue.identifier)?;
         let workspace_path = crate::workspace_path_for_root(&canonical_root, &issue.identifier)?;
-        let created = !path_exists(&workspace_path).await?;
 
         self.create_directory(&workspace_path).await?;
         let canonical_workspace = self.canonicalize_path(&workspace_path).await?;
@@ -61,8 +60,7 @@ impl WorkspaceManager {
             workspace_key,
             canonical_workspace,
         );
-        self.bootstrap_workspace_layout(&handle).await?;
-        let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
+        let created = !path_exists(&handle.issue_manifest_path()).await?;
         let after_create = if created {
             match self.execute_hook(HookKind::AfterCreate, &handle).await {
                 Ok(record) => record,
@@ -71,6 +69,8 @@ impl WorkspaceManager {
         } else {
             None
         };
+        self.bootstrap_workspace_layout(&handle).await?;
+        let issue_manifest = self.upsert_issue_manifest(issue, &handle).await?;
 
         Ok(EnsureWorkspaceResult {
             handle,
@@ -274,7 +274,7 @@ impl WorkspaceManager {
         let Some(hook) = self.hook_definition(kind) else {
             return Ok(None);
         };
-        let cwd = self.resolve_hook_cwd(workspace, kind, hook)?;
+        let cwd = self.resolve_hook_cwd(workspace, kind, hook).await?;
         let mut command = build_shell_command(&hook.command);
         command
             .current_dir(&cwd)
@@ -386,7 +386,7 @@ impl WorkspaceManager {
         }
     }
 
-    fn resolve_hook_cwd(
+    async fn resolve_hook_cwd(
         &self,
         workspace: &WorkspaceHandle,
         kind: HookKind,
@@ -394,33 +394,84 @@ impl WorkspaceManager {
     ) -> Result<std::path::PathBuf, Box<HookFailure>> {
         let workspace_path = workspace.workspace_path().to_path_buf();
         let cwd = match hook.cwd.as_ref() {
-            Some(cwd) => resolve_path_within_root(&workspace_path, cwd).map_err(|error| {
-                let escaped = match &error {
-                    WorkspaceError::PathEscape { path, .. } => path.clone(),
-                    _ => cwd.clone(),
-                };
+            Some(cwd) => {
+                let lexical_cwd =
+                    resolve_path_within_root(&workspace_path, cwd).map_err(|error| {
+                        let escaped = match &error {
+                            WorkspaceError::PathEscape { path, .. } => path.clone(),
+                            _ => cwd.clone(),
+                        };
 
-                Box::new(HookFailure {
-                    error: WorkspaceError::HookPathEscape {
-                        hook: kind,
-                        workspace: workspace_path.clone(),
-                        cwd: escaped.clone(),
-                    },
-                    record: HookExecutionRecord {
-                        kind,
-                        command: hook.command.clone(),
-                        cwd: escaped,
-                        best_effort: !kind.is_required(),
-                        status: HookExecutionStatus::Failed,
-                        started_at: Utc::now(),
-                        finished_at: Utc::now(),
-                        duration_ms: 0,
-                        exit_code: None,
-                        stdout: String::new(),
-                        stderr: String::new(),
-                    },
-                })
-            })?,
+                        Box::new(HookFailure {
+                            error: WorkspaceError::HookPathEscape {
+                                hook: kind,
+                                workspace: workspace_path.clone(),
+                                cwd: escaped.clone(),
+                            },
+                            record: HookExecutionRecord {
+                                kind,
+                                command: hook.command.clone(),
+                                cwd: escaped,
+                                best_effort: !kind.is_required(),
+                                status: HookExecutionStatus::Failed,
+                                started_at: Utc::now(),
+                                finished_at: Utc::now(),
+                                duration_ms: 0,
+                                exit_code: None,
+                                stdout: String::new(),
+                                stderr: String::new(),
+                            },
+                        })
+                    })?;
+
+                let canonical_cwd = fs::canonicalize(&lexical_cwd).await.map_err(|error| {
+                    Box::new(HookFailure {
+                        error: WorkspaceError::LaunchHook {
+                            hook: kind,
+                            cwd: lexical_cwd.clone(),
+                            source: error,
+                        },
+                        record: HookExecutionRecord {
+                            kind,
+                            command: hook.command.clone(),
+                            cwd: lexical_cwd.clone(),
+                            best_effort: !kind.is_required(),
+                            status: HookExecutionStatus::Failed,
+                            started_at: Utc::now(),
+                            finished_at: Utc::now(),
+                            duration_ms: 0,
+                            exit_code: None,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        },
+                    })
+                })?;
+
+                ensure_descendant(&workspace_path, &canonical_cwd).map_err(|_| {
+                    Box::new(HookFailure {
+                        error: WorkspaceError::HookPathEscape {
+                            hook: kind,
+                            workspace: workspace_path.clone(),
+                            cwd: canonical_cwd.clone(),
+                        },
+                        record: HookExecutionRecord {
+                            kind,
+                            command: hook.command.clone(),
+                            cwd: canonical_cwd.clone(),
+                            best_effort: !kind.is_required(),
+                            status: HookExecutionStatus::Failed,
+                            started_at: Utc::now(),
+                            finished_at: Utc::now(),
+                            duration_ms: 0,
+                            exit_code: None,
+                            stdout: String::new(),
+                            stderr: String::new(),
+                        },
+                    })
+                })?;
+
+                canonical_cwd
+            }
             None => workspace_path,
         };
 
