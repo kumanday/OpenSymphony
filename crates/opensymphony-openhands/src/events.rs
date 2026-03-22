@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashSet};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::models::{Conversation, ConversationStateUpdatePayload, EventEnvelope};
 

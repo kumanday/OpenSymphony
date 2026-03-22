@@ -3,7 +3,26 @@ name = "opensymphony-control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 repository.workspace = true
+rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-stream.workspace = true
+axum.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+reqwest-eventsource.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true

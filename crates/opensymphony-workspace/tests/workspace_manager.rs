@@ -171,14 +171,16 @@ async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
         "after_create"
     );
 
-    assert!(!tokio::fs::try_exists(
-        second
-            .handle
-            .workspace_path()
-            .join("after_create_attempt.txt")
-    )
-    .await
-    .expect("attempt marker lookup should succeed"));
+    assert!(
+        !tokio::fs::try_exists(
+            second
+                .handle
+                .workspace_path()
+                .join("after_create_attempt.txt")
+        )
+        .await
+        .expect("attempt marker lookup should succeed")
+    );
 }
 
 #[tokio::test]
@@ -226,9 +228,11 @@ async fn ensure_retries_after_create_after_failed_first_bootstrap() {
         .trim(),
         "success"
     );
-    assert!(tokio::fs::try_exists(ensured.handle.issue_manifest_path())
-        .await
-        .expect("issue manifest lookup should succeed"));
+    assert!(
+        tokio::fs::try_exists(ensured.handle.issue_manifest_path())
+            .await
+            .expect("issue manifest lookup should succeed")
+    );
 }
 
 #[tokio::test]
@@ -706,9 +710,11 @@ async fn cleanup_retains_non_terminal_workspaces() {
         .expect("non-terminal cleanup should succeed");
 
     assert_eq!(outcome.decision, CleanupDecision::Retain);
-    assert!(tokio::fs::metadata(ensured.handle.workspace_path())
-        .await
-        .is_ok());
+    assert!(
+        tokio::fs::metadata(ensured.handle.workspace_path())
+            .await
+            .is_ok()
+    );
 }
 
 #[tokio::test]
@@ -771,9 +777,11 @@ async fn terminal_cleanup_can_delete_workspace() {
         .expect("terminal cleanup should succeed");
 
     assert_eq!(outcome.decision, CleanupDecision::Remove);
-    assert!(tokio::fs::metadata(ensured.handle.workspace_path())
-        .await
-        .is_err());
+    assert!(
+        tokio::fs::metadata(ensured.handle.workspace_path())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -846,9 +854,11 @@ async fn workspace_handle_validation_rejects_symlinked_workspace_roots() {
         WorkspaceError::WorkspacePathSymlink { ref path }
             if path == first.handle.workspace_path()
     ));
-    assert!(!tokio::fs::try_exists(second.handle.run_manifest_path())
-        .await
-        .expect("run manifest lookup should succeed"));
+    assert!(
+        !tokio::fs::try_exists(second.handle.run_manifest_path())
+            .await
+            .expect("run manifest lookup should succeed")
+    );
 }
 
 #[cfg(unix)]
