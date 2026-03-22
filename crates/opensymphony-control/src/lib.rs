@@ -417,7 +417,7 @@ impl ControlPlaneClient {
         Ok(ControlPlaneEventStream {
             inner,
             stream_connect_timeout: self.stream_connect_timeout,
-            observed_open: false,
+            observed_snapshot: false,
         })
     }
 
@@ -435,7 +435,7 @@ impl ControlPlaneClient {
 pub struct ControlPlaneEventStream {
     inner: EventSource,
     stream_connect_timeout: Duration,
-    observed_open: bool,
+    observed_snapshot: bool,
 }
 
 #[derive(Debug)]
@@ -449,7 +449,7 @@ impl ControlPlaneEventStream {
         &mut self,
     ) -> Option<Result<ControlPlaneStreamUpdate, ControlPlaneClientError>> {
         loop {
-            let event = if self.observed_open {
+            let event = if self.observed_snapshot {
                 match self.inner.next().await {
                     Some(event) => event,
                     None => return None,
@@ -466,26 +466,24 @@ impl ControlPlaneEventStream {
                 }
             };
             match event {
-                Ok(EventSourceEvent::Open) => {
-                    self.observed_open = true;
-                    continue;
-                }
+                Ok(EventSourceEvent::Open) => continue,
                 Ok(EventSourceEvent::Message(message)) => {
-                    self.observed_open = true;
-                    return Some(
-                        serde_json::from_str(&message.data)
-                            .map(ControlPlaneStreamUpdate::Snapshot)
-                            .map_err(ControlPlaneClientError::Decode),
-                    );
+                    let snapshot = serde_json::from_str(&message.data)
+                        .map(ControlPlaneStreamUpdate::Snapshot)
+                        .map_err(ControlPlaneClientError::Decode);
+                    if snapshot.is_ok() {
+                        self.observed_snapshot = true;
+                    }
+                    return Some(snapshot);
                 }
                 Err(error) if self.inner.ready_state() == ReadyState::Connecting => {
-                    self.observed_open = false;
+                    self.observed_snapshot = false;
                     return Some(Ok(ControlPlaneStreamUpdate::Reconnecting(
                         ControlPlaneClientError::Stream(Box::new(error)),
                     )));
                 }
                 Err(error) => {
-                    self.observed_open = false;
+                    self.observed_snapshot = false;
                     return Some(Err(ControlPlaneClientError::Stream(Box::new(error))));
                 }
             }
