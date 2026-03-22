@@ -103,8 +103,9 @@ OpenSymphony creates a stable OpenHands `conversation_id` per issue and persists
 - restart recovery after daemon restarts
 
 Reuse is conditional on the authoritative server-side `working_dir` and `persistence_dir`
-continuing to match the current issue workspace. A copied or stale manifest must trigger a fresh
-conversation instead of reusing execution state in the wrong checkout.
+continuing to match the current issue workspace, including the configured
+`conversation.persistence_dir_relative` path inside that workspace. A copied or stale manifest must
+trigger a fresh conversation instead of reusing execution state in the wrong checkout.
 
 This is stricter than the minimum Symphony requirement and intentionally optimizes continuity.
 
@@ -234,6 +235,8 @@ Use different prompt shapes for different moments:
   - fresh full workflow prompt again
 
 This follows Symphony's instruction not to resend the original full task prompt into an already live thread.
+That also applies when `POST /api/conversations` rehydrates a persisted thread after a transient
+`GET /api/conversations/{id}` miss: existing history still receives continuation guidance only.
 
 ## 6. Event and state ownership
 

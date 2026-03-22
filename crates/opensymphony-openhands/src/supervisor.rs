@@ -51,6 +51,14 @@ impl LocalAgentServerSupervisor {
         if self.child.is_some() {
             return self.status().await;
         }
+        if self.probe_ready().await {
+            return Err(OpenHandsError::SupervisorConflict {
+                message: format!(
+                    "readiness probe already succeeds at {}; refusing to adopt an external server as supervisor-owned",
+                    self.client.transport().base_url
+                ),
+            });
+        }
 
         let mut command = Command::new(&self.config.command[0]);
         command.args(&self.config.command[1..]);
@@ -162,10 +170,109 @@ fn readiness_probe_candidates(preferred: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    use crate::config::{HttpAuth, WebSocketAuthMode};
+    use crate::error::OpenHandsError;
 
     #[test]
     fn readiness_candidates_prefer_configured_path_without_duplicates() {
         let candidates = readiness_probe_candidates("/ready");
         assert_eq!(candidates, vec!["/ready", "/health", "/openapi.json"]);
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_rejects_foreign_ready_server() {
+        let (base_url, shutdown_tx) = spawn_foreign_ready_server().await;
+        let mut supervisor = LocalAgentServerSupervisor::new(
+            TransportConfig {
+                base_url,
+                http_auth: HttpAuth::None,
+                http_connect_timeout_ms: 100,
+                http_request_timeout_ms: 100,
+                websocket_auth: WebSocketAuthMode::None,
+                websocket_query_param_name: "session_api_key".to_string(),
+            },
+            LocalServerConfig {
+                command: vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "sleep 1".to_string(),
+                ],
+                workdir: None,
+                env: BTreeMap::new(),
+                startup_timeout_ms: 200,
+                readiness_probe_path: "/ready".to_string(),
+            },
+        )
+        .expect("supervisor config should be valid");
+
+        let error = supervisor
+            .start()
+            .await
+            .expect_err("an already-ready foreign server must not be treated as supervised");
+        assert!(matches!(error, OpenHandsError::SupervisorConflict { .. }));
+
+        let status = supervisor
+            .status()
+            .await
+            .expect("status should remain queryable");
+        assert!(status.ready);
+        assert!(!status.launched_by_supervisor);
+        assert_eq!(status.pid, None);
+
+        let _ = shutdown_tx.send(());
+    }
+
+    async fn spawn_foreign_ready_server() -> (url::Url, oneshot::Sender<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should have an address");
+        let base_url =
+            url::Url::parse(&format!("http://{address}")).expect("loopback URL should parse");
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let Ok((mut stream, _)) = accepted else {
+                            break;
+                        };
+                        tokio::spawn(async move {
+                            let mut buffer = [0_u8; 1024];
+                            let read = stream.read(&mut buffer).await.unwrap_or(0);
+                            if read == 0 {
+                                return;
+                            }
+                            let request = String::from_utf8_lossy(&buffer[..read]);
+                            let path = request.split_whitespace().nth(1).unwrap_or("/");
+                            let body = if path == "/server_info" {
+                                "{\"version\":\"foreign-test-server\"}"
+                            } else {
+                                "{\"status\":\"ready\"}"
+                            };
+                            let response = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                body.len(),
+                                body
+                            );
+                            let _ = stream.write_all(response.as_bytes()).await;
+                            let _ = stream.shutdown().await;
+                        });
+                    }
+                }
+            }
+        });
+
+        (base_url, shutdown_tx)
     }
 }

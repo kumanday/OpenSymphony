@@ -227,9 +227,11 @@ Required checks:
 
 - Python environment for pinned OpenHands can be resolved
 - supervised server command can start
+- supervised mode fails fast if the configured base URL is already serving a different ready server
 - server responds on the expected base URL
 - `GET /ready` succeeds for the pinned local server environment
 - a test conversation can be created with a temp `working_dir`
+- the configured `persistence_dir_relative` is reflected in the create request and reuse checks
 - WebSocket can attach and reach readiness
 - a reconcile call succeeds
 
