@@ -949,6 +949,8 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -994,6 +996,9 @@ dependencies = [
 [[package]]
 name = "opensymphony-orchestrator"
 version = "0.1.0"
+dependencies = [
+ "opensymphony-domain",
+]
 
 [[package]]
 name = "opensymphony-testkit"

@@ -1,4 +1,8 @@
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use axum::{
     body::Body,
@@ -277,6 +281,25 @@ fn client_configuration_requires_project_slug() {
     }
 }
 
+#[test]
+fn client_configuration_requires_api_key() {
+    let mut config = LinearConfig::new("   ", "e7b957855cb7");
+    config.active_states = vec!["In Progress".to_string()];
+    config.terminal_states = vec!["Done".to_string()];
+
+    let error = match LinearClient::new(config) {
+        Ok(_) => panic!("blank api key should fail"),
+        Err(error) => error,
+    };
+
+    match error {
+        LinearError::InvalidConfiguration(message) => {
+            assert!(message.contains("LINEAR_API_KEY"));
+        }
+        other => panic!("expected invalid configuration error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn rate_limited_requests_retry_using_retry_after() {
     let server = MockGraphqlServer::start(vec![
@@ -322,6 +345,42 @@ async fn graphql_rate_limited_bad_request_retries() {
 
     assert_eq!(issues.len(), 2);
     assert_eq!(server.recorded_requests().await.len(), 2);
+}
+
+#[tokio::test]
+async fn graphql_rate_limited_bad_request_retries_using_reset_header() {
+    let reset_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("current time should be after epoch")
+        .as_millis()
+        .to_string();
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::new(
+            StatusCode::BAD_REQUEST,
+            r#"{"errors":[{"message":"rate limit exceeded","extensions":{"code":"RATELIMITED"}}]}"#,
+        )
+        .with_header("content-type", "application/json")
+        .with_header("x-ratelimit-requests-reset", &reset_ms),
+        QueuedResponse::json(include_str!("fixtures/candidate_issues_page.json")),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.retry_policy.initial_backoff = Duration::from_secs(5);
+    config.retry_policy.max_backoff = Duration::from_secs(5);
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+    let start = tokio::time::Instant::now();
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("GraphQL rate-limited requests should honor reset headers");
+
+    assert_eq!(issues.len(), 2);
+    assert_eq!(server.recorded_requests().await.len(), 2);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "retry should use the reset header instead of the exponential backoff"
+    );
 }
 
 #[tokio::test]

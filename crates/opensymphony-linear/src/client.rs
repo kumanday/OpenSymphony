@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot};
 use reqwest::{
@@ -94,6 +94,7 @@ impl LinearClient {
         if config.retry_policy.max_backoff < config.retry_policy.initial_backoff {
             config.retry_policy.max_backoff = config.retry_policy.initial_backoff;
         }
+        config.api_key = normalize_required_string("LINEAR_API_KEY", &config.api_key)?;
         config.project_slug =
             normalize_required_string("tracker.project_slug", &config.project_slug)?;
         config.active_states =
@@ -284,7 +285,7 @@ impl LinearClient {
             match response {
                 Ok(response) => {
                     let status = response.status();
-                    let retry_after = parse_retry_after(response.headers().get(RETRY_AFTER));
+                    let retry_after = parse_retry_delay(response.headers());
                     let payload = response
                         .text()
                         .await
@@ -459,7 +460,7 @@ fn normalize_required_string(field_name: &str, value: &str) -> Result<String, Li
     let normalized = value.trim();
     if normalized.is_empty() {
         Err(LinearError::InvalidConfiguration(format!(
-            "workflow {field_name} must be a non-empty string"
+            "{field_name} must be a non-empty string"
         )))
     } else {
         Ok(normalized.to_string())
@@ -489,4 +490,73 @@ fn ensure_complete_issue_states(
 fn parse_retry_after(header_value: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {
     let seconds = header_value?.to_str().ok()?.trim().parse::<u64>().ok()?;
     Some(Duration::from_secs(seconds))
+}
+
+fn parse_retry_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    parse_rate_limit_reset(headers, SystemTime::now())
+        .or_else(|| parse_retry_after(headers.get(RETRY_AFTER)))
+}
+
+fn parse_rate_limit_reset(
+    headers: &reqwest::header::HeaderMap,
+    now: SystemTime,
+) -> Option<Duration> {
+    const RESET_HEADERS: [&str; 3] = [
+        "x-ratelimit-requests-reset",
+        "x-ratelimit-endpoint-requests-reset",
+        "x-ratelimit-complexity-reset",
+    ];
+
+    let now_ms = now.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    let latest_reset_ms = RESET_HEADERS
+        .into_iter()
+        .filter_map(|header_name| headers.get(header_name))
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.trim().parse::<u128>().ok())
+        .max()?;
+    let delay_ms = latest_reset_ms.saturating_sub(now_ms);
+    let delay_ms = u64::try_from(delay_ms).unwrap_or(u64::MAX);
+
+    Some(Duration::from_millis(delay_ms))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+    use super::{parse_rate_limit_reset, parse_retry_delay};
+
+    #[test]
+    fn rate_limit_reset_headers_use_latest_reset_window() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-ratelimit-requests-reset",
+            HeaderValue::from_static("1100"),
+        );
+        headers.insert(
+            "x-ratelimit-endpoint-requests-reset",
+            HeaderValue::from_static("1250"),
+        );
+        headers.insert(
+            "x-ratelimit-complexity-reset",
+            HeaderValue::from_static("1200"),
+        );
+
+        let delay = parse_rate_limit_reset(&headers, UNIX_EPOCH + Duration::from_millis(1_000));
+
+        assert_eq!(delay, Some(Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn retry_delay_prefers_reset_headers_over_retry_after() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("30"));
+        headers.insert("x-ratelimit-requests-reset", HeaderValue::from_static("0"));
+
+        let delay = parse_retry_delay(&headers);
+
+        assert_eq!(delay, Some(Duration::ZERO));
+    }
 }
