@@ -115,13 +115,25 @@ impl LinearClient {
     }
 
     pub async fn terminal_issues(&self) -> Result<Vec<TrackerIssue>, LinearError> {
-        self.issues_by_state_names(&self.config.terminal_states)
+        self.issues_by_state_names_with_archived(&self.config.terminal_states, true)
             .await
     }
 
     pub async fn issues_by_state_names<S>(
         &self,
         state_names: &[S],
+    ) -> Result<Vec<TrackerIssue>, LinearError>
+    where
+        S: AsRef<str>,
+    {
+        self.issues_by_state_names_with_archived(state_names, false)
+            .await
+    }
+
+    async fn issues_by_state_names_with_archived<S>(
+        &self,
+        state_names: &[S],
+        include_archived: bool,
     ) -> Result<Vec<TrackerIssue>, LinearError>
     where
         S: AsRef<str>,
@@ -138,6 +150,7 @@ impl LinearClient {
             let variables = IssuesByStateVariables {
                 project_slug: self.config.project_slug.clone(),
                 state_names: state_names.clone(),
+                include_archived,
                 first: self.config.page_size,
                 after: after.clone(),
                 relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
