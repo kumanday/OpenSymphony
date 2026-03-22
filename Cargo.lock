@@ -1360,14 +1360,17 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 name = "opensymphony-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chrono",
  "clap",
  "opensymphony-control",
+ "opensymphony-linear-mcp",
  "opensymphony-openhands",
  "opensymphony-testkit",
  "opensymphony-tui",
  "opensymphony-workflow",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
@@ -1423,6 +1426,17 @@ dependencies = [
 [[package]]
 name = "opensymphony-linear-mcp"
 version = "0.1.0"
+dependencies = [
+ "axum",
+ "opensymphony-domain",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "opensymphony-openhands"

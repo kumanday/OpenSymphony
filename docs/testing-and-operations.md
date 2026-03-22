@@ -300,6 +300,7 @@ Current command set in this repository:
 
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
+- `cargo run -p opensymphony-cli -- linear-mcp`
 - `./scripts/smoke_local.sh`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
 
@@ -363,6 +364,7 @@ Current implementation notes:
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames, authenticated REST/WebSocket requests, forward-compatible readiness envelopes, ready-state freshness after attach, ready-barrier persistence across later stale state rebuilds, buffered live frames outranking later attach replay items, explicit-close suppression of replay and reconnect, reused-conversation restart freshness over stale terminal REST state, forward-compatible `state_delta` mirror refresh, stale readiness snapshots not regressing newer probe state after reconnect, undecodable later persisted state updates not suppressing a usable ready barrier, terminal REST fallback after reconnect exhaustion, deferred reconnect after buffered delivery, non-replay of reconnect-only readiness barriers, next-turn probe error delivery after `finished`, and post-terminal probe success when a final REST refresh would fail
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs` locks in attach, initial snapshot replay, reconcile, out-of-order insertion, and reconnect recovery against `opensymphony-testkit`
 - `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback, workflow-driven runtime inputs, and the pinned launcher `cwd` behavior
+- `crates/opensymphony-cli/tests/linear_mcp.rs` drives the real `opensymphony linear-mcp` child process through MCP initialization, tool listing, and comment/transition/link/state-list calls against a local fake Linear GraphQL server
 - the current example configs carry machine-local tool/probe settings only; the repo-owned workflow now supplies the workspace root and OpenHands base URL that doctor validates
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials when the workflow omits `tracker.api_key`
 

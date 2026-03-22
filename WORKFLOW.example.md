@@ -88,6 +88,8 @@ openhands:
 
   # Workflow-owned MCP stdio server declarations are rejected until the current
   # conversation-create adapter can forward `mcp_config` to OpenHands.
+  # Provision `opensymphony linear-mcp` through the host tool environment until
+  # that adapter wiring lands.
 ---
 
 # Assignment
