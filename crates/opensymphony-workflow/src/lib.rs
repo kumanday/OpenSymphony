@@ -305,7 +305,7 @@ tracker:
         );
         assert_eq!(
             resolved.extensions.openhands.local_server.command,
-            vec!["tools/openhands-server/run-local.sh".to_owned()]
+            vec!["/repo/tools/openhands-server/run-local.sh".to_owned()]
         );
         assert_eq!(
             resolved
@@ -467,6 +467,42 @@ openhands:
             resolved.extensions.openhands.conversation.agent.kind,
             "Agent"
         );
+    }
+
+    #[test]
+    fn rejects_invalid_openhands_transport_base_urls() {
+        for invalid_base_url in ["localhost:8000", "ws://127.0.0.1:8000"] {
+            let workflow = WorkflowDefinition::parse(&format!(
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: {invalid_base_url}
+---
+{{{{ issue.identifier }}}}
+"#
+            ))
+            .expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow
+                .resolve(Path::new("/repo"), &env)
+                .expect_err("invalid OpenHands base URLs should fail during resolution");
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField {
+                    field: "openhands.transport.base_url",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

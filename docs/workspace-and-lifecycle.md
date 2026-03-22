@@ -27,6 +27,7 @@ Examples:
 
 - The resolved workspace path must stay under `workspace.root`.
 - `cwd` for all hook commands and all OpenHands runs must equal the resolved issue workspace path unless an explicit per-command `cwd` override inside the same workspace is required.
+- When `openhands.local_server.command` is omitted, workflow resolution must expand it to an absolute launcher path before that `cwd` switch happens.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
 

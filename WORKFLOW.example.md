@@ -47,9 +47,7 @@ openhands:
 
   local_server:
     enabled: true
-    # Defaults to the pinned repo launcher when omitted.
-    command:
-      - tools/openhands-server/run-local.sh
+    # Omit `command` to use the absolute pinned launcher under the workflow repo root.
     startup_timeout_ms: 30000
     readiness_probe_path: "/openapi.json"
     env:

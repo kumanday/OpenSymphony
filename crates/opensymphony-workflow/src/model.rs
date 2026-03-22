@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
@@ -27,8 +27,11 @@ pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 
-pub fn default_openhands_local_server_command() -> Vec<String> {
-    vec!["tools/openhands-server/run-local.sh".to_owned()]
+pub fn default_openhands_local_server_command(base_dir: &Path) -> Vec<String> {
+    vec![base_dir
+        .join("tools/openhands-server/run-local.sh")
+        .to_string_lossy()
+        .into_owned()]
 }
 
 #[derive(Debug, Clone, PartialEq)]

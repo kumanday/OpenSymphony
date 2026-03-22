@@ -101,7 +101,8 @@ Current repository implementation:
 - `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
-- when `openhands.local_server.command` is omitted, the workflow resolver defaults it to `tools/openhands-server/run-local.sh`
+- when `openhands.local_server.command` is omitted, the workflow resolver expands it to an absolute `<workflow-root>/tools/openhands-server/run-local.sh` launcher before the supervisor switches `cwd` to the issue workspace
+- workflow resolution rejects malformed or non-HTTP(S) `openhands.transport.base_url` values before the daemon reaches runtime transport setup
 
 ## 4.2 Startup contract
 
