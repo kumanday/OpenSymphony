@@ -426,6 +426,41 @@ async fn attach_runtime_stream_applies_forward_compatible_readiness_snapshot_to_
 }
 
 #[tokio::test]
+async fn attach_runtime_stream_applies_newer_reused_conversation_readiness_snapshot_to_state_mirror(
+) {
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(reused_conversation_readiness_mirror_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    assert_eq!(
+        stream.state_mirror().execution_status(),
+        Some("running"),
+        "a newer ready barrier should override stale terminal REST state when a reused conversation restarts"
+    );
+}
+
+#[tokio::test]
 async fn runtime_stream_replays_initial_snapshot_when_post_ready_reconcile_is_empty() {
     let state = InitialReplayState::default();
     let server = TestServer::start(initial_replay_router(state)).await;
@@ -681,6 +716,27 @@ fn forward_compatible_readiness_mirror_router(state: ReadinessMirrorState) -> Ro
         .with_state(state)
 }
 
+fn reused_conversation_readiness_mirror_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(reused_conversation_readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(readiness_mirror_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(readiness_mirror_events_socket),
+        )
+        .with_state(state)
+}
+
 async fn readiness_mirror_create_conversation(
     State(state): State<ReadinessMirrorState>,
     Json(request): Json<ConversationCreateRequest>,
@@ -692,6 +748,24 @@ async fn readiness_mirror_create_conversation(
         max_iterations: request.max_iterations,
         stuck_detection: request.stuck_detection,
         execution_status: "queued".to_string(),
+        confirmation_policy: request.confirmation_policy,
+        agent: request.agent,
+    };
+    *state.conversation.lock().await = Some(conversation.clone());
+    Ok(Json(conversation))
+}
+
+async fn reused_conversation_readiness_mirror_create_conversation(
+    State(state): State<ReadinessMirrorState>,
+    Json(request): Json<ConversationCreateRequest>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = Conversation {
+        conversation_id: request.conversation_id,
+        workspace: request.workspace,
+        persistence_dir: request.persistence_dir,
+        max_iterations: request.max_iterations,
+        stuck_detection: request.stuck_detection,
+        execution_status: "finished".to_string(),
         confirmation_policy: request.confirmation_policy,
         agent: request.agent,
     };
