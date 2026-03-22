@@ -859,10 +859,13 @@ impl OpenHandsClient {
         .await?;
         self.run_conversation(conversation.conversation_id).await?;
         wait_for_probe_terminal_state(&mut stream, wait_timeout).await?;
-        let conversation = self.get_conversation(conversation.conversation_id).await?;
         let ready_event = stream.ready_event().clone();
         let event_cache = stream.event_cache().clone();
         let state_mirror = stream.state_mirror().clone();
+        let mut conversation = stream.conversation().clone();
+        if let Some(status) = state_mirror.execution_status() {
+            conversation.execution_status = status.to_string();
+        }
         stream.close().await?;
 
         Ok(OpenHandsProbeResult {
