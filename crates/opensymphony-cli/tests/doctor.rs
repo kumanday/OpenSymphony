@@ -85,12 +85,13 @@ async fn doctor_live_probe_succeeds_against_fake_server() {
 }
 
 #[test]
-fn doctor_defaults_target_repo_from_checkout_root() {
+fn doctor_defaults_target_repo_from_checkout_root_even_outside_the_repo_cwd() {
     let repo_root = repo_root();
     let config_dir =
         tempfile::tempdir_in(repo_root.join("examples/configs")).expect("config dir should exist");
     let config_path = config_dir.path().join("doctor-default-target.yaml");
     let workspace_root = config_dir.path().join("workspaces");
+    let outside_repo = TempDir::new().expect("outside repo dir should be created");
     let config = serde_yaml::to_string(&Value::Mapping(
         [
             (
@@ -146,14 +147,15 @@ fn doctor_defaults_target_repo_from_checkout_root() {
         .arg("doctor")
         .arg("--config")
         .arg(&config_path)
-        .current_dir(&repo_root)
+        .current_dir(outside_repo.path())
         .output()
         .expect("doctor command should run");
 
     assert!(
         output.status.success(),
-        "doctor should succeed with bundled target repo fallback: {}",
-        String::from_utf8_lossy(&output.stdout)
+        "doctor should succeed with checkout-root target repo fallback from outside the repo cwd: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
 }
 

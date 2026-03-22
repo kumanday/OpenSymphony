@@ -362,14 +362,25 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
     };
 
     let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let repo_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let tool_dir = resolve_path(config_root, &config.openhands.tool_dir);
+    let configured_target_repo = config
+        .target_repo
+        .as_deref()
+        .map(|target_repo| resolve_path(config_root, target_repo));
+    let repo_root =
+        discover_checkout_root(config_root, configured_target_repo.as_deref(), &tool_dir)
+            .or_else(|| {
+                env::current_dir()
+                    .ok()
+                    .and_then(|cwd| find_cargo_workspace_root(&cwd).or(Some(cwd)))
+            })
+            .unwrap_or_else(|| PathBuf::from("."));
     let target_repo = config
         .target_repo
         .as_deref()
         .map(|target_repo| resolve_path(config_root, target_repo))
         .unwrap_or_else(|| repo_root.join("examples/target-repo"));
     let workspace_root = resolve_path(config_root, &config.workspace_root);
-    let tool_dir = resolve_path(config_root, &config.openhands.tool_dir);
 
     checks.push(check_repo_root(&repo_root));
     checks.push(check_target_repo(&target_repo).await);
@@ -473,6 +484,34 @@ fn resolve_path(base: &Path, raw: &str) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+fn discover_checkout_root(
+    config_root: &Path,
+    target_repo: Option<&Path>,
+    tool_dir: &Path,
+) -> Option<PathBuf> {
+    [Some(config_root), target_repo, Some(tool_dir)]
+        .into_iter()
+        .flatten()
+        .find_map(find_cargo_workspace_root)
+}
+
+fn find_cargo_workspace_root(path: &Path) -> Option<PathBuf> {
+    let start = if path.is_file() { path.parent()? } else { path };
+    start
+        .ancestors()
+        .find(|candidate| candidate.join("Cargo.toml").is_file())
+        .map(|candidate| candidate.to_path_buf())
+}
+
+fn effective_openhands_probe_base_url(
+    configured_base_url: &str,
+    started_supervisor_base_url: Option<&str>,
+) -> String {
+    started_supervisor_base_url
+        .unwrap_or(configured_base_url)
+        .to_string()
 }
 
 fn check_repo_root(repo_root: &Path) -> CheckResult {
@@ -669,8 +708,9 @@ async fn run_live_openhands_checks(
     }
 
     let mut managed_supervisor = None;
-    let mut http_detail = format!("{} responded to /openapi.json", config.openhands.base_url);
-    let client = OpenHandsClient::new(TransportConfig::new(config.openhands.base_url.clone()));
+    let mut probe_base_url = config.openhands.base_url.clone();
+    let mut http_detail = format!("{probe_base_url} responded to /openapi.json");
+    let client = OpenHandsClient::new(TransportConfig::new(probe_base_url.clone()));
     if let Err(error) = client.openapi_probe().await {
         match maybe_start_local_supervisor(config, tooling) {
             Ok(Some(mut supervisor)) => {
@@ -681,7 +721,7 @@ async fn run_live_openhands_checks(
                             "openhands-supervisor-status",
                             status_error.to_string(),
                         ));
-                        return checks;
+                        return stop_managed_supervisor(checks, Some(supervisor));
                     }
                 };
                 checks.push(CheckResult::pass(
@@ -692,10 +732,13 @@ async fn run_live_openhands_checks(
                         started.base_url
                     ),
                 ));
+                probe_base_url = effective_openhands_probe_base_url(
+                    &config.openhands.base_url,
+                    Some(&started.base_url),
+                );
                 managed_supervisor = Some(supervisor);
                 http_detail = format!(
-                    "started local supervisor and {} responded to /openapi.json",
-                    config.openhands.base_url
+                    "started local supervisor and {probe_base_url} responded to /openapi.json"
                 );
             }
             Ok(None) => {
@@ -709,7 +752,7 @@ async fn run_live_openhands_checks(
         }
     }
 
-    let client = OpenHandsClient::new(TransportConfig::new(config.openhands.base_url.clone()));
+    let client = OpenHandsClient::new(TransportConfig::new(probe_base_url));
     match client.openapi_probe().await {
         Ok(()) => checks.push(CheckResult::pass("openhands-http", http_detail)),
         Err(error) => {
@@ -873,12 +916,16 @@ enum CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::{sample_snapshot, spawn_demo_updates, Cli, Command, SnapshotStore};
+    use super::{
+        discover_checkout_root, effective_openhands_probe_base_url, find_cargo_workspace_root,
+        sample_snapshot, spawn_demo_updates, Cli, Command, SnapshotStore,
+    };
     use clap::{error::ErrorKind, Parser};
     use opensymphony_domain::{
         ControlPlaneDaemonState as DaemonState, ControlPlaneIssueRuntimeState as IssueRuntimeState,
     };
-    use std::time::Duration;
+    use std::{fs, time::Duration};
+    use tempfile::TempDir;
 
     #[test]
     fn daemon_rejects_zero_sample_interval() {
@@ -950,5 +997,59 @@ mod tests {
         let updated = store.current().await;
         assert_eq!(updated.sequence, 2);
         assert!(matches!(updated.snapshot.daemon.state, DaemonState::Ready));
+    }
+
+    #[test]
+    fn find_cargo_workspace_root_walks_up_from_nested_paths() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let repo_root = temp_dir.path().join("repo");
+        let config_root = repo_root.join("examples/configs");
+        let tool_dir = repo_root.join("tools/openhands-server");
+        fs::create_dir_all(&config_root).expect("config root should exist");
+        fs::create_dir_all(&tool_dir).expect("tool dir should exist");
+        fs::write(repo_root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("Cargo.toml should exist");
+
+        let config_path = config_root.join("local-dev.yaml");
+
+        assert_eq!(
+            find_cargo_workspace_root(&config_path),
+            Some(repo_root.clone())
+        );
+        assert_eq!(find_cargo_workspace_root(&tool_dir), Some(repo_root));
+    }
+
+    #[test]
+    fn discover_checkout_root_prefers_repo_anchored_inputs() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let repo_root = temp_dir.path().join("repo");
+        let config_root = repo_root.join("examples/configs");
+        let tool_dir = repo_root.join("tools/openhands-server");
+        let target_repo = repo_root.join("examples/target-repo");
+        fs::create_dir_all(&config_root).expect("config root should exist");
+        fs::create_dir_all(&tool_dir).expect("tool dir should exist");
+        fs::create_dir_all(&target_repo).expect("target repo should exist");
+        fs::write(repo_root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
+            .expect("Cargo.toml should exist");
+
+        let discovered = discover_checkout_root(&config_root, Some(&target_repo), &tool_dir)
+            .expect("repo root should be discovered");
+
+        assert_eq!(discovered, repo_root);
+    }
+
+    #[test]
+    fn effective_openhands_probe_base_url_prefers_the_started_supervisor() {
+        assert_eq!(
+            effective_openhands_probe_base_url(
+                "http://localhost:8000/opensymphony",
+                Some("http://127.0.0.1:8000"),
+            ),
+            "http://127.0.0.1:8000"
+        );
+        assert_eq!(
+            effective_openhands_probe_base_url("http://localhost:8000/opensymphony", None),
+            "http://localhost:8000/opensymphony"
+        );
     }
 }
