@@ -2,13 +2,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub(super) const ISSUES_BY_STATE_QUERY: &str = r#"
-query IssuesByState($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String, $relationFirst: Int!) {
+query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchived: Boolean!, $first: Int!, $after: String, $relationFirst: Int!) {
   issues(
     filter: {
       project: { slugId: { eq: $projectSlug } }
       state: { name: { in: $stateNames } }
     }
-    includeArchived: true
+    includeArchived: $includeArchived
     first: $first
     after: $after
   ) {
@@ -136,6 +136,7 @@ pub(super) struct GraphqlErrorExtensions {
 pub(super) struct IssuesByStateVariables {
     pub project_slug: String,
     pub state_names: Vec<String>,
+    pub include_archived: bool,
     pub first: usize,
     pub after: Option<String>,
     pub relation_first: usize,

@@ -76,10 +76,14 @@ async fn candidate_issues_normalize_fixture_payloads() {
         requests[0].body["variables"]["relationFirst"],
         serde_json::json!(10)
     );
+    assert_eq!(
+        requests[0].body["variables"]["includeArchived"],
+        Value::Bool(false)
+    );
     assert!(requests[0].body["query"]
         .as_str()
         .expect("query should be a string")
-        .contains("includeArchived: true"));
+        .contains("includeArchived: $includeArchived"));
 }
 
 #[tokio::test]
@@ -158,15 +162,51 @@ async fn issues_by_state_walk_pagination() {
         requests[0].body["variables"]["relationFirst"],
         serde_json::json!(2)
     );
+    assert_eq!(
+        requests[0].body["variables"]["includeArchived"],
+        Value::Bool(false)
+    );
     assert!(requests[0].body["query"]
         .as_str()
         .expect("query should be a string")
-        .contains("includeArchived: true"));
+        .contains("includeArchived: $includeArchived"));
     assert_eq!(requests[0].body["variables"]["after"], Value::Null);
     assert_eq!(
         requests[1].body["variables"]["after"],
         Value::String("cursor-1".to_string())
     );
+}
+
+#[tokio::test]
+async fn terminal_issues_include_archived_for_cleanup() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
+        "fixtures/candidate_issues_page.json"
+    ))])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .terminal_issues()
+        .await
+        .expect("terminal cleanup query should succeed");
+
+    assert_eq!(issues.len(), 2);
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body["variables"]["stateNames"],
+        serde_json::json!(["Done", "Canceled"])
+    );
+    assert_eq!(
+        requests[0].body["variables"]["includeArchived"],
+        Value::Bool(true)
+    );
+    assert!(requests[0].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("includeArchived: $includeArchived"));
 }
 
 #[tokio::test]

@@ -25,7 +25,7 @@ Fetch issues that:
 Implementation note:
 
 - the GraphQL adapter filters by Linear `Project.slugId`, so workflow `tracker.project_slug` should store that stable slug value
-- candidate and terminal-state `issues(...)` reads should pass `includeArchived: true` so cleanup can still observe archived terminal work
+- candidate issue polling should exclude archived issues so archiving an active ticket releases it instead of redispatching it on the next poll
 
 ## 2.2 State refresh by IDs
 
@@ -39,6 +39,10 @@ Implementation note:
 ## 2.3 Terminal-state fetch for startup cleanup
 
 Fetch issues in terminal states when sweeping existing workspaces on startup.
+
+Implementation note:
+
+- terminal-state cleanup reads should pass `includeArchived: true` so archived terminal work remains visible during startup cleanup
 
 ## 2.4 Normalization
 
