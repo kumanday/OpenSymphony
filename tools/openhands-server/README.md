@@ -1,44 +1,37 @@
-# OpenHands Server Pin
+# Pinned OpenHands Agent-Server
 
-This directory pins the exact OpenHands SDK agent-server packages used by the local MVP runtime adapter.
+This directory owns the pinned local trusted-machine OpenHands runtime used by the OpenSymphony MVP.
 
-Pinned package set:
+Current pin:
 
-- `openhands-agent-server==1.14.0`
-- `openhands-sdk==1.14.0`
-- `openhands-tools==1.14.0`
-- `openhands-workspace==1.14.0`
+- `version.txt` records the expected OpenHands SDK bundle version: `1.14.0`
+- `pyproject.toml` records the pinned `agent-server` extra:
+  - `openhands-agent-server==1.14.0`
+  - `openhands-sdk==1.14.0`
+  - `openhands-tools==1.14.0`
+  - `openhands-workspace==1.14.0`
+- `uv.lock` records the resolved Python dependency graph for that exact pin
+- `run-local.sh` launches the pinned server via `RUNTIME=process uv run --directory . --locked --extra agent-server --module openhands.agent_server --host 127.0.0.1 --port 8000`
 
-Verified contract assumptions for this pin:
+Requirements:
 
-- supervised entrypoint: `agent-server` or `python -m openhands.agent_server`
-- REST base: `/api`
-- health endpoints: `/health` and `/ready`
-- event stream: `/sockets/events/{conversation_id}`
-- WebSocket readiness barrier: first `ConversationStateUpdateEvent`
-- REST auth header: `X-Session-API-Key`
-- WebSocket auth: `X-Session-API-Key` header or `session_api_key` query parameter
+- `uv`
+- Python `3.12.x`
 
-## Local usage
-
-Install and sync the pinned environment:
+## Provision with `uv`
 
 ```bash
-uv sync --project tools/openhands-server --extra agent-server
+cd tools/openhands-server
+uv sync --extra agent-server
 ```
 
-Run the server on loopback:
+## Run locally
 
 ```bash
-OPENHANDS_SERVER_PORT=8000 tools/openhands-server/run-local.sh
+./tools/openhands-server/run-local.sh
 ```
 
-Probe readiness:
+The launcher binds to loopback-only at `127.0.0.1:8000` by default and only accepts `OPENHANDS_SERVER_PORT` as a runtime override. It intentionally rejects extra agent-server CLI flags so smoke runs stay aligned with the daemon-managed supervised topology.
+It also fails fast if `uv` is missing, if `OPENHANDS_SERVER_PORT` is invalid, or if the pinned `uv.lock` cannot be honored through `uv run --locked`.
 
-```bash
-curl http://127.0.0.1:8000/ready
-```
-
-The wrapper always launches the pinned server in host-process mode with `RUNTIME=process`,
-binds to loopback, and rejects extra agent-server CLI arguments so local smoke runs match the
-daemon-managed topology.
+Do not rely on a globally installed moving-target `openhands` binary for this repository.

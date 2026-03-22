@@ -1,437 +1,1306 @@
-//! Minimal REST and WebSocket client for the pinned OpenHands server contract.
+use std::{cmp::Ordering, collections::VecDeque, time::Duration};
 
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::Request;
-use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
+use futures_util::StreamExt;
+use reqwest::{
+    RequestBuilder,
+    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+};
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use tokio::{
+    net::TcpStream,
+    task::yield_now,
+    time::{Instant, sleep, timeout_at},
+};
+use tokio_tungstenite::{
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
+};
+use tracing::debug;
 use url::Url;
+use uuid::Uuid;
 
-use crate::config::{HttpAuth, TransportConfig, WebSocketAuthMode};
-use crate::error::{OpenHandsError, Result};
-use crate::wire::{
-    ConversationInfo, CreateConversationRequest, EventPage, RuntimeEventEnvelope,
-    SendMessageRequest, ServerInfo, SuccessResponse,
+use crate::events::{ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus};
+use crate::models::{
+    AcceptedResponse, Conversation, ConversationCreateRequest, ConversationRunRequest,
+    EventEnvelope, SearchConversationEventsResponse, SendMessageRequest,
 };
 
-const SESSION_API_KEY_HEADER: &str = "x-session-api-key";
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyAuth {
+    name: String,
+    value: String,
+}
 
-/// REST and WebSocket client facade for the OpenHands agent-server.
-#[derive(Clone, Debug)]
+impl ApiKeyAuth {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpAuth {
+    None,
+    QueryParam(ApiKeyAuth),
+    Header(ApiKeyAuth),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebSocketAuth {
+    None,
+    QueryParam(ApiKeyAuth),
+    Header(ApiKeyAuth),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthConfig {
+    pub http: HttpAuth,
+    pub websocket: WebSocketAuth,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl AuthConfig {
+    pub fn none() -> Self {
+        Self {
+            http: HttpAuth::None,
+            websocket: WebSocketAuth::None,
+        }
+    }
+
+    pub fn query_param_api_key(name: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = ApiKeyAuth::new(name, value);
+        Self {
+            http: HttpAuth::QueryParam(key.clone()),
+            websocket: WebSocketAuth::QueryParam(key),
+        }
+    }
+
+    pub fn header_api_key(name: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = ApiKeyAuth::new(name, value);
+        Self {
+            http: HttpAuth::Header(key.clone()),
+            websocket: WebSocketAuth::Header(key),
+        }
+    }
+
+    pub fn header_api_key_with_websocket_query_fallback(
+        header_name: impl Into<String>,
+        websocket_query_param: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        let value = value.into();
+        Self {
+            http: HttpAuth::Header(ApiKeyAuth::new(header_name, value.clone())),
+            websocket: WebSocketAuth::QueryParam(ApiKeyAuth::new(websocket_query_param, value)),
+        }
+    }
+
+    fn apply_http_query(&self, url: &mut Url) {
+        if let HttpAuth::QueryParam(key) = &self.http {
+            url.query_pairs_mut().append_pair(key.name(), key.value());
+        }
+    }
+
+    fn apply_websocket_query(&self, url: &mut Url) {
+        if let WebSocketAuth::QueryParam(key) = &self.websocket {
+            url.query_pairs_mut().append_pair(key.name(), key.value());
+        }
+    }
+
+    fn apply_http_headers(
+        &self,
+        request: RequestBuilder,
+    ) -> Result<RequestBuilder, OpenHandsError> {
+        match &self.http {
+            HttpAuth::Header(key) => Ok(request.header(
+                parse_header_name(key.name())?,
+                parse_header_value(key.value())?,
+            )),
+            _ => Ok(request),
+        }
+    }
+
+    fn apply_websocket_headers(&self, headers: &mut HeaderMap) -> Result<(), OpenHandsError> {
+        if let WebSocketAuth::Header(key) = &self.websocket {
+            headers.insert(
+                parse_header_name(key.name())?,
+                parse_header_value(key.value())?,
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportConfig {
+    base_url: String,
+    auth: AuthConfig,
+}
+
+impl TransportConfig {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            auth: AuthConfig::default(),
+        }
+    }
+
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn auth(&self) -> &AuthConfig {
+        &self.auth
+    }
+
+    fn endpoint(&self, suffix: &str) -> Result<Url, OpenHandsError> {
+        let mut url = self.parsed_base_url()?;
+        let base_path = url.path().trim_end_matches('/');
+        let path = format!("{base_path}{suffix}");
+        let normalized = if path.is_empty() {
+            "/".to_string()
+        } else {
+            path
+        };
+        url.set_path(&normalized);
+        self.auth.apply_http_query(&mut url);
+        Ok(url)
+    }
+
+    fn websocket_request(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, OpenHandsError> {
+        let mut url = self.parsed_base_url()?;
+        let scheme = match url.scheme() {
+            "http" => "ws",
+            "https" => "wss",
+            other => {
+                return Err(OpenHandsError::invalid_configuration(format!(
+                    "unsupported base URL scheme `{other}`"
+                )));
+            }
+        };
+        url.set_scheme(scheme).map_err(|_| {
+            OpenHandsError::invalid_configuration(format!(
+                "failed to apply websocket scheme `{scheme}`"
+            ))
+        })?;
+
+        let base_path = url.path().trim_end_matches('/');
+        let path = if base_path.is_empty() {
+            format!("/sockets/events/{conversation_id}")
+        } else {
+            format!("{base_path}/sockets/events/{conversation_id}")
+        };
+        url.set_path(&path);
+        self.auth.apply_websocket_query(&mut url);
+
+        let mut request = url.as_str().into_client_request().map_err(|error| {
+            OpenHandsError::invalid_configuration(format!(
+                "invalid websocket request `{url}`: {error}"
+            ))
+        })?;
+        self.auth.apply_websocket_headers(request.headers_mut())?;
+        Ok(request)
+    }
+
+    fn apply_http_auth(&self, request: RequestBuilder) -> Result<RequestBuilder, OpenHandsError> {
+        self.auth.apply_http_headers(request)
+    }
+
+    fn parsed_base_url(&self) -> Result<Url, OpenHandsError> {
+        Url::parse(&self.base_url).map_err(|error| {
+            OpenHandsError::invalid_configuration(format!(
+                "invalid base URL `{}`: {error}",
+                self.base_url
+            ))
+        })
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum OpenHandsError {
+    #[error("invalid transport configuration: {detail}")]
+    InvalidConfiguration { detail: String },
+    #[error("{operation} transport failed: {detail}")]
+    Transport {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("{operation} returned HTTP {status_code}: {body}")]
+    HttpStatus {
+        operation: &'static str,
+        status_code: u16,
+        body: String,
+    },
+    #[error("{operation} protocol error: {detail}")]
+    Protocol {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("{operation} websocket failed: {detail}")]
+    WebSocketTransport {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("websocket event decoding failed: {detail}; payload prefix: {snippet}")]
+    MalformedWebSocketEvent { detail: String, snippet: String },
+    #[error("websocket readiness timed out after {0:?}")]
+    ReadinessTimeout(Duration),
+    #[error("probe run activity was not observed after {0:?}")]
+    ProbeActivityTimeout(Duration),
+    #[error("probe run reported an unhealthy runtime: {0}")]
+    ProbeRunUnhealthy(String),
+    #[error("websocket closed before readiness")]
+    WebSocketClosed,
+    #[error("runtime stream reconnect exhausted after {attempts} attempt(s): {last_error}")]
+    ReconnectExhausted { attempts: usize, last_error: String },
+}
+
+impl OpenHandsError {
+    fn invalid_configuration(detail: impl Into<String>) -> Self {
+        Self::InvalidConfiguration {
+            detail: detail.into(),
+        }
+    }
+
+    fn transport(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Transport {
+            operation,
+            detail: error.to_string(),
+        }
+    }
+
+    fn protocol(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Protocol {
+            operation,
+            detail: error.to_string(),
+        }
+    }
+
+    fn websocket_transport(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::WebSocketTransport {
+            operation,
+            detail: error.to_string(),
+        }
+    }
+}
+
+type RuntimeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+const CONVERSATION_STATE_UPDATE_EVENT_KIND: &str = "ConversationStateUpdateEvent";
+const UNREADY_EVENT_ID: &str = "runtime-stream-unready";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStreamConfig {
+    pub readiness_timeout: Duration,
+    pub reconnect_initial_backoff: Duration,
+    pub reconnect_max_backoff: Duration,
+    pub max_reconnect_attempts: usize,
+}
+
+impl Default for RuntimeStreamConfig {
+    fn default() -> Self {
+        Self {
+            readiness_timeout: Duration::from_secs(30),
+            reconnect_initial_backoff: Duration::from_secs(1),
+            reconnect_max_backoff: Duration::from_secs(30),
+            max_reconnect_attempts: 8,
+        }
+    }
+}
+
+pub struct RuntimeEventStream {
+    client: OpenHandsClient,
+    conversation_id: Uuid,
+    config: RuntimeStreamConfig,
+    socket: Option<RuntimeSocket>,
+    conversation: Conversation,
+    ready_event: EventEnvelope,
+    event_cache: EventCache,
+    state_mirror: ConversationStateMirror,
+    pending_events: VecDeque<EventEnvelope>,
+    pending_delivery_needs_drain: bool,
+    reconnect_pending: bool,
+}
+
+impl RuntimeEventStream {
+    fn new(
+        client: OpenHandsClient,
+        conversation_id: Uuid,
+        config: RuntimeStreamConfig,
+        conversation: Conversation,
+    ) -> Self {
+        let ready_event = EventEnvelope::state_update(UNREADY_EVENT_ID, "idle");
+        let mut state_mirror = ConversationStateMirror::default();
+        state_mirror.apply_conversation(&conversation);
+        Self {
+            client,
+            conversation_id,
+            config,
+            socket: None,
+            conversation,
+            ready_event,
+            event_cache: EventCache::new(),
+            state_mirror,
+            pending_events: VecDeque::new(),
+            pending_delivery_needs_drain: false,
+            reconnect_pending: false,
+        }
+    }
+
+    pub fn conversation(&self) -> &Conversation {
+        &self.conversation
+    }
+
+    pub fn ready_event(&self) -> &EventEnvelope {
+        &self.ready_event
+    }
+
+    pub fn event_cache(&self) -> &EventCache {
+        &self.event_cache
+    }
+
+    pub fn state_mirror(&self) -> &ConversationStateMirror {
+        &self.state_mirror
+    }
+
+    pub async fn reconcile_events(&mut self) -> Result<usize, OpenHandsError> {
+        let reconciled = self.client.search_all_events(self.conversation_id).await?;
+        Ok(self.push_new_events(reconciled.items().iter().cloned(), true))
+    }
+
+    pub async fn next_event(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
+        loop {
+            if let Some(event) = self.poll_next_event_once().await? {
+                return Ok(Some(event));
+            }
+
+            if self.socket.is_none() && self.pending_events.is_empty() && !self.reconnect_pending {
+                return Ok(None);
+            }
+        }
+    }
+
+    async fn poll_next_event_once(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
+        self.absorb_buffered_socket_events().await?;
+        if self.defer_pending_event_delivery_once().await? {
+            return Ok(None);
+        }
+
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(Some(event));
+        }
+
+        if self.reconnect_pending {
+            self.reconnect_pending = false;
+            self.reconnect().await?;
+            if self.defer_pending_event_delivery_once().await? {
+                return Ok(None);
+            }
+
+            if let Some(event) = self.pending_events.pop_front() {
+                return Ok(Some(event));
+            }
+        }
+
+        let stream_read = {
+            let Some(socket) = self.socket.as_mut() else {
+                return Ok(None);
+            };
+            read_next_socket_event(socket).await
+        };
+
+        match stream_read {
+            StreamRead::Event(event) => {
+                let mut drained_events = vec![event];
+                let reconnect_signal = self.drain_buffered_socket_events(&mut drained_events).await;
+                self.push_new_events(drained_events, true);
+                self.handle_reconnect_signal(reconnect_signal).await?;
+
+                Ok(None)
+            }
+            StreamRead::Closed => {
+                self.handle_reconnect_signal(Some(StreamRead::Closed))
+                    .await?;
+                if self.defer_pending_event_delivery_once().await? {
+                    return Ok(None);
+                }
+                Ok(self.pending_events.pop_front())
+            }
+            StreamRead::Transport(error) => {
+                self.handle_reconnect_signal(Some(StreamRead::Transport(error)))
+                    .await?;
+                if self.defer_pending_event_delivery_once().await? {
+                    return Ok(None);
+                }
+                Ok(self.pending_events.pop_front())
+            }
+        }
+    }
+
+    async fn absorb_buffered_socket_events(&mut self) -> Result<(), OpenHandsError> {
+        if self.socket.is_none() {
+            return Ok(());
+        }
+
+        let mut drained_events = Vec::new();
+        let reconnect_signal = self.drain_buffered_socket_events(&mut drained_events).await;
+        self.push_new_events(drained_events, true);
+        self.handle_reconnect_signal(reconnect_signal).await
+    }
+
+    async fn defer_pending_event_delivery_once(&mut self) -> Result<bool, OpenHandsError> {
+        if !self.pending_delivery_needs_drain || self.pending_events.is_empty() {
+            return Ok(false);
+        }
+
+        // Give newly queued batches one more scheduler turn and drain so
+        // out-of-order live frames can settle into timestamp order before
+        // delivery.
+        self.pending_delivery_needs_drain = false;
+        yield_now().await;
+        self.absorb_buffered_socket_events().await?;
+        Ok(true)
+    }
+
+    async fn drain_buffered_socket_events(
+        &mut self,
+        drained_events: &mut Vec<EventEnvelope>,
+    ) -> Option<StreamRead> {
+        loop {
+            let next = {
+                let socket = self
+                    .socket
+                    .as_mut()
+                    .expect("socket should be present while draining buffered events");
+                read_buffered_socket_event(socket).await
+            };
+
+            match next {
+                Some(StreamRead::Event(event)) => drained_events.push(event),
+                Some(StreamRead::Closed) => return Some(StreamRead::Closed),
+                Some(StreamRead::Transport(error)) => {
+                    return Some(StreamRead::Transport(error));
+                }
+                None => return None,
+            }
+        }
+    }
+
+    async fn handle_reconnect_signal(
+        &mut self,
+        reconnect_signal: Option<StreamRead>,
+    ) -> Result<(), OpenHandsError> {
+        match reconnect_signal {
+            Some(StreamRead::Closed) => {
+                self.socket.take();
+                if self.pending_events.is_empty() {
+                    self.reconnect().await?;
+                } else {
+                    self.reconnect_pending = true;
+                }
+            }
+            Some(StreamRead::Transport(error)) => {
+                debug!(
+                    error = %error,
+                    "runtime websocket read failed while draining buffered events; attempting reconnect"
+                );
+                self.socket.take();
+                if self.pending_events.is_empty() {
+                    self.reconnect().await?;
+                } else {
+                    self.reconnect_pending = true;
+                }
+            }
+            Some(StreamRead::Event(_)) => {
+                unreachable!("buffered socket draining should not return nested stream events")
+            }
+            None => {}
+        }
+
+        Ok(())
+    }
+
+    pub async fn close(&mut self) -> Result<(), OpenHandsError> {
+        self.clear_ready_event();
+        self.pending_delivery_needs_drain = false;
+        self.reconnect_pending = false;
+        self.pending_events.clear();
+        if let Some(mut socket) = self.socket.take() {
+            socket.close(None).await.map_err(|error| {
+                OpenHandsError::websocket_transport("close runtime stream", error)
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn attach(mut self) -> Result<Self, OpenHandsError> {
+        self.refresh_conversation().await?;
+        let initial_cache = self.client.search_all_events(self.conversation_id).await?;
+        self.push_new_events(initial_cache.items().iter().cloned(), true);
+        self.connect_ready_and_reconcile().await?;
+        Ok(self)
+    }
+
+    async fn refresh_conversation(&mut self) -> Result<(), OpenHandsError> {
+        self.conversation = self.client.get_conversation(self.conversation_id).await?;
+        self.rebuild_state_mirror();
+        Ok(())
+    }
+
+    async fn reconnect(&mut self) -> Result<(), OpenHandsError> {
+        self.clear_ready_event();
+        let mut attempts = 0usize;
+        let mut delay = self.config.reconnect_initial_backoff;
+
+        loop {
+            attempts += 1;
+            if attempts > 1 {
+                sleep(delay).await;
+                delay = delay
+                    .saturating_mul(2)
+                    .min(self.config.reconnect_max_backoff);
+            }
+
+            let error = match self.refresh_conversation().await {
+                Ok(()) => match self.connect_ready_and_reconcile().await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => error,
+                },
+                Err(error) => error,
+            };
+
+            if attempts >= self.config.max_reconnect_attempts {
+                return Err(OpenHandsError::ReconnectExhausted {
+                    attempts,
+                    last_error: error.to_string(),
+                });
+            }
+        }
+    }
+
+    async fn connect_ready_and_reconcile(&mut self) -> Result<(), OpenHandsError> {
+        let mut socket = self.client.connect_websocket(self.conversation_id).await?;
+        let ready_event =
+            wait_for_readiness_on_stream(&mut socket, self.config.readiness_timeout).await?;
+        self.ready_event = ready_event.clone();
+        self.socket = Some(socket);
+
+        let reconciled = self.client.search_all_events(self.conversation_id).await?;
+        self.push_new_events(reconciled.items().iter().cloned(), true);
+        self.rebuild_state_mirror();
+        Ok(())
+    }
+
+    fn push_new_events<I>(&mut self, events: I, queue_new: bool) -> usize
+    where
+        I: IntoIterator<Item = EventEnvelope>,
+    {
+        let inserted = self.event_cache.merge_new_events(events);
+        if inserted.is_empty() {
+            return 0;
+        }
+
+        self.pending_delivery_needs_drain = true;
+        if queue_new {
+            self.queue_pending_events(&inserted);
+        }
+        if inserted.iter().any(|event| {
+            matches!(
+                KnownEvent::from_envelope(event),
+                KnownEvent::ConversationStateUpdate(_)
+            )
+        }) {
+            self.rebuild_state_mirror();
+        }
+        inserted.len()
+    }
+
+    fn queue_pending_events(&mut self, inserted: &[EventEnvelope]) {
+        for event in inserted {
+            let position = self
+                .pending_events
+                .iter()
+                .position(|pending| compare_pending_events(pending, event) == Ordering::Greater)
+                .unwrap_or(self.pending_events.len());
+            self.pending_events.insert(position, event.clone());
+        }
+    }
+
+    fn rebuild_state_mirror(&mut self) {
+        self.state_mirror
+            .rebuild_from(&self.conversation, self.event_cache.items());
+        self.apply_terminal_conversation_fallback();
+        self.apply_ready_event_to_state_mirror();
+    }
+
+    fn clear_ready_event(&mut self) {
+        self.ready_event = EventEnvelope::state_update(UNREADY_EVENT_ID, "idle");
+    }
+
+    fn apply_ready_event_to_state_mirror(&mut self) {
+        if self.ready_event.id == UNREADY_EVENT_ID
+            || self.ready_event.kind != CONVERSATION_STATE_UPDATE_EVENT_KIND
+        {
+            return;
+        }
+
+        let KnownEvent::ConversationStateUpdate(payload) =
+            KnownEvent::from_envelope(&self.ready_event)
+        else {
+            return;
+        };
+
+        let cache_already_has_same_or_newer_state = self.event_cache.items().iter().any(|event| {
+            compare_pending_events(event, &self.ready_event) != Ordering::Less
+                && matches!(
+                    KnownEvent::from_envelope(event),
+                    KnownEvent::ConversationStateUpdate(_)
+                )
+        });
+        if cache_already_has_same_or_newer_state {
+            return;
+        }
+
+        let ready_event_is_terminal = matches!(
+            payload.execution_status.as_deref(),
+            Some("finished" | "error" | "stuck")
+        );
+        let ready_event_restarts_execution = matches!(
+            payload.execution_status.as_deref(),
+            Some("queued" | "running")
+        );
+        if self.state_mirror.terminal_status().is_some()
+            && !ready_event_is_terminal
+            && !ready_event_restarts_execution
+        {
+            return;
+        }
+
+        self.state_mirror.apply_event(&self.ready_event);
+    }
+
+    fn apply_terminal_conversation_fallback(&mut self) {
+        if matches!(
+            self.conversation.execution_status.as_str(),
+            "finished" | "error" | "stuck"
+        ) && self.state_mirror.terminal_status().is_none()
+        {
+            self.state_mirror
+                .apply_conversation_execution_status(&self.conversation);
+        }
+    }
+}
+
+fn compare_pending_events(left: &EventEnvelope, right: &EventEnvelope) -> Ordering {
+    left.timestamp
+        .cmp(&right.timestamp)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+#[derive(Debug)]
+enum StreamRead {
+    Event(EventEnvelope),
+    Closed,
+    Transport(OpenHandsError),
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenHandsProbeResult {
+    pub conversation: Conversation,
+    pub ready_event: EventEnvelope,
+    pub event_cache: EventCache,
+    pub state_mirror: ConversationStateMirror,
+}
+
+#[derive(Clone)]
 pub struct OpenHandsClient {
     http: reqwest::Client,
     transport: TransportConfig,
 }
 
-/// Result of triggering a background run.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RunConversationResponse {
-    /// Whether the server reported that the conversation was already running.
-    pub already_running: bool,
-}
-
 impl OpenHandsClient {
-    /// Builds a new client around the provided transport configuration.
-    #[must_use]
     pub fn new(transport: TransportConfig) -> Self {
-        let http = reqwest::Client::builder()
-            .connect_timeout(transport.http_connect_timeout())
-            .timeout(transport.http_request_timeout())
-            .build()
-            .expect("OpenHands HTTP client should build from validated transport config");
-        Self { http, transport }
-    }
-
-    /// Returns the immutable transport configuration.
-    #[must_use]
-    pub fn transport(&self) -> &TransportConfig {
-        &self.transport
-    }
-
-    /// Fetches the server diagnostics surface exposed outside `/api`.
-    pub async fn server_info(&self) -> Result<ServerInfo> {
-        self.request_json(
-            reqwest::Method::GET,
-            self.transport.join_root_path("/server_info")?,
-            None::<&()>,
-        )
-        .await
-    }
-
-    /// Performs a simple health probe.
-    pub async fn health(&self) -> Result<()> {
-        self.probe_path("/health").await
-    }
-
-    /// Performs a readiness probe.
-    pub async fn ready(&self) -> Result<()> {
-        self.probe_path("/ready").await
-    }
-
-    /// Probes a root-relative path and returns success on any 2xx status.
-    pub async fn probe_path(&self, path: &str) -> Result<()> {
-        let url = self.transport.join_root_path(path)?;
-        let response = self
-            .send_request(reqwest::Method::GET, url.clone(), None::<&()>)
-            .await?;
-        if response.status().is_success() {
-            return Ok(());
+        Self {
+            http: reqwest::Client::new(),
+            transport,
         }
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(OpenHandsError::HttpStatus {
-            method: "GET".to_string(),
-            url: url.to_string(),
-            status,
-            body,
-        })
     }
 
-    /// Creates or reuses a conversation through `POST /api/conversations`.
+    pub fn base_url(&self) -> &str {
+        self.transport.base_url()
+    }
+
+    pub async fn openapi_probe(&self) -> Result<(), OpenHandsError> {
+        let response = send(self.get_request("/openapi.json")?, "probe OpenAPI").await?;
+        read_success_body(response, "probe OpenAPI")
+            .await
+            .map(|_| ())
+    }
+
     pub async fn create_conversation(
         &self,
-        request: &CreateConversationRequest,
-    ) -> Result<ConversationInfo> {
-        self.request_json(
-            reqwest::Method::POST,
-            self.transport.join_rest_path("/conversations")?,
-            Some(request),
+        request: &ConversationCreateRequest,
+    ) -> Result<Conversation, OpenHandsError> {
+        let response = send(
+            self.json_request(
+                self.post_request("/api/conversations")?,
+                "create conversation",
+                request,
+            )?,
+            "create conversation",
         )
-        .await
+        .await?;
+        decode_json(response, "create conversation").await
     }
 
-    /// Fetches the authoritative conversation state, returning `None` on 404.
     pub async fn get_conversation(
         &self,
-        conversation_id: &str,
-    ) -> Result<Option<ConversationInfo>> {
-        self.request_json_allow_not_found(
-            reqwest::Method::GET,
-            self.transport
-                .join_rest_path(&format!("/conversations/{conversation_id}"))?,
+        conversation_id: Uuid,
+    ) -> Result<Conversation, OpenHandsError> {
+        let response = send(
+            self.get_request(&format!("/api/conversations/{conversation_id}"))?,
+            "fetch conversation",
         )
-        .await
+        .await?;
+        decode_json(response, "fetch conversation").await
     }
 
-    /// Sends a user message event to the server.
-    pub async fn send_user_message(
+    pub async fn send_message(
         &self,
-        conversation_id: &str,
+        conversation_id: Uuid,
         request: &SendMessageRequest,
-    ) -> Result<SuccessResponse> {
-        self.request_json(
-            reqwest::Method::POST,
-            self.transport
-                .join_rest_path(&format!("/conversations/{conversation_id}/events"))?,
-            Some(request),
+    ) -> Result<AcceptedResponse, OpenHandsError> {
+        let response = send(
+            self.json_request(
+                self.post_request(&format!("/api/conversations/{conversation_id}/events"))?,
+                "send conversation event",
+                request,
+            )?,
+            "send conversation event",
         )
-        .await
+        .await?;
+        decode_accepted(response, "send conversation event").await
     }
 
-    /// Triggers the background run endpoint and tolerates the server's 409 no-op case.
-    pub async fn run_conversation(&self, conversation_id: &str) -> Result<RunConversationResponse> {
-        let url = self
-            .transport
-            .join_rest_path(&format!("/conversations/{conversation_id}/run"))?;
-        let response = self
-            .send_request(reqwest::Method::POST, url.clone(), Option::<&()>::None)
-            .await?;
-        match response.status() {
-            status if status.is_success() => Ok(RunConversationResponse {
-                already_running: false,
-            }),
-            reqwest::StatusCode::CONFLICT => Ok(RunConversationResponse {
-                already_running: true,
-            }),
-            status => {
-                let body = response.text().await.unwrap_or_default();
-                Err(OpenHandsError::HttpStatus {
-                    method: "POST".to_string(),
-                    url: url.to_string(),
-                    status,
-                    body,
-                })
-            }
-        }
+    pub async fn run_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<AcceptedResponse, OpenHandsError> {
+        let response = send(
+            self.json_request(
+                self.post_request(&format!("/api/conversations/{conversation_id}/run"))?,
+                "trigger conversation run",
+                &ConversationRunRequest::default(),
+            )?,
+            "trigger conversation run",
+        )
+        .await?;
+        decode_accepted(response, "trigger conversation run").await
     }
 
-    /// Fetches a single search page from the event API.
     pub async fn search_events_page(
         &self,
-        conversation_id: &str,
+        conversation_id: Uuid,
         page_id: Option<&str>,
-        limit: u32,
-    ) -> Result<EventPage> {
-        let mut url = self
-            .transport
-            .join_rest_path(&format!("/conversations/{conversation_id}/events/search"))?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("limit", &limit.to_string());
-            if let Some(page_id) = page_id {
-                query.append_pair("page_id", page_id);
+    ) -> Result<SearchConversationEventsResponse, OpenHandsError> {
+        let mut url = self.transport.endpoint(&format!(
+            "/api/conversations/{conversation_id}/events/search"
+        ))?;
+        if let Some(page_id) = page_id {
+            url.query_pairs_mut().append_pair("page_id", page_id);
+        }
+
+        let response = send(
+            self.transport.apply_http_auth(self.http.get(url))?,
+            "search conversation events",
+        )
+        .await?;
+        decode_json(response, "search conversation events").await
+    }
+
+    pub async fn search_all_events(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<EventCache, OpenHandsError> {
+        let mut page_id: Option<String> = None;
+        let mut cache = EventCache::new();
+        loop {
+            let page = self
+                .search_events_page(conversation_id, page_id.as_deref())
+                .await?;
+            cache.extend(page.events);
+            match page.next_page_id {
+                Some(next_page_id) => page_id = Some(next_page_id),
+                None => return Ok(cache),
             }
         }
-        self.request_json(reqwest::Method::GET, url, None::<&()>)
+    }
+
+    pub async fn attach_runtime_stream(
+        &self,
+        conversation_id: Uuid,
+        config: RuntimeStreamConfig,
+    ) -> Result<RuntimeEventStream, OpenHandsError> {
+        let conversation = self.get_conversation(conversation_id).await?;
+        RuntimeEventStream::new(self.clone(), conversation_id, config, conversation)
+            .attach()
             .await
     }
 
-    /// Fetches and decodes every event page, preserving unknown events as raw JSON.
-    pub async fn search_events_all(
+    pub async fn wait_for_readiness(
         &self,
-        conversation_id: &str,
-    ) -> Result<Vec<RuntimeEventEnvelope>> {
-        let mut page_id = None;
-        let mut events = Vec::new();
-
-        loop {
-            let page = self
-                .search_events_page(conversation_id, page_id.as_deref(), 100)
-                .await?;
-            for item in page.items {
-                events.push(RuntimeEventEnvelope::from_json(item)?);
-            }
-            match page.next_page_id {
-                Some(next_page_id) => page_id = Some(next_page_id),
-                None => return Ok(events),
-            }
-        }
+        conversation_id: Uuid,
+        wait_timeout: Duration,
+    ) -> Result<EventEnvelope, OpenHandsError> {
+        let mut stream = self.connect_websocket(conversation_id).await?;
+        wait_for_readiness_on_stream(&mut stream, wait_timeout).await
     }
 
-    /// Builds a WebSocket request for the event stream, preserving any base path prefix.
-    pub fn websocket_request(&self, conversation_id: &str) -> Result<(Url, Request<()>)> {
-        let mut url = self
-            .transport
-            .join_root_path(&format!("/sockets/events/{conversation_id}"))?;
-        let scheme = match url.scheme() {
-            "https" => "wss",
-            "http" => "ws",
-            "wss" => "wss",
-            "ws" => "ws",
-            other => {
-                return Err(OpenHandsError::InvalidConfig {
-                    message: format!("unsupported websocket scheme derived from {other}"),
-                });
-            }
-        };
-        url.set_scheme(scheme)
-            .map_err(|_| OpenHandsError::InvalidConfig {
-                message: "failed to set websocket URL scheme".to_string(),
-            })?;
-
-        let mut query_value = None;
-        if let Some(api_key) = self.transport.session_api_key() {
-            match self.transport.websocket_auth {
-                WebSocketAuthMode::None => {}
-                WebSocketAuthMode::QueryParam => query_value = Some(api_key.to_string()),
-                WebSocketAuthMode::Header => {}
-                WebSocketAuthMode::Auto => {}
-            }
-        }
-        if let Some(api_key) = query_value {
-            url.query_pairs_mut()
-                .append_pair(&self.transport.websocket_query_param_name, &api_key);
-        }
-
-        let mut request =
-            url.as_str()
-                .into_client_request()
-                .map_err(|source| OpenHandsError::Protocol {
-                    message: format!("failed to build websocket request: {source}"),
-                })?;
-        if let Some(api_key) = self.transport.session_api_key() {
-            if matches!(
-                self.transport.websocket_auth,
-                WebSocketAuthMode::Header | WebSocketAuthMode::Auto
-            ) {
-                let name = HeaderName::from_static(SESSION_API_KEY_HEADER);
-                let value =
-                    HeaderValue::from_str(api_key).map_err(|_| OpenHandsError::InvalidConfig {
-                        message: "session API key contains invalid header bytes".to_string(),
-                    })?;
-                request.headers_mut().insert(name, value);
-            }
-        }
-
-        Ok((url, request))
+    pub async fn run_probe(
+        &self,
+        request: &ConversationCreateRequest,
+        wait_timeout: Duration,
+    ) -> Result<OpenHandsProbeResult, OpenHandsError> {
+        self.run_probe_with_message(
+            request,
+            "Reply with the exact text `OpenSymphony doctor probe OK` and then finish.",
+            wait_timeout,
+        )
+        .await
     }
 
-    async fn request_json<T, B>(
+    pub async fn run_probe_with_message(
         &self,
-        method: reqwest::Method,
-        url: Url,
-        body: Option<&B>,
-    ) -> Result<T>
-    where
-        T: serde::de::DeserializeOwned,
-        B: serde::Serialize + ?Sized,
-    {
-        let response = self.send_request(method.clone(), url.clone(), body).await?;
-        if response.status().is_success() {
-            response
-                .json()
-                .await
-                .map_err(|source| OpenHandsError::HttpTransport {
-                    method: method.to_string(),
-                    url: url.to_string(),
-                    source,
-                })
-        } else {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            Err(OpenHandsError::HttpStatus {
-                method: method.to_string(),
-                url: url.to_string(),
-                status,
-                body,
-            })
-        }
-    }
-
-    async fn request_json_allow_not_found<T>(
-        &self,
-        method: reqwest::Method,
-        url: Url,
-    ) -> Result<Option<T>>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        let response = self
-            .send_request(method.clone(), url.clone(), None::<&()>)
+        request: &ConversationCreateRequest,
+        prompt: &str,
+        wait_timeout: Duration,
+    ) -> Result<OpenHandsProbeResult, OpenHandsError> {
+        let conversation = self.create_conversation(request).await?;
+        let mut stream = self
+            .attach_runtime_stream(
+                conversation.conversation_id,
+                RuntimeStreamConfig {
+                    readiness_timeout: wait_timeout,
+                    reconnect_initial_backoff: Duration::from_millis(100),
+                    reconnect_max_backoff: Duration::from_secs(1),
+                    max_reconnect_attempts: 4,
+                },
+            )
             .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
+        self.send_message(
+            conversation.conversation_id,
+            &SendMessageRequest::user_text(prompt),
+        )
+        .await?;
+        self.run_conversation(conversation.conversation_id).await?;
+        wait_for_probe_terminal_state(&mut stream, wait_timeout).await?;
+        let ready_event = stream.ready_event().clone();
+        let event_cache = stream.event_cache().clone();
+        let state_mirror = stream.state_mirror().clone();
+        let mut conversation = stream.conversation().clone();
+        if let Some(status) = state_mirror.execution_status() {
+            conversation.execution_status = status.to_string();
         }
-        if response.status().is_success() {
-            return response.json().await.map(Some).map_err(|source| {
-                OpenHandsError::HttpTransport {
-                    method: method.to_string(),
-                    url: url.to_string(),
-                    source,
-                }
-            });
-        }
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(OpenHandsError::HttpStatus {
-            method: method.to_string(),
-            url: url.to_string(),
-            status,
-            body,
+        stream.close().await?;
+
+        Ok(OpenHandsProbeResult {
+            conversation,
+            ready_event,
+            event_cache,
+            state_mirror,
         })
     }
 
-    async fn send_request<B>(
+    fn get_request(&self, suffix: &str) -> Result<RequestBuilder, OpenHandsError> {
+        let url = self.transport.endpoint(suffix)?;
+        self.transport.apply_http_auth(self.http.get(url))
+    }
+
+    fn post_request(&self, suffix: &str) -> Result<RequestBuilder, OpenHandsError> {
+        let url = self.transport.endpoint(suffix)?;
+        self.transport.apply_http_auth(self.http.post(url))
+    }
+
+    fn json_request<T>(
         &self,
-        method: reqwest::Method,
-        url: Url,
-        body: Option<&B>,
-    ) -> Result<reqwest::Response>
+        request: RequestBuilder,
+        operation: &'static str,
+        payload: &T,
+    ) -> Result<RequestBuilder, OpenHandsError>
     where
-        B: serde::Serialize + ?Sized,
+        T: Serialize,
     {
-        let mut request = self.http.request(method.clone(), url.clone());
-        if let HttpAuth::SessionApiKey(api_key) = &self.transport.http_auth {
-            request = request.header(SESSION_API_KEY_HEADER, api_key);
-        }
-        if let Some(body) = body {
-            request = request.json(body);
-        }
-        request
-            .send()
-            .await
-            .map_err(|source| OpenHandsError::HttpTransport {
-                method: method.to_string(),
-                url: url.to_string(),
-                source,
-            })
+        let body = serde_json::to_vec(payload)
+            .map_err(|error| OpenHandsError::protocol(operation, error))?;
+        Ok(request.header(CONTENT_TYPE, "application/json").body(body))
+    }
+
+    async fn connect_websocket(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<RuntimeSocket, OpenHandsError> {
+        let ws_request = self.transport.websocket_request(conversation_id)?;
+        let (stream, _) = connect_async(ws_request).await.map_err(|error| {
+            OpenHandsError::websocket_transport("connect runtime stream", error)
+        })?;
+        Ok(stream)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
+async fn send(
+    request: RequestBuilder,
+    operation: &'static str,
+) -> Result<reqwest::Response, OpenHandsError> {
+    request
+        .send()
+        .await
+        .map_err(|error| OpenHandsError::transport(operation, error))
+}
 
-    use super::*;
-    use crate::config::{HttpAuth, TransportConfig, WebSocketAuthMode};
-    use tokio::net::TcpListener;
-
-    #[test]
-    fn websocket_request_uses_server_root_when_base_url_contains_api() {
-        let client = OpenHandsClient::new(TransportConfig {
-            base_url: Url::parse("https://example.com/runtime/456/api")
-                .expect("static test URL must parse"),
-            http_auth: HttpAuth::SessionApiKey("secret".to_string()),
-            http_connect_timeout_ms: 5_000,
-            http_request_timeout_ms: 30_000,
-            websocket_auth: WebSocketAuthMode::Header,
-            websocket_query_param_name: "session_api_key".to_string(),
+async fn read_success_body(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<Option<Value>, OpenHandsError> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| OpenHandsError::transport(operation, error))?;
+    if !status.is_success() {
+        return Err(OpenHandsError::HttpStatus {
+            operation,
+            status_code: status.as_u16(),
+            body,
         });
-        let (url, request) = client
-            .websocket_request("abc")
-            .expect("websocket request should build");
-        assert_eq!(
-            url.as_str(),
-            "wss://example.com/runtime/456/sockets/events/abc"
-        );
-        assert_eq!(
-            request
-                .headers()
-                .get(SESSION_API_KEY_HEADER)
-                .expect("session API key header should be present"),
-            "secret"
-        );
     }
 
-    #[test]
-    fn websocket_request_can_use_query_param_auth() {
-        let client = OpenHandsClient::new(TransportConfig {
-            base_url: Url::parse("http://127.0.0.1:8000").expect("static test URL must parse"),
-            http_auth: HttpAuth::SessionApiKey("secret".to_string()),
-            http_connect_timeout_ms: 5_000,
-            http_request_timeout_ms: 30_000,
-            websocket_auth: WebSocketAuthMode::QueryParam,
-            websocket_query_param_name: "session_api_key".to_string(),
-        });
-        let (url, request) = client
-            .websocket_request("abc")
-            .expect("websocket request should build");
-        assert_eq!(
-            url.as_str(),
-            "ws://127.0.0.1:8000/sockets/events/abc?session_api_key=secret"
-        );
-        assert!(request.headers().get(SESSION_API_KEY_HEADER).is_none());
+    if body.trim().is_empty() {
+        return Ok(None);
     }
 
-    #[tokio::test]
-    async fn client_request_timeout_fails_fast_on_unresponsive_server() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener should bind");
-        let address = listener
-            .local_addr()
-            .expect("listener address should resolve");
-        let server = tokio::spawn(async move {
-            let (_socket, _) = listener.accept().await.expect("client should connect");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        });
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|error| OpenHandsError::protocol(operation, error))
+}
 
-        let client = OpenHandsClient::new(TransportConfig {
-            base_url: Url::parse(&format!("http://{address}")).expect("base URL should parse"),
-            http_auth: HttpAuth::None,
-            http_connect_timeout_ms: 50,
-            http_request_timeout_ms: 50,
-            websocket_auth: WebSocketAuthMode::Auto,
-            websocket_query_param_name: "session_api_key".to_string(),
-        });
+async fn decode_json<T>(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<T, OpenHandsError>
+where
+    T: DeserializeOwned,
+{
+    let value = read_success_body(response, operation)
+        .await?
+        .ok_or_else(|| OpenHandsError::protocol(operation, "expected JSON response body"))?;
+    serde_json::from_value(value).map_err(|error| OpenHandsError::protocol(operation, error))
+}
 
-        let error = tokio::time::timeout(Duration::from_millis(200), client.probe_path("/health"))
+async fn decode_accepted(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<AcceptedResponse, OpenHandsError> {
+    let Some(value) = read_success_body(response, operation).await? else {
+        return Ok(AcceptedResponse::accepted());
+    };
+
+    let accepted: AcceptedResponse = serde_json::from_value(value)
+        .map_err(|error| OpenHandsError::protocol(operation, error))?;
+    if accepted.success {
+        Ok(accepted)
+    } else {
+        Err(OpenHandsError::protocol(
+            operation,
+            "response reported `success=false`",
+        ))
+    }
+}
+
+fn parse_text_event(payload: &str) -> Result<EventEnvelope, OpenHandsError> {
+    serde_json::from_str(payload).map_err(|error| OpenHandsError::MalformedWebSocketEvent {
+        detail: error.to_string(),
+        snippet: payload.chars().take(160).collect(),
+    })
+}
+
+fn parse_binary_event(payload: &[u8]) -> Result<EventEnvelope, OpenHandsError> {
+    serde_json::from_slice(payload).map_err(|error| OpenHandsError::MalformedWebSocketEvent {
+        detail: error.to_string(),
+        snippet: String::from_utf8_lossy(payload).chars().take(160).collect(),
+    })
+}
+
+fn parse_header_name(name: &str) -> Result<HeaderName, OpenHandsError> {
+    HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+        OpenHandsError::invalid_configuration(format!("invalid auth header name `{name}`: {error}"))
+    })
+}
+
+fn parse_header_value(value: &str) -> Result<HeaderValue, OpenHandsError> {
+    HeaderValue::from_str(value).map_err(|error| {
+        OpenHandsError::invalid_configuration(format!("invalid auth header value: {error}"))
+    })
+}
+
+async fn wait_for_readiness_on_stream(
+    stream: &mut RuntimeSocket,
+    wait_timeout: Duration,
+) -> Result<EventEnvelope, OpenHandsError> {
+    let deadline = Instant::now() + wait_timeout;
+
+    loop {
+        let next_message = timeout_at(deadline, stream.next())
             .await
-            .expect("probe should obey the internal request timeout")
-            .expect_err("unresponsive server should time out");
-        match error {
-            OpenHandsError::HttpTransport { source, .. } => assert!(source.is_timeout()),
-            other => panic!("expected transport timeout, got {other:?}"),
+            .map_err(|_| OpenHandsError::ReadinessTimeout(wait_timeout))?;
+
+        match next_message {
+            Some(Ok(Message::Text(payload))) => match parse_text_event(&payload) {
+                Ok(event) if event.kind == CONVERSATION_STATE_UPDATE_EVENT_KIND => {
+                    return Ok(event);
+                }
+                Ok(event) => {
+                    debug!(event_kind = %event.kind, "ignoring non-readiness websocket event");
+                }
+                Err(error) => {
+                    debug!(error = %error, "ignoring undecodable websocket text frame before readiness");
+                }
+            },
+            Some(Ok(Message::Binary(payload))) => match parse_binary_event(&payload) {
+                Ok(event) if event.kind == CONVERSATION_STATE_UPDATE_EVENT_KIND => {
+                    return Ok(event);
+                }
+                Ok(event) => {
+                    debug!(event_kind = %event.kind, "ignoring non-readiness websocket event");
+                }
+                Err(error) => {
+                    debug!(error = %error, "ignoring undecodable websocket binary frame before readiness");
+                }
+            },
+            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                debug!("ignoring websocket control frame before readiness");
+            }
+            Some(Ok(Message::Frame(_))) => {
+                debug!("ignoring raw websocket frame before readiness");
+            }
+            Some(Ok(Message::Close(_))) | None => return Err(OpenHandsError::WebSocketClosed),
+            Some(Err(error)) => {
+                return Err(OpenHandsError::websocket_transport(
+                    "wait for readiness",
+                    error,
+                ));
+            }
+        }
+    }
+}
+
+async fn read_next_socket_event(stream: &mut RuntimeSocket) -> StreamRead {
+    loop {
+        match stream.next().await {
+            Some(Ok(Message::Text(payload))) => match parse_text_event(&payload) {
+                Ok(event) => return StreamRead::Event(event),
+                Err(error) => {
+                    debug!(error = %error, "ignoring undecodable websocket text frame during streaming");
+                }
+            },
+            Some(Ok(Message::Binary(payload))) => match parse_binary_event(&payload) {
+                Ok(event) => return StreamRead::Event(event),
+                Err(error) => {
+                    debug!(error = %error, "ignoring undecodable websocket binary frame during streaming");
+                }
+            },
+            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                debug!("ignoring websocket control frame during streaming");
+            }
+            Some(Ok(Message::Frame(_))) => {
+                debug!("ignoring raw websocket frame during streaming");
+            }
+            Some(Ok(Message::Close(_))) | None => return StreamRead::Closed,
+            Some(Err(error)) => {
+                return StreamRead::Transport(OpenHandsError::websocket_transport(
+                    "read runtime event",
+                    error,
+                ));
+            }
+        }
+    }
+}
+
+async fn read_buffered_socket_event(stream: &mut RuntimeSocket) -> Option<StreamRead> {
+    loop {
+        let next_message = tokio::select! {
+            biased;
+            message = stream.next() => Some(message),
+            () = yield_now() => None,
+        };
+
+        match next_message {
+            None => return None,
+            Some(Some(Ok(Message::Text(payload)))) => match parse_text_event(&payload) {
+                Ok(event) => return Some(StreamRead::Event(event)),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "ignoring undecodable websocket text frame while draining buffered events"
+                    );
+                }
+            },
+            Some(Some(Ok(Message::Binary(payload)))) => match parse_binary_event(&payload) {
+                Ok(event) => return Some(StreamRead::Event(event)),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "ignoring undecodable websocket binary frame while draining buffered events"
+                    );
+                }
+            },
+            Some(Some(Ok(Message::Ping(_)))) | Some(Some(Ok(Message::Pong(_)))) => {
+                debug!("ignoring websocket control frame while draining buffered events");
+            }
+            Some(Some(Ok(Message::Frame(_)))) => {
+                debug!("ignoring raw websocket frame while draining buffered events");
+            }
+            Some(Some(Ok(Message::Close(_)))) | Some(None) => return Some(StreamRead::Closed),
+            Some(Some(Err(error))) => {
+                return Some(StreamRead::Transport(OpenHandsError::websocket_transport(
+                    "read runtime event",
+                    error,
+                )));
+            }
+        }
+    }
+}
+
+async fn wait_for_probe_terminal_state(
+    stream: &mut RuntimeEventStream,
+    wait_timeout: Duration,
+) -> Result<(), OpenHandsError> {
+    let deadline = Instant::now() + wait_timeout;
+
+    loop {
+        if let Some(event) = stream.pending_conversation_error_event() {
+            return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                "received {} {} before a successful terminal status",
+                event.kind, event.id
+            )));
         }
 
-        server.abort();
+        match stream.state_mirror().terminal_status() {
+            Some(TerminalExecutionStatus::Finished) => {
+                if confirm_finished_probe_terminal_state(stream).await? {
+                    return Ok(());
+                }
+            }
+            Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                    "terminal execution_status `{}`",
+                    stream.state_mirror().execution_status().unwrap_or_default()
+                )));
+            }
+            None => {}
+        }
+
+        let next_event = timeout_at(deadline, stream.poll_next_event_once())
+            .await
+            .map_err(|_| OpenHandsError::ProbeActivityTimeout(wait_timeout))?;
+        let next_event = match next_event {
+            Ok(next_event) => next_event,
+            Err(error) => match stream.state_mirror().terminal_status() {
+                Some(TerminalExecutionStatus::Finished) => return Ok(()),
+                Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                    return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                        "terminal execution_status `{}`",
+                        stream.state_mirror().execution_status().unwrap_or_default()
+                    )));
+                }
+                None => return Err(error),
+            },
+        };
+        let Some(event) = next_event else {
+            continue;
+        };
+
+        if matches!(
+            KnownEvent::from_envelope(&event),
+            KnownEvent::ConversationError(_)
+        ) {
+            return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                "received {} {} before a successful terminal status",
+                event.kind, event.id
+            )));
+        }
+    }
+}
+
+async fn confirm_finished_probe_terminal_state(
+    stream: &mut RuntimeEventStream,
+) -> Result<bool, OpenHandsError> {
+    // Give the socket one more scheduler turn so a failure frame that arrives
+    // just after the finished state is still observed before probe success.
+    yield_now().await;
+
+    if let Err(error) = stream.absorb_buffered_socket_events().await {
+        return match stream.state_mirror().terminal_status() {
+            Some(TerminalExecutionStatus::Finished) => Ok(true),
+            Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                    "terminal execution_status `{}`",
+                    stream.state_mirror().execution_status().unwrap_or_default()
+                )))
+            }
+            None => Err(error),
+        };
+    }
+
+    if let Some(event) = stream.pending_conversation_error_event() {
+        return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+            "received {} {} before a successful terminal status",
+            event.kind, event.id
+        )));
+    }
+
+    match stream.state_mirror().terminal_status() {
+        Some(TerminalExecutionStatus::Finished) => Ok(true),
+        Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+            Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                "terminal execution_status `{}`",
+                stream.state_mirror().execution_status().unwrap_or_default()
+            )))
+        }
+        None => Ok(false),
+    }
+}
+
+impl RuntimeEventStream {
+    fn pending_conversation_error_event(&self) -> Option<&EventEnvelope> {
+        self.pending_events.iter().find(|event| {
+            matches!(
+                KnownEvent::from_envelope(event),
+                KnownEvent::ConversationError(_)
+            )
+        })
     }
 }

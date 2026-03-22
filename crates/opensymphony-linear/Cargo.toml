@@ -1,11 +1,23 @@
 [package]
 name = "opensymphony-linear"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
 repository.workspace = true
-rust-version.workspace = true
-version.workspace = true
 
-[lints]
-workspace = true
+[dependencies]
+chrono.workspace = true
+opensymphony-domain = { path = "../opensymphony-domain" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
+
+[lib]
+path = "src/lib.rs"
