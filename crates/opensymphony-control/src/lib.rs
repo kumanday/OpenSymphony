@@ -186,15 +186,35 @@ pub struct ControlPlaneClient {
 
 impl ControlPlaneClient {
     const DEFAULT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+    const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
     pub fn new(base_url: Url) -> Self {
-        Self::with_snapshot_timeout(base_url, Self::DEFAULT_SNAPSHOT_TIMEOUT)
+        Self::with_timeouts(
+            base_url,
+            Self::DEFAULT_SNAPSHOT_TIMEOUT,
+            Self::DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
     }
 
     pub fn with_snapshot_timeout(base_url: Url, snapshot_timeout: Duration) -> Self {
+        Self::with_timeouts(
+            base_url,
+            snapshot_timeout,
+            Self::DEFAULT_STREAM_IDLE_TIMEOUT,
+        )
+    }
+
+    pub fn with_timeouts(
+        base_url: Url,
+        snapshot_timeout: Duration,
+        stream_idle_timeout: Duration,
+    ) -> Self {
         Self {
             base_url,
-            http: reqwest::Client::new(),
+            http: reqwest::Client::builder()
+                .read_timeout(stream_idle_timeout)
+                .build()
+                .expect("control-plane reqwest client should build"),
             snapshot_timeout,
         }
     }
