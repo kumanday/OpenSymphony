@@ -184,6 +184,7 @@ examples/
   target-repo/
     WORKFLOW.md
     AGENTS.md
+    .gitignore
     .agents/skills/
   configs/
     local-dev.yaml

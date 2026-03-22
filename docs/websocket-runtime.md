@@ -227,6 +227,7 @@ For each turn:
 1. Select prompt shape:
    - full prompt on fresh conversation
    - continuation guidance on resumed conversation or later turns
+   - persist the selected prompt under `.opensymphony/prompts/last-*-prompt.(md|json)` and archive the per-run capture under `.opensymphony/runs/attempt-####/`
 2. `POST /api/conversations/{id}/events`
    - user role
    - prompt content

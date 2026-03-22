@@ -10,10 +10,11 @@ use tokio::{
 };
 
 use crate::{
-    CleanupDecision, CleanupOutcome, EnsureWorkspaceResult, HookDefinition, HookExecutionRecord,
-    HookExecutionStatus, HookKind, IssueDescriptor, IssueLifecycleState, IssueManifest,
-    RunDescriptor, RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManagerConfig,
-    WorkspaceOwnershipConflictDetails,
+    CleanupDecision, CleanupOutcome, ConversationManifest, EnsureWorkspaceResult, HookDefinition,
+    HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
+    IssueLifecycleState, IssueManifest, PromptCaptureDescriptor, PromptCaptureManifest,
+    RunDescriptor, RunManifest, RunStatus, SessionContextArtifact, WorkspaceError, WorkspaceHandle,
+    WorkspaceManagerConfig, WorkspaceOwnershipConflictDetails,
     models::AfterCreateBootstrapReceipt,
     paths::{normalize_absolute_path, resolve_path_within_root, sanitize_workspace_key},
 };
@@ -279,6 +280,84 @@ impl WorkspaceManager {
     ) -> Result<(), WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
         self.write_manifest(workspace, &workspace.run_manifest_path(), manifest)
+            .await
+    }
+
+    pub async fn load_conversation_manifest(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<Option<ConversationManifest>, WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+        self.load_manifest(workspace, &workspace.conversation_manifest_path())
+            .await
+    }
+
+    pub async fn write_conversation_manifest(
+        &self,
+        workspace: &WorkspaceHandle,
+        manifest: &ConversationManifest,
+    ) -> Result<(), WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+        self.write_manifest(workspace, &workspace.conversation_manifest_path(), manifest)
+            .await
+    }
+
+    pub async fn write_prompt_capture(
+        &self,
+        workspace: &WorkspaceHandle,
+        run: &RunDescriptor,
+        descriptor: PromptCaptureDescriptor,
+        prompt: &str,
+    ) -> Result<PromptCaptureManifest, WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+
+        let manifest = PromptCaptureManifest::new(workspace, run, descriptor, prompt);
+        let archived_manifest_path =
+            workspace.run_prompt_manifest_path(run.attempt, descriptor.kind, descriptor.sequence);
+        let stable_manifest_path = workspace.latest_prompt_manifest_path(descriptor.kind);
+
+        self.write_text_artifact(workspace, &manifest.archived_prompt_path, prompt)
+            .await?;
+        self.write_text_artifact(workspace, &manifest.stable_prompt_path, prompt)
+            .await?;
+        self.write_manifest(workspace, &archived_manifest_path, &manifest)
+            .await?;
+        self.write_manifest(workspace, &stable_manifest_path, &manifest)
+            .await?;
+
+        Ok(manifest)
+    }
+
+    pub async fn write_issue_context(
+        &self,
+        workspace: &WorkspaceHandle,
+        artifact: &IssueContextArtifact,
+    ) -> Result<(), WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+        self.write_text_artifact(
+            workspace,
+            &workspace.issue_context_path(),
+            &artifact.render_markdown(workspace),
+        )
+        .await
+    }
+
+    pub async fn load_session_context(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<Option<SessionContextArtifact>, WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+        self.load_manifest(workspace, &workspace.session_context_path())
+            .await
+    }
+
+    pub async fn write_session_context(
+        &self,
+        workspace: &WorkspaceHandle,
+        artifact: &SessionContextArtifact,
+    ) -> Result<(), WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+        self.write_manifest(workspace, &workspace.session_context_path(), artifact)
             .await
     }
 
@@ -773,6 +852,25 @@ impl WorkspaceManager {
         fs::write(&path, payload)
             .await
             .map_err(|error| WorkspaceError::WriteManifest {
+                path,
+                source: error,
+            })
+    }
+
+    async fn write_text_artifact(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+        content: &str,
+    ) -> Result<(), WorkspaceError> {
+        if let Some(parent) = path.parent() {
+            self.create_managed_directory(workspace, parent).await?;
+        }
+        let path = self.validate_workspace_owned_path(workspace, path).await?;
+
+        fs::write(&path, content)
+            .await
+            .map_err(|error| WorkspaceError::WriteArtifact {
                 path,
                 source: error,
             })

@@ -162,6 +162,43 @@ impl WorkspaceHandle {
     pub fn runs_dir(&self) -> PathBuf {
         self.metadata_dir().join("runs")
     }
+
+    pub fn latest_prompt_path(&self, kind: PromptKind) -> PathBuf {
+        self.prompts_dir()
+            .join(format!("last-{}-prompt.md", kind.file_stem()))
+    }
+
+    pub fn latest_prompt_manifest_path(&self, kind: PromptKind) -> PathBuf {
+        self.prompts_dir()
+            .join(format!("last-{}-prompt.json", kind.file_stem()))
+    }
+
+    pub fn run_artifacts_dir(&self, attempt: u32) -> PathBuf {
+        self.runs_dir().join(format!("attempt-{attempt:04}"))
+    }
+
+    pub fn run_prompt_path(&self, attempt: u32, kind: PromptKind, sequence: u32) -> PathBuf {
+        self.run_artifacts_dir(attempt)
+            .join(format!("prompt-{}-{sequence:03}.md", kind.file_stem()))
+    }
+
+    pub fn run_prompt_manifest_path(
+        &self,
+        attempt: u32,
+        kind: PromptKind,
+        sequence: u32,
+    ) -> PathBuf {
+        self.run_artifacts_dir(attempt)
+            .join(format!("prompt-{}-{sequence:03}.json", kind.file_stem()))
+    }
+
+    pub fn issue_context_path(&self) -> PathBuf {
+        self.generated_dir().join("issue-context.md")
+    }
+
+    pub fn session_context_path(&self) -> PathBuf {
+        self.generated_dir().join("session-context.json")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +326,20 @@ pub enum RunStatus {
     PreparationFailed,
 }
 
+impl fmt::Display for RunStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Preparing => "preparing",
+            Self::Prepared => "prepared",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::PreparationFailed => "preparation_failed",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunManifest {
     pub run_id: String,
@@ -321,6 +372,283 @@ impl RunManifest {
             updated_at: now,
             status_detail: None,
             hooks: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationManifest {
+    pub issue_id: String,
+    pub identifier: String,
+    pub conversation_id: String,
+    pub server_base_url: String,
+    pub persistence_dir: PathBuf,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_attached_at: Option<DateTime<Utc>>,
+    pub fresh_conversation: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_reason: Option<String>,
+    pub runtime_contract_version: String,
+}
+
+impl ConversationManifest {
+    pub fn new(
+        workspace: &WorkspaceHandle,
+        conversation_id: impl Into<String>,
+        server_base_url: impl Into<String>,
+        persistence_dir: impl Into<PathBuf>,
+        runtime_contract_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            issue_id: workspace.issue_id().to_string(),
+            identifier: workspace.identifier().to_string(),
+            conversation_id: conversation_id.into(),
+            server_base_url: server_base_url.into(),
+            persistence_dir: persistence_dir.into(),
+            created_at: Utc::now(),
+            last_attached_at: None,
+            fresh_conversation: true,
+            reset_reason: None,
+            runtime_contract_version: runtime_contract_version.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    Full,
+    Continuation,
+}
+
+impl PromptKind {
+    pub fn file_stem(self) -> &'static str {
+        match self {
+            Self::Full => "full",
+            Self::Continuation => "continuation",
+        }
+    }
+}
+
+impl fmt::Display for PromptKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Full => "full",
+            Self::Continuation => "continuation",
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptCaptureDescriptor {
+    pub kind: PromptKind,
+    pub sequence: u32,
+}
+
+impl PromptCaptureDescriptor {
+    pub fn new(kind: PromptKind, sequence: u32) -> Self {
+        Self { kind, sequence }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCaptureManifest {
+    pub issue_id: String,
+    pub identifier: String,
+    pub run_id: String,
+    pub attempt: u32,
+    pub prompt_kind: PromptKind,
+    pub sequence: u32,
+    pub workspace_path: PathBuf,
+    pub archived_prompt_path: PathBuf,
+    pub stable_prompt_path: PathBuf,
+    pub captured_at: DateTime<Utc>,
+    pub prompt_length_bytes: usize,
+}
+
+impl PromptCaptureManifest {
+    pub fn new(
+        workspace: &WorkspaceHandle,
+        run: &RunDescriptor,
+        descriptor: PromptCaptureDescriptor,
+        prompt: &str,
+    ) -> Self {
+        Self {
+            issue_id: workspace.issue_id().to_string(),
+            identifier: workspace.identifier().to_string(),
+            run_id: run.run_id.clone(),
+            attempt: run.attempt,
+            prompt_kind: descriptor.kind,
+            sequence: descriptor.sequence,
+            workspace_path: workspace.workspace_path().to_path_buf(),
+            archived_prompt_path: workspace.run_prompt_path(
+                run.attempt,
+                descriptor.kind,
+                descriptor.sequence,
+            ),
+            stable_prompt_path: workspace.latest_prompt_path(descriptor.kind),
+            captured_at: Utc::now(),
+            prompt_length_bytes: prompt.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueContextArtifact {
+    pub issue_id: String,
+    pub identifier: String,
+    pub title: String,
+    pub current_state: String,
+    pub repo_workflow_path: PathBuf,
+    pub repo_agents_path: Option<PathBuf>,
+    pub repo_skills_dir: Option<PathBuf>,
+    pub last_run_status: Option<RunStatus>,
+    pub important_constraints: Vec<String>,
+    pub known_blockers: Vec<String>,
+}
+
+impl IssueContextArtifact {
+    pub fn render_markdown(&self, workspace: &WorkspaceHandle) -> String {
+        use std::fmt::Write as _;
+
+        let mut output = String::new();
+        let _ = writeln!(output, "# OpenSymphony Issue Context");
+        let _ = writeln!(output);
+        let _ = writeln!(output, "Repository-owned policy remains authoritative.");
+        let _ = writeln!(
+            output,
+            "These generated notes reference repo-owned files without overwriting them."
+        );
+        let _ = writeln!(output);
+        let _ = writeln!(output, "- issue: {}", self.identifier);
+        let _ = writeln!(output, "- issue id: {}", self.issue_id);
+        let _ = writeln!(output, "- title: {}", self.title);
+        let _ = writeln!(output, "- current state: {}", self.current_state);
+        let _ = writeln!(
+            output,
+            "- last run status: {}",
+            self.last_run_status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## Repository Context");
+        let _ = writeln!(output);
+        let _ = writeln!(
+            output,
+            "- WORKFLOW.md: {}",
+            self.repo_workflow_path.display()
+        );
+        let _ = writeln!(
+            output,
+            "- AGENTS.md: {}",
+            self.repo_agents_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "absent".to_string())
+        );
+        let _ = writeln!(
+            output,
+            "- .agents/skills/: {}",
+            self.repo_skills_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "absent".to_string())
+        );
+        let _ = writeln!(output);
+        let _ = writeln!(output, "## OpenSymphony Artifacts");
+        let _ = writeln!(output);
+        let _ = writeln!(
+            output,
+            "- issue manifest: {}",
+            workspace.issue_manifest_path().display()
+        );
+        let _ = writeln!(
+            output,
+            "- run manifest: {}",
+            workspace.run_manifest_path().display()
+        );
+        let _ = writeln!(
+            output,
+            "- conversation manifest: {}",
+            workspace.conversation_manifest_path().display()
+        );
+        let _ = writeln!(
+            output,
+            "- latest full prompt: {}",
+            workspace.latest_prompt_path(PromptKind::Full).display()
+        );
+        let _ = writeln!(
+            output,
+            "- latest continuation prompt: {}",
+            workspace
+                .latest_prompt_path(PromptKind::Continuation)
+                .display()
+        );
+        let _ = writeln!(
+            output,
+            "- session context: {}",
+            workspace.session_context_path().display()
+        );
+        if !self.important_constraints.is_empty() {
+            let _ = writeln!(output);
+            let _ = writeln!(output, "## Important Constraints");
+            let _ = writeln!(output);
+            for constraint in &self.important_constraints {
+                let _ = writeln!(output, "- {constraint}");
+            }
+        }
+        if !self.known_blockers.is_empty() {
+            let _ = writeln!(output);
+            let _ = writeln!(output, "## Known Blockers");
+            let _ = writeln!(output);
+            for blocker in &self.known_blockers {
+                let _ = writeln!(output, "- {blocker}");
+            }
+        }
+
+        output
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionContextArtifact {
+    pub issue_id: String,
+    pub identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_status: Option<RunStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_kind: Option<PromptKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prompt_path: Option<PathBuf>,
+    #[serde(default)]
+    pub recent_validation_commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_retry_reason: Option<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl SessionContextArtifact {
+    pub fn new(workspace: &WorkspaceHandle) -> Self {
+        Self {
+            issue_id: workspace.issue_id().to_string(),
+            identifier: workspace.identifier().to_string(),
+            conversation_id: None,
+            attempt: None,
+            last_run_id: None,
+            last_run_status: None,
+            last_prompt_kind: None,
+            last_prompt_path: None,
+            recent_validation_commands: Vec::new(),
+            last_retry_reason: None,
+            updated_at: Utc::now(),
         }
     }
 }

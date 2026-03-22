@@ -130,6 +130,9 @@ Current implementation:
 - refuse path escape
 - create and reuse workspace
 - persist issue and run manifests
+- persist conversation manifests
+- persist stable prompt captures plus per-run prompt archives
+- persist generated `issue-context.md` and `session-context.json`
 - allow fresh `after_create` hooks to bootstrap clone/worktree flows before `.opensymphony/` exists
 - retry failed first-time `after_create` hooks on the next `ensure`
 - remember a successful first-time `after_create` before later metadata bootstrap steps so clone/worktree hooks are not rerun after a post-hook bootstrap failure
@@ -439,10 +442,21 @@ Each issue workspace should expose enough local artifacts to debug recovery:
   run.json
   conversation.json
   prompts/
+    last-full-prompt.md
+    last-full-prompt.json
+    last-continuation-prompt.md
+    last-continuation-prompt.json
+  runs/
+    attempt-0001/
+      prompt-full-001.md
+      prompt-full-001.json
   logs/
+  generated/
+    issue-context.md
+    session-context.json
 ```
 
-These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, and `run.json` should retain the latest hook/status evidence for the worker lifetime.
+These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, `run.json` should retain the latest hook/status evidence for the worker lifetime, and the prompt plus generated-context artifacts should make repo-policy precedence and the last dispatched prompt inspectable without reconstructing daemon state.
 
 ## 10. Version pinning
 
