@@ -27,6 +27,7 @@ Purpose:
 
 - shared domain types
 - runtime enums
+- scheduler state and transition helpers
 - snapshot models
 - config-independent constants
 
@@ -85,7 +86,7 @@ This crate owns all OpenHands-specific transport details.
 Purpose:
 
 - poll tick
-- runtime state machine
+- scheduler actor and policy decisions over the shared state machine
 - worker supervision
 - retry queue
 - cancellation and reconciliation
