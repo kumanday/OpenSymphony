@@ -11,16 +11,17 @@ use serde::Serialize;
 pub use error::{PromptTemplateError, WorkflowConfigError, WorkflowLoadError};
 pub use model::{
     AgentConfig, AgentFrontMatter, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
-    OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConversationAgentConfig,
-    OpenHandsConversationAgentFrontMatter, OpenHandsConversationConfig,
-    OpenHandsConversationFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
-    OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
-    OpenHandsMcpConfig, OpenHandsMcpFrontMatter, OpenHandsStdioServerConfig,
-    OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig, OpenHandsTransportFrontMatter,
-    OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter,
-    ProcessEnvironment, PromptContext, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter,
-    TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkflowFrontMatter,
-    WorkspaceConfig, WorkspaceFrontMatter, DEFAULT_PROMPT_TEMPLATE,
+    OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
+    OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
+    OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsFrontMatter,
+    OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
+    OpenHandsLocalServerFrontMatter, OpenHandsMcpConfig, OpenHandsMcpFrontMatter,
+    OpenHandsStdioServerConfig, OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig,
+    OpenHandsTransportFrontMatter, OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter,
+    PollingConfig, PollingFrontMatter, ProcessEnvironment, PromptContext, ResolvedWorkflow,
+    TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition,
+    WorkflowExtensions, WorkflowFrontMatter, WorkspaceConfig, WorkspaceFrontMatter,
+    DEFAULT_PROMPT_TEMPLATE,
 };
 
 pub const CRATE_NAME: &str = "opensymphony-workflow";
@@ -35,7 +36,7 @@ impl WorkflowDefinition {
     }
 
     pub fn effective_prompt_template(&self) -> &str {
-        if self.prompt_template.is_empty() {
+        if self.prompt_template.trim().is_empty() {
             DEFAULT_PROMPT_TEMPLATE
         } else {
             &self.prompt_template
@@ -76,7 +77,7 @@ impl std::str::FromStr for WorkflowDefinition {
 
 impl ResolvedWorkflow {
     pub fn effective_prompt_template(&self) -> &str {
-        if self.prompt_template.is_empty() {
+        if self.prompt_template.trim().is_empty() {
             DEFAULT_PROMPT_TEMPLATE
         } else {
             &self.prompt_template
@@ -505,7 +506,12 @@ openhands:
 
     #[test]
     fn rejects_invalid_openhands_transport_base_urls() {
-        for invalid_base_url in ["localhost:8000", "ws://127.0.0.1:8000"] {
+        for invalid_base_url in [
+            "localhost:8000",
+            "ws://127.0.0.1:8000",
+            "http://127.0.0.1:8000/api",
+            "https://example.com/runtime/api/",
+        ] {
             let workflow = WorkflowDefinition::parse(&format!(
                 r#"---
 tracker:
@@ -572,6 +578,53 @@ openhands:
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn defaults_confirmation_policy_kind_when_block_omits_it() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    confirmation_policy:
+      max_budget_usd: 5
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("confirmation policy defaults should resolve");
+
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .confirmation_policy
+                .kind,
+            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .confirmation_policy
+                .options
+                .get("max_budget_usd"),
+            Some(&serde_yaml::Value::Number(5.into()))
+        );
     }
 
     #[test]
@@ -814,6 +867,33 @@ tracker:
         let rendered = workflow
             .render_prompt(&issue, None)
             .expect("default prompt render should succeed");
+
+        assert_eq!(rendered, DEFAULT_PROMPT_TEMPLATE);
+    }
+
+    #[test]
+    fn uses_default_prompt_when_body_is_whitespace_only() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: None,
+            labels: vec![],
+        };
+
+        let rendered = workflow
+            .render_prompt(&issue, None)
+            .expect("whitespace-only prompt should use the default template");
 
         assert_eq!(rendered, DEFAULT_PROMPT_TEMPLATE);
     }

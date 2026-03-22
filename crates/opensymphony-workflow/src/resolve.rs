@@ -10,22 +10,22 @@ use crate::{
     model::{
         default_openhands_local_server_command, AgentConfig, AgentFrontMatter, Environment,
         HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
-        OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
-        OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsFrontMatter,
-        OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
-        OpenHandsMcpConfig, OpenHandsStdioServerConfig, OpenHandsStdioServerFrontMatter,
-        OpenHandsTransportConfig, OpenHandsWebSocketConfig, PollingConfig, PollingFrontMatter,
-        ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig,
-        WorkflowDefinition, WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter,
-        DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
-        DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND,
-        DEFAULT_OPENHANDS_AUTH_MODE, DEFAULT_OPENHANDS_BASE_URL,
-        DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_MAX_ITERATIONS,
-        DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
-        DEFAULT_OPENHANDS_READINESS_PROBE_PATH, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
-        DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
-        DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS,
-        DEFAULT_WORKSPACE_ROOT,
+        OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
+        OpenHandsConversationAgentFrontMatter, OpenHandsConversationConfig,
+        OpenHandsConversationFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
+        OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsMcpConfig,
+        OpenHandsStdioServerConfig, OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig,
+        OpenHandsWebSocketConfig, PollingConfig, PollingFrontMatter, ResolvedWorkflow,
+        TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition,
+        WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter, DEFAULT_HOOK_TIMEOUT_MS,
+        DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS,
+        DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AUTH_MODE,
+        DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
+        DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
+        DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
+        DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
+        DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
+        DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT,
     },
 };
 
@@ -336,6 +336,18 @@ fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError
         });
     }
 
+    let normalized_path = parsed.path().trim_end_matches('/');
+    if normalized_path
+        .rsplit('/')
+        .next()
+        .is_some_and(|segment| segment == "api")
+    {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.transport.base_url",
+            message: "must not include a trailing /api path segment".to_owned(),
+        });
+    }
+
     Ok(())
 }
 
@@ -344,15 +356,7 @@ fn resolve_openhands_conversation<E: Environment>(
     env: &E,
 ) -> Result<OpenHandsConversationConfig, WorkflowConfigError> {
     let confirmation_policy = match conversation.confirmation_policy.clone() {
-        Some(policy) => {
-            if policy.kind.trim().is_empty() {
-                return Err(WorkflowConfigError::InvalidField {
-                    field: "openhands.conversation.confirmation_policy.kind",
-                    message: "must not be empty".to_owned(),
-                });
-            }
-            policy
-        }
+        Some(policy) => resolve_openhands_confirmation_policy(policy)?,
         None => OpenHandsConfirmationPolicy {
             kind: DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND.to_owned(),
             options: BTreeMap::new(),
@@ -393,6 +397,25 @@ fn resolve_openhands_conversation<E: Environment>(
         stuck_detection: conversation.stuck_detection.unwrap_or(true),
         confirmation_policy,
         agent,
+    })
+}
+
+fn resolve_openhands_confirmation_policy(
+    policy: OpenHandsConfirmationPolicyFrontMatter,
+) -> Result<OpenHandsConfirmationPolicy, WorkflowConfigError> {
+    let kind = match policy.kind.as_deref() {
+        Some(kind) => {
+            normalize_optional(kind).ok_or_else(|| WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.confirmation_policy.kind",
+                message: "must not be empty".to_owned(),
+            })?
+        }
+        None => DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND.to_owned(),
+    };
+
+    Ok(OpenHandsConfirmationPolicy {
+        kind,
+        options: policy.options,
     })
 }
 
