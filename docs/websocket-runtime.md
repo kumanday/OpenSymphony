@@ -145,8 +145,9 @@ If readiness is not achieved, fail the attach attempt and surface a transport er
 Current repository implementation:
 
 - `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until a `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable events before readiness
+- `opensymphony-openhands::OpenHandsClient::attach_runtime_stream` performs the full attach sequence: initial REST sync, WebSocket connect, readiness barrier, and post-ready reconcile before returning a live `RuntimeEventStream`
 - `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
-- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness and reconcile path
+- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, and reconcile path
 
 ## 6. Event cache and reconciliation
 
@@ -181,8 +182,9 @@ The reconcile pass should:
 Current repository implementation:
 
 - `OpenHandsClient::search_all_events` paginates until `next_page_id` is absent
-- `EventCache` deduplicates by event ID and inserts by timestamp order
-- the contract suite includes a multi-page reconciliation test and an out-of-order insertion test
+- `EventCache` deduplicates by event ID, inserts by timestamp order, and can return the newly merged events from reconcile or reconnect passes
+- `RuntimeEventStream` preserves one cache across reconnect cycles and replays ordered state updates into the state mirror after late arrivals
+- the contract suite includes multi-page reconciliation, out-of-order insertion, and reconnect-recovery tests
 
 ## 6.4 Conversation state mirror
 
@@ -197,6 +199,13 @@ Wire-level compatibility note:
 
 - the pinned source may emit both full-state snapshots and single-key state updates
 - the Rust client should support both without depending on undocumented fields leaking into orchestrator code
+
+Current repository implementation:
+
+- `KnownEvent` now distinguishes `ConversationStateUpdateEvent`, `LLMCompletionLogEvent`, `ConversationErrorEvent`, and `UnknownEvent`
+- unknown event kinds retain raw JSON in the event journal instead of failing the stream
+- `ConversationStateMirror::rebuild_from` replays the timestamp-ordered cache so late state updates do not regress terminal detection
+- `ConversationStateMirror::terminal_status` provides the current finished/error/stuck classification used by the probe and future workers
 
 ## 7. Run lifecycle over REST plus WebSocket
 
@@ -263,6 +272,12 @@ On reconnect:
 
 If reconnection exhausts policy limits or the worker deadline, fail the worker and let the orchestrator schedule retry.
 
+Current repository implementation:
+
+- `RuntimeStreamConfig` carries readiness timeout, bounded exponential backoff, and max reconnect attempts
+- `RuntimeEventStream::next_event` reconnects on both clean socket close and transport resets, then re-runs readiness plus reconcile before resuming
+- `opensymphony-testkit` can now force live socket drops so reconnect coverage is deterministic in CI
+
 ## 8.3 Decode failures
 
 A single malformed or unknown event must not kill the stream unless the connection itself is corrupted.
@@ -312,6 +327,12 @@ trait RuntimeEventStream {
     async fn close(&mut self) -> Result<()>;
 }
 ```
+
+Current repository implementation:
+
+- `OpenHandsClient::attach_runtime_stream(conversation_id, RuntimeStreamConfig)` returns a live `RuntimeEventStream`
+- `RuntimeEventStream` currently exposes `ready_event`, `event_cache`, `state_mirror`, `next_event`, and `close`
+- `OpenHandsClient::wait_for_readiness` remains available as the narrow readiness helper used by lower-level tests and diagnostics
 
 ## 11. Relationship to Symphony worker state
 

@@ -101,7 +101,7 @@ Local MVP work starts with supervised mode, but the trait boundary must support 
 Current repository implementation:
 
 - `tools/openhands-server/pyproject.toml` pins the local server environment and `tools/openhands-server/run-local.sh` starts it via `uv`
-- `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
+- `opensymphony-openhands` currently implements the typed conversation create, get, send-message, run, paginated event search, readiness probe, and `RuntimeEventStream` attach/reconcile/reconnect surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
 
@@ -286,7 +286,7 @@ Current repository implementation:
 - REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape
 - `OpenHandsError` now maps invalid config, transport failures, HTTP status failures, protocol failures, and WebSocket failures into stable runtime categories without exposing `reqwest::Error` or `http::StatusCode`
 - `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, and non-readiness frames before the first state update
-- the doctor probe now exercises a real `POST /events` plus `POST /run` path and only reports the runtime healthy after a successful terminal `execution_status` of `finished`
+- the doctor probe now runs through `RuntimeEventStream`, exercises a real `POST /events` plus `POST /run` path, and only reports the runtime healthy after the attached stream reaches a successful terminal `execution_status` of `finished`
 - failure-only probe streams such as `ConversationErrorEvent` or terminal `execution_status` values like `error` and `stuck` are treated as unhealthy instead of silently passing
 
 Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
