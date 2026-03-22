@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use crate::{WorkflowDefinition, WorkflowFrontMatter, error::WorkflowLoadError};
+use crate::{error::WorkflowLoadError, WorkflowDefinition, WorkflowFrontMatter};
 
 pub(crate) fn load_workflow_from_path(
     path: &Path,
