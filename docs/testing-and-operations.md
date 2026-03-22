@@ -99,6 +99,7 @@ Current implementation:
 - retry failed first-time `after_create` hooks on the next `ensure`
 - hook timeout
 - hook stderr capture
+- avoid login-shell startup files when launching Unix hooks
 - reject symlink-based `cwd` escapes for hooks
 - cleanup on terminal issue state
 

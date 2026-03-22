@@ -133,6 +133,7 @@ Use for:
 - Hooks execute inside the issue workspace unless explicitly documented otherwise.
 - Any explicit hook `cwd` override must still resolve inside the same issue workspace.
 - Containment checks for explicit hook `cwd` overrides should use canonicalized paths so symlinked subdirectories cannot escape the workspace.
+- Unix hook commands should run via a non-login `sh -c` shell so host profile startup files cannot change `cwd` or fail the hook before the configured command runs.
 - Hook timeouts use the configured `hooks.timeout_ms`.
 - Hook failures are categorized and surfaced with issue context.
 - `after_run` and `before_remove` are best effort by default.
