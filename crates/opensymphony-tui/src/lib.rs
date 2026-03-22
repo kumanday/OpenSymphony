@@ -409,7 +409,6 @@ impl BridgeMailbox {
 
     fn push_snapshot(&mut self, snapshot: SnapshotEnvelope) {
         self.latest_bootstrap_snapshot = None;
-        self.latest_connection_loss = None;
         self.latest_snapshot = Some(Box::new(snapshot));
     }
 
@@ -418,6 +417,10 @@ impl BridgeMailbox {
     }
 
     fn take_action(&mut self) -> Option<TuiAction> {
+        if let Some(reason) = self.latest_connection_loss.take() {
+            return Some(TuiAction::ConnectionLost(reason));
+        }
+
         if let Some(snapshot) = self.latest_snapshot.take() {
             return Some(TuiAction::SnapshotReceived(snapshot));
         }
@@ -426,9 +429,7 @@ impl BridgeMailbox {
             return Some(TuiAction::BootstrapSnapshotReceived(snapshot));
         }
 
-        self.latest_connection_loss
-            .take()
-            .map(TuiAction::ConnectionLost)
+        None
     }
 }
 
@@ -494,7 +495,6 @@ struct OperatorApp {
     bridge: Arc<Mutex<BridgeMailbox>>,
     exit_after: Option<Duration>,
     started_at: Instant,
-    observed_live_stream: bool,
     scripted_exit: Arc<Mutex<ScriptedExitOutcome>>,
 }
 
@@ -509,7 +509,6 @@ impl OperatorApp {
             bridge,
             exit_after,
             started_at: Instant::now(),
-            observed_live_stream: false,
             scripted_exit,
         }
     }
@@ -520,15 +519,16 @@ impl OperatorApp {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         while let Some(action) = bridge.take_action() {
+            let stop_after_render = matches!(action, TuiAction::ConnectionLost(_));
             self.state.reduce(action);
-            if self.state.connection == ConnectionState::Live {
-                self.observed_live_stream = true;
+            if stop_after_render {
+                break;
             }
         }
     }
 
     fn record_scripted_exit(&self) {
-        let outcome = if self.observed_live_stream {
+        let outcome = if self.state.connection == ConnectionState::Live {
             ScriptedExitOutcome::Succeeded
         } else {
             ScriptedExitOutcome::Failed(format!("last status: {}", self.state.status_line))
@@ -1019,10 +1019,9 @@ mod tests {
     fn keeps_latest_snapshot_visible_across_disconnects() {
         let mut mailbox = BridgeMailbox::default();
         let latest = fixture(5);
-        mailbox.push_snapshot(latest.clone());
-        mailbox.push_connection_loss("stream closed".to_owned());
-
         let mut state = TuiState::default();
+        state.reduce(super::TuiAction::SnapshotReceived(Box::new(latest.clone())));
+        mailbox.push_connection_loss("stream closed".to_owned());
         while let Some(action) = mailbox.take_action() {
             state.reduce(action);
         }
@@ -1031,6 +1030,63 @@ mod tests {
         assert_eq!(
             state.connection,
             ConnectionState::Reconnecting("stream closed".to_owned())
+        );
+    }
+
+    #[test]
+    fn queued_connection_loss_is_rendered_before_recovery_snapshot() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let scripted_exit = Arc::new(Mutex::new(ScriptedExitOutcome::Pending));
+        let mut app = OperatorApp::new(
+            Arc::clone(&bridge),
+            Some(Duration::from_millis(250)),
+            Arc::clone(&scripted_exit),
+        );
+
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_snapshot(fixture(1));
+        }
+        app.drain_bridge();
+        assert_eq!(app.state.connection, ConnectionState::Live);
+        assert_eq!(
+            app.state
+                .latest_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.snapshot.issues.len()),
+            Some(1)
+        );
+
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_connection_loss("stream closed".to_owned());
+            mailbox.push_snapshot(fixture(2));
+        }
+        app.drain_bridge();
+        assert_eq!(
+            app.state.connection,
+            ConnectionState::Reconnecting("stream closed".to_owned())
+        );
+        assert_eq!(
+            app.state
+                .latest_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.snapshot.issues.len()),
+            Some(1)
+        );
+
+        app.drain_bridge();
+        assert_eq!(app.state.connection, ConnectionState::Live);
+        assert_eq!(
+            app.state
+                .latest_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.snapshot.issues.len()),
+            Some(2)
         );
     }
 
@@ -1087,6 +1143,44 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             ScriptedExitOutcome::Succeeded
+        );
+    }
+
+    #[test]
+    fn scripted_exit_fails_after_live_stream_falls_back_to_reconnecting() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let scripted_exit = Arc::new(Mutex::new(ScriptedExitOutcome::Pending));
+        let mut app = OperatorApp::new(
+            Arc::clone(&bridge),
+            Some(Duration::from_millis(250)),
+            Arc::clone(&scripted_exit),
+        );
+
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_snapshot(fixture(1));
+        }
+        app.drain_bridge();
+        assert_eq!(app.state.connection, ConnectionState::Live);
+
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_connection_loss("stream closed".to_owned());
+        }
+        app.drain_bridge();
+        app.record_scripted_exit();
+
+        assert_eq!(
+            *scripted_exit
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ScriptedExitOutcome::Failed(
+                "last status: reconnecting after: stream closed".to_owned()
+            )
         );
     }
 

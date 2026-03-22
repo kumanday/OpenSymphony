@@ -220,10 +220,11 @@ Current validation commands for the implemented observability slice:
 - `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
 - `curl http://127.0.0.1:4010/healthz`
 
-The scripted `tui --exit-after-ms` smoke path now exits `0` only after the
-operator has observed a real streamed `live control-plane stream` state. If
-the control plane never becomes live, the command exits non-zero instead of
-reporting a false-positive healthy attach.
+The scripted `tui --exit-after-ms` smoke path now exits `0` only when the
+final reduced control-plane state is still a real streamed
+`live control-plane stream` state. If the control plane never becomes live,
+or briefly becomes live before falling back to reconnecting again, the command
+exits non-zero instead of reporting a false-positive healthy attach.
 
 The rendered TUI header also carries the reducer-owned control-plane status
 text so reconnect and attach state remain visible even while the operator is
@@ -239,7 +240,8 @@ has actually begun delivering updates. Also confirm that a hung
 that a never-established `/api/v1/events` attach times out back into reconnect,
 that an idle `/api/v1/events` read also flips the bridge into reconnecting
 while the event-source retry stays in flight, that a later blackholed reopen
-is still bounded by the attach timeout, and
+is still bounded by the attach timeout, that a queued reconnect plus recovery
+snapshot still renders one reconnecting frame before returning to live, and
 that additive `recent_events[].kind` values still decode into a usable snapshot
 for the UI. For scripted smoke coverage, also confirm that an unreachable
 control plane causes `opensymphony tui --exit-after-ms ...` to exit non-zero.
