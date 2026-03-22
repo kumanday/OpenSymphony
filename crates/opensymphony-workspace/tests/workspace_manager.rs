@@ -107,6 +107,24 @@ fn foreign_issue_manifest_json(workspace_path: &std::path::Path, key: &str) -> S
     .expect("foreign issue manifest JSON should serialize")
 }
 
+#[cfg(unix)]
+fn shell_quote(path: &std::path::Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+fn after_create_bootstrap_failure_command(outside_dir: &std::path::Path) -> String {
+    format!(
+        "if [ -f after_create_success.txt ]; then echo reran > after_create_reran.txt; exit 41; fi; echo success > after_create_success.txt; ln -s {} .opensymphony",
+        shell_quote(outside_dir)
+    )
+}
+
+#[cfg(unix)]
+fn timeout_with_background_child_command() -> &'static str {
+    "(sleep 1; echo descendant > .opensymphony/logs/descendant.txt) & echo $! > .opensymphony/logs/descendant.pid; sleep 5"
+}
+
 #[tokio::test]
 async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
@@ -348,6 +366,71 @@ async fn ensure_retries_after_create_when_copied_malformed_issue_manifest_preexi
     );
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn ensure_does_not_rerun_after_create_after_post_hook_bootstrap_failure() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let outside_dir = temp_dir.path().join("outside");
+    tokio::fs::create_dir_all(&outside_dir)
+        .await
+        .expect("outside dir should exist");
+
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            after_create: Some(HookDefinition::shell(
+                after_create_bootstrap_failure_command(&outside_dir),
+            )),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-263-after-create-receipt");
+
+    let first_error = manager
+        .ensure(&issue)
+        .await
+        .expect_err("first ensure should fail after after_create succeeds");
+    assert!(matches!(
+        first_error,
+        WorkspaceError::ManagedPathSymlink { .. }
+    ));
+
+    let workspace_path = manager
+        .workspace_path_for(&issue.identifier)
+        .expect("workspace path should resolve");
+    assert!(
+        tokio::fs::try_exists(workspace_path.join(".opensymphony.after_create.json"))
+            .await
+            .expect("after_create receipt lookup should succeed")
+    );
+
+    tokio::fs::remove_file(workspace_path.join(".opensymphony"))
+        .await
+        .expect("symlinked metadata dir should be removable");
+
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("second ensure should resume bootstrap without rerunning after_create");
+
+    assert!(!ensured.created);
+    assert!(
+        !tokio::fs::try_exists(workspace_path.join("after_create_reran.txt"))
+            .await
+            .expect("rerun marker lookup should succeed")
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(workspace_path.join("after_create_success.txt"))
+            .await
+            .expect("first after_create run marker should exist")
+            .trim(),
+        "success"
+    );
+}
+
 #[tokio::test]
 async fn ensure_rejects_workspace_reuse_for_colliding_sanitized_key() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
@@ -470,6 +553,54 @@ async fn before_run_timeout_is_recorded_and_returned() {
     assert_eq!(persisted.status, RunStatus::PreparationFailed);
     assert_eq!(persisted.hooks.len(), 1);
     assert_eq!(persisted.hooks[0].status, HookExecutionStatus::TimedOut);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn before_run_timeout_kills_spawned_descendants() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            before_run: Some(HookDefinition::shell(
+                timeout_with_background_child_command(),
+            )),
+            timeout: Duration::from_millis(100),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-263-timeout-tree"))
+        .await
+        .expect("workspace should exist");
+
+    let error = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-timeout-tree", 1))
+        .await
+        .expect_err("timeout should fail required hook");
+    assert!(matches!(
+        error,
+        WorkspaceError::HookTimedOut {
+            hook: HookKind::BeforeRun,
+            ..
+        }
+    ));
+
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+
+    assert!(
+        tokio::fs::try_exists(ensured.handle.logs_dir().join("descendant.pid"))
+            .await
+            .expect("descendant pid lookup should succeed")
+    );
+    assert!(
+        !tokio::fs::try_exists(ensured.handle.logs_dir().join("descendant.txt"))
+            .await
+            .expect("descendant marker lookup should succeed")
+    );
 }
 
 #[tokio::test]

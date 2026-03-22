@@ -127,6 +127,10 @@ impl WorkspaceHandle {
         self.workspace_path.join(".opensymphony")
     }
 
+    pub(crate) fn after_create_receipt_path(&self) -> PathBuf {
+        self.workspace_path.join(".opensymphony.after_create.json")
+    }
+
     pub fn issue_manifest_path(&self) -> PathBuf {
         self.metadata_dir().join("issue.json")
     }
@@ -157,6 +161,27 @@ impl WorkspaceHandle {
 
     pub fn runs_dir(&self) -> PathBuf {
         self.metadata_dir().join("runs")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct AfterCreateBootstrapReceipt {
+    pub issue_id: String,
+    pub identifier: String,
+    pub sanitized_workspace_key: String,
+    pub workspace_path: PathBuf,
+    pub completed_at: DateTime<Utc>,
+}
+
+impl AfterCreateBootstrapReceipt {
+    pub(crate) fn new(workspace: &WorkspaceHandle, issue: &IssueDescriptor) -> Self {
+        Self {
+            issue_id: issue.issue_id.clone(),
+            identifier: issue.identifier.clone(),
+            sanitized_workspace_key: workspace.workspace_key().to_string(),
+            workspace_path: workspace.workspace_path().to_path_buf(),
+            completed_at: Utc::now(),
+        }
     }
 }
 

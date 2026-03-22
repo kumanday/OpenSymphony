@@ -1,14 +1,16 @@
-use std::{path::Path, process::Stdio};
+use std::{io, path::Path, process::Stdio};
 
 use chrono::Utc;
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::{
     fs,
+    io::{AsyncRead, AsyncReadExt},
     process::Command,
     time::{timeout, Instant},
 };
 
 use crate::{
+    models::AfterCreateBootstrapReceipt,
     paths::{normalize_absolute_path, resolve_path_within_root, sanitize_workspace_key},
     CleanupDecision, CleanupOutcome, EnsureWorkspaceResult, HookDefinition, HookExecutionRecord,
     HookExecutionStatus, HookKind, IssueDescriptor, IssueLifecycleState, IssueManifest,
@@ -30,6 +32,31 @@ enum ExistingIssueManifestState {
     Owned(IssueManifest),
     ForeignArtifact,
     Conflict(IssueManifest),
+}
+
+enum ExistingReceiptState {
+    Missing,
+    Owned,
+    ForeignArtifact,
+    Conflict(AfterCreateBootstrapReceipt),
+}
+
+enum ExistingWorkspaceState {
+    Missing,
+    Owned,
+    AfterCreateCompleted,
+    ForeignArtifact,
+    Conflict(WorkspaceOwnershipClaim),
+}
+
+struct WorkspaceOwnershipClaim {
+    issue_id: String,
+    identifier: String,
+}
+
+enum HookCommandOutput {
+    Completed(std::process::Output),
+    TimedOut { stdout: String, stderr: String },
 }
 
 impl WorkspaceManager {
@@ -72,24 +99,32 @@ impl WorkspaceManager {
             workspace_key,
             canonical_workspace,
         );
-        let existing_manifest = self.inspect_issue_manifest_state(issue, &handle).await?;
-        if let ExistingIssueManifestState::Conflict(manifest) = &existing_manifest {
+        let existing_state = self.inspect_workspace_state(issue, &handle).await?;
+        if let ExistingWorkspaceState::Conflict(claim) = &existing_state {
             return Err(WorkspaceError::WorkspaceOwnershipConflict {
                 details: Box::new(WorkspaceOwnershipConflictDetails {
                     workspace: handle.workspace_path().to_path_buf(),
                     workspace_key: handle.workspace_key().to_string(),
-                    existing_issue_id: manifest.issue_id.clone(),
-                    existing_identifier: manifest.identifier.clone(),
+                    existing_issue_id: claim.issue_id.clone(),
+                    existing_identifier: claim.identifier.clone(),
                     requested_issue_id: issue.issue_id.clone(),
                     requested_identifier: issue.identifier.clone(),
                 }),
             });
         }
 
-        let created = !matches!(existing_manifest, ExistingIssueManifestState::Owned(_));
+        let created = matches!(
+            existing_state,
+            ExistingWorkspaceState::Missing | ExistingWorkspaceState::ForeignArtifact
+        );
         let after_create = if created {
             match self.execute_hook(HookKind::AfterCreate, &handle).await {
-                Ok(record) => record,
+                Ok(record) => {
+                    if record.is_some() {
+                        self.write_after_create_receipt(issue, &handle).await?;
+                    }
+                    record
+                }
                 Err(failure) => return Err(failure.error),
             }
         } else {
@@ -291,6 +326,16 @@ impl WorkspaceManager {
         Ok(manifest)
     }
 
+    async fn write_after_create_receipt(
+        &self,
+        issue: &IssueDescriptor,
+        workspace: &WorkspaceHandle,
+    ) -> Result<(), WorkspaceError> {
+        let receipt = AfterCreateBootstrapReceipt::new(workspace, issue);
+        self.write_manifest(workspace, &workspace.after_create_receipt_path(), &receipt)
+            .await
+    }
+
     async fn bootstrap_workspace_layout(
         &self,
         workspace: &WorkspaceHandle,
@@ -315,9 +360,7 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
     ) -> Result<ExistingIssueManifestState, WorkspaceError> {
         let path = workspace.issue_manifest_path();
-        let path = self
-            .validate_managed_metadata_path(workspace, &path)
-            .await?;
+        let path = self.validate_workspace_owned_path(workspace, &path).await?;
         let raw = match fs::read_to_string(&path).await {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -339,6 +382,73 @@ impl WorkspaceManager {
         }
     }
 
+    async fn inspect_after_create_receipt_state(
+        &self,
+        issue: &IssueDescriptor,
+        workspace: &WorkspaceHandle,
+    ) -> Result<ExistingReceiptState, WorkspaceError> {
+        let path = workspace.after_create_receipt_path();
+        let path = self.validate_workspace_owned_path(workspace, &path).await?;
+        let raw = match fs::read_to_string(&path).await {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ExistingReceiptState::Missing);
+            }
+            Err(error) => {
+                return Err(WorkspaceError::ReadManifest {
+                    path,
+                    source: error,
+                });
+            }
+        };
+
+        match serde_json::from_str::<AfterCreateBootstrapReceipt>(&raw) {
+            Ok(receipt) => Ok(classify_after_create_receipt_ownership(
+                issue, workspace, receipt,
+            )),
+            Err(_) => Ok(ExistingReceiptState::ForeignArtifact),
+        }
+    }
+
+    async fn inspect_workspace_state(
+        &self,
+        issue: &IssueDescriptor,
+        workspace: &WorkspaceHandle,
+    ) -> Result<ExistingWorkspaceState, WorkspaceError> {
+        let issue_manifest_state = self.inspect_issue_manifest_state(issue, workspace).await?;
+        let issue_manifest_is_foreign = matches!(
+            issue_manifest_state,
+            ExistingIssueManifestState::ForeignArtifact
+        );
+        match issue_manifest_state {
+            ExistingIssueManifestState::Owned(_) => return Ok(ExistingWorkspaceState::Owned),
+            ExistingIssueManifestState::Conflict(manifest) => {
+                return Ok(ExistingWorkspaceState::Conflict(
+                    ownership_claim_from_issue_manifest(manifest),
+                ));
+            }
+            ExistingIssueManifestState::Missing | ExistingIssueManifestState::ForeignArtifact => {}
+        }
+
+        let receipt_state = self
+            .inspect_after_create_receipt_state(issue, workspace)
+            .await?;
+        match receipt_state {
+            ExistingReceiptState::Owned => Ok(ExistingWorkspaceState::AfterCreateCompleted),
+            ExistingReceiptState::Conflict(receipt) => Ok(ExistingWorkspaceState::Conflict(
+                ownership_claim_from_after_create_receipt(receipt),
+            )),
+            ExistingReceiptState::ForeignArtifact => Ok(ExistingWorkspaceState::ForeignArtifact),
+            ExistingReceiptState::Missing => {
+                if issue_manifest_is_foreign {
+                    Ok(ExistingWorkspaceState::ForeignArtifact)
+                } else {
+                    Ok(ExistingWorkspaceState::Missing)
+                }
+            }
+        }
+    }
+
     async fn execute_hook(
         &self,
         kind: HookKind,
@@ -349,6 +459,7 @@ impl WorkspaceManager {
         };
         let cwd = self.resolve_hook_cwd(workspace, kind, hook).await?;
         let mut command = build_shell_command(&hook.command);
+        configure_hook_command(&mut command);
         command
             .current_dir(&cwd)
             .stdout(Stdio::piped())
@@ -357,12 +468,35 @@ impl WorkspaceManager {
 
         let started_at = Utc::now();
         let started = Instant::now();
-        let output = timeout(self.config.hooks.timeout, command.output()).await;
+        let output = run_hook_command(command, self.config.hooks.timeout)
+            .await
+            .map_err(|error| {
+                Box::new(HookFailure {
+                    error: WorkspaceError::LaunchHook {
+                        hook: kind,
+                        cwd: cwd.clone(),
+                        source: error,
+                    },
+                    record: HookExecutionRecord {
+                        kind,
+                        command: hook.command.clone(),
+                        cwd: cwd.clone(),
+                        best_effort: !kind.is_required(),
+                        status: HookExecutionStatus::Failed,
+                        started_at,
+                        finished_at: Utc::now(),
+                        duration_ms: started.elapsed().as_millis() as u64,
+                        exit_code: None,
+                        stdout: String::new(),
+                        stderr: String::new(),
+                    },
+                })
+            })?;
         let finished_at = Utc::now();
         let duration_ms = started.elapsed().as_millis() as u64;
 
         match output {
-            Ok(Ok(output)) => {
+            HookCommandOutput::Completed(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let exit_code = output.status.code();
@@ -407,27 +541,7 @@ impl WorkspaceManager {
                     }))
                 }
             }
-            Ok(Err(error)) => Err(Box::new(HookFailure {
-                error: WorkspaceError::LaunchHook {
-                    hook: kind,
-                    cwd: cwd.clone(),
-                    source: error,
-                },
-                record: HookExecutionRecord {
-                    kind,
-                    command: hook.command.clone(),
-                    cwd,
-                    best_effort: !kind.is_required(),
-                    status: HookExecutionStatus::Failed,
-                    started_at,
-                    finished_at,
-                    duration_ms,
-                    exit_code: None,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                },
-            })),
-            Err(_) => Err(Box::new(HookFailure {
+            HookCommandOutput::TimedOut { stdout, stderr } => Err(Box::new(HookFailure {
                 error: WorkspaceError::HookTimedOut {
                     hook: kind,
                     command: hook.command.clone(),
@@ -443,8 +557,8 @@ impl WorkspaceManager {
                     finished_at,
                     duration_ms,
                     exit_code: None,
-                    stdout: String::new(),
-                    stderr: String::new(),
+                    stdout,
+                    stderr,
                 },
             })),
         }
@@ -576,10 +690,9 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
         path: &Path,
     ) -> Result<(), WorkspaceError> {
-        let path = self.validate_managed_metadata_path(workspace, path).await?;
+        let path = self.validate_workspace_owned_path(workspace, path).await?;
         self.create_directory(&path).await?;
-        self.validate_managed_metadata_path(workspace, &path)
-            .await?;
+        self.validate_workspace_owned_path(workspace, &path).await?;
         Ok(())
     }
 
@@ -616,7 +729,7 @@ impl WorkspaceManager {
     where
         T: DeserializeOwned,
     {
-        let path = self.validate_managed_metadata_path(workspace, path).await?;
+        let path = self.validate_workspace_owned_path(workspace, path).await?;
         let raw = match fs::read_to_string(&path).await {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -648,7 +761,7 @@ impl WorkspaceManager {
         if let Some(parent) = path.parent() {
             self.create_managed_directory(workspace, parent).await?;
         }
-        let path = self.validate_managed_metadata_path(workspace, path).await?;
+        let path = self.validate_workspace_owned_path(workspace, path).await?;
 
         let payload = serde_json::to_vec_pretty(manifest).map_err(|error| {
             WorkspaceError::EncodeManifest {
@@ -665,7 +778,7 @@ impl WorkspaceManager {
             })
     }
 
-    async fn validate_managed_metadata_path(
+    async fn validate_workspace_owned_path(
         &self,
         workspace: &WorkspaceHandle,
         path: &Path,
@@ -675,7 +788,7 @@ impl WorkspaceManager {
 
         let relative = normalized
             .strip_prefix(workspace.workspace_path())
-            .expect("managed metadata paths should remain within the workspace");
+            .expect("managed workspace paths should remain within the workspace");
         let mut current = workspace.workspace_path().to_path_buf();
 
         for component in relative.components() {
@@ -702,6 +815,130 @@ impl WorkspaceManager {
     }
 }
 
+async fn run_hook_command(
+    mut command: Command,
+    timeout_duration: std::time::Duration,
+) -> io::Result<HookCommandOutput> {
+    let mut child = command.spawn()?;
+    let process_id = child.id();
+    let stdout_task = tokio::spawn(read_child_pipe(child.stdout.take()));
+    let stderr_task = tokio::spawn(read_child_pipe(child.stderr.take()));
+
+    match timeout(timeout_duration, child.wait()).await {
+        Ok(status) => {
+            let status = status?;
+            let stdout = join_child_pipe(stdout_task).await?;
+            let stderr = join_child_pipe(stderr_task).await?;
+
+            Ok(HookCommandOutput::Completed(std::process::Output {
+                status,
+                stdout,
+                stderr,
+            }))
+        }
+        Err(_) => {
+            terminate_hook_process_tree(&mut child, process_id).await?;
+            let _ = child.wait().await?;
+            let stdout = join_child_pipe(stdout_task).await?;
+            let stderr = join_child_pipe(stderr_task).await?;
+
+            Ok(HookCommandOutput::TimedOut {
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+            })
+        }
+    }
+}
+
+async fn read_child_pipe<R>(pipe: Option<R>) -> io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let Some(mut pipe) = pipe else {
+        return Ok(Vec::new());
+    };
+    let mut buffer = Vec::new();
+    pipe.read_to_end(&mut buffer).await?;
+    Ok(buffer)
+}
+
+async fn join_child_pipe(
+    task: tokio::task::JoinHandle<io::Result<Vec<u8>>>,
+) -> io::Result<Vec<u8>> {
+    match task.await {
+        Ok(result) => result,
+        Err(error) => Err(io::Error::other(error)),
+    }
+}
+
+#[cfg(unix)]
+fn configure_hook_command(command: &mut Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_hook_command(_command: &mut Command) {}
+
+#[cfg(unix)]
+async fn terminate_hook_process_tree(
+    _child: &mut tokio::process::Child,
+    process_id: Option<u32>,
+) -> io::Result<()> {
+    if let Some(process_id) = process_id {
+        let result = unsafe { libc::kill(-(process_id as i32), libc::SIGKILL) };
+        if result != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(error);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn terminate_hook_process_tree(
+    child: &mut tokio::process::Child,
+    process_id: Option<u32>,
+) -> io::Result<()> {
+    let Some(process_id) = process_id else {
+        return child.kill().await;
+    };
+
+    let status = Command::new("taskkill")
+        .arg("/T")
+        .arg("/F")
+        .arg("/PID")
+        .arg(process_id.to_string())
+        .status()
+        .await?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "taskkill /T /F /PID {process_id} exited with {status}"
+        )))
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn terminate_hook_process_tree(
+    child: &mut tokio::process::Child,
+    _process_id: Option<u32>,
+) -> io::Result<()> {
+    child.kill().await
+}
+
 fn classify_issue_manifest_ownership(
     issue: &IssueDescriptor,
     workspace: &WorkspaceHandle,
@@ -718,14 +955,69 @@ fn classify_issue_manifest_ownership(
     }
 }
 
+fn classify_after_create_receipt_ownership(
+    issue: &IssueDescriptor,
+    workspace: &WorkspaceHandle,
+    receipt: AfterCreateBootstrapReceipt,
+) -> ExistingReceiptState {
+    if !after_create_receipt_claims_workspace(workspace, &receipt) {
+        return ExistingReceiptState::ForeignArtifact;
+    }
+
+    if receipt.issue_id == issue.issue_id && receipt.identifier == issue.identifier {
+        ExistingReceiptState::Owned
+    } else {
+        ExistingReceiptState::Conflict(receipt)
+    }
+}
+
 fn issue_manifest_claims_workspace(workspace: &WorkspaceHandle, manifest: &IssueManifest) -> bool {
-    if manifest.sanitized_workspace_key != workspace.workspace_key() {
+    workspace_path_claim_matches(
+        workspace,
+        &manifest.sanitized_workspace_key,
+        &manifest.workspace_path,
+    )
+}
+
+fn after_create_receipt_claims_workspace(
+    workspace: &WorkspaceHandle,
+    receipt: &AfterCreateBootstrapReceipt,
+) -> bool {
+    workspace_path_claim_matches(
+        workspace,
+        &receipt.sanitized_workspace_key,
+        &receipt.workspace_path,
+    )
+}
+
+fn workspace_path_claim_matches(
+    workspace: &WorkspaceHandle,
+    claimed_workspace_key: &str,
+    claimed_workspace_path: &Path,
+) -> bool {
+    if claimed_workspace_key != workspace.workspace_key() {
         return false;
     }
 
-    match normalize_absolute_path(&manifest.workspace_path) {
+    match normalize_absolute_path(claimed_workspace_path) {
         Ok(path) => path == workspace.workspace_path(),
         Err(_) => false,
+    }
+}
+
+fn ownership_claim_from_issue_manifest(manifest: IssueManifest) -> WorkspaceOwnershipClaim {
+    WorkspaceOwnershipClaim {
+        issue_id: manifest.issue_id,
+        identifier: manifest.identifier,
+    }
+}
+
+fn ownership_claim_from_after_create_receipt(
+    receipt: AfterCreateBootstrapReceipt,
+) -> WorkspaceOwnershipClaim {
+    WorkspaceOwnershipClaim {
+        issue_id: receipt.issue_id,
+        identifier: receipt.identifier,
     }
 }
 
