@@ -145,7 +145,9 @@ Recommended crate boundaries:
   - candidate fetching
   - state reconciliation
 - `opensymphony-linear-mcp`
-  - stdio MCP server for agent-side ticket writes
+  - line-delimited stdio MCP server for agent-side ticket writes
+  - `initialize`, `ping`, `tools/list`, and `tools/call`
+  - minimal Linear tool surface backed by direct GraphQL mutations
 - `opensymphony-openhands`
   - repo-local tooling resolution
   - local server supervisor
@@ -183,6 +185,11 @@ Local MVP process graph:
   - owns orchestrator and control plane
   - may spawn:
     - `bash tools/openhands-server/run-local.sh`
+- OpenHands MCP child processes
+  - may spawn:
+    - `opensymphony linear-mcp --stdio`
+  - write ticket comments, transitions, and links directly to Linear
+  - do not participate in scheduler correctness
 - `opensymphony tui`
   - separate process
   - reads control-plane APIs only

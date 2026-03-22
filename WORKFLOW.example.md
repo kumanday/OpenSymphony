@@ -84,6 +84,8 @@ openhands:
   mcp:
     stdio_servers:
       - name: linear
+        # Exposes linear_get_issue, linear_comment_issue, linear_transition_issue,
+        # linear_link_pr, and linear_list_project_states.
         command:
           - opensymphony
           - linear-mcp

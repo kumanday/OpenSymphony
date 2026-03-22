@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+opensymphony-linear-mcp = { path = "../opensymphony-linear-mcp" }
 opensymphony-openhands = { path = "../opensymphony-openhands" }
 serde.workspace = true
 serde_yaml.workspace = true
@@ -24,5 +25,7 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
 opensymphony-testkit = { path = "../opensymphony-testkit" }
+serde_json.workspace = true
 tempfile.workspace = true

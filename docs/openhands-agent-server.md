@@ -327,7 +327,18 @@ Why:
 - avoids building and maintaining a custom Python runtime image too early
 - cleaner path to future hosted mode
 
-For local MVP, the planned MCP surface is a small Linear tool server launched via stdio.
+For local MVP, the implemented MCP surface is a small Linear tool server launched via stdio:
+
+- `opensymphony linear-mcp --stdio`
+- line-delimited JSON-RPC over stdio
+- tool set:
+  - `linear_get_issue`
+  - `linear_comment_issue`
+  - `linear_transition_issue`
+  - `linear_link_pr`
+  - `linear_list_project_states`
+
+`WORKFLOW.example.md` shows how that process is attached to OpenHands conversations through the `mcp.stdio_servers` block.
 
 ## 12. Hosted-mode implications kept in mind during MVP
 

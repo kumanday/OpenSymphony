@@ -6,6 +6,7 @@ use std::{
 };
 
 use clap::{Args, Parser, Subcommand};
+use opensymphony_linear_mcp::run_stdio_server as run_linear_mcp_stdio_server;
 use opensymphony_openhands::{
     ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
     SupervisedServerConfig, SupervisorConfig, TransportConfig,
@@ -28,7 +29,7 @@ pub struct Cli {
 enum Command {
     Daemon,
     Tui,
-    LinearMcp,
+    LinearMcp(LinearMcpArgs),
     Doctor(DoctorArgs),
 }
 
@@ -38,6 +39,12 @@ pub struct DoctorArgs {
     config: PathBuf,
     #[arg(long)]
     live_openhands: bool,
+}
+
+#[derive(Args)]
+pub struct LinearMcpArgs {
+    #[arg(long, required = true, help = "Run the Linear MCP server over stdio")]
+    stdio: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,15 +135,24 @@ pub async fn run() -> ExitCode {
             println!("`opensymphony tui` is scaffolded but not implemented in this branch.");
             ExitCode::SUCCESS
         }
-        Command::LinearMcp => {
-            println!("`opensymphony linear-mcp` is scaffolded but not implemented in this branch.");
-            ExitCode::SUCCESS
-        }
+        Command::LinearMcp(args) => run_linear_mcp(args).await,
     }
 }
 
 async fn run_doctor(args: DoctorArgs) -> ExitCode {
     run_doctor_command(args.config, args.live_openhands).await
+}
+
+async fn run_linear_mcp(args: LinearMcpArgs) -> ExitCode {
+    let _ = args.stdio;
+
+    match run_linear_mcp_stdio_server().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("failed to start Linear MCP server: {error}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> ExitCode {

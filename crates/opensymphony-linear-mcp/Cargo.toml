@@ -8,3 +8,16 @@ repository.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+opensymphony-domain = { path = "../opensymphony-domain" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio.workspace = true
