@@ -224,6 +224,12 @@ operator has observed a real streamed `live control-plane stream` state. If
 the control plane never becomes live, the command exits non-zero instead of
 reporting a false-positive healthy attach.
 
+The rendered TUI header also carries the reducer-owned control-plane status
+text so reconnect and attach state remain visible even while the operator is
+focused on another pane. The `/healthz` endpoint reflects the daemon snapshot
+state instead of always returning `ok`, so local smoke checks should confirm
+that degraded or stopped snapshots surface through the endpoint.
+
 When validating reconnect behavior, confirm that a newer post-restart snapshot
 is accepted even if the reducer never saw an explicit `ConnectionLost`, and
 that the TUI does not report `live control-plane stream` until the SSE stream

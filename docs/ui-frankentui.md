@@ -41,7 +41,11 @@ Current implemented local contract:
 - `GET /api/v1/snapshot`
 - `GET /api/v1/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
   - lagged consumers are snapped forward to the latest published sequence instead of replaying stale snapshots out of order
-- `GET /healthz` for daemon liveness
+- `GET /healthz` for daemon liveness, with the returned `status` reflecting the daemon snapshot state (`ok`, `starting`, `degraded`, `stopped`)
+
+The inline header should always surface the reducer-owned control-plane status
+text so operators can see whether the client is still connecting, live on the
+stream, or retrying after a disconnect without changing focus panes.
 
 ### Explicitly out of scope
 
