@@ -550,22 +550,12 @@ fn probe_address(
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
         path, host
     )
-    .map_err(|source| {
-        ProbeAttempt::Fatal(SupervisorError::ProbeIo {
-            base_url: base_url.to_string(),
-            path: path.to_string(),
-            source,
-        })
-    })?;
+    .map_err(|source| transient_probe_error(base_url, path, source))?;
 
     let mut response = String::new();
-    stream.read_to_string(&mut response).map_err(|source| {
-        ProbeAttempt::Fatal(SupervisorError::ProbeIo {
-            base_url: base_url.to_string(),
-            path: path.to_string(),
-            source,
-        })
-    })?;
+    stream
+        .read_to_string(&mut response)
+        .map_err(|source| transient_probe_error(base_url, path, source))?;
 
     let status_line = response.lines().next().unwrap_or_default();
     Ok(status_line.contains(" 200 "))
@@ -595,6 +585,18 @@ fn is_transient_connection_error(error: &std::io::Error) -> bool {
             | std::io::ErrorKind::AddrNotAvailable
             | std::io::ErrorKind::BrokenPipe
     )
+}
+
+fn transient_probe_error(base_url: &str, path: &str, source: std::io::Error) -> ProbeAttempt {
+    if is_transient_connection_error(&source) {
+        ProbeAttempt::Transient
+    } else {
+        ProbeAttempt::Fatal(SupervisorError::ProbeIo {
+            base_url: base_url.to_string(),
+            path: path.to_string(),
+            source,
+        })
+    }
 }
 
 struct HttpEndpoint {
