@@ -273,12 +273,12 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             identifier: "OSYM-402".to_owned(),
             title: "FrankenTUI operator client".to_owned(),
             tracker_state: "In Progress".to_owned(),
-            runtime_state: if step % 2 == 0 {
+            runtime_state: if step.is_multiple_of(2) {
                 IssueRuntimeState::Running
             } else {
                 IssueRuntimeState::Idle
             },
-            last_outcome: if step % 2 == 0 {
+            last_outcome: if step.is_multiple_of(2) {
                 WorkerOutcome::Running
             } else {
                 WorkerOutcome::Unknown

@@ -475,7 +475,8 @@ impl From<Event> for AppMessage {
 
 pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), TuiError> {
     let bridge = BridgeHandle::spawn(base_url);
-    let app = OperatorApp::new(bridge.mailbox(), exit_after);
+    let outcome = Arc::new(Mutex::new(RunOutcome::default()));
+    let app = OperatorApp::new(bridge.mailbox(), exit_after, Arc::clone(&outcome));
     let run_result = App::new(app)
         .screen_mode(ScreenMode::Inline {
             ui_height: INLINE_UI_HEIGHT,
@@ -483,12 +484,25 @@ pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), T
         .run()
         .map_err(TuiError::Runtime);
     let shutdown_result = bridge.shutdown();
+    let timeout_before_live = outcome
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .timeout_before_live
+        .clone();
 
     match (run_result, shutdown_result) {
         (Err(error), _) => Err(error),
         (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Ok(())) => match timeout_before_live {
+            Some(status_line) => Err(TuiError::AttachTimeout(status_line)),
+            None => Ok(()),
+        },
     }
+}
+
+#[derive(Debug, Default)]
+struct RunOutcome {
+    timeout_before_live: Option<String>,
 }
 
 #[derive(Debug)]
@@ -497,15 +511,23 @@ struct OperatorApp {
     bridge: Arc<Mutex<BridgeMailbox>>,
     exit_after: Option<Duration>,
     started_at: Instant,
+    saw_live_stream: bool,
+    outcome: Arc<Mutex<RunOutcome>>,
 }
 
 impl OperatorApp {
-    fn new(bridge: Arc<Mutex<BridgeMailbox>>, exit_after: Option<Duration>) -> Self {
+    fn new(
+        bridge: Arc<Mutex<BridgeMailbox>>,
+        exit_after: Option<Duration>,
+        outcome: Arc<Mutex<RunOutcome>>,
+    ) -> Self {
         Self {
             state: TuiState::default(),
             bridge,
             exit_after,
             started_at: Instant::now(),
+            saw_live_stream: false,
+            outcome,
         }
     }
 
@@ -517,6 +539,7 @@ impl OperatorApp {
         while let Some(action) = bridge.take_action() {
             self.state.reduce(action);
         }
+        self.saw_live_stream |= matches!(self.state.connection, ConnectionState::Live);
     }
 }
 
@@ -669,11 +692,19 @@ impl Model for OperatorApp {
             AppMessage::ToggleTimelineMode => self.state.reduce(TuiAction::ToggleTimelineMode),
             AppMessage::Quit => return Cmd::quit(),
         }
+        self.saw_live_stream |= matches!(self.state.connection, ConnectionState::Live);
 
         if self
             .exit_after
             .is_some_and(|limit| self.started_at.elapsed() >= limit)
         {
+            if !self.saw_live_stream {
+                let mut outcome = self
+                    .outcome
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                outcome.timeout_before_live = Some(self.state.status_line.clone());
+            }
             return Cmd::quit();
         }
 
@@ -700,6 +731,8 @@ pub enum TuiError {
     Runtime(std::io::Error),
     #[error("background control-plane bridge thread panicked during shutdown")]
     BridgeThreadPanicked,
+    #[error("control-plane stream did not become live before exit: {0}")]
+    AttachTimeout(String),
 }
 
 fn handle_bridge_error(bridge: &Arc<Mutex<BridgeMailbox>>, error: &ControlPlaneClientError) {
@@ -1086,10 +1119,11 @@ impl DaemonStateLabel for opensymphony_domain::ControlPlaneDaemonState {
 mod tests {
     use super::{
         display_width, fit, handle_bridge_error, issue_window, section_layout, stacked_body_layout,
-        visible_issue_count, BridgeHandle, BridgeMailbox, ConnectionState, ControlPlaneClientError,
-        OperatorApp, TuiAction, TuiState,
+        visible_issue_count, AppMessage, BridgeHandle, BridgeMailbox, ConnectionState,
+        ControlPlaneClientError, OperatorApp, RunOutcome, TuiAction, TuiState,
     };
     use chrono::{TimeZone, Utc};
+    use ftui::prelude::Model;
     use opensymphony_domain::{
         ControlPlaneAgentServerStatus as AgentServerStatus,
         ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
@@ -1280,7 +1314,8 @@ mod tests {
     #[test]
     fn draining_an_attached_snapshot_never_marks_live_on_the_old_snapshot() {
         let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
-        let mut app = OperatorApp::new(Arc::clone(&bridge), None);
+        let outcome = Arc::new(Mutex::new(RunOutcome::default()));
+        let mut app = OperatorApp::new(Arc::clone(&bridge), None, outcome);
         app.state
             .reduce(TuiAction::SnapshotReceived(Box::new(fixture(4, 1))));
 
@@ -1303,6 +1338,25 @@ mod tests {
             5
         );
         assert_eq!(app.state.status_line, "live control-plane stream");
+    }
+
+    #[test]
+    fn timed_exit_records_a_failure_until_a_live_stream_is_seen() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let outcome = Arc::new(Mutex::new(RunOutcome::default()));
+        let mut app = OperatorApp::new(
+            Arc::clone(&bridge),
+            Some(Duration::ZERO),
+            Arc::clone(&outcome),
+        );
+
+        let _ = app.update(AppMessage::Tick);
+
+        let outcome = outcome.lock().expect("run outcome should stay unlocked");
+        assert_eq!(
+            outcome.timeout_before_live.as_deref(),
+            Some("connecting to control plane")
+        );
     }
 
     #[test]
