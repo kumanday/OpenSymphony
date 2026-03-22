@@ -1,22 +1,20 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
 use opensymphony_openhands::{
-    Conversation, ConversationCreateRequest, EventEnvelope, OpenHandsClient,
-    SearchConversationEventsResponse, SendMessageRequest, TransportConfig,
+    AuthConfig, Conversation, ConversationCreateRequest, EventEnvelope, OpenHandsClient,
+    OpenHandsError, SearchConversationEventsResponse, SendMessageRequest, TransportConfig,
 };
-use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
@@ -33,11 +31,21 @@ async fn wait_for_readiness_ignores_non_state_frames_before_ready_event() {
 }
 
 #[tokio::test]
-async fn session_api_key_authenticates_rest_operations() {
-    let server = TestServer::start(auth_router("secret-token")).await;
-    let mut transport = TransportConfig::new(server.base_url());
-    transport.session_api_key = Some("secret-token".to_string());
-    let client = OpenHandsClient::new(transport);
+async fn query_param_api_key_authenticates_rest_and_websocket_operations() {
+    let server = TestServer::start(auth_router(AuthExpectations {
+        rest: ExpectedAuth::QueryParam {
+            name: "session_api_key".to_string(),
+            value: "secret-token".to_string(),
+        },
+        websocket: ExpectedAuth::QueryParam {
+            name: "session_api_key".to_string(),
+            value: "secret-token".to_string(),
+        },
+    }))
+    .await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()).with_auth(
+        AuthConfig::query_param_api_key("session_api_key", "secret-token"),
+    ));
     let request = ConversationCreateRequest::doctor_probe(
         "/tmp/workspace",
         "/tmp/workspace/.opensymphony/openhands",
@@ -68,6 +76,121 @@ async fn session_api_key_authenticates_rest_operations() {
         .search_all_events(conversation.conversation_id)
         .await
         .expect("search should carry auth");
+    client
+        .wait_for_readiness(conversation.conversation_id, Duration::from_secs(2))
+        .await
+        .expect("websocket readiness should carry query auth");
+}
+
+#[tokio::test]
+async fn header_api_key_with_websocket_query_fallback_authenticates_operations() {
+    let server = TestServer::start(auth_router(AuthExpectations {
+        rest: ExpectedAuth::Header {
+            name: "x-session-api-key".to_string(),
+            value: "secret-token".to_string(),
+        },
+        websocket: ExpectedAuth::QueryParam {
+            name: "session_api_key".to_string(),
+            value: "secret-token".to_string(),
+        },
+    }))
+    .await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()).with_auth(
+        AuthConfig::header_api_key_with_websocket_query_fallback(
+            "x-session-api-key",
+            "session_api_key",
+            "secret-token",
+        ),
+    ));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("create should carry header auth");
+    client
+        .wait_for_readiness(conversation.conversation_id, Duration::from_secs(2))
+        .await
+        .expect("websocket readiness should use query fallback");
+    client
+        .send_message(
+            conversation.conversation_id,
+            &SendMessageRequest::user_text("hello"),
+        )
+        .await
+        .expect("send_message should carry header auth");
+    client
+        .run_conversation(conversation.conversation_id)
+        .await
+        .expect("run should carry header auth");
+}
+
+#[tokio::test]
+async fn auth_failure_maps_to_stable_http_status_error() {
+    let server = TestServer::start(auth_router(AuthExpectations {
+        rest: ExpectedAuth::QueryParam {
+            name: "session_api_key".to_string(),
+            value: "secret-token".to_string(),
+        },
+        websocket: ExpectedAuth::QueryParam {
+            name: "session_api_key".to_string(),
+            value: "secret-token".to_string(),
+        },
+    }))
+    .await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+
+    let error = client
+        .create_conversation(&request)
+        .await
+        .expect_err("missing auth should fail");
+
+    match error {
+        OpenHandsError::HttpStatus {
+            operation,
+            status_code,
+            ..
+        } => {
+            assert_eq!(operation, "create conversation");
+            assert_eq!(status_code, 401);
+        }
+        other => panic!("expected stable HTTP status error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn malformed_payload_maps_to_stable_protocol_error() {
+    let server = TestServer::start(malformed_payload_router()).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+
+    let error = client
+        .create_conversation(&request)
+        .await
+        .expect_err("invalid JSON should fail");
+
+    match error {
+        OpenHandsError::Protocol { operation, .. } => {
+            assert_eq!(operation, "create conversation");
+        }
+        other => panic!("expected stable protocol error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -188,14 +311,26 @@ async fn handle_readiness_socket(mut socket: WebSocket) {
 
 #[derive(Clone)]
 struct AuthState {
-    expected_key: String,
+    expectations: AuthExpectations,
     conversation: Arc<Mutex<Option<Conversation>>>,
     ready_events: Arc<Mutex<Vec<EventEnvelope>>>,
 }
 
-fn auth_router(expected_key: &str) -> Router {
+#[derive(Clone)]
+struct AuthExpectations {
+    rest: ExpectedAuth,
+    websocket: ExpectedAuth,
+}
+
+#[derive(Clone)]
+enum ExpectedAuth {
+    QueryParam { name: String, value: String },
+    Header { name: String, value: String },
+}
+
+fn auth_router(expectations: AuthExpectations) -> Router {
     let state = AuthState {
-        expected_key: expected_key.to_string(),
+        expectations,
         conversation: Arc::new(Mutex::new(None)),
         ready_events: Arc::new(Mutex::new(vec![EventEnvelope::state_update(
             "evt-ready",
@@ -218,7 +353,150 @@ fn auth_router(expected_key: &str) -> Router {
             "/api/conversations/:conversation_id/events/search",
             get(search_events),
         )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(authenticated_readiness_socket),
+        )
         .with_state(state)
+}
+
+async fn create_conversation(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Json(request): Json<ConversationCreateRequest>,
+) -> Result<Json<Conversation>, StatusCode> {
+    ensure_expected_auth(&state.expectations.rest, &headers, &query)?;
+    let conversation = Conversation {
+        conversation_id: request.conversation_id,
+        workspace: request.workspace,
+        persistence_dir: request.persistence_dir,
+        max_iterations: request.max_iterations,
+        stuck_detection: request.stuck_detection,
+        execution_status: "idle".to_string(),
+        confirmation_policy: request.confirmation_policy,
+        agent: request.agent,
+    };
+    *state.conversation.lock().await = Some(conversation.clone());
+    Ok(Json(conversation))
+}
+
+async fn get_conversation(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Conversation>, StatusCode> {
+    ensure_expected_auth(&state.expectations.rest, &headers, &query)?;
+    let conversation = state
+        .conversation
+        .lock()
+        .await
+        .clone()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(conversation))
+}
+
+async fn send_message(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Path(_conversation_id): Path<Uuid>,
+    Json(_request): Json<SendMessageRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    ensure_expected_auth(&state.expectations.rest, &headers, &query)?;
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn run_conversation(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    ensure_expected_auth(&state.expectations.rest, &headers, &query)?;
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn search_events(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    ensure_expected_auth(&state.expectations.rest, &headers, &query)?;
+    let offset = query
+        .get("page_id")
+        .map(String::as_str)
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let events = state.ready_events.lock().await;
+    let page = events
+        .iter()
+        .skip(offset)
+        .take(1)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_page_id = (offset + page.len() < events.len()).then(|| (offset + 1).to_string());
+    Ok(Json(SearchConversationEventsResponse {
+        events: page,
+        next_page_id,
+    }))
+}
+
+async fn authenticated_readiness_socket(
+    State(state): State<AuthState>,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
+    Path(_conversation_id): Path<Uuid>,
+    websocket: WebSocketUpgrade,
+) -> Result<impl IntoResponse, StatusCode> {
+    ensure_expected_auth(&state.expectations.websocket, &headers, &query)?;
+    let ready_events = state.ready_events.lock().await.clone();
+
+    Ok(websocket.on_upgrade(async move |mut socket| {
+        for event in ready_events {
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&event).expect("event should serialize"),
+                ))
+                .await
+                .expect("ready event should send");
+        }
+    }))
+}
+
+fn ensure_expected_auth(
+    expected: &ExpectedAuth,
+    headers: &HeaderMap,
+    query: &HashMap<String, String>,
+) -> Result<(), StatusCode> {
+    match expected {
+        ExpectedAuth::QueryParam { name, value } => match query.get(name) {
+            Some(actual) if actual == value => Ok(()),
+            _ => Err(StatusCode::UNAUTHORIZED),
+        },
+        ExpectedAuth::Header { name, value } => match headers.get(name) {
+            Some(actual)
+                if actual
+                    .to_str()
+                    .map(|candidate| candidate == value)
+                    .unwrap_or(false) =>
+            {
+                Ok(())
+            }
+            _ => Err(StatusCode::UNAUTHORIZED),
+        },
+    }
+}
+
+fn malformed_payload_router() -> Router {
+    Router::new().route("/api/conversations", post(malformed_create_conversation))
+}
+
+async fn malformed_create_conversation() -> impl IntoResponse {
+    (StatusCode::OK, "not-json")
 }
 
 #[derive(Clone, Default)]
@@ -273,99 +551,6 @@ fn failed_probe_router(state: ProbeState) -> Router {
         )
         .route("/sockets/events/:conversation_id", get(probe_events_socket))
         .with_state(state)
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct AuthQuery {
-    session_api_key: Option<String>,
-    page_id: Option<String>,
-}
-
-async fn create_conversation(
-    State(state): State<AuthState>,
-    Query(query): Query<AuthQuery>,
-    Json(request): Json<ConversationCreateRequest>,
-) -> Result<Json<Conversation>, StatusCode> {
-    ensure_auth(&state, &query)?;
-    let conversation = Conversation {
-        conversation_id: request.conversation_id,
-        workspace: request.workspace,
-        persistence_dir: request.persistence_dir,
-        max_iterations: request.max_iterations,
-        stuck_detection: request.stuck_detection,
-        execution_status: "idle".to_string(),
-        confirmation_policy: request.confirmation_policy,
-        agent: request.agent,
-    };
-    *state.conversation.lock().await = Some(conversation.clone());
-    Ok(Json(conversation))
-}
-
-async fn get_conversation(
-    State(state): State<AuthState>,
-    Query(query): Query<AuthQuery>,
-    Path(_conversation_id): Path<Uuid>,
-) -> Result<Json<Conversation>, StatusCode> {
-    ensure_auth(&state, &query)?;
-    let conversation = state
-        .conversation
-        .lock()
-        .await
-        .clone()
-        .ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(conversation))
-}
-
-async fn send_message(
-    State(state): State<AuthState>,
-    Query(query): Query<AuthQuery>,
-    Path(_conversation_id): Path<Uuid>,
-    Json(_request): Json<SendMessageRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    ensure_auth(&state, &query)?;
-    Ok(Json(json!({ "success": true })))
-}
-
-async fn run_conversation(
-    State(state): State<AuthState>,
-    Query(query): Query<AuthQuery>,
-    Path(_conversation_id): Path<Uuid>,
-) -> Result<Json<Value>, StatusCode> {
-    ensure_auth(&state, &query)?;
-    Ok(Json(json!({ "success": true })))
-}
-
-async fn search_events(
-    State(state): State<AuthState>,
-    Query(query): Query<AuthQuery>,
-    Path(_conversation_id): Path<Uuid>,
-) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
-    ensure_auth(&state, &query)?;
-    let offset = query
-        .page_id
-        .as_deref()
-        .unwrap_or("0")
-        .parse::<usize>()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let events = state.ready_events.lock().await;
-    let page = events
-        .iter()
-        .skip(offset)
-        .take(1)
-        .cloned()
-        .collect::<Vec<_>>();
-    let next_page_id = (offset + page.len() < events.len()).then(|| (offset + 1).to_string());
-    Ok(Json(SearchConversationEventsResponse {
-        events: page,
-        next_page_id,
-    }))
-}
-
-fn ensure_auth(state: &AuthState, query: &AuthQuery) -> Result<(), StatusCode> {
-    match query.session_api_key.as_deref() {
-        Some(value) if value == state.expected_key => Ok(()),
-        _ => Err(StatusCode::UNAUTHORIZED),
-    }
 }
 
 async fn probe_create_conversation(

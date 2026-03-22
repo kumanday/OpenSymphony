@@ -120,16 +120,15 @@ impl TuiState {
         let agent = snapshot
             .map(agent_server_status_summary)
             .unwrap_or_else(|| "agent=--".to_owned());
-        let status = format!(
-            "OpenSymphony | {daemon} | {agent} | conn={} | focus={} | bottom={} | seq={} | issues={} | updated={} | q quit  tab focus  e toggle",
-            self.connection.label(),
-            self.focus.label(),
-            self.timeline_mode.label(),
-            sequence,
-            issue_count,
-            generated
-        );
-        lines.push(fit(&status, width));
+        let mut header = vec!["OpenSymphony".to_owned(), daemon, agent];
+        header.push(connection_status_summary(self));
+        header.push(format!("seq={sequence}"));
+        header.push(format!("focus={}", self.focus.label()));
+        header.push(format!("bottom={}", self.timeline_mode.label()));
+        header.push(format!("issues={issue_count}"));
+        header.push(format!("updated={generated}"));
+        header.push("q quit  tab focus  e toggle".to_owned());
+        lines.push(fit(&header.join(" | "), width));
         lines.push("=".repeat(width));
 
         if width >= 80 {
@@ -707,17 +706,80 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.format("%H:%M:%S").to_string()
 }
 
+fn connection_status_summary(state: &TuiState) -> String {
+    let detail = match &state.connection {
+        ConnectionState::Connecting => {
+            if state.latest_snapshot.is_none() {
+                None
+            } else if state
+                .status_line
+                .eq_ignore_ascii_case("bootstrap snapshot loaded; waiting for live stream")
+            {
+                Some("stream pending")
+            } else {
+                informative_status(&state.status_line, &["connecting to control plane"])
+            }
+        }
+        ConnectionState::Live => {
+            informative_status(&state.status_line, &["live control-plane stream"])
+        }
+        ConnectionState::Reconnecting(reason) => informative_status(reason, &[])
+            .or_else(|| informative_status(&state.status_line, &["reconnecting"])),
+    };
+    status_segment(format!("conn={}", state.connection.label()), detail)
+}
+
 fn daemon_status_summary(snapshot: &SnapshotEnvelope) -> String {
-    format!("daemon={}", snapshot.snapshot.daemon.state.as_str())
+    let daemon = &snapshot.snapshot.daemon;
+    status_segment(
+        format!("daemon={}", daemon.state.as_str()),
+        informative_status(
+            &daemon.status_line,
+            &[
+                daemon.state.as_str(),
+                "ready",
+                "healthy",
+                "scheduler heartbeat healthy",
+            ],
+        ),
+    )
 }
 
 fn agent_server_status_summary(snapshot: &SnapshotEnvelope) -> String {
     let agent_server = &snapshot.snapshot.agent_server;
-    if agent_server.reachable {
+    let base = if agent_server.reachable {
         format!("agent=up/{}", agent_server.conversation_count)
     } else {
         "agent=down".to_owned()
+    };
+    status_segment(
+        base,
+        informative_status(
+            &agent_server.status_line,
+            &["healthy", "local agent-server healthy", "down"],
+        ),
+    )
+}
+
+fn status_segment(base: String, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => format!("{base} ({detail})"),
+        None => base,
     }
+}
+
+fn informative_status<'a>(status_line: &'a str, ignored: &[&str]) -> Option<&'a str> {
+    let status_line = status_line.trim();
+    if status_line.is_empty() {
+        return None;
+    }
+    if ignored
+        .iter()
+        .any(|ignored| status_line.eq_ignore_ascii_case(ignored))
+    {
+        return None;
+    }
+    Some(status_line)
 }
 
 fn pane_title(title: &str, focused: bool) -> String {
@@ -1206,6 +1268,25 @@ mod tests {
         let header = rendered.lines().next().expect("header row");
         assert!(header.contains("daemon=degraded"));
         assert!(header.contains("agent=down"));
+    }
+
+    #[test]
+    fn header_renders_connection_and_backend_status_text() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 3);
+        snapshot.snapshot.daemon.state = DaemonState::Degraded;
+        snapshot.snapshot.daemon.status_line = "scheduler poll overdue".to_owned();
+        snapshot.snapshot.agent_server.reachable = false;
+        snapshot.snapshot.agent_server.status_line = "agent-server refused connection".to_owned();
+
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+        state.reduce(TuiAction::ConnectionLost("sse stalled".to_owned()));
+
+        let rendered = state.render_text(200, 22);
+        let header = rendered.lines().next().expect("header row");
+        assert!(header.contains("conn=reconnecting (sse stalled)"));
+        assert!(header.contains("daemon=degraded (scheduler poll overdue)"));
+        assert!(header.contains("agent=down (agent-server refused connection)"));
     }
 
     #[test]
