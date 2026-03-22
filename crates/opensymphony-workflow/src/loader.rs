@@ -76,7 +76,7 @@ fn split_front_matter(source: &str) -> Result<(Option<&str>, &str), WorkflowLoad
         offset += line_length;
     }
 
-    Err(WorkflowLoadError::MissingFrontMatterTerminator)
+    Ok((None, source))
 }
 
 fn trim_line(line: &str) -> &str {

@@ -164,14 +164,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_front_matter_terminator() {
-        let error = WorkflowDefinition::parse("---\ntracker:\n  kind: linear\nbody")
-            .expect_err("unterminated front matter should fail");
+    fn treats_unmatched_leading_delimiter_as_prompt_body() {
+        let source = "---\n# Assignment\n";
+        let workflow = WorkflowDefinition::parse(source)
+            .expect("unterminated leading delimiter should fall back to prompt body");
 
-        assert!(matches!(
-            error,
-            WorkflowLoadError::MissingFrontMatterTerminator
-        ));
+        assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
+        assert_eq!(workflow.prompt_template, source);
     }
 
     #[test]
@@ -248,6 +247,38 @@ codex:
     }
 
     #[test]
+    fn resolves_default_openhands_launcher_from_checkout_root_for_target_repos() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+        let repo_root = repo_root();
+
+        let resolved = workflow
+            .resolve(&repo_root.join("examples/target-repo"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(
+            resolved.extensions.openhands.local_server.command,
+            vec![repo_root
+                .join("tools/openhands-server/run-local.sh")
+                .to_string_lossy()
+                .into_owned()]
+        );
+    }
+
+    #[test]
     fn resolves_defaults_and_openhands_extension() {
         let workflow = WorkflowDefinition::parse(
             r#"---
@@ -305,7 +336,10 @@ tracker:
         );
         assert_eq!(
             resolved.extensions.openhands.local_server.command,
-            vec!["/repo/tools/openhands-server/run-local.sh".to_owned()]
+            vec![repo_root()
+                .join("tools/openhands-server/run-local.sh")
+                .to_string_lossy()
+                .into_owned()]
         );
         assert_eq!(
             resolved
