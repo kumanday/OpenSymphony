@@ -184,6 +184,28 @@ mod tests {
     }
 
     #[test]
+    fn preserves_indented_delimiter_lines_inside_yaml_block_scalars() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+hooks:
+  before_run: |
+    cat <<'EOF'
+    ---
+    EOF
+---
+Prompt body
+"#,
+        )
+        .expect("indented delimiter-like lines in block scalars should parse");
+
+        assert_eq!(
+            workflow.front_matter.hooks.before_run.as_deref(),
+            Some("cat <<'EOF'\n---\nEOF\n")
+        );
+        assert_eq!(workflow.prompt_template, "Prompt body\n");
+    }
+
+    #[test]
     fn rejects_unknown_top_level_namespaces() {
         let error = WorkflowDefinition::parse(
             r#"---
