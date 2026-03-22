@@ -28,6 +28,8 @@ pub struct TrackerIssueStateSnapshot {
 pub struct TrackerIssueState {
     pub id: String,
     pub name: String,
+    #[serde(rename = "type")]
+    pub tracker_type: String,
     pub kind: TrackerIssueStateKind,
 }
 
@@ -127,16 +129,33 @@ mod tests {
         let non_terminal = TrackerIssueState {
             id: "state-started".to_string(),
             name: "In Progress".to_string(),
+            tracker_type: "started".to_string(),
             kind: TrackerIssueStateKind::Started,
         };
         let terminal = TrackerIssueState {
             id: "state-done".to_string(),
             name: "Done".to_string(),
+            tracker_type: "completed".to_string(),
             kind: TrackerIssueStateKind::Completed,
         };
 
         assert!(!non_terminal.is_terminal());
         assert!(terminal.is_terminal());
+    }
+
+    #[test]
+    fn tracker_state_serialization_preserves_raw_tracker_type() {
+        let state = TrackerIssueState {
+            id: "state-triaged".to_string(),
+            name: "Triage".to_string(),
+            tracker_type: "triaged".to_string(),
+            kind: TrackerIssueStateKind::from_tracker_type("triaged"),
+        };
+
+        let json = serde_json::to_value(&state).expect("state should serialize");
+
+        assert_eq!(json["type"], serde_json::json!("triaged"));
+        assert_eq!(json["kind"], serde_json::json!("triage"));
     }
 
     #[test]

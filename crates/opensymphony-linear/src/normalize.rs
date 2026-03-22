@@ -38,6 +38,7 @@ fn normalize_state(state: LinearWorkflowState) -> TrackerIssueState {
     TrackerIssueState {
         id: state.id,
         name: state.name,
+        tracker_type: state.kind.clone(),
         kind: TrackerIssueStateKind::from_tracker_type(state.kind),
     }
 }

@@ -62,7 +62,7 @@ Implementation note:
 
 - blocker normalization should derive `blocked_by` from `inverseRelations` entries where relation `type == "blocks"`
 - `TrackerIssue.state` should remain the workflow-facing state name string consumed by `WORKFLOW.md` and `WORKFLOW.example.md`
-- blocker and state-refresh normalization should retain both the state name and the Linear `WorkflowState.type` string so terminal blockers remain detectable without hardcoding active-state semantics
+- blocker and state-refresh normalization should retain both the state name and the raw Linear `WorkflowState.type` string, while also exposing a normalized `kind`, so terminal blockers remain detectable without losing the tracker's exact type value
 - issue normalization should retain the Linear issue URL because `WORKFLOW.md` renders `{{ issue.url }}` under strict template validation
 - issue normalization should preserve the raw Linear priority because prompt/UI consumers render `{{ issue.priority }}` directly
 - top-level issue pages should request only a small initial `inverseRelations` slice and page the rest per issue so nested connection complexity stays under Linear's query cap
