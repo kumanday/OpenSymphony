@@ -87,6 +87,8 @@ pub enum StateTransitionError {
     },
     #[error("issue mismatch: expected {expected}, got {actual}")]
     IssueMismatch { expected: IssueId, actual: IssueId },
+    #[error("cannot claim issue without attached workspace; run requested path {attempted:?}")]
+    WorkspaceNotAttached { attempted: PathBuf },
     #[error("workspace path mismatch: expected {expected:?}, got {actual:?}")]
     WorkspacePathMismatch { expected: PathBuf, actual: PathBuf },
 }
@@ -380,13 +382,17 @@ impl IssueExecution {
             });
         }
 
-        if let Some(workspace) = &self.workspace {
-            let expected = comparable_workspace_path(&workspace.path);
-            let actual = comparable_workspace_path(&run.workspace_path);
+        let Some(workspace) = &self.workspace else {
+            return Err(StateTransitionError::WorkspaceNotAttached {
+                attempted: run.workspace_path.clone(),
+            });
+        };
 
-            if expected != actual {
-                return Err(StateTransitionError::WorkspacePathMismatch { expected, actual });
-            }
+        let expected = comparable_workspace_path(&workspace.path);
+        let actual = comparable_workspace_path(&run.workspace_path);
+
+        if expected != actual {
+            return Err(StateTransitionError::WorkspacePathMismatch { expected, actual });
         }
 
         Ok(())
