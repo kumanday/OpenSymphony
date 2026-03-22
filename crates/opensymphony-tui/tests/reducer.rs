@@ -1,5 +1,5 @@
 use chrono::{TimeZone, Utc};
-use opensymphony_domain::{
+use opensymphony_control::{
     AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot,
     MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope, WorkerOutcome,
 };

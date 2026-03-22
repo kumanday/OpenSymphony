@@ -13,9 +13,9 @@ use ftui::{
     widgets::{Widget, paragraph::Paragraph},
 };
 use opensymphony_control::{
-    ControlPlaneClient, ControlPlaneClientError, ControlPlaneStreamUpdate, log_stream_error,
+    ControlPlaneClient, ControlPlaneClientError, ControlPlaneStreamUpdate, IssueRuntimeState,
+    IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope, WorkerOutcome, log_stream_error,
 };
-use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope};
 use thiserror::Error;
 use url::Url;
 
@@ -861,15 +861,15 @@ trait RuntimeStateLabel {
     fn as_str(&self) -> &'static str;
 }
 
-impl RuntimeStateLabel for opensymphony_domain::IssueRuntimeState {
+impl RuntimeStateLabel for IssueRuntimeState {
     fn as_str(&self) -> &'static str {
         match self {
-            opensymphony_domain::IssueRuntimeState::Idle => "idle",
-            opensymphony_domain::IssueRuntimeState::Running => "running",
-            opensymphony_domain::IssueRuntimeState::RetryQueued => "retry_queued",
-            opensymphony_domain::IssueRuntimeState::Releasing => "releasing",
-            opensymphony_domain::IssueRuntimeState::Completed => "completed",
-            opensymphony_domain::IssueRuntimeState::Failed => "failed",
+            IssueRuntimeState::Idle => "idle",
+            IssueRuntimeState::Running => "running",
+            IssueRuntimeState::RetryQueued => "retry_queued",
+            IssueRuntimeState::Releasing => "releasing",
+            IssueRuntimeState::Completed => "completed",
+            IssueRuntimeState::Failed => "failed",
         }
     }
 }
@@ -878,15 +878,15 @@ trait WorkerOutcomeLabel {
     fn as_str(&self) -> &'static str;
 }
 
-impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
+impl WorkerOutcomeLabel for WorkerOutcome {
     fn as_str(&self) -> &'static str {
         match self {
-            opensymphony_domain::WorkerOutcome::Unknown => "unknown",
-            opensymphony_domain::WorkerOutcome::Running => "running",
-            opensymphony_domain::WorkerOutcome::Continued => "continued",
-            opensymphony_domain::WorkerOutcome::Completed => "completed",
-            opensymphony_domain::WorkerOutcome::Failed => "failed",
-            opensymphony_domain::WorkerOutcome::Canceled => "canceled",
+            WorkerOutcome::Unknown => "unknown",
+            WorkerOutcome::Running => "running",
+            WorkerOutcome::Continued => "continued",
+            WorkerOutcome::Completed => "completed",
+            WorkerOutcome::Failed => "failed",
+            WorkerOutcome::Canceled => "canceled",
         }
     }
 }
@@ -898,11 +898,10 @@ mod tests {
         stacked_section_layout,
     };
     use chrono::{TimeZone, Utc};
-    use opensymphony_control::{ControlPlaneClientError, ControlPlaneStreamUpdate};
-    use opensymphony_domain::{
-        AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
-        IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope,
-        WorkerOutcome,
+    use opensymphony_control::{
+        AgentServerStatus, ControlPlaneClientError, ControlPlaneStreamUpdate, DaemonSnapshot,
+        DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent,
+        RecentEventKind, SnapshotEnvelope, WorkerOutcome,
     };
     use std::sync::{Arc, Mutex};
     use std::time::Duration;

@@ -21,7 +21,6 @@ workspace = true
 chrono.workspace = true
 clap.workspace = true
 opensymphony-control = { path = "../opensymphony-control" }
-opensymphony-domain = { path = "../opensymphony-domain" }
 opensymphony-openhands = { path = "../opensymphony-openhands" }
 opensymphony-tui = { path = "../opensymphony-tui" }
 serde.workspace = true
