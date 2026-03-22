@@ -577,7 +577,7 @@ async fn path_exists(path: &Path) -> Result<bool, WorkspaceError> {
 #[cfg(unix)]
 fn build_shell_command(command: &str) -> Command {
     let mut process = Command::new("sh");
-    process.arg("-lc").arg(command);
+    process.arg("-c").arg(command);
     process
 }
 
@@ -586,4 +586,26 @@ fn build_shell_command(command: &str) -> Command {
     let mut process = Command::new("cmd");
     process.arg("/C").arg(command);
     process
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use std::ffi::OsString;
+
+    use super::build_shell_command;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_hook_commands_use_non_login_shell() {
+        let command = build_shell_command("echo hook");
+        let std_command = command.as_std();
+        let args: Vec<OsString> = std_command.get_args().map(|arg| arg.to_owned()).collect();
+
+        assert_eq!(std_command.get_program(), "sh");
+        assert_eq!(
+            args,
+            vec![OsString::from("-c"), OsString::from("echo hook")]
+        );
+    }
 }
