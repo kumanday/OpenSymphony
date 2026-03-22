@@ -94,6 +94,7 @@ Current implementation:
 - fail when `tracker.active_states` or `tracker.terminal_states` are omitted
 - resolve workflow-relative workspace paths and relative OpenHands persistence paths
 - resolve bare relative workspace roots against the `WORKFLOW.md` directory
+- normalize relative workflow directories first so relative `workspace.root` values still resolve to absolute paths
 - reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
 - leave `openhands.local_server.command` unset when omitted so the runtime-owned local tooling layer resolves the pinned launcher from the OpenSymphony checkout
@@ -104,7 +105,7 @@ Current implementation:
 - resolve the bundled `examples/target-repo/WORKFLOW.md` file end-to-end, not just parse it
 - treat a leading unmatched `---` as prompt body text instead of failing front-matter parsing
 - treat leading thematic-break-delimited non-mapping blocks as prompt body text instead of silently dropping prompt content
-- fail on malformed, non-`http://`, or path-bearing `openhands.transport.base_url` values during workflow resolution
+- fail on malformed, non-`http://`, path-bearing, or bracketed-IPv6 `openhands.transport.base_url` values during workflow resolution
 - fail when explicit `openhands.websocket.enabled`, `ready_timeout_ms`, `reconnect_initial_ms`, or `reconnect_max_ms` values are configured before the runtime readiness/reconnect path consumes them
 - fail when `openhands.transport.session_api_key_env` or explicit OpenHands WebSocket auth knobs are configured before the runtime transport layer consumes them
 - fail when `openhands.mcp.stdio_servers` is configured before the runtime conversation-create adapter can forward `mcp_config`

@@ -108,7 +108,7 @@ Current repository implementation:
 - explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
 - explicit `openhands.local_server.enabled: false` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - explicit `openhands.local_server.startup_timeout_ms` overrides are currently rejected during workflow resolution until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
-- workflow resolution rejects malformed, non-`http://`, or path-bearing `openhands.transport.base_url` values before the daemon reaches runtime transport setup because the current readiness probes still require a bare `http://host:port` origin
+- workflow resolution rejects malformed, non-`http://`, path-bearing, or bracketed-IPv6 `openhands.transport.base_url` values before the daemon reaches runtime transport setup because the current readiness probes still require a bare IPv4-or-hostname `http://host:port` origin
 
 ## 4.2 Startup contract
 

@@ -676,6 +676,7 @@ openhands:
             "https://example.com/runtime",
             "http://127.0.0.1:8000/api",
             "https://example.com/runtime/api/",
+            "http://[::1]:8000",
         ] {
             let workflow = WorkflowDefinition::parse(&format!(
                 r#"---
@@ -1438,6 +1439,71 @@ workspace:
             resolved.config.workspace.root,
             PathBuf::from("/repo/config/workspaces")
         );
+    }
+
+    #[test]
+    fn resolves_relative_workspace_roots_against_relative_workflow_directories() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+        let expected_root = std::env::current_dir()
+            .expect("current directory should resolve for test")
+            .join("examples/target-repo/var/workspaces");
+
+        let resolved = workflow
+            .resolve(Path::new("examples/target-repo"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(resolved.config.workspace.root, expected_root);
+        assert!(resolved.config.workspace.root.is_absolute());
+    }
+
+    #[test]
+    fn rejects_unsupported_ipv6_openhands_transport_base_url() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: http://[::1]:8000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("IPv6 OpenHands origins should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.transport.base_url",
+                ..
+            }
+        ));
     }
 
     #[test]

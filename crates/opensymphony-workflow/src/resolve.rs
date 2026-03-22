@@ -3,7 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use url::Url;
+use url::{Host, Url};
 
 use crate::{
     error::WorkflowConfigError,
@@ -475,11 +475,22 @@ fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError
         }
     }
 
-    if parsed.host_str().is_none() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.transport.base_url",
-            message: "must include a host".to_owned(),
-        });
+    match parsed.host() {
+        Some(Host::Ipv6(_)) => {
+            return Err(WorkflowConfigError::InvalidField {
+                field: "openhands.transport.base_url",
+                message:
+                    "must not use bracketed IPv6 hosts until supervisor readiness probes support them"
+                        .to_owned(),
+            });
+        }
+        Some(_) => {}
+        None => {
+            return Err(WorkflowConfigError::InvalidField {
+                field: "openhands.transport.base_url",
+                message: "must include a host".to_owned(),
+            });
+        }
     }
 
     let without_scheme =
@@ -796,7 +807,23 @@ fn resolve_workspace_root<E: Environment>(
         return Ok(normalize_path(&expanded));
     }
 
+    let base_dir = normalize_workflow_base_dir(base_dir)?;
     Ok(normalize_path(&base_dir.join(expanded)))
+}
+
+fn normalize_workflow_base_dir(base_dir: &Path) -> Result<PathBuf, WorkflowConfigError> {
+    if base_dir.is_absolute() {
+        return Ok(normalize_path(base_dir));
+    }
+
+    let cwd = std::env::current_dir().map_err(|error| WorkflowConfigError::InvalidField {
+        field: "workspace.root",
+        message: format!(
+            "cannot resolve a relative workflow directory without the current working directory: {error}"
+        ),
+    })?;
+
+    Ok(normalize_path(&cwd.join(base_dir)))
 }
 
 fn resolve_relative_path<E: Environment>(
