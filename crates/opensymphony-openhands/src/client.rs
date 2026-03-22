@@ -342,6 +342,7 @@ pub struct RuntimeEventStream {
     event_cache: EventCache,
     state_mirror: ConversationStateMirror,
     pending_events: VecDeque<EventEnvelope>,
+    reconnect_pending: bool,
 }
 
 impl RuntimeEventStream {
@@ -364,6 +365,7 @@ impl RuntimeEventStream {
             event_cache: EventCache::new(),
             state_mirror,
             pending_events: VecDeque::new(),
+            reconnect_pending: false,
         }
     }
 
@@ -400,6 +402,15 @@ impl RuntimeEventStream {
             return Ok(Some(event));
         }
 
+        if self.reconnect_pending {
+            self.reconnect_pending = false;
+            self.reconnect().await?;
+
+            if let Some(event) = self.pending_events.pop_front() {
+                return Ok(Some(event));
+            }
+        }
+
         let stream_read = {
             let Some(socket) = self.socket.as_mut() else {
                 return Ok(None);
@@ -416,7 +427,11 @@ impl RuntimeEventStream {
                 match reconnect_signal {
                     Some(StreamRead::Closed) => {
                         self.socket.take();
-                        self.reconnect().await?;
+                        if self.pending_events.is_empty() {
+                            self.reconnect().await?;
+                        } else {
+                            self.reconnect_pending = true;
+                        }
                     }
                     Some(StreamRead::Transport(error)) => {
                         debug!(
@@ -424,7 +439,11 @@ impl RuntimeEventStream {
                             "runtime websocket read failed while draining buffered events; attempting reconnect"
                         );
                         self.socket.take();
-                        self.reconnect().await?;
+                        if self.pending_events.is_empty() {
+                            self.reconnect().await?;
+                        } else {
+                            self.reconnect_pending = true;
+                        }
                     }
                     Some(StreamRead::Event(_)) => unreachable!(
                         "draining buffered events should not return nested stream events"
@@ -484,7 +503,7 @@ impl RuntimeEventStream {
     async fn attach(mut self) -> Result<Self, OpenHandsError> {
         self.refresh_conversation().await?;
         let initial_cache = self.client.search_all_events(self.conversation_id).await?;
-        self.push_new_events(initial_cache.items().iter().cloned(), false);
+        self.push_new_events(initial_cache.items().iter().cloned(), true);
         self.connect_ready_and_reconcile().await?;
         Ok(self)
     }

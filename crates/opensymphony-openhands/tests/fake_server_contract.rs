@@ -66,6 +66,92 @@ async fn fake_server_runtime_stream_attaches_reconciles_and_detects_terminal_sta
 }
 
 #[tokio::test]
+async fn runtime_stream_replays_initial_snapshot_events_on_attach() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+    let running = EventEnvelope::new(
+        "evt-running",
+        Utc::now(),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        serde_json::json!({
+            "execution_status": "running",
+            "state_delta": {
+                "execution_status": "running",
+            },
+        }),
+    );
+    let completion = EventEnvelope::new(
+        "evt-log",
+        running.timestamp + ChronoDuration::seconds(1),
+        "llm",
+        "LLMCompletionLogEvent",
+        serde_json::json!({
+            "model": "fake-model",
+            "tokens": 42,
+        }),
+    );
+
+    server
+        .insert_event(conversation.conversation_id, running)
+        .await
+        .expect("running event should be persisted");
+    server
+        .insert_event(conversation.conversation_id, completion)
+        .await
+        .expect("completion event should be persisted");
+
+    let expected_ids = client
+        .search_all_events(conversation.conversation_id)
+        .await
+        .expect("initial search should succeed")
+        .items()
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    let mut replayed_ids = Vec::new();
+    for _ in 0..expected_ids.len() {
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+            .await
+            .expect("replayed attach event should arrive")
+            .expect("stream read should succeed")
+            .expect("replayed attach event should exist");
+        replayed_ids.push(event.id);
+    }
+
+    assert_eq!(replayed_ids, expected_ids);
+    let no_extra = tokio::time::timeout(Duration::from_millis(200), stream.next_event()).await;
+    assert!(
+        no_extra.is_err(),
+        "attach replay should not fabricate extra events after the initial REST snapshot is drained"
+    );
+}
+
+#[tokio::test]
 async fn event_cache_orders_by_timestamp_and_deduplicates_ids() {
     let mut cache = EventCache::new();
     let newer = EventEnvelope::new(
@@ -154,6 +240,12 @@ async fn runtime_stream_keeps_latest_state_when_out_of_order_events_arrive() {
         )
         .await
         .expect("runtime stream attach should succeed");
+    let initial = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("initial persisted snapshot event should arrive")
+        .expect("stream read should succeed")
+        .expect("initial persisted snapshot event should exist");
+    assert_eq!(initial.id, "evt-1");
     let running = EventEnvelope::new(
         "evt-running",
         Utc::now(),
@@ -213,6 +305,66 @@ async fn runtime_stream_keeps_latest_state_when_out_of_order_events_arrive() {
 }
 
 #[tokio::test]
+async fn attach_runtime_stream_replays_initial_persisted_snapshot() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    server
+        .emit_state_update(conversation.conversation_id, "running")
+        .await
+        .expect("running state should be recorded");
+    server
+        .emit_state_update(conversation.conversation_id, "finished")
+        .await
+        .expect("finished state should be recorded");
+
+    let initial_snapshot = client
+        .search_all_events(conversation.conversation_id)
+        .await
+        .expect("initial search should succeed");
+    let expected_ids = initial_snapshot
+        .items()
+        .iter()
+        .map(|event| event.id.clone())
+        .collect::<Vec<_>>();
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    let mut replayed_ids = Vec::new();
+    for _ in 0..expected_ids.len() {
+        let event = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+            .await
+            .expect("snapshot replay should not stall")
+            .expect("stream read should succeed")
+            .expect("replayed snapshot event should exist");
+        replayed_ids.push(event.id);
+    }
+
+    assert_eq!(replayed_ids, expected_ids);
+}
+
+#[tokio::test]
 async fn runtime_stream_reconnects_and_recovers_missed_events() {
     let server = FakeOpenHandsServer::start()
         .await
@@ -241,6 +393,12 @@ async fn runtime_stream_reconnects_and_recovers_missed_events() {
         )
         .await
         .expect("runtime stream attach should succeed");
+    let initial = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("initial persisted snapshot event should arrive")
+        .expect("stream read should succeed")
+        .expect("initial persisted snapshot event should exist");
+    assert_eq!(initial.id, "evt-1");
     let completion_log = EventEnvelope::new(
         "evt-log",
         Utc::now(),

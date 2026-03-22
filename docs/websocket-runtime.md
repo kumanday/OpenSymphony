@@ -101,6 +101,12 @@ Use this sequence whenever attaching to a conversation, both fresh and existing.
 5. Reconcile events again with `GET /events/search`.
 6. Only after readiness and reconcile is the stream considered attached.
 
+Attach replay rule:
+
+- queue the initial `/events/search` snapshot into the same ordered pending buffer used by later reconcile inserts
+- `next_event()` replays that persisted snapshot for resumed conversations after attach completes
+- the WebSocket readiness frame still stays on `ready_event` as the attach barrier unless `/events/search` independently contains the same event ID
+
 ### 4.2 Why the double sync exists
 
 There is a race window between:
@@ -146,7 +152,7 @@ Current repository implementation:
 
 - `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until a `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable events before readiness
 - `opensymphony-openhands::OpenHandsClient::attach_runtime_stream` performs the full attach sequence: initial REST sync, WebSocket connect, readiness barrier, and post-ready reconcile before returning a live `RuntimeEventStream`
-- the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, but replayable runtime events still come from the reconciled event cache rather than the barrier frame itself
+- the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, but replayable runtime events come from the ordered `/events/search` snapshot plus later reconcile inserts rather than the barrier frame itself
 - `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, and reconcile path
 
@@ -272,12 +278,19 @@ On reconnect:
 4. reconcile events
 5. resume streaming
 
+Buffered-delivery rule:
+
+- if a read yields replayable events and then the socket closes or resets during the same read-ahead window, queue and yield those events first
+- only attempt reconnect after the already-queued events have been drained
+- if reconnect later exhausts policy limits, surface that failure on the following poll instead of dropping buffered runtime activity
+
 If reconnection exhausts policy limits or the worker deadline, fail the worker and let the orchestrator schedule retry.
 
 Current repository implementation:
 
 - `RuntimeStreamConfig` carries readiness timeout, bounded exponential backoff, and max reconnect attempts
 - `RuntimeEventStream::next_event` reconnects on both clean socket close and transport resets, then re-runs readiness plus reconcile before resuming
+- reconnect-required reads now defer reconnect long enough to flush any already-queued events before surfacing exhaustion
 - reconnect readiness snapshots remain barriers only; they refresh `ready_event` but are not replayed as synthetic runtime events unless `/events/search` also returns them
 - `opensymphony-testkit` can now force live socket drops so reconnect coverage is deterministic in CI
 
