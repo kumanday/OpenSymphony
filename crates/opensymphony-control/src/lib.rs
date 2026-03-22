@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use opensymphony_domain::{DaemonSnapshot, SnapshotEnvelope};
+use opensymphony_domain::{ControlPlaneDaemonSnapshot as DaemonSnapshot, SnapshotEnvelope};
 use reqwest_eventsource::{Event as EventSourceEvent, EventSource};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -304,8 +304,13 @@ pub fn log_stream_error(error: &ControlPlaneClientError) {
 mod tests {
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
-        AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
-        IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
+        ControlPlaneAgentServerStatus as AgentServerStatus,
+        ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+        ControlPlaneDaemonStatus as DaemonStatus,
+        ControlPlaneIssueRuntimeState as IssueRuntimeState,
+        ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+        ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+        ControlPlaneWorkerOutcome as WorkerOutcome,
     };
     use std::time::Duration;
     use tokio::time::timeout;

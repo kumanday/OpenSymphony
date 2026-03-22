@@ -11,8 +11,12 @@ use chrono::{Duration as ChronoDuration, Utc};
 use clap::{Args, Parser, Subcommand};
 use opensymphony_control::{ControlPlaneServer, SnapshotStore};
 use opensymphony_domain::{
-    AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot,
-    MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
+    ControlPlaneAgentServerStatus as AgentServerStatus,
+    ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+    ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+    ControlPlaneWorkerOutcome as WorkerOutcome,
 };
 use opensymphony_openhands::{
     ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
@@ -844,7 +848,9 @@ enum CliError {
 mod tests {
     use super::{sample_snapshot, spawn_demo_updates, Cli, Command, SnapshotStore};
     use clap::{error::ErrorKind, Parser};
-    use opensymphony_domain::{DaemonState, IssueRuntimeState};
+    use opensymphony_domain::{
+        ControlPlaneDaemonState as DaemonState, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+    };
     use std::time::Duration;
 
     #[test]
