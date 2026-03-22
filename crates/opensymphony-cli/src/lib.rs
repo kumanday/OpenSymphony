@@ -728,8 +728,9 @@ fn build_doctor_probe_request(
     });
     let max_iterations = u32::try_from(conversation.max_iterations).map_err(|_| {
         format!(
-            "workflow max_iterations {} exceeds the current doctor probe limit type",
-            conversation.max_iterations
+            "workflow max_iterations {} exceeds u32::MAX ({}), which is the maximum the doctor probe can handle",
+            conversation.max_iterations,
+            u32::MAX
         )
     })?;
 
@@ -855,4 +856,78 @@ fn init_tracing() {
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
         .try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use opensymphony_workflow::WorkflowDefinition;
+    use tempfile::TempDir;
+
+    use super::{build_doctor_probe_request, resolve_doctor_workflow, DoctorRuntimeConfig};
+
+    #[test]
+    fn build_doctor_probe_request_reports_u32_limit_for_oversized_iterations() {
+        let mut runtime = sample_doctor_runtime();
+        runtime
+            .workflow
+            .extensions
+            .openhands
+            .conversation
+            .max_iterations = u64::from(u32::MAX) + 1;
+
+        let probe_workspace = PathBuf::from("/tmp/doctor-probe-workspace");
+        let persistence_dir = probe_workspace.join("sessions");
+        let error = build_doctor_probe_request(&runtime, &probe_workspace, &persistence_dir, None)
+            .expect_err("oversized doctor probe max_iterations should fail");
+
+        assert_eq!(
+            error,
+            format!(
+                "workflow max_iterations {} exceeds u32::MAX ({}), which is the maximum the doctor probe can handle",
+                u64::from(u32::MAX) + 1,
+                u32::MAX
+            )
+        );
+    }
+
+    fn sample_doctor_runtime() -> DoctorRuntimeConfig {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let target_repo = temp_dir.path().join("target-repo");
+        std::fs::create_dir_all(&target_repo).expect("target repo should exist");
+
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+---
+
+# Doctor Probe
+"#,
+        )
+        .expect("workflow should parse");
+        let workflow = resolve_doctor_workflow(&workflow, &target_repo, false)
+            .expect("workflow should resolve with Linear disabled");
+
+        DoctorRuntimeConfig {
+            target_repo,
+            workflow_path: temp_dir.path().join("target-repo/WORKFLOW.md"),
+            workflow,
+            tool_dir: temp_dir.path().join("tools/openhands-server"),
+            probe_model: None,
+            probe_api_key_env: None,
+        }
+    }
 }
