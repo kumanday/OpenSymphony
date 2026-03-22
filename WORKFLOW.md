@@ -322,7 +322,61 @@ For major rework:
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action.
 
-## Workpad template
+## Dependency Blocker Dashboard Maintenance
+
+This workflow manages multiple concurrent issues with complex dependencies. To help human reviewers prioritize which PRs to review first, agents must maintain a **Dependency Blockers & PR Review Priority** table in the Linear project description.
+
+### When to update the dashboard
+
+Update the priority table in the Linear project overview whenever:
+- An issue moves to/from `Human Review` or `Merging` (has a pending PR)
+- An issue's blocking relationships change (blockedBy links added/removed)
+- An issue is completed (status becomes Done/Closed/Cancelled)
+- An issue is discovered to be on the critical path (unblocks many downstream issues)
+
+### How to update the dashboard
+
+1. Use the `linear_get_project` tool to fetch the current project description
+2. Locate the `## Dependency Blockers & PR Review Priority` section
+3. Regenerate the table with current data:
+   - Query all issues in `Human Review`, `Merging`, `Rework`, `In Progress`, and `Todo` states
+   - Include `includeRelations: true` to get blockedBy/blocks data
+   - Map each issue's attachments to find PR links
+4. Prioritize using this algorithm:
+   - **P0 (🔴 Critical):** Issues that are unblocked AND block the most downstream work (highest impact)
+   - **P1 (🟡 Epic):** Parent issues of active milestones that need review
+   - **P2 (🟢 Ready):** Issues unblocked but with lower downstream impact
+   - **P3 (⚪ Waiting):** Issues currently blocked by dependencies
+5. Use `linear_save_project` to update the description with the new table
+
+### Priority calculation guidelines
+
+For each issue with a pending PR, score it by:
+1. **Is it unblocked?** (no open blockers in non-terminal states) → Higher priority
+2. **How many issues does it block?** (count blocks relationships) → More = higher priority
+3. **Is it a parent issue?** (has child issues grouped under it) → These should generally be P1 minimum
+4. **Is it in the critical path?** (e.g., COE-266 → COE-268 → COE-269 chain) → P0
+
+### Table format
+
+Use this exact markdown structure (no Status column - Linear issue refs automatically show status):
+
+```markdown
+## Dependency Blockers & PR Review Priority
+
+| Priority | Issue | PR | Blocked By | Blocks | Impact |
+|:--------:|:------|:--:|:-----------|:-------|:-------|
+| 🔴 **P0** | [COE-XXX](<https://linear.app/trilogy-ai-coe/issue/COE-XXX>) | [#N](<https://github.com/kumanday/OpenSymphony/pull/N>) | Blockers | Count | Brief description |
+| 🟡 **P1** | ... | ... | ... | ... | ... |
+| 🟢 **P2** | ... | ... | ... | ... | ... |
+| ⚪ **P3** | ... | ... | ... | ... | ... |
+
+**Legend:** 🔴 Critical path | 🟡 Parent issue | 🟢 Ready but lower priority | ⚪ Waiting on dependencies
+
+**Immediate Action:** [One-line summary of what to review first]
+```
+
+### Workpad template
 
 Use this exact structure for the persistent workpad comment and keep it updated in place throughout execution:
 

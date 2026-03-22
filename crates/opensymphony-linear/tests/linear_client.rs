@@ -5,11 +5,11 @@ use std::{
 };
 
 use axum::{
+    Json, Router,
     body::Body,
     extract::State,
     http::{HeaderMap, Response, StatusCode},
     routing::post,
-    Json, Router,
 };
 use opensymphony_domain::{TrackerErrorCategory, TrackerIssueStateKind};
 use opensymphony_linear::{LinearClient, LinearConfig, LinearError, RetryPolicy};
@@ -84,14 +84,18 @@ async fn candidate_issues_normalize_fixture_payloads() {
         requests[0].body["variables"]["includeArchived"],
         Value::Bool(false)
     );
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("includeArchived: $includeArchived"));
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("labels(first: $labelFirst)"));
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("includeArchived: $includeArchived")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("labels(first: $labelFirst)")
+    );
 }
 
 #[tokio::test]
@@ -119,10 +123,12 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("query IssueInverseRelationsPage"));
+    assert!(
+        requests[1].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("query IssueInverseRelationsPage")
+    );
     assert_eq!(
         requests[1].body["variables"]["issueId"],
         Value::String("issue-264".to_string())
@@ -139,10 +145,12 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
         requests[0].body["variables"]["labelFirst"],
         serde_json::json!(10)
     );
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("labels(first: $labelFirst)"));
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("labels(first: $labelFirst)")
+    );
 }
 
 #[tokio::test]
@@ -168,10 +176,12 @@ async fn candidate_issues_fetch_all_label_pages() {
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 2);
-    assert!(requests[1].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("query IssueLabelsPage"));
+    assert!(
+        requests[1].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("query IssueLabelsPage")
+    );
     assert_eq!(
         requests[1].body["variables"]["issueId"],
         Value::String("issue-260".to_string())
@@ -207,10 +217,12 @@ async fn issues_by_state_walk_pagination() {
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 2);
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("query IssuesByState"));
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("query IssuesByState")
+    );
     assert_eq!(
         requests[0].body["variables"]["relationFirst"],
         serde_json::json!(2)
@@ -223,14 +235,18 @@ async fn issues_by_state_walk_pagination() {
         requests[0].body["variables"]["includeArchived"],
         Value::Bool(false)
     );
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("includeArchived: $includeArchived"));
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("labels(first: $labelFirst)"));
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("includeArchived: $includeArchived")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("labels(first: $labelFirst)")
+    );
     assert_eq!(requests[0].body["variables"]["after"], Value::Null);
     assert_eq!(
         requests[1].body["variables"]["after"],
@@ -268,14 +284,18 @@ async fn terminal_issues_include_archived_for_cleanup() {
         requests[0].body["variables"]["labelFirst"],
         serde_json::json!(10)
     );
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("includeArchived: $includeArchived"));
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("labels(first: $labelFirst)"));
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("includeArchived: $includeArchived")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("labels(first: $labelFirst)")
+    );
 }
 
 #[tokio::test]
@@ -302,14 +322,18 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 1);
-    assert!(requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("query IssueStatesByIds"));
-    assert!(!requests[0].body["query"]
-        .as_str()
-        .expect("query should be a string")
-        .contains("includeArchived: true"));
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("query IssueStatesByIds")
+    );
+    assert!(
+        !requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("includeArchived: true")
+    );
     assert_eq!(
         requests[0].body["variables"]["issueIds"],
         serde_json::json!(["issue-260", "issue-264"])

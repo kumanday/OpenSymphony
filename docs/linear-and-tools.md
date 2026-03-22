@@ -148,18 +148,18 @@ Current repository note:
 
 ## 5.1 MVP tool set
 
-Recommended tools:
+Implemented MVP tools:
 
 - `linear_get_issue`
-  - fetch issue by identifier or ID
+  - fetch an issue by UUID or identifier such as `COE-267`
 - `linear_comment_issue`
-  - add a comment to an issue
+  - add a comment to an issue and return the created comment plus the resolved issue snapshot
 - `linear_transition_issue`
-  - move issue to a named state
+  - move an issue to a named workflow state for that issue's team
 - `linear_link_pr`
-  - add a PR URL or related link to the issue
+  - add a PR URL or related link to the issue via a URL attachment
 - `linear_list_project_states`
-  - fetch valid state names for safer transitions
+  - fetch valid team workflow states for safer transitions using either an issue reference or a team key/UUID
 
 Do not start with a giant tool surface.
 
@@ -177,18 +177,25 @@ Benefits:
 Recommended command exposed by `opensymphony-cli`:
 
 ```text
-opensymphony linear-mcp --stdio
+opensymphony linear-mcp
 ```
 
 Input dependencies:
 
 - `LINEAR_API_KEY`
-- optional config file for org or project defaults
+- optional `LINEAR_BASE_URL` override for local testing
+
+Current transport notes:
+
+- the stdio transport uses one JSON-RPC message per line
+- the server negotiates MCP protocol versions from `2024-11-05` through `2025-11-25`
+- the server advertises only the tool capability and keeps the write surface intentionally narrow
 
 ## 6. Tool design guidelines
 
 - prefer narrow, explicit schemas
 - avoid free-form giant mutation tools
+- prefer a single `issue` argument that accepts either a UUID or an issue identifier
 - return normalized issue snapshots after mutation when possible
 - surface permission and validation errors clearly
 - keep tool outputs concise enough for agent context
@@ -255,15 +262,22 @@ These categories should be shared by the read adapter and the MCP server where s
 - valid tool registration
 - happy-path issue comment
 - happy-path state transition
+- happy-path link attachment
 - invalid state name
 - auth failure
 - concise error surfaces
+- MCP handshake and line-delimited stdio framing
 
 ### End-to-end
 
 - worker can read issue via orchestrator
 - agent can comment or transition via MCP during a live run
 - orchestrator remains correct even if MCP writes fail
+
+Current repository coverage:
+
+- `crates/opensymphony-linear-mcp/src/server.rs` locks in the documented tool registration and version negotiation rules
+- `crates/opensymphony-cli/tests/linear_mcp.rs` drives `opensymphony linear-mcp` through initialize, `tools/list`, `linear_get_issue`, `linear_comment_issue`, `linear_transition_issue`, `linear_link_pr`, and `linear_list_project_states` against a local fake GraphQL server
 
 ## 11. Future hosted-mode notes
 
