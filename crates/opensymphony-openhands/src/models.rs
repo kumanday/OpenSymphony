@@ -43,12 +43,51 @@ pub struct ConversationCreateRequest {
     pub agent: AgentConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoctorProbeConfig {
+    pub max_iterations: u32,
+    pub stuck_detection: bool,
+    pub confirmation_policy_kind: String,
+    pub agent_kind: String,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl Default for DoctorProbeConfig {
+    fn default() -> Self {
+        Self {
+            max_iterations: 4,
+            stuck_detection: true,
+            confirmation_policy_kind: "NeverConfirm".to_string(),
+            agent_kind: "Agent".to_string(),
+            model: None,
+            api_key: None,
+        }
+    }
+}
+
 impl ConversationCreateRequest {
     pub fn doctor_probe(
         working_dir: impl Into<String>,
         persistence_dir: impl Into<String>,
         model: Option<String>,
         api_key: Option<String>,
+    ) -> Self {
+        Self::doctor_probe_with_config(
+            working_dir,
+            persistence_dir,
+            DoctorProbeConfig {
+                model,
+                api_key,
+                ..DoctorProbeConfig::default()
+            },
+        )
+    }
+
+    pub fn doctor_probe_with_config(
+        working_dir: impl Into<String>,
+        persistence_dir: impl Into<String>,
+        config: DoctorProbeConfig,
     ) -> Self {
         Self {
             conversation_id: Uuid::new_v4(),
@@ -57,14 +96,17 @@ impl ConversationCreateRequest {
                 kind: "LocalWorkspace".to_string(),
             },
             persistence_dir: persistence_dir.into(),
-            max_iterations: 4,
-            stuck_detection: true,
+            max_iterations: config.max_iterations,
+            stuck_detection: config.stuck_detection,
             confirmation_policy: ConfirmationPolicy {
-                kind: "NeverConfirm".to_string(),
+                kind: config.confirmation_policy_kind,
             },
             agent: AgentConfig {
-                kind: "Agent".to_string(),
-                llm: model.map(|model| LlmConfig { model, api_key }),
+                kind: config.agent_kind,
+                llm: config.model.map(|model| LlmConfig {
+                    model,
+                    api_key: config.api_key,
+                }),
             },
         }
     }

@@ -9,4 +9,3 @@ if [[ "${OPENSYMPHONY_LIVE_OPENHANDS}" != "1" ]]; then
 fi
 
 cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands
-

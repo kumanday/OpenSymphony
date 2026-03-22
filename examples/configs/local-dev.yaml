@@ -1,10 +1,7 @@
-workspace_root: ../../var/workspaces
 target_repo: ../target-repo
 openhands:
-  base_url: http://127.0.0.1:8000
   tool_dir: ../../tools/openhands-server
   probe_model: null
   probe_api_key_env: null
 linear:
   enabled: false
-  api_key_env: LINEAR_API_KEY
