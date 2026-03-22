@@ -49,6 +49,8 @@ pub struct WorkflowFrontMatter {
     pub openhands: OpenHandsFrontMatter,
     #[serde(default)]
     pub codex: Option<BTreeMap<String, serde_yaml::Value>>,
+    #[serde(default)]
+    pub logging: Option<BTreeMap<String, serde_yaml::Value>>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, serde_yaml::Value>,
 }
