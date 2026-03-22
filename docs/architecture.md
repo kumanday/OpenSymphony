@@ -187,7 +187,7 @@ Local MVP process graph:
     - `bash tools/openhands-server/run-local.sh`
 - OpenHands MCP child processes
   - may spawn:
-    - `opensymphony linear-mcp --stdio`
+    - `opensymphony linear-mcp`
   - write ticket comments, transitions, and links directly to Linear
   - do not participate in scheduler correctness
 - `opensymphony tui`

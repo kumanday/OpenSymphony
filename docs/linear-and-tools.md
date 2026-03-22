@@ -170,7 +170,7 @@ Benefits:
 Recommended command exposed by `opensymphony-cli`:
 
 ```text
-opensymphony linear-mcp --stdio
+opensymphony linear-mcp
 ```
 
 Input dependencies:
@@ -270,7 +270,7 @@ These categories should be shared by the read adapter and the MCP server where s
 Current repository coverage:
 
 - `crates/opensymphony-linear-mcp/src/server.rs` locks in the documented tool registration and version negotiation rules
-- `crates/opensymphony-cli/tests/linear_mcp.rs` drives `opensymphony linear-mcp --stdio` through initialize, `tools/list`, `linear_get_issue`, `linear_comment_issue`, `linear_transition_issue`, `linear_link_pr`, and `linear_list_project_states` against a local fake GraphQL server
+- `crates/opensymphony-cli/tests/linear_mcp.rs` drives `opensymphony linear-mcp` through initialize, `tools/list`, `linear_get_issue`, `linear_comment_issue`, `linear_transition_issue`, `linear_link_pr`, and `linear_list_project_states` against a local fake GraphQL server
 
 ## 11. Future hosted-mode notes
 

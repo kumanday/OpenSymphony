@@ -23,7 +23,6 @@ async fn linear_mcp_stdio_server_advertises_tools_and_executes_writes() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .arg("linear-mcp")
-        .arg("--stdio")
         .env("LINEAR_API_KEY", "test-linear-key")
         .env("LINEAR_BASE_URL", server.base_url())
         .stdin(Stdio::piped())

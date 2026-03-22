@@ -89,7 +89,6 @@ openhands:
         command:
           - opensymphony
           - linear-mcp
-          - --stdio
 ---
 
 # Assignment
