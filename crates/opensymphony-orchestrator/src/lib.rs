@@ -72,7 +72,7 @@ mod tests {
         );
 
         let mut execution = IssueExecution::new(issue, TimestampMs::new(0));
-        execution.attach_workspace(workspace);
+        must(execution.attach_workspace(workspace));
         let execution = must(execution.claim(run));
         let execution =
             must(execution.start_running(TimestampMs::new(11), DurationMs::new(300_000), None));

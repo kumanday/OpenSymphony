@@ -8,7 +8,8 @@ use thiserror::Error;
 
 use crate::{
     ConversationMetadata, DurationMs, IssueId, NormalizedIssue, ReleaseReason, RetryAttempt,
-    RetryEntry, RunAttempt, StallMetadata, TimestampMs, WorkerOutcomeRecord, WorkspaceRecord,
+    RetryEntry, RunAttempt, StallMetadata, TimestampMs, WorkerOutcomeRecord, WorkspaceKey,
+    WorkspaceRecord,
 };
 
 const MAX_RECENT_WORKER_OUTCOMES: usize = 10;
@@ -89,6 +90,15 @@ pub enum StateTransitionError {
     IssueMismatch { expected: IssueId, actual: IssueId },
     #[error("cannot claim issue without attached workspace; run requested path {attempted:?}")]
     WorkspaceNotAttached { attempted: PathBuf },
+    #[error(
+        "workspace identity mismatch: expected key {expected_key} at {expected_path:?}, got key {actual_key} at {actual_path:?}"
+    )]
+    WorkspaceIdentityMismatch {
+        expected_key: WorkspaceKey,
+        actual_key: WorkspaceKey,
+        expected_path: PathBuf,
+        actual_path: PathBuf,
+    },
     #[error("workspace path mismatch: expected {expected:?}, got {actual:?}")]
     WorkspacePathMismatch { expected: PathBuf, actual: PathBuf },
 }
@@ -191,14 +201,32 @@ impl IssueExecution {
         }
     }
 
-    pub fn attach_workspace(&mut self, workspace: WorkspaceRecord) {
+    pub fn attach_workspace(
+        &mut self,
+        workspace: WorkspaceRecord,
+    ) -> Result<(), StateTransitionError> {
+        if let Some(current) = &self.workspace {
+            let expected_path = comparable_workspace_path(&current.path);
+            let actual_path = comparable_workspace_path(&workspace.path);
+
+            if current.workspace_key != workspace.workspace_key || expected_path != actual_path {
+                return Err(StateTransitionError::WorkspaceIdentityMismatch {
+                    expected_key: current.workspace_key.clone(),
+                    actual_key: workspace.workspace_key.clone(),
+                    expected_path,
+                    actual_path,
+                });
+            }
+        }
+
         self.workspace = Some(workspace);
+        Ok(())
     }
 
     pub fn claim(mut self, run: RunAttempt) -> Result<Self, StateTransitionError> {
         self.validate_run_binding(&run)?;
 
-        match &self.state {
+        let normal_retry_count = match &self.state {
             SchedulerState::Unclaimed { .. } => {
                 if run.attempt.is_some() {
                     return Err(StateTransitionError::AttemptMismatch {
@@ -206,6 +234,7 @@ impl IssueExecution {
                         actual: run.attempt,
                     });
                 }
+                0
             }
             SchedulerState::RetryQueued { retry } => {
                 if run.attempt != Some(retry.attempt) {
@@ -214,6 +243,7 @@ impl IssueExecution {
                         actual: run.attempt,
                     });
                 }
+                retry.normal_retry_count
             }
             _ => {
                 return Err(StateTransitionError::InvalidTransition {
@@ -221,9 +251,11 @@ impl IssueExecution {
                     action: TransitionAction::Claim,
                 });
             }
-        }
+        };
 
-        self.state = SchedulerState::Claimed { run };
+        self.state = SchedulerState::Claimed {
+            run: run.with_normal_retry_count(normal_retry_count),
+        };
         Ok(self)
     }
 

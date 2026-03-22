@@ -165,7 +165,7 @@ mod tests {
         let issue = sample_issue();
         let workspace = sample_workspace();
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
 
         let run = sample_run(&issue, &workspace, None, ts(40));
         let execution = must(execution.claim(run));
@@ -232,6 +232,10 @@ mod tests {
         let retry_run = sample_run(&issue, &workspace, Some(retry.attempt), ts(61));
         let execution = must(execution.claim(retry_run));
         assert_eq!(execution.status(), SchedulerStatus::Claimed);
+        assert_eq!(
+            must_some(execution.current_run(), "claimed retry run must exist").normal_retry_count,
+            1
+        );
 
         let execution = must(execution.release(ts(70), ReleaseReason::TrackerInactive, None));
         assert_eq!(execution.status(), SchedulerStatus::Released);
@@ -261,7 +265,7 @@ mod tests {
         ));
 
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
         let run = sample_run(&issue, &workspace, None, ts(40));
         let execution = must(execution.claim(run));
         let outcome = WorkerOutcomeRecord {
@@ -318,7 +322,7 @@ mod tests {
         let issue = sample_issue();
         let workspace = sample_workspace();
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
 
         let mut run = sample_run(&issue, &workspace, None, ts(40));
         run.workspace_path = PathBuf::from("/tmp/workspaces/../workspaces/COE-260");
@@ -346,7 +350,7 @@ mod tests {
         };
 
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
 
         let mut run = sample_run(&issue, &workspace, None, ts(40));
         run.workspace_path = canonical_workspace;
@@ -404,7 +408,7 @@ mod tests {
         let issue = sample_issue();
         let workspace = sample_workspace();
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
 
         let run = sample_run(&issue, &workspace, None, ts(40));
         let execution = must(execution.claim(run));
@@ -426,7 +430,7 @@ mod tests {
         let issue = sample_issue();
         let workspace = sample_workspace();
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
 
         let run = sample_run(&issue, &workspace, None, ts(40));
         let execution = must(execution.claim(run));
@@ -448,7 +452,7 @@ mod tests {
         let issue = sample_issue();
         let workspace = sample_workspace();
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
 
         let mut next_attempt = None;
 
@@ -505,7 +509,7 @@ mod tests {
         let issue = sample_issue();
         let workspace = sample_workspace();
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
         let run = sample_run(&issue, &workspace, None, ts(40));
         let execution = must(execution.claim(run));
         let issue_snapshot = IssueSnapshot::from(&execution);
@@ -545,7 +549,7 @@ mod tests {
         let issue = sample_issue();
         let workspace = sample_workspace();
         let mut execution = IssueExecution::new(issue.clone(), ts(30));
-        execution.attach_workspace(workspace.clone());
+        must(execution.attach_workspace(workspace.clone()));
 
         let run = sample_run(&issue, &workspace, None, ts(40));
         let execution = must(execution.claim(run));
@@ -578,5 +582,76 @@ mod tests {
         let snapshot = execution.snapshot();
         assert_eq!(snapshot.runtime.last_event_at, Some(ts(60)));
         assert_eq!(snapshot.runtime.stalled_at, Some(ts(360)));
+    }
+
+    #[test]
+    fn attach_workspace_rejects_rebinding_to_different_identity() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue, ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let rebound_workspace = WorkspaceRecord {
+            path: PathBuf::from("/tmp/workspaces/COE-260-alt"),
+            workspace_key: must(WorkspaceKey::new("COE-260-alt")),
+            ..workspace.clone()
+        };
+
+        let error = match execution.attach_workspace(rebound_workspace) {
+            Ok(_) => panic!("rebinding a different workspace identity should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::WorkspaceIdentityMismatch { .. }
+        ));
+        assert_eq!(execution.workspace(), Some(&workspace));
+    }
+
+    #[test]
+    fn attach_workspace_allows_refresh_for_same_identity() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue, ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let refreshed_workspace = WorkspaceRecord {
+            updated_at: Some(ts(99)),
+            last_seen_tracker_refresh_at: Some(ts(100)),
+            ..workspace.clone()
+        };
+
+        must(execution.attach_workspace(refreshed_workspace.clone()));
+        assert_eq!(execution.workspace(), Some(&refreshed_workspace));
+    }
+
+    #[test]
+    fn running_snapshot_last_event_at_stays_none_without_runtime_events() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let mut execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300),
+            Some(sample_conversation(false)),
+        ));
+
+        must(execution.record_turn_started(ts(55)));
+
+        let snapshot = execution.snapshot();
+        assert_eq!(snapshot.runtime.last_event_at, None);
+        assert_eq!(snapshot.runtime.stalled_at, Some(ts(355)));
+        assert_eq!(
+            snapshot
+                .runtime
+                .worker
+                .as_ref()
+                .map(|worker| worker.normal_retry_count),
+            Some(0)
+        );
     }
 }
