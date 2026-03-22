@@ -22,6 +22,10 @@ Fetch issues that:
 - are in configured active states
 - include enough fields to normalize issue data and eligibility
 
+Implementation note:
+
+- the GraphQL adapter filters by Linear `Project.slugId`, so workflow `tracker.project_slug` should store that stable slug value
+
 ## 2.2 State refresh by IDs
 
 Fetch current states for all running issues during reconciliation.
@@ -46,6 +50,11 @@ Normalize tracker payloads into a stable issue model with fields such as:
 - `updated_at`
 
 Keep the orchestrator independent of raw GraphQL response shape.
+
+Implementation note:
+
+- blocker normalization should derive `blocked_by` from `inverseRelations` entries where relation `type == "blocks"`
+- issue state normalization should retain both the state name and the Linear `WorkflowState.type` string so terminal blockers remain detectable
 
 ## 3. Candidate sorting and eligibility
 
@@ -74,12 +83,18 @@ Eligibility reminders:
 - structured error classification
 - redaction of tokens in logs
 
+Current adapter contract:
+
+- send GraphQL requests to the configured endpoint with `Authorization: Bearer <LINEAR_API_KEY>`
+- keep GraphQL query and response structs private to `opensymphony-linear`
+- return only normalized domain models to orchestrator-facing callers
+
 ## 4.2 Configuration inputs
 
 Required:
 
 - `LINEAR_API_KEY`
-- workflow `tracker.project_slug`
+- workflow `tracker.project_slug` (the Linear `Project.slugId` value)
 - workflow `tracker.active_states`
 - workflow `tracker.terminal_states`
 
