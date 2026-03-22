@@ -394,7 +394,7 @@ tracker:
     }
 
     #[test]
-    fn preserves_explicit_openhands_local_server_command() {
+    fn rejects_explicit_openhands_local_server_command() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -418,19 +418,17 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-        let resolved = workflow
+        let error = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect("workflow should resolve");
+            .expect_err("explicit local server commands should fail during resolution");
 
-        assert_eq!(
-            resolved.extensions.openhands.local_server.command,
-            Some(vec![
-                "bash".to_string(),
-                "./scripts/run-openhands.sh".to_string(),
-                "--port".to_string(),
-                "9000".to_string(),
-            ])
-        );
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.command",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -726,8 +724,7 @@ tracker:
 openhands:
   conversation:
     agent:
-      llm:
-        api_key_env: OPENHANDS_API_KEY
+      llm: {}
 ---
 {{ issue.identifier }}
 "#,
@@ -743,6 +740,188 @@ openhands:
             error,
             WorkflowConfigError::MissingRequiredField {
                 field: "openhands.conversation.agent.llm.model",
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_transport_session_api_key_env() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    session_api_key_env: OPENHANDS_SESSION_API_KEY
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("transport auth overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.transport.session_api_key_env",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_websocket_auth_mode_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    auth_mode: header
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("websocket auth mode overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.websocket.auth_mode",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_websocket_query_param_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    query_param_name: openhands_token
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("websocket query-param overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.websocket.query_param_name",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_llm_api_key_env_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: ${OPENHANDS_MODEL}
+        api_key_env: OPENHANDS_API_KEY
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("OPENHANDS_MODEL", "gpt-4.1"),
+        ]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("llm api-key env overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.agent.llm.api_key_env",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_llm_base_url_env_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: ${OPENHANDS_MODEL}
+        base_url_env: OPENHANDS_BASE_URL
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("OPENHANDS_MODEL", "gpt-4.1"),
+        ]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("llm base-url env overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.agent.llm.base_url_env",
+                ..
             }
         ));
     }
@@ -1162,8 +1341,6 @@ openhands:
     agent:
       llm:
         model: ${OPENHANDS_MODEL}
-  websocket:
-    auth_mode: auto
 ---
 
 # Assignment
