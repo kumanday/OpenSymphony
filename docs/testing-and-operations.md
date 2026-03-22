@@ -75,6 +75,7 @@ Suggested gates:
 Current implementation:
 
 - `cargo test --workspace` exercises the fake-server contract suite in `crates/opensymphony-openhands/tests/fake_server_contract.rs`
+- `cargo test -p opensymphony-linear` exercises fixture-backed GraphQL normalization, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, archived terminal cleanup reads, non-archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
 - `crates/opensymphony-cli/tests/doctor.rs` runs the CLI live-probe path against `opensymphony-testkit`
 - `scripts/smoke_local.sh` runs the static doctor pass
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
