@@ -283,6 +283,54 @@ impl WorkspaceManager {
             .await
     }
 
+    pub async fn read_text_artifact(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+    ) -> Result<Option<String>, WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+        let path = self.validate_workspace_owned_path(workspace, path).await?;
+        match fs::read_to_string(&path).await {
+            Ok(raw) => Ok(Some(raw)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(WorkspaceError::ReadManagedFile {
+                path,
+                source: error,
+            }),
+        }
+    }
+
+    pub async fn write_text_artifact(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+        contents: &str,
+    ) -> Result<(), WorkspaceError> {
+        self.validate_workspace_handle(workspace).await?;
+        self.write_bytes_artifact(workspace, path, contents.as_bytes())
+            .await
+    }
+
+    pub async fn write_json_artifact<T>(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+        artifact: &T,
+    ) -> Result<(), WorkspaceError>
+    where
+        T: Serialize,
+    {
+        self.validate_workspace_handle(workspace).await?;
+        let path = normalize_absolute_path(path)?;
+        let payload = serde_json::to_vec_pretty(artifact).map_err(|error| {
+            WorkspaceError::EncodeJsonArtifact {
+                path: path.clone(),
+                source: error,
+            }
+        })?;
+        self.write_bytes_artifact(workspace, &path, &payload).await
+    }
+
     pub async fn load_conversation_manifest(
         &self,
         workspace: &WorkspaceHandle,
@@ -857,18 +905,18 @@ impl WorkspaceManager {
             })
     }
 
-    async fn write_text_artifact(
+    async fn write_bytes_artifact(
         &self,
         workspace: &WorkspaceHandle,
         path: &Path,
-        content: &str,
+        payload: &[u8],
     ) -> Result<(), WorkspaceError> {
         if let Some(parent) = path.parent() {
             self.create_managed_directory(workspace, parent).await?;
         }
         let path = self.validate_workspace_owned_path(workspace, path).await?;
 
-        fs::write(&path, content)
+        fs::write(&path, payload)
             .await
             .map_err(|error| WorkspaceError::WriteArtifact {
                 path,

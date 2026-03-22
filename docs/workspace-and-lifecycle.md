@@ -231,10 +231,20 @@ Suggested fields:
 - `server_base_url`
 - `persistence_dir`
 - `created_at`
+- `updated_at`
 - `last_attached_at`
 - `fresh_conversation`
+- `workflow_prompt_seeded`
 - `reset_reason`
 - `runtime_contract_version`
+- `last_prompt_kind`
+- `last_prompt_at`
+- `last_prompt_path`
+- `last_execution_status`
+- `last_event_id`
+- `last_event_kind`
+- `last_event_at`
+- `last_event_summary`
 
 This file is the bridge between Symphony issue ownership and OpenHands conversation reuse.
 
@@ -261,11 +271,18 @@ Human-readable summary for the agent and operator:
 Machine-readable runtime summary:
 
 - conversation ID
+- run ID
 - attempt number
+- worker ID
+- prompt kind and prompt artifact path
+- whether the workflow prompt has been seeded into the conversation
+- last known execution status
+- last event summary
 - last run ID and status
 - last prompt kind and path
 - recent validation commands
 - last retry reason if any
+- latest worker outcome
 
 These files help continuity without altering the repository's own guidance files.
 They are additive references to repo-owned policy, not replacements for it.
@@ -296,6 +313,12 @@ Also archive every captured prompt under `.opensymphony/runs/attempt-####/` usin
 - `prompt-continuation-001.json`
 
 The stable files in `prompts/` should always mirror the latest capture of that kind, while the per-run `runs/` archive remains append-only for that worker attempt.
+
+Current implementation detail:
+
+- the full workflow prompt is rendered from `WORKFLOW.md`
+- continuation guidance is a separate built-in resume prompt, not a rerender of the workflow template
+- `conversation.json` records which prompt shape last ran and whether the workflow prompt has been successfully seeded into the reused conversation
 
 ## 11. Conversation lifetime policy inside the workspace
 
