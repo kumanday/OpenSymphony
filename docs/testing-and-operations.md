@@ -232,6 +232,7 @@ Suggested scenarios:
 - run the same issue twice
 - verify the same `conversation_id` is reused
 - verify continuation guidance is used instead of the full first-turn prompt
+- verify a reused-but-unseeded conversation still receives the full workflow prompt
 - verify workflow validation rejects non-default `openhands.conversation.reuse_policy` values until runtime support exists
 
 ### Scenario C: WebSocket reconnect
@@ -396,11 +397,16 @@ Each issue workspace should expose enough local artifacts to debug recovery:
   issue.json
   run.json
   conversation.json
+  openhands/
+    create-conversation-request.json
+    last-conversation-state.json
+  generated/
+    session-context.json
   prompts/
   logs/
 ```
 
-These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, and `run.json` should retain the latest hook/status evidence for the worker lifetime.
+These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, `run.json` retains the latest hook/status evidence for the worker lifetime, `conversation.json` records reuse plus prompt-seeding state, and the OpenHands plus generated snapshots preserve the exact create request, latest mirrored conversation state, and latest normalized runner context.
 
 ## 10. Version pinning
 
