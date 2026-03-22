@@ -285,10 +285,10 @@ Current repository implementation:
 - `TransportConfig` now carries an `AuthConfig` with explicit no-auth, query-param API key, header API key, and header-plus-WebSocket-query-fallback modes
 - REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape
 - `OpenHandsError` now maps invalid config, transport failures, HTTP status failures, protocol failures, and WebSocket failures into stable runtime categories without exposing `reqwest::Error` or `http::StatusCode`
-- `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, and non-readiness frames before the first state update
+- `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, forward-compatible readiness envelopes, ready-state freshness after attach, and non-readiness frames before the first state update
 - the doctor probe now runs through `RuntimeEventStream`, exercises a real `POST /events` plus `POST /run` path, and only reports the runtime healthy after the attached stream reaches a successful terminal `execution_status` of `finished` with no queued `ConversationErrorEvent` still pending ahead of completion
 - failure-only probe streams such as `ConversationErrorEvent` or terminal `execution_status` values like `error` and `stuck` are treated as unhealthy instead of silently passing
-- readiness snapshots are attach/reconnect barriers, not synthetic replay events; consumers only observe them through `ready_event` unless the same state update is also present in `/events/search`
+- readiness snapshots are attach/reconnect barriers keyed by envelope kind, not synthetic replay events; consumers observe them through `ready_event`, and the adapter folds them into `state_mirror()` only when reconcile and REST refresh do not already expose an equal or newer state update
 - initial attach now replays the persisted `/events/search` snapshot through `RuntimeEventStream::next_event()` so resumed conversations expose pre-existing history in timestamp order
 - if the socket closes after already-yieldable events have been drained into the pending queue, reconnect is deferred until that queued work has been delivered
 

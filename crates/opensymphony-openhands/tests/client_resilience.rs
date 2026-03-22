@@ -32,6 +32,19 @@ async fn wait_for_readiness_ignores_non_state_frames_before_ready_event() {
 }
 
 #[tokio::test]
+async fn wait_for_readiness_accepts_forward_compatible_state_update_kind() {
+    let server = TestServer::start(forward_compatible_readiness_router()).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+
+    let ready = client
+        .wait_for_readiness(Uuid::new_v4(), Duration::from_millis(100))
+        .await
+        .expect("readiness should key off the state-update event kind");
+
+    assert_eq!(ready.kind, "ConversationStateUpdateEvent");
+}
+
+#[tokio::test]
 async fn query_param_api_key_authenticates_rest_and_websocket_operations() {
     let server = TestServer::start(auth_router(AuthExpectations {
         rest: ExpectedAuth::QueryParam {
@@ -319,6 +332,40 @@ async fn runtime_stream_does_not_replay_reconnect_readiness_barriers_without_new
 }
 
 #[tokio::test]
+async fn attach_runtime_stream_applies_readiness_snapshot_to_state_mirror() {
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(readiness_mirror_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    assert_eq!(
+        stream.state_mirror().execution_status(),
+        Some("running"),
+        "the ready-state barrier should refresh the mirror even when REST state and reconcile lag behind it"
+    );
+}
+
+#[tokio::test]
 async fn runtime_stream_replays_initial_snapshot_when_post_ready_reconcile_is_empty() {
     let state = InitialReplayState::default();
     let server = TestServer::start(initial_replay_router(state)).await;
@@ -452,11 +499,48 @@ fn readiness_router() -> Router {
     Router::new().route("/sockets/events/:conversation_id", get(readiness_socket))
 }
 
+fn forward_compatible_readiness_router() -> Router {
+    Router::new().route(
+        "/sockets/events/:conversation_id",
+        get(forward_compatible_readiness_socket),
+    )
+}
+
 async fn readiness_socket(
     Path(_conversation_id): Path<Uuid>,
     websocket: WebSocketUpgrade,
 ) -> impl IntoResponse {
     websocket.on_upgrade(handle_readiness_socket)
+}
+
+async fn forward_compatible_readiness_socket(
+    Path(_conversation_id): Path<Uuid>,
+    websocket: WebSocketUpgrade,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        let ready = EventEnvelope::new(
+            "evt-ready-forward-compatible",
+            Utc::now(),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": {
+                    "current": "running",
+                },
+                "state_delta": {
+                    "execution_status": "running",
+                },
+            }),
+        );
+
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&ready).expect("event should serialize"),
+            ))
+            .await
+            .expect("forward-compatible ready event should send");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
 }
 
 async fn handle_readiness_socket(mut socket: WebSocket) {
@@ -488,6 +572,99 @@ async fn handle_readiness_socket(mut socket: WebSocket) {
         ))
         .await
         .expect("ready event should send");
+}
+
+#[derive(Clone, Default)]
+struct ReadinessMirrorState {
+    conversation: Arc<Mutex<Option<Conversation>>>,
+}
+
+fn readiness_mirror_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(readiness_mirror_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(readiness_mirror_events_socket),
+        )
+        .with_state(state)
+}
+
+async fn readiness_mirror_create_conversation(
+    State(state): State<ReadinessMirrorState>,
+    Json(request): Json<ConversationCreateRequest>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = Conversation {
+        conversation_id: request.conversation_id,
+        workspace: request.workspace,
+        persistence_dir: request.persistence_dir,
+        max_iterations: request.max_iterations,
+        stuck_detection: request.stuck_detection,
+        execution_status: "queued".to_string(),
+        confirmation_policy: request.confirmation_policy,
+        agent: request.agent,
+    };
+    *state.conversation.lock().await = Some(conversation.clone());
+    Ok(Json(conversation))
+}
+
+async fn readiness_mirror_get_conversation(
+    State(state): State<ReadinessMirrorState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = state
+        .conversation
+        .lock()
+        .await
+        .clone()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(conversation))
+}
+
+async fn readiness_mirror_search_events(
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    Ok(Json(SearchConversationEventsResponse {
+        events: Vec::new(),
+        next_page_id: None,
+    }))
+}
+
+async fn readiness_mirror_events_socket(
+    Path(_conversation_id): Path<Uuid>,
+    websocket: WebSocketUpgrade,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&EventEnvelope::new(
+                    "evt-ready-running",
+                    Utc::now(),
+                    "runtime",
+                    "ConversationStateUpdateEvent",
+                    json!({
+                        "execution_status": "running",
+                        "state_delta": {
+                            "execution_status": "running",
+                        },
+                    }),
+                ))
+                .expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
 }
 
 #[derive(Clone)]
