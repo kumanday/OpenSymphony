@@ -1078,8 +1078,15 @@ enum CommandError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use std::path::PathBuf;
+
     use clap::{Parser, error::ErrorKind};
+    use opensymphony_workflow::WorkflowDefinition;
+    use tempfile::TempDir;
+
+    use super::{
+        Cli, Command, DoctorRuntimeConfig, build_doctor_probe_request, resolve_doctor_workflow,
+    };
 
     #[test]
     fn daemon_rejects_zero_sample_interval() {
@@ -1101,16 +1108,6 @@ mod tests {
             }
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use opensymphony_workflow::WorkflowDefinition;
-    use tempfile::TempDir;
-
-    use super::{build_doctor_probe_request, resolve_doctor_workflow, DoctorRuntimeConfig};
 
     #[test]
     fn build_doctor_probe_request_reports_u32_limit_for_oversized_iterations() {
