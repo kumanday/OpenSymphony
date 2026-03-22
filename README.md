@@ -41,14 +41,29 @@ Not in MVP:
 - replacing Symphony tracker polling with push webhooks
 - implementing against the OpenHands web-app Socket.IO API
 
-## Current foundation surface
+## Current implemented slice
 
-Milestone M1 is the contract baseline that later milestones build on:
+This branch now boots the first local observability vertical slice even though the rest of the orchestration stack is still being filled in.
 
-- `opensymphony-domain` defines normalized issue, blocker, run-attempt, retry, and snapshot models
-- `opensymphony-workflow` loads `WORKFLOW.md`, rejects unknown nested config keys and unknown top-level keys outside the supported opaque `codex` namespace, applies defaults and env/path resolution, and renders prompts with strict template failures
-- `opensymphony-orchestrator` owns the deterministic scheduler state machine for candidate selection, reservation-aware start gating against current reservation state and latest dispatch eligibility, retries, reconciliation, stall detection, and snapshot derivation
-- the remaining crates already exist at their final boundaries and compile against these public interfaces without reaching into implementation details
+Available today:
+
+- a Cargo workspace with shared snapshot domain models
+- a read-only control-plane server with:
+  - `GET /healthz` with status derived from the daemon snapshot state
+  - `GET /api/v1/snapshot`
+  - `GET /api/v1/events` as an SSE update stream
+- a FrankenTUI client that:
+  - fetches the initial snapshot over HTTP
+  - reconnects to the SSE stream after disconnects or stalled reads, surfacing reconnecting state while retryable SSE errors are in flight
+  - keeps reconnecting state visible through a rendered frame before returning to `live` when recovery snapshots arrive
+  - renders focused issue/workspace detail plus recent event or metrics panes in inline mode
+  - shows reducer-owned connection status plus the active focus pane in the header and pane headers for keyboard-driven navigation
+- a small `opensymphony-cli` demo path so the control plane and UI can be validated without coupling the TUI to orchestrator internals
+
+Local commands:
+
+- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
+- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
 
 ## Core design decisions
 
@@ -150,18 +165,36 @@ global `openhands` install.
 2. Read `docs/architecture.md` and `docs/websocket-runtime.md`.
 3. Implement milestone M1 before touching runtime code.
 4. Build the OpenHands runtime adapter against a pinned server version.
-5. Keep the control-plane API stable before starting the TUI.
+5. Keep the control-plane API stable before expanding the TUI.
 6. Use the task files in `docs/tasks/` as the Linear issue source of truth.
 
-## M1 validation
+## Current local validation entrypoints
 
-The CI-equivalent local validation for the foundation milestone is:
+This repository now includes the local validation scaffolding for M5:
 
-- `cargo fmt --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo test --workspace`
+- a Rust workspace with the documented crate boundaries
+- `opensymphony-openhands` for minimal conversation, search, and WebSocket readiness probes
+- `opensymphony-testkit` with an in-memory fake OpenHands server
+- `opensymphony` CLI with a meaningful `doctor` command
+- pinned OpenHands tooling under `tools/openhands-server/`
+- example config and target-repo fixtures under `examples/`
+- smoke and live validation scripts under `scripts/`
 
-The workspace test suite includes a downstream compile-time smoke test in `opensymphony-testkit` so later crates can depend on the M1 public contracts without touching private implementation details.
+Useful commands:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml
+./scripts/smoke_local.sh
+OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
+```
+
+Current note:
+
+- the example doctor YAML now only carries machine-local inputs such as the OpenHands tool directory and optional probe overrides; the target repo `WORKFLOW.md` provides the workspace root, OpenHands base URL, and prompt that the doctor probe validates
+- `daemon`, `tui`, and `linear-mcp` subcommands are present so the CLI shape is stable, but they remain scaffolds until the corresponding runtime and control-plane milestones land.
 
 ## Non-negotiable implementation rules
 

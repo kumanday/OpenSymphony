@@ -1,1527 +1,1954 @@
-//! `WORKFLOW.md` loading, typed config resolution, and strict prompt rendering.
+mod error;
+mod loader;
+mod model;
+mod resolve;
+mod template;
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::io;
-use std::path::Component;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use opensymphony_domain::Issue;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
-use tera::{Context, Tera};
-use thiserror::Error;
+use serde::Serialize;
 
-const DEFAULT_TRACKER_ENDPOINT: &str = "https://api.linear.app/graphql";
-const DEFAULT_ACTIVE_STATES: [&str; 2] = ["Todo", "In Progress"];
-const DEFAULT_TERMINAL_STATES: [&str; 5] = ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"];
-const DEFAULT_POLL_INTERVAL_MS: u64 = 30_000;
-const DEFAULT_WORKSPACE_ROOT: &str = "/symphony_workspaces";
-const DEFAULT_HOOK_TIMEOUT_MS: u64 = 60_000;
-const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 10;
-const DEFAULT_MAX_TURNS: u32 = 20;
-const DEFAULT_MAX_RETRY_BACKOFF_MS: u64 = 300_000;
-const DEFAULT_STALL_TIMEOUT_MS: u64 = 300_000;
-const DEFAULT_OPENHANDS_BASE_URL: &str = "http://127.0.0.1:8000";
-const DEFAULT_LOCAL_SERVER_COMMAND: [&str; 3] = ["python", "-m", "openhands.agent_server"];
-const DEFAULT_STARTUP_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_READINESS_PROBE_PATH: &str = "/openapi.json";
-const DEFAULT_PERSISTENCE_DIR_RELATIVE: &str = ".opensymphony/openhands";
-const DEFAULT_MAX_ITERATIONS: u32 = 500;
-const DEFAULT_CONFIRMATION_POLICY_KIND: &str = "NeverConfirm";
-const DEFAULT_AGENT_KIND: &str = "Agent";
-const DEFAULT_LINEAR_API_KEY_ENV: &str = "LINEAR_API_KEY";
-const DEFAULT_READY_TIMEOUT_MS: u64 = 30_000;
-const DEFAULT_RECONNECT_INITIAL_MS: u64 = 1_000;
-const DEFAULT_RECONNECT_MAX_MS: u64 = 30_000;
-const DEFAULT_QUERY_PARAM_NAME: &str = "session_api_key";
-const DEFAULT_PROMPT_TEMPLATE: &str = "You are working on an issue from Linear.";
+pub use error::{PromptTemplateError, WorkflowConfigError, WorkflowLoadError};
+pub use model::{
+    AgentConfig, AgentFrontMatter, DEFAULT_PROMPT_TEMPLATE, Environment, HooksConfig,
+    HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
+    OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
+    OpenHandsConversationAgentFrontMatter, OpenHandsConversationConfig,
+    OpenHandsConversationFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
+    OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
+    OpenHandsMcpConfig, OpenHandsMcpFrontMatter, OpenHandsStdioServerConfig,
+    OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig, OpenHandsTransportFrontMatter,
+    OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter,
+    ProcessEnvironment, PromptContext, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter,
+    TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkflowFrontMatter,
+    WorkspaceConfig, WorkspaceFrontMatter,
+};
 
-/// Environment access abstraction used for deterministic tests.
-pub trait EnvProvider {
-    fn get_var(&self, name: &str) -> Option<String>;
-}
+pub const CRATE_NAME: &str = "opensymphony-workflow";
 
-/// The current process environment.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct ProcessEnv;
-
-impl EnvProvider for ProcessEnv {
-    fn get_var(&self, name: &str) -> Option<String> {
-        std::env::var(name).ok().filter(|value| !value.is_empty())
-    }
-}
-
-impl EnvProvider for BTreeMap<String, String> {
-    fn get_var(&self, name: &str) -> Option<String> {
-        self.get(name).cloned().filter(|value| !value.is_empty())
-    }
-}
-
-/// Raw workflow payload returned by front matter parsing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowDefinition {
-    pub config: Map<String, Value>,
-    pub prompt_template: String,
-}
-
-/// Fully typed workflow contract used by downstream crates.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Workflow {
-    pub definition: WorkflowDefinition,
-    pub config: WorkflowConfig,
-}
-
-impl Workflow {
-    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, WorkflowError> {
-        Self::load_from_path_with_env(path, &ProcessEnv)
+impl WorkflowDefinition {
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, WorkflowLoadError> {
+        loader::load_workflow_from_path(path.as_ref())
     }
 
-    pub fn load_from_path_with_env(
-        path: impl AsRef<Path>,
-        env: &impl EnvProvider,
-    ) -> Result<Self, WorkflowError> {
-        let path = path.as_ref();
-        let contents =
-            fs::read_to_string(path).map_err(|source| WorkflowError::MissingWorkflowFile {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        Self::load_from_str_with_env(&contents, env)
+    pub fn parse(source: &str) -> Result<Self, WorkflowLoadError> {
+        loader::parse_workflow(source)
     }
 
-    pub fn load_from_str(contents: &str) -> Result<Self, WorkflowError> {
-        Self::load_from_str_with_env(contents, &ProcessEnv)
-    }
-
-    pub fn load_from_str_with_env(
-        contents: &str,
-        env: &impl EnvProvider,
-    ) -> Result<Self, WorkflowError> {
-        let definition = parse_workflow_definition(contents)?;
-        let config = WorkflowConfig::from_definition_with_env(&definition, env)?;
-        Ok(Self { definition, config })
-    }
-
-    pub fn render_prompt(
-        &self,
-        issue: &Issue,
-        attempt: Option<u32>,
-    ) -> Result<String, WorkflowError> {
-        let template = if self.definition.prompt_template.is_empty() {
+    pub fn effective_prompt_template(&self) -> &str {
+        if self.prompt_template.trim().is_empty() {
             DEFAULT_PROMPT_TEMPLATE
         } else {
-            &self.definition.prompt_template
-        };
-
-        #[derive(Serialize)]
-        struct RenderContext<'a> {
-            issue: &'a Issue,
-            attempt: Option<u32>,
-        }
-
-        let mut tera = Tera::default();
-        tera.autoescape_on(Vec::<&'static str>::new());
-        tera.add_raw_template("workflow", template)
-            .map_err(WorkflowError::TemplateParseError)?;
-
-        let context = Context::from_serialize(RenderContext { issue, attempt })
-            .map_err(WorkflowError::TemplateRenderError)?;
-        tera.render("workflow", &context)
-            .map_err(WorkflowError::TemplateRenderError)
-    }
-}
-
-/// Typed configuration view resolved from workflow front matter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkflowConfig {
-    pub tracker: TrackerConfig,
-    pub polling: PollingConfig,
-    pub workspace: WorkspaceConfig,
-    pub hooks: HooksConfig,
-    pub agent: AgentConfig,
-    pub openhands: OpenHandsConfig,
-}
-
-impl WorkflowConfig {
-    pub fn from_definition(definition: &WorkflowDefinition) -> Result<Self, WorkflowError> {
-        Self::from_definition_with_env(definition, &ProcessEnv)
-    }
-
-    pub fn from_definition_with_env(
-        definition: &WorkflowDefinition,
-        env: &impl EnvProvider,
-    ) -> Result<Self, WorkflowError> {
-        let raw: RawWorkflowConfig =
-            serde_json::from_value(Value::Object(definition.config.clone()))
-                .map_err(WorkflowError::WorkflowParseError)?;
-
-        Ok(Self {
-            tracker: TrackerConfig::from_raw(raw.tracker.unwrap_or_default(), env)?,
-            polling: PollingConfig::from_raw(raw.polling.unwrap_or_default())?,
-            workspace: WorkspaceConfig::from_raw(raw.workspace.unwrap_or_default(), env)?,
-            hooks: HooksConfig::from_raw(raw.hooks.unwrap_or_default())?,
-            agent: AgentConfig::from_raw(raw.agent.unwrap_or_default())?,
-            openhands: OpenHandsConfig::from_raw(raw.openhands.unwrap_or_default(), env)?,
-        })
-    }
-}
-
-/// Supported tracker kinds for the local MVP.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TrackerKind {
-    Linear,
-}
-
-/// Tracker settings required for orchestration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TrackerConfig {
-    pub kind: Option<TrackerKind>,
-    pub endpoint: String,
-    pub api_key: Option<String>,
-    pub project_slug: Option<String>,
-    pub active_states: Vec<String>,
-    pub terminal_states: Vec<String>,
-}
-
-impl TrackerConfig {
-    fn from_raw(raw: RawTrackerConfig, env: &impl EnvProvider) -> Result<Self, WorkflowError> {
-        let kind = match raw.kind.as_deref() {
-            None => None,
-            Some("linear") | Some("Linear") => Some(TrackerKind::Linear),
-            Some(other) => {
-                return Err(WorkflowError::invalid_config(
-                    "tracker.kind",
-                    format!("unsupported tracker kind `{other}`"),
-                ));
-            }
-        };
-
-        let api_key = match raw.api_key.as_deref() {
-            Some(value) => Some(resolve_explicit_config_value(
-                value,
-                env,
-                "tracker.api_key",
-            )?),
-            None if matches!(kind, Some(TrackerKind::Linear)) => {
-                env.get_var(DEFAULT_LINEAR_API_KEY_ENV)
-            }
-            None => None,
-        }
-        .and_then(|value| {
-            let trimmed = value.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
-        let project_slug = raw.project_slug.and_then(|slug| {
-            let trimmed = slug.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
-        });
-
-        if matches!(kind, Some(TrackerKind::Linear)) && project_slug.is_none() {
-            return Err(WorkflowError::invalid_config(
-                "tracker.project_slug",
-                "must be set for the Linear tracker",
-            ));
-        }
-        if matches!(kind, Some(TrackerKind::Linear)) && api_key.is_none() {
-            return Err(WorkflowError::invalid_config(
-                "tracker.api_key",
-                format!(
-                    "must be set for the Linear tracker via `tracker.api_key` or `{DEFAULT_LINEAR_API_KEY_ENV}`"
-                ),
-            ));
-        }
-
-        Ok(Self {
-            kind,
-            endpoint: raw
-                .endpoint
-                .unwrap_or_else(|| DEFAULT_TRACKER_ENDPOINT.to_string()),
-            api_key,
-            project_slug,
-            active_states: normalize_states(
-                raw.active_states.unwrap_or_else(default_active_states),
-            ),
-            terminal_states: normalize_states(
-                raw.terminal_states.unwrap_or_else(default_terminal_states),
-            ),
-        })
-    }
-}
-
-/// Poll loop settings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PollingConfig {
-    pub interval_ms: u64,
-}
-
-impl PollingConfig {
-    fn from_raw(raw: RawPollingConfig) -> Result<Self, WorkflowError> {
-        Ok(Self {
-            interval_ms: parse_u64(
-                raw.interval_ms,
-                DEFAULT_POLL_INTERVAL_MS,
-                "polling.interval_ms",
-            )?,
-        })
-    }
-}
-
-/// Workspace path settings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceConfig {
-    pub root: PathBuf,
-}
-
-impl WorkspaceConfig {
-    fn from_raw(raw: RawWorkspaceConfig, env: &impl EnvProvider) -> Result<Self, WorkflowError> {
-        Ok(Self {
-            root: resolve_path_like(
-                raw.root.as_deref(),
-                DEFAULT_WORKSPACE_ROOT,
-                env,
-                "workspace.root",
-            )?,
-        })
-    }
-}
-
-/// Repository-owned workspace hooks.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HooksConfig {
-    pub after_create: Option<String>,
-    pub before_run: Option<String>,
-    pub after_run: Option<String>,
-    pub before_remove: Option<String>,
-    pub timeout_ms: u64,
-}
-
-impl HooksConfig {
-    fn from_raw(raw: RawHooksConfig) -> Result<Self, WorkflowError> {
-        Ok(Self {
-            after_create: raw.after_create,
-            before_run: raw.before_run,
-            after_run: raw.after_run,
-            before_remove: raw.before_remove,
-            timeout_ms: parse_non_positive_as_default(
-                raw.timeout_ms,
-                DEFAULT_HOOK_TIMEOUT_MS,
-                "hooks.timeout_ms",
-            )?,
-        })
-    }
-}
-
-/// Scheduler-relevant agent limits.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AgentConfig {
-    pub max_concurrent_agents: usize,
-    pub max_turns: u32,
-    pub max_retry_backoff_ms: u64,
-    pub stall_timeout_ms: Option<u64>,
-    pub max_concurrent_agents_by_state: BTreeMap<String, usize>,
-}
-
-impl AgentConfig {
-    fn from_raw(raw: RawAgentConfig) -> Result<Self, WorkflowError> {
-        Ok(Self {
-            max_concurrent_agents: parse_usize(
-                raw.max_concurrent_agents,
-                DEFAULT_MAX_CONCURRENT_AGENTS,
-                "agent.max_concurrent_agents",
-            )?,
-            max_turns: parse_u32(raw.max_turns, DEFAULT_MAX_TURNS, "agent.max_turns")?,
-            max_retry_backoff_ms: parse_u64(
-                raw.max_retry_backoff_ms,
-                DEFAULT_MAX_RETRY_BACKOFF_MS,
-                "agent.max_retry_backoff_ms",
-            )?,
-            stall_timeout_ms: parse_optional_positive_u64(
-                raw.stall_timeout_ms,
-                DEFAULT_STALL_TIMEOUT_MS,
-                "agent.stall_timeout_ms",
-            )?,
-            max_concurrent_agents_by_state: normalize_state_limits(
-                raw.max_concurrent_agents_by_state,
-            )?,
-        })
-    }
-}
-
-/// OpenHands-specific runtime namespace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenHandsConfig {
-    pub transport: OpenHandsTransportConfig,
-    pub local_server: OpenHandsLocalServerConfig,
-    pub conversation: OpenHandsConversationConfig,
-    pub websocket: OpenHandsWebSocketConfig,
-    pub mcp: OpenHandsMcpConfig,
-}
-
-impl OpenHandsConfig {
-    fn from_raw(raw: RawOpenHandsConfig, env: &impl EnvProvider) -> Result<Self, WorkflowError> {
-        let websocket = OpenHandsWebSocketConfig::from_raw(raw.websocket.unwrap_or_default())?;
-
-        Ok(Self {
-            transport: OpenHandsTransportConfig::from_raw(raw.transport.unwrap_or_default()),
-            local_server: OpenHandsLocalServerConfig::from_raw(
-                raw.local_server.unwrap_or_default(),
-            )?,
-            conversation: OpenHandsConversationConfig::from_raw(
-                raw.conversation.unwrap_or_default(),
-                env,
-            )?,
-            websocket,
-            mcp: OpenHandsMcpConfig::from_raw(raw.mcp.unwrap_or_default())?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenHandsTransportConfig {
-    pub base_url: String,
-    pub session_api_key_env: Option<String>,
-}
-
-impl OpenHandsTransportConfig {
-    fn from_raw(raw: RawOpenHandsTransportConfig) -> Self {
-        Self {
-            base_url: raw
-                .base_url
-                .unwrap_or_else(|| DEFAULT_OPENHANDS_BASE_URL.to_string()),
-            session_api_key_env: raw.session_api_key_env,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenHandsLocalServerConfig {
-    pub enabled: bool,
-    pub command: Vec<String>,
-    pub startup_timeout_ms: u64,
-    pub readiness_probe_path: String,
-    pub env: BTreeMap<String, String>,
-}
-
-impl OpenHandsLocalServerConfig {
-    fn from_raw(raw: RawOpenHandsLocalServerConfig) -> Result<Self, WorkflowError> {
-        Ok(Self {
-            enabled: raw.enabled.unwrap_or(false),
-            command: normalize_command(
-                raw.command,
-                DEFAULT_LOCAL_SERVER_COMMAND.as_slice(),
-                "openhands.local_server.command",
-            )?,
-            startup_timeout_ms: parse_u64(
-                raw.startup_timeout_ms,
-                DEFAULT_STARTUP_TIMEOUT_MS,
-                "openhands.local_server.startup_timeout_ms",
-            )?,
-            readiness_probe_path: raw
-                .readiness_probe_path
-                .unwrap_or_else(|| DEFAULT_READINESS_PROBE_PATH.to_string()),
-            env: raw.env.unwrap_or_default(),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConversationReusePolicy {
-    PerIssue,
-    Fresh,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenHandsConversationConfig {
-    pub reuse_policy: ConversationReusePolicy,
-    pub persistence_dir_relative: PathBuf,
-    pub max_iterations: u32,
-    pub stuck_detection: bool,
-    pub confirmation_policy_kind: String,
-    pub agent: OpenHandsAgentProfile,
-}
-
-impl OpenHandsConversationConfig {
-    fn from_raw(
-        raw: RawOpenHandsConversationConfig,
-        env: &impl EnvProvider,
-    ) -> Result<Self, WorkflowError> {
-        let reuse_policy = match raw.reuse_policy.as_deref() {
-            None | Some("per_issue") => ConversationReusePolicy::PerIssue,
-            Some("fresh") => ConversationReusePolicy::Fresh,
-            Some(other) => {
-                return Err(WorkflowError::invalid_config(
-                    "openhands.conversation.reuse_policy",
-                    format!("unsupported reuse policy `{other}`"),
-                ));
-            }
-        };
-
-        let persistence_dir_relative = PathBuf::from(
-            raw.persistence_dir_relative
-                .unwrap_or_else(|| DEFAULT_PERSISTENCE_DIR_RELATIVE.to_string()),
-        );
-        if persistence_dir_relative.is_absolute()
-            || persistence_dir_relative.components().any(|component| {
-                matches!(
-                    component,
-                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
-                )
-            })
-        {
-            return Err(WorkflowError::invalid_config(
-                "openhands.conversation.persistence_dir_relative",
-                "must remain relative to the issue workspace",
-            ));
-        }
-
-        Ok(Self {
-            reuse_policy,
-            persistence_dir_relative,
-            max_iterations: parse_u32(
-                raw.max_iterations,
-                DEFAULT_MAX_ITERATIONS,
-                "openhands.conversation.max_iterations",
-            )?,
-            stuck_detection: raw.stuck_detection.unwrap_or(true),
-            confirmation_policy_kind: raw
-                .confirmation_policy
-                .and_then(|policy| policy.kind)
-                .unwrap_or_else(|| DEFAULT_CONFIRMATION_POLICY_KIND.to_string()),
-            agent: OpenHandsAgentProfile::from_raw(raw.agent.unwrap_or_default(), env)?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenHandsAgentProfile {
-    pub kind: String,
-    pub llm: OpenHandsLlmConfig,
-    pub log_completions: bool,
-}
-
-impl OpenHandsAgentProfile {
-    fn from_raw(
-        raw: RawOpenHandsAgentProfile,
-        env: &impl EnvProvider,
-    ) -> Result<Self, WorkflowError> {
-        Ok(Self {
-            kind: raw.kind.unwrap_or_else(|| DEFAULT_AGENT_KIND.to_string()),
-            llm: OpenHandsLlmConfig::from_raw(raw.llm.unwrap_or_default(), env)?,
-            log_completions: raw.log_completions.unwrap_or(false),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenHandsLlmConfig {
-    pub model: Option<String>,
-    pub api_key_env: Option<String>,
-    pub base_url_env: Option<String>,
-}
-
-impl OpenHandsLlmConfig {
-    fn from_raw(raw: RawOpenHandsLlmConfig, env: &impl EnvProvider) -> Result<Self, WorkflowError> {
-        Ok(Self {
-            model: resolve_optional_explicit_config_value(
-                raw.model.as_deref(),
-                env,
-                "openhands.conversation.agent.llm.model",
-            )?,
-            api_key_env: raw.api_key_env,
-            base_url_env: raw.base_url_env,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WebSocketAuthMode {
-    Auto,
-    Header,
-    QueryParam,
-    None,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenHandsWebSocketConfig {
-    pub enabled: bool,
-    pub ready_timeout_ms: u64,
-    pub reconnect_initial_ms: u64,
-    pub reconnect_max_ms: u64,
-    pub auth_mode: WebSocketAuthMode,
-    pub query_param_name: String,
-}
-
-impl OpenHandsWebSocketConfig {
-    fn from_raw(raw: RawOpenHandsWebSocketConfig) -> Result<Self, WorkflowError> {
-        let reconnect_initial_ms = parse_u64(
-            raw.reconnect_initial_ms,
-            DEFAULT_RECONNECT_INITIAL_MS,
-            "openhands.websocket.reconnect_initial_ms",
-        )?;
-        let reconnect_max_ms = parse_u64(
-            raw.reconnect_max_ms,
-            DEFAULT_RECONNECT_MAX_MS,
-            "openhands.websocket.reconnect_max_ms",
-        )?;
-        if reconnect_max_ms < reconnect_initial_ms {
-            return Err(WorkflowError::invalid_config(
-                "openhands.websocket.reconnect_max_ms",
-                "must be greater than or equal to reconnect_initial_ms",
-            ));
-        }
-
-        let auth_mode = match raw.auth_mode.as_deref() {
-            None | Some("auto") => WebSocketAuthMode::Auto,
-            Some("header") => WebSocketAuthMode::Header,
-            Some("query_param") => WebSocketAuthMode::QueryParam,
-            Some("none") => WebSocketAuthMode::None,
-            Some(other) => {
-                return Err(WorkflowError::invalid_config(
-                    "openhands.websocket.auth_mode",
-                    format!("unsupported auth mode `{other}`"),
-                ));
-            }
-        };
-
-        Ok(Self {
-            enabled: raw.enabled.unwrap_or(true),
-            ready_timeout_ms: parse_u64(
-                raw.ready_timeout_ms,
-                DEFAULT_READY_TIMEOUT_MS,
-                "openhands.websocket.ready_timeout_ms",
-            )?,
-            reconnect_initial_ms,
-            reconnect_max_ms,
-            auth_mode,
-            query_param_name: raw
-                .query_param_name
-                .unwrap_or_else(|| DEFAULT_QUERY_PARAM_NAME.to_string()),
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OpenHandsMcpConfig {
-    pub stdio_servers: Vec<StdioMcpServerConfig>,
-}
-
-impl OpenHandsMcpConfig {
-    fn from_raw(raw: RawOpenHandsMcpConfig) -> Result<Self, WorkflowError> {
-        Ok(Self {
-            stdio_servers: raw
-                .stdio_servers
-                .unwrap_or_default()
-                .into_iter()
-                .map(StdioMcpServerConfig::from_raw)
-                .collect::<Result<Vec<_>, _>>()?,
-        })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StdioMcpServerConfig {
-    pub name: String,
-    pub command: Vec<String>,
-}
-
-impl StdioMcpServerConfig {
-    fn from_raw(raw: RawStdioMcpServerConfig) -> Result<Self, WorkflowError> {
-        if raw.name.trim().is_empty() {
-            return Err(WorkflowError::invalid_config(
-                "openhands.mcp.stdio_servers.name",
-                "must not be empty",
-            ));
-        }
-
-        Ok(Self {
-            name: raw.name,
-            command: normalize_command(
-                Some(raw.command),
-                &[],
-                "openhands.mcp.stdio_servers.command",
-            )?,
-        })
-    }
-}
-
-/// Workflow parsing and config errors.
-#[derive(Debug, Error)]
-pub enum WorkflowError {
-    #[error("missing workflow file `{path}`")]
-    MissingWorkflowFile {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("workflow parse error")]
-    WorkflowParseError(#[source] serde_json::Error),
-    #[error("workflow parse error: {0}")]
-    WorkflowStructure(String),
-    #[error("workflow front matter must decode to a map")]
-    WorkflowFrontMatterNotAMap,
-    #[error("template parse error")]
-    TemplateParseError(#[source] tera::Error),
-    #[error("template render error")]
-    TemplateRenderError(#[source] tera::Error),
-    #[error("invalid config for `{field}`: {reason}")]
-    InvalidConfig { field: &'static str, reason: String },
-}
-
-impl WorkflowError {
-    fn invalid_config(field: &'static str, reason: impl Into<String>) -> Self {
-        Self::InvalidConfig {
-            field,
-            reason: reason.into(),
-        }
-    }
-}
-
-/// Parse a `WORKFLOW.md` payload into raw front matter and prompt template text.
-pub fn parse_workflow_definition(contents: &str) -> Result<WorkflowDefinition, WorkflowError> {
-    let (front_matter, body) = split_front_matter(contents)?;
-    let config = if let Some(front_matter) = front_matter {
-        let value: serde_yaml::Value = serde_yaml::from_str(front_matter)
-            .map_err(|error| WorkflowError::WorkflowStructure(error.to_string()))?;
-        let mapping = match value {
-            serde_yaml::Value::Mapping(mapping) => mapping,
-            _ => return Err(WorkflowError::WorkflowFrontMatterNotAMap),
-        };
-
-        match serde_json::to_value(mapping)
-            .map_err(|error| WorkflowError::WorkflowStructure(error.to_string()))?
-        {
-            Value::Object(object) => object,
-            _ => return Err(WorkflowError::WorkflowFrontMatterNotAMap),
-        }
-    } else {
-        Map::new()
-    };
-
-    Ok(WorkflowDefinition {
-        config,
-        prompt_template: body.trim().to_string(),
-    })
-}
-
-fn split_front_matter(contents: &str) -> Result<(Option<&str>, &str), WorkflowError> {
-    let Some(first_line) = contents.split_inclusive('\n').next() else {
-        return Ok((None, ""));
-    };
-    if trim_line(first_line) != "---" {
-        return Ok((None, contents));
-    }
-
-    let mut offset = first_line.len();
-    let front_matter_start = offset;
-    for line in contents[offset..].split_inclusive('\n') {
-        let line_start = offset;
-        offset += line.len();
-        if trim_line(line) == "---" {
-            return Ok((
-                Some(&contents[front_matter_start..line_start]),
-                &contents[offset..],
-            ));
+            &self.prompt_template
         }
     }
 
-    Err(WorkflowError::WorkflowStructure(
-        "front matter started with `---` but no closing delimiter was found".to_string(),
-    ))
-}
+    pub fn resolve<E: Environment>(
+        &self,
+        base_dir: &Path,
+        env: &E,
+    ) -> Result<ResolvedWorkflow, WorkflowConfigError> {
+        resolve::resolve_workflow(self, base_dir, env)
+    }
 
-fn trim_line(line: &str) -> &str {
-    line.trim_end_matches('\n').trim_end_matches('\r')
-}
+    pub fn resolve_with_process_env(
+        &self,
+        base_dir: &Path,
+    ) -> Result<ResolvedWorkflow, WorkflowConfigError> {
+        self.resolve(base_dir, &ProcessEnvironment)
+    }
 
-fn parse_i64(value: IntLike, field: &'static str) -> Result<i64, WorkflowError> {
-    match value {
-        IntLike::Integer(number) => Ok(number),
-        IntLike::String(number) => number.parse::<i64>().map_err(|_| {
-            WorkflowError::invalid_config(field, format!("expected an integer, got `{number}`"))
-        }),
+    pub fn render_prompt<T: Serialize>(
+        &self,
+        issue: &T,
+        attempt: Option<u32>,
+    ) -> Result<String, PromptTemplateError> {
+        template::render_prompt(self.effective_prompt_template(), issue, attempt)
     }
 }
 
-fn parse_u64(
-    value: Option<IntLike>,
-    default: u64,
-    field: &'static str,
-) -> Result<u64, WorkflowError> {
-    match value {
-        Some(value) => {
-            let parsed = parse_i64(value, field)?;
-            u64::try_from(parsed)
-                .map_err(|_| WorkflowError::invalid_config(field, "must be a non-negative integer"))
-        }
-        None => Ok(default),
+impl std::str::FromStr for WorkflowDefinition {
+    type Err = WorkflowLoadError;
+
+    fn from_str(source: &str) -> Result<Self, Self::Err> {
+        Self::parse(source)
     }
 }
 
-fn parse_u32(
-    value: Option<IntLike>,
-    default: u32,
-    field: &'static str,
-) -> Result<u32, WorkflowError> {
-    let parsed = parse_u64(value, u64::from(default), field)?;
-    u32::try_from(parsed)
-        .map_err(|_| WorkflowError::invalid_config(field, "value does not fit in u32"))
-}
-
-fn parse_usize(
-    value: Option<IntLike>,
-    default: usize,
-    field: &'static str,
-) -> Result<usize, WorkflowError> {
-    let parsed = parse_u64(value, default as u64, field)?;
-    usize::try_from(parsed)
-        .map_err(|_| WorkflowError::invalid_config(field, "value does not fit in usize"))
-}
-
-fn parse_non_positive_as_default(
-    value: Option<IntLike>,
-    default: u64,
-    field: &'static str,
-) -> Result<u64, WorkflowError> {
-    match value {
-        Some(raw) => {
-            let parsed = parse_i64(raw, field)?;
-            if parsed <= 0 {
-                Ok(default)
-            } else {
-                u64::try_from(parsed).map_err(|_| {
-                    WorkflowError::invalid_config(field, "must be a non-negative integer")
-                })
-            }
-        }
-        None => Ok(default),
-    }
-}
-
-fn parse_optional_positive_u64(
-    value: Option<IntLike>,
-    default: u64,
-    field: &'static str,
-) -> Result<Option<u64>, WorkflowError> {
-    match value {
-        Some(raw) => {
-            let parsed = parse_i64(raw, field)?;
-            if parsed <= 0 {
-                Ok(None)
-            } else {
-                Ok(Some(u64::try_from(parsed).map_err(|_| {
-                    WorkflowError::invalid_config(field, "must be a non-negative integer")
-                })?))
-            }
-        }
-        None => Ok(Some(default)),
-    }
-}
-
-fn normalize_states(states: Vec<String>) -> Vec<String> {
-    states
-        .into_iter()
-        .map(|state| state.trim().to_lowercase())
-        .filter(|state| !state.is_empty())
-        .collect()
-}
-
-fn normalize_state_limits(
-    raw: Option<BTreeMap<String, IntLike>>,
-) -> Result<BTreeMap<String, usize>, WorkflowError> {
-    let mut normalized = BTreeMap::new();
-    for (state, value) in raw.unwrap_or_default() {
-        let limit = parse_i64(value, "agent.max_concurrent_agents_by_state")?;
-        if limit > 0 {
-            normalized.insert(
-                state.trim().to_lowercase(),
-                usize::try_from(limit).map_err(|_| {
-                    WorkflowError::invalid_config(
-                        "agent.max_concurrent_agents_by_state",
-                        "value does not fit in usize",
-                    )
-                })?,
-            );
+impl ResolvedWorkflow {
+    pub fn effective_prompt_template(&self) -> &str {
+        if self.prompt_template.trim().is_empty() {
+            DEFAULT_PROMPT_TEMPLATE
+        } else {
+            &self.prompt_template
         }
     }
-    Ok(normalized)
-}
 
-fn normalize_command(
-    raw: Option<Vec<String>>,
-    default: &[&str],
-    field: &'static str,
-) -> Result<Vec<String>, WorkflowError> {
-    let command = raw.unwrap_or_else(|| default.iter().map(|part| part.to_string()).collect());
-    if command.is_empty() || command.iter().all(|part| part.trim().is_empty()) {
-        return Err(WorkflowError::invalid_config(
-            field,
-            "command must not be empty",
-        ));
+    pub fn render_prompt<T: Serialize>(
+        &self,
+        issue: &T,
+        attempt: Option<u32>,
+    ) -> Result<String, PromptTemplateError> {
+        template::render_prompt(self.effective_prompt_template(), issue, attempt)
     }
-    Ok(command)
-}
-
-fn resolve_explicit_config_value(
-    raw: &str,
-    env: &impl EnvProvider,
-    field: &'static str,
-) -> Result<String, WorkflowError> {
-    if let Some(name) = parse_env_token(raw) {
-        return env.get_var(name).ok_or_else(|| {
-            WorkflowError::invalid_config(
-                field,
-                format!("environment variable `{name}` is required"),
-            )
-        });
-    }
-    Ok(raw.to_string())
-}
-
-fn resolve_optional_explicit_config_value(
-    raw: Option<&str>,
-    env: &impl EnvProvider,
-    field: &'static str,
-) -> Result<Option<String>, WorkflowError> {
-    raw.map(|value| resolve_explicit_config_value(value, env, field))
-        .transpose()
-}
-
-fn parse_env_token(raw: &str) -> Option<&str> {
-    if let Some(stripped) = raw
-        .strip_prefix("${")
-        .and_then(|value| value.strip_suffix('}'))
-    {
-        return Some(stripped);
-    }
-    raw.strip_prefix('$')
-}
-
-fn resolve_path_like(
-    raw: Option<&str>,
-    default: &str,
-    env: &impl EnvProvider,
-    field: &'static str,
-) -> Result<PathBuf, WorkflowError> {
-    let raw = match raw {
-        Some(value) => resolve_explicit_config_value(value, env, field)?,
-        None => default.to_string(),
-    };
-    let expanded = if raw == "~" {
-        env.get_var("HOME")
-            .ok_or_else(|| WorkflowError::invalid_config(field, "HOME is required to expand `~`"))?
-    } else if let Some(rest) = raw.strip_prefix("~/") {
-        let home = env.get_var("HOME").ok_or_else(|| {
-            WorkflowError::invalid_config(field, "HOME is required to expand `~`")
-        })?;
-        format!("{home}/{rest}")
-    } else {
-        raw
-    };
-    Ok(PathBuf::from(expanded))
-}
-
-fn default_active_states() -> Vec<String> {
-    DEFAULT_ACTIVE_STATES
-        .into_iter()
-        .map(String::from)
-        .collect()
-}
-
-fn default_terminal_states() -> Vec<String> {
-    DEFAULT_TERMINAL_STATES
-        .into_iter()
-        .map(String::from)
-        .collect()
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawWorkflowConfig {
-    #[serde(default)]
-    tracker: Option<RawTrackerConfig>,
-    #[serde(default)]
-    polling: Option<RawPollingConfig>,
-    #[serde(default)]
-    workspace: Option<RawWorkspaceConfig>,
-    #[serde(default)]
-    hooks: Option<RawHooksConfig>,
-    #[serde(default)]
-    agent: Option<RawAgentConfig>,
-    #[serde(default)]
-    openhands: Option<RawOpenHandsConfig>,
-    #[serde(default, rename = "codex")]
-    _codex: Option<Map<String, Value>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawTrackerConfig {
-    kind: Option<String>,
-    endpoint: Option<String>,
-    api_key: Option<String>,
-    project_slug: Option<String>,
-    active_states: Option<Vec<String>>,
-    terminal_states: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawPollingConfig {
-    interval_ms: Option<IntLike>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawWorkspaceConfig {
-    root: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawHooksConfig {
-    after_create: Option<String>,
-    before_run: Option<String>,
-    after_run: Option<String>,
-    before_remove: Option<String>,
-    timeout_ms: Option<IntLike>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawAgentConfig {
-    max_concurrent_agents: Option<IntLike>,
-    max_turns: Option<IntLike>,
-    max_retry_backoff_ms: Option<IntLike>,
-    stall_timeout_ms: Option<IntLike>,
-    max_concurrent_agents_by_state: Option<BTreeMap<String, IntLike>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawOpenHandsConfig {
-    transport: Option<RawOpenHandsTransportConfig>,
-    local_server: Option<RawOpenHandsLocalServerConfig>,
-    conversation: Option<RawOpenHandsConversationConfig>,
-    websocket: Option<RawOpenHandsWebSocketConfig>,
-    mcp: Option<RawOpenHandsMcpConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawOpenHandsTransportConfig {
-    base_url: Option<String>,
-    session_api_key_env: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawOpenHandsLocalServerConfig {
-    enabled: Option<bool>,
-    command: Option<Vec<String>>,
-    startup_timeout_ms: Option<IntLike>,
-    readiness_probe_path: Option<String>,
-    env: Option<BTreeMap<String, String>>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawOpenHandsConversationConfig {
-    reuse_policy: Option<String>,
-    persistence_dir_relative: Option<String>,
-    max_iterations: Option<IntLike>,
-    stuck_detection: Option<bool>,
-    confirmation_policy: Option<RawConfirmationPolicy>,
-    agent: Option<RawOpenHandsAgentProfile>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawConfirmationPolicy {
-    kind: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawOpenHandsAgentProfile {
-    kind: Option<String>,
-    llm: Option<RawOpenHandsLlmConfig>,
-    log_completions: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawOpenHandsLlmConfig {
-    model: Option<String>,
-    api_key_env: Option<String>,
-    base_url_env: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawOpenHandsWebSocketConfig {
-    enabled: Option<bool>,
-    ready_timeout_ms: Option<IntLike>,
-    reconnect_initial_ms: Option<IntLike>,
-    reconnect_max_ms: Option<IntLike>,
-    auth_mode: Option<String>,
-    query_param_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct RawOpenHandsMcpConfig {
-    stdio_servers: Option<Vec<RawStdioMcpServerConfig>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawStdioMcpServerConfig {
-    name: String,
-    command: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
-enum IntLike {
-    Integer(i64),
-    String(String),
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+    };
 
-    use super::*;
+    use serde::Serialize;
 
-    fn env() -> BTreeMap<String, String> {
-        BTreeMap::from([
-            ("HOME".into(), "/home/tester".into()),
-            ("LINEAR_KEY".into(), "linear-secret".into()),
-            ("OPENHANDS_MODEL".into(), "gpt-5.4".into()),
-        ])
-    }
+    use super::{
+        PromptTemplateError, TrackerKind, WorkflowConfigError, WorkflowDefinition,
+        WorkflowLoadError,
+        model::{
+            DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
+            DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_BASE_URL,
+            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
+            DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+            DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+            DEFAULT_POLL_INTERVAL_MS, DEFAULT_PROMPT_TEMPLATE, DEFAULT_STALL_TIMEOUT_MS,
+            DEFAULT_WORKSPACE_ROOT,
+        },
+    };
 
-    fn issue() -> Issue {
-        Issue::new(
-            "1",
-            "OSYM-1",
-            "Foundation",
-            "In Progress",
-            Utc.timestamp_opt(1, 0).single().unwrap(),
-        )
-        .with_description("Implement the contracts")
-        .with_labels(["foundation", "urgent"])
+    #[derive(Debug, Serialize)]
+    struct TestIssue<'a> {
+        identifier: &'a str,
+        title: &'a str,
+        state: &'a str,
+        description: Option<&'a str>,
+        labels: Vec<&'a str>,
     }
 
     #[test]
-    fn parses_front_matter_and_prompt() {
-        let workflow = Workflow::load_from_str_with_env(
+    fn parses_valid_front_matter_and_prompt_body() {
+        let workflow =
+            WorkflowDefinition::parse(sample_workflow()).expect("sample workflow should parse");
+
+        assert_eq!(
+            workflow.front_matter.tracker.kind.as_deref(),
+            Some("linear")
+        );
+        assert_eq!(
+            workflow.front_matter.agent.max_turns,
+            Some(super::IntegerLike::Integer(8))
+        );
+        assert_eq!(
+            workflow.prompt_template,
+            "\n# Assignment\n\nTicket: {{ issue.identifier }}\n"
+        );
+    }
+
+    #[test]
+    fn parses_workflow_without_front_matter() {
+        let workflow = WorkflowDefinition::parse("\n\nPrompt only\n")
+            .expect("prompt-only workflow should parse");
+
+        assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
+        assert_eq!(workflow.prompt_template, "\n\nPrompt only\n");
+    }
+
+    #[test]
+    fn treats_non_map_delimited_block_as_prompt_body() {
+        let source = "---\n- nope\n---\nbody\n";
+        let workflow = WorkflowDefinition::parse(source)
+            .expect("non-mapping delimited blocks should fall back to prompt body");
+
+        assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
+        assert_eq!(workflow.prompt_template, source);
+    }
+
+    #[test]
+    fn treats_unmatched_leading_delimiter_as_prompt_body() {
+        let source = "---\n# Assignment\n";
+        let workflow = WorkflowDefinition::parse(source)
+            .expect("unterminated leading delimiter should fall back to prompt body");
+
+        assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
+        assert_eq!(workflow.prompt_template, source);
+    }
+
+    #[test]
+    fn parses_leading_thematic_breaks_as_prompt_body_when_front_matter_is_not_a_map() {
+        let source = "---\n# Assignment\n---\n\nContinue.\n";
+        let workflow = WorkflowDefinition::parse(source)
+            .expect("plain markdown thematic breaks should not consume prompt content");
+
+        assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
+        assert_eq!(workflow.prompt_template, source);
+    }
+
+    #[test]
+    fn preserves_indented_delimiter_lines_inside_yaml_block_scalars() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+hooks:
+  before_run: |
+    cat <<'EOF'
+    ---
+    EOF
+---
+Prompt body
+"#,
+        )
+        .expect("indented delimiter-like lines in block scalars should parse");
+
+        assert_eq!(
+            workflow.front_matter.hooks.before_run.as_deref(),
+            Some("cat <<'EOF'\n---\nEOF\n")
+        );
+        assert_eq!(workflow.prompt_template, "Prompt body\n");
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_namespaces() {
+        let error = WorkflowDefinition::parse(
             r#"---
 tracker:
   kind: linear
-  project_slug: opensymphony
-  api_key: $LINEAR_KEY
+  project_slug: sample-project
+openhadns:
+  transport:
+    base_url: http://127.0.0.1:8000
 ---
-
-# Assignment
-Hello {{ issue.identifier }}
+{{ issue.identifier }}
 "#,
-            &env(),
         )
-        .unwrap();
+        .expect_err("unknown namespaces should fail deterministically");
 
-        assert_eq!(
-            workflow.definition.config["tracker"]["project_slug"],
-            "opensymphony"
-        );
-        assert_eq!(
-            workflow.definition.prompt_template,
-            "# Assignment\nHello {{ issue.identifier }}"
-        );
-        assert_eq!(workflow.config.tracker.kind, Some(TrackerKind::Linear));
+        assert!(matches!(
+            error,
+            WorkflowLoadError::UnknownTopLevelNamespace { namespace } if namespace == "openhadns"
+        ));
     }
 
     #[test]
-    fn allows_workflows_without_front_matter() {
-        let workflow = Workflow::load_from_str_with_env("Hello {{ issue.title }}", &env()).unwrap();
-
-        assert!(workflow.definition.config.is_empty());
-        assert_eq!(
-            workflow.definition.prompt_template,
-            "Hello {{ issue.title }}"
-        );
-    }
-
-    #[test]
-    fn rejects_non_map_front_matter() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-  - invalid
----
-body
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, WorkflowError::WorkflowFrontMatterNotAMap));
-    }
-
-    #[test]
-    fn resolves_env_indirection_and_normalizes_paths() {
-        let workflow = Workflow::load_from_str_with_env(
+    fn accepts_repo_local_namespaces() {
+        let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
   kind: linear
-  project_slug: opensymphony
-  api_key: $LINEAR_KEY
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+logging:
+  level: debug
+codex:
+  command: codex app-server
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("repo-local namespaces should be accepted");
+
+        assert_eq!(
+            workflow
+                .front_matter
+                .codex
+                .as_ref()
+                .and_then(|codex| codex.get("command")),
+            Some(&serde_yaml::Value::String("codex app-server".to_owned()))
+        );
+        assert_eq!(
+            workflow
+                .front_matter
+                .logging
+                .as_ref()
+                .and_then(|logging| logging.get("level")),
+            Some(&serde_yaml::Value::String("debug".to_owned()))
+        );
+    }
+
+    #[test]
+    fn loads_checked_in_workflows() {
+        let repo_root = repo_root();
+
+        WorkflowDefinition::load_from_path(repo_root.join("WORKFLOW.md"))
+            .expect("repo root workflow should parse");
+        WorkflowDefinition::load_from_path(repo_root.join("examples/target-repo/WORKFLOW.md"))
+            .expect("bundled target repo workflow should parse");
+    }
+
+    #[test]
+    fn resolves_checked_in_target_repo_workflow() {
+        let repo_root = repo_root();
+        let workflow =
+            WorkflowDefinition::load_from_path(repo_root.join("examples/target-repo/WORKFLOW.md"))
+                .expect("bundled target repo workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(&repo_root.join("examples/target-repo"), &env)
+            .expect("bundled target repo workflow should resolve");
+
+        assert!(matches!(resolved.config.tracker.kind, TrackerKind::Linear));
+        assert_eq!(resolved.config.tracker.project_slug, "sample-project");
+        assert_eq!(
+            resolved.config.tracker.active_states,
+            vec!["Todo".to_string(), "In Progress".to_string()]
+        );
+        assert_eq!(
+            resolved.config.tracker.terminal_states,
+            vec!["Done".to_string()]
+        );
+        assert_eq!(resolved.extensions.openhands.local_server.command, None);
+    }
+
+    #[test]
+    fn reports_missing_workflow_file() {
+        let path = Path::new("/definitely/missing/WORKFLOW.md");
+        let error = WorkflowDefinition::load_from_path(path)
+            .expect_err("missing workflow file should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowLoadError::MissingWorkflowFile { path: missing } if missing == path
+        ));
+    }
+
+    #[test]
+    fn leaves_openhands_local_server_command_unset_when_omitted() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo/target"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(resolved.extensions.openhands.local_server.command, None);
+    }
+
+    #[test]
+    fn resolves_defaults_and_openhands_extension() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+    - Closed
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("HOME", "/Users/tester"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+
+        assert!(matches!(resolved.config.tracker.kind, TrackerKind::Linear));
+        assert_eq!(resolved.config.tracker.endpoint, DEFAULT_LINEAR_ENDPOINT);
+        assert_eq!(resolved.config.tracker.api_key, "linear-token");
+        assert_eq!(
+            resolved.config.polling.interval_ms,
+            DEFAULT_POLL_INTERVAL_MS
+        );
+        assert_eq!(
+            resolved.config.workspace.root,
+            PathBuf::from(DEFAULT_WORKSPACE_ROOT)
+        );
+        assert_eq!(resolved.config.hooks.timeout_ms, DEFAULT_HOOK_TIMEOUT_MS);
+        assert_eq!(
+            resolved.config.agent.max_concurrent_agents,
+            DEFAULT_MAX_CONCURRENT_AGENTS
+        );
+        assert_eq!(resolved.config.agent.max_turns, DEFAULT_MAX_TURNS);
+        assert_eq!(
+            resolved.config.agent.max_retry_backoff_ms,
+            DEFAULT_MAX_RETRY_BACKOFF_MS
+        );
+        assert_eq!(
+            resolved.config.agent.stall_timeout_ms,
+            Some(DEFAULT_STALL_TIMEOUT_MS)
+        );
+        assert_eq!(
+            resolved.extensions.openhands.transport.base_url,
+            DEFAULT_OPENHANDS_BASE_URL
+        );
+        assert_eq!(resolved.extensions.openhands.local_server.command, None);
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .persistence_dir_relative,
+            PathBuf::from(DEFAULT_OPENHANDS_PERSISTENCE_DIR)
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .confirmation_policy
+                .kind,
+            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND
+        );
+        assert_eq!(
+            resolved.extensions.openhands.conversation.agent.kind,
+            "Agent"
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.ready_timeout_ms,
+            DEFAULT_OPENHANDS_READY_TIMEOUT_MS
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.reconnect_initial_ms,
+            DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.reconnect_max_ms,
+            DEFAULT_OPENHANDS_RECONNECT_MAX_MS
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.query_param_name,
+            DEFAULT_OPENHANDS_QUERY_PARAM_NAME
+        );
+        assert!(resolved.extensions.openhands.mcp.stdio_servers.is_empty());
+    }
+
+    #[test]
+    fn rejects_explicit_openhands_local_server_command() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    command:
+      - bash
+      - ./scripts/run-openhands.sh
+      - --port
+      - "9000"
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("explicit local server commands should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.command",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_local_server_enabled_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    enabled: false
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported local server disablement should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.enabled",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_local_server_startup_timeout_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    startup_timeout_ms: 30000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported startup timeout overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.startup_timeout_ms",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_local_server_readiness_probe_path_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    readiness_probe_path: /readyz
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported readiness probe path overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.readiness_probe_path",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_local_server_env_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    env:
+      RUNTIME: process
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported local server env overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.env",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn explicit_tracker_api_key_env_reference_must_resolve() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  api_key: ${TRACKER_API_KEY}
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "fallback-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unset explicit tracker api key env should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingEnvironmentVariable {
+                field: "tracker.api_key",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolves_env_substitution_and_path_rules() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
 workspace:
-  root: ~/opensymphony/workspaces
+  root: ${WORKSPACE_ROOT}
+hooks:
+  timeout_ms: 0
+agent:
+  max_turns: "5"
+  stall_timeout_ms: 0
+  max_concurrent_agents_by_state:
+    In Review: 2
+openhands:
+  transport:
+    base_url: ${OPENHANDS_BASE_URL}
+  conversation:
+    persistence_dir_relative: .cache/openhands
+    agent:
+      llm:
+        model: ${OPENHANDS_MODEL}
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("WORKSPACE_ROOT", "/tmp/workspaces"),
+            ("OPENHANDS_BASE_URL", "http://localhost:8000"),
+            ("OPENHANDS_MODEL", "gpt-4.1-mini"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo/config"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(
+            resolved.config.workspace.root,
+            PathBuf::from("/tmp/workspaces")
+        );
+        assert_eq!(resolved.config.hooks.timeout_ms, DEFAULT_HOOK_TIMEOUT_MS);
+        assert_eq!(resolved.config.agent.max_turns, 5);
+        assert_eq!(resolved.config.agent.stall_timeout_ms, None);
+        assert_eq!(
+            resolved
+                .config
+                .agent
+                .max_concurrent_agents_by_state
+                .get("in review"),
+            Some(&2)
+        );
+        assert_eq!(
+            resolved.extensions.openhands.transport.base_url,
+            "http://localhost:8000"
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .persistence_dir_relative,
+            PathBuf::from(".cache/openhands")
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .llm
+                .as_ref()
+                .expect("llm config should exist")
+                .model
+                .as_deref(),
+            Some("gpt-4.1-mini")
+        );
+        assert_eq!(
+            resolved.extensions.openhands.conversation.agent.kind,
+            "Agent"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_openhands_transport_base_urls() {
+        for invalid_base_url in [
+            "localhost:8000",
+            "ws://127.0.0.1:8000",
+            "http://127.0.0.1:8000/",
+            "https://127.0.0.1:8000",
+            "https://example.com/runtime",
+            "http://127.0.0.1:8000/api",
+            "https://example.com/runtime/api/",
+            "http://[::1]:8000",
+            "http://127.0.0.1:8000?session=abc",
+            "http://127.0.0.1:8000#fragment",
+        ] {
+            let workflow = WorkflowDefinition::parse(&format!(
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: {invalid_base_url}
+---
+{{{{ issue.identifier }}}}
+"#
+            ))
+            .expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow
+                .resolve(Path::new("/repo"), &env)
+                .expect_err("invalid OpenHands base URLs should fail during resolution");
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField {
+                    field: "openhands.transport.base_url",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_query_or_fragment_openhands_transport_base_url() {
+        for invalid_base_url in [
+            "http://127.0.0.1:8000?session=abc",
+            "http://127.0.0.1:8000#fragment",
+        ] {
+            let workflow = WorkflowDefinition::parse(&format!(
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: {invalid_base_url}
+---
+{{{{ issue.identifier }}}}
+"#
+            ))
+            .expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow.resolve(Path::new("/repo"), &env).expect_err(
+                "query/fragment-bearing OpenHands origins should fail during resolution",
+            );
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField {
+                    field: "openhands.transport.base_url",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_https_openhands_transport_base_url() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: https://127.0.0.1:8000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("https OpenHands origins should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.transport.base_url",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_mcp_stdio_servers() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  mcp:
+    stdio_servers:
+      - name: linear
+        command:
+          - opensymphony
+          - linear-mcp
+          - --stdio
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("workflow-owned mcp stdio servers should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.mcp.stdio_servers",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_conversation_reuse_policy_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    reuse_policy: fresh_each_run
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported reuse policies should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.reuse_policy",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_agent_option_overrides() {
+        for workflow_source in [
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      log_completions: true
+---
+{{ issue.identifier }}
+"#,
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      custom_mode: verbose
+---
+{{ issue.identifier }}
+"#,
+        ] {
+            let workflow =
+                WorkflowDefinition::parse(workflow_source).expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow
+                .resolve(Path::new("/repo"), &env)
+                .expect_err("unsupported agent options should fail during resolution");
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent.log_completions",
+                    ..
+                } | WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_openhands_max_iterations_above_u32_range() {
+        let workflow = WorkflowDefinition::parse(&format!(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    max_iterations: {}
+---
+{{{{ issue.identifier }}}}
+"#,
+            u64::from(u32::MAX) + 1
+        ))
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("oversized max_iterations should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.max_iterations",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn defaults_confirmation_policy_kind_when_block_omits_it() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    confirmation_policy: {}
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("confirmation policy defaults should resolve");
+
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .confirmation_policy
+                .kind,
+            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .confirmation_policy
+                .kind,
+            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND
+        );
+    }
+
+    #[test]
+    fn rejects_confirmation_policy_options_that_cannot_reach_runtime() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    confirmation_policy:
+      max_budget_usd: 5
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported confirmation policy options should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.confirmation_policy",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_openhands_llm_blocks_without_model() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm: {}
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("llm blocks without model should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingRequiredField {
+                field: "openhands.conversation.agent.llm.model",
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_transport_session_api_key_env() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    session_api_key_env: OPENHANDS_SESSION_API_KEY
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("transport auth overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.transport.session_api_key_env",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_websocket_auth_mode_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    auth_mode: header
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("websocket auth mode overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.websocket.auth_mode",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_websocket_runtime_overrides() {
+        for (workflow_source, field) in [
+            (
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    enabled: false
+---
+{{ issue.identifier }}
+"#,
+                "openhands.websocket.enabled",
+            ),
+            (
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    ready_timeout_ms: 45000
+---
+{{ issue.identifier }}
+"#,
+                "openhands.websocket.ready_timeout_ms",
+            ),
+            (
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    reconnect_initial_ms: 1500
+---
+{{ issue.identifier }}
+"#,
+                "openhands.websocket.reconnect_initial_ms",
+            ),
+            (
+                r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    reconnect_max_ms: 45000
+---
+{{ issue.identifier }}
+"#,
+                "openhands.websocket.reconnect_max_ms",
+            ),
+        ] {
+            let workflow =
+                WorkflowDefinition::parse(workflow_source).expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow.resolve(Path::new("/repo"), &env).expect_err(
+                "unsupported websocket runtime overrides should fail during resolution",
+            );
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField { field: actual, .. } if actual == field
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_websocket_query_param_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  websocket:
+    query_param_name: openhands_token
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("websocket query-param overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.websocket.query_param_name",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_llm_api_key_env_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: ${OPENHANDS_MODEL}
+        api_key_env: OPENHANDS_API_KEY
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("OPENHANDS_MODEL", "gpt-4.1"),
+        ]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("llm api-key env overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.agent.llm.api_key_env",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_llm_option_overrides() {
+        for workflow_source in [
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: gpt-4.1-mini
+        temperature: 0.1
+---
+{{ issue.identifier }}
+"#,
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: gpt-4.1-mini
+        reasoning_effort: high
+---
+{{ issue.identifier }}
+"#,
+        ] {
+            let workflow =
+                WorkflowDefinition::parse(workflow_source).expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow
+                .resolve(Path::new("/repo"), &env)
+                .expect_err("unsupported llm options should fail during resolution");
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent.llm",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_llm_base_url_env_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: ${OPENHANDS_MODEL}
+        base_url_env: OPENHANDS_BASE_URL
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("OPENHANDS_MODEL", "gpt-4.1"),
+        ]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("llm base-url env overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.agent.llm.base_url_env",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_persistence_paths_that_escape_the_workspace() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    persistence_dir_relative: ../shared-state
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("parent-directory traversal should be rejected");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.persistence_dir_relative",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolves_relative_workspace_paths_against_workflow_directory() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+workspace:
+  root: ./nested/workspaces
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo/config"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(
+            resolved.config.workspace.root,
+            PathBuf::from("/repo/config/nested/workspaces")
+        );
+    }
+
+    #[test]
+    fn resolves_bare_workspace_roots_against_workflow_directory() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+workspace:
+  root: workspaces
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo/config"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(
+            resolved.config.workspace.root,
+            PathBuf::from("/repo/config/workspaces")
+        );
+    }
+
+    #[test]
+    fn resolves_relative_workspace_roots_against_relative_workflow_directories() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+        let expected_root = std::env::current_dir()
+            .expect("current directory should resolve for test")
+            .join("examples/target-repo/var/workspaces");
+
+        let resolved = workflow
+            .resolve(Path::new("examples/target-repo"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(resolved.config.workspace.root, expected_root);
+        assert!(resolved.config.workspace.root.is_absolute());
+    }
+
+    #[test]
+    fn rejects_unsupported_ipv6_openhands_transport_base_url() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: http://[::1]:8000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("IPv6 OpenHands origins should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.transport.base_url",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn renders_prompt_for_first_run_and_continuation() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+Ticket {{ issue.identifier }}
+{% if attempt %}
+Attempt {{ attempt }}
+{% endif %}
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: Some("Implement the workflow crate"),
+            labels: vec!["rust", "workflow"],
+        };
+
+        let first = workflow
+            .render_prompt(&issue, None)
+            .expect("first run render should succeed");
+        let continuation = workflow
+            .render_prompt(&issue, Some(2))
+            .expect("continuation render should succeed");
+
+        assert!(first.contains("Ticket COE-259"));
+        assert!(!first.contains("Attempt"));
+        assert!(continuation.contains("Attempt 2"));
+    }
+
+    #[test]
+    fn rejects_unknown_template_variables() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+{{ issue.missing_field }}
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: None,
+            labels: vec![],
+        };
+
+        let error = workflow
+            .render_prompt(&issue, None)
+            .expect_err("missing template variables should fail");
+
+        assert!(matches!(error, PromptTemplateError::Render { .. }));
+    }
+
+    #[test]
+    fn rejects_unknown_template_filters() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+{{ issue.title | missing_filter }}
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: None,
+            labels: vec![],
+        };
+
+        let error = workflow
+            .render_prompt(&issue, None)
+            .expect_err("unknown filters should fail");
+
+        assert!(matches!(error, PromptTemplateError::Parse { .. }));
+    }
+
+    #[test]
+    fn uses_default_prompt_when_body_is_empty() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: None,
+            labels: vec![],
+        };
+
+        let rendered = workflow
+            .render_prompt(&issue, None)
+            .expect("default prompt render should succeed");
+
+        assert_eq!(rendered, DEFAULT_PROMPT_TEMPLATE);
+    }
+
+    #[test]
+    fn uses_default_prompt_when_body_is_whitespace_only() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+
+"#,
+        )
+        .expect("workflow should parse");
+        let issue = TestIssue {
+            identifier: "COE-259",
+            title: "Workflow loader",
+            state: "In Progress",
+            description: None,
+            labels: vec![],
+        };
+
+        let rendered = workflow
+            .render_prompt(&issue, None)
+            .expect("whitespace-only prompt should use the default template");
+
+        assert_eq!(rendered, DEFAULT_PROMPT_TEMPLATE);
+    }
+
+    #[test]
+    fn preserves_whitespace_sensitive_prompt_body() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+
+    code block
+"#,
+        )
+        .expect("workflow should parse");
+
+        assert_eq!(workflow.prompt_template, "\n    code block\n");
+    }
+
+    #[test]
+    fn errors_on_missing_required_tracker_config() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("missing project slug should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingRequiredField {
+                field: "tracker.project_slug"
+            }
+        ));
+    }
+
+    #[test]
+    fn missing_tracker_terminal_states_fail() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("missing terminal states should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingRequiredField {
+                field: "tracker.terminal_states"
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_per_state_concurrency_limits() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
 agent:
   max_concurrent_agents_by_state:
-    In Progress: 2
-    Todo: "0"
+    In Review: two
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("malformed state limits should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidInteger {
+                field: "agent.max_concurrent_agents_by_state",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_non_positive_per_state_concurrency_limits() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+agent:
+  max_concurrent_agents_by_state:
+    In Review: 0
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("non-positive state limits should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "agent.max_concurrent_agents_by_state",
+                ..
+            }
+        ));
+    }
+
+    fn env<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> {
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    fn sample_workflow() -> &'static str {
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+    - Closed
+polling:
+  interval_ms: 5000
+workspace:
+  root: ~/workspaces
+hooks:
+  timeout_ms: 60000
+agent:
+  max_concurrent_agents: 4
+  max_turns: 8
+  max_retry_backoff_ms: 120000
+  stall_timeout_ms: 90000
 openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
   conversation:
     persistence_dir_relative: .opensymphony/openhands
     agent:
       llm:
         model: ${OPENHANDS_MODEL}
 ---
-Hello
-"#,
-            &env(),
-        )
-        .unwrap();
 
-        assert_eq!(
-            workflow.config.tracker.api_key.as_deref(),
-            Some("linear-secret")
-        );
-        assert_eq!(
-            workflow.config.workspace.root,
-            PathBuf::from("/home/tester/opensymphony/workspaces")
-        );
-        assert_eq!(
-            workflow.config.agent.max_concurrent_agents_by_state,
-            BTreeMap::from([("in progress".into(), 2usize)])
-        );
-        assert_eq!(
-            workflow
-                .config
-                .openhands
-                .conversation
-                .agent
-                .llm
-                .model
-                .as_deref(),
-            Some("gpt-5.4")
-        );
+# Assignment
+
+Ticket: {{ issue.identifier }}
+"#
     }
 
-    #[test]
-    fn rejects_missing_openhands_model_env_reference() {
-        let mut env = env();
-        env.remove("OPENHANDS_MODEL");
-
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-tracker:
-  kind: linear
-  project_slug: opensymphony
-  api_key: $LINEAR_KEY
-openhands:
-  conversation:
-    agent:
-      llm:
-        model: ${OPENHANDS_MODEL}
----
-Hello
-"#,
-            &env,
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "openhands.conversation.agent.llm.model")
-        );
-    }
-
-    #[test]
-    fn accepts_checked_in_workflow_codex_namespace() {
-        let mut env = env();
-        env.insert("LINEAR_API_KEY".into(), "process-linear-key".into());
-
-        let workflow_path =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../WORKFLOW.md");
-        let workflow = Workflow::load_from_path_with_env(workflow_path, &env).unwrap();
-
-        assert!(workflow.definition.config.contains_key("codex"));
-        assert!(
-            workflow
-                .definition
-                .prompt_template
-                .contains("You are working on a Linear ticket")
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_top_level_workflow_sections() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-tracker:
-  kind: linear
-  project_slug: opensymphony
-  api_key: $LINEAR_KEY
-workpace:
-  root: ~/wrong
----
-Hello
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(matches!(error, WorkflowError::WorkflowParseError(_)));
-    }
-
-    #[test]
-    fn rejects_unknown_nested_workflow_keys() {
-        for workflow in [
-            r#"---
-tracker:
-  kind: linear
-  project_slug: opensymphony
-  api_key: $LINEAR_KEY
-  project_sulg: typo
----
-Hello
-"#,
-            r#"---
-polling:
-  intervl_ms: 1000
----
-Hello
-"#,
-            r#"---
-workspace:
-  rooot: ~/wrong
----
-Hello
-"#,
-            r#"---
-hooks:
-  before_rn: echo nope
----
-Hello
-"#,
-            r#"---
-agent:
-  max_concurent_agents: 2
----
-Hello
-"#,
-        ] {
-            let error = Workflow::load_from_str_with_env(workflow, &env()).unwrap_err();
-            assert!(matches!(error, WorkflowError::WorkflowParseError(_)));
-        }
-    }
-
-    #[test]
-    fn strict_rendering_rejects_unknown_variables() {
-        let workflow =
-            Workflow::load_from_str_with_env("Hello {{ issue.missing_field }}", &env()).unwrap();
-        let error = workflow.render_prompt(&issue(), None).unwrap_err();
-
-        assert!(matches!(error, WorkflowError::TemplateRenderError(_)));
-    }
-
-    #[test]
-    fn strict_rendering_rejects_unknown_filters() {
-        let workflow =
-            Workflow::load_from_str_with_env("Hello {{ issue.identifier | unknown }}", &env())
-                .unwrap();
-        let error = workflow.render_prompt(&issue(), None).unwrap_err();
-
-        assert!(matches!(error, WorkflowError::TemplateRenderError(_)));
-    }
-
-    #[test]
-    fn renders_continuation_context() {
-        let workflow = Workflow::load_from_str_with_env(
-            r#"{% if attempt %}attempt={{ attempt }}{% endif %} {{ issue.identifier }}"#,
-            &env(),
-        )
-        .unwrap();
-
-        let rendered = workflow.render_prompt(&issue(), Some(2)).unwrap();
-
-        assert_eq!(rendered, "attempt=2 OSYM-1");
-    }
-
-    #[test]
-    fn rejects_linear_tracker_without_project_slug() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-tracker:
-  kind: linear
----
-Hello
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "tracker.project_slug")
-        );
-    }
-
-    #[test]
-    fn accepts_linear_tracker_with_process_env_api_key() {
-        let mut env = env();
-        env.insert("LINEAR_API_KEY".into(), "process-linear-key".into());
-
-        let workflow = Workflow::load_from_str_with_env(
-            r#"---
-tracker:
-  kind: linear
-  project_slug: opensymphony
----
-Hello
-"#,
-            &env,
-        )
-        .unwrap();
-
-        assert_eq!(
-            workflow.config.tracker.api_key.as_deref(),
-            Some("process-linear-key")
-        );
-    }
-
-    #[test]
-    fn rejects_linear_tracker_with_unresolved_api_key_env() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-tracker:
-  kind: linear
-  project_slug: opensymphony
-  api_key: $MISSING_LINEAR_KEY
----
-Hello
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "tracker.api_key")
-        );
-    }
-
-    #[test]
-    fn rejects_missing_env_backed_workspace_root() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-tracker:
-  kind: linear
-  project_slug: opensymphony
-  api_key: $LINEAR_KEY
-workspace:
-  root: $WORKSPACE_ROOT
----
-Hello
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "workspace.root")
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_openhands_keys() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-tracker:
-  kind: linear
-  project_slug: opensymphony
-  api_key: $LINEAR_KEY
-openhands:
-  websocket:
-    reconnect_inital_ms: 1000
----
-Hello
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(error, WorkflowError::WorkflowParseError(_))
-                || matches!(error, WorkflowError::InvalidConfig { .. })
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_openhands_extension_values() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-openhands:
-  websocket:
-    reconnect_initial_ms: 5000
-    reconnect_max_ms: 1000
----
-Hello
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "openhands.websocket.reconnect_max_ms")
-        );
-    }
-
-    #[test]
-    fn rejects_absolute_openhands_persistence_path() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-openhands:
-  conversation:
-    persistence_dir_relative: /tmp/absolute
----
-Hello
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "openhands.conversation.persistence_dir_relative")
-        );
-    }
-
-    #[test]
-    fn rejects_parent_directory_escape_in_persistence_path() {
-        let error = Workflow::load_from_str_with_env(
-            r#"---
-openhands:
-  conversation:
-    persistence_dir_relative: ../shared
----
-Hello
-"#,
-            &env(),
-        )
-        .unwrap_err();
-
-        assert!(
-            matches!(error, WorkflowError::InvalidConfig { field, .. } if field == "openhands.conversation.persistence_dir_relative")
-        );
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate dir should have workspace parent")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
     }
 }

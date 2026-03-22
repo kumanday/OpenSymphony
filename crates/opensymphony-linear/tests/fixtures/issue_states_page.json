@@ -1,0 +1,32 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "issue-260",
+          "identifier": "COE-260",
+          "updatedAt": "2026-03-21T16:00:00Z",
+          "state": {
+            "id": "state-done",
+            "name": "Done",
+            "type": "completed"
+          }
+        },
+        {
+          "id": "issue-264",
+          "identifier": "COE-264",
+          "updatedAt": "2026-03-21T17:00:00Z",
+          "state": {
+            "id": "state-canceled",
+            "name": "Canceled",
+            "type": "canceled"
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      }
+    }
+  }
+}

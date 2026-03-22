@@ -27,6 +27,7 @@ Purpose:
 
 - shared domain types
 - runtime enums
+- scheduler state and transition helpers
 - snapshot models
 - config-independent constants
 
@@ -97,7 +98,7 @@ This crate owns all OpenHands-specific transport details.
 Purpose:
 
 - poll tick
-- runtime state machine
+- scheduler actor and policy decisions over the shared state machine
 - worker supervision
 - retry queue
 - cancellation and reconciliation
@@ -194,6 +195,10 @@ Use examples for:
 - a minimal target repository
 - sample workflow files
 - local development config
+
+The example target repository is distinct from the OpenSymphony implementation checkout.
+It intentionally does not include `tools/openhands-server/`, which remains owned by the
+implementation repo.
 
 ## 5. Docs structure
 

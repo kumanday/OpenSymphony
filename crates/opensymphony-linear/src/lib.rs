@@ -1,3 +1,7 @@
-//! Normalized tracker-facing contracts used by the future Linear adapter.
+mod client;
+mod error;
+mod graphql;
+mod normalize;
 
-pub use opensymphony_domain::{BlockerRef, Issue};
+pub use client::{LinearClient, LinearConfig, RetryPolicy};
+pub use error::{GraphqlError, LinearError};

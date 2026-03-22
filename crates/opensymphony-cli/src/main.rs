@@ -1,3 +1,4 @@
-fn main() {
-    println!("OpenSymphony CLI bootstrap. Runtime subcommands land in later milestones.");
+#[tokio::main]
+async fn main() -> std::process::ExitCode {
+    opensymphony_cli::run().await
 }

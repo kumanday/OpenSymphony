@@ -1,467 +1,828 @@
-//! Shared domain contracts for OpenSymphony.
+mod identifiers;
+mod issue;
+mod runtime;
+mod snapshot;
+mod state_machine;
+mod time;
+mod tracker;
 
-use std::path::PathBuf;
+pub const CRATE_NAME: &str = "opensymphony-domain";
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
-/// Fixed continuation delay after a clean worker exit.
-pub const CONTINUATION_RETRY_DELAY_MS: i64 = 1_000;
-
-/// Lowercase a tracker state name for stable comparisons.
-pub fn normalize_state_name(state: &str) -> String {
-    state.trim().to_lowercase()
-}
-
-fn normalize_labels<I>(labels: I) -> Vec<String>
-where
-    I: IntoIterator,
-    I::Item: Into<String>,
-{
-    labels
-        .into_iter()
-        .map(Into::into)
-        .map(|label| label.trim().to_lowercase())
-        .filter(|label| !label.is_empty())
-        .collect()
-}
-
-/// Best-effort blocker reference attached to an issue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlockerRef {
-    pub id: Option<String>,
-    pub identifier: Option<String>,
-    pub state: Option<String>,
-    pub created_at: Option<DateTime<Utc>>,
-    pub updated_at: Option<DateTime<Utc>>,
-}
-
-impl BlockerRef {
-    /// Return true when the blocker is in one of the configured terminal states.
-    pub fn is_terminal(&self, terminal_states: &[String]) -> bool {
-        self.state
-            .as_deref()
-            .map(normalize_state_name)
-            .is_some_and(|state| terminal_states.iter().any(|terminal| terminal == &state))
-    }
-}
-
-/// Normalized tracker issue model used across orchestration, prompting, and snapshots.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Issue {
-    pub id: String,
-    pub identifier: String,
-    pub title: String,
-    pub description: Option<String>,
-    pub priority: Option<u8>,
-    pub state: String,
-    pub branch_name: Option<String>,
-    pub url: Option<String>,
-    pub labels: Vec<String>,
-    pub blocked_by: Vec<BlockerRef>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-impl Issue {
-    /// Build a minimal issue with the fields required by scheduling and prompt rendering.
-    pub fn new(
-        id: impl Into<String>,
-        identifier: impl Into<String>,
-        title: impl Into<String>,
-        state: impl Into<String>,
-        created_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            identifier: identifier.into(),
-            title: title.into(),
-            description: None,
-            priority: None,
-            state: state.into(),
-            branch_name: None,
-            url: None,
-            labels: Vec::new(),
-            blocked_by: Vec::new(),
-            created_at,
-            updated_at: created_at,
-        }
-    }
-
-    /// Attach a description to the issue.
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    /// Set the issue priority.
-    pub fn with_priority(mut self, priority: u8) -> Self {
-        self.priority = Some(priority);
-        self
-    }
-
-    /// Replace the normalized label set.
-    pub fn with_labels<I>(mut self, labels: I) -> Self
-    where
-        I: IntoIterator,
-        I::Item: Into<String>,
-    {
-        self.labels = normalize_labels(labels);
-        self
-    }
-
-    /// Replace the blocker references.
-    pub fn with_blockers(mut self, blockers: Vec<BlockerRef>) -> Self {
-        self.blocked_by = blockers;
-        self
-    }
-
-    /// Override the update timestamp.
-    pub fn with_updated_at(mut self, updated_at: DateTime<Utc>) -> Self {
-        self.updated_at = updated_at;
-        self
-    }
-
-    /// Override the branch name.
-    pub fn with_branch_name(mut self, branch_name: impl Into<String>) -> Self {
-        self.branch_name = Some(branch_name.into());
-        self
-    }
-
-    /// Lowercased state for comparisons.
-    pub fn normalized_state(&self) -> String {
-        normalize_state_name(&self.state)
-    }
-
-    /// Return true when the issue is in one of the configured terminal states.
-    pub fn is_terminal(&self, terminal_states: &[String]) -> bool {
-        let normalized = self.normalized_state();
-        terminal_states.iter().any(|state| state == &normalized)
-    }
-
-    /// Return true when the issue is in one of the configured active states and not terminal.
-    pub fn is_active(&self, active_states: &[String], terminal_states: &[String]) -> bool {
-        let normalized = self.normalized_state();
-        active_states.iter().any(|state| state == &normalized)
-            && !terminal_states.iter().any(|state| state == &normalized)
-    }
-
-    /// Return true when any blocker is not terminal.
-    pub fn has_non_terminal_blockers(&self, terminal_states: &[String]) -> bool {
-        self.blocked_by
-            .iter()
-            .any(|blocker| !blocker.is_terminal(terminal_states))
-    }
-}
-
-/// Filesystem assignment for a single issue workspace.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkspaceAssignment {
-    pub workspace_key: String,
-    pub path: PathBuf,
-    pub created_now: bool,
-}
-
-/// High-level worker phase used by the orchestrator and control plane.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RunPhase {
-    PreparingWorkspace,
-    BuildingPrompt,
-    LaunchingAgentProcess,
-    InitializingSession,
-    StreamingTurn,
-    Finishing,
-    Succeeded,
-    Failed,
-    TimedOut,
-    Stalled,
-    CanceledByReconciliation,
-}
-
-/// Terminal worker outcome used by retry logic.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum WorkerOutcomeKind {
-    Succeeded,
-    Failed,
-    TimedOut,
-    Stalled,
-    CanceledByReconciliation,
-}
-
-/// Result reported back to the orchestrator when a worker stops.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorkerOutcome {
-    pub kind: WorkerOutcomeKind,
-    pub error: Option<String>,
-}
-
-impl WorkerOutcome {
-    pub fn succeeded() -> Self {
-        Self {
-            kind: WorkerOutcomeKind::Succeeded,
-            error: None,
-        }
-    }
-
-    pub fn failed(error: impl Into<String>) -> Self {
-        Self {
-            kind: WorkerOutcomeKind::Failed,
-            error: Some(error.into()),
-        }
-    }
-
-    pub fn timed_out(error: impl Into<String>) -> Self {
-        Self {
-            kind: WorkerOutcomeKind::TimedOut,
-            error: Some(error.into()),
-        }
-    }
-
-    pub fn stalled(error: impl Into<String>) -> Self {
-        Self {
-            kind: WorkerOutcomeKind::Stalled,
-            error: Some(error.into()),
-        }
-    }
-
-    pub fn canceled_by_reconciliation(error: impl Into<String>) -> Self {
-        Self {
-            kind: WorkerOutcomeKind::CanceledByReconciliation,
-            error: Some(error.into()),
-        }
-    }
-}
-
-/// Aggregate token counters reported by the runtime.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub total_tokens: u64,
-}
-
-impl TokenUsage {
-    pub fn add_assign(&mut self, other: &Self) {
-        self.input_tokens += other.input_tokens;
-        self.output_tokens += other.output_tokens;
-        self.total_tokens += other.total_tokens;
-    }
-}
-
-/// Latest rate-limit snapshot carried over from runtime events.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RateLimitSnapshot {
-    pub requests_remaining: Option<u64>,
-    pub tokens_remaining: Option<u64>,
-    pub resets_at: Option<DateTime<Utc>>,
-}
-
-/// Live worker session data retained by the orchestrator.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeSession {
-    pub phase: RunPhase,
-    pub turn_count: u32,
-    pub last_event_kind: Option<String>,
-    pub last_event_message: Option<String>,
-    pub last_event_at: Option<DateTime<Utc>>,
-    pub token_usage: TokenUsage,
-    pub rate_limits: Option<RateLimitSnapshot>,
-}
-
-impl Default for RuntimeSession {
-    fn default() -> Self {
-        Self {
-            phase: RunPhase::PreparingWorkspace,
-            turn_count: 0,
-            last_event_kind: None,
-            last_event_message: None,
-            last_event_at: None,
-            token_usage: TokenUsage::default(),
-            rate_limits: None,
-        }
-    }
-}
-
-impl RuntimeSession {
-    /// Update the last seen event metadata while preserving other counters.
-    pub fn with_event(
-        mut self,
-        kind: impl Into<String>,
-        message: impl Into<String>,
-        event_at: DateTime<Utc>,
-    ) -> Self {
-        self.last_event_kind = Some(kind.into());
-        self.last_event_message = Some(message.into());
-        self.last_event_at = Some(event_at);
-        self
-    }
-
-    /// Replace the phase.
-    pub fn with_phase(mut self, phase: RunPhase) -> Self {
-        self.phase = phase;
-        self
-    }
-}
-
-/// One execution attempt for an issue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunAttempt {
-    pub issue_id: String,
-    pub issue_identifier: String,
-    pub attempt: Option<u32>,
-    pub workspace_path: PathBuf,
-    pub started_at: DateTime<Utc>,
-    pub session: RuntimeSession,
-}
-
-/// Scheduled retry metadata held by the orchestrator.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetryEntry {
-    pub issue_id: String,
-    pub identifier: String,
-    pub attempt: u32,
-    pub due_at: DateTime<Utc>,
-    pub error: Option<String>,
-}
-
-/// Internal claim state used by the orchestrator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OrchestrationState {
-    Unclaimed,
-    Claimed,
-    Running,
-    RetryQueued,
-    Released,
-}
-
-/// Aggregate runtime totals for the control plane.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeTotals {
-    pub token_usage: TokenUsage,
-    pub runtime_seconds: u64,
-}
-
-/// Snapshot entry for a running issue.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RunningIssueSnapshot {
-    pub issue: Issue,
-    pub attempt: Option<u32>,
-    pub workspace_path: PathBuf,
-    pub started_at: DateTime<Utc>,
-    pub session: RuntimeSession,
-    pub orchestration_state: OrchestrationState,
-}
-
-/// Snapshot entry for a queued retry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RetryQueueSnapshot {
-    pub issue_id: String,
-    pub identifier: String,
-    pub attempt: u32,
-    pub due_at: DateTime<Utc>,
-    pub error: Option<String>,
-}
-
-/// Control-plane view derived from the orchestrator state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrchestratorSnapshot {
-    pub generated_at: DateTime<Utc>,
-    pub poll_interval_ms: u64,
-    pub max_concurrent_agents: usize,
-    pub claimed_issue_ids: Vec<String>,
-    pub completed_issue_ids: Vec<String>,
-    pub running: Vec<RunningIssueSnapshot>,
-    pub retry_queue: Vec<RetryQueueSnapshot>,
-    pub runtime_totals: RuntimeTotals,
-    pub rate_limits: Option<RateLimitSnapshot>,
-}
+pub use identifiers::{
+    ConversationId, IdentifierError, IssueId, IssueIdentifier, TrackerStateId, WorkerId,
+    WorkspaceKey,
+};
+pub use issue::{BlockerRef, IssueState, IssueStateCategory, NormalizedIssue};
+pub use runtime::{
+    ConversationMetadata, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry,
+    RetryPolicy, RetryReason, RunAttempt, RuntimeStreamState, StallMetadata, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceRecord,
+};
+pub use snapshot::{
+    ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, IssueSnapshot, OrchestratorSnapshot,
+    RetrySnapshot, RuntimeStateSnapshot, RuntimeUsageTotals, WorkerAttemptSnapshot,
+};
+pub use state_machine::{
+    IssueExecution, SchedulerState, SchedulerStatus, StateTransitionError, TransitionAction,
+};
+pub use time::{DurationMs, TimestampMs};
+pub use tracker::{
+    TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueState,
+    TrackerIssueStateKind, TrackerIssueStateSnapshot,
+};
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
-    use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
-    fn timestamp(seconds: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(seconds, 0).single().unwrap()
+    use serde_json::json;
+
+    use super::{
+        ComponentHealthSnapshot, ConversationMetadata, HealthStatus, IssueExecution, IssueId,
+        IssueIdentifier, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
+        OrchestratorSnapshot, ReleaseReason, RetryAttempt, RetryEntry, RetryPolicy, RetryReason,
+        RunAttempt, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
+        TimestampMs, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
+        WorkspaceRecord,
+    };
+
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    fn must_some<T>(value: Option<T>, message: &str) -> T {
+        match value {
+            Some(value) => value,
+            None => panic!("{message}"),
+        }
+    }
+
+    fn ts(value: u64) -> TimestampMs {
+        TimestampMs::new(value)
+    }
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        std::env::temp_dir().join(format!(
+            "opensymphony-domain-{prefix}-{}-{unique_suffix}",
+            std::process::id()
+        ))
+    }
+
+    struct TempPathGuard(PathBuf);
+
+    impl TempPathGuard {
+        fn new(path: PathBuf) -> Self {
+            Self(path)
+        }
+    }
+
+    impl Drop for TempPathGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn sample_issue() -> NormalizedIssue {
+        NormalizedIssue {
+            id: must(IssueId::new("lin_260")),
+            identifier: must(IssueIdentifier::new("COE-260")),
+            title: "Domain model and orchestrator state machine".to_owned(),
+            description: Some("Define the shared orchestration model.".to_owned()),
+            priority: Some(1),
+            state: IssueState {
+                id: None,
+                name: "In Progress".to_owned(),
+                category: IssueStateCategory::Active,
+            },
+            branch_name: Some(
+                "leonardogonzalez/coe-260-domain-model-and-orchestrator-state-machine".to_owned(),
+            ),
+            url: Some(
+                "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine"
+                    .to_owned(),
+            ),
+            labels: vec!["foundation".to_owned(), "contracts".to_owned()],
+            blocked_by: Vec::new(),
+            created_at: Some(ts(10)),
+            updated_at: Some(ts(20)),
+        }
+    }
+
+    fn sample_workspace() -> WorkspaceRecord {
+        WorkspaceRecord {
+            path: PathBuf::from("/tmp/workspaces/COE-260"),
+            workspace_key: must(WorkspaceKey::new("COE-260")),
+            created_now: false,
+            created_at: Some(ts(11)),
+            updated_at: Some(ts(21)),
+            last_seen_tracker_refresh_at: Some(ts(22)),
+        }
+    }
+
+    fn sample_run(
+        issue: &NormalizedIssue,
+        workspace: &WorkspaceRecord,
+        attempt: Option<RetryAttempt>,
+        claimed_at: TimestampMs,
+    ) -> RunAttempt {
+        RunAttempt::new(
+            must(WorkerId::new("worker-1")),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            workspace.path.clone(),
+            claimed_at,
+            attempt,
+            8,
+        )
+    }
+
+    fn sample_conversation(fresh_conversation: bool) -> ConversationMetadata {
+        ConversationMetadata {
+            conversation_id: must(super::ConversationId::new("conv_260")),
+            server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+            fresh_conversation,
+            runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_owned()),
+            stream_state: RuntimeStreamState::Ready,
+            last_event_id: None,
+            last_event_kind: None,
+            last_event_at: None,
+            last_event_summary: None,
+        }
     }
 
     #[test]
-    fn issue_normalizes_labels_and_states() {
-        let issue = Issue::new("1", "OSYM-1", "Title", "In Progress", timestamp(1))
-            .with_labels(["Needs Review", " BUG "]);
+    fn state_transitions_are_explicit_and_testable() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
 
-        assert_eq!(issue.labels, vec!["needs review", "bug"]);
-        assert_eq!(issue.normalized_state(), "in progress");
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        assert_eq!(execution.status(), SchedulerStatus::Claimed);
+
+        let mut session = sample_conversation(true);
+        session.stream_state = RuntimeStreamState::Attaching;
+
+        let mut execution =
+            must(execution.start_running(ts(50), super::DurationMs::new(300_000), Some(session)));
+        assert_eq!(execution.status(), SchedulerStatus::Running);
+
+        must(execution.record_turn_started(ts(55)));
+        must(execution.observe_runtime_event(
+            ts(56),
+            Some("evt_1".to_owned()),
+            Some("conversation_state_update".to_owned()),
+            Some("ready".to_owned()),
+        ));
+
+        let running = must_some(execution.current_run(), "running attempt must exist");
+        assert_eq!(running.turn_count, 1);
+        let outcome = WorkerOutcomeRecord::from_run(
+            running,
+            WorkerOutcomeKind::Succeeded,
+            ts(60),
+            Some("worker exited cleanly".to_owned()),
+            None,
+        );
+
+        let retry = must(RetryEntry::continuation(
+            &issue,
+            running.attempt,
+            0,
+            ts(60),
+            RetryPolicy::default(),
+        ));
+
+        let execution = must(execution.queue_retry(retry.clone(), outcome.clone()));
+        assert_eq!(execution.status(), SchedulerStatus::RetryQueued);
+        assert_eq!(
+            must_some(execution.retry(), "retry metadata must exist").attempt,
+            retry.attempt
+        );
+        let retry_snapshot = execution.snapshot();
+        assert_eq!(
+            must_some(
+                retry_snapshot.conversation,
+                "retry-queued snapshots must retain conversation metadata",
+            )
+            .conversation_id
+            .as_str(),
+            "conv_260"
+        );
+        assert_eq!(
+            must_some(
+                execution.last_worker_outcome(),
+                "last worker outcome must be recorded",
+            )
+            .outcome,
+            WorkerOutcomeKind::Succeeded
+        );
+
+        let retry_run = sample_run(&issue, &workspace, Some(retry.attempt), ts(61));
+        let execution = must(execution.claim(retry_run));
+        assert_eq!(execution.status(), SchedulerStatus::Claimed);
+        assert_eq!(
+            must_some(execution.current_run(), "claimed retry run must exist").normal_retry_count,
+            1
+        );
+
+        let execution = must(execution.release(ts(70), ReleaseReason::TrackerInactive, None));
+        assert_eq!(execution.status(), SchedulerStatus::Released);
+
+        let snapshot = execution.snapshot();
+        assert_eq!(snapshot.runtime.state, SchedulerStatus::Released);
+        assert_eq!(
+            snapshot.runtime.release_reason,
+            Some(ReleaseReason::TrackerInactive)
+        );
+        assert_eq!(snapshot.recent_worker_outcomes.len(), 1);
     }
 
     #[test]
-    fn blockers_only_count_when_not_terminal() {
-        let issue = Issue::new("1", "OSYM-1", "Title", "Todo", timestamp(1)).with_blockers(vec![
-            BlockerRef {
-                id: Some("b1".into()),
-                identifier: Some("OSYM-2".into()),
-                state: Some("Done".into()),
-                created_at: None,
-                updated_at: None,
-            },
-            BlockerRef {
-                id: Some("b2".into()),
-                identifier: Some("OSYM-3".into()),
-                state: Some("In Progress".into()),
-                created_at: None,
-                updated_at: None,
-            },
-        ]);
+    fn invalid_transitions_and_attempt_mismatches_are_rejected() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
 
-        assert!(issue.has_non_terminal_blockers(&[
-            "done".into(),
-            "closed".into(),
-            "cancelled".into(),
-        ]));
+        let execution = IssueExecution::new(issue.clone(), ts(30));
+        let error = match execution.start_running(ts(50), super::DurationMs::new(10_000), None) {
+            Ok(_) => panic!("starting from unclaimed should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::InvalidTransition { .. }
+        ));
+
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let outcome = WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-1")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(40),
+            finished_at: ts(41),
+            turn_count: 0,
+            summary: None,
+            error: Some("boom".to_owned()),
+        };
+        let retry = must(RetryEntry::failure(
+            &issue,
+            None,
+            0,
+            ts(41),
+            RetryReason::Failure,
+            Some("boom".to_owned()),
+            RetryPolicy::default(),
+        ));
+        let execution = must(execution.queue_retry(retry.clone(), outcome));
+
+        let wrong_attempt_run = sample_run(&issue, &workspace, None, ts(42));
+        let error = match execution.claim(wrong_attempt_run) {
+            Ok(_) => panic!("claiming with the wrong retry attempt should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::AttemptMismatch { .. }
+        ));
     }
 
     #[test]
-    fn snapshot_round_trips_through_json() {
-        let snapshot = OrchestratorSnapshot {
-            generated_at: timestamp(10),
-            poll_interval_ms: 30_000,
-            max_concurrent_agents: 4,
-            claimed_issue_ids: vec!["issue-1".into()],
-            completed_issue_ids: vec!["issue-2".into()],
-            running: vec![RunningIssueSnapshot {
-                issue: Issue::new("1", "OSYM-1", "Title", "In Progress", timestamp(1)),
-                attempt: Some(1),
-                workspace_path: PathBuf::from("/tmp/OSYM-1"),
-                started_at: timestamp(2),
-                session: RuntimeSession::default().with_phase(RunPhase::StreamingTurn),
-                orchestration_state: OrchestrationState::Running,
-            }],
-            retry_queue: vec![RetryQueueSnapshot {
-                issue_id: "1".into(),
-                identifier: "OSYM-1".into(),
-                attempt: 2,
-                due_at: timestamp(20),
-                error: Some("transient".into()),
-            }],
-            runtime_totals: RuntimeTotals {
-                token_usage: TokenUsage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                    total_tokens: 15,
-                },
-                runtime_seconds: 8,
-            },
-            rate_limits: Some(RateLimitSnapshot {
-                requests_remaining: Some(10),
-                tokens_remaining: Some(50),
-                resets_at: Some(timestamp(30)),
-            }),
+    fn claim_rejects_runs_without_an_attached_workspace() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let execution = IssueExecution::new(issue.clone(), ts(30));
+        let run = sample_run(&issue, &workspace, None, ts(40));
+
+        let error = match execution.claim(run) {
+            Ok(_) => panic!("claiming without an attached workspace should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::WorkspaceNotAttached { .. }
+        ));
+    }
+
+    #[test]
+    fn start_running_requires_conversation_metadata_for_first_run() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let error = match execution.start_running(ts(50), super::DurationMs::new(300), None) {
+            Ok(_) => panic!("starting the first run without conversation metadata should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::ConversationNotAttached
+        ));
+    }
+
+    #[test]
+    fn start_running_can_reuse_retained_conversation_metadata() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300),
+            Some(sample_conversation(false)),
+        ));
+        let execution = must(execution.release(ts(60), ReleaseReason::TrackerInactive, None));
+        let execution = must(execution.reopen(ts(70)));
+
+        let run = sample_run(&issue, &workspace, None, ts(80));
+        let execution = must(execution.claim(run));
+        let execution = must(execution.start_running(ts(90), super::DurationMs::new(300), None));
+
+        assert_eq!(
+            must_some(
+                execution.conversation(),
+                "retained conversation metadata should be reused",
+            )
+            .conversation_id
+            .as_str(),
+            "conv_260"
+        );
+        assert_eq!(execution.status(), SchedulerStatus::Running);
+    }
+
+    #[test]
+    fn claim_accepts_equivalent_normalized_workspace_paths() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let mut run = sample_run(&issue, &workspace, None, ts(40));
+        run.workspace_path = PathBuf::from("/tmp/workspaces/../workspaces/COE-260");
+
+        let execution = must(execution.claim(run));
+        assert_eq!(execution.status(), SchedulerStatus::Claimed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_accepts_workspace_paths_with_equivalent_symlink_roots() {
+        let issue = sample_issue();
+        let temp_root = unique_temp_path("workspace-symlink");
+        let _temp_root_guard = TempPathGuard::new(temp_root.clone());
+        let canonical_root = temp_root.join("canonical-root");
+        let canonical_workspace = canonical_root.join("COE-260");
+        let symlink_root = temp_root.join("symlink-root");
+
+        must(fs::create_dir_all(&canonical_workspace));
+        must(symlink(&canonical_root, &symlink_root));
+
+        let workspace = WorkspaceRecord {
+            path: symlink_root.join("COE-260"),
+            ..sample_workspace()
         };
 
-        let json = serde_json::to_string(&snapshot).unwrap();
-        let decoded: OrchestratorSnapshot = serde_json::from_str(&json).unwrap();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
 
-        assert_eq!(decoded, snapshot);
+        let mut run = sample_run(&issue, &workspace, None, ts(40));
+        run.workspace_path = canonical_workspace;
+
+        let execution = must(execution.claim(run));
+        assert_eq!(execution.status(), SchedulerStatus::Claimed);
+    }
+
+    #[test]
+    fn workspace_keys_are_sanitized_on_creation() {
+        assert_eq!(must(WorkspaceKey::new("feature/42")).as_str(), "feature_42");
+        assert_eq!(must(WorkspaceKey::new("../tmp")).as_str(), ".._tmp");
+        assert_eq!(
+            must(WorkspaceKey::new("Bug: weird path")).as_str(),
+            "Bug__weird_path"
+        );
+    }
+
+    #[test]
+    fn retry_delay_math_matches_continuation_and_failure_rules() {
+        let issue = sample_issue();
+        let policy = RetryPolicy::default();
+
+        let continuation = must(RetryEntry::continuation(&issue, None, 0, ts(100), policy));
+        assert_eq!(continuation.attempt.get(), 1);
+        assert_eq!(continuation.normal_retry_count, 1);
+        assert_eq!(continuation.due_at, ts(1_100));
+
+        let first_failure = must(RetryEntry::failure(
+            &issue,
+            None,
+            1,
+            ts(100),
+            RetryReason::Failure,
+            Some("first failure".to_owned()),
+            policy,
+        ));
+        assert_eq!(first_failure.attempt.get(), 1);
+        assert_eq!(first_failure.due_at, ts(10_100));
+
+        let capped_policy = RetryPolicy {
+            continuation_delay_ms: super::DurationMs::new(1_000),
+            failure_base_delay_ms: super::DurationMs::new(10_000),
+            max_backoff_ms: super::DurationMs::new(25_000),
+        };
+        let fifth_attempt = must(RetryAttempt::new(5));
+        assert_eq!(
+            capped_policy.failure_delay(fifth_attempt),
+            super::DurationMs::new(25_000)
+        );
+    }
+
+    #[test]
+    fn reopen_preserves_workspace_and_conversation_after_inactive_release() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300_000),
+            Some(sample_conversation(false)),
+        ));
+        let execution = must(execution.release(ts(60), ReleaseReason::TrackerInactive, None));
+        let execution = must(execution.reopen(ts(70)));
+
+        assert_eq!(execution.status(), SchedulerStatus::Unclaimed);
+        assert_eq!(execution.workspace(), Some(&workspace));
+        assert!(execution.conversation().is_some());
+    }
+
+    #[test]
+    fn reopen_clears_workspace_and_conversation_after_terminal_release() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300_000),
+            Some(sample_conversation(false)),
+        ));
+        let execution = must(execution.release(ts(60), ReleaseReason::TrackerTerminal, None));
+        let execution = must(execution.reopen(ts(70)));
+
+        assert_eq!(execution.status(), SchedulerStatus::Unclaimed);
+        assert!(execution.workspace().is_none());
+        assert!(execution.conversation().is_none());
+    }
+
+    #[test]
+    fn recent_worker_outcomes_are_bounded_to_latest_window() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let mut next_attempt = None;
+
+        for index in 0_u64..12 {
+            let claimed_at = ts(40 + index * 10);
+            let run = sample_run(&issue, &workspace, next_attempt, claimed_at);
+            execution = must(execution.claim(run));
+
+            let current_run = must_some(execution.current_run(), "claimed run must exist");
+            let summary = format!("outcome {index}");
+            let finished_at = ts(45 + index * 10);
+            let outcome = WorkerOutcomeRecord::from_run(
+                current_run,
+                WorkerOutcomeKind::Failed,
+                finished_at,
+                Some(summary.clone()),
+                Some("boom".to_owned()),
+            );
+            let retry = must(RetryEntry::failure(
+                &issue,
+                current_run.attempt,
+                0,
+                finished_at,
+                RetryReason::Failure,
+                Some("boom".to_owned()),
+                RetryPolicy::default(),
+            ));
+
+            next_attempt = Some(retry.attempt);
+            execution = must(execution.queue_retry(retry, outcome));
+        }
+
+        let snapshot = execution.snapshot();
+        assert_eq!(
+            snapshot
+                .last_worker_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.summary.as_deref()),
+            Some("outcome 11")
+        );
+        assert_eq!(snapshot.recent_worker_outcomes.len(), 10);
+        assert_eq!(
+            snapshot.recent_worker_outcomes[0].summary.as_deref(),
+            Some("outcome 2")
+        );
+        assert_eq!(
+            snapshot.recent_worker_outcomes[9].summary.as_deref(),
+            Some("outcome 11")
+        );
+    }
+
+    #[test]
+    fn snapshot_models_serialize_stably() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let issue_snapshot = IssueSnapshot::from(&execution);
+
+        let snapshot = OrchestratorSnapshot::new(
+            ts(100),
+            super::DaemonSnapshot::new(
+                HealthStatus::Healthy,
+                30_000,
+                4,
+                Some(ts(90)),
+                ComponentHealthSnapshot {
+                    status: HealthStatus::Healthy,
+                    detail: Some("ready".to_owned()),
+                    updated_at: Some(ts(95)),
+                },
+                RuntimeUsageTotals::default(),
+            ),
+            vec![issue_snapshot],
+        );
+
+        let json = must(serde_json::to_value(&snapshot));
+        assert_eq!(json["generated_at"], json!(100));
+        assert_eq!(json["daemon"]["health"], json!("healthy"));
+        assert_eq!(json["daemon"]["running_issue_count"], json!(0));
+        assert_eq!(json["issues"][0]["issue"]["identifier"], json!("COE-260"));
+        assert_eq!(json["issues"][0]["runtime"]["state"], json!("claimed"));
+        assert_eq!(
+            json["issues"][0]["workspace"]["path"],
+            json!("/tmp/workspaces/COE-260")
+        );
+        assert_eq!(json["issues"][0]["retry"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn replayed_runtime_events_do_not_hide_existing_stalls() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let mut execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300),
+            Some(sample_conversation(false)),
+        ));
+
+        must(execution.observe_runtime_event(
+            ts(60),
+            Some("evt_latest".to_owned()),
+            Some("conversation_state_update".to_owned()),
+            Some("ready".to_owned()),
+        ));
+        must(execution.observe_runtime_event(
+            ts(55),
+            Some("evt_old".to_owned()),
+            Some("tool_call".to_owned()),
+            Some("replayed".to_owned()),
+        ));
+
+        let conversation = must_some(
+            execution.conversation(),
+            "running execution must keep conversation metadata",
+        );
+        assert_eq!(conversation.last_event_at, Some(ts(60)));
+        assert_eq!(conversation.last_event_id.as_deref(), Some("evt_latest"));
+
+        let snapshot = execution.snapshot();
+        assert_eq!(snapshot.runtime.last_event_at, Some(ts(60)));
+        assert_eq!(snapshot.runtime.stalled_at, Some(ts(360)));
+    }
+
+    #[test]
+    fn attach_workspace_rejects_rebinding_to_different_identity() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue, ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let rebound_workspace = WorkspaceRecord {
+            path: PathBuf::from("/tmp/workspaces/COE-260-alt"),
+            workspace_key: must(WorkspaceKey::new("COE-260-alt")),
+            ..workspace.clone()
+        };
+
+        let error = match execution.attach_workspace(rebound_workspace) {
+            Ok(_) => panic!("rebinding a different workspace identity should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::WorkspaceIdentityMismatch { .. }
+        ));
+        assert_eq!(execution.workspace(), Some(&workspace));
+    }
+
+    #[test]
+    fn attach_workspace_rejects_first_binding_for_the_wrong_issue_path() {
+        let issue = sample_issue();
+        let workspace = WorkspaceRecord {
+            path: PathBuf::from("/tmp/workspaces/COE-261"),
+            workspace_key: must(WorkspaceKey::new("COE-260")),
+            ..sample_workspace()
+        };
+        let mut execution = IssueExecution::new(issue, ts(30));
+
+        let error = match execution.attach_workspace(workspace) {
+            Ok(_) => panic!("first workspace attachment for a different issue path should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::WorkspaceIssueMismatch { .. }
+        ));
+        assert!(execution.workspace().is_none());
+    }
+
+    #[test]
+    fn attach_workspace_allows_refresh_for_same_identity() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue, ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let refreshed_workspace = WorkspaceRecord {
+            updated_at: Some(ts(99)),
+            last_seen_tracker_refresh_at: Some(ts(100)),
+            ..workspace.clone()
+        };
+
+        must(execution.attach_workspace(refreshed_workspace.clone()));
+        assert_eq!(execution.workspace(), Some(&refreshed_workspace));
+    }
+
+    #[test]
+    fn running_snapshot_last_event_at_stays_none_without_runtime_events() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let mut execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300),
+            Some(sample_conversation(false)),
+        ));
+
+        must(execution.record_turn_started(ts(55)));
+
+        let snapshot = execution.snapshot();
+        assert_eq!(snapshot.runtime.last_event_at, None);
+        assert_eq!(snapshot.runtime.stalled_at, Some(ts(355)));
+        assert_eq!(
+            snapshot
+                .runtime
+                .worker
+                .as_ref()
+                .map(|worker| worker.normal_retry_count),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn queue_retry_rejects_outcomes_from_a_different_worker() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let outcome = WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-2")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(40),
+            finished_at: ts(41),
+            turn_count: 0,
+            summary: Some("stale worker".to_owned()),
+            error: Some("boom".to_owned()),
+        };
+        let retry = must(RetryEntry::failure(
+            &issue,
+            None,
+            0,
+            ts(41),
+            RetryReason::Failure,
+            Some("boom".to_owned()),
+            RetryPolicy::default(),
+        ));
+
+        let error = match execution.queue_retry(retry, outcome) {
+            Ok(_) => panic!("queue_retry should reject stale worker outcomes"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, StateTransitionError::WorkerMismatch { .. }));
+    }
+
+    #[test]
+    fn queue_retry_rejects_outcomes_from_a_different_attempt() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let first_run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(first_run));
+        let first_outcome = WorkerOutcomeRecord::from_run(
+            must_some(execution.current_run(), "claimed run must exist"),
+            WorkerOutcomeKind::Succeeded,
+            ts(50),
+            Some("completed".to_owned()),
+            None,
+        );
+        let first_retry = must(RetryEntry::continuation(
+            &issue,
+            None,
+            0,
+            ts(50),
+            RetryPolicy::default(),
+        ));
+        let execution = must(execution.queue_retry(first_retry.clone(), first_outcome));
+
+        let retry_run = sample_run(&issue, &workspace, Some(first_retry.attempt), ts(60));
+        let execution = must(execution.claim(retry_run));
+        let stale_outcome = WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-1")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(40),
+            finished_at: ts(61),
+            turn_count: 1,
+            summary: Some("old attempt".to_owned()),
+            error: Some("boom".to_owned()),
+        };
+        let retry = must(RetryEntry::failure(
+            &issue,
+            Some(first_retry.attempt),
+            1,
+            ts(61),
+            RetryReason::Failure,
+            Some("boom".to_owned()),
+            RetryPolicy::default(),
+        ));
+
+        let error = match execution.queue_retry(retry, stale_outcome) {
+            Ok(_) => panic!("queue_retry should reject stale attempt outcomes"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::AttemptMismatch { .. }
+        ));
     }
 }

@@ -1,1 +1,1 @@
-//! Agent-side Linear write surface placeholder for later milestones.
+pub const CRATE_NAME: &str = "opensymphony-linear-mcp";
