@@ -86,10 +86,43 @@ Current implementation:
 ## 3.1 Workflow and config
 
 - parse valid `WORKFLOW.md`
+- parse the checked-in repository and example `WORKFLOW.md` files
 - fail on invalid front matter
+- fail on unknown top-level workflow namespaces
 - fail on unknown template variables
 - resolve defaults and env vars
+- fail when an explicitly referenced env token such as `tracker.api_key: $VAR` is unset
+- fall back to `LINEAR_API_KEY` when `tracker.api_key` is omitted
+- fail when `tracker.active_states` or `tracker.terminal_states` are omitted
+- resolve workflow-relative workspace paths and relative OpenHands persistence paths
+- resolve bare relative workspace roots against the `WORKFLOW.md` directory
+- normalize relative workflow directories first so relative `workspace.root` values still resolve to absolute paths
+- reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
+- leave `openhands.local_server.command` unset when omitted so the runtime-owned local tooling layer resolves the pinned launcher from the OpenSymphony checkout
+- fail when `openhands.local_server.command` is configured until the runtime supervisor can honor workflow-owned launcher overrides
+- fail when `openhands.local_server.enabled: false` is configured until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
+- fail when `openhands.local_server.env` is configured until the runtime supervisor creation path forwards workflow-owned launcher environment variables instead of always using runtime-owned defaults
+- fail when `openhands.local_server.readiness_probe_path` is configured until the runtime supervisor launch path consumes workflow-owned probe settings instead of always using `/openapi.json`
+- fail when `openhands.local_server.startup_timeout_ms` is configured until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
+- resolve the bundled `examples/target-repo/WORKFLOW.md` file end-to-end, not just parse it
+- treat a leading unmatched `---` as prompt body text instead of failing front-matter parsing
+- treat leading thematic-break-delimited non-mapping blocks as prompt body text instead of silently dropping prompt content
+- fail on malformed, non-`http://`, path-bearing, query-bearing, fragment-bearing, or bracketed-IPv6 `openhands.transport.base_url` values during workflow resolution
+- fail when explicit `openhands.websocket.enabled`, `ready_timeout_ms`, `reconnect_initial_ms`, or `reconnect_max_ms` values are configured before the runtime readiness/reconnect path consumes them
+- fail when `openhands.transport.session_api_key_env` or explicit OpenHands WebSocket auth knobs are configured before the runtime transport layer consumes them
+- fail when `openhands.mcp.stdio_servers` is configured before the runtime conversation-create adapter can forward `mcp_config`
+- fail when non-default `openhands.conversation.reuse_policy` values are configured before the orchestrator/runtime path can honor alternate conversation reuse behavior
+- default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
+- fail when `openhands.conversation.confirmation_policy` includes options that cannot be represented in the current OpenHands request subset
+- fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range
+- fail when `openhands.conversation.agent.log_completions` or extra agent option keys are configured before the runtime conversation-create adapter can forward them
+- fail when `openhands.conversation.agent.llm` is present without a non-empty `model`
+- fail when `openhands.conversation.agent.llm` includes extra option keys before the runtime conversation-create adapter can forward them
+- fail when `openhands.conversation.agent.llm.api_key_env` or `base_url_env` are configured before the runtime conversation-create adapter can forward them
+- fail on malformed `agent.max_concurrent_agents_by_state` entries
+- preserve the Markdown body exactly after the front matter terminator
+- treat whitespace-only prompt bodies as absent so `DEFAULT_PROMPT_TEMPLATE` still applies
 
 ## 3.2 Workspace manager
 
@@ -199,6 +232,7 @@ Suggested scenarios:
 - run the same issue twice
 - verify the same `conversation_id` is reused
 - verify continuation guidance is used instead of the full first-turn prompt
+- verify workflow validation rejects non-default `openhands.conversation.reuse_policy` values until runtime support exists
 
 ### Scenario C: WebSocket reconnect
 
@@ -274,13 +308,15 @@ Current command set in this repository:
 
 Current implemented scope for OSYM-201 and OSYM-203:
 
+- load and resolve the target repo `WORKFLOW.md` before any runtime probe
+- render the workflow prompt with a synthetic issue shape during doctor preflight
 - resolve the repo-local OpenHands wrapper metadata from `tools/openhands-server/`
 - report pin readiness from `version.txt`, `pyproject.toml`, and `uv.lock`
-- start the supervised local server when the pin is valid
-- verify HTTP readiness on the expected loopback base URL
-- create a temp conversation and attach the WebSocket runtime stream
+- start the supervised local server when the pin is valid and the workflow-derived loopback base URL is down
+- verify HTTP readiness on the workflow-derived loopback base URL
+- create a temp conversation with workflow-derived OpenHands settings and attach the WebSocket runtime stream
 - reconcile events before and after readiness
-- send a real probe message, trigger `/run`, and wait for a healthy terminal stream state
+- send a real probe message that includes the rendered workflow prompt, trigger `/run`, and wait for a healthy terminal stream state
 - stop the supervised child and report launch metadata
 
 Required checks:
@@ -290,6 +326,8 @@ Required checks:
 - config file exists and parses
 - target repo exists
 - target repo contains `WORKFLOW.md`
+- target repo `WORKFLOW.md` resolves against the current environment
+- target repo prompt template renders against the current issue/attempt input shape
 - workspace root exists or can be created
 - OpenHands version pin files exist in `tools/openhands-server/`
 
@@ -316,15 +354,16 @@ Required checks:
 
 Current implementation notes:
 
-- the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
-- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, attaches `RuntimeEventStream`, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` after post-ready reconcile and reconnect-aware streaming, including terminal REST refresh fallback when a post-completion WebSocket reattach exhausts and one final scheduler-turn buffered drain before success is accepted
+- the static doctor path checks config parsing, target-repo presence, workflow load/resolve/render, workspace-root creation from the workflow, loopback bind scope from the workflow OpenHands transport, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
+- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation using workflow-derived OpenHands conversation settings, attaches `RuntimeEventStream`, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a doctor message that includes the rendered workflow prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` after post-ready reconcile and reconnect-aware streaming, including terminal REST refresh fallback when a post-completion WebSocket reattach exhausts and one final scheduler-turn buffered drain before success is accepted
 - once that live doctor path has already observed terminal success on the attached stream, it reuses the last successful stream-backed conversation snapshot instead of requiring a final `GET /api/conversations/{id}` that can flap during agent-server shutdown
-- when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
+- when the configured workflow loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
 - failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity, even when a later mirrored `finished` status is already present in the same drained batch
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames, authenticated REST/WebSocket requests, forward-compatible readiness envelopes, ready-state freshness after attach, ready-barrier persistence across later stale state rebuilds, buffered live frames outranking later attach replay items, explicit-close suppression of replay and reconnect, reused-conversation restart freshness over stale terminal REST state, forward-compatible `state_delta` mirror refresh, stale readiness snapshots not regressing newer probe state after reconnect, undecodable later persisted state updates not suppressing a usable ready barrier, terminal REST fallback after reconnect exhaustion, deferred reconnect after buffered delivery, non-replay of reconnect-only readiness barriers, next-turn probe error delivery after `finished`, and post-terminal probe success when a final REST refresh would fail
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs` locks in attach, initial snapshot replay, reconcile, out-of-order insertion, and reconnect recovery against `opensymphony-testkit`
-- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback and the pinned launcher `cwd` behavior
-- the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials
+- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback, workflow-driven runtime inputs, and the pinned launcher `cwd` behavior
+- the current example configs carry machine-local tool/probe settings only; the repo-owned workflow now supplies the workspace root and OpenHands base URL that doctor validates
+- the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials when the workflow omits `tracker.api_key`
 
 ## 8. Logging and diagnostics
 

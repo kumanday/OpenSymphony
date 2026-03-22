@@ -15,10 +15,11 @@ use opensymphony_control::{
     WorkerOutcome,
 };
 use opensymphony_openhands::{
-    ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
-    SupervisedServerConfig, SupervisorConfig, TransportConfig,
+    ConversationCreateRequest, DoctorProbeConfig, LocalServerSupervisor, LocalServerTooling,
+    OpenHandsClient, SupervisedServerConfig, SupervisorConfig, TransportConfig,
 };
-use serde::Deserialize;
+use opensymphony_workflow::{Environment, ResolvedWorkflow, WorkflowDefinition};
+use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use thiserror::Error;
 use tokio::fs;
@@ -68,24 +69,60 @@ pub struct DoctorArgs {
 
 #[derive(Debug, Deserialize)]
 struct DoctorConfig {
-    workspace_root: String,
     target_repo: Option<String>,
     openhands: OpenHandsDoctorConfig,
+    #[serde(default)]
     linear: LinearDoctorConfig,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenHandsDoctorConfig {
-    base_url: String,
     tool_dir: String,
     probe_model: Option<String>,
     probe_api_key_env: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct LinearDoctorConfig {
+    #[serde(default)]
     enabled: bool,
-    api_key_env: String,
+}
+
+struct DoctorRuntimeConfig {
+    target_repo: PathBuf,
+    workflow_path: PathBuf,
+    workflow: ResolvedWorkflow,
+    tool_dir: PathBuf,
+    probe_model: Option<String>,
+    probe_api_key_env: Option<String>,
+}
+
+struct DoctorWorkflowEnvironment {
+    fallback_linear_api_key: bool,
+}
+
+impl Environment for DoctorWorkflowEnvironment {
+    fn get(&self, name: &str) -> Option<String> {
+        env::var_os(name)
+            .map(|value| value.to_string_lossy().into_owned())
+            .or_else(|| {
+                if self.fallback_linear_api_key && name == "LINEAR_API_KEY" {
+                    Some("doctor-linear-disabled-placeholder".to_string())
+                } else {
+                    None
+                }
+            })
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DoctorProbeIssue<'a> {
+    identifier: &'a str,
+    title: &'a str,
+    state: &'a str,
+    description: Option<&'a str>,
+    priority: Option<u8>,
+    labels: Vec<&'a str>,
 }
 
 #[derive(Clone, Copy)]
@@ -233,29 +270,63 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
 
     let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
     let repo_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let target_repo = config
-        .target_repo
-        .as_deref()
-        .map(|target_repo| resolve_path(config_root, target_repo))
-        .unwrap_or_else(|| repo_root.join("examples/target-repo"));
-    let workspace_root = resolve_path(config_root, &config.workspace_root);
-    let tool_dir = resolve_path(config_root, &config.openhands.tool_dir);
+    let runtime = resolve_doctor_runtime(&config, config_root, &repo_root);
 
     checks.push(check_repo_root(&repo_root));
-    checks.push(check_target_repo(&target_repo).await);
-    checks.push(check_workspace_root(&workspace_root).await);
-    checks.push(check_tool_dir(&tool_dir).await);
-    checks.push(check_loopback_base_url(&config.openhands.base_url));
-    checks.push(check_linear_env(&config.linear));
 
-    let tooling_inspection = inspect_local_tooling(&tool_dir);
+    let (runtime, rendered_probe_prompt) = match runtime {
+        Ok(runtime) => {
+            checks.push(check_target_repo(&runtime.target_repo).await);
+            checks.push(check_workflow(&runtime));
+
+            let rendered_probe_prompt = match render_doctor_probe_prompt(&runtime.workflow) {
+                Ok(prompt) => {
+                    checks.push(CheckResult::pass(
+                        "workflow-prompt",
+                        format!(
+                            "rendered {} characters from {}",
+                            prompt.len(),
+                            runtime.workflow_path.display()
+                        ),
+                    ));
+                    prompt
+                }
+                Err(error) => {
+                    checks.push(CheckResult::fail("workflow-prompt", error));
+                    print_checks(&checks);
+                    return ExitCode::from(1);
+                }
+            };
+
+            checks.push(check_workspace_root(&runtime.workflow.config.workspace.root).await);
+            checks.push(check_tool_dir(&runtime.tool_dir).await);
+            checks.push(check_loopback_base_url(
+                &runtime.workflow.extensions.openhands.transport.base_url,
+            ));
+            checks.push(check_linear(&config.linear, &runtime.workflow));
+            (runtime, rendered_probe_prompt)
+        }
+        Err(error) => {
+            let target_repo = config
+                .target_repo
+                .as_deref()
+                .map(|target_repo| resolve_path(config_root, target_repo))
+                .unwrap_or_else(|| repo_root.join("examples/target-repo"));
+            checks.push(check_target_repo(&target_repo).await);
+            checks.push(CheckResult::fail("workflow", error));
+            print_checks(&checks);
+            return ExitCode::from(1);
+        }
+    };
+
+    let tooling_inspection = inspect_local_tooling(&runtime.tool_dir);
     checks.extend(tooling_inspection.checks);
 
     if live_openhands {
         checks.extend(
             run_live_openhands_checks(
-                &config,
-                &workspace_root,
+                &runtime,
+                &rendered_probe_prompt,
                 tooling_inspection.tooling.as_ref(),
             )
             .await,
@@ -317,6 +388,88 @@ fn resolve_path(base: &Path, raw: &str) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+fn resolve_doctor_runtime(
+    config: &DoctorConfig,
+    config_root: &Path,
+    repo_root: &Path,
+) -> Result<DoctorRuntimeConfig, String> {
+    let target_repo = config
+        .target_repo
+        .as_deref()
+        .map(|target_repo| resolve_path(config_root, target_repo))
+        .unwrap_or_else(|| repo_root.join("examples/target-repo"));
+    let workflow_path = target_repo.join("WORKFLOW.md");
+    let workflow = WorkflowDefinition::load_from_path(&workflow_path)
+        .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?;
+    let workflow = resolve_doctor_workflow(&workflow, &target_repo, config.linear.enabled)
+        .map_err(|error| format!("failed to resolve {}: {error}", workflow_path.display()))?;
+
+    Ok(DoctorRuntimeConfig {
+        target_repo,
+        workflow_path,
+        workflow,
+        tool_dir: resolve_path(config_root, &config.openhands.tool_dir),
+        probe_model: normalized_option(&config.openhands.probe_model),
+        probe_api_key_env: normalized_option(&config.openhands.probe_api_key_env),
+    })
+}
+
+fn resolve_doctor_workflow(
+    workflow: &WorkflowDefinition,
+    target_repo: &Path,
+    linear_enabled: bool,
+) -> Result<ResolvedWorkflow, opensymphony_workflow::WorkflowConfigError> {
+    if linear_enabled || workflow.front_matter.tracker.api_key.is_some() {
+        workflow.resolve_with_process_env(target_repo)
+    } else {
+        workflow.resolve(
+            target_repo,
+            &DoctorWorkflowEnvironment {
+                fallback_linear_api_key: true,
+            },
+        )
+    }
+}
+
+fn render_doctor_probe_prompt(workflow: &ResolvedWorkflow) -> Result<String, String> {
+    let issue = DoctorProbeIssue {
+        identifier: "DOCTOR-PROBE",
+        title: "Doctor workflow/runtime probe",
+        state: "In Progress",
+        description: Some(
+            "Validate that the target repository workflow resolves and renders inside the doctor runtime path.",
+        ),
+        priority: Some(3),
+        labels: vec!["doctor", "probe"],
+    };
+
+    workflow.render_prompt(&issue, None).map_err(|error| {
+        format!(
+            "failed to render the target repo workflow prompt with the doctor probe issue shape: {error}"
+        )
+    })
+}
+
+fn check_workflow(runtime: &DoctorRuntimeConfig) -> CheckResult {
+    let linear_mode =
+        if runtime.workflow.config.tracker.api_key == "doctor-linear-disabled-placeholder" {
+            "tracker api_key fallback relaxed because `linear.enabled` is false"
+        } else {
+            "tracker auth resolved"
+        };
+
+    CheckResult::pass(
+        "workflow",
+        format!(
+            "resolved {} -> workspace {}, OpenHands {}, project {}, {linear_mode}",
+            runtime.workflow_path.display(),
+            runtime.workflow.config.workspace.root.display(),
+            runtime.workflow.extensions.openhands.transport.base_url,
+            runtime.workflow.config.tracker.project_slug,
+        ),
+    )
 }
 
 fn check_repo_root(repo_root: &Path) -> CheckResult {
@@ -463,39 +616,40 @@ fn check_loopback_base_url(base_url: &str) -> CheckResult {
     }
 }
 
-fn check_linear_env(linear: &LinearDoctorConfig) -> CheckResult {
+fn check_linear(linear: &LinearDoctorConfig, workflow: &ResolvedWorkflow) -> CheckResult {
     if !linear.enabled {
         return CheckResult::skip(
             "linear",
-            "Linear checks skipped because `linear.enabled` is false",
+            format!(
+                "Linear checks skipped because `linear.enabled` is false; workflow tracker project {} still resolved",
+                workflow.config.tracker.project_slug
+            ),
         );
     }
 
-    match env::var(&linear.api_key_env) {
-        Ok(_) => CheckResult::pass("linear", format!("found {}", linear.api_key_env)),
-        Err(_) => CheckResult::warn(
-            "linear",
-            format!(
-                "missing {} while Linear mode is enabled",
-                linear.api_key_env
-            ),
+    CheckResult::pass(
+        "linear",
+        format!(
+            "workflow tracker ready for project {} with {} active and {} terminal states",
+            workflow.config.tracker.project_slug,
+            workflow.config.tracker.active_states.len(),
+            workflow.config.tracker.terminal_states.len(),
         ),
-    }
+    )
 }
 
 async fn run_live_openhands_checks(
-    config: &DoctorConfig,
-    workspace_root: &Path,
+    runtime: &DoctorRuntimeConfig,
+    rendered_probe_prompt: &str,
     tooling: Option<&LocalServerTooling>,
 ) -> Vec<CheckResult> {
     let mut checks = Vec::new();
-    let api_key = config
-        .openhands
+    let api_key = runtime
         .probe_api_key_env
         .as_ref()
         .and_then(|env_name| env::var(env_name).ok());
 
-    if let Some(env_name) = &config.openhands.probe_api_key_env {
+    if let Some(env_name) = &runtime.probe_api_key_env {
         if api_key.is_none() {
             checks.push(CheckResult::warn(
                 "openhands-secret",
@@ -512,11 +666,12 @@ async fn run_live_openhands_checks(
         }
     }
 
+    let base_url = &runtime.workflow.extensions.openhands.transport.base_url;
     let mut managed_supervisor = None;
-    let mut http_detail = format!("{} responded to /openapi.json", config.openhands.base_url);
-    let client = OpenHandsClient::new(TransportConfig::new(config.openhands.base_url.clone()));
+    let mut http_detail = format!("{base_url} responded to /openapi.json");
+    let client = OpenHandsClient::new(TransportConfig::new(base_url.clone()));
     if let Err(error) = client.openapi_probe().await {
-        match maybe_start_local_supervisor(config, tooling) {
+        match maybe_start_local_supervisor(runtime, tooling) {
             Ok(Some(mut supervisor)) => {
                 let started = match supervisor.status() {
                     Ok(status) => status,
@@ -539,7 +694,7 @@ async fn run_live_openhands_checks(
                 managed_supervisor = Some(supervisor);
                 http_detail = format!(
                     "started local supervisor and {} responded to /openapi.json",
-                    config.openhands.base_url
+                    base_url
                 );
             }
             Ok(None) => {
@@ -553,7 +708,7 @@ async fn run_live_openhands_checks(
         }
     }
 
-    let client = OpenHandsClient::new(TransportConfig::new(config.openhands.base_url.clone()));
+    let client = OpenHandsClient::new(TransportConfig::new(base_url.clone()));
     match client.openapi_probe().await {
         Ok(()) => checks.push(CheckResult::pass("openhands-http", http_detail)),
         Err(error) => {
@@ -562,7 +717,7 @@ async fn run_live_openhands_checks(
         }
     }
 
-    let temp_dir = match TempDir::new_in(workspace_root) {
+    let temp_dir = match TempDir::new_in(&runtime.workflow.config.workspace.root) {
         Ok(temp_dir) => temp_dir,
         Err(error) => {
             checks.push(CheckResult::fail(
@@ -574,7 +729,16 @@ async fn run_live_openhands_checks(
     };
 
     let probe_workspace = temp_dir.path().join("probe-workspace");
-    if let Err(error) = fs::create_dir_all(probe_workspace.join(".opensymphony/openhands")).await {
+    let persistence_dir = probe_workspace.join(
+        &runtime
+            .workflow
+            .extensions
+            .openhands
+            .conversation
+            .persistence_dir_relative,
+    );
+
+    if let Err(error) = fs::create_dir_all(&persistence_dir).await {
         checks.push(CheckResult::fail(
             "openhands-probe-dir",
             format!("failed to build probe workspace: {error}"),
@@ -582,17 +746,23 @@ async fn run_live_openhands_checks(
         return stop_managed_supervisor(checks, managed_supervisor);
     }
 
-    let request = ConversationCreateRequest::doctor_probe(
-        probe_workspace.display().to_string(),
-        probe_workspace
-            .join(".opensymphony/openhands")
-            .display()
-            .to_string(),
-        normalized_option(&config.openhands.probe_model),
-        api_key,
+    let request =
+        match build_doctor_probe_request(runtime, &probe_workspace, &persistence_dir, api_key) {
+            Ok(request) => request,
+            Err(error) => {
+                checks.push(CheckResult::fail("openhands-probe", error));
+                return stop_managed_supervisor(checks, managed_supervisor);
+            }
+        };
+
+    let probe_message = format!(
+        "This is an OpenSymphony doctor health check. Do not inspect the repository, do not modify files, and do not call external tools. Confirm that the rendered workflow prompt below arrived successfully, then reply with the exact text `OpenSymphony doctor probe OK` and finish.\n\n--- BEGIN RENDERED WORKFLOW PROMPT ---\n{rendered_probe_prompt}\n--- END RENDERED WORKFLOW PROMPT ---"
     );
 
-    match client.run_probe(&request, Duration::from_secs(5)).await {
+    match client
+        .run_probe_with_message(&request, &probe_message, Duration::from_secs(5))
+        .await
+    {
         Ok(result) => {
             checks.push(CheckResult::pass(
                 "openhands-conversation",
@@ -616,6 +786,42 @@ async fn run_live_openhands_checks(
     stop_managed_supervisor(checks, managed_supervisor)
 }
 
+fn build_doctor_probe_request(
+    runtime: &DoctorRuntimeConfig,
+    probe_workspace: &Path,
+    persistence_dir: &Path,
+    api_key: Option<String>,
+) -> Result<ConversationCreateRequest, String> {
+    let conversation = &runtime.workflow.extensions.openhands.conversation;
+    let model = runtime.probe_model.clone().or_else(|| {
+        conversation
+            .agent
+            .llm
+            .as_ref()
+            .and_then(|llm| llm.model.clone())
+    });
+    let max_iterations = u32::try_from(conversation.max_iterations).map_err(|_| {
+        format!(
+            "workflow max_iterations {} exceeds u32::MAX ({}), which is the maximum the doctor probe can handle",
+            conversation.max_iterations,
+            u32::MAX
+        )
+    })?;
+
+    Ok(ConversationCreateRequest::doctor_probe_with_config(
+        probe_workspace.display().to_string(),
+        persistence_dir.display().to_string(),
+        DoctorProbeConfig {
+            max_iterations,
+            stuck_detection: conversation.stuck_detection,
+            confirmation_policy_kind: conversation.confirmation_policy.kind.clone(),
+            agent_kind: conversation.agent.kind.clone(),
+            model,
+            api_key,
+        },
+    ))
+}
+
 fn stop_managed_supervisor(
     mut checks: Vec<CheckResult>,
     managed_supervisor: Option<LocalServerSupervisor>,
@@ -637,9 +843,13 @@ fn stop_managed_supervisor(
 }
 
 fn maybe_start_local_supervisor(
-    config: &DoctorConfig,
+    runtime: &DoctorRuntimeConfig,
     tooling: Option<&LocalServerTooling>,
 ) -> Result<Option<LocalServerSupervisor>, String> {
+    if !runtime.workflow.extensions.openhands.local_server.enabled {
+        return Ok(None);
+    }
+
     let Some(tooling) = tooling else {
         return Ok(None);
     };
@@ -651,24 +861,41 @@ fn maybe_start_local_supervisor(
         ));
     }
 
-    let url = Url::parse(&config.openhands.base_url).map_err(|error| {
-        format!(
-            "invalid OpenHands base URL `{}`: {error}",
-            config.openhands.base_url
-        )
-    })?;
+    let base_url = &runtime.workflow.extensions.openhands.transport.base_url;
+    let url = Url::parse(base_url)
+        .map_err(|error| format!("invalid OpenHands base URL `{base_url}`: {error}"))?;
     match url.host_str() {
         Some("127.0.0.1") | Some("localhost") => {}
         _ => return Ok(None),
     }
 
     let mut supervisor_config = SupervisedServerConfig::new(tooling.clone());
-    supervisor_config.port_override = Some(url.port_or_known_default().ok_or_else(|| {
-        format!(
-            "OpenHands base URL `{}` does not include a port",
-            config.openhands.base_url
-        )
-    })?);
+    supervisor_config.extra_env = runtime
+        .workflow
+        .extensions
+        .openhands
+        .local_server
+        .env
+        .clone();
+    supervisor_config.startup_timeout = Duration::from_millis(
+        runtime
+            .workflow
+            .extensions
+            .openhands
+            .local_server
+            .startup_timeout_ms,
+    );
+    supervisor_config.probe.path = runtime
+        .workflow
+        .extensions
+        .openhands
+        .local_server
+        .readiness_probe_path
+        .clone();
+    supervisor_config.port_override = Some(
+        url.port_or_known_default()
+            .ok_or_else(|| format!("OpenHands base URL `{base_url}` does not include a port"))?,
+    );
 
     let mut supervisor =
         LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(supervisor_config)));
@@ -851,8 +1078,15 @@ enum CommandError {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Command};
+    use std::path::PathBuf;
+
     use clap::{Parser, error::ErrorKind};
+    use opensymphony_workflow::WorkflowDefinition;
+    use tempfile::TempDir;
+
+    use super::{
+        Cli, Command, DoctorRuntimeConfig, build_doctor_probe_request, resolve_doctor_workflow,
+    };
 
     #[test]
     fn daemon_rejects_zero_sample_interval() {
@@ -872,6 +1106,70 @@ mod tests {
             Command::Tui(_) | Command::LinearMcp | Command::Doctor(_) => {
                 panic!("expected daemon command")
             }
+        }
+    }
+
+    #[test]
+    fn build_doctor_probe_request_reports_u32_limit_for_oversized_iterations() {
+        let mut runtime = sample_doctor_runtime();
+        runtime
+            .workflow
+            .extensions
+            .openhands
+            .conversation
+            .max_iterations = u64::from(u32::MAX) + 1;
+
+        let probe_workspace = PathBuf::from("/tmp/doctor-probe-workspace");
+        let persistence_dir = probe_workspace.join("sessions");
+        let error = build_doctor_probe_request(&runtime, &probe_workspace, &persistence_dir, None)
+            .expect_err("oversized doctor probe max_iterations should fail");
+
+        assert_eq!(
+            error,
+            format!(
+                "workflow max_iterations {} exceeds u32::MAX ({}), which is the maximum the doctor probe can handle",
+                u64::from(u32::MAX) + 1,
+                u32::MAX
+            )
+        );
+    }
+
+    fn sample_doctor_runtime() -> DoctorRuntimeConfig {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let target_repo = temp_dir.path().join("target-repo");
+        std::fs::create_dir_all(&target_repo).expect("target repo should exist");
+
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+---
+
+# Doctor Probe
+"#,
+        )
+        .expect("workflow should parse");
+        let workflow = resolve_doctor_workflow(&workflow, &target_repo, false)
+            .expect("workflow should resolve with Linear disabled");
+
+        DoctorRuntimeConfig {
+            target_repo,
+            workflow_path: temp_dir.path().join("target-repo/WORKFLOW.md"),
+            workflow,
+            tool_dir: temp_dir.path().join("tools/openhands-server"),
+            probe_model: None,
+            probe_api_key_env: None,
         }
     }
 }
