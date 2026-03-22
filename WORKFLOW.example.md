@@ -42,6 +42,8 @@ agent:
 
 openhands:
   transport:
+    # The current readiness probe path only supports bare `http://host:port`
+    # origins. `https://` and path-prefixed origins are rejected for now.
     base_url: "http://127.0.0.1:8000"
 
   local_server:
@@ -51,7 +53,8 @@ openhands:
     enabled: true
     # Omit `command` to use the pinned launcher chosen by the runtime-owned tooling layer.
     # Explicit launcher overrides are rejected until the runtime can honor workflow-owned commands.
-    startup_timeout_ms: 30000
+    # Explicit startup-timeout overrides are rejected until the runtime
+    # supervisor creation path consumes workflow-owned timeout settings.
     readiness_probe_path: "/openapi.json"
     env:
       LOG_JSON: "true"

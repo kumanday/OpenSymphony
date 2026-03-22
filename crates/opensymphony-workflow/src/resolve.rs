@@ -338,6 +338,15 @@ fn reject_unsupported_openhands_local_server_overrides(
         });
     }
 
+    if local_server.startup_timeout_ms.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.local_server.startup_timeout_ms",
+            message:
+                "is not supported until the runtime supervisor creation path consumes workflow-owned startup timeouts"
+                    .to_owned(),
+        });
+    }
+
     if local_server.command.is_some() {
         return Err(WorkflowConfigError::InvalidField {
             field: "openhands.local_server.command",
@@ -406,15 +415,17 @@ fn resolve_openhands_base_url<E: Environment>(
 fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError> {
     let parsed = Url::parse(base_url).map_err(|error| WorkflowConfigError::InvalidField {
         field: "openhands.transport.base_url",
-        message: format!("must be an absolute http(s) URL: {error}"),
+        message: format!("must be an absolute http URL: {error}"),
     })?;
 
     match parsed.scheme() {
-        "http" | "https" => {}
+        "http" => {}
         _ => {
             return Err(WorkflowConfigError::InvalidField {
                 field: "openhands.transport.base_url",
-                message: "must use the http or https scheme".to_owned(),
+                message:
+                    "must use the http scheme until supervisor readiness probes support TLS endpoints"
+                        .to_owned(),
             });
         }
     }
@@ -426,13 +437,17 @@ fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError
         });
     }
 
-    let without_scheme = base_url
-        .strip_prefix("http://")
-        .or_else(|| base_url.strip_prefix("https://"))
-        .ok_or_else(|| WorkflowConfigError::InvalidField {
+    let without_scheme =
+        base_url
+            .strip_prefix("http://")
+            .ok_or_else(|| {
+                WorkflowConfigError::InvalidField {
             field: "openhands.transport.base_url",
-            message: "must use the http or https scheme".to_owned(),
-        })?;
+            message:
+                "must use the http scheme until supervisor readiness probes support TLS endpoints"
+                    .to_owned(),
+        }
+            })?;
 
     if without_scheme.contains('/') {
         return Err(WorkflowConfigError::InvalidField {
