@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{cmp::Ordering, collections::VecDeque, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -7,16 +7,21 @@ use reqwest::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
-use tokio::time::{timeout_at, Instant};
+use tokio::{
+    net::TcpStream,
+    task::yield_now,
+    time::{sleep, timeout_at, Instant},
+};
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{client::IntoClientRequest, Message},
+    MaybeTlsStream, WebSocketStream,
 };
 use tracing::debug;
 use url::Url;
 use uuid::Uuid;
 
-use crate::events::{ConversationStateMirror, EventCache, KnownEvent};
+use crate::events::{ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus};
 use crate::models::{
     AcceptedResponse, Conversation, ConversationCreateRequest, ConversationRunRequest,
     EventEnvelope, SearchConversationEventsResponse, SendMessageRequest,
@@ -272,6 +277,8 @@ pub enum OpenHandsError {
     ProbeRunUnhealthy(String),
     #[error("websocket closed before readiness")]
     WebSocketClosed,
+    #[error("runtime stream reconnect exhausted after {attempts} attempt(s): {last_error}")]
+    ReconnectExhausted { attempts: usize, last_error: String },
 }
 
 impl OpenHandsError {
@@ -301,6 +308,418 @@ impl OpenHandsError {
             detail: error.to_string(),
         }
     }
+}
+
+type RuntimeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+const CONVERSATION_STATE_UPDATE_EVENT_KIND: &str = "ConversationStateUpdateEvent";
+const UNREADY_EVENT_ID: &str = "runtime-stream-unready";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStreamConfig {
+    pub readiness_timeout: Duration,
+    pub reconnect_initial_backoff: Duration,
+    pub reconnect_max_backoff: Duration,
+    pub max_reconnect_attempts: usize,
+}
+
+impl Default for RuntimeStreamConfig {
+    fn default() -> Self {
+        Self {
+            readiness_timeout: Duration::from_secs(30),
+            reconnect_initial_backoff: Duration::from_secs(1),
+            reconnect_max_backoff: Duration::from_secs(30),
+            max_reconnect_attempts: 8,
+        }
+    }
+}
+
+pub struct RuntimeEventStream {
+    client: OpenHandsClient,
+    conversation_id: Uuid,
+    config: RuntimeStreamConfig,
+    socket: Option<RuntimeSocket>,
+    conversation: Conversation,
+    ready_event: EventEnvelope,
+    event_cache: EventCache,
+    state_mirror: ConversationStateMirror,
+    pending_events: VecDeque<EventEnvelope>,
+    pending_delivery_needs_drain: bool,
+    reconnect_pending: bool,
+}
+
+impl RuntimeEventStream {
+    fn new(
+        client: OpenHandsClient,
+        conversation_id: Uuid,
+        config: RuntimeStreamConfig,
+        conversation: Conversation,
+    ) -> Self {
+        let ready_event = EventEnvelope::state_update(UNREADY_EVENT_ID, "idle");
+        let mut state_mirror = ConversationStateMirror::default();
+        state_mirror.apply_conversation(&conversation);
+        Self {
+            client,
+            conversation_id,
+            config,
+            socket: None,
+            conversation,
+            ready_event,
+            event_cache: EventCache::new(),
+            state_mirror,
+            pending_events: VecDeque::new(),
+            pending_delivery_needs_drain: false,
+            reconnect_pending: false,
+        }
+    }
+
+    pub fn conversation(&self) -> &Conversation {
+        &self.conversation
+    }
+
+    pub fn ready_event(&self) -> &EventEnvelope {
+        &self.ready_event
+    }
+
+    pub fn event_cache(&self) -> &EventCache {
+        &self.event_cache
+    }
+
+    pub fn state_mirror(&self) -> &ConversationStateMirror {
+        &self.state_mirror
+    }
+
+    pub async fn next_event(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
+        loop {
+            if let Some(event) = self.poll_next_event_once().await? {
+                return Ok(Some(event));
+            }
+
+            if self.socket.is_none() && self.pending_events.is_empty() && !self.reconnect_pending {
+                return Ok(None);
+            }
+        }
+    }
+
+    async fn poll_next_event_once(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
+        self.absorb_buffered_socket_events().await?;
+        if self.defer_pending_event_delivery_once().await? {
+            return Ok(None);
+        }
+
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(Some(event));
+        }
+
+        if self.reconnect_pending {
+            self.reconnect_pending = false;
+            self.reconnect().await?;
+            if self.defer_pending_event_delivery_once().await? {
+                return Ok(None);
+            }
+
+            if let Some(event) = self.pending_events.pop_front() {
+                return Ok(Some(event));
+            }
+        }
+
+        let stream_read = {
+            let Some(socket) = self.socket.as_mut() else {
+                return Ok(None);
+            };
+            read_next_socket_event(socket).await
+        };
+
+        match stream_read {
+            StreamRead::Event(event) => {
+                let mut drained_events = vec![event];
+                let reconnect_signal = self.drain_buffered_socket_events(&mut drained_events).await;
+                self.push_new_events(drained_events, true);
+                self.handle_reconnect_signal(reconnect_signal).await?;
+
+                Ok(None)
+            }
+            StreamRead::Closed => {
+                self.handle_reconnect_signal(Some(StreamRead::Closed))
+                    .await?;
+                if self.defer_pending_event_delivery_once().await? {
+                    return Ok(None);
+                }
+                Ok(self.pending_events.pop_front())
+            }
+            StreamRead::Transport(error) => {
+                self.handle_reconnect_signal(Some(StreamRead::Transport(error)))
+                    .await?;
+                if self.defer_pending_event_delivery_once().await? {
+                    return Ok(None);
+                }
+                Ok(self.pending_events.pop_front())
+            }
+        }
+    }
+
+    async fn absorb_buffered_socket_events(&mut self) -> Result<(), OpenHandsError> {
+        if self.socket.is_none() {
+            return Ok(());
+        }
+
+        let mut drained_events = Vec::new();
+        let reconnect_signal = self.drain_buffered_socket_events(&mut drained_events).await;
+        self.push_new_events(drained_events, true);
+        self.handle_reconnect_signal(reconnect_signal).await
+    }
+
+    async fn defer_pending_event_delivery_once(&mut self) -> Result<bool, OpenHandsError> {
+        if !self.pending_delivery_needs_drain || self.pending_events.is_empty() {
+            return Ok(false);
+        }
+
+        // Give newly queued batches one more immediate drain turn so out-of-order
+        // live frames can settle into timestamp order before delivery.
+        self.pending_delivery_needs_drain = false;
+        self.absorb_buffered_socket_events().await?;
+        Ok(true)
+    }
+
+    async fn drain_buffered_socket_events(
+        &mut self,
+        drained_events: &mut Vec<EventEnvelope>,
+    ) -> Option<StreamRead> {
+        loop {
+            let next = {
+                let socket = self
+                    .socket
+                    .as_mut()
+                    .expect("socket should be present while draining buffered events");
+                read_buffered_socket_event(socket).await
+            };
+
+            match next {
+                Some(StreamRead::Event(event)) => drained_events.push(event),
+                Some(StreamRead::Closed) => return Some(StreamRead::Closed),
+                Some(StreamRead::Transport(error)) => {
+                    return Some(StreamRead::Transport(error));
+                }
+                None => return None,
+            }
+        }
+    }
+
+    async fn handle_reconnect_signal(
+        &mut self,
+        reconnect_signal: Option<StreamRead>,
+    ) -> Result<(), OpenHandsError> {
+        match reconnect_signal {
+            Some(StreamRead::Closed) => {
+                self.socket.take();
+                if self.pending_events.is_empty() {
+                    self.reconnect().await?;
+                } else {
+                    self.reconnect_pending = true;
+                }
+            }
+            Some(StreamRead::Transport(error)) => {
+                debug!(
+                    error = %error,
+                    "runtime websocket read failed while draining buffered events; attempting reconnect"
+                );
+                self.socket.take();
+                if self.pending_events.is_empty() {
+                    self.reconnect().await?;
+                } else {
+                    self.reconnect_pending = true;
+                }
+            }
+            Some(StreamRead::Event(_)) => {
+                unreachable!("buffered socket draining should not return nested stream events")
+            }
+            None => {}
+        }
+
+        Ok(())
+    }
+
+    pub async fn close(&mut self) -> Result<(), OpenHandsError> {
+        self.clear_ready_event();
+        self.pending_delivery_needs_drain = false;
+        self.reconnect_pending = false;
+        self.pending_events.clear();
+        if let Some(mut socket) = self.socket.take() {
+            socket.close(None).await.map_err(|error| {
+                OpenHandsError::websocket_transport("close runtime stream", error)
+            })?;
+        }
+        Ok(())
+    }
+
+    async fn attach(mut self) -> Result<Self, OpenHandsError> {
+        self.refresh_conversation().await?;
+        let initial_cache = self.client.search_all_events(self.conversation_id).await?;
+        self.push_new_events(initial_cache.items().iter().cloned(), true);
+        self.connect_ready_and_reconcile().await?;
+        Ok(self)
+    }
+
+    async fn refresh_conversation(&mut self) -> Result<(), OpenHandsError> {
+        self.conversation = self.client.get_conversation(self.conversation_id).await?;
+        self.rebuild_state_mirror();
+        Ok(())
+    }
+
+    async fn reconnect(&mut self) -> Result<(), OpenHandsError> {
+        self.clear_ready_event();
+        let mut attempts = 0usize;
+        let mut delay = self.config.reconnect_initial_backoff;
+
+        loop {
+            attempts += 1;
+            if attempts > 1 {
+                sleep(delay).await;
+                delay = delay
+                    .saturating_mul(2)
+                    .min(self.config.reconnect_max_backoff);
+            }
+
+            let error = match self.refresh_conversation().await {
+                Ok(()) => match self.connect_ready_and_reconcile().await {
+                    Ok(()) => return Ok(()),
+                    Err(error) => error,
+                },
+                Err(error) => error,
+            };
+
+            if attempts >= self.config.max_reconnect_attempts {
+                return Err(OpenHandsError::ReconnectExhausted {
+                    attempts,
+                    last_error: error.to_string(),
+                });
+            }
+        }
+    }
+
+    async fn connect_ready_and_reconcile(&mut self) -> Result<(), OpenHandsError> {
+        let mut socket = self.client.connect_websocket(self.conversation_id).await?;
+        let ready_event =
+            wait_for_readiness_on_stream(&mut socket, self.config.readiness_timeout).await?;
+        self.ready_event = ready_event.clone();
+        self.socket = Some(socket);
+
+        let reconciled = self.client.search_all_events(self.conversation_id).await?;
+        self.push_new_events(reconciled.items().iter().cloned(), true);
+        self.rebuild_state_mirror();
+        Ok(())
+    }
+
+    fn push_new_events<I>(&mut self, events: I, queue_new: bool) -> usize
+    where
+        I: IntoIterator<Item = EventEnvelope>,
+    {
+        let inserted = self.event_cache.merge_new_events(events);
+        if inserted.is_empty() {
+            return 0;
+        }
+
+        self.pending_delivery_needs_drain = true;
+        if queue_new {
+            self.queue_pending_events(&inserted);
+        }
+        if inserted.iter().any(|event| {
+            matches!(
+                KnownEvent::from_envelope(event),
+                KnownEvent::ConversationStateUpdate(_)
+            )
+        }) {
+            self.rebuild_state_mirror();
+        }
+        inserted.len()
+    }
+
+    fn queue_pending_events(&mut self, inserted: &[EventEnvelope]) {
+        for event in inserted {
+            let position = self
+                .pending_events
+                .iter()
+                .position(|pending| compare_pending_events(pending, event) == Ordering::Greater)
+                .unwrap_or(self.pending_events.len());
+            self.pending_events.insert(position, event.clone());
+        }
+    }
+
+    fn rebuild_state_mirror(&mut self) {
+        self.state_mirror
+            .rebuild_from(&self.conversation, self.event_cache.items());
+        self.apply_terminal_conversation_fallback();
+        self.apply_ready_event_to_state_mirror();
+    }
+
+    fn clear_ready_event(&mut self) {
+        self.ready_event = EventEnvelope::state_update(UNREADY_EVENT_ID, "idle");
+    }
+
+    fn apply_ready_event_to_state_mirror(&mut self) {
+        if self.ready_event.id == UNREADY_EVENT_ID
+            || self.ready_event.kind != CONVERSATION_STATE_UPDATE_EVENT_KIND
+        {
+            return;
+        }
+
+        let KnownEvent::ConversationStateUpdate(payload) =
+            KnownEvent::from_envelope(&self.ready_event)
+        else {
+            return;
+        };
+
+        let cache_already_has_same_or_newer_state = self.event_cache.items().iter().any(|event| {
+            compare_pending_events(event, &self.ready_event) != Ordering::Less
+                && matches!(
+                    KnownEvent::from_envelope(event),
+                    KnownEvent::ConversationStateUpdate(_)
+                )
+        });
+        if cache_already_has_same_or_newer_state {
+            return;
+        }
+
+        let ready_event_is_terminal = matches!(
+            payload.execution_status.as_deref(),
+            Some("finished" | "error" | "stuck")
+        );
+        let ready_event_restarts_execution = matches!(
+            payload.execution_status.as_deref(),
+            Some("queued" | "running")
+        );
+        if self.state_mirror.terminal_status().is_some()
+            && !ready_event_is_terminal
+            && !ready_event_restarts_execution
+        {
+            return;
+        }
+
+        self.state_mirror.apply_event(&self.ready_event);
+    }
+
+    fn apply_terminal_conversation_fallback(&mut self) {
+        if matches!(
+            self.conversation.execution_status.as_str(),
+            "finished" | "error" | "stuck"
+        ) && self.state_mirror.terminal_status().is_none()
+        {
+            self.state_mirror
+                .apply_conversation_execution_status(&self.conversation);
+        }
+    }
+}
+
+fn compare_pending_events(left: &EventEnvelope, right: &EventEnvelope) -> Ordering {
+    left.timestamp
+        .cmp(&right.timestamp)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+#[derive(Debug)]
+enum StreamRead {
+    Event(EventEnvelope),
+    Closed,
+    Transport(OpenHandsError),
 }
 
 #[derive(Debug, Clone)]
@@ -431,70 +850,24 @@ impl OpenHandsClient {
         }
     }
 
+    pub async fn attach_runtime_stream(
+        &self,
+        conversation_id: Uuid,
+        config: RuntimeStreamConfig,
+    ) -> Result<RuntimeEventStream, OpenHandsError> {
+        let conversation = self.get_conversation(conversation_id).await?;
+        RuntimeEventStream::new(self.clone(), conversation_id, config, conversation)
+            .attach()
+            .await
+    }
+
     pub async fn wait_for_readiness(
         &self,
         conversation_id: Uuid,
         wait_timeout: Duration,
     ) -> Result<EventEnvelope, OpenHandsError> {
-        let ws_request = self.transport.websocket_request(conversation_id)?;
-        let (mut stream, _) = connect_async(ws_request)
-            .await
-            .map_err(|error| OpenHandsError::websocket_transport("wait for readiness", error))?;
-        let deadline = Instant::now() + wait_timeout;
-
-        loop {
-            let next_message = timeout_at(deadline, stream.next())
-                .await
-                .map_err(|_| OpenHandsError::ReadinessTimeout(wait_timeout))?;
-
-            match next_message {
-                Some(Ok(Message::Text(payload))) => match parse_text_event(&payload) {
-                    Ok(event)
-                        if matches!(
-                            KnownEvent::from_envelope(&event),
-                            KnownEvent::ConversationStateUpdate(_)
-                        ) =>
-                    {
-                        return Ok(event);
-                    }
-                    Ok(event) => {
-                        debug!(event_kind = %event.kind, "ignoring non-readiness websocket event");
-                    }
-                    Err(error) => {
-                        debug!(error = %error, "ignoring undecodable websocket text frame before readiness");
-                    }
-                },
-                Some(Ok(Message::Binary(payload))) => match parse_binary_event(&payload) {
-                    Ok(event)
-                        if matches!(
-                            KnownEvent::from_envelope(&event),
-                            KnownEvent::ConversationStateUpdate(_)
-                        ) =>
-                    {
-                        return Ok(event);
-                    }
-                    Ok(event) => {
-                        debug!(event_kind = %event.kind, "ignoring non-readiness websocket event");
-                    }
-                    Err(error) => {
-                        debug!(error = %error, "ignoring undecodable websocket binary frame before readiness");
-                    }
-                },
-                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
-                    debug!("ignoring websocket control frame before readiness");
-                }
-                Some(Ok(Message::Frame(_))) => {
-                    debug!("ignoring raw websocket frame before readiness");
-                }
-                Some(Ok(Message::Close(_))) | None => return Err(OpenHandsError::WebSocketClosed),
-                Some(Err(error)) => {
-                    return Err(OpenHandsError::websocket_transport(
-                        "wait for readiness",
-                        error,
-                    ));
-                }
-            }
-        }
+        let mut stream = self.connect_websocket(conversation_id).await?;
+        wait_for_readiness_on_stream(&mut stream, wait_timeout).await
     }
 
     pub async fn run_probe(
@@ -503,9 +876,16 @@ impl OpenHandsClient {
         wait_timeout: Duration,
     ) -> Result<OpenHandsProbeResult, OpenHandsError> {
         let conversation = self.create_conversation(request).await?;
-        let conversation = self.get_conversation(conversation.conversation_id).await?;
-        let ready_event = self
-            .wait_for_readiness(conversation.conversation_id, wait_timeout)
+        let mut stream = self
+            .attach_runtime_stream(
+                conversation.conversation_id,
+                RuntimeStreamConfig {
+                    readiness_timeout: wait_timeout,
+                    reconnect_initial_backoff: Duration::from_millis(100),
+                    reconnect_max_backoff: Duration::from_secs(1),
+                    max_reconnect_attempts: 4,
+                },
+            )
             .await?;
         self.send_message(
             conversation.conversation_id,
@@ -515,15 +895,15 @@ impl OpenHandsClient {
         )
         .await?;
         self.run_conversation(conversation.conversation_id).await?;
-
-        let (conversation, event_cache) = self
-            .wait_for_probe_activity(conversation.conversation_id, wait_timeout)
-            .await?;
-        let mut state_mirror = ConversationStateMirror::default();
-        state_mirror.apply_conversation(&conversation);
-        for event in event_cache.items() {
-            state_mirror.apply_event(event);
+        wait_for_probe_terminal_state(&mut stream, wait_timeout).await?;
+        let ready_event = stream.ready_event().clone();
+        let event_cache = stream.event_cache().clone();
+        let state_mirror = stream.state_mirror().clone();
+        let mut conversation = stream.conversation().clone();
+        if let Some(status) = state_mirror.execution_status() {
+            conversation.execution_status = status.to_string();
         }
+        stream.close().await?;
 
         Ok(OpenHandsProbeResult {
             conversation,
@@ -531,32 +911,6 @@ impl OpenHandsClient {
             event_cache,
             state_mirror,
         })
-    }
-
-    async fn wait_for_probe_activity(
-        &self,
-        conversation_id: Uuid,
-        wait_timeout: Duration,
-    ) -> Result<(Conversation, EventCache), OpenHandsError> {
-        let deadline = Instant::now() + wait_timeout;
-
-        loop {
-            let conversation = self.get_conversation(conversation_id).await?;
-            let event_cache = self.search_all_events(conversation_id).await?;
-            match probe_activity_observed(&conversation, &event_cache) {
-                ProbeActivity::Healthy => return Ok((conversation, event_cache)),
-                ProbeActivity::Unhealthy(detail) => {
-                    return Err(OpenHandsError::ProbeRunUnhealthy(detail));
-                }
-                ProbeActivity::Pending => {}
-            }
-
-            if Instant::now() >= deadline {
-                return Err(OpenHandsError::ProbeActivityTimeout(wait_timeout));
-            }
-
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
     }
 
     fn get_request(&self, suffix: &str) -> Result<RequestBuilder, OpenHandsError> {
@@ -582,12 +936,17 @@ impl OpenHandsClient {
             .map_err(|error| OpenHandsError::protocol(operation, error))?;
         Ok(request.header(CONTENT_TYPE, "application/json").body(body))
     }
-}
 
-enum ProbeActivity {
-    Pending,
-    Healthy,
-    Unhealthy(String),
+    async fn connect_websocket(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<RuntimeSocket, OpenHandsError> {
+        let ws_request = self.transport.websocket_request(conversation_id)?;
+        let (stream, _) = connect_async(ws_request).await.map_err(|error| {
+            OpenHandsError::websocket_transport("connect runtime stream", error)
+        })?;
+        Ok(stream)
+    }
 }
 
 async fn send(
@@ -685,27 +1044,241 @@ fn parse_header_value(value: &str) -> Result<HeaderValue, OpenHandsError> {
     })
 }
 
-fn probe_activity_observed(conversation: &Conversation, event_cache: &EventCache) -> ProbeActivity {
-    let mut state_mirror = ConversationStateMirror::default();
-    state_mirror.apply_conversation(conversation);
+async fn wait_for_readiness_on_stream(
+    stream: &mut RuntimeSocket,
+    wait_timeout: Duration,
+) -> Result<EventEnvelope, OpenHandsError> {
+    let deadline = Instant::now() + wait_timeout;
 
-    for event in event_cache.items() {
-        if event.kind == "ConversationErrorEvent" {
-            return ProbeActivity::Unhealthy(format!(
+    loop {
+        let next_message = timeout_at(deadline, stream.next())
+            .await
+            .map_err(|_| OpenHandsError::ReadinessTimeout(wait_timeout))?;
+
+        match next_message {
+            Some(Ok(Message::Text(payload))) => match parse_text_event(&payload) {
+                Ok(event) if event.kind == CONVERSATION_STATE_UPDATE_EVENT_KIND => {
+                    return Ok(event);
+                }
+                Ok(event) => {
+                    debug!(event_kind = %event.kind, "ignoring non-readiness websocket event");
+                }
+                Err(error) => {
+                    debug!(error = %error, "ignoring undecodable websocket text frame before readiness");
+                }
+            },
+            Some(Ok(Message::Binary(payload))) => match parse_binary_event(&payload) {
+                Ok(event) if event.kind == CONVERSATION_STATE_UPDATE_EVENT_KIND => {
+                    return Ok(event);
+                }
+                Ok(event) => {
+                    debug!(event_kind = %event.kind, "ignoring non-readiness websocket event");
+                }
+                Err(error) => {
+                    debug!(error = %error, "ignoring undecodable websocket binary frame before readiness");
+                }
+            },
+            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                debug!("ignoring websocket control frame before readiness");
+            }
+            Some(Ok(Message::Frame(_))) => {
+                debug!("ignoring raw websocket frame before readiness");
+            }
+            Some(Ok(Message::Close(_))) | None => return Err(OpenHandsError::WebSocketClosed),
+            Some(Err(error)) => {
+                return Err(OpenHandsError::websocket_transport(
+                    "wait for readiness",
+                    error,
+                ));
+            }
+        }
+    }
+}
+
+async fn read_next_socket_event(stream: &mut RuntimeSocket) -> StreamRead {
+    loop {
+        match stream.next().await {
+            Some(Ok(Message::Text(payload))) => match parse_text_event(&payload) {
+                Ok(event) => return StreamRead::Event(event),
+                Err(error) => {
+                    debug!(error = %error, "ignoring undecodable websocket text frame during streaming");
+                }
+            },
+            Some(Ok(Message::Binary(payload))) => match parse_binary_event(&payload) {
+                Ok(event) => return StreamRead::Event(event),
+                Err(error) => {
+                    debug!(error = %error, "ignoring undecodable websocket binary frame during streaming");
+                }
+            },
+            Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                debug!("ignoring websocket control frame during streaming");
+            }
+            Some(Ok(Message::Frame(_))) => {
+                debug!("ignoring raw websocket frame during streaming");
+            }
+            Some(Ok(Message::Close(_))) | None => return StreamRead::Closed,
+            Some(Err(error)) => {
+                return StreamRead::Transport(OpenHandsError::websocket_transport(
+                    "read runtime event",
+                    error,
+                ));
+            }
+        }
+    }
+}
+
+async fn read_buffered_socket_event(stream: &mut RuntimeSocket) -> Option<StreamRead> {
+    loop {
+        let next_message = tokio::select! {
+            biased;
+            message = stream.next() => Some(message),
+            () = yield_now() => None,
+        };
+
+        match next_message {
+            None => return None,
+            Some(Some(Ok(Message::Text(payload)))) => match parse_text_event(&payload) {
+                Ok(event) => return Some(StreamRead::Event(event)),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "ignoring undecodable websocket text frame while draining buffered events"
+                    );
+                }
+            },
+            Some(Some(Ok(Message::Binary(payload)))) => match parse_binary_event(&payload) {
+                Ok(event) => return Some(StreamRead::Event(event)),
+                Err(error) => {
+                    debug!(
+                        error = %error,
+                        "ignoring undecodable websocket binary frame while draining buffered events"
+                    );
+                }
+            },
+            Some(Some(Ok(Message::Ping(_)))) | Some(Some(Ok(Message::Pong(_)))) => {
+                debug!("ignoring websocket control frame while draining buffered events");
+            }
+            Some(Some(Ok(Message::Frame(_)))) => {
+                debug!("ignoring raw websocket frame while draining buffered events");
+            }
+            Some(Some(Ok(Message::Close(_)))) | Some(None) => return Some(StreamRead::Closed),
+            Some(Some(Err(error))) => {
+                return Some(StreamRead::Transport(OpenHandsError::websocket_transport(
+                    "read runtime event",
+                    error,
+                )));
+            }
+        }
+    }
+}
+
+async fn wait_for_probe_terminal_state(
+    stream: &mut RuntimeEventStream,
+    wait_timeout: Duration,
+) -> Result<(), OpenHandsError> {
+    let deadline = Instant::now() + wait_timeout;
+
+    loop {
+        if let Some(event) = stream.pending_conversation_error_event() {
+            return Err(OpenHandsError::ProbeRunUnhealthy(format!(
                 "received {} {} before a successful terminal status",
                 event.kind, event.id
-            ));
+            )));
         }
 
-        state_mirror.apply_event(event);
+        match stream.state_mirror().terminal_status() {
+            Some(TerminalExecutionStatus::Finished) => {
+                if confirm_finished_probe_terminal_state(stream).await? {
+                    return Ok(());
+                }
+            }
+            Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                    "terminal execution_status `{}`",
+                    stream.state_mirror().execution_status().unwrap_or_default()
+                )));
+            }
+            None => {}
+        }
+
+        let next_event = timeout_at(deadline, stream.poll_next_event_once())
+            .await
+            .map_err(|_| OpenHandsError::ProbeActivityTimeout(wait_timeout))?;
+        let next_event = match next_event {
+            Ok(next_event) => next_event,
+            Err(error) => match stream.state_mirror().terminal_status() {
+                Some(TerminalExecutionStatus::Finished) => return Ok(()),
+                Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                    return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                        "terminal execution_status `{}`",
+                        stream.state_mirror().execution_status().unwrap_or_default()
+                    )));
+                }
+                None => return Err(error),
+            },
+        };
+        let Some(event) = next_event else {
+            continue;
+        };
+
+        if matches!(
+            KnownEvent::from_envelope(&event),
+            KnownEvent::ConversationError(_)
+        ) {
+            return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                "received {} {} before a successful terminal status",
+                event.kind, event.id
+            )));
+        }
+    }
+}
+
+async fn confirm_finished_probe_terminal_state(
+    stream: &mut RuntimeEventStream,
+) -> Result<bool, OpenHandsError> {
+    // Give the socket one more scheduler turn so a failure frame that arrives
+    // just after the finished state is still observed before probe success.
+    yield_now().await;
+
+    if let Err(error) = stream.absorb_buffered_socket_events().await {
+        return match stream.state_mirror().terminal_status() {
+            Some(TerminalExecutionStatus::Finished) => Ok(true),
+            Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                    "terminal execution_status `{}`",
+                    stream.state_mirror().execution_status().unwrap_or_default()
+                )))
+            }
+            None => Err(error),
+        };
     }
 
-    match state_mirror.execution_status() {
-        Some("finished") => ProbeActivity::Healthy,
-        Some("error") | Some("stuck") => ProbeActivity::Unhealthy(format!(
-            "terminal execution_status `{}`",
-            state_mirror.execution_status().unwrap_or_default()
-        )),
-        _ => ProbeActivity::Pending,
+    if let Some(event) = stream.pending_conversation_error_event() {
+        return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+            "received {} {} before a successful terminal status",
+            event.kind, event.id
+        )));
+    }
+
+    match stream.state_mirror().terminal_status() {
+        Some(TerminalExecutionStatus::Finished) => Ok(true),
+        Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+            Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                "terminal execution_status `{}`",
+                stream.state_mirror().execution_status().unwrap_or_default()
+            )))
+        }
+        None => Ok(false),
+    }
+}
+
+impl RuntimeEventStream {
+    fn pending_conversation_error_event(&self) -> Option<&EventEnvelope> {
+        self.pending_events.iter().find(|event| {
+            matches!(
+                KnownEvent::from_envelope(event),
+                KnownEvent::ConversationError(_)
+            )
+        })
     }
 }
