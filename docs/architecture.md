@@ -141,6 +141,7 @@ Recommended crate boundaries:
 - `opensymphony-linear-mcp`
   - stdio MCP server for agent-side ticket writes
 - `opensymphony-openhands`
+  - repo-local tooling resolution
   - local server supervisor
   - REST client
   - WebSocket stream
@@ -158,6 +159,7 @@ Recommended crate boundaries:
 - `opensymphony-cli`
   - daemon startup
   - doctor command
+  - repo-root OpenHands preflight checks
   - linear-mcp command
   - config entrypoints
 - `opensymphony-tui`
@@ -174,7 +176,7 @@ Local MVP process graph:
 - `opensymphony daemon`
   - owns orchestrator and control plane
   - may spawn:
-    - `python -m openhands.agent_server`
+    - `bash tools/openhands-server/run-local.sh`
 - `opensymphony tui`
   - separate process
   - reads control-plane APIs only
@@ -182,6 +184,10 @@ Local MVP process graph:
   - started by workspace manager
 - OpenHands agent subprocesses or tool execution
   - managed by agent-server
+
+The current local supervisor implementation resolves its launch metadata from
+`tools/openhands-server/`, probes readiness with `GET /openapi.json`, and only
+terminates a process that it launched itself.
 
 ## 5. Worker and conversation model
 

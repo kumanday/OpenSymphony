@@ -153,7 +153,7 @@ Current key map in the implemented client:
 - `e`: switch the bottom pane between recent events and metrics
 - `q`: quit cleanly
 
-The rendered status line and pane headers explicitly show the active focus target so inline-mode navigation stays understandable without a mouse or alternate screen.
+The rendered status line and pane headers explicitly show the active focus target, and the top header also surfaces the computed connection, daemon, and agent-server cause text when bootstrap, reconnect, or degraded states need explanation.
 
 Do not start with in-UI mutation commands unless the control plane already defines them cleanly.
 
@@ -218,7 +218,7 @@ Current reconnect behavior:
 - fetch the latest snapshot over HTTP on startup
 - keep rendering that bootstrap snapshot with `conn=connecting` until the SSE stream yields its first snapshot
 - subscribe to the SSE stream
-- if the stream closes or fails, keep the last good snapshot visible and mark the connection as reconnecting
+- if the stream closes or fails, keep the last good snapshot visible, mark the connection as reconnecting, and surface the computed reconnect reason in the top header
 - refetch the current snapshot before resubscribing
 - if the SSE consumer lags, accept the latest published snapshot and ignore any older retained sequence that would roll the UI backward
 
