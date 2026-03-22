@@ -745,6 +745,10 @@ impl OpenHandsClient {
         }
     }
 
+    pub fn base_url(&self) -> &str {
+        self.transport.base_url()
+    }
+
     pub async fn openapi_probe(&self) -> Result<(), OpenHandsError> {
         let response = send(self.get_request("/openapi.json")?, "probe OpenAPI").await?;
         read_success_body(response, "probe OpenAPI")

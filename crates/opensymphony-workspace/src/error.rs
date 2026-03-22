@@ -53,10 +53,14 @@ pub enum WorkspaceError {
     Canonicalize { path: PathBuf, source: io::Error },
     #[error("failed to read manifest {path}: {source}")]
     ReadManifest { path: PathBuf, source: io::Error },
+    #[error("failed to read managed file {path}: {source}")]
+    ReadManagedFile { path: PathBuf, source: io::Error },
     #[error("failed to decode manifest {path}: {source}")]
     DecodeManifest { path: PathBuf, source: JsonError },
     #[error("failed to encode manifest {path}: {source}")]
     EncodeManifest { path: PathBuf, source: JsonError },
+    #[error("failed to encode JSON artifact {path}: {source}")]
+    EncodeJsonArtifact { path: PathBuf, source: JsonError },
     #[error("failed to write manifest {path}: {source}")]
     WriteManifest { path: PathBuf, source: io::Error },
     #[error("failed to write artifact {path}: {source}")]

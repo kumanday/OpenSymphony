@@ -27,12 +27,14 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy)]
 pub struct FakeOpenHandsConfig {
     pub search_page_size: usize,
+    pub run_terminal_status: &'static str,
 }
 
 impl Default for FakeOpenHandsConfig {
     fn default() -> Self {
         Self {
             search_page_size: 2,
+            run_terminal_status: "finished",
         }
     }
 }
@@ -45,6 +47,7 @@ struct AppState {
 struct Inner {
     conversations: HashMap<Uuid, FakeConversation>,
     search_page_size: usize,
+    run_terminal_status: String,
     next_event_index: u64,
 }
 
@@ -76,6 +79,7 @@ impl FakeOpenHandsServer {
             inner: Arc::new(Mutex::new(Inner {
                 conversations: HashMap::new(),
                 search_page_size: config.search_page_size,
+                run_terminal_status: config.run_terminal_status.to_string(),
                 next_event_index: 1,
             })),
         };
@@ -289,6 +293,7 @@ async fn run_conversation(
     Path(conversation_id): Path<Uuid>,
 ) -> Result<Json<Value>, StatusCode> {
     let mut inner = state.inner.lock().await;
+    let terminal_status = inner.run_terminal_status.clone();
     let running_event = EventEnvelope::new(
         next_event_id(&mut inner),
         Utc::now(),
@@ -317,9 +322,9 @@ async fn run_conversation(
         "runtime",
         "ConversationStateUpdateEvent",
         json!({
-            "execution_status": "finished",
+            "execution_status": terminal_status.clone(),
             "state_delta": {
-                "execution_status": "finished",
+                "execution_status": terminal_status,
             },
         }),
     );

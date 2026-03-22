@@ -11,6 +11,7 @@ use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 async fn fake_server_runtime_stream_attaches_reconciles_and_detects_terminal_state() {
     let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
         search_page_size: 2,
+        ..FakeOpenHandsConfig::default()
     })
     .await
     .expect("fake server should start");
@@ -183,6 +184,7 @@ async fn event_cache_orders_by_timestamp_and_deduplicates_ids() {
 async fn reconciliation_walks_multiple_pages() {
     let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
         search_page_size: 1,
+        ..FakeOpenHandsConfig::default()
     })
     .await
     .expect("fake server should start");

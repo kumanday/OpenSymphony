@@ -1,6 +1,7 @@
 mod client;
 mod events;
 mod models;
+mod session;
 mod supervisor;
 mod tooling;
 
@@ -16,6 +17,10 @@ pub use models::{
     AcceptedResponse, AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
     ConversationRunRequest, ConversationStateUpdatePayload, DoctorProbeConfig, EventEnvelope,
     LlmConfig, SearchConversationEventsResponse, SendMessageRequest, TextContent, WorkspaceConfig,
+};
+pub use session::{
+    IssueConversationManifest, IssueSessionContext, IssueSessionError, IssueSessionPromptKind,
+    IssueSessionResult, IssueSessionRunner, IssueSessionRunnerConfig, RUNTIME_CONTRACT_VERSION,
 };
 pub use supervisor::{
     ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, ProbeConfig, ServerMode,

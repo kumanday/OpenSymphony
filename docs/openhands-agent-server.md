@@ -190,18 +190,27 @@ Suggested persisted fields:
 - `issue_id`
 - `identifier`
 - `conversation_id`
+- `created_at`
+- `updated_at`
+- `last_attached_at`
 - `server_base_url`
 - `persistence_dir`
-- `created_at`
-- `last_attached_at`
 - `fresh_conversation`
+- `workflow_prompt_seeded`
 - `reset_reason`
 - `runtime_contract_version`
+- `last_prompt_kind`
+- `last_prompt_path`
+- `last_execution_status`
+- `last_event_id`
+- `last_event_kind`
+- `last_event_at`
+- `last_event_summary`
 
 Implementation note:
 
-- `opensymphony-workspace` owns the deterministic `conversation.json` path and serialization helper
-- the OpenHands issue-session runner still decides when to create, reuse, attach, or reset the conversation
+- `opensymphony-workspace` owns the deterministic `conversation.json` path and serialization helpers
+- `opensymphony-openhands::IssueSessionRunner` decides when to create, reuse, attach, or reset the conversation and populates the runtime-facing fields above
 
 ## 6.2 Persistence directory
 
@@ -223,6 +232,14 @@ Default policy:
   - the server reports the conversation cannot be attached
   - an incompatible protocol version is detected
   - an explicit reset policy is configured
+
+Current implementation detail:
+
+- `opensymphony-openhands::IssueSessionRunner` owns `conversation.json`
+- fresh conversations start with `workflow_prompt_seeded = false`
+- the full workflow prompt is selected until a `POST /events` call accepts that first assignment message
+- once seeded, later worker lifetimes send built-in continuation guidance instead of rerendering the workflow template
+- each fresh create also snapshots `create-conversation-request.json`, `last-conversation-state.json`, and `generated/session-context.json` inside the issue workspace for recovery and observability
 
 ## 7. REST endpoints used by OpenSymphony
 

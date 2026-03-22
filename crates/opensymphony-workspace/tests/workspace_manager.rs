@@ -689,6 +689,62 @@ async fn after_run_failure_is_best_effort_and_persisted() {
 }
 
 #[tokio::test]
+async fn conversation_manifest_artifacts_round_trip_inside_workspace() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-266-conversation-artifacts"))
+        .await
+        .expect("workspace should exist");
+
+    manager
+        .write_json_artifact(
+            &ensured.handle,
+            &ensured.handle.conversation_manifest_path(),
+            &json!({
+                "conversation_id": "conv_266",
+                "workflow_prompt_seeded": true,
+            }),
+        )
+        .await
+        .expect("conversation manifest artifact should be writable");
+    manager
+        .write_text_artifact(
+            &ensured.handle,
+            &ensured.handle.prompts_dir().join("last-full-prompt.md"),
+            "Ticket COE-266",
+        )
+        .await
+        .expect("prompt artifact should be writable");
+
+    let conversation_manifest = manager
+        .read_text_artifact(
+            &ensured.handle,
+            &ensured.handle.conversation_manifest_path(),
+        )
+        .await
+        .expect("conversation manifest artifact should be readable")
+        .expect("conversation manifest artifact should exist");
+    let prompt = manager
+        .read_text_artifact(
+            &ensured.handle,
+            &ensured.handle.prompts_dir().join("last-full-prompt.md"),
+        )
+        .await
+        .expect("prompt artifact should be readable")
+        .expect("prompt artifact should exist");
+
+    assert!(conversation_manifest.contains("\"conversation_id\": \"conv_266\""));
+    assert_eq!(prompt, "Ticket COE-266");
+}
+
+#[tokio::test]
 async fn conversation_manifest_and_generated_context_artifacts_are_persisted() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let workspace_root = temp_dir.path().join("workspaces");
@@ -1211,6 +1267,44 @@ async fn managed_manifest_paths_reject_symlinked_reads_and_writes() {
         .expect_err("symlinked run manifest should be rejected");
     assert!(matches!(
         write_error,
+        WorkspaceError::ManagedPathSymlink { .. }
+    ));
+
+    let outside_conversation_manifest = temp_dir.path().join("outside-conversation.json");
+    tokio::fs::write(&outside_conversation_manifest, "{}")
+        .await
+        .expect("outside conversation manifest should exist");
+    symlink(
+        &outside_conversation_manifest,
+        ensured.handle.conversation_manifest_path(),
+    )
+    .expect("conversation manifest symlink should be created");
+
+    let conversation_read_error = manager
+        .read_text_artifact(
+            &ensured.handle,
+            &ensured.handle.conversation_manifest_path(),
+        )
+        .await
+        .expect_err("symlinked conversation manifest should be rejected");
+    assert!(matches!(
+        conversation_read_error,
+        WorkspaceError::ManagedPathSymlink { .. }
+    ));
+
+    let outside_prompt = temp_dir.path().join("outside-prompt.md");
+    tokio::fs::write(&outside_prompt, "outside")
+        .await
+        .expect("outside prompt should exist");
+    let prompt_path = ensured.handle.prompts_dir().join("last-full-prompt.md");
+    symlink(&outside_prompt, &prompt_path).expect("prompt symlink should be created");
+
+    let prompt_write_error = manager
+        .write_text_artifact(&ensured.handle, &prompt_path, "prompt")
+        .await
+        .expect_err("symlinked prompt artifact should be rejected");
+    assert!(matches!(
+        prompt_write_error,
         WorkspaceError::ManagedPathSymlink { .. }
     ));
 }
