@@ -105,6 +105,7 @@ Current repository implementation:
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
+- explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
 - workflow resolution rejects malformed, non-HTTP(S), or `/api`-suffixed `openhands.transport.base_url` values before the daemon reaches runtime transport setup
 
 ## 4.2 Startup contract
@@ -259,6 +260,7 @@ Current workflow defaulting:
 - `agent.kind` defaults to `Agent` when omitted
 - `max_iterations` must fit the downstream OpenHands `u32` request range
 - `agent.llm.model` is required whenever an `llm` block is present
+- workflow-owned LLM provider env overrides such as `api_key_env` and `base_url_env` are rejected during workflow resolution until the runtime conversation-create adapter can actually forward them
 
 Implementation rule:
 
@@ -294,6 +296,7 @@ Current repository implementation:
 
 - `TransportConfig` now carries an `AuthConfig` with explicit no-auth, query-param API key, header API key, and header-plus-WebSocket-query-fallback modes
 - REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape
+- workflow-owned auth knobs such as `openhands.transport.session_api_key_env`, `openhands.websocket.auth_mode`, and `openhands.websocket.query_param_name` are currently rejected during workflow resolution until a runtime adapter wires them into `AuthConfig`
 - `OpenHandsError` now maps invalid config, transport failures, HTTP status failures, protocol failures, and WebSocket failures into stable runtime categories without exposing `reqwest::Error` or `http::StatusCode`
 - `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, and non-readiness frames before the first state update
 - the doctor probe now exercises a real `POST /events` plus `POST /run` path and only reports the runtime healthy after a successful terminal `execution_status` of `finished`

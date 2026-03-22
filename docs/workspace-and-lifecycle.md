@@ -31,6 +31,7 @@ Because this sanitization is not injective, workspace reuse must be gated by the
 - The issue workspace path itself must not be a symlink when OpenSymphony reuses or validates it.
 - `cwd` for all hook commands and all OpenHands runs must equal the resolved issue workspace path unless an explicit per-command `cwd` override inside the same workspace is required.
 - When `openhands.local_server.command` is omitted, the runtime-owned local tooling layer must resolve the pinned launcher from the OpenSymphony checkout before that `cwd` switch happens. Workflow resolution must not bake a compile-time checkout path into config defaults.
+- Explicit workflow-owned `openhands.local_server.command` overrides are currently rejected until the runtime supervisor can honor them instead of always launching the pinned repo-local server wrapper.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
 

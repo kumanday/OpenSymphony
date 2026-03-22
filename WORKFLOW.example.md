@@ -43,11 +43,11 @@ agent:
 openhands:
   transport:
     base_url: "http://127.0.0.1:8000"
-    session_api_key_env: null
 
   local_server:
     enabled: true
-    # Omit `command` to use the absolute pinned launcher under the workflow repo root.
+    # Omit `command` to use the pinned launcher chosen by the runtime-owned tooling layer.
+    # Explicit launcher overrides are rejected until the runtime can honor workflow-owned commands.
     startup_timeout_ms: 30000
     readiness_probe_path: "/openapi.json"
     env:
@@ -68,9 +68,9 @@ openhands:
       kind: Agent
       llm:
         # Exact $VAR/${VAR} tokens are resolved before runtime launch.
+        # Provider-specific auth/base-url overrides are rejected until the
+        # current conversation-create adapter can forward them.
         model: ${OPENHANDS_MODEL}
-        api_key_env: OPENHANDS_LLM_API_KEY
-        base_url_env: OPENHANDS_LLM_BASE_URL
       log_completions: false
 
   websocket:
@@ -78,8 +78,6 @@ openhands:
     ready_timeout_ms: 30000
     reconnect_initial_ms: 1000
     reconnect_max_ms: 30000
-    auth_mode: auto
-    query_param_name: session_api_key
 
   mcp:
     stdio_servers:

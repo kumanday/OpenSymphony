@@ -13,8 +13,9 @@ use crate::{
         OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
         OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsFrontMatter,
         OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
-        OpenHandsMcpConfig, OpenHandsStdioServerConfig, OpenHandsStdioServerFrontMatter,
-        OpenHandsTransportConfig, OpenHandsWebSocketConfig, PollingConfig, PollingFrontMatter,
+        OpenHandsLocalServerFrontMatter, OpenHandsMcpConfig, OpenHandsStdioServerConfig,
+        OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig, OpenHandsTransportFrontMatter,
+        OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter,
         ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig,
         WorkflowDefinition, WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter,
         DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
@@ -231,6 +232,10 @@ fn resolve_openhands<E: Environment>(
     _base_dir: &Path,
     env: &E,
 ) -> Result<OpenHandsConfig, WorkflowConfigError> {
+    reject_unsupported_openhands_transport_auth(&openhands.transport)?;
+    reject_unsupported_openhands_local_server_command(&openhands.local_server)?;
+    reject_unsupported_openhands_websocket_auth(&openhands.websocket)?;
+
     Ok(OpenHandsConfig {
         transport: OpenHandsTransportConfig {
             base_url: resolve_openhands_base_url(openhands.transport.base_url.as_deref(), env)?,
@@ -304,6 +309,60 @@ fn resolve_openhands<E: Environment>(
             stdio_servers: resolve_stdio_servers(openhands.mcp.stdio_servers.as_deref())?,
         },
     })
+}
+
+fn reject_unsupported_openhands_transport_auth(
+    transport: &OpenHandsTransportFrontMatter,
+) -> Result<(), WorkflowConfigError> {
+    if transport.session_api_key_env.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.transport.session_api_key_env",
+            message:
+                "is not supported until the runtime transport layer wires workflow auth into AuthConfig"
+                    .to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn reject_unsupported_openhands_local_server_command(
+    local_server: &OpenHandsLocalServerFrontMatter,
+) -> Result<(), WorkflowConfigError> {
+    if local_server.command.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.local_server.command",
+            message:
+                "is not supported until the runtime supervisor can honor workflow-owned launcher overrides"
+                    .to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn reject_unsupported_openhands_websocket_auth(
+    websocket: &OpenHandsWebSocketFrontMatter,
+) -> Result<(), WorkflowConfigError> {
+    if websocket.auth_mode.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.websocket.auth_mode",
+            message:
+                "is not supported until the runtime transport layer wires workflow auth into AuthConfig"
+                    .to_owned(),
+        });
+    }
+
+    if websocket.query_param_name.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.websocket.query_param_name",
+            message:
+                "is not supported until the runtime transport layer wires workflow auth into AuthConfig"
+                    .to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn resolve_openhands_base_url<E: Environment>(
@@ -467,6 +526,8 @@ fn resolve_openhands_llm<E: Environment>(
     llm: &OpenHandsLlmFrontMatter,
     env: &E,
 ) -> Result<OpenHandsLlmConfig, WorkflowConfigError> {
+    reject_unsupported_openhands_llm_provider_overrides(llm)?;
+
     let field = "openhands.conversation.agent.llm.model";
     let model = llm
         .model
@@ -486,6 +547,30 @@ fn resolve_openhands_llm<E: Environment>(
         base_url_env: normalize_optional_literal(&llm.base_url_env),
         options: llm.options.clone(),
     })
+}
+
+fn reject_unsupported_openhands_llm_provider_overrides(
+    llm: &OpenHandsLlmFrontMatter,
+) -> Result<(), WorkflowConfigError> {
+    if llm.api_key_env.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm.api_key_env",
+            message:
+                "is not supported until the runtime conversation-create adapter resolves provider credentials"
+                    .to_owned(),
+        });
+    }
+
+    if llm.base_url_env.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm.base_url_env",
+            message:
+                "is not supported until the runtime conversation-create adapter can forward provider base URLs"
+                    .to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn resolve_openhands_max_iterations(
