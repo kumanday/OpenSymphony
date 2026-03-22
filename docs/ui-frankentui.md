@@ -218,7 +218,7 @@ Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
 - if `/api/v1/snapshot` accepts the connection but hangs without returning a body, fail that bootstrap or reconnect refresh within the bounded snapshot timeout and retry instead of waiting forever
-- if `/api/v1/events` never finishes attaching, including streams that open headers but never deliver their first snapshot, fail that attach attempt within the bounded stream-attach timeout and retry instead of waiting forever in `conn=connecting` or `conn=reconnecting`
+- if `/api/v1/events` never finishes attaching, including streams that open headers and then only emit keepalive comments before the first snapshot, fail that attach attempt within one bounded stream-attach timeout and retry instead of waiting forever in `conn=connecting` or `conn=reconnecting`
 - keep rendering that bootstrap snapshot with `conn=connecting` until the SSE stream yields its first snapshot
 - publish the first streamed snapshot and the `conn=live` attachment signal atomically through the bridge mailbox so the header never outruns the data it is describing
 - subscribe to the SSE stream

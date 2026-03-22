@@ -695,6 +695,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stream_updates_time_out_when_only_keepalive_comments_arrive_before_a_snapshot() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SSE client");
+            write_sse_headers(&mut socket).await;
+            for _ in 0..8 {
+                sleep(Duration::from_millis(20)).await;
+                if socket.write_all(b": keepalive\n\n").await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let attach_timeout = Duration::from_millis(75);
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            attach_timeout,
+            Duration::from_secs(1),
+        );
+        let mut stream = client.stream_updates().expect("open event stream");
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should surface the attach timeout")
+            .expect("stream should report an error after timing out")
+            .expect_err("stream attach should time out");
+
+        match result {
+            ControlPlaneClientError::StreamAttachTimeout(timeout) => {
+                assert_eq!(timeout, attach_timeout);
+            }
+            other => panic!("expected a stream attach timeout, got {other:?}"),
+        }
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
+    }
+
+    #[tokio::test]
     async fn stream_updates_time_out_when_the_first_snapshot_never_arrives_after_open() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

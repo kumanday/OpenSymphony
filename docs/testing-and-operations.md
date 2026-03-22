@@ -226,9 +226,9 @@ When validating the local control-plane and TUI slice, also confirm that:
   so a hung `/api/v1/snapshot` response retries instead of pinning the UI in `connecting` or
   `reconnecting`
 - `/api/v1/events` attach attempts time out within the bounded stream-attach watchdog budget,
-  including streams that flush headers but never deliver their first snapshot, so a blackholed,
-  half-open, or first-message-stalled SSE attach retries instead of pinning the UI in
-  `connecting` or `reconnecting`
+  including streams that flush headers and then only emit keepalive comments before their first
+  snapshot, so a blackholed, half-open, or first-message-stalled SSE attach retries instead of
+  pinning the UI in `connecting` or `reconnecting`
 - the bootstrap snapshot stays visible with `conn=connecting` until the SSE stream actually
   attaches
 - the first streamed snapshot and the live-stream attachment signal are published atomically, so
@@ -268,6 +268,7 @@ Required checks:
 ### Repository and config
 
 - config file exists and parses
+- required env-backed config placeholders resolve instead of silently collapsing to empty strings
 - target repo exists
 - target repo contains `WORKFLOW.md`
 - workspace root exists or can be created
@@ -300,6 +301,7 @@ Current implementation notes:
 - the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` before reconciling events
 - when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
 - failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity
+- missing `${VAR}` tokens in required config values now fail doctor during config expansion instead of silently validating the config directory as an empty fallback path
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
 - `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback and the pinned launcher `cwd` behavior
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials

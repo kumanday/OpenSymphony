@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env,
     net::SocketAddr,
     num::NonZeroU64,
@@ -411,32 +412,58 @@ async fn load_config(path: &Path) -> Result<DoctorConfig, String> {
     let raw = fs::read_to_string(path)
         .await
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let expanded = expand_env_tokens(&raw);
+    let expanded = expand_env_tokens(&raw)
+        .map_err(|error| format!("failed to expand {}: {error}", path.display()))?;
     serde_yaml::from_str(&expanded)
         .map_err(|error| format!("failed to parse {}: {error}", path.display()))
 }
 
-fn expand_env_tokens(input: &str) -> String {
+#[derive(Debug, Error)]
+enum ExpandEnvTokensError {
+    #[error("missing environment variable(s): {vars}")]
+    MissingVars { vars: String },
+    #[error("unterminated environment token `${{{token}}}`")]
+    UnterminatedToken { token: String },
+}
+
+fn expand_env_tokens(input: &str) -> Result<String, ExpandEnvTokensError> {
     let mut expanded = String::new();
     let mut chars = input.chars().peekable();
+    let mut missing = BTreeSet::new();
 
     while let Some(ch) = chars.next() {
         if ch == '$' && chars.peek() == Some(&'{') {
             let _ = chars.next();
             let mut key = String::new();
+            let mut closed = false;
             for next in chars.by_ref() {
                 if next == '}' {
+                    closed = true;
                     break;
                 }
                 key.push(next);
             }
-            expanded.push_str(&env::var(key).unwrap_or_default());
+            if !closed {
+                return Err(ExpandEnvTokensError::UnterminatedToken { token: key });
+            }
+            match env::var(&key) {
+                Ok(value) => expanded.push_str(&value),
+                Err(_) => {
+                    missing.insert(key);
+                }
+            }
         } else {
             expanded.push(ch);
         }
     }
 
-    expanded
+    if missing.is_empty() {
+        Ok(expanded)
+    } else {
+        Err(ExpandEnvTokensError::MissingVars {
+            vars: missing.into_iter().collect::<Vec<_>>().join(", "),
+        })
+    }
 }
 
 fn resolve_path(base: &Path, raw: &str) -> PathBuf {

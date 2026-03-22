@@ -340,7 +340,7 @@ The implemented local observability flow is narrower than the full future daemon
 1. `opensymphony-cli daemon` starts a local control-plane server.
 2. A snapshot store publishes immutable `SnapshotEnvelope` values.
 3. `opensymphony-cli tui` fetches `/api/v1/snapshot` and renders it as bootstrap state.
-4. The TUI gives that snapshot fetch a bounded timeout, then opens `/api/v1/events` behind a separate bounded stream-attach watchdog that stays armed until the first snapshot arrives, keeps `conn=connecting` until the stream delivers that first snapshot, and publishes the first streamed snapshot plus the live attachment signal atomically before listening for ongoing SSE updates.
+4. The TUI gives that snapshot fetch a bounded timeout, then opens `/api/v1/events` behind a separate bounded stream-attach watchdog that stays armed until the first snapshot arrives. That deadline is measured across the whole pre-snapshot phase rather than restarting on keepalive comments or other non-snapshot SSE frames, keeps `conn=connecting` until the stream delivers that first snapshot, and publishes the first streamed snapshot plus the live attachment signal atomically before listening for ongoing SSE updates.
 5. If an SSE client lags, the control plane immediately fast-forwards it to `store.current()` instead of waiting for the retained broadcast backlog to drain, and suppresses any older retained sequences so reducers never regress.
 6. On snapshot or stream failure, the TUI keeps rendering the last good snapshot, marks the connection as reconnecting, then retries the current snapshot fetch before resubscribing.
 7. Detaching the UI leaves the daemon process and snapshot publication unaffected.
