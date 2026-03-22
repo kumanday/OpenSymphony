@@ -60,5 +60,60 @@ string_identifier!(ConversationId);
 string_identifier!(IssueId);
 string_identifier!(IssueIdentifier);
 string_identifier!(TrackerStateId);
-string_identifier!(WorkspaceKey);
 string_identifier!(WorkerId);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct WorkspaceKey(String);
+
+impl WorkspaceKey {
+    pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(IdentifierError::Empty {
+                kind: stringify!(WorkspaceKey),
+            });
+        }
+
+        Ok(Self(sanitize_workspace_key(&value)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for WorkspaceKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WorkspaceKey {
+    type Err = IdentifierError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
+    }
+}
+
+impl TryFrom<String> for WorkspaceKey {
+    type Error = IdentifierError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+fn sanitize_workspace_key(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
