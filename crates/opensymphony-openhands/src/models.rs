@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceConfig {
     pub working_dir: String,
@@ -115,6 +119,21 @@ impl SendMessageRequest {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationRunRequest {}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AcceptedResponse {
+    #[serde(default = "default_true")]
+    pub success: bool,
+}
+
+impl AcceptedResponse {
+    pub fn accepted() -> Self {
+        Self { success: true }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConversationStateUpdatePayload {
     #[serde(default)]
@@ -209,4 +228,69 @@ pub struct SearchConversationEventsResponse {
     pub events: Vec<EventEnvelope>,
     #[serde(default)]
     pub next_page_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn conversation_create_request_serializes_minimal_contract() {
+        let request = ConversationCreateRequest {
+            conversation_id: Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+                .expect("uuid should parse"),
+            workspace: WorkspaceConfig {
+                working_dir: "/tmp/workspace".to_string(),
+                kind: "LocalWorkspace".to_string(),
+            },
+            persistence_dir: "/tmp/workspace/.opensymphony/openhands".to_string(),
+            max_iterations: 7,
+            stuck_detection: true,
+            confirmation_policy: ConfirmationPolicy {
+                kind: "NeverConfirm".to_string(),
+            },
+            agent: AgentConfig {
+                kind: "Agent".to_string(),
+                llm: Some(LlmConfig {
+                    model: "fake-model".to_string(),
+                    api_key: Some("fake-key".to_string()),
+                }),
+            },
+        };
+
+        let value = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "conversation_id": "11111111-2222-3333-4444-555555555555",
+                "workspace": {
+                    "working_dir": "/tmp/workspace",
+                    "kind": "LocalWorkspace",
+                },
+                "persistence_dir": "/tmp/workspace/.opensymphony/openhands",
+                "max_iterations": 7,
+                "stuck_detection": true,
+                "confirmation_policy": {
+                    "kind": "NeverConfirm",
+                },
+                "agent": {
+                    "kind": "Agent",
+                    "llm": {
+                        "model": "fake-model",
+                        "api_key": "fake-key",
+                    },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn conversation_run_request_serializes_to_empty_object() {
+        let value = serde_json::to_value(ConversationRunRequest::default())
+            .expect("request should serialize");
+
+        assert_eq!(value, json!({}));
+    }
 }
