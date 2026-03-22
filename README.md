@@ -41,6 +41,29 @@ Not in MVP:
 - replacing Symphony tracker polling with push webhooks
 - implementing against the OpenHands web-app Socket.IO API
 
+## Current implemented slice
+
+This branch now boots the first local observability vertical slice even though the rest of the orchestration stack is still being filled in.
+
+Available today:
+
+- a Cargo workspace with shared snapshot domain models
+- a read-only control-plane server with:
+  - `GET /healthz`
+  - `GET /api/v1/snapshot`
+  - `GET /api/v1/events` as an SSE update stream
+- a FrankenTUI client that:
+  - fetches the initial snapshot over HTTP
+  - reconnects to the SSE stream after disconnect
+  - renders focused issue/workspace detail plus recent event or metrics panes in inline mode
+  - shows the active focus pane in the status line and pane headers for keyboard-driven navigation
+- a small `opensymphony-cli` demo path so the control plane and UI can be validated without coupling the TUI to orchestrator internals
+
+Local commands:
+
+- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
+- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
+
 ## Core design decisions
 
 ### 1. Keep Symphony orchestration in Rust
@@ -143,8 +166,38 @@ global `openhands` install.
 2. Read `docs/architecture.md` and `docs/websocket-runtime.md`.
 3. Implement milestone M1 before touching runtime code.
 4. Build the OpenHands runtime adapter against a pinned server version.
-5. Keep the control-plane API stable before starting the TUI.
+5. Keep the control-plane API stable before expanding the TUI.
 6. Use the task files in `docs/tasks/` as the Linear issue source of truth.
+
+## Current local validation entrypoints
+
+This repository now includes the local validation scaffolding for M5:
+
+- a Rust workspace with the documented crate boundaries
+- `opensymphony-openhands` for minimal conversation, search, and WebSocket readiness probes
+- `opensymphony-linear-mcp` for a schema-tested Linear stdio MCP server
+- `opensymphony-testkit` with an in-memory fake OpenHands server
+- `opensymphony` CLI with a meaningful `doctor` command
+- pinned OpenHands tooling under `tools/openhands-server/`
+- example config and target-repo fixtures under `examples/`
+- smoke and live validation scripts under `scripts/`
+
+Useful commands:
+
+```bash
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml
+cargo run -p opensymphony-cli -- linear-mcp
+./scripts/smoke_local.sh
+OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
+```
+
+Current note:
+
+- the example doctor YAML now only carries machine-local inputs such as the OpenHands tool directory and optional probe overrides; the target repo `WORKFLOW.md` provides the workspace root, OpenHands base URL, and prompt that the doctor probe validates
+- `linear-mcp` is implemented and exposes the documented Linear tool surface over stdio; `daemon` and `tui` remain scaffolds until their runtime and control-plane milestones land.
 
 ## Non-negotiable implementation rules
 

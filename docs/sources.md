@@ -94,6 +94,34 @@ Use release notes to track:
 - event-model additions
 - compatibility risks across versions
 
+### Pinned OpenHands version notes
+
+As of 2026-03-21, this repository pins:
+
+- `openhands-agent-server==1.14.0`
+- `openhands-sdk==1.14.0`
+- `openhands-tools==1.14.0`
+- `openhands-workspace==1.14.0`
+- release tag `v1.14.0`
+- Python `3.12.x` for the repo-local server environment
+
+Validation sources for this pin:
+
+- PyPI project:
+  `https://pypi.org/project/openhands-agent-server/1.14.0/`
+- GitHub release:
+  `https://github.com/OpenHands/software-agent-sdk/releases/tag/v1.14.0`
+
+The current local supervisor assumptions validated against this pin are:
+
+- the server still starts with `python -m openhands.agent_server`
+- the CLI still accepts `--host` and `--port`
+- the default bind host remains broader than loopback, so OpenSymphony keeps the
+  loopback-only wrapper
+
+When bumping this version, re-validate the launch surface, readiness probe, HTTP
+contract assumptions, and WebSocket notes before changing the repo pin.
+
 ### OpenHands skills and context loading
 
 - Agent skills guide:

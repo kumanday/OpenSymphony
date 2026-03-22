@@ -1,26 +1,53 @@
-//! Direct Rust integration with the OpenHands SDK agent-server.
-
-mod cache;
 mod client;
-mod config;
-mod error;
+mod events;
+mod models;
 mod session;
-mod stream;
 mod supervisor;
-mod wire;
+mod tooling;
 
-pub use cache::EventCache;
-pub use client::{OpenHandsClient, RunConversationResponse};
-pub use config::{
-    ConversationConfig, HttpAuth, LocalServerConfig, OpenHandsConfig, TransportConfig,
-    WebSocketAuthMode, WebSocketConfig,
+pub use client::{
+    ApiKeyAuth, AuthConfig, HttpAuth, OpenHandsClient, OpenHandsError, OpenHandsProbeResult,
+    RuntimeEventStream, RuntimeStreamConfig, TransportConfig, WebSocketAuth,
 };
-pub use error::{OpenHandsError, Result};
-pub use session::{IssueSessionRequest, IssueSessionRunner};
-pub use stream::{AttachedConversation, ConversationStateMirror};
-pub use supervisor::{LocalAgentServerSupervisor, ServerStatus};
-pub use wire::{
-    AgentConfig, ConfirmationPolicy, ContentBlock, ConversationInfo, CreateConversationRequest,
-    EventPage, LlmConfig, OpenHandsWorkspace, RemoteExecutionStatus, RuntimeEventEnvelope,
-    RuntimeEventPayload, SendMessageRequest, ServerInfo, ToolConfig,
+pub use events::{
+    ConversationErrorEvent, ConversationStateMirror, EventCache, KnownEvent, LlmCompletionLogEvent,
+    TerminalExecutionStatus, UnknownEvent,
 };
+pub use models::{
+    AcceptedResponse, AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
+    ConversationRunRequest, ConversationStateUpdatePayload, DoctorProbeConfig, EventEnvelope,
+    LlmConfig, SearchConversationEventsResponse, SendMessageRequest, TextContent, WorkspaceConfig,
+};
+pub use session::{
+    IssueConversationManifest, IssueSessionContext, IssueSessionError, IssueSessionPromptKind,
+    IssueSessionResult, IssueSessionRunner, IssueSessionRunnerConfig, RUNTIME_CONTRACT_VERSION,
+};
+pub use supervisor::{
+    ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, ProbeConfig, ServerMode,
+    ServerState, ServerStatus, SupervisedServerConfig, SupervisorConfig, SupervisorError,
+};
+pub use tooling::{
+    LocalServerTooling, LocalToolingError, LocalToolingLayout, PinStatus, ResolvedLaunch,
+    ToolingMetadata,
+};
+
+pub const CRATE_NAME: &str = "opensymphony-openhands";
+
+pub fn crate_summary() -> &'static str {
+    "REST client, WebSocket event stream, event cache/state mirror, local server supervisor, repo-local tooling resolution, conservative readiness probes, doctor diagnostics, issue session runner, and protocol error mapping"
+}
+
+pub fn placeholder_summary() -> &'static str {
+    crate_summary()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CRATE_NAME, crate_summary};
+
+    #[test]
+    fn reports_its_boundary() {
+        assert_eq!(CRATE_NAME, "opensymphony-openhands");
+        assert!(crate_summary().contains("local server supervisor"));
+    }
+}

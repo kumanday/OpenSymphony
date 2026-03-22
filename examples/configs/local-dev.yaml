@@ -1,0 +1,7 @@
+target_repo: ../target-repo
+openhands:
+  tool_dir: ../../tools/openhands-server
+  probe_model: null
+  probe_api_key_env: null
+linear:
+  enabled: false

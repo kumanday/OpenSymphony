@@ -101,6 +101,12 @@ Use this sequence whenever attaching to a conversation, both fresh and existing.
 5. Reconcile events again with `GET /events/search`.
 6. Only after readiness and reconcile is the stream considered attached.
 
+Attach replay rule:
+
+- queue the initial `/events/search` snapshot into the same ordered pending buffer used by later reconcile inserts
+- `next_event()` replays that persisted snapshot for resumed conversations after attach completes
+- the WebSocket readiness frame still stays on `ready_event` as the attach barrier unless `/events/search` independently contains the same event ID
+
 ### 4.2 Why the double sync exists
 
 There is a race window between:
@@ -117,6 +123,15 @@ This is why the Rust runtime should intentionally copy the high-level behavior o
 The current SDK client treats the first `ConversationStateUpdateEvent` received after subscription as proof that the subscription is ready. On the pinned `v1.14.0` server this is a full-state snapshot with `key == "full_state"`.
 
 Implement the same rule.
+
+Do not require that the first WebSocket frame be the readiness event.
+
+The client should:
+
+- keep waiting across ping and pong traffic
+- ignore unrelated event kinds until a `ConversationStateUpdateEvent` arrives
+- treat the envelope kind itself as the readiness signal even if a forward-compatible payload cannot be typed yet
+- ignore one malformed or forward-compatible frame and continue waiting until timeout or socket close
 
 Suggested API in Rust:
 
@@ -135,6 +150,16 @@ Configurable timeout:
 If readiness is not achieved, fail the attach attempt and surface a transport error.
 Apply the same timeout budget to the WebSocket handshake itself so a blackholed socket does not
 wait on kernel TCP timeouts.
+
+Current repository implementation:
+
+- `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until an event envelope with kind `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable frames before readiness
+- `opensymphony-openhands::OpenHandsClient::attach_runtime_stream` performs the full attach sequence: initial REST sync, WebSocket connect, readiness barrier, and post-ready reconcile before returning a live `RuntimeEventStream`
+- the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, refreshes the in-memory state mirror only when it is newer than the reconciled state, stays authoritative across later mirror rebuilds until reconcile or REST refresh surfaces an equal or newer decodable state update, can salvage a forward-compatible `state_delta` even when the full payload shape no longer deserializes cleanly, can clear stale terminal REST fallback when a reused conversation has already restarted into an active `queued` or `running` state, and is not replayed through `next_event()` unless `/events/search` independently contains the same event ID
+- `RuntimeEventStream::next_event` now drains any immediately available live socket frames into the same ordered pending queue before yielding a later attach-backlog item, so direct consumers still observe timestamp order while replaying persisted history without relying on a fixed read-ahead delay
+- workflow-owned `openhands.websocket.enabled`, `ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` overrides are currently rejected during workflow resolution until the runtime attach/reconnect path consumes them; the live runtime still always opens the readiness socket and uses runtime-owned budgets
+- `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
+- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, and reconcile path
 
 ## 6. Event cache and reconciliation
 
@@ -166,6 +191,13 @@ The reconcile pass should:
 - return the number of new events added
 - tolerate partial failure by preserving already-cached events
 
+Current repository implementation:
+
+- `OpenHandsClient::search_all_events` paginates until `next_page_id` is absent
+- `EventCache` deduplicates by event ID, inserts by timestamp order, and can return the newly merged events from reconcile or reconnect passes
+- `RuntimeEventStream` preserves one cache across reconnect cycles and replays ordered state updates into the state mirror after late arrivals
+- the contract suite includes multi-page reconciliation, out-of-order insertion, and reconnect-recovery tests
+
 ## 6.4 Conversation state mirror
 
 Maintain a conversation state mirror alongside the event cache.
@@ -182,6 +214,14 @@ Wire-level compatibility note:
 - per-field ordering should compare parsed RFC3339 timestamps, not raw strings, so equivalent
   offset spellings such as `Z` and `+01:00` do not rewind newer state
 
+Current repository implementation:
+
+- `KnownEvent` now distinguishes `ConversationStateUpdateEvent`, `LLMCompletionLogEvent`, `ConversationErrorEvent`, and `UnknownEvent`
+- unknown event kinds retain raw JSON in the event journal instead of failing the stream
+- `ConversationStateMirror::rebuild_from` replays the timestamp-ordered cache so late state updates do not regress terminal detection
+- `RuntimeEventStream` reapplies the non-replayable readiness snapshot after attach/reconnect and after later cache-driven mirror rebuilds only when reconcile and REST refresh do not already carry an equal or newer decodable state update, still derives a minimal mirror patch from forward-compatible `state_delta` payloads even when typed state decoding would otherwise fall back, and lets an active `queued` or `running` ready barrier clear stale terminal REST fallback for restarted reused conversations
+- `ConversationStateMirror::terminal_status` provides the current finished/error/stuck classification used by the probe and future workers
+
 ## 7. Run lifecycle over REST plus WebSocket
 
 ## 7.1 Sending a turn
@@ -189,14 +229,20 @@ Wire-level compatibility note:
 For each turn:
 
 1. Select prompt shape:
-   - full prompt on fresh conversation
-   - continuation guidance on resumed conversation or later turns
-2. `POST /api/conversations/{id}/events`
+   - full rendered workflow prompt on a fresh conversation
+   - full rendered workflow prompt again if a reused conversation exists locally but has never been seeded with that first assignment message
+   - built-in continuation guidance on resumed seeded conversations or later turns
+   - persist the selected prompt under `.opensymphony/prompts/last-*-prompt.(md|json)` and archive the per-run capture under `.opensymphony/runs/attempt-####/`
+2. If the reused conversation is already `queued` or `running`, wait for that
+   turn to reach a terminal state before sending the next prompt.
+3. `POST /api/conversations/{id}/events`
    - user role
    - prompt content
    - `run=false`
-3. `POST /api/conversations/{id}/run`
-4. Observe progress through the WebSocket event stream
+4. `POST /api/conversations/{id}/run`
+   - if the server returns `409 Conflict`, wait for the active turn to finish,
+     reconcile the attached backlog, then retry `POST /run` on the same conversation
+5. Observe progress through the WebSocket event stream
 
 ## 7.2 Waiting for completion
 
@@ -210,6 +256,9 @@ Fallback mechanism:
 - refresh `GET /api/conversations/{id}` if stream health is uncertain
 - reconcile events after refresh, but treat that final reconcile as best-effort once the
   authoritative REST snapshot has already confirmed a terminal state
+- if the stream reaches the stall timeout without a terminal state, run one final
+  `GET /events/search` reconcile before classifying the turn as stalled so
+  persisted-but-missed terminal events can still be recovered
 - classify the worker if the authoritative state is terminal
 
 ## 7.3 Terminal state queue
@@ -219,6 +268,8 @@ Implementation recommendation:
 - maintain a small internal channel that receives terminal execution-status transitions
 - let the worker await this channel with timeout and cancellation support
 - keep REST fallback as backup, not as the main loop
+- do not report success while a queued `ConversationErrorEvent` still exists in the pending stream buffer, even if the mirrored state has already reached `finished`
+- before accepting `finished`, give the socket one extra scheduler turn and buffered-drain pass so a failure frame that arrives immediately after the terminal state update is still observed
 
 ## 8. Disconnect and reconnect behavior
 
@@ -247,11 +298,29 @@ On reconnect:
 4. reconcile events
 5. resume streaming
 
+Buffered-delivery rule:
+
+- if a read yields replayable events and then the socket closes or resets during the same read-ahead window, queue and yield those events first
+- only attempt reconnect after the already-queued events have been drained
+- if reconnect later exhausts policy limits, surface that failure on the following poll instead of dropping buffered runtime activity
+
 If reconnection exhausts policy limits or the worker deadline, fail the worker and let the orchestrator schedule retry.
 If shutdown or cancellation arrives during a reconnect handshake, abort that attempt immediately
 instead of waiting for the transport timeout to expire.
 Apply the same stop-aware behavior after the socket is accepted but before the first readiness event
 arrives, so reconnect shutdown does not wait for `ready_timeout_ms` to expire.
+
+Current repository implementation:
+
+- `RuntimeStreamConfig` carries readiness timeout, bounded exponential backoff, and max reconnect attempts
+- `RuntimeEventStream::next_event` reconnects on both clean socket close and transport resets, then re-runs readiness plus reconcile before resuming
+- reconnect-required reads now defer reconnect long enough to flush any already-queued events before surfacing exhaustion
+- reconnect readiness snapshots remain barriers only; they refresh `ready_event` but are not replayed as synthetic runtime events unless `/events/search` also returns them
+- `wait_for_probe_terminal_state` now prefers an already-refreshed terminal `state_mirror()` over surfacing `ReconnectExhausted`, so the doctor/live probe path can complete from authoritative REST state when a run is already terminal but WebSocket reattach fails afterward
+- `wait_for_probe_terminal_state` also gives the stream one extra scheduler-turn buffered drain before accepting `finished`, so a just-arrived `ConversationErrorEvent` still fails the probe instead of being skipped after the terminal state update
+- after `wait_for_probe_terminal_state` has already succeeded, `run_probe` reuses the stream-backed conversation snapshot plus mirrored terminal `execution_status` instead of requiring one more terminal REST fetch
+- `RuntimeEventStream::close` clears any queued replay and deferred reconnect intent before closing the socket, so later polls on that stream instance stay closed instead of reopening the conversation
+- `opensymphony-testkit` can now force live socket drops so reconnect coverage is deterministic in CI
 
 ## 8.3 Decode failures
 
@@ -303,18 +372,25 @@ trait RuntimeEventStream {
 }
 ```
 
+Current repository implementation:
+
+- `OpenHandsClient::attach_runtime_stream(conversation_id, RuntimeStreamConfig)` returns a live `RuntimeEventStream`
+- `RuntimeEventStream` currently exposes `ready_event`, `event_cache`, `state_mirror`, `next_event`, and `close`
+- `OpenHandsClient::wait_for_readiness` remains available as the narrow readiness helper used by lower-level tests and diagnostics
+
 ## 11. Relationship to Symphony worker state
 
 The runtime stream informs, but does not define, Symphony outcomes.
 
 Mapping examples:
 
-- terminal `execution_status` with clean completion:
+- terminal `execution_status` `finished` with clean completion:
   - worker may continue another in-process turn or exit normally
 - transport failure:
   - abnormal worker exit, schedule backoff retry
 - no events for longer than `stall_timeout_ms`:
-  - classify as stalled, terminate worker, schedule retry
+  - run one final REST event reconcile
+  - if no recovered terminal state appears, classify as stalled, terminate worker, schedule retry
 - issue becomes terminal in Linear while stream is healthy:
   - orchestrator cancels worker regardless of OpenHands status
 
@@ -338,6 +414,7 @@ Required automated scenarios:
 - disconnect before terminal status
 - reconnect plus reconcile catches missed events
 - terminal `execution_status` observed over WebSocket
+- failure-only events such as `ConversationErrorEvent` do not count as successful completion
 - REST fallback after stream uncertainty
 - unknown event kind does not crash the stream
 

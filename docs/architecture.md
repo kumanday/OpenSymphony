@@ -85,8 +85,6 @@ REST remains necessary for:
 - recovery after missed events or process restarts
 
 This avoids a throwaway polling-only runtime client, while still being robust to dropped WebSocket connections.
-REST requests and WebSocket handshakes must both run under explicit deadlines so workers can fail fast
-on blackholed transports and cancellation can stop reconnect loops promptly.
 
 ### 3.4 One local server, many issue workspaces
 
@@ -102,12 +100,9 @@ OpenSymphony creates a stable OpenHands `conversation_id` per issue and persists
 - normal continuation retries after a worker exits
 - restart recovery after daemon restarts
 
-Reuse is conditional on the authoritative server-side `working_dir` and `persistence_dir`
-continuing to match the current issue workspace, including the configured
-`conversation.persistence_dir_relative` path inside that workspace. A copied or stale manifest must
-trigger a fresh conversation instead of reusing execution state in the wrong checkout.
-
 This is stricter than the minimum Symphony requirement and intentionally optimizes continuity.
+The current issue session runner also tracks whether that conversation has already been seeded with the full workflow prompt so a reused but never-started thread can still receive the original assignment on the next attempt.
+The persisted OpenHands state directory is derived from the workflow-owned `openhands.conversation.persistence_dir_relative` path inside the issue workspace, and a missing-but-recreatable conversation that still has persisted history stays on continuation guidance instead of replaying the full workflow template.
 
 ### 3.6 The UI only sees the control plane
 
@@ -123,31 +118,42 @@ This keeps:
 
 ## 4.1 Core crates
 
-Recommended crate boundaries:
+Current crate boundaries:
 
 - `opensymphony-domain`
   - issue model
   - run-attempt model
   - retry-entry model
+  - scheduler state and transition types
   - orchestrator snapshot model
 - `opensymphony-workflow`
   - `WORKFLOW.md` loader
   - YAML front matter parsing
   - strict prompt rendering
-  - config validation
+  - config validation plus defaults/env/path resolution
+  - OpenHands extension config kept separate from core workflow config
 - `opensymphony-workspace`
   - workspace mapping
   - sanitization and containment
   - hook runner
-  - issue metadata manifest
+  - issue, run, and conversation manifests
+  - prompt capture helpers and generated issue/session context artifacts
+  - root-scoped `after_create` bootstrap receipt for post-hook recovery
+  - manifest-backed workspace ownership checks for colliding sanitized keys
+  - symlink rejection for reused workspace roots
+  - managed metadata path safety for `.opensymphony/`
+  - process-tree teardown for timed-out hooks
 - `opensymphony-linear`
   - Linear GraphQL client
   - issue normalization
   - candidate fetching
   - state reconciliation
 - `opensymphony-linear-mcp`
-  - stdio MCP server for agent-side ticket writes
+  - line-delimited stdio MCP server for agent-side ticket writes
+  - `initialize`, `ping`, `tools/list`, and `tools/call`
+  - minimal Linear tool surface backed by direct GraphQL mutations
 - `opensymphony-openhands`
+  - repo-local tooling resolution
   - local server supervisor
   - REST client
   - WebSocket stream
@@ -155,7 +161,7 @@ Recommended crate boundaries:
   - issue session runner
 - `opensymphony-orchestrator`
   - poll tick
-  - runtime state machine
+  - scheduler actor and policy decisions over the shared state machine
   - worker supervision
   - retry timers
   - reconciliation
@@ -165,6 +171,8 @@ Recommended crate boundaries:
 - `opensymphony-cli`
   - daemon startup
   - doctor command
+  - target-repo `WORKFLOW.md` resolution and prompt preflight for doctor
+  - repo-root OpenHands preflight checks
   - linear-mcp command
   - config entrypoints
 - `opensymphony-tui`
@@ -174,6 +182,26 @@ Recommended crate boundaries:
   - fake OpenHands agent-server
   - shared fixtures
 
+## 4.1.1 M1 public contract surface
+
+The repository now exposes three stable foundation contracts that later milestones build on:
+
+- `opensymphony-domain`
+  - normalized tracker issue model
+  - blocker references
+  - run-attempt, retry-entry, runtime-session, and worker-outcome models
+  - serialized orchestrator snapshot types
+- `opensymphony-workflow`
+  - raw `WORKFLOW.md` parsing into `{config, prompt_template}`
+  - typed config resolution with fail-fast unknown nested workflow keys plus fail-fast unknown top-level keys outside the supported opaque `codex` namespace, defaults, env indirection, path normalization, required Linear tracker credentials via either explicit `tracker.api_key` or process-level `LINEAR_API_KEY`, explicit env-backed workspace roots, and strict `openhands` extension validation
+  - strict prompt rendering over `{issue, attempt}`
+- `opensymphony-orchestrator`
+  - deterministic candidate sorting, claim logic, and claimed-to-running enforcement
+  - explicit `Claimed` / `Running` / `RetryQueued` / `Released` transitions
+  - fixed continuation retry, exponential failure backoff, stall detection, retry-start validation for `due_at`, `attempt`, latest dispatch eligibility, and bounded global/per-state capacity using the reservation's current state, reconciliation of running, retry-queued, and claimed-only issues including a claim-to-start grace window that remains independent from disabled stall detection before stale claimed-only release, freshest global rate-limit retention, and restart recovery
+
+The other crates are already present at their final ownership boundaries, but for M1 they intentionally expose only thin re-exports or placeholders rather than premature transport logic.
+
 ## 4.2 External processes
 
 Local MVP process graph:
@@ -181,7 +209,12 @@ Local MVP process graph:
 - `opensymphony daemon`
   - owns orchestrator and control plane
   - may spawn:
-    - `uv run --project tools/openhands-server agent-server --host 127.0.0.1 --port 8000`
+    - `bash tools/openhands-server/run-local.sh`
+- OpenHands MCP child processes
+  - may spawn:
+    - `opensymphony linear-mcp`
+  - write ticket comments, transitions, and links directly to Linear
+  - do not participate in scheduler correctness
 - `opensymphony tui`
   - separate process
   - reads control-plane APIs only
@@ -189,6 +222,21 @@ Local MVP process graph:
   - started by workspace manager
 - OpenHands agent subprocesses or tool execution
   - managed by agent-server
+
+The current local supervisor implementation resolves its launch metadata from
+`tools/openhands-server/`, probes readiness with `GET /openapi.json`, and only
+terminates a process that it launched itself. In supervised mode it also refuses
+to launch when another ready server is already responding on the configured
+base URL, so the daemon never silently adopts a foreign process as its owned
+child. The runtime attach loop also still
+uses runtime-owned WebSocket readiness and reconnect budgets. Until those paths
+consume workflow-owned launch env, readiness-probe-path, startup-timeout, and
+websocket enablement/timing overrides, workflow resolution rejects explicit
+`local_server.env`, `local_server.readiness_probe_path`,
+`local_server.startup_timeout_ms`, `websocket.enabled`,
+`websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and
+`websocket.reconnect_max_ms` settings, as well as `https://`, path-bearing,
+query-bearing, fragment-bearing, and bracketed-IPv6 OpenHands origins.
 
 ## 5. Worker and conversation model
 
@@ -217,15 +265,22 @@ For each issue:
 1. Ensure workspace exists.
 2. Load or create stable conversation metadata.
 3. Attach WebSocket stream and reconcile events.
-4. Execute one or more turns on the same conversation up to `agent.max_turns`.
-5. Exit worker normally or abnormally.
-6. Let the orchestrator decide continuation retry, failure retry, release, or cancellation.
+4. If that reused conversation is already `queued` or `running`, wait for it to
+   reach a terminal state before sending the next prompt.
+5. Execute one or more turns on the same conversation up to `agent.max_turns`.
+   If `POST /run` races with an already-active turn and returns `409 Conflict`,
+   wait for that active turn to finish, refresh the event backlog, and retry the
+   run on the same conversation.
+6. Exit worker normally or abnormally.
+7. Let the orchestrator decide continuation retry, failure retry, release, or cancellation.
 
 ### 5.4 Prompt policy
 
 Use different prompt shapes for different moments:
 
 - Fresh conversation, first turn:
+  - full rendered workflow prompt
+- Existing conversation whose full workflow prompt was never successfully sent:
   - full rendered workflow prompt
 - Existing conversation, first turn of a new worker lifetime:
   - continuation guidance only
@@ -234,9 +289,8 @@ Use different prompt shapes for different moments:
 - Conversation reset after corruption or incompatible version:
   - fresh full workflow prompt again
 
+The current runner implements continuation guidance as a small built-in resume message that tells the agent to keep working from the existing conversation and workspace context instead of replaying the workflow template.
 This follows Symphony's instruction not to resend the original full task prompt into an already live thread.
-That also applies when `POST /api/conversations` rehydrates a persisted thread after a transient
-`GET /api/conversations/{id}` miss: existing history still receives continuation guidance only.
 
 ## 6. Event and state ownership
 
@@ -266,12 +320,35 @@ The control plane exposes a summarized runtime snapshot derived from:
 
 The snapshot is not just a projection of OpenHands state. It is a Symphony-specific view.
 
+## 6.3 Implemented observability slice
+
+The current repository implements the first read-only control-plane and FrankenTUI slice with these concrete boundaries:
+
+- `opensymphony-domain`
+  - `SnapshotEnvelope`
+  - daemon, issue, metrics, and recent-event serialization models
+- `opensymphony-control`
+  - in-memory snapshot store
+  - `GET /healthz`
+  - `GET /api/v1/snapshot`
+  - `GET /api/v1/events` using Server-Sent Events with lagged-subscriber catch-up to the newest snapshot
+- `opensymphony-tui`
+  - reducer-owned TUI state
+  - REST bootstrap plus SSE reconnect loop
+  - latest-value bridge mailbox that coalesces bursty snapshots
+  - reconnect indicator that preserves the last good snapshot while the bridge resubscribes
+  - inline-mode rendering over immutable view text with pane-specific row budgeting
+- `opensymphony-cli`
+  - `daemon` and `tui` entrypoints used for local attach and detach validation
+
+This slice deliberately keeps the UI on a stable read-only contract while the orchestration crates continue to mature behind it.
+
 ## 7. Local MVP data flow
 
 ## 7.1 Dispatch path
 
 1. Poll tick fires.
-2. Orchestrator reconciles running issues and retry queue.
+2. Orchestrator reconciles running issues, retry queue, and claimed-only reservations.
 3. Orchestrator fetches candidate issues from Linear.
 4. Orchestrator selects eligible issues subject to concurrency.
 5. Worker starts for one issue.
@@ -307,6 +384,18 @@ PollTick
   -> SnapshotPublisher.publish()
 ```
 
+## 7.3 Current local attach path
+
+The implemented local observability flow is narrower than the full future daemon path, but it already preserves the same boundary:
+
+1. `opensymphony-cli daemon` starts a local control-plane server.
+2. A snapshot store publishes immutable `SnapshotEnvelope` values.
+3. `opensymphony-cli tui` fetches `/api/v1/snapshot` and renders it as bootstrap state.
+4. The TUI gives that snapshot fetch a bounded timeout, then opens `/api/v1/events` behind a separate bounded stream-attach watchdog that stays armed until the first snapshot arrives. That deadline is measured across the whole pre-snapshot phase rather than restarting on keepalive comments or other non-snapshot SSE frames, keeps `conn=connecting` until the stream delivers that first snapshot, and publishes the first streamed snapshot plus the live attachment signal atomically before listening for ongoing SSE updates.
+5. If an SSE client lags, the control plane immediately fast-forwards it to `store.current()` instead of waiting for the retained broadcast backlog to drain, and suppresses any older retained sequences so reducers never regress.
+6. On snapshot or stream failure, the TUI keeps rendering the last good snapshot, marks the connection as reconnecting, then retries the current snapshot fetch before resubscribing.
+7. Detaching the UI leaves the daemon process and snapshot publication unaffected.
+
 ## 8. Recovery model
 
 ## 8.1 Daemon restart
@@ -329,8 +418,8 @@ On disconnect:
 - mark runtime stream as degraded
 - start bounded reconnect backoff
 - refresh authoritative conversation state with REST
-- reconnect WebSocket with a bounded handshake timeout
-- wait for readiness barrier, but abort that wait immediately if the worker is shutting down
+- reconnect WebSocket
+- wait for readiness barrier
 - reconcile event backlog
 - resume live processing
 
