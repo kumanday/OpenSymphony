@@ -39,6 +39,7 @@ Recommended layout inside each issue workspace:
 
 ```text
 <issue_workspace>/
+  .opensymphony.after_create.json
   .opensymphony/
     issue.json
     run.json
@@ -60,6 +61,7 @@ Recommended layout inside each issue workspace:
 Notes:
 
 - `.opensymphony/` is OpenSymphony-owned metadata.
+- `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap.
 - The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
 - `conversation.json` remains reserved for the OpenHands session layer even though the workspace handle exposes its deterministic path.
 - The repository working tree remains otherwise untouched except by normal agent work.
@@ -99,7 +101,9 @@ Do not rerun it on every worker attempt.
 
 If the first `after_create` attempt fails before bootstrap completes, the next `ensure` attempt should retry `after_create` instead of treating the partially initialized workspace directory as fully reusable.
 
-Bootstrap completion is determined by a decodable OpenSymphony-owned `issue.json` whose workspace path and sanitized key match the current workspace, not by raw file existence. Repository-provided, copied, or undecodable `.opensymphony/issue.json` artifacts must not suppress the retry.
+After a successful first-time `after_create`, OpenSymphony must persist a root-scoped bootstrap receipt before it starts creating `.opensymphony/` metadata. If later bootstrap steps fail, the next `ensure` should resume metadata bootstrap without rerunning `after_create`.
+
+Steady-state workspace ownership is still determined by a decodable OpenSymphony-owned `issue.json` whose workspace path and sanitized key match the current workspace, not by raw file existence. Repository-provided, copied, or undecodable `.opensymphony/issue.json` or `.opensymphony.after_create.json` artifacts must not suppress a required first-bootstrap retry.
 
 ## 6.2 `before_run`
 
@@ -142,6 +146,7 @@ Use for:
 - OpenSymphony-managed metadata paths under `.opensymphony/` must reject symlinked directories or files before any manifest read or write.
 - Unix hook commands should run via a non-login `sh -c` shell so host profile startup files cannot change `cwd` or fail the hook before the configured command runs.
 - Hook timeouts use the configured `hooks.timeout_ms`.
+- When a hook times out, OpenSymphony must terminate the entire spawned process tree rather than only the direct shell wrapper process.
 - Hook failures are categorized and surfaced with issue context.
 - `after_run` and `before_remove` are best effort by default.
 - `after_create` and `before_run` failures fail the current worker attempt.

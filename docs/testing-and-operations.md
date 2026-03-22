@@ -97,9 +97,11 @@ Current implementation:
 - persist issue and run manifests
 - allow fresh `after_create` hooks to bootstrap clone/worktree flows before `.opensymphony/` exists
 - retry failed first-time `after_create` hooks on the next `ensure`
+- remember a successful first-time `after_create` before later metadata bootstrap steps so clone/worktree hooks are not rerun after a post-hook bootstrap failure
 - reject sanitized-key collisions when an existing current-path issue manifest belongs to another issue
 - ignore foreign, copied, or undecodable `.opensymphony/issue.json` artifacts when deciding whether first bootstrap already completed
 - hook timeout
+- kill spawned hook descendants when a timeout fires
 - hook stderr capture
 - avoid login-shell startup files when launching Unix hooks
 - reject symlinked workspace roots during reused-workspace validation
@@ -292,6 +294,7 @@ Write logs to:
 Each issue workspace should expose enough local artifacts to debug recovery:
 
 ```text
+<issue_workspace>/.opensymphony.after_create.json
 <issue_workspace>/.opensymphony/
   issue.json
   run.json
@@ -300,7 +303,7 @@ Each issue workspace should expose enough local artifacts to debug recovery:
   logs/
 ```
 
-These files should make restart recovery explainable without scraping daemon memory, and `run.json` should retain the latest hook/status evidence for the worker lifetime.
+These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, and `run.json` should retain the latest hook/status evidence for the worker lifetime.
 
 ## 10. Version pinning
 
