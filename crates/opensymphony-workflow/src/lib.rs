@@ -228,7 +228,7 @@ openhadns:
     }
 
     #[test]
-    fn accepts_repo_codex_namespace() {
+    fn accepts_repo_local_namespaces() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -238,13 +238,15 @@ tracker:
     - Todo
   terminal_states:
     - Done
+logging:
+  level: debug
 codex:
   command: codex app-server
 ---
 {{ issue.identifier }}
 "#,
         )
-        .expect("codex namespace should be accepted");
+        .expect("repo-local namespaces should be accepted");
 
         assert_eq!(
             workflow
@@ -253,6 +255,14 @@ codex:
                 .as_ref()
                 .and_then(|codex| codex.get("command")),
             Some(&serde_yaml::Value::String("codex app-server".to_owned()))
+        );
+        assert_eq!(
+            workflow
+                .front_matter
+                .logging
+                .as_ref()
+                .and_then(|logging| logging.get("level")),
+            Some(&serde_yaml::Value::String("debug".to_owned()))
         );
     }
 
