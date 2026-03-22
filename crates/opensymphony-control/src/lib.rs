@@ -184,22 +184,14 @@ async fn next_snapshot_envelope(
 
 async fn catch_up_lagged_receiver(
     store: &SnapshotStore,
-    receiver: &mut broadcast::Receiver<SnapshotEnvelope>,
+    _receiver: &mut broadcast::Receiver<SnapshotEnvelope>,
     last_sent_sequence: u64,
 ) -> Option<SnapshotEnvelope> {
-    let mut latest = store.current().await;
-    loop {
-        match receiver.try_recv() {
-            Ok(envelope) => latest = envelope,
-            Err(broadcast::error::TryRecvError::Lagged(_)) => {
-                latest = store.current().await;
-            }
-            Err(broadcast::error::TryRecvError::Empty) => {
-                return (latest.sequence > last_sent_sequence).then_some(latest);
-            }
-            Err(broadcast::error::TryRecvError::Closed) => return None,
-        }
-    }
+    // Fast-forward lagged subscribers straight to the latest published snapshot instead of
+    // draining the retained broadcast backlog. Under sustained publication that backlog may
+    // never go empty, which would otherwise stall SSE delivery indefinitely.
+    let latest = store.current().await;
+    (latest.sequence > last_sent_sequence).then_some(latest)
 }
 
 #[derive(Debug, Clone)]
@@ -387,12 +379,14 @@ mod tests {
     use tokio::{
         io::AsyncWriteExt,
         net::TcpListener,
+        sync::broadcast,
         time::{sleep, timeout},
     };
     use url::Url;
 
     use super::{
-        next_snapshot_envelope, ControlPlaneClient, ControlPlaneClientError, SnapshotStore,
+        catch_up_lagged_receiver, next_snapshot_envelope, ControlPlaneClient,
+        ControlPlaneClientError, SnapshotStore,
     };
 
     fn fixture_snapshot(step: u64) -> DaemonSnapshot {
@@ -471,6 +465,31 @@ mod tests {
             resumed.snapshot.recent_events[0].summary,
             "published step 81"
         );
+    }
+
+    #[tokio::test]
+    async fn lagged_catch_up_returns_before_the_broadcast_backlog_drains() {
+        let store = SnapshotStore::new(fixture_snapshot(0));
+        let mut receiver = store.subscribe();
+        let last_sent_sequence = store.current().await.sequence;
+
+        for step in 1..=80 {
+            store.publish(fixture_snapshot(step)).await;
+        }
+
+        let latest = catch_up_lagged_receiver(&store, &mut receiver, last_sent_sequence)
+            .await
+            .expect("latest snapshot after lag");
+
+        assert_eq!(latest.sequence, 81);
+
+        match receiver.try_recv() {
+            Ok(buffered) => assert!(buffered.sequence < latest.sequence),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(other) => {
+                panic!("expected catch-up to return before draining the backlog, got {other:?}")
+            }
+        }
     }
 
     #[test]
