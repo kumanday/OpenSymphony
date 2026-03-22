@@ -79,13 +79,8 @@ openhands:
     reconnect_initial_ms: 1000
     reconnect_max_ms: 30000
 
-  mcp:
-    stdio_servers:
-      - name: linear
-        command:
-          - opensymphony
-          - linear-mcp
-          - --stdio
+  # Workflow-owned MCP stdio server declarations are rejected until the current
+  # conversation-create adapter can forward `mcp_config` to OpenHands.
 ---
 
 # Assignment
