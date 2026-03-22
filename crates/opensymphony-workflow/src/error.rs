@@ -25,6 +25,9 @@ pub enum WorkflowLoadError {
 
     #[error("workflow front matter must decode to a YAML map")]
     WorkflowFrontMatterNotAMap,
+
+    #[error("unknown top-level workflow namespace `{namespace}`")]
+    UnknownTopLevelNamespace { namespace: String },
 }
 
 #[derive(Debug, Error)]

@@ -20,6 +20,7 @@ polling:
 
 workspace:
   # `~` and exact $VAR/${VAR} tokens are expanded during config resolution.
+  # Any non-absolute path here is resolved relative to the repository's WORKFLOW.md.
   root: ~/.opensymphony/workspaces
 
 hooks:

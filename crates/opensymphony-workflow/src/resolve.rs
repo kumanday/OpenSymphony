@@ -421,11 +421,7 @@ fn resolve_workspace_root<E: Environment>(
         return Ok(normalize_path(&expanded));
     }
 
-    if contains_path_separator(&resolved) {
-        return Ok(normalize_path(&base_dir.join(expanded)));
-    }
-
-    Ok(expanded)
+    Ok(normalize_path(&base_dir.join(expanded)))
 }
 
 fn resolve_relative_path<E: Environment>(
@@ -577,10 +573,6 @@ fn home_directory<E: Environment>(env: &E) -> Result<PathBuf, WorkflowConfigErro
             field: "workspace.root",
             variable: "HOME".to_owned(),
         })
-}
-
-fn contains_path_separator(value: &str) -> bool {
-    value.contains('/') || value.contains('\\')
 }
 
 fn normalize_path(path: &Path) -> PathBuf {

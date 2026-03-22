@@ -85,13 +85,16 @@ Current implementation:
 
 - parse valid `WORKFLOW.md`
 - fail on invalid front matter
+- fail on unknown top-level workflow namespaces
 - fail on unknown template variables
 - resolve defaults and env vars
 - fail when an explicitly referenced env token such as `tracker.api_key: $VAR` is unset
 - fall back to `LINEAR_API_KEY` when `tracker.api_key` is omitted
 - resolve workflow-relative workspace paths and relative OpenHands persistence paths
+- resolve bare relative workspace roots against the `WORKFLOW.md` directory
 - reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
+- preserve the Markdown body exactly after the front matter terminator
 
 ## 3.2 Workspace manager
 
