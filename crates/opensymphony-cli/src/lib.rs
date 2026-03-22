@@ -14,7 +14,10 @@ use opensymphony_domain::{
     AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot,
     MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
 };
-use opensymphony_openhands::{ConversationCreateRequest, OpenHandsClient, TransportConfig};
+use opensymphony_openhands::{
+    ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
+    SupervisedServerConfig, SupervisorConfig, TransportConfig,
+};
 use serde::Deserialize;
 use tempfile::TempDir;
 use thiserror::Error;
@@ -133,6 +136,11 @@ impl CheckResult {
     }
 }
 
+struct ToolingInspection {
+    tooling: Option<LocalServerTooling>,
+    checks: Vec<CheckResult>,
+}
+
 pub async fn run() -> ExitCode {
     init_tracing();
     let cli = Cli::parse();
@@ -240,8 +248,18 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
     checks.push(check_loopback_base_url(&config.openhands.base_url));
     checks.push(check_linear_env(&config.linear));
 
+    let tooling_inspection = inspect_local_tooling(&tool_dir);
+    checks.extend(tooling_inspection.checks);
+
     if live_openhands {
-        checks.extend(run_live_openhands_checks(&config, &workspace_root).await);
+        checks.extend(
+            run_live_openhands_checks(
+                &config,
+                &workspace_root,
+                tooling_inspection.tooling.as_ref(),
+            )
+            .await,
+        );
     } else {
         checks.push(CheckResult::skip(
             "openhands-live",
@@ -384,6 +402,47 @@ async fn check_tool_dir(tool_dir: &Path) -> CheckResult {
     }
 }
 
+fn inspect_local_tooling(tool_dir: &Path) -> ToolingInspection {
+    match LocalServerTooling::load(tool_dir) {
+        Ok(tooling) => {
+            let mut checks = vec![
+                CheckResult::pass(
+                    "openhands-launcher",
+                    format!("{} [{}]", tooling.metadata.launcher, tooling.base_url(None)),
+                ),
+                CheckResult::pass(
+                    "openhands-version",
+                    format!("version.txt pins {}", tooling.version),
+                ),
+            ];
+
+            if tooling.pin_status.is_ready() {
+                checks.push(CheckResult::pass(
+                    "openhands-pin",
+                    format!("{} matches pyproject.toml and uv.lock", tooling.version),
+                ));
+            } else {
+                checks.push(CheckResult::fail(
+                    "openhands-pin",
+                    tooling.pin_status.blocking_issues().join("; "),
+                ));
+            }
+
+            ToolingInspection {
+                tooling: Some(tooling),
+                checks,
+            }
+        }
+        Err(error) => ToolingInspection {
+            tooling: None,
+            checks: vec![CheckResult::fail(
+                "openhands-tooling-load",
+                error.to_string(),
+            )],
+        },
+    }
+}
+
 fn check_loopback_base_url(base_url: &str) -> CheckResult {
     match Url::parse(base_url) {
         Ok(url) => match url.host_str() {
@@ -427,9 +486,9 @@ fn check_linear_env(linear: &LinearDoctorConfig) -> CheckResult {
 async fn run_live_openhands_checks(
     config: &DoctorConfig,
     workspace_root: &Path,
+    tooling: Option<&LocalServerTooling>,
 ) -> Vec<CheckResult> {
     let mut checks = Vec::new();
-    let client = OpenHandsClient::new(TransportConfig::new(config.openhands.base_url.clone()));
     let api_key = config
         .openhands
         .probe_api_key_env
@@ -453,14 +512,53 @@ async fn run_live_openhands_checks(
         }
     }
 
+    let mut managed_supervisor = None;
+    let mut http_detail = format!("{} responded to /openapi.json", config.openhands.base_url);
+    let client = OpenHandsClient::new(TransportConfig::new(config.openhands.base_url.clone()));
+    if let Err(error) = client.openapi_probe().await {
+        match maybe_start_local_supervisor(config, tooling) {
+            Ok(Some(mut supervisor)) => {
+                let started = match supervisor.status() {
+                    Ok(status) => status,
+                    Err(status_error) => {
+                        checks.push(CheckResult::fail(
+                            "openhands-supervisor-status",
+                            status_error.to_string(),
+                        ));
+                        return checks;
+                    }
+                };
+                checks.push(CheckResult::pass(
+                    "openhands-supervisor-start",
+                    format!(
+                        "started pid {} for {}",
+                        started.pid.unwrap_or_default(),
+                        started.base_url
+                    ),
+                ));
+                managed_supervisor = Some(supervisor);
+                http_detail = format!(
+                    "started local supervisor and {} responded to /openapi.json",
+                    config.openhands.base_url
+                );
+            }
+            Ok(None) => {
+                checks.push(CheckResult::fail("openhands-http", error.to_string()));
+                return checks;
+            }
+            Err(start_error) => {
+                checks.push(CheckResult::fail("openhands-supervisor-start", start_error));
+                return checks;
+            }
+        }
+    }
+
+    let client = OpenHandsClient::new(TransportConfig::new(config.openhands.base_url.clone()));
     match client.openapi_probe().await {
-        Ok(()) => checks.push(CheckResult::pass(
-            "openhands-http",
-            format!("{} responded to /openapi.json", config.openhands.base_url),
-        )),
+        Ok(()) => checks.push(CheckResult::pass("openhands-http", http_detail)),
         Err(error) => {
             checks.push(CheckResult::fail("openhands-http", error.to_string()));
-            return checks;
+            return stop_managed_supervisor(checks, managed_supervisor);
         }
     }
 
@@ -471,7 +569,7 @@ async fn run_live_openhands_checks(
                 "openhands-probe-dir",
                 format!("failed to create probe dir: {error}"),
             ));
-            return checks;
+            return stop_managed_supervisor(checks, managed_supervisor);
         }
     };
 
@@ -481,7 +579,7 @@ async fn run_live_openhands_checks(
             "openhands-probe-dir",
             format!("failed to build probe workspace: {error}"),
         ));
-        return checks;
+        return stop_managed_supervisor(checks, managed_supervisor);
     }
 
     let request = ConversationCreateRequest::doctor_probe(
@@ -511,10 +609,73 @@ async fn run_live_openhands_checks(
         }
         Err(error) => {
             checks.push(CheckResult::fail("openhands-probe", error.to_string()));
+            return stop_managed_supervisor(checks, managed_supervisor);
+        }
+    }
+
+    stop_managed_supervisor(checks, managed_supervisor)
+}
+
+fn stop_managed_supervisor(
+    mut checks: Vec<CheckResult>,
+    managed_supervisor: Option<LocalServerSupervisor>,
+) -> Vec<CheckResult> {
+    if let Some(mut supervisor) = managed_supervisor {
+        match supervisor.stop() {
+            Ok(status) => checks.push(CheckResult::pass(
+                "openhands-supervisor-stop",
+                format!("stopped {}", status.base_url),
+            )),
+            Err(error) => checks.push(CheckResult::fail(
+                "openhands-supervisor-stop",
+                error.to_string(),
+            )),
         }
     }
 
     checks
+}
+
+fn maybe_start_local_supervisor(
+    config: &DoctorConfig,
+    tooling: Option<&LocalServerTooling>,
+) -> Result<Option<LocalServerSupervisor>, String> {
+    let Some(tooling) = tooling else {
+        return Ok(None);
+    };
+
+    if !tooling.pin_status.is_ready() {
+        return Err(format!(
+            "local tooling is not launchable: {}",
+            tooling.pin_status.blocking_issues().join("; ")
+        ));
+    }
+
+    let url = Url::parse(&config.openhands.base_url).map_err(|error| {
+        format!(
+            "invalid OpenHands base URL `{}`: {error}",
+            config.openhands.base_url
+        )
+    })?;
+    match url.host_str() {
+        Some("127.0.0.1") | Some("localhost") => {}
+        _ => return Ok(None),
+    }
+
+    let mut supervisor_config = SupervisedServerConfig::new(tooling.clone());
+    supervisor_config.port_override = Some(url.port_or_known_default().ok_or_else(|| {
+        format!(
+            "OpenHands base URL `{}` does not include a port",
+            config.openhands.base_url
+        )
+    })?);
+
+    let mut supervisor =
+        LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(supervisor_config)));
+    supervisor
+        .start()
+        .map_err(|error| format!("failed to start local OpenHands supervisor: {error}"))?;
+    Ok(Some(supervisor))
 }
 
 fn normalized_option(value: &Option<String>) -> Option<String> {

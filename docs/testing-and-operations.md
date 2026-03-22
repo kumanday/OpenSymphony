@@ -138,6 +138,7 @@ Current implemented checks:
 - forward-compatible snapshot decoding for unknown additive recent event kinds in `opensymphony-domain`
 - control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane bootstrap snapshot timeout coverage in `opensymphony-control/tests/control_plane.rs`
+- control-plane SSE connect-establishment timeout coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane idle SSE timeout coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane monotonic lag-recovery coverage in `opensymphony-control/src/lib.rs`
 - TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, and disconnect retention coverage in `opensymphony-tui`
@@ -228,6 +229,7 @@ is accepted even if the reducer never saw an explicit `ConnectionLost`, and
 that the TUI does not report `live control-plane stream` until the SSE stream
 has actually begun delivering updates. Also confirm that a hung
 `/api/v1/snapshot` request times out instead of stalling the bridge forever,
+that a never-established `/api/v1/events` attach times out back into reconnect,
 that an idle `/api/v1/events` read also times out back into reconnect, and
 that additive `recent_events[].kind` values still decode into a usable snapshot
 for the UI. For scripted smoke coverage, also confirm that an unreachable
@@ -242,6 +244,17 @@ Current command set in this repository:
 ## 7. Doctor checks
 
 `opensymphony doctor` should be a serious preflight tool, not a superficial version printer.
+
+Current implemented scope for OSYM-201:
+
+- resolve the repo-local OpenHands wrapper metadata from `tools/openhands-server/`
+- report pin readiness from `version.txt`, `pyproject.toml`, and `uv.lock`
+- start the supervised local server when the pin is valid
+- verify HTTP readiness on the expected loopback base URL
+- stop the supervised child and report launch metadata
+
+Future doctor milestones should add conversation creation, WebSocket attach, and
+reconcile coverage once those runtime surfaces land.
 
 Required checks:
 
@@ -276,8 +289,9 @@ Required checks:
 
 Current implementation notes:
 
-- the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, and pinned-tooling files
+- the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
 - the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` before reconciling events
+- when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
 - failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
 - `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback and the pinned launcher `cwd` behavior
@@ -331,6 +345,30 @@ Include:
 - quick run script
 - note about the exact WebSocket assumptions pinned by this repo
 
+During the M1 bootstrap task, the directory may contain explicit placeholders
+for those files so the repository boundary exists before the local supervisor
+lands. Those placeholders must fail closed and must not start a server until
+the exact package version, uv dependency pin, and resolved lockfile are
+committed. Once they are replaced, the quick run script should launch the
+pinned server through the local `uv` environment and its `agent-server` extra,
+explicitly setting `RUNTIME=process`, passing `--host 127.0.0.1`, and using a
+configured `--port`.
+The wrapper should reject extra agent-server CLI flags so local smoke runs stay
+aligned with the daemon-managed single-server topology; `OPENHANDS_SERVER_PORT`
+is the only supported runtime override, and the sandbox selection stays fixed to
+host-process mode.
+
+The current implementation follows that fail-closed rule: doctor and the local
+supervisor validate the repo-owned pin files before launch and refuse to start
+if the version file, direct dependency pin, and resolved lockfile drift apart.
+
+Current repository pin:
+
+- `openhands-agent-server==1.14.0`
+- `openhands-sdk==1.14.0`
+- `openhands-tools==1.14.0`
+- `openhands-workspace==1.14.0`
+- Python `3.12.x`
 Do not rely on a random globally installed `openhands` binary.
 
 ## 11. CI strategy

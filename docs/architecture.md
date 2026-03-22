@@ -118,9 +118,9 @@ The control-plane snapshot contract should remain additive for read-only clients
 unknown summarized event kinds must not invalidate the whole snapshot payload,
 and bootstrap snapshot fetches should fail fast enough that reconnect logic can
 retry instead of wedging the UI behind a hung HTTP request. SSE subscriptions
-should also use a bounded read timeout so a stalled `/api/v1/events` connection
-fails back into reconnect, while normal keepalive traffic keeps healthy idle
-streams attached.
+should also use bounded connection-establishment and read timeouts so a
+blackholed or stalled `/api/v1/events` connection fails back into reconnect,
+while normal keepalive traffic keeps healthy idle streams attached.
 
 ## 4. Runtime component model
 
@@ -151,6 +151,7 @@ Recommended crate boundaries:
 - `opensymphony-linear-mcp`
   - stdio MCP server for agent-side ticket writes
 - `opensymphony-openhands`
+  - repo-local tooling resolution
   - local server supervisor
   - REST client
   - WebSocket stream
@@ -168,6 +169,7 @@ Recommended crate boundaries:
 - `opensymphony-cli`
   - daemon startup
   - doctor command
+  - repo-root OpenHands preflight checks
   - linear-mcp command
   - config entrypoints
 - `opensymphony-tui`
@@ -184,7 +186,7 @@ Local MVP process graph:
 - `opensymphony daemon`
   - owns orchestrator and control plane
   - may spawn:
-    - `python -m openhands.agent_server`
+    - `bash tools/openhands-server/run-local.sh`
 - `opensymphony tui`
   - separate process
   - reads control-plane APIs only
@@ -192,6 +194,10 @@ Local MVP process graph:
   - started by workspace manager
 - OpenHands agent subprocesses or tool execution
   - managed by agent-server
+
+The current local supervisor implementation resolves its launch metadata from
+`tools/openhands-server/`, probes readiness with `GET /openapi.json`, and only
+terminates a process that it launched itself.
 
 ## 5. Worker and conversation model
 
@@ -338,8 +344,9 @@ The implemented local observability flow is narrower than the full future daemon
 3. `opensymphony-cli tui` fetches `/api/v1/snapshot`.
 4. The TUI opens `/api/v1/events` and listens for SSE updates.
 5. Snapshot fetches use a bounded timeout so reconnect can retry if the HTTP endpoint hangs.
-6. SSE reads also use a bounded idle timeout so wedged streams fail back into the reconnect loop.
-7. On stream failure, the TUI refetches the current snapshot before resubscribing.
+6. SSE attach attempts use a bounded connection-establishment timeout so blackholed or never-opening streams fail back into reconnect.
+7. SSE reads also use a bounded idle timeout so wedged streams fail back into the reconnect loop.
+8. On stream failure, the TUI refetches the current snapshot before resubscribing.
 8. Detaching the UI leaves the daemon process and snapshot publication unaffected.
 
 ## 8. Recovery model

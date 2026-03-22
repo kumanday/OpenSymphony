@@ -18,6 +18,7 @@ use thiserror::Error;
 use url::Url;
 
 const CONTROL_PLANE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_PLANE_STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_PLANE_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const CONTROL_PLANE_RETRY_DELAY: Duration = Duration::from_millis(750);
 
@@ -555,6 +556,7 @@ fn spawn_bridge(base_url: Url, bridge: Arc<Mutex<BridgeMailbox>>) {
             let client = ControlPlaneClient::with_timeouts(
                 base_url,
                 CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+                CONTROL_PLANE_STREAM_CONNECT_TIMEOUT,
                 CONTROL_PLANE_STREAM_IDLE_TIMEOUT,
             );
             loop {

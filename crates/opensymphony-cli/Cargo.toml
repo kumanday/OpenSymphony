@@ -35,3 +35,4 @@ url.workspace = true
 
 [dev-dependencies]
 opensymphony-testkit = { path = "../opensymphony-testkit" }
+tempfile.workspace = true

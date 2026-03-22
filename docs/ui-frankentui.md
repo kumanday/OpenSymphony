@@ -209,6 +209,7 @@ Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
 - bound each bootstrap snapshot fetch so a hung `/api/v1/snapshot` cannot stall reconnect forever
+- bound SSE connection establishment so a blackholed or never-opening `/api/v1/events` attach falls back into reconnect instead of hanging forever
 - bound SSE reads so a stalled `/api/v1/events` connection falls back into reconnect instead of hanging forever
 - keep that bootstrap snapshot visible while the client is still connecting or reconnecting
 - only report `live control-plane stream` after the SSE subscription is actually yielding stream data
@@ -240,6 +241,7 @@ Current automated coverage:
 - mailbox tests for snapshot coalescing and last-good-snapshot retention across disconnects
 - control-plane snapshot plus SSE round-trip tests
 - control-plane bootstrap snapshot timeout coverage
+- control-plane SSE connect-establishment timeout coverage
 - control-plane idle SSE timeout coverage
 - scripted CLI attach coverage for healthy and never-live `--exit-after-ms` runs
 - monotonic SSE lag-recovery tests for slow consumers
