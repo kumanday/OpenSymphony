@@ -1,3 +1,8 @@
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Component, Path, PathBuf},
+};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -81,10 +86,7 @@ pub enum StateTransitionError {
     #[error("issue mismatch: expected {expected}, got {actual}")]
     IssueMismatch { expected: IssueId, actual: IssueId },
     #[error("workspace path mismatch: expected {expected:?}, got {actual:?}")]
-    WorkspacePathMismatch {
-        expected: std::path::PathBuf,
-        actual: std::path::PathBuf,
-    },
+    WorkspacePathMismatch { expected: PathBuf, actual: PathBuf },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -370,11 +372,11 @@ impl IssueExecution {
         }
 
         if let Some(workspace) = &self.workspace {
-            if workspace.path != run.workspace_path {
-                return Err(StateTransitionError::WorkspacePathMismatch {
-                    expected: workspace.path.clone(),
-                    actual: run.workspace_path.clone(),
-                });
+            let expected = comparable_workspace_path(&workspace.path);
+            let actual = comparable_workspace_path(&run.workspace_path);
+
+            if expected != actual {
+                return Err(StateTransitionError::WorkspacePathMismatch { expected, actual });
             }
         }
 
@@ -390,5 +392,52 @@ impl IssueExecution {
         }
 
         Ok(())
+    }
+}
+
+fn comparable_workspace_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        std::fs::canonicalize(path).unwrap_or_else(|_| normalize_workspace_path(path))
+    } else {
+        normalize_workspace_path(path)
+    }
+}
+
+fn normalize_workspace_path(path: &Path) -> PathBuf {
+    let mut prefix: Option<OsString> = None;
+    let mut has_root = false;
+    let mut parts: Vec<OsString> = Vec::new();
+
+    for component in path.components() {
+        match component {
+            Component::Prefix(component) => prefix = Some(component.as_os_str().to_os_string()),
+            Component::RootDir => has_root = true,
+            Component::CurDir => {}
+            Component::ParentDir => match parts.last() {
+                Some(last) if last != OsStr::new("..") => {
+                    parts.pop();
+                }
+                _ if !has_root => parts.push(OsString::from("..")),
+                _ => {}
+            },
+            Component::Normal(component) => parts.push(component.to_os_string()),
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    if let Some(prefix) = prefix {
+        normalized.push(prefix);
+    }
+    if has_root {
+        normalized.push(Path::new(std::path::MAIN_SEPARATOR_STR));
+    }
+    for part in parts {
+        normalized.push(part);
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
     }
 }

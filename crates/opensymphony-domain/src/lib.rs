@@ -28,7 +28,14 @@ pub use time::{DurationMs, TimestampMs};
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
 
     use serde_json::json;
 
@@ -57,6 +64,32 @@ mod tests {
 
     fn ts(value: u64) -> TimestampMs {
         TimestampMs::new(value)
+    }
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let unique_suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+
+        std::env::temp_dir().join(format!(
+            "opensymphony-domain-{prefix}-{}-{unique_suffix}",
+            std::process::id()
+        ))
+    }
+
+    struct TempPathGuard(PathBuf);
+
+    impl TempPathGuard {
+        fn new(path: PathBuf) -> Self {
+            Self(path)
+        }
+    }
+
+    impl Drop for TempPathGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     fn sample_issue() -> NormalizedIssue {
@@ -256,6 +289,58 @@ mod tests {
             error,
             StateTransitionError::AttemptMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn claim_accepts_equivalent_normalized_workspace_paths() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        execution.attach_workspace(workspace.clone());
+
+        let mut run = sample_run(&issue, &workspace, None, ts(40));
+        run.workspace_path = PathBuf::from("/tmp/workspaces/../workspaces/COE-260");
+
+        let execution = must(execution.claim(run));
+        assert_eq!(execution.status(), SchedulerStatus::Claimed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_accepts_workspace_paths_with_equivalent_symlink_roots() {
+        let issue = sample_issue();
+        let temp_root = unique_temp_path("workspace-symlink");
+        let _temp_root_guard = TempPathGuard::new(temp_root.clone());
+        let canonical_root = temp_root.join("canonical-root");
+        let canonical_workspace = canonical_root.join("COE-260");
+        let symlink_root = temp_root.join("symlink-root");
+
+        must(fs::create_dir_all(&canonical_workspace));
+        must(symlink(&canonical_root, &symlink_root));
+
+        let workspace = WorkspaceRecord {
+            path: symlink_root.join("COE-260"),
+            ..sample_workspace()
+        };
+
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        execution.attach_workspace(workspace.clone());
+
+        let mut run = sample_run(&issue, &workspace, None, ts(40));
+        run.workspace_path = canonical_workspace;
+
+        let execution = must(execution.claim(run));
+        assert_eq!(execution.status(), SchedulerStatus::Claimed);
+    }
+
+    #[test]
+    fn workspace_keys_are_sanitized_on_creation() {
+        assert_eq!(must(WorkspaceKey::new("feature/42")).as_str(), "feature_42");
+        assert_eq!(must(WorkspaceKey::new("../tmp")).as_str(), ".._tmp");
+        assert_eq!(
+            must(WorkspaceKey::new("Bug: weird path")).as_str(),
+            "Bug__weird_path"
+        );
     }
 
     #[test]
