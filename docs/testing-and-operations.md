@@ -72,6 +72,13 @@ Suggested gates:
 - `OPENSYMPHONY_LIVE_OPENHANDS=1`
 - `OPENSYMPHONY_LIVE_LINEAR=1`
 
+Current implementation:
+
+- `cargo test --workspace` exercises the fake-server contract suite in `crates/opensymphony-openhands/tests/fake_server_contract.rs`
+- `crates/opensymphony-cli/tests/doctor.rs` runs the CLI live-probe path against `opensymphony-testkit`
+- `scripts/smoke_local.sh` runs the static doctor pass
+- `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
+
 ## 3. Minimum required test coverage by subsystem
 
 ## 3.1 Workflow and config
@@ -187,6 +194,13 @@ Possible helper commands later:
 - `opensymphony inspect workspace <issue-id>`
 - `opensymphony inspect conversation <issue-id>`
 
+Current command set in this repository:
+
+- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
+- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
+- `./scripts/smoke_local.sh`
+- `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
+
 ## 7. Doctor checks
 
 `opensymphony doctor` should be a serious preflight tool, not a superficial version printer.
@@ -217,9 +231,10 @@ Required checks:
 - Python environment for pinned OpenHands can be resolved
 - supervised server command can start
 - server responds on the expected base URL
-- conversation creation with a temp `working_dir` is a future doctor check
-- WebSocket attach and readiness are a future doctor check
-- reconcile verification is a future doctor check
+- a test conversation can be created with a temp `working_dir`
+- WebSocket can attach and reach readiness
+- the doctor probe sends a real message and triggers `/run`
+- a reconcile call succeeds after the probe run starts
 
 ### External services
 
@@ -231,6 +246,16 @@ Required checks:
 - warn if server binds beyond loopback in local mode
 - warn if local mode is used with an obviously shared workspace root
 - warn if required secrets are missing
+
+Current implementation notes:
+
+- the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
+- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` before reconciling events
+- when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
+- failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity
+- `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
+- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback and the pinned launcher `cwd` behavior
+- the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials
 
 ## 8. Logging and diagnostics
 
@@ -304,7 +329,6 @@ Current repository pin:
 - `openhands-tools==1.14.0`
 - `openhands-workspace==1.14.0`
 - Python `3.12.x`
-
 Do not rely on a random globally installed `openhands` binary.
 
 ## 11. CI strategy
@@ -317,9 +341,11 @@ Recommended CI stages:
 4. selected integration tests
 5. optional nightly live tests on a controlled runner
 
-The bootstrap repository baseline is smaller: every PR should at least run
-`cargo fmt --check`, `cargo clippy --workspace --all-targets`, and
-`cargo test --workspace`.
+Current repo workflow:
+
+1. `cargo fmt --check`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo test --workspace`
 
 ## 12. Failure triage guidelines
 
@@ -339,3 +365,5 @@ This prevents noisy bug reports that mix multiple layers together.
 ## 13. Local safety note
 
 The MVP local mode runs agent activity on the host with process-level isolation. The docs, CLI help, and doctor output should state this plainly.
+
+The current `tools/openhands-server/run-local.sh` script binds OpenHands to loopback by default, and the doctor command warns when the configured base URL is not loopback in local mode.

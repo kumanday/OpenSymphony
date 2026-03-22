@@ -10,6 +10,12 @@ use thiserror::Error;
 const PLACEHOLDER_VERSION: &str = "0+bootstrap.placeholder";
 const PLACEHOLDER_REQUIREMENT: &str = "openhands-agent-server-placeholder==0+bootstrap.placeholder";
 const PLACEHOLDER_LOCK_SNIPPET: &str = "Placeholder bootstrap file.";
+const REQUIRED_PIN_PACKAGES: [&str; 4] = [
+    "openhands-agent-server",
+    "openhands-sdk",
+    "openhands-tools",
+    "openhands-workspace",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalToolingLayout {
@@ -37,12 +43,18 @@ impl LocalToolingLayout {
 pub struct PinStatus {
     pub version_pinned: bool,
     pub dependency_pinned: bool,
+    pub dependency_matches_version: bool,
     pub lockfile_resolved: bool,
+    pub lockfile_matches_version: bool,
 }
 
 impl PinStatus {
     pub fn is_ready(&self) -> bool {
-        self.version_pinned && self.dependency_pinned && self.lockfile_resolved
+        self.version_pinned
+            && self.dependency_pinned
+            && self.dependency_matches_version
+            && self.lockfile_resolved
+            && self.lockfile_matches_version
     }
 
     pub fn blocking_issues(&self) -> Vec<String> {
@@ -54,12 +66,23 @@ impl PinStatus {
 
         if !self.dependency_pinned {
             issues.push(
-                "pyproject.toml still contains the placeholder agent-server dependency".to_string(),
+                "pyproject.toml is missing one or more required OpenHands package pins".to_string(),
             );
         }
 
+        if self.version_pinned && !self.dependency_matches_version {
+            issues
+                .push("pyproject.toml OpenHands package pins do not match version.txt".to_string());
+        }
+
         if !self.lockfile_resolved {
-            issues.push("uv.lock still contains the bootstrap placeholder content".to_string());
+            issues.push(
+                "uv.lock does not contain a verifiable resolved OpenHands package set".to_string(),
+            );
+        }
+
+        if self.version_pinned && !self.lockfile_matches_version {
+            issues.push("uv.lock OpenHands package versions do not match version.txt".to_string());
         }
 
         issues
@@ -142,12 +165,22 @@ impl LocalServerTooling {
 
         let version = read_to_string(&layout.version_file)?.trim().to_string();
         let lockfile_contents = read_to_string(&layout.lockfile)?;
+        let dependency_versions = required_pin_versions(agent_server_dependencies);
+        let lockfile_versions = resolved_lockfile_versions(&lockfile_contents);
         let pin_status = PinStatus {
             version_pinned: version != PLACEHOLDER_VERSION,
-            dependency_pinned: !agent_server_dependencies
-                .iter()
-                .any(|dependency| dependency == PLACEHOLDER_REQUIREMENT),
-            lockfile_resolved: !lockfile_contents.contains(PLACEHOLDER_LOCK_SNIPPET),
+            dependency_pinned: dependency_versions.is_some()
+                && !agent_server_dependencies
+                    .iter()
+                    .any(|dependency| dependency == PLACEHOLDER_REQUIREMENT),
+            dependency_matches_version: dependency_versions
+                .as_ref()
+                .is_some_and(|pins| pins.values().all(|pin| pin == &version)),
+            lockfile_resolved: !lockfile_contents.contains(PLACEHOLDER_LOCK_SNIPPET)
+                && lockfile_versions.is_some(),
+            lockfile_matches_version: lockfile_versions
+                .as_ref()
+                .is_some_and(|pins| pins.values().all(|pin| pin == &version)),
         };
 
         Ok(Self {
@@ -256,6 +289,53 @@ struct PyprojectOpenSymphony {
     openhands_server: Option<ToolingMetadata>,
 }
 
+#[derive(Debug, Deserialize)]
+struct UvLock {
+    #[serde(default)]
+    package: Vec<UvLockPackage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UvLockPackage {
+    name: String,
+    version: String,
+}
+
+fn required_pin_versions(requirements: &[String]) -> Option<BTreeMap<String, String>> {
+    let pins: BTreeMap<String, String> = requirements
+        .iter()
+        .filter_map(|requirement| {
+            let (name, version) = requirement.split_once("==")?;
+            Some((name.trim().to_string(), version.trim().to_string()))
+        })
+        .collect();
+
+    REQUIRED_PIN_PACKAGES
+        .iter()
+        .all(|package| pins.contains_key(*package))
+        .then(|| {
+            REQUIRED_PIN_PACKAGES
+                .iter()
+                .map(|package| (package.to_string(), pins[*package].clone()))
+                .collect()
+        })
+}
+
+fn resolved_lockfile_versions(lockfile_contents: &str) -> Option<BTreeMap<String, String>> {
+    let parsed: UvLock = toml::from_str(lockfile_contents).ok()?;
+    let pins: BTreeMap<String, String> = parsed
+        .package
+        .into_iter()
+        .filter(|package| REQUIRED_PIN_PACKAGES.contains(&package.name.as_str()))
+        .map(|package| (package.name, package.version))
+        .collect();
+
+    REQUIRED_PIN_PACKAGES
+        .iter()
+        .all(|package| pins.contains_key(*package))
+        .then_some(pins)
+}
+
 fn ensure_exists(path: &Path) -> Result<(), LocalToolingError> {
     if path.exists() {
         Ok(())
@@ -309,11 +389,39 @@ mod tests {
         assert!(matches!(error, LocalToolingError::UnresolvedPin { .. }));
     }
 
+    #[test]
+    fn marks_pin_unready_when_dependency_versions_drift_from_version_file() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        write_tooling_fixture(
+            temp_dir.path(),
+            "1.2.4",
+            "openhands-agent-server==1.2.3",
+            resolved_lockfile("1.2.3"),
+            "127.0.0.1",
+        );
+
+        let tooling = LocalServerTooling::load(temp_dir.path()).expect("load should succeed");
+
+        assert!(!tooling.pin_status.is_ready());
+        assert!(tooling
+            .pin_status
+            .blocking_issues()
+            .iter()
+            .any(|issue| issue
+                .contains("pyproject.toml OpenHands package pins do not match version.txt")));
+        assert!(tooling
+            .pin_status
+            .blocking_issues()
+            .iter()
+            .any(|issue| issue
+                .contains("uv.lock OpenHands package versions do not match version.txt")));
+    }
+
     fn write_tooling_fixture(
         tool_dir: &Path,
         version: &str,
         dependency: &str,
-        lockfile: &str,
+        lockfile: impl AsRef<str>,
         host: &str,
     ) {
         fs::write(
@@ -324,11 +432,17 @@ mod tests {
         fs::write(
             tool_dir.join("pyproject.toml"),
             format!(
-                "[project]\nname = \"fixture\"\nversion = \"0.0.0\"\n[project.optional-dependencies]\nagent-server = [\"{dependency}\"]\n[tool.opensymphony.openhands_server]\nmodule = \"openhands.agent_server\"\nruntime_env = \"RUNTIME\"\nruntime = \"process\"\nhost = \"{host}\"\ndefault_port = 8000\nport_env = \"OPENHANDS_SERVER_PORT\"\nlauncher = \"RUNTIME=process uv run --module openhands.agent_server --host {host} --port 8000\"\n"
+                "[project]\nname = \"fixture\"\nversion = \"0.0.0\"\n\n[project.optional-dependencies]\nagent-server = [\n  \"{dependency}\",\n  \"openhands-sdk==1.2.3\",\n  \"openhands-tools==1.2.3\",\n  \"openhands-workspace==1.2.3\",\n]\n\n[tool.opensymphony.openhands_server]\nmodule = \"openhands.agent_server\"\nruntime_env = \"RUNTIME\"\nruntime = \"process\"\nhost = \"{host}\"\ndefault_port = 8000\nport_env = \"OPENHANDS_SERVER_PORT\"\nlauncher = \"RUNTIME=process uv run --module openhands.agent_server --host {host} --port 8000\"\n"
             ),
         )
         .expect("pyproject");
-        fs::write(tool_dir.join("uv.lock"), lockfile).expect("uv.lock");
+        fs::write(tool_dir.join("uv.lock"), lockfile.as_ref()).expect("uv.lock");
         fs::write(tool_dir.join("version.txt"), version).expect("version");
+    }
+
+    fn resolved_lockfile(version: &str) -> String {
+        format!(
+            "version = 1\n\n[[package]]\nname = \"fixture\"\nversion = \"0.0.0\"\nsource = {{ virtual = \".\" }}\n\n[package.optional-dependencies]\nagent-server = [\n  {{ name = \"openhands-agent-server\" }},\n  {{ name = \"openhands-sdk\" }},\n  {{ name = \"openhands-tools\" }},\n  {{ name = \"openhands-workspace\" }},\n]\n\n[[package]]\nname = \"openhands-agent-server\"\nversion = \"{version}\"\nsource = {{ registry = \"https://pypi.org/simple\" }}\n\n[[package]]\nname = \"openhands-sdk\"\nversion = \"{version}\"\nsource = {{ registry = \"https://pypi.org/simple\" }}\n\n[[package]]\nname = \"openhands-tools\"\nversion = \"{version}\"\nsource = {{ registry = \"https://pypi.org/simple\" }}\n\n[[package]]\nname = \"openhands-workspace\"\nversion = \"{version}\"\nsource = {{ registry = \"https://pypi.org/simple\" }}\n"
+        )
     }
 }

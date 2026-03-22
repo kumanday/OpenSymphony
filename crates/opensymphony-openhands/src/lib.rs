@@ -1,6 +1,16 @@
+mod client;
+mod events;
+mod models;
 mod supervisor;
 mod tooling;
 
+pub use client::{OpenHandsClient, OpenHandsError, OpenHandsProbeResult, TransportConfig};
+pub use events::{ConversationStateMirror, EventCache, KnownEvent};
+pub use models::{
+    AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
+    ConversationStateUpdatePayload, EventEnvelope, LlmConfig, SearchConversationEventsResponse,
+    SendMessageRequest, TextContent, WorkspaceConfig,
+};
 pub use supervisor::{
     ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, ProbeConfig, ServerMode,
     ServerState, ServerStatus, SupervisedServerConfig, SupervisorConfig, SupervisorError,
@@ -13,7 +23,7 @@ pub use tooling::{
 pub const CRATE_NAME: &str = "opensymphony-openhands";
 
 pub fn crate_summary() -> &'static str {
-    "local server supervisor, repo-local tooling resolution, conservative readiness probes, doctor diagnostics, REST client, WebSocket event stream, event cache/state mirror, issue session runner, and protocol error mapping"
+    "REST client, WebSocket event stream, event cache/state mirror, local server supervisor, repo-local tooling resolution, conservative readiness probes, doctor diagnostics, issue session runner, and protocol error mapping"
 }
 
 pub fn placeholder_summary() -> &'static str {
@@ -22,7 +32,7 @@ pub fn placeholder_summary() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{CRATE_NAME, crate_summary};
+    use super::{crate_summary, CRATE_NAME};
 
     #[test]
     fn reports_its_boundary() {

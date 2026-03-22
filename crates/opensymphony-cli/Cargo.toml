@@ -1,21 +1,28 @@
 [package]
 name = "opensymphony-cli"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
 repository.workspace = true
-rust-version.workspace = true
-version.workspace = true
 
-[dependencies]
-opensymphony-openhands = { path = "../opensymphony-openhands" }
-
-[dev-dependencies]
-tempfile = "3.15"
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "opensymphony"
 path = "src/main.rs"
 
-[lints]
-workspace = true
+[dependencies]
+clap.workspace = true
+opensymphony-openhands = { path = "../opensymphony-openhands" }
+serde.workspace = true
+serde_yaml.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+opensymphony-testkit = { path = "../opensymphony-testkit" }
+tempfile.workspace = true
