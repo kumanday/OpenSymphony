@@ -150,6 +150,7 @@ This repository now includes the local validation scaffolding for M5:
 
 - a Rust workspace with the documented crate boundaries
 - `opensymphony-openhands` for minimal conversation, search, and WebSocket readiness probes
+- `opensymphony-linear-mcp` for a schema-tested Linear stdio MCP server
 - `opensymphony-testkit` with an in-memory fake OpenHands server
 - `opensymphony` CLI with a meaningful `doctor` command
 - pinned OpenHands tooling under `tools/openhands-server/`
@@ -163,13 +164,14 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml
+cargo run -p opensymphony-cli -- linear-mcp --stdio
 ./scripts/smoke_local.sh
 OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 ```
 
 Current note:
 
-- `daemon`, `tui`, and `linear-mcp` subcommands are present so the CLI shape is stable, but they remain scaffolds until the corresponding runtime and control-plane milestones land.
+- `linear-mcp` is implemented and exposes the documented Linear tool surface over stdio; `daemon` and `tui` remain scaffolds until their runtime and control-plane milestones land.
 
 ## Non-negotiable implementation rules
 
