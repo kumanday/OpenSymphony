@@ -20,6 +20,9 @@ workspace:
   root: ~/code/symphony-workspaces
 logging:
   level: debug
+agent:
+  max_concurrent_agents: 16
+  max_turns: 50
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/kumanday/OpenSymphony .
