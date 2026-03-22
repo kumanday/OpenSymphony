@@ -13,6 +13,7 @@ use crate::{
     CleanupDecision, CleanupOutcome, EnsureWorkspaceResult, HookDefinition, HookExecutionRecord,
     HookExecutionStatus, HookKind, IssueDescriptor, IssueLifecycleState, IssueManifest,
     RunDescriptor, RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManagerConfig,
+    WorkspaceOwnershipConflictDetails,
 };
 
 pub struct WorkspaceManager {
@@ -22,6 +23,13 @@ pub struct WorkspaceManager {
 struct HookFailure {
     error: WorkspaceError,
     record: HookExecutionRecord,
+}
+
+enum ExistingIssueManifestState {
+    Missing,
+    Owned(IssueManifest),
+    ForeignArtifact,
+    Conflict(IssueManifest),
 }
 
 impl WorkspaceManager {
@@ -60,7 +68,21 @@ impl WorkspaceManager {
             workspace_key,
             canonical_workspace,
         );
-        let created = !path_exists(&handle.issue_manifest_path()).await?;
+        let existing_manifest = self.inspect_issue_manifest_state(issue, &handle).await?;
+        if let ExistingIssueManifestState::Conflict(manifest) = &existing_manifest {
+            return Err(WorkspaceError::WorkspaceOwnershipConflict {
+                details: Box::new(WorkspaceOwnershipConflictDetails {
+                    workspace: handle.workspace_path().to_path_buf(),
+                    workspace_key: handle.workspace_key().to_string(),
+                    existing_issue_id: manifest.issue_id.clone(),
+                    existing_identifier: manifest.identifier.clone(),
+                    requested_issue_id: issue.issue_id.clone(),
+                    requested_identifier: issue.identifier.clone(),
+                }),
+            });
+        }
+
+        let created = !matches!(existing_manifest, ExistingIssueManifestState::Owned(_));
         let after_create = if created {
             match self.execute_hook(HookKind::AfterCreate, &handle).await {
                 Ok(record) => record,
@@ -188,7 +210,8 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
     ) -> Result<Option<IssueManifest>, WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
-        self.load_manifest(&workspace.issue_manifest_path()).await
+        self.load_manifest(workspace, &workspace.issue_manifest_path())
+            .await
     }
 
     pub async fn write_issue_manifest(
@@ -197,7 +220,7 @@ impl WorkspaceManager {
         manifest: &IssueManifest,
     ) -> Result<(), WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
-        self.write_manifest(&workspace.issue_manifest_path(), manifest)
+        self.write_manifest(workspace, &workspace.issue_manifest_path(), manifest)
             .await
     }
 
@@ -206,7 +229,8 @@ impl WorkspaceManager {
         workspace: &WorkspaceHandle,
     ) -> Result<Option<RunManifest>, WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
-        self.load_manifest(&workspace.run_manifest_path()).await
+        self.load_manifest(workspace, &workspace.run_manifest_path())
+            .await
     }
 
     pub async fn write_run_manifest(
@@ -215,7 +239,7 @@ impl WorkspaceManager {
         manifest: &RunManifest,
     ) -> Result<(), WorkspaceError> {
         self.validate_workspace_handle(workspace).await?;
-        self.write_manifest(&workspace.run_manifest_path(), manifest)
+        self.write_manifest(workspace, &workspace.run_manifest_path(), manifest)
             .await
     }
 
@@ -224,9 +248,24 @@ impl WorkspaceManager {
         issue: &IssueDescriptor,
         workspace: &WorkspaceHandle,
     ) -> Result<IssueManifest, WorkspaceError> {
-        let existing = self
-            .load_manifest::<IssueManifest>(&workspace.issue_manifest_path())
-            .await?;
+        let existing = match self.inspect_issue_manifest_state(issue, workspace).await? {
+            ExistingIssueManifestState::Owned(manifest) => Some(manifest),
+            ExistingIssueManifestState::Conflict(manifest) => {
+                return Err(WorkspaceError::WorkspaceOwnershipConflict {
+                    details: Box::new(WorkspaceOwnershipConflictDetails {
+                        workspace: workspace.workspace_path().to_path_buf(),
+                        workspace_key: workspace.workspace_key().to_string(),
+                        existing_issue_id: manifest.issue_id,
+                        existing_identifier: manifest.identifier,
+                        requested_issue_id: issue.issue_id.clone(),
+                        requested_identifier: issue.identifier.clone(),
+                    }),
+                });
+            }
+            ExistingIssueManifestState::Missing | ExistingIssueManifestState::ForeignArtifact => {
+                None
+            }
+        };
         let now = Utc::now();
         let manifest = IssueManifest {
             issue_id: issue.issue_id.clone(),
@@ -243,7 +282,7 @@ impl WorkspaceManager {
             last_seen_tracker_refresh_at: issue.last_seen_tracker_refresh_at,
         };
 
-        self.write_manifest(&workspace.issue_manifest_path(), &manifest)
+        self.write_manifest(workspace, &workspace.issue_manifest_path(), &manifest)
             .await?;
         Ok(manifest)
     }
@@ -260,10 +299,46 @@ impl WorkspaceManager {
             workspace.prompts_dir(),
             workspace.runs_dir(),
         ] {
-            self.create_directory(&directory).await?;
+            self.create_managed_directory(workspace, &directory).await?;
         }
 
         Ok(())
+    }
+
+    async fn inspect_issue_manifest_state(
+        &self,
+        issue: &IssueDescriptor,
+        workspace: &WorkspaceHandle,
+    ) -> Result<ExistingIssueManifestState, WorkspaceError> {
+        let path = workspace.issue_manifest_path();
+        let path = self
+            .validate_managed_metadata_path(workspace, &path)
+            .await?;
+        let raw = match fs::read_to_string(&path).await {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ExistingIssueManifestState::Missing);
+            }
+            Err(error) => {
+                return Err(WorkspaceError::ReadManifest {
+                    path,
+                    source: error,
+                });
+            }
+        };
+
+        match serde_json::from_str::<IssueManifest>(&raw) {
+            Ok(manifest) => Ok(classify_issue_manifest_ownership(
+                issue, workspace, manifest,
+            )),
+            Err(error) if !self.bootstrap_layout_exists(workspace).await? => {
+                Ok(ExistingIssueManifestState::ForeignArtifact)
+            }
+            Err(error) => Err(WorkspaceError::DecodeManifest {
+                path,
+                source: error,
+            }),
+        }
     }
 
     async fn execute_hook(
@@ -487,6 +562,37 @@ impl WorkspaceManager {
         ensure_descendant(&canonical_root, &canonical_workspace)
     }
 
+    async fn bootstrap_layout_exists(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<bool, WorkspaceError> {
+        for directory in [
+            workspace.metadata_dir(),
+            workspace.logs_dir(),
+            workspace.generated_dir(),
+            workspace.openhands_dir(),
+            workspace.prompts_dir(),
+            workspace.runs_dir(),
+        ] {
+            let path = self
+                .validate_managed_metadata_path(workspace, &directory)
+                .await?;
+            match fs::metadata(&path).await {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Ok(false),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => {
+                    return Err(WorkspaceError::Canonicalize {
+                        path,
+                        source: error,
+                    });
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
     async fn create_directory(&self, path: &Path) -> Result<(), WorkspaceError> {
         fs::create_dir_all(path)
             .await
@@ -494,6 +600,18 @@ impl WorkspaceManager {
                 path: path.to_path_buf(),
                 source: error,
             })
+    }
+
+    async fn create_managed_directory(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+    ) -> Result<(), WorkspaceError> {
+        let path = self.validate_managed_metadata_path(workspace, path).await?;
+        self.create_directory(&path).await?;
+        self.validate_managed_metadata_path(workspace, &path)
+            .await?;
+        Ok(())
     }
 
     async fn canonicalize_path(&self, path: &Path) -> Result<std::path::PathBuf, WorkspaceError> {
@@ -505,11 +623,16 @@ impl WorkspaceManager {
             })
     }
 
-    async fn load_manifest<T>(&self, path: &Path) -> Result<Option<T>, WorkspaceError>
+    async fn load_manifest<T>(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+    ) -> Result<Option<T>, WorkspaceError>
     where
         T: DeserializeOwned,
     {
-        let raw = match fs::read_to_string(path).await {
+        let path = self.validate_managed_metadata_path(workspace, path).await?;
+        let raw = match fs::read_to_string(&path).await {
             Ok(raw) => raw,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
@@ -528,27 +651,96 @@ impl WorkspaceManager {
             })
     }
 
-    async fn write_manifest<T>(&self, path: &Path, manifest: &T) -> Result<(), WorkspaceError>
+    async fn write_manifest<T>(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+        manifest: &T,
+    ) -> Result<(), WorkspaceError>
     where
         T: Serialize,
     {
         if let Some(parent) = path.parent() {
-            self.create_directory(parent).await?;
+            self.create_managed_directory(workspace, parent).await?;
         }
+        let path = self.validate_managed_metadata_path(workspace, path).await?;
 
         let payload = serde_json::to_vec_pretty(manifest).map_err(|error| {
             WorkspaceError::EncodeManifest {
-                path: path.to_path_buf(),
+                path: path.clone(),
                 source: error,
             }
         })?;
 
-        fs::write(path, payload)
+        fs::write(&path, payload)
             .await
             .map_err(|error| WorkspaceError::WriteManifest {
-                path: path.to_path_buf(),
+                path,
                 source: error,
             })
+    }
+
+    async fn validate_managed_metadata_path(
+        &self,
+        workspace: &WorkspaceHandle,
+        path: &Path,
+    ) -> Result<std::path::PathBuf, WorkspaceError> {
+        let normalized = normalize_absolute_path(path)?;
+        ensure_descendant(workspace.workspace_path(), &normalized)?;
+
+        let relative = normalized
+            .strip_prefix(workspace.workspace_path())
+            .expect("managed metadata paths should remain within the workspace");
+        let mut current = workspace.workspace_path().to_path_buf();
+
+        for component in relative.components() {
+            current.push(component.as_os_str());
+
+            match fs::symlink_metadata(&current).await {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(WorkspaceError::ManagedPathSymlink {
+                        path: current.clone(),
+                    });
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) => {
+                    return Err(WorkspaceError::Canonicalize {
+                        path: current.clone(),
+                        source: error,
+                    });
+                }
+            }
+        }
+
+        Ok(normalized)
+    }
+}
+
+fn classify_issue_manifest_ownership(
+    issue: &IssueDescriptor,
+    workspace: &WorkspaceHandle,
+    manifest: IssueManifest,
+) -> ExistingIssueManifestState {
+    if !issue_manifest_claims_workspace(workspace, &manifest) {
+        return ExistingIssueManifestState::ForeignArtifact;
+    }
+
+    if manifest.issue_id == issue.issue_id && manifest.identifier == issue.identifier {
+        ExistingIssueManifestState::Owned(manifest)
+    } else {
+        ExistingIssueManifestState::Conflict(manifest)
+    }
+}
+
+fn issue_manifest_claims_workspace(workspace: &WorkspaceHandle, manifest: &IssueManifest) -> bool {
+    if manifest.sanitized_workspace_key != workspace.workspace_key() {
+        return false;
+    }
+
+    match normalize_absolute_path(&manifest.workspace_path) {
+        Ok(path) => path == workspace.workspace_path(),
+        Err(_) => false,
     }
 }
 

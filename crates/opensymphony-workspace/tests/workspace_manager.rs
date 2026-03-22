@@ -5,6 +5,7 @@ use opensymphony_workspace::{
     IssueDescriptor, IssueLifecycleState, RunDescriptor, RunStatus, WorkspaceError,
     WorkspaceManager, WorkspaceManagerConfig,
 };
+use serde_json::json;
 use tempfile::TempDir;
 
 #[cfg(unix)]
@@ -90,6 +91,20 @@ fn after_create_retry_command() -> &'static str {
 #[cfg(windows)]
 fn after_create_retry_command() -> &'static str {
     "if not exist after_create_attempt.txt (echo first> after_create_attempt.txt && echo retry 1>&2 && exit /b 23) else (echo success> after_create_success.txt)"
+}
+
+fn foreign_issue_manifest_json(workspace_path: &std::path::Path, key: &str) -> String {
+    serde_json::to_string_pretty(&json!({
+        "issue_id": "foreign-id",
+        "identifier": "foreign-issue",
+        "title": "Foreign issue",
+        "current_state": "In Progress",
+        "sanitized_workspace_key": key,
+        "workspace_path": workspace_path,
+        "created_at": "2026-03-21T00:00:00Z",
+        "updated_at": "2026-03-21T00:00:00Z"
+    }))
+    .expect("foreign issue manifest JSON should serialize")
 }
 
 #[tokio::test]
@@ -196,6 +211,105 @@ async fn ensure_retries_after_create_after_failed_first_bootstrap() {
     assert!(tokio::fs::try_exists(ensured.handle.issue_manifest_path())
         .await
         .expect("issue manifest lookup should succeed"));
+}
+
+#[tokio::test]
+async fn ensure_retries_after_create_when_foreign_issue_manifest_preexists() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            after_create: Some(HookDefinition::shell(after_create_retry_command())),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-263-foreign-manifest");
+
+    manager
+        .ensure(&issue)
+        .await
+        .expect_err("first ensure should fail its after_create hook");
+
+    let workspace_path = manager
+        .workspace_path_for(&issue.identifier)
+        .expect("workspace path should resolve");
+    let metadata_dir = workspace_path.join(".opensymphony");
+    tokio::fs::create_dir_all(&metadata_dir)
+        .await
+        .expect("metadata dir should exist");
+    tokio::fs::write(
+        metadata_dir.join("issue.json"),
+        foreign_issue_manifest_json(
+            temp_dir.path().join("elsewhere").as_path(),
+            "COE-263-foreign-manifest",
+        ),
+    )
+    .await
+    .expect("foreign issue manifest should be written");
+
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("second ensure should retry after_create and succeed");
+
+    assert!(ensured.created);
+    assert_eq!(
+        tokio::fs::read_to_string(
+            ensured
+                .handle
+                .workspace_path()
+                .join("after_create_success.txt")
+        )
+        .await
+        .expect("after_create should succeed on retry")
+        .trim(),
+        "success"
+    );
+    assert_eq!(
+        manager
+            .load_issue_manifest(&ensured.handle)
+            .await
+            .expect("issue manifest should load")
+            .expect("issue manifest should exist")
+            .issue_id,
+        issue.issue_id
+    );
+}
+
+#[tokio::test]
+async fn ensure_rejects_workspace_reuse_for_colliding_sanitized_key() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let first_issue = sample_issue("feature/42");
+    let second_issue = sample_issue("feature:42");
+
+    manager
+        .ensure(&first_issue)
+        .await
+        .expect("first workspace should be created");
+
+    let error = manager
+        .ensure(&second_issue)
+        .await
+        .expect_err("colliding sanitized key should be rejected");
+
+    assert!(matches!(
+        error,
+        WorkspaceError::WorkspaceOwnershipConflict {
+            details,
+            ..
+        } if details.existing_issue_id == first_issue.issue_id
+            && details.requested_issue_id == second_issue.issue_id
+    ));
 }
 
 #[tokio::test]
@@ -541,5 +655,75 @@ async fn hook_cwd_override_cannot_escape_workspace_through_symlink() {
             hook: HookKind::BeforeRun,
             ..
         }
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_manifest_paths_reject_symlinked_reads_and_writes() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-263-metadata-symlink"))
+        .await
+        .expect("workspace should exist");
+
+    let outside_issue_manifest = temp_dir.path().join("outside-issue.json");
+    tokio::fs::write(&outside_issue_manifest, "{}")
+        .await
+        .expect("outside issue manifest should exist");
+    tokio::fs::remove_file(ensured.handle.issue_manifest_path())
+        .await
+        .expect("managed issue manifest should be removable");
+    symlink(
+        &outside_issue_manifest,
+        ensured.handle.issue_manifest_path(),
+    )
+    .expect("issue manifest symlink should be created");
+
+    let read_error = manager
+        .load_issue_manifest(&ensured.handle)
+        .await
+        .expect_err("symlinked issue manifest should be rejected");
+    assert!(matches!(
+        read_error,
+        WorkspaceError::ManagedPathSymlink { .. }
+    ));
+
+    tokio::fs::remove_file(ensured.handle.issue_manifest_path())
+        .await
+        .expect("issue manifest symlink should be removable");
+    let restored = manager
+        .ensure(&sample_issue("COE-263-metadata-symlink"))
+        .await
+        .expect("workspace should remain reusable");
+    manager
+        .write_issue_manifest(&ensured.handle, &restored.issue_manifest)
+        .await
+        .expect("issue manifest should be writable after restoring direct path");
+
+    let outside_run_manifest = temp_dir.path().join("outside-run.json");
+    tokio::fs::write(&outside_run_manifest, "{}")
+        .await
+        .expect("outside run manifest should exist");
+    symlink(&outside_run_manifest, ensured.handle.run_manifest_path())
+        .expect("run manifest symlink should be created");
+
+    let write_error = manager
+        .start_run(
+            &ensured.handle,
+            &RunDescriptor::new("run-symlinked-manifest", 1),
+        )
+        .await
+        .expect_err("symlinked run manifest should be rejected");
+    assert!(matches!(
+        write_error,
+        WorkspaceError::ManagedPathSymlink { .. }
     ));
 }

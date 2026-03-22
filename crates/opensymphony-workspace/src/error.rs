@@ -4,6 +4,31 @@ use serde_json::Error as JsonError;
 
 use crate::HookKind;
 
+#[derive(Debug)]
+pub struct WorkspaceOwnershipConflictDetails {
+    pub workspace: PathBuf,
+    pub workspace_key: String,
+    pub existing_issue_id: String,
+    pub existing_identifier: String,
+    pub requested_issue_id: String,
+    pub requested_identifier: String,
+}
+
+impl std::fmt::Display for WorkspaceOwnershipConflictDetails {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "workspace {} with sanitized key {} is already owned by issue {} ({}), cannot reuse it for {} ({})",
+            self.workspace.display(),
+            self.workspace_key,
+            self.existing_identifier,
+            self.existing_issue_id,
+            self.requested_identifier,
+            self.requested_issue_id
+        )
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
     #[error("workspace root must be absolute: {path}")]
@@ -12,8 +37,14 @@ pub enum WorkspaceError {
     EmptyIdentifier,
     #[error("sanitized workspace key is invalid or reserved: {key}")]
     InvalidWorkspaceKey { key: String },
+    #[error("{details}")]
+    WorkspaceOwnershipConflict {
+        details: Box<WorkspaceOwnershipConflictDetails>,
+    },
     #[error("path {path} escapes configured root {root}")]
     PathEscape { root: PathBuf, path: PathBuf },
+    #[error("OpenSymphony-managed metadata path may not be a symlink: {path}")]
+    ManagedPathSymlink { path: PathBuf },
     #[error("failed to create directory {path}: {source}")]
     CreateDirectory { path: PathBuf, source: io::Error },
     #[error("failed to canonicalize {path}: {source}")]

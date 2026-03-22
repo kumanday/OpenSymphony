@@ -97,10 +97,13 @@ Current implementation:
 - persist issue and run manifests
 - allow fresh `after_create` hooks to bootstrap clone/worktree flows before `.opensymphony/` exists
 - retry failed first-time `after_create` hooks on the next `ensure`
+- reject sanitized-key collisions when an existing current-path issue manifest belongs to another issue
+- ignore foreign or copied `.opensymphony/issue.json` artifacts when deciding whether first bootstrap already completed
 - hook timeout
 - hook stderr capture
 - avoid login-shell startup files when launching Unix hooks
 - reject symlink-based `cwd` escapes for hooks
+- reject symlinked `.opensymphony` manifest reads and writes
 - cleanup on terminal issue state
 
 ## 3.3 OpenHands adapter
