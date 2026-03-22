@@ -1026,6 +1026,15 @@ version = "0.1.0"
 [[package]]
 name = "opensymphony-workspace"
 version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
 
 [[package]]
 name = "percent-encoding"
