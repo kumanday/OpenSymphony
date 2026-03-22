@@ -1,16 +1,11 @@
-pub const CRATE_NAME: &str = "opensymphony-openhands";
+mod client;
+mod events;
+mod models;
 
-pub fn placeholder_summary() -> &'static str {
-    "local server supervisor, REST client, WebSocket event stream, event cache/state mirror, issue session runner, and protocol error mapping"
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{CRATE_NAME, placeholder_summary};
-
-    #[test]
-    fn reports_its_boundary() {
-        assert_eq!(CRATE_NAME, "opensymphony-openhands");
-        assert!(placeholder_summary().contains("WebSocket event stream"));
-    }
-}
+pub use client::{OpenHandsClient, OpenHandsError, OpenHandsProbeResult, TransportConfig};
+pub use events::{ConversationStateMirror, EventCache, KnownEvent};
+pub use models::{
+    AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
+    ConversationStateUpdatePayload, EventEnvelope, LlmConfig, SearchConversationEventsResponse,
+    SendMessageRequest, TextContent, WorkspaceConfig,
+};
