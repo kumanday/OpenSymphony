@@ -1,0 +1,43 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "issue-260",
+          "identifier": "COE-260",
+          "url": "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine",
+          "title": "Domain model and orchestrator state machine",
+          "description": "Implement the shared orchestrator state machine.",
+          "priority": 1.0,
+          "createdAt": "2026-03-20T10:00:00Z",
+          "updatedAt": "2026-03-21T12:00:00Z",
+          "state": {
+            "id": "state-started",
+            "name": "In Progress",
+            "type": "started"
+          },
+          "labels": {
+            "nodes": [
+              { "name": "backend" }
+            ],
+            "pageInfo": {
+              "hasNextPage": true,
+              "endCursor": "labels-cursor-1"
+            }
+          },
+          "inverseRelations": {
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      }
+    }
+  }
+}

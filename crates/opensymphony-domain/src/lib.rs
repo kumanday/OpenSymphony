@@ -4,6 +4,7 @@ mod runtime;
 mod snapshot;
 mod state_machine;
 mod time;
+mod tracker;
 
 pub const CRATE_NAME: &str = "opensymphony-domain";
 
@@ -25,6 +26,10 @@ pub use state_machine::{
     IssueExecution, SchedulerState, SchedulerStatus, StateTransitionError, TransitionAction,
 };
 pub use time::{DurationMs, TimestampMs};
+pub use tracker::{
+    TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueState,
+    TrackerIssueStateKind, TrackerIssueStateSnapshot,
+};
 
 #[cfg(test)]
 mod tests {
