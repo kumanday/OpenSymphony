@@ -146,6 +146,20 @@ mod tests {
         )
     }
 
+    fn sample_conversation(fresh_conversation: bool) -> ConversationMetadata {
+        ConversationMetadata {
+            conversation_id: must(super::ConversationId::new("conv_260")),
+            server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+            fresh_conversation,
+            runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_owned()),
+            stream_state: RuntimeStreamState::Ready,
+            last_event_id: None,
+            last_event_kind: None,
+            last_event_at: None,
+            last_event_summary: None,
+        }
+    }
+
     #[test]
     fn state_transitions_are_explicit_and_testable() {
         let issue = sample_issue();
@@ -157,17 +171,8 @@ mod tests {
         let execution = must(execution.claim(run));
         assert_eq!(execution.status(), SchedulerStatus::Claimed);
 
-        let session = ConversationMetadata {
-            conversation_id: must(super::ConversationId::new("conv_260")),
-            server_base_url: Some("http://127.0.0.1:3000".to_owned()),
-            fresh_conversation: true,
-            runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_owned()),
-            stream_state: RuntimeStreamState::Attaching,
-            last_event_id: None,
-            last_event_kind: None,
-            last_event_at: None,
-            last_event_summary: None,
-        };
+        let mut session = sample_conversation(true);
+        session.stream_state = RuntimeStreamState::Attaching;
 
         let mut execution =
             must(execution.start_running(ts(50), super::DurationMs::new(300_000), Some(session)));
@@ -378,6 +383,107 @@ mod tests {
     }
 
     #[test]
+    fn reopen_preserves_workspace_and_conversation_after_inactive_release() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        execution.attach_workspace(workspace.clone());
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300_000),
+            Some(sample_conversation(false)),
+        ));
+        let execution = must(execution.release(ts(60), ReleaseReason::TrackerInactive, None));
+        let execution = must(execution.reopen(ts(70)));
+
+        assert_eq!(execution.status(), SchedulerStatus::Unclaimed);
+        assert_eq!(execution.workspace(), Some(&workspace));
+        assert!(execution.conversation().is_some());
+    }
+
+    #[test]
+    fn reopen_clears_workspace_and_conversation_after_terminal_release() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        execution.attach_workspace(workspace.clone());
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300_000),
+            Some(sample_conversation(false)),
+        ));
+        let execution = must(execution.release(ts(60), ReleaseReason::TrackerTerminal, None));
+        let execution = must(execution.reopen(ts(70)));
+
+        assert_eq!(execution.status(), SchedulerStatus::Unclaimed);
+        assert!(execution.workspace().is_none());
+        assert!(execution.conversation().is_none());
+    }
+
+    #[test]
+    fn recent_worker_outcomes_are_bounded_to_latest_window() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        execution.attach_workspace(workspace.clone());
+
+        let mut next_attempt = None;
+
+        for index in 0_u64..12 {
+            let claimed_at = ts(40 + index * 10);
+            let run = sample_run(&issue, &workspace, next_attempt, claimed_at);
+            execution = must(execution.claim(run));
+
+            let current_run = must_some(execution.current_run(), "claimed run must exist");
+            let summary = format!("outcome {index}");
+            let finished_at = ts(45 + index * 10);
+            let outcome = WorkerOutcomeRecord::from_run(
+                current_run,
+                WorkerOutcomeKind::Failed,
+                finished_at,
+                Some(summary.clone()),
+                Some("boom".to_owned()),
+            );
+            let retry = must(RetryEntry::failure(
+                &issue,
+                current_run.attempt,
+                0,
+                finished_at,
+                RetryReason::Failure,
+                Some("boom".to_owned()),
+                RetryPolicy::default(),
+            ));
+
+            next_attempt = Some(retry.attempt);
+            execution = must(execution.queue_retry(retry, outcome));
+        }
+
+        let snapshot = execution.snapshot();
+        assert_eq!(
+            snapshot
+                .last_worker_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.summary.as_deref()),
+            Some("outcome 11")
+        );
+        assert_eq!(snapshot.recent_worker_outcomes.len(), 10);
+        assert_eq!(
+            snapshot.recent_worker_outcomes[0].summary.as_deref(),
+            Some("outcome 2")
+        );
+        assert_eq!(
+            snapshot.recent_worker_outcomes[9].summary.as_deref(),
+            Some("outcome 11")
+        );
+    }
+
+    #[test]
     fn snapshot_models_serialize_stably() {
         let issue = sample_issue();
         let workspace = sample_workspace();
@@ -426,20 +532,11 @@ mod tests {
 
         let run = sample_run(&issue, &workspace, None, ts(40));
         let execution = must(execution.claim(run));
-        let session = ConversationMetadata {
-            conversation_id: must(super::ConversationId::new("conv_260")),
-            server_base_url: Some("http://127.0.0.1:3000".to_owned()),
-            fresh_conversation: false,
-            runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_owned()),
-            stream_state: RuntimeStreamState::Ready,
-            last_event_id: None,
-            last_event_kind: None,
-            last_event_at: None,
-            last_event_summary: None,
-        };
-
-        let mut execution =
-            must(execution.start_running(ts(50), super::DurationMs::new(300), Some(session)));
+        let mut execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300),
+            Some(sample_conversation(false)),
+        ));
 
         must(execution.observe_runtime_event(
             ts(60),

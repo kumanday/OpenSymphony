@@ -337,3 +337,9 @@ pub enum ReleaseReason {
     Cancelled,
     RetryExhausted,
 }
+
+impl ReleaseReason {
+    pub const fn preserves_reactivation_state(self) -> bool {
+        matches!(self, Self::TrackerInactive)
+    }
+}
