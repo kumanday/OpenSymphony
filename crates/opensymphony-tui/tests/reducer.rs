@@ -93,14 +93,27 @@ fn applies_snapshot_and_renders_selected_issue() {
     let mut state = TuiState::default();
     state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 2))));
 
-    assert_eq!(state.connection, ConnectionState::Live);
+    assert_eq!(state.connection, ConnectionState::Connecting);
     let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("conn=connecting"));
     assert!(rendered.contains("focus=issues"));
     assert!(rendered.contains("[x] ISSUES"));
     assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
     assert!(rendered.contains("COE-255"));
     assert!(rendered.contains("Issue COE-255"));
     assert!(rendered.contains("RECENT EVENTS"));
+}
+
+#[test]
+fn marks_the_ui_live_after_the_stream_attaches() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 2))));
+    state.reduce(TuiAction::StreamAttached);
+
+    assert_eq!(state.connection, ConnectionState::Live);
+    let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("conn=live"));
+    assert!(rendered.contains("COE-255"));
 }
 
 #[test]
@@ -194,6 +207,7 @@ fn keeps_selected_issue_visible_when_issue_list_is_windowed() {
 fn keeps_rendering_latest_snapshot_while_reconnecting() {
     let mut state = TuiState::default();
     state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 2))));
+    state.reduce(TuiAction::StreamAttached);
     state.reduce(TuiAction::ConnectionLost("stream closed".to_owned()));
 
     let rendered = state.render_text(100, 20);
@@ -201,6 +215,23 @@ fn keeps_rendering_latest_snapshot_while_reconnecting() {
     assert!(rendered.contains("conn=reconnecting"));
     assert!(rendered.contains("COE-255"));
     assert!(rendered.contains("workspace path: workspace-0"));
+}
+
+#[test]
+fn refreshed_snapshots_do_not_claim_live_before_stream_reattaches() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 2))));
+    state.reduce(TuiAction::StreamAttached);
+    state.reduce(TuiAction::ConnectionLost("stream closed".to_owned()));
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(4, 2))));
+
+    assert_eq!(
+        state.connection,
+        ConnectionState::Reconnecting("stream closed".to_owned())
+    );
+    let rendered = state.render_text(100, 20);
+    assert!(rendered.contains("conn=reconnecting"));
+    assert!(rendered.contains("seq=4"));
 }
 
 #[test]
