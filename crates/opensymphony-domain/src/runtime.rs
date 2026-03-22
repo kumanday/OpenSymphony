@@ -96,12 +96,19 @@ pub struct ConversationMetadata {
 impl ConversationMetadata {
     pub fn observe_event(
         &mut self,
-        observed_at: TimestampMs,
+        event_at: TimestampMs,
         event_id: Option<String>,
         event_kind: Option<String>,
         summary: Option<String>,
     ) {
-        self.last_event_at = Some(observed_at);
+        if self
+            .last_event_at
+            .is_some_and(|last_event_at| event_at < last_event_at)
+        {
+            return;
+        }
+
+        self.last_event_at = Some(event_at);
         self.last_event_id = event_id;
         self.last_event_kind = event_kind;
         self.last_event_summary = summary;
@@ -268,9 +275,13 @@ impl StallMetadata {
         }
     }
 
-    pub fn observe_activity(&mut self, observed_at: TimestampMs) {
-        self.last_activity_at = observed_at;
-        self.stalled_at = observed_at.saturating_add(self.stall_timeout_ms);
+    pub fn observe_activity(&mut self, activity_at: TimestampMs) {
+        if activity_at < self.last_activity_at {
+            return;
+        }
+
+        self.last_activity_at = activity_at;
+        self.stalled_at = activity_at.saturating_add(self.stall_timeout_ms);
     }
 }
 

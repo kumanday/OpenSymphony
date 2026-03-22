@@ -121,8 +121,10 @@ pub struct RuntimeStateSnapshot {
 }
 
 impl RuntimeStateSnapshot {
-    fn from_state(state: &SchedulerState) -> Self {
-        match state {
+    fn from_execution(execution: &IssueExecution) -> Self {
+        let conversation = execution.conversation();
+
+        match execution.state() {
             SchedulerState::Unclaimed { .. } => Self {
                 state: SchedulerStatus::Unclaimed,
                 claimed_at: None,
@@ -130,7 +132,7 @@ impl RuntimeStateSnapshot {
                 released_at: None,
                 release_reason: None,
                 worker: None,
-                last_event_at: None,
+                last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: None,
             },
             SchedulerState::Claimed { run } => Self {
@@ -140,23 +142,18 @@ impl RuntimeStateSnapshot {
                 released_at: None,
                 release_reason: None,
                 worker: Some(WorkerAttemptSnapshot::from(run)),
-                last_event_at: None,
+                last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: None,
             },
-            SchedulerState::Running {
-                run,
-                session,
-                stall,
-            } => Self {
+            SchedulerState::Running { run, stall } => Self {
                 state: SchedulerStatus::Running,
                 claimed_at: Some(run.claimed_at),
                 started_at: run.started_at,
                 released_at: None,
                 release_reason: None,
                 worker: Some(WorkerAttemptSnapshot::from(run)),
-                last_event_at: session
-                    .as_ref()
-                    .and_then(|session| session.last_event_at)
+                last_event_at: conversation
+                    .and_then(|conversation| conversation.last_event_at)
                     .or(Some(stall.last_activity_at)),
                 stalled_at: Some(stall.stalled_at),
             },
@@ -167,7 +164,7 @@ impl RuntimeStateSnapshot {
                 released_at: None,
                 release_reason: None,
                 worker: None,
-                last_event_at: None,
+                last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: None,
             },
             SchedulerState::Released {
@@ -180,7 +177,7 @@ impl RuntimeStateSnapshot {
                 released_at: Some(*released_at),
                 release_reason: Some(*reason),
                 worker: None,
-                last_event_at: None,
+                last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: None,
             },
         }
@@ -202,7 +199,7 @@ impl From<&IssueExecution> for IssueSnapshot {
     fn from(execution: &IssueExecution) -> Self {
         Self {
             issue: execution.issue().clone(),
-            runtime: RuntimeStateSnapshot::from_state(execution.state()),
+            runtime: RuntimeStateSnapshot::from_execution(execution),
             workspace: execution.workspace().cloned(),
             conversation: execution.conversation().cloned(),
             retry: execution.retry().map(RetrySnapshot::from),
