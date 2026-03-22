@@ -10,7 +10,7 @@ use ftui::{
     core::geometry::Rect,
     prelude::{App, Cmd, Event, Frame, KeyCode, Model, ScreenMode},
     runtime::{Every, Subscription},
-    widgets::{paragraph::Paragraph, Widget},
+    widgets::{Widget, paragraph::Paragraph},
 };
 use opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
 use opensymphony_domain::{
@@ -294,17 +294,17 @@ impl TuiState {
             return;
         }
 
-        if let Some(identifier) = selected_issue_identifier {
-            if let Some(selected_issue) = self.latest_snapshot.as_ref().and_then(|snapshot| {
+        if let Some(identifier) = selected_issue_identifier
+            && let Some(selected_issue) = self.latest_snapshot.as_ref().and_then(|snapshot| {
                 snapshot
                     .snapshot
                     .issues
                     .iter()
                     .position(|issue| issue.identifier == identifier)
-            }) {
-                self.selected_issue = selected_issue;
-                return;
-            }
+            })
+        {
+            self.selected_issue = selected_issue;
+            return;
         }
 
         self.selected_issue = min(self.selected_issue, count - 1);
@@ -1118,9 +1118,9 @@ impl DaemonStateLabel for opensymphony_domain::ControlPlaneDaemonState {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_width, fit, handle_bridge_error, issue_window, section_layout, stacked_body_layout,
-        visible_issue_count, AppMessage, BridgeHandle, BridgeMailbox, ConnectionState,
-        ControlPlaneClientError, OperatorApp, RunOutcome, TuiAction, TuiState,
+        AppMessage, BridgeHandle, BridgeMailbox, ConnectionState, ControlPlaneClientError,
+        OperatorApp, RunOutcome, TuiAction, TuiState, display_width, fit, handle_bridge_error,
+        issue_window, section_layout, stacked_body_layout, visible_issue_count,
     };
     use chrono::{TimeZone, Utc};
     use ftui::prelude::Model;
@@ -1135,15 +1135,16 @@ mod tests {
     };
     use std::{
         sync::{
+            Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
-            mpsc, Arc, Mutex,
+            mpsc,
         },
         thread,
         time::Duration,
     };
     use tracing::{
-        span::{Attributes, Record},
         Event, Id, Metadata, Subscriber,
+        span::{Attributes, Record},
     };
     use url::Url;
 

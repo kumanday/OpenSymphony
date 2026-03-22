@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::{error::PromptTemplateError, PromptContext};
+use crate::{PromptContext, error::PromptTemplateError};
 
 pub(crate) fn render_prompt<T: Serialize>(
     template_source: &str,

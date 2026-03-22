@@ -1,14 +1,14 @@
 use std::{collections::HashMap, sync::Arc};
 
 use axum::{
+    Json, Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use chrono::Utc;
 use opensymphony_openhands::{
@@ -16,10 +16,10 @@ use opensymphony_openhands::{
     KnownEvent, SearchConversationEventsResponse, SendMessageRequest,
 };
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{
     net::TcpListener,
-    sync::{broadcast, Mutex},
+    sync::{Mutex, broadcast},
     task::JoinHandle,
 };
 use uuid::Uuid;
@@ -83,20 +83,23 @@ impl FakeOpenHandsServer {
         let app = Router::new()
             .route("/openapi.json", get(openapi))
             .route("/api/conversations", post(create_conversation))
-            .route("/api/conversations/:conversation_id", get(get_conversation))
             .route(
-                "/api/conversations/:conversation_id/events",
+                "/api/conversations/{conversation_id}",
+                get(get_conversation),
+            )
+            .route(
+                "/api/conversations/{conversation_id}/events",
                 post(send_message),
             )
             .route(
-                "/api/conversations/:conversation_id/run",
+                "/api/conversations/{conversation_id}/run",
                 post(run_conversation),
             )
             .route(
-                "/api/conversations/:conversation_id/events/search",
+                "/api/conversations/{conversation_id}/events/search",
                 get(search_events),
             )
-            .route("/sockets/events/:conversation_id", get(events_socket))
+            .route("/sockets/events/{conversation_id}", get(events_socket))
             .with_state(state.clone());
 
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -400,7 +403,9 @@ async fn handle_socket(state: AppState, conversation_id: Uuid, mut socket: WebSo
 
     if socket
         .send(Message::Text(
-            serde_json::to_string(&ready_event).expect("serializing ready event should succeed"),
+            serde_json::to_string(&ready_event)
+                .expect("serializing ready event should succeed")
+                .into(),
         ))
         .await
         .is_err()
@@ -421,7 +426,7 @@ async fn handle_socket(state: AppState, conversation_id: Uuid, mut socket: WebSo
                     Err(_) => continue,
                 };
 
-                if socket.send(Message::Text(payload)).await.is_err() {
+                if socket.send(Message::Text(payload.into())).await.is_err() {
                     break;
                 }
             }

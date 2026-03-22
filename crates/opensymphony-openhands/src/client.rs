@@ -2,20 +2,19 @@ use std::{cmp::Ordering, collections::VecDeque, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{
-    header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE},
     RequestBuilder,
+    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::{
     net::TcpStream,
     task::yield_now,
-    time::{sleep, timeout_at, Instant},
+    time::{Instant, sleep, timeout_at},
 };
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{client::IntoClientRequest, Message},
-    MaybeTlsStream, WebSocketStream,
+    MaybeTlsStream, WebSocketStream, connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
 };
 use tracing::debug;
 use url::Url;
@@ -473,9 +472,11 @@ impl RuntimeEventStream {
             return Ok(false);
         }
 
-        // Give newly queued batches one more immediate drain turn so out-of-order
-        // live frames can settle into timestamp order before delivery.
+        // Give newly queued batches one more scheduler turn and drain so
+        // out-of-order live frames can settle into timestamp order before
+        // delivery.
         self.pending_delivery_needs_drain = false;
+        yield_now().await;
         self.absorb_buffered_socket_events().await?;
         Ok(true)
     }

@@ -1,14 +1,14 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{
+    Json, Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use chrono::Utc;
 use opensymphony_openhands::{
@@ -16,9 +16,13 @@ use opensymphony_openhands::{
     OpenHandsError, RuntimeStreamConfig, SearchConversationEventsResponse, SendMessageRequest,
     TerminalExecutionStatus, TransportConfig,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
+
+fn text_message(value: String) -> Message {
+    Message::Text(value.into())
+}
 
 #[tokio::test]
 async fn wait_for_readiness_ignores_non_state_frames_before_ready_event() {
@@ -473,8 +477,8 @@ async fn attach_runtime_stream_applies_forward_compatible_readiness_snapshot_to_
 }
 
 #[tokio::test]
-async fn attach_runtime_stream_applies_newer_reused_conversation_readiness_snapshot_to_state_mirror(
-) {
+async fn attach_runtime_stream_applies_newer_reused_conversation_readiness_snapshot_to_state_mirror()
+ {
     let state = ReadinessMirrorState::default();
     let server = TestServer::start(reused_conversation_readiness_mirror_router(state)).await;
     let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
@@ -820,12 +824,12 @@ impl Drop for TestServer {
 }
 
 fn readiness_router() -> Router {
-    Router::new().route("/sockets/events/:conversation_id", get(readiness_socket))
+    Router::new().route("/sockets/events/{conversation_id}", get(readiness_socket))
 }
 
 fn forward_compatible_readiness_router() -> Router {
     Router::new().route(
-        "/sockets/events/:conversation_id",
+        "/sockets/events/{conversation_id}",
         get(forward_compatible_readiness_socket),
     )
 }
@@ -858,7 +862,7 @@ async fn forward_compatible_readiness_socket(
         );
 
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&ready).expect("event should serialize"),
             ))
             .await
@@ -881,17 +885,17 @@ async fn handle_readiness_socket(mut socket: WebSocket) {
     let ready = EventEnvelope::state_update("evt-ready", "idle");
 
     socket
-        .send(Message::Ping(vec![1, 2, 3]))
+        .send(Message::Ping(vec![1, 2, 3].into()))
         .await
         .expect("ping should send");
     socket
-        .send(Message::Text(
+        .send(text_message(
             serde_json::to_string(&unrelated).expect("event should serialize"),
         ))
         .await
         .expect("unrelated event should send");
     socket
-        .send(Message::Text(
+        .send(text_message(
             serde_json::to_string(&ready).expect("event should serialize"),
         ))
         .await
@@ -910,15 +914,15 @@ fn readiness_mirror_router(state: ReadinessMirrorState) -> Router {
             post(readiness_mirror_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(readiness_mirror_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(readiness_mirror_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(readiness_mirror_events_socket),
         )
         .with_state(state)
@@ -931,15 +935,15 @@ fn forward_compatible_readiness_mirror_router(state: ReadinessMirrorState) -> Ro
             post(readiness_mirror_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(readiness_mirror_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(readiness_mirror_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(forward_compatible_readiness_mirror_events_socket),
         )
         .with_state(state)
@@ -952,15 +956,15 @@ fn reused_conversation_readiness_mirror_router(state: ReadinessMirrorState) -> R
             post(reused_conversation_readiness_mirror_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(readiness_mirror_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(readiness_mirror_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(readiness_mirror_events_socket),
         )
         .with_state(state)
@@ -973,15 +977,15 @@ fn undecodable_newer_state_readiness_mirror_router(state: ReadinessMirrorState) 
             post(readiness_mirror_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(readiness_mirror_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(undecodable_newer_state_readiness_mirror_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(readiness_mirror_events_socket),
         )
         .with_state(state)
@@ -994,15 +998,15 @@ fn ready_barrier_rebuild_regression_router(state: ReadinessMirrorState) -> Route
             post(readiness_mirror_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(readiness_mirror_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(readiness_mirror_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(ready_barrier_rebuild_regression_events_socket),
         )
         .with_state(state)
@@ -1092,7 +1096,7 @@ async fn readiness_mirror_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::new(
                     "evt-ready-running",
                     Utc::now(),
@@ -1119,7 +1123,7 @@ async fn forward_compatible_readiness_mirror_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::new(
                     "evt-ready-running-forward-compatible",
                     Utc::now(),
@@ -1173,13 +1177,13 @@ async fn ready_barrier_rebuild_regression_events_socket(
         );
 
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&ready).expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&stale_queued).expect("stale queued event should serialize"),
             ))
             .await
@@ -1219,21 +1223,24 @@ fn auth_router(expectations: AuthExpectations) -> Router {
 
     Router::new()
         .route("/api/conversations", post(create_conversation))
-        .route("/api/conversations/:conversation_id", get(get_conversation))
         .route(
-            "/api/conversations/:conversation_id/events",
+            "/api/conversations/{conversation_id}",
+            get(get_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}/events",
             post(send_message),
         )
         .route(
-            "/api/conversations/:conversation_id/run",
+            "/api/conversations/{conversation_id}/run",
             post(run_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(authenticated_readiness_socket),
         )
         .with_state(state)
@@ -1337,7 +1344,7 @@ async fn authenticated_readiness_socket(
     Ok(websocket.on_upgrade(async move |mut socket| {
         for event in ready_events {
             socket
-                .send(Message::Text(
+                .send(text_message(
                     serde_json::to_string(&event).expect("event should serialize"),
                 ))
                 .await
@@ -1391,15 +1398,15 @@ fn initial_replay_router(state: InitialReplayState) -> Router {
             post(initial_replay_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(initial_replay_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(initial_replay_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(initial_replay_events_socket),
         )
         .with_state(state)
@@ -1484,7 +1491,7 @@ async fn initial_replay_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "running"))
                     .expect("ready event should serialize"),
             ))
@@ -1507,15 +1514,15 @@ fn buffered_attach_ordering_router(state: BufferedAttachOrderingState) -> Router
             post(buffered_attach_ordering_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(buffered_attach_ordering_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(buffered_attach_ordering_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(buffered_attach_ordering_events_socket),
         )
         .with_state(state)
@@ -1625,13 +1632,13 @@ async fn buffered_attach_ordering_events_socket(
         );
 
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&ready).expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&queued_live).expect("buffered live event should serialize"),
             ))
             .await
@@ -1653,15 +1660,15 @@ fn deferred_reconnect_router(state: DeferredReconnectState) -> Router {
             post(deferred_reconnect_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(deferred_reconnect_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(deferred_reconnect_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(deferred_reconnect_events_socket),
         )
         .with_state(state)
@@ -1720,14 +1727,14 @@ async fn deferred_reconnect_events_socket(
     websocket.on_upgrade(async move |mut socket| {
         if connection_number == 1 {
             socket
-                .send(Message::Text(
+                .send(text_message(
                     serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
                         .expect("ready event should serialize"),
                 ))
                 .await
                 .expect("ready event should send");
             socket
-                .send(Message::Text(
+                .send(text_message(
                     serde_json::to_string(&EventEnvelope::new(
                         "evt-runtime",
                         Utc::now(),
@@ -1767,22 +1774,25 @@ fn probe_router(state: ProbeState) -> Router {
     Router::new()
         .route("/api/conversations", post(probe_create_conversation))
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(probe_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events",
+            "/api/conversations/{conversation_id}/events",
             post(probe_send_message),
         )
         .route(
-            "/api/conversations/:conversation_id/run",
+            "/api/conversations/{conversation_id}/run",
             post(probe_run_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(probe_search_events),
         )
-        .route("/sockets/events/:conversation_id", get(probe_events_socket))
+        .route(
+            "/sockets/events/{conversation_id}",
+            get(probe_events_socket),
+        )
         .with_state(state)
 }
 
@@ -1790,22 +1800,25 @@ fn failed_probe_router(state: ProbeState) -> Router {
     Router::new()
         .route("/api/conversations", post(probe_create_conversation))
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(probe_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events",
+            "/api/conversations/{conversation_id}/events",
             post(probe_send_message),
         )
         .route(
-            "/api/conversations/:conversation_id/run",
+            "/api/conversations/{conversation_id}/run",
             post(failed_probe_run_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(probe_search_events),
         )
-        .route("/sockets/events/:conversation_id", get(probe_events_socket))
+        .route(
+            "/sockets/events/{conversation_id}",
+            get(probe_events_socket),
+        )
         .with_state(state)
 }
 
@@ -1813,23 +1826,23 @@ fn reconnect_probe_router(state: ProbeState) -> Router {
     Router::new()
         .route("/api/conversations", post(probe_create_conversation))
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(probe_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events",
+            "/api/conversations/{conversation_id}/events",
             post(reconnect_probe_send_message),
         )
         .route(
-            "/api/conversations/:conversation_id/run",
+            "/api/conversations/{conversation_id}/run",
             post(reconnect_probe_run_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(probe_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(reconnect_probe_events_socket),
         )
         .with_state(state)
@@ -1839,23 +1852,23 @@ fn terminal_rest_refresh_probe_router(state: ProbeState) -> Router {
     Router::new()
         .route("/api/conversations", post(probe_create_conversation))
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(probe_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events",
+            "/api/conversations/{conversation_id}/events",
             post(reconnect_probe_send_message),
         )
         .route(
-            "/api/conversations/:conversation_id/run",
+            "/api/conversations/{conversation_id}/run",
             post(reconnect_probe_run_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(probe_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(exhausting_reconnect_probe_events_socket),
         )
         .with_state(state)
@@ -1865,23 +1878,23 @@ fn final_refresh_failure_probe_router(state: ProbeState) -> Router {
     Router::new()
         .route("/api/conversations", post(probe_create_conversation))
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(final_refresh_failure_probe_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events",
+            "/api/conversations/{conversation_id}/events",
             post(probe_send_message),
         )
         .route(
-            "/api/conversations/:conversation_id/run",
+            "/api/conversations/{conversation_id}/run",
             post(final_refresh_failure_probe_run_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(probe_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(final_refresh_failure_probe_events_socket),
         )
         .with_state(state)
@@ -1891,23 +1904,23 @@ fn reconnect_error_then_finished_probe_router(state: ProbeState) -> Router {
     Router::new()
         .route("/api/conversations", post(probe_create_conversation))
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(probe_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events",
+            "/api/conversations/{conversation_id}/events",
             post(probe_send_message),
         )
         .route(
-            "/api/conversations/:conversation_id/run",
+            "/api/conversations/{conversation_id}/run",
             post(error_then_finished_probe_run_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(probe_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(reconnect_probe_events_socket),
         )
         .with_state(state)
@@ -1917,23 +1930,23 @@ fn finished_then_error_probe_router(state: ProbeState) -> Router {
     Router::new()
         .route("/api/conversations", post(probe_create_conversation))
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(probe_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events",
+            "/api/conversations/{conversation_id}/events",
             post(probe_send_message),
         )
         .route(
-            "/api/conversations/:conversation_id/run",
+            "/api/conversations/{conversation_id}/run",
             post(final_refresh_failure_probe_run_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(probe_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(finished_then_error_probe_events_socket),
         )
         .with_state(state)
@@ -2127,7 +2140,7 @@ async fn probe_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
                     .expect("ready event should serialize"),
             ))
@@ -2142,7 +2155,7 @@ async fn reconnect_probe_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
                     .expect("ready event should serialize"),
             ))
@@ -2168,7 +2181,7 @@ async fn exhausting_reconnect_probe_events_socket(
     websocket.on_upgrade(async move |mut socket| {
         if connection_number == 1 {
             socket
-                .send(Message::Text(
+                .send(text_message(
                     serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
                         .expect("ready event should serialize"),
                 ))
@@ -2190,7 +2203,7 @@ async fn final_refresh_failure_probe_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
                     .expect("ready event should serialize"),
             ))
@@ -2200,7 +2213,7 @@ async fn final_refresh_failure_probe_events_socket(
         loop {
             if *state.run_count.lock().await > 0 {
                 socket
-                    .send(Message::Text(
+                    .send(text_message(
                         serde_json::to_string(&EventEnvelope::new(
                             "evt-finished",
                             Utc::now(),
@@ -2234,7 +2247,7 @@ async fn finished_then_error_probe_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
                     .expect("ready event should serialize"),
             ))
@@ -2244,7 +2257,7 @@ async fn finished_then_error_probe_events_socket(
         loop {
             if *state.run_count.lock().await > 0 {
                 socket
-                    .send(Message::Text(
+                    .send(text_message(
                         serde_json::to_string(&EventEnvelope::new(
                             "evt-finished",
                             Utc::now(),
@@ -2263,7 +2276,7 @@ async fn finished_then_error_probe_events_socket(
                     .expect("finished event should send");
                 tokio::task::yield_now().await;
                 socket
-                    .send(Message::Text(
+                    .send(text_message(
                         serde_json::to_string(&EventEnvelope::new(
                             "evt-error-after-finished",
                             Utc::now(),
@@ -2300,15 +2313,15 @@ fn readiness_replay_router(state: ReadinessReplayState) -> Router {
             post(readiness_replay_create_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id",
+            "/api/conversations/{conversation_id}",
             get(readiness_replay_get_conversation),
         )
         .route(
-            "/api/conversations/:conversation_id/events/search",
+            "/api/conversations/{conversation_id}/events/search",
             get(readiness_replay_search_events),
         )
         .route(
-            "/sockets/events/:conversation_id",
+            "/sockets/events/{conversation_id}",
             get(readiness_replay_events_socket),
         )
         .with_state(state)
@@ -2371,7 +2384,7 @@ async fn readiness_replay_events_socket(
             "evt-ready-reconnect"
         };
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::new(
                     ready_id,
                     Utc::now(),
