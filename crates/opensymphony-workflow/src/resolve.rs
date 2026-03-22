@@ -356,6 +356,15 @@ fn reject_unsupported_openhands_local_server_overrides(
         });
     }
 
+    if !local_server.env.is_empty() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.local_server.env",
+            message:
+                "is not supported until the runtime supervisor creation path forwards workflow-owned launcher environment overrides"
+                    .to_owned(),
+        });
+    }
+
     if local_server.command.is_some() {
         return Err(WorkflowConfigError::InvalidField {
             field: "openhands.local_server.command",
@@ -510,6 +519,15 @@ fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError
             field: "openhands.transport.base_url",
             message:
                 "must not include a path until supervisor readiness probes support prefixed base URLs"
+                    .to_owned(),
+        });
+    }
+
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.transport.base_url",
+            message:
+                "must not include query or fragment suffixes until supervisor readiness probes support origin-only base URLs"
                     .to_owned(),
         });
     }
