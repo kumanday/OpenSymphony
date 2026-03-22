@@ -214,6 +214,12 @@ openhadns:
 tracker:
   kind: linear
   project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+    - Closed
 ---
 {{ issue.identifier }}
 "#,
@@ -291,6 +297,10 @@ tracker:
   kind: linear
   api_key: ${TRACKER_API_KEY}
   project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
 ---
 {{ issue.identifier }}
 "#,
@@ -318,6 +328,11 @@ tracker:
 tracker:
   kind: linear
   project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
 workspace:
   root: ${WORKSPACE_ROOT}
 hooks:
@@ -325,6 +340,8 @@ hooks:
 agent:
   max_turns: "5"
   stall_timeout_ms: 0
+  max_concurrent_agents_by_state:
+    In Review: 2
 openhands:
   transport:
     base_url: ${OPENHANDS_BASE_URL}
@@ -356,6 +373,14 @@ openhands:
         assert_eq!(resolved.config.hooks.timeout_ms, DEFAULT_HOOK_TIMEOUT_MS);
         assert_eq!(resolved.config.agent.max_turns, 5);
         assert_eq!(resolved.config.agent.stall_timeout_ms, None);
+        assert_eq!(
+            resolved
+                .config
+                .agent
+                .max_concurrent_agents_by_state
+                .get("in review"),
+            Some(&2)
+        );
         assert_eq!(
             resolved.extensions.openhands.transport.base_url,
             "http://localhost:8000"
@@ -392,6 +417,10 @@ openhands:
 tracker:
   kind: linear
   project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
 openhands:
   conversation:
     persistence_dir_relative: ../shared-state
@@ -422,6 +451,10 @@ openhands:
 tracker:
   kind: linear
   project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
 workspace:
   root: ./nested/workspaces
 ---
@@ -448,6 +481,10 @@ workspace:
 tracker:
   kind: linear
   project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
 workspace:
   root: workspaces
 ---
@@ -605,6 +642,10 @@ tracker:
             r#"---
 tracker:
   kind: linear
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
 ---
 {{ issue.identifier }}
 "#,
@@ -624,6 +665,102 @@ tracker:
         ));
     }
 
+    #[test]
+    fn missing_tracker_terminal_states_fail() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("missing terminal states should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::MissingRequiredField {
+                field: "tracker.terminal_states"
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_per_state_concurrency_limits() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+agent:
+  max_concurrent_agents_by_state:
+    In Review: two
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("malformed state limits should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidInteger {
+                field: "agent.max_concurrent_agents_by_state",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_non_positive_per_state_concurrency_limits() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+agent:
+  max_concurrent_agents_by_state:
+    In Review: 0
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("non-positive state limits should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "agent.max_concurrent_agents_by_state",
+                ..
+            }
+        ));
+    }
+
     fn env<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> {
         pairs
             .into_iter()
@@ -636,6 +773,12 @@ tracker:
 tracker:
   kind: linear
   project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+    - Closed
 polling:
   interval_ms: 5000
 workspace:
