@@ -27,22 +27,6 @@ pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 
-pub fn default_openhands_local_server_command() -> Vec<String> {
-    vec![opensymphony_checkout_root()
-        .join("tools/openhands-server/run-local.sh")
-        .to_string_lossy()
-        .into_owned()]
-}
-
-fn opensymphony_checkout_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir should have workspace parent")
-        .parent()
-        .expect("workspace root should exist")
-        .to_path_buf()
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowDefinition {
     pub front_matter: WorkflowFrontMatter,
@@ -166,8 +150,6 @@ pub struct OpenHandsConfirmationPolicyFrontMatter {
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct OpenHandsConfirmationPolicy {
     pub kind: String,
-    #[serde(flatten)]
-    pub options: BTreeMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -301,7 +283,7 @@ pub struct OpenHandsTransportConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenHandsLocalServerConfig {
     pub enabled: bool,
-    pub command: Vec<String>,
+    pub command: Option<Vec<String>>,
     pub startup_timeout_ms: u64,
     pub readiness_probe_path: String,
     pub env: BTreeMap<String, String>,

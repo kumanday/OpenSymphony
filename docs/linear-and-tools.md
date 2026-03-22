@@ -79,6 +79,7 @@ Eligibility reminders:
 Required:
 
 - `LINEAR_API_KEY`
+- workflow `tracker.kind`
 - workflow `tracker.project_slug`
 - workflow `tracker.active_states`
 - workflow `tracker.terminal_states`

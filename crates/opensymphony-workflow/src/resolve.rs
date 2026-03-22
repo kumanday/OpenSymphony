@@ -8,24 +8,24 @@ use url::Url;
 use crate::{
     error::WorkflowConfigError,
     model::{
-        default_openhands_local_server_command, AgentConfig, AgentFrontMatter, Environment,
-        HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
-        OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
-        OpenHandsConversationAgentFrontMatter, OpenHandsConversationConfig,
-        OpenHandsConversationFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
-        OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsMcpConfig,
-        OpenHandsStdioServerConfig, OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig,
-        OpenHandsWebSocketConfig, PollingConfig, PollingFrontMatter, ResolvedWorkflow,
-        TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition,
-        WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter, DEFAULT_HOOK_TIMEOUT_MS,
-        DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS,
-        DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AUTH_MODE,
-        DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
-        DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
-        DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
-        DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
-        DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
-        DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT,
+        AgentConfig, AgentFrontMatter, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
+        OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
+        OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
+        OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsFrontMatter,
+        OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
+        OpenHandsMcpConfig, OpenHandsStdioServerConfig, OpenHandsStdioServerFrontMatter,
+        OpenHandsTransportConfig, OpenHandsWebSocketConfig, PollingConfig, PollingFrontMatter,
+        ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig,
+        WorkflowDefinition, WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter,
+        DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
+        DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND,
+        DEFAULT_OPENHANDS_AUTH_MODE, DEFAULT_OPENHANDS_BASE_URL,
+        DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_MAX_ITERATIONS,
+        DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
+        DEFAULT_OPENHANDS_READINESS_PROBE_PATH, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+        DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+        DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS,
+        DEFAULT_WORKSPACE_ROOT,
     },
 };
 
@@ -240,11 +240,18 @@ fn resolve_openhands<E: Environment>(
         },
         local_server: OpenHandsLocalServerConfig {
             enabled: openhands.local_server.enabled.unwrap_or(true),
-            command: resolve_command(
-                openhands.local_server.command.as_deref(),
-                "openhands.local_server.command",
-                default_openhands_local_server_command(),
-            )?,
+            command: openhands
+                .local_server
+                .command
+                .as_deref()
+                .map(|configured| {
+                    resolve_command(
+                        Some(configured),
+                        "openhands.local_server.command",
+                        Vec::new(),
+                    )
+                })
+                .transpose()?,
             startup_timeout_ms: resolve_positive_u64(
                 openhands.local_server.startup_timeout_ms.as_ref(),
                 "openhands.local_server.startup_timeout_ms",
@@ -359,7 +366,6 @@ fn resolve_openhands_conversation<E: Environment>(
         Some(policy) => resolve_openhands_confirmation_policy(policy)?,
         None => OpenHandsConfirmationPolicy {
             kind: DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND.to_owned(),
-            options: BTreeMap::new(),
         },
     };
 
@@ -403,6 +409,21 @@ fn resolve_openhands_conversation<E: Environment>(
 fn resolve_openhands_confirmation_policy(
     policy: OpenHandsConfirmationPolicyFrontMatter,
 ) -> Result<OpenHandsConfirmationPolicy, WorkflowConfigError> {
+    if !policy.options.is_empty() {
+        let unsupported = policy
+            .options
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.confirmation_policy",
+            message: format!(
+                "unsupported options cannot be forwarded to the current OpenHands request subset: {unsupported}"
+            ),
+        });
+    }
+
     let kind = match policy.kind.as_deref() {
         Some(kind) => {
             normalize_optional(kind).ok_or_else(|| WorkflowConfigError::InvalidField {
@@ -413,10 +434,7 @@ fn resolve_openhands_confirmation_policy(
         None => DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND.to_owned(),
     };
 
-    Ok(OpenHandsConfirmationPolicy {
-        kind,
-        options: policy.options,
-    })
+    Ok(OpenHandsConfirmationPolicy { kind })
 }
 
 fn resolve_openhands_agent<E: Environment>(

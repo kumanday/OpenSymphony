@@ -236,6 +236,31 @@ codex:
     }
 
     #[test]
+    fn resolves_checked_in_target_repo_workflow() {
+        let repo_root = repo_root();
+        let workflow =
+            WorkflowDefinition::load_from_path(repo_root.join("examples/target-repo/WORKFLOW.md"))
+                .expect("bundled target repo workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(&repo_root.join("examples/target-repo"), &env)
+            .expect("bundled target repo workflow should resolve");
+
+        assert!(matches!(resolved.config.tracker.kind, TrackerKind::Linear));
+        assert_eq!(resolved.config.tracker.project_slug, "sample-project");
+        assert_eq!(
+            resolved.config.tracker.active_states,
+            vec!["Todo".to_string(), "In Progress".to_string()]
+        );
+        assert_eq!(
+            resolved.config.tracker.terminal_states,
+            vec!["Done".to_string()]
+        );
+        assert_eq!(resolved.extensions.openhands.local_server.command, None);
+    }
+
+    #[test]
     fn reports_missing_workflow_file() {
         let path = Path::new("/definitely/missing/WORKFLOW.md");
         let error = WorkflowDefinition::load_from_path(path)
@@ -248,7 +273,7 @@ codex:
     }
 
     #[test]
-    fn resolves_default_openhands_launcher_from_checkout_root_for_target_repos() {
+    fn leaves_openhands_local_server_command_unset_when_omitted() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -264,19 +289,12 @@ tracker:
         )
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
-        let repo_root = repo_root();
 
         let resolved = workflow
-            .resolve(&repo_root.join("examples/target-repo"), &env)
+            .resolve(Path::new("/repo/target"), &env)
             .expect("workflow should resolve");
 
-        assert_eq!(
-            resolved.extensions.openhands.local_server.command,
-            vec![repo_root
-                .join("tools/openhands-server/run-local.sh")
-                .to_string_lossy()
-                .into_owned()]
-        );
+        assert_eq!(resolved.extensions.openhands.local_server.command, None);
     }
 
     #[test]
@@ -335,13 +353,7 @@ tracker:
             resolved.extensions.openhands.transport.base_url,
             DEFAULT_OPENHANDS_BASE_URL
         );
-        assert_eq!(
-            resolved.extensions.openhands.local_server.command,
-            vec![repo_root()
-                .join("tools/openhands-server/run-local.sh")
-                .to_string_lossy()
-                .into_owned()]
-        );
+        assert_eq!(resolved.extensions.openhands.local_server.command, None);
         assert_eq!(
             resolved
                 .extensions
@@ -378,6 +390,46 @@ tracker:
         assert_eq!(
             resolved.extensions.openhands.websocket.query_param_name,
             DEFAULT_OPENHANDS_QUERY_PARAM_NAME
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_openhands_local_server_command() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    command:
+      - bash
+      - ./scripts/run-openhands.sh
+      - --port
+      - "9000"
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+
+        assert_eq!(
+            resolved.extensions.openhands.local_server.command,
+            Some(vec![
+                "bash".to_string(),
+                "./scripts/run-openhands.sh".to_string(),
+                "--port".to_string(),
+                "9000".to_string(),
+            ])
         );
     }
 
@@ -593,8 +645,7 @@ tracker:
     - Done
 openhands:
   conversation:
-    confirmation_policy:
-      max_budget_usd: 5
+    confirmation_policy: {}
 ---
 {{ issue.identifier }}
 "#,
@@ -621,10 +672,44 @@ openhands:
                 .openhands
                 .conversation
                 .confirmation_policy
-                .options
-                .get("max_budget_usd"),
-            Some(&serde_yaml::Value::Number(5.into()))
+                .kind,
+            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND
         );
+    }
+
+    #[test]
+    fn rejects_confirmation_policy_options_that_cannot_reach_runtime() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    confirmation_policy:
+      max_budget_usd: 5
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported confirmation policy options should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.confirmation_policy",
+                ..
+            }
+        ));
     }
 
     #[test]
