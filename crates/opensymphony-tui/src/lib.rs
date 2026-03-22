@@ -17,6 +17,10 @@ use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotE
 use thiserror::Error;
 use url::Url;
 
+const CONTROL_PLANE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_PLANE_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+const CONTROL_PLANE_RETRY_DELAY: Duration = Duration::from_millis(750);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiState {
     pub focus: FocusPane,
@@ -503,8 +507,12 @@ fn spawn_bridge(base_url: Url, bridge: Arc<Mutex<BridgeMailbox>>) {
         };
 
         runtime.block_on(async move {
-            let retry_delay = Duration::from_millis(750);
-            let client = ControlPlaneClient::new(base_url);
+            let retry_delay = CONTROL_PLANE_RETRY_DELAY;
+            let client = ControlPlaneClient::with_timeouts(
+                base_url,
+                CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+                CONTROL_PLANE_STREAM_IDLE_TIMEOUT,
+            );
             loop {
                 match client.fetch_snapshot().await {
                     Ok(snapshot) => {

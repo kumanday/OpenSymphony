@@ -156,3 +156,58 @@ async fn fetch_snapshot_times_out_when_snapshot_endpoint_hangs() {
 
     server_task.abort();
 }
+
+#[tokio::test]
+async fn stream_updates_times_out_when_event_stream_goes_idle() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should expose an address");
+    let server = ControlPlaneServer::new(store);
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("control-plane server should run");
+    });
+
+    let client = ControlPlaneClient::with_timeouts(
+        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+    );
+    let mut stream = client
+        .stream_updates()
+        .expect("client should open the update stream");
+
+    let initial = stream
+        .next()
+        .await
+        .expect("stream should yield the bootstrap snapshot")
+        .expect("bootstrap snapshot should decode");
+    assert_eq!(initial.sequence, 1);
+
+    let started = tokio::time::Instant::now();
+    let error = stream
+        .next()
+        .await
+        .expect("idle stream should surface a timeout error")
+        .expect_err("idle stream should not decode as a snapshot");
+
+    match error {
+        ControlPlaneClientError::Stream(source) => {
+            assert!(matches!(
+                source.as_ref(),
+                reqwest_eventsource::Error::Transport(transport) if transport.is_timeout()
+            ));
+        }
+        other => panic!("expected stream timeout error, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    stream.close();
+    server_task.abort();
+}
