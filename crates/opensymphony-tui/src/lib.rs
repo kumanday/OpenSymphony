@@ -12,7 +12,9 @@ use ftui::{
     runtime::{Every, Subscription},
     widgets::{Widget, paragraph::Paragraph},
 };
-use opensymphony_control::{ControlPlaneClient, ControlPlaneClientError, log_stream_error};
+use opensymphony_control::{
+    ControlPlaneClient, ControlPlaneClientError, ControlPlaneStreamUpdate, log_stream_error,
+};
 use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope};
 use thiserror::Error;
 use url::Url;
@@ -584,8 +586,8 @@ fn spawn_bridge(base_url: Url, bridge: Arc<Mutex<BridgeMailbox>>) {
                 let mut should_retry = false;
                 while let Some(update) = stream.next().await {
                     match update {
-                        Ok(snapshot) => {
-                            push_snapshot(&bridge, snapshot);
+                        Ok(stream_update) => {
+                            handle_stream_update(&bridge, stream_update);
                         }
                         Err(error) => {
                             handle_bridge_error(&bridge, &error);
@@ -655,6 +657,13 @@ pub enum TuiError {
 fn handle_bridge_error(bridge: &Arc<Mutex<BridgeMailbox>>, error: &ControlPlaneClientError) {
     log_stream_error(error);
     push_connection_loss(bridge, error.to_string());
+}
+
+fn handle_stream_update(bridge: &Arc<Mutex<BridgeMailbox>>, update: ControlPlaneStreamUpdate) {
+    match update {
+        ControlPlaneStreamUpdate::Snapshot(snapshot) => push_snapshot(bridge, snapshot),
+        ControlPlaneStreamUpdate::Reconnecting(error) => handle_bridge_error(bridge, &error),
+    }
 }
 
 fn format_timestamp(timestamp: DateTime<Utc>) -> String {
@@ -889,6 +898,7 @@ mod tests {
         stacked_section_layout,
     };
     use chrono::{TimeZone, Utc};
+    use opensymphony_control::{ControlPlaneClientError, ControlPlaneStreamUpdate};
     use opensymphony_domain::{
         AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
         IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope,
@@ -1078,6 +1088,59 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             ScriptedExitOutcome::Succeeded
+        );
+    }
+
+    #[test]
+    fn retrying_stream_update_marks_state_reconnecting_until_next_snapshot() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let mut state = TuiState::default();
+
+        super::handle_stream_update(&bridge, ControlPlaneStreamUpdate::Snapshot(fixture(1)));
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while let Some(action) = mailbox.take_action() {
+                state.reduce(action);
+            }
+        }
+        assert_eq!(state.connection, ConnectionState::Live);
+
+        super::handle_stream_update(
+            &bridge,
+            ControlPlaneStreamUpdate::Reconnecting(ControlPlaneClientError::StreamConnectTimeout(
+                Duration::from_millis(50),
+            )),
+        );
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while let Some(action) = mailbox.take_action() {
+                state.reduce(action);
+            }
+        }
+        assert!(matches!(state.connection, ConnectionState::Reconnecting(_)));
+        assert!(state.status_line.contains("reconnecting after:"));
+
+        super::handle_stream_update(&bridge, ControlPlaneStreamUpdate::Snapshot(fixture(2)));
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while let Some(action) = mailbox.take_action() {
+                state.reduce(action);
+            }
+        }
+        assert_eq!(state.connection, ConnectionState::Live);
+        assert_eq!(state.status_line, "live control-plane stream");
+        assert_eq!(
+            state
+                .latest_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.snapshot.issues.len()),
+            Some(2)
         );
     }
 

@@ -54,7 +54,7 @@ Available today:
   - `GET /api/v1/events` as an SSE update stream
 - a FrankenTUI client that:
   - fetches the initial snapshot over HTTP
-  - reconnects to the SSE stream after disconnects or stalled reads
+  - reconnects to the SSE stream after disconnects or stalled reads, surfacing reconnecting state while retryable SSE errors are in flight
   - renders focused issue/workspace detail plus recent event or metrics panes in inline mode
   - shows reducer-owned connection status plus the active focus pane in the header and pane headers for keyboard-driven navigation
 - a small `opensymphony-cli` demo path so the control plane and UI can be validated without coupling the TUI to orchestrator internals

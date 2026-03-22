@@ -139,9 +139,10 @@ Current implemented checks:
 - control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane bootstrap snapshot timeout coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane SSE connect-establishment timeout coverage in `opensymphony-control/tests/control_plane.rs`
-- control-plane idle SSE timeout coverage in `opensymphony-control/tests/control_plane.rs`
+- control-plane idle SSE timeout coverage in `opensymphony-control/tests/control_plane.rs`, including retry-in-place reconnect signaling
+- control-plane post-disconnect reconnect-timeout reapplication coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane monotonic lag-recovery coverage in `opensymphony-control/src/lib.rs`
-- TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, and disconnect retention coverage in `opensymphony-tui`
+- TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, disconnect retention, and reconnect-to-live recovery coverage in `opensymphony-tui`
 
 ## 4. Fake OpenHands server requirements
 
@@ -236,7 +237,9 @@ that the TUI does not report `live control-plane stream` until the SSE stream
 has actually begun delivering updates. Also confirm that a hung
 `/api/v1/snapshot` request times out instead of stalling the bridge forever,
 that a never-established `/api/v1/events` attach times out back into reconnect,
-that an idle `/api/v1/events` read also times out back into reconnect, and
+that an idle `/api/v1/events` read also flips the bridge into reconnecting
+while the event-source retry stays in flight, that a later blackholed reopen
+is still bounded by the attach timeout, and
 that additive `recent_events[].kind` values still decode into a usable snapshot
 for the UI. For scripted smoke coverage, also confirm that an unreachable
 control plane causes `opensymphony tui --exit-after-ms ...` to exit non-zero.

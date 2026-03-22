@@ -3,12 +3,14 @@ use std::time::Duration;
 use axum::{Json, Router, routing::get};
 use chrono::{TimeZone, Utc};
 use opensymphony_control::{
-    ControlPlaneClient, ControlPlaneClientError, ControlPlaneServer, SnapshotStore,
+    ControlPlaneClient, ControlPlaneClientError, ControlPlaneServer, ControlPlaneStreamUpdate,
+    SnapshotStore,
 };
 use opensymphony_domain::{
     AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot,
     MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope, WorkerOutcome,
 };
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -102,20 +104,26 @@ async fn serves_snapshot_and_streams_updates() {
     let mut stream = client
         .stream_updates()
         .expect("client should open the update stream");
-    let initial: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
+    let initial = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
         .expect("initial stream event should arrive")
         .expect("stream should not end before the initial snapshot")
         .expect("initial stream event should decode");
+    let ControlPlaneStreamUpdate::Snapshot(initial) = initial else {
+        panic!("expected initial snapshot update");
+    };
     assert_eq!(initial.sequence, 1);
 
     let expected = store.publish(fixture_snapshot(1)).await;
 
-    let streamed: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
+    let streamed = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
         .expect("streamed update should arrive")
         .expect("stream should stay open for the published update")
         .expect("streamed update should decode");
+    let ControlPlaneStreamUpdate::Snapshot(streamed) = streamed else {
+        panic!("expected streamed snapshot update");
+    };
 
     assert_eq!(streamed.sequence, expected.sequence);
     assert_eq!(
@@ -242,23 +250,110 @@ async fn stream_updates_times_out_when_event_stream_goes_idle() {
         .await
         .expect("stream should yield the bootstrap snapshot")
         .expect("bootstrap snapshot should decode");
+    let ControlPlaneStreamUpdate::Snapshot(initial) = initial else {
+        panic!("expected bootstrap snapshot update");
+    };
     assert_eq!(initial.sequence, 1);
 
     let started = tokio::time::Instant::now();
-    let error = stream
+    let retrying = stream
         .next()
         .await
-        .expect("idle stream should surface a timeout error")
-        .expect_err("idle stream should not decode as a snapshot");
+        .expect("idle stream should surface retrying state")
+        .expect("idle timeout should remain inside the same stream");
 
-    match error {
-        ControlPlaneClientError::Stream(source) => {
+    match retrying {
+        ControlPlaneStreamUpdate::Reconnecting(ControlPlaneClientError::Stream(source)) => {
             assert!(matches!(
                 source.as_ref(),
                 reqwest_eventsource::Error::Transport(transport) if transport.is_timeout()
             ));
         }
-        other => panic!("expected stream timeout error, got {other:?}"),
+        other => panic!("expected retrying timeout update, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    stream.close();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn stream_updates_surfaces_retrying_state_and_reapplies_connect_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should expose an address");
+    let bootstrap = SnapshotEnvelope {
+        sequence: 1,
+        published_at: Utc::now(),
+        snapshot: fixture_snapshot(0),
+    };
+    let payload = serde_json::to_string(&bootstrap).expect("bootstrap payload should encode");
+    let server_task = tokio::spawn(async move {
+        let (mut first, _) = listener
+            .accept()
+            .await
+            .expect("client should connect for the initial stream");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\nevent: snapshot\r\nid: 1\r\ndata: {payload}\r\n\r\n"
+        );
+        first
+            .write_all(response.as_bytes())
+            .await
+            .expect("first SSE response should write");
+        drop(first);
+
+        let (_second, _) = listener
+            .accept()
+            .await
+            .expect("client should reconnect after the stream error");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let client = ControlPlaneClient::with_timeouts(
+        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
+        Duration::from_secs(5),
+        Duration::from_millis(400),
+        Duration::from_secs(5),
+    );
+    let mut stream = client
+        .stream_updates()
+        .expect("client should open the update stream");
+
+    let initial = stream
+        .next()
+        .await
+        .expect("stream should yield the bootstrap snapshot")
+        .expect("bootstrap snapshot should decode");
+    let ControlPlaneStreamUpdate::Snapshot(initial) = initial else {
+        panic!("expected bootstrap snapshot update");
+    };
+    assert_eq!(initial.sequence, 1);
+
+    let retrying = stream
+        .next()
+        .await
+        .expect("stream should surface retrying state after the broken connection")
+        .expect("retrying state should stay inside the same stream");
+    match retrying {
+        ControlPlaneStreamUpdate::Reconnecting(ControlPlaneClientError::Stream(_)) => {}
+        other => panic!("expected retrying stream error, got {other:?}"),
+    }
+
+    let started = tokio::time::Instant::now();
+    let error = stream
+        .next()
+        .await
+        .expect("reconnect attach should surface a timeout error")
+        .expect_err("blackholed reconnect should not decode as a snapshot");
+
+    match error {
+        ControlPlaneClientError::StreamConnectTimeout(timeout) => {
+            assert_eq!(timeout, Duration::from_millis(400));
+        }
+        other => panic!("expected reconnect attach timeout, got {other:?}"),
     }
     assert!(started.elapsed() < Duration::from_secs(1));
 

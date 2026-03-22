@@ -120,7 +120,10 @@ and bootstrap snapshot fetches should fail fast enough that reconnect logic can
 retry instead of wedging the UI behind a hung HTTP request. SSE subscriptions
 should also use bounded connection-establishment and read timeouts so a
 blackholed or stalled `/api/v1/events` connection fails back into reconnect,
-while normal keepalive traffic keeps healthy idle streams attached.
+while normal keepalive traffic keeps healthy idle streams attached. Retryable
+SSE transport failures should surface a reconnecting state to the UI before the
+next successful snapshot arrives, and the attach-timeout guard must reapply
+after those failures so a later blackholed reopen cannot wedge the bridge.
 
 ## 4. Runtime component model
 

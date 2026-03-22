@@ -10,7 +10,7 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use opensymphony_domain::{DaemonSnapshot, DaemonState, SnapshotEnvelope};
-use reqwest_eventsource::{Event as EventSourceEvent, EventSource};
+use reqwest_eventsource::{Event as EventSourceEvent, EventSource, ReadyState};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -274,8 +274,16 @@ pub struct ControlPlaneEventStream {
     observed_open: bool,
 }
 
+#[derive(Debug)]
+pub enum ControlPlaneStreamUpdate {
+    Snapshot(SnapshotEnvelope),
+    Reconnecting(ControlPlaneClientError),
+}
+
 impl ControlPlaneEventStream {
-    pub async fn next(&mut self) -> Option<Result<SnapshotEnvelope, ControlPlaneClientError>> {
+    pub async fn next(
+        &mut self,
+    ) -> Option<Result<ControlPlaneStreamUpdate, ControlPlaneClientError>> {
         loop {
             let event = if self.observed_open {
                 match self.inner.next().await {
@@ -302,10 +310,20 @@ impl ControlPlaneEventStream {
                     self.observed_open = true;
                     return Some(
                         serde_json::from_str(&message.data)
+                            .map(ControlPlaneStreamUpdate::Snapshot)
                             .map_err(ControlPlaneClientError::Decode),
                     );
                 }
-                Err(error) => return Some(Err(ControlPlaneClientError::Stream(Box::new(error)))),
+                Err(error) if self.inner.ready_state() == ReadyState::Connecting => {
+                    self.observed_open = false;
+                    return Some(Ok(ControlPlaneStreamUpdate::Reconnecting(
+                        ControlPlaneClientError::Stream(Box::new(error)),
+                    )));
+                }
+                Err(error) => {
+                    self.observed_open = false;
+                    return Some(Err(ControlPlaneClientError::Stream(Box::new(error))));
+                }
             }
         }
     }
