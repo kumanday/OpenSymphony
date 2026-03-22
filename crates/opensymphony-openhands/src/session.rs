@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::time::{Instant, timeout, timeout_at};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -667,8 +668,14 @@ impl IssueSessionRunner {
                 }
             }
         }
-        if prepared_turn.waited_for_prior_turn || had_run_conflict {
-            let _ = active_session.stream.reconcile_events().await;
+        if (prepared_turn.waited_for_prior_turn || had_run_conflict)
+            && let Err(error) = active_session.stream.reconcile_events().await
+        {
+            debug!(
+                %error,
+                conversation_id = %active_session.manifest.conversation_id,
+                "post-conflict reconcile failed, proceeding anyway"
+            );
         }
 
         run_manifest.status = RunStatus::Running;
@@ -956,7 +963,14 @@ impl IssueSessionRunner {
         let request =
             match build_conversation_create_request(workflow, workspace, Some(conversation_id)) {
                 Ok(request) => request,
-                Err(_) => return Ok(None),
+                Err(error) => {
+                    debug!(
+                        %error,
+                        %conversation_id,
+                        "skipping session rehydrate because create request construction failed"
+                    );
+                    return Ok(None);
+                }
             };
         workspace_manager
             .write_json_artifact(
@@ -968,9 +982,21 @@ impl IssueSessionRunner {
 
         let conversation = match self.client.create_conversation(&request).await {
             Ok(conversation) => conversation,
-            Err(_) => return Ok(None),
+            Err(error) => {
+                debug!(
+                    %error,
+                    %conversation_id,
+                    "skipping session rehydrate because conversation recreation failed"
+                );
+                return Ok(None);
+            }
         };
         if conversation.conversation_id != conversation_id {
+            debug!(
+                %conversation_id,
+                recreated_conversation_id = %conversation.conversation_id,
+                "skipping session rehydrate because recreated conversation id changed"
+            );
             return Ok(None);
         }
 
@@ -980,9 +1006,20 @@ impl IssueSessionRunner {
             .await
         {
             Ok(stream) => stream,
-            Err(_) => return Ok(None),
+            Err(error) => {
+                debug!(
+                    %error,
+                    %conversation_id,
+                    "skipping session rehydrate because runtime stream attach failed"
+                );
+                return Ok(None);
+            }
         };
         if !stream_has_persisted_history(&stream) {
+            debug!(
+                %conversation_id,
+                "skipping session rehydrate because recreated conversation has no persisted history"
+            );
             return Ok(None);
         }
 
@@ -1404,6 +1441,8 @@ fn turn_has_stopped(status: &str) -> bool {
 }
 
 fn stream_has_persisted_history(stream: &RuntimeEventStream) -> bool {
+    // Fresh conversations emit only the initial state snapshot, while rehydrated
+    // conversations replay that snapshot plus prior history.
     stream.event_cache().items().len() > 1
 }
 
