@@ -1094,7 +1094,20 @@ async fn wait_for_probe_terminal_state(
 
         let next_event = timeout_at(deadline, stream.poll_next_event_once())
             .await
-            .map_err(|_| OpenHandsError::ProbeActivityTimeout(wait_timeout))??;
+            .map_err(|_| OpenHandsError::ProbeActivityTimeout(wait_timeout))?;
+        let next_event = match next_event {
+            Ok(next_event) => next_event,
+            Err(error) => match stream.state_mirror().terminal_status() {
+                Some(TerminalExecutionStatus::Finished) => return Ok(()),
+                Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                    return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                        "terminal execution_status `{}`",
+                        stream.state_mirror().execution_status().unwrap_or_default()
+                    )));
+                }
+                None => return Err(error),
+            },
+        };
         let Some(event) = next_event else {
             continue;
         };

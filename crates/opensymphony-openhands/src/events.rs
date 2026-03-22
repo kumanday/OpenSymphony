@@ -1,6 +1,6 @@
 use std::{cmp::Ordering, collections::HashSet};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::models::{Conversation, ConversationStateUpdatePayload, EventEnvelope};
 
@@ -58,7 +58,13 @@ fn unknown_event(event: &EventEnvelope) -> UnknownEvent {
 
 fn decode_state_update(event: &EventEnvelope) -> Option<ConversationStateUpdatePayload> {
     if !event.payload.is_null() && event.payload != Value::Object(Default::default()) {
-        return serde_json::from_value(event.payload.clone()).ok();
+        if let Ok(payload) = serde_json::from_value(event.payload.clone()) {
+            return Some(payload);
+        }
+
+        if let Some(payload) = decode_forward_compatible_state_update(&event.payload) {
+            return Some(payload);
+        }
     }
 
     let key = event.key.as_deref()?;
@@ -84,6 +90,37 @@ fn decode_state_update(event: &EventEnvelope) -> Option<ConversationStateUpdateP
             }),
         }),
     }
+}
+
+fn decode_forward_compatible_state_update(
+    payload: &Value,
+) -> Option<ConversationStateUpdatePayload> {
+    let state_delta = payload.get("state_delta").cloned().or_else(|| {
+        payload
+            .get("execution_status")
+            .and_then(Value::as_str)
+            .map(|status| {
+                json!({
+                    "execution_status": status,
+                })
+            })
+    })?;
+
+    let execution_status = payload
+        .get("execution_status")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            state_delta
+                .get("execution_status")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        });
+
+    Some(ConversationStateUpdatePayload {
+        execution_status,
+        state_delta,
+    })
 }
 
 #[derive(Debug, Clone, Default)]
