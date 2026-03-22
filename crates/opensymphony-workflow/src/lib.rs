@@ -105,10 +105,11 @@ mod tests {
         model::{
             DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
             DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_BASE_URL,
-            DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
-            DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
-            DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_PROMPT_TEMPLATE,
-            DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT,
+            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
+            DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+            DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+            DEFAULT_POLL_INTERVAL_MS, DEFAULT_PROMPT_TEMPLATE, DEFAULT_STALL_TIMEOUT_MS,
+            DEFAULT_WORKSPACE_ROOT,
         },
         PromptTemplateError, TrackerKind, WorkflowConfigError, WorkflowDefinition,
         WorkflowLoadError,
@@ -196,6 +197,45 @@ openhadns:
     }
 
     #[test]
+    fn accepts_repo_codex_namespace() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+codex:
+  command: codex app-server
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("codex namespace should be accepted");
+
+        assert_eq!(
+            workflow
+                .front_matter
+                .codex
+                .as_ref()
+                .and_then(|codex| codex.get("command")),
+            Some(&serde_yaml::Value::String("codex app-server".to_owned()))
+        );
+    }
+
+    #[test]
+    fn loads_checked_in_workflows() {
+        let repo_root = repo_root();
+
+        WorkflowDefinition::load_from_path(repo_root.join("WORKFLOW.md"))
+            .expect("repo root workflow should parse");
+        WorkflowDefinition::load_from_path(repo_root.join("examples/target-repo/WORKFLOW.md"))
+            .expect("bundled target repo workflow should parse");
+    }
+
+    #[test]
     fn reports_missing_workflow_file() {
         let path = Path::new("/definitely/missing/WORKFLOW.md");
         let error = WorkflowDefinition::load_from_path(path)
@@ -264,12 +304,29 @@ tracker:
             DEFAULT_OPENHANDS_BASE_URL
         );
         assert_eq!(
+            resolved.extensions.openhands.local_server.command,
+            vec!["tools/openhands-server/run-local.sh".to_owned()]
+        );
+        assert_eq!(
             resolved
                 .extensions
                 .openhands
                 .conversation
                 .persistence_dir_relative,
             PathBuf::from(DEFAULT_OPENHANDS_PERSISTENCE_DIR)
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .confirmation_policy
+                .kind,
+            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND
+        );
+        assert_eq!(
+            resolved.extensions.openhands.conversation.agent.kind,
+            "Agent"
         );
         assert_eq!(
             resolved.extensions.openhands.websocket.ready_timeout_ms,
@@ -399,14 +456,16 @@ openhands:
                 .openhands
                 .conversation
                 .agent
-                .as_ref()
-                .expect("agent config should exist")
                 .llm
                 .as_ref()
                 .expect("llm config should exist")
                 .model
                 .as_deref(),
             Some("gpt-4.1-mini")
+        );
+        assert_eq!(
+            resolved.extensions.openhands.conversation.agent.kind,
+            "Agent"
         );
     }
 
@@ -806,5 +865,14 @@ openhands:
 
 Ticket: {{ issue.identifier }}
 "#
+    }
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate dir should have workspace parent")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
     }
 }

@@ -19,6 +19,8 @@ pub const DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_READINESS_PROBE_PATH: &str = "/openapi.json";
 pub const DEFAULT_OPENHANDS_PERSISTENCE_DIR: &str = ".opensymphony/openhands";
 pub const DEFAULT_OPENHANDS_MAX_ITERATIONS: u64 = 500;
+pub const DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND: &str = "NeverConfirm";
+pub const DEFAULT_OPENHANDS_AGENT_KIND: &str = "Agent";
 pub const DEFAULT_OPENHANDS_READY_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS: u64 = 1_000;
 pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
@@ -26,15 +28,7 @@ pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 
 pub fn default_openhands_local_server_command() -> Vec<String> {
-    vec![
-        "python".to_owned(),
-        "-m".to_owned(),
-        "openhands.agent_server".to_owned(),
-        "--host".to_owned(),
-        "127.0.0.1".to_owned(),
-        "--port".to_owned(),
-        "8000".to_owned(),
-    ]
+    vec!["tools/openhands-server/run-local.sh".to_owned()]
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +51,8 @@ pub struct WorkflowFrontMatter {
     pub agent: AgentFrontMatter,
     #[serde(default)]
     pub openhands: OpenHandsFrontMatter,
+    #[serde(default)]
+    pub codex: Option<BTreeMap<String, serde_yaml::Value>>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, serde_yaml::Value>,
 }
@@ -298,13 +294,13 @@ pub struct OpenHandsConversationConfig {
     pub persistence_dir_relative: PathBuf,
     pub max_iterations: u64,
     pub stuck_detection: bool,
-    pub confirmation_policy: Option<OpenHandsConfirmationPolicy>,
-    pub agent: Option<OpenHandsConversationAgentConfig>,
+    pub confirmation_policy: OpenHandsConfirmationPolicy,
+    pub agent: OpenHandsConversationAgentConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenHandsConversationAgentConfig {
-    pub kind: Option<String>,
+    pub kind: String,
     pub llm: Option<OpenHandsLlmConfig>,
     pub log_completions: bool,
     pub options: BTreeMap<String, serde_yaml::Value>,

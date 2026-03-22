@@ -84,6 +84,7 @@ Current implementation:
 ## 3.1 Workflow and config
 
 - parse valid `WORKFLOW.md`
+- parse the checked-in repository and example `WORKFLOW.md` files
 - fail on invalid front matter
 - fail on unknown top-level workflow namespaces
 - fail on unknown template variables
@@ -95,6 +96,8 @@ Current implementation:
 - resolve bare relative workspace roots against the `WORKFLOW.md` directory
 - reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
+- default `openhands.local_server.command` to the pinned `tools/openhands-server/run-local.sh` launcher
+- default required OpenHands conversation request fields such as `confirmation_policy` and `agent`
 - fail on malformed `agent.max_concurrent_agents_by_state` entries
 - preserve the Markdown body exactly after the front matter terminator
 
