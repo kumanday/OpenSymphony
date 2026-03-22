@@ -58,7 +58,11 @@ impl WorkspaceManager {
         let workspace_key = sanitize_workspace_key(&issue.identifier)?;
         let workspace_path = crate::workspace_path_for_root(&canonical_root, &issue.identifier)?;
 
+        self.reject_symlinked_workspace_root(&workspace_path)
+            .await?;
         self.create_directory(&workspace_path).await?;
+        self.reject_symlinked_workspace_root(&workspace_path)
+            .await?;
         let canonical_workspace = self.canonicalize_path(&workspace_path).await?;
         ensure_descendant(&canonical_root, &canonical_workspace)?;
 
@@ -331,13 +335,7 @@ impl WorkspaceManager {
             Ok(manifest) => Ok(classify_issue_manifest_ownership(
                 issue, workspace, manifest,
             )),
-            Err(_) if !self.bootstrap_layout_exists(workspace).await? => {
-                Ok(ExistingIssueManifestState::ForeignArtifact)
-            }
-            Err(error) => Err(WorkspaceError::DecodeManifest {
-                path,
-                source: error,
-            }),
+            Err(_) => Ok(ExistingIssueManifestState::ForeignArtifact),
         }
     }
 
@@ -557,40 +555,11 @@ impl WorkspaceManager {
         &self,
         workspace: &WorkspaceHandle,
     ) -> Result<(), WorkspaceError> {
+        self.reject_symlinked_workspace_root(workspace.workspace_path())
+            .await?;
         let canonical_root = self.canonicalize_path(&self.config.root).await?;
         let canonical_workspace = self.canonicalize_path(workspace.workspace_path()).await?;
         ensure_descendant(&canonical_root, &canonical_workspace)
-    }
-
-    async fn bootstrap_layout_exists(
-        &self,
-        workspace: &WorkspaceHandle,
-    ) -> Result<bool, WorkspaceError> {
-        for directory in [
-            workspace.metadata_dir(),
-            workspace.logs_dir(),
-            workspace.generated_dir(),
-            workspace.openhands_dir(),
-            workspace.prompts_dir(),
-            workspace.runs_dir(),
-        ] {
-            let path = self
-                .validate_managed_metadata_path(workspace, &directory)
-                .await?;
-            match fs::metadata(&path).await {
-                Ok(metadata) if metadata.is_dir() => {}
-                Ok(_) => return Ok(false),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-                Err(error) => {
-                    return Err(WorkspaceError::Canonicalize {
-                        path,
-                        source: error,
-                    });
-                }
-            }
-        }
-
-        Ok(true)
     }
 
     async fn create_directory(&self, path: &Path) -> Result<(), WorkspaceError> {
@@ -621,6 +590,22 @@ impl WorkspaceManager {
                 path: path.to_path_buf(),
                 source: error,
             })
+    }
+
+    async fn reject_symlinked_workspace_root(&self, path: &Path) -> Result<(), WorkspaceError> {
+        match fs::symlink_metadata(path).await {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                Err(WorkspaceError::WorkspacePathSymlink {
+                    path: path.to_path_buf(),
+                })
+            }
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(WorkspaceError::Canonicalize {
+                path: path.to_path_buf(),
+                source: error,
+            }),
+        }
     }
 
     async fn load_manifest<T>(

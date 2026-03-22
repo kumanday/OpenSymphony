@@ -280,6 +280,75 @@ async fn ensure_retries_after_create_when_foreign_issue_manifest_preexists() {
 }
 
 #[tokio::test]
+async fn ensure_retries_after_create_when_copied_malformed_issue_manifest_preexists() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            after_create: Some(HookDefinition::shell(after_create_retry_command())),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-263-malformed-manifest");
+
+    manager
+        .ensure(&issue)
+        .await
+        .expect_err("first ensure should fail its after_create hook");
+
+    let workspace_path = manager
+        .workspace_path_for(&issue.identifier)
+        .expect("workspace path should resolve");
+    let metadata_dir = workspace_path.join(".opensymphony");
+    for directory in [
+        metadata_dir.clone(),
+        metadata_dir.join("logs"),
+        metadata_dir.join("generated"),
+        metadata_dir.join("openhands"),
+        metadata_dir.join("prompts"),
+        metadata_dir.join("runs"),
+    ] {
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .expect("bootstrap directory should exist");
+    }
+    tokio::fs::write(metadata_dir.join("issue.json"), "{")
+        .await
+        .expect("malformed issue manifest should be written");
+
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("second ensure should retry after_create and succeed");
+
+    assert!(ensured.created);
+    assert_eq!(
+        tokio::fs::read_to_string(
+            ensured
+                .handle
+                .workspace_path()
+                .join("after_create_success.txt")
+        )
+        .await
+        .expect("after_create should succeed on retry")
+        .trim(),
+        "success"
+    );
+    assert_eq!(
+        manager
+            .load_issue_manifest(&ensured.handle)
+            .await
+            .expect("issue manifest should load")
+            .expect("issue manifest should exist")
+            .issue_id,
+        issue.issue_id
+    );
+}
+
+#[tokio::test]
 async fn ensure_rejects_workspace_reuse_for_colliding_sanitized_key() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let workspace_root = temp_dir.path().join("workspaces");
@@ -606,6 +675,49 @@ async fn hook_cwd_override_cannot_escape_workspace() {
             ..
         }
     ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn workspace_handle_validation_rejects_symlinked_workspace_roots() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let first = manager
+        .ensure(&sample_issue("COE-263-root-symlink-a"))
+        .await
+        .expect("first workspace should exist");
+    let second = manager
+        .ensure(&sample_issue("COE-263-root-symlink-b"))
+        .await
+        .expect("second workspace should exist");
+
+    tokio::fs::remove_dir_all(first.handle.workspace_path())
+        .await
+        .expect("first workspace should be removable");
+    symlink(
+        second.handle.workspace_path(),
+        first.handle.workspace_path(),
+    )
+    .expect("workspace root symlink should be created");
+
+    let error = manager
+        .start_run(&first.handle, &RunDescriptor::new("run-root-symlink", 1))
+        .await
+        .expect_err("symlinked workspace root should be rejected");
+    assert!(matches!(
+        error,
+        WorkspaceError::WorkspacePathSymlink { ref path }
+            if path == first.handle.workspace_path()
+    ));
+    assert!(!tokio::fs::try_exists(second.handle.run_manifest_path())
+        .await
+        .expect("run manifest lookup should succeed"));
 }
 
 #[cfg(unix)]
