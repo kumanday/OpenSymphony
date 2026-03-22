@@ -94,6 +94,8 @@ impl LinearClient {
         if config.retry_policy.max_backoff < config.retry_policy.initial_backoff {
             config.retry_policy.max_backoff = config.retry_policy.initial_backoff;
         }
+        config.project_slug =
+            normalize_required_string("tracker.project_slug", &config.project_slug)?;
         config.active_states =
             normalize_required_state_names("tracker.active_states", &config.active_states)?;
         config.terminal_states =
@@ -265,14 +267,14 @@ impl LinearClient {
             "query": query,
             "variables": variables,
         });
-        let authorization = format!("Bearer {}", self.config.api_key);
+        let authorization = self.config.api_key.as_str();
         let mut attempt = 1;
 
         loop {
             let response = self
                 .http
                 .post(&self.config.base_url)
-                .header(AUTHORIZATION, authorization.as_str())
+                .header(AUTHORIZATION, authorization)
                 .header(CONTENT_TYPE, "application/json")
                 .header(ACCEPT, "application/json")
                 .json(&body)
@@ -450,6 +452,17 @@ where
         )))
     } else {
         Ok(normalized)
+    }
+}
+
+fn normalize_required_string(field_name: &str, value: &str) -> Result<String, LinearError> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        Err(LinearError::InvalidConfiguration(format!(
+            "workflow {field_name} must be a non-empty string"
+        )))
+    } else {
+        Ok(normalized.to_string())
     }
 }
 
