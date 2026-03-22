@@ -3,9 +3,7 @@ name = "opensymphony-control"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
 repository.workspace = true
-rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
@@ -18,6 +16,7 @@ async-stream.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+opensymphony-domain = { path = "../opensymphony-domain" }
 reqwest.workspace = true
 reqwest-eventsource.workspace = true
 serde.workspace = true

@@ -49,15 +49,14 @@ Available today:
 
 - a Cargo workspace with shared snapshot domain models
 - a read-only control-plane server with:
-  - `GET /healthz` with status derived from the daemon snapshot state
+  - `GET /healthz`
   - `GET /api/v1/snapshot`
   - `GET /api/v1/events` as an SSE update stream
 - a FrankenTUI client that:
   - fetches the initial snapshot over HTTP
-  - reconnects to the SSE stream after disconnects or stalled reads, surfacing reconnecting state while retryable SSE errors are in flight
-  - keeps reconnecting state visible through a rendered frame before returning to `live` when recovery snapshots arrive
+  - reconnects to the SSE stream after disconnect
   - renders focused issue/workspace detail plus recent event or metrics panes in inline mode
-  - shows reducer-owned connection status plus the active focus pane in the header and pane headers for keyboard-driven navigation
+  - shows the active focus pane in the status line and pane headers for keyboard-driven navigation
 - a small `opensymphony-cli` demo path so the control plane and UI can be validated without coupling the TUI to orchestrator internals
 
 Local commands:

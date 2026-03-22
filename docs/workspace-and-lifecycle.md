@@ -17,6 +17,10 @@ Sanitization rule:
 - keep `[A-Za-z0-9._-]`
 - replace every other character with `_`
 
+Configuration rule:
+
+- if `workspace.root` is provided through env indirection such as `$WORKSPACE_ROOT`, that env var must resolve during workflow loading; OpenSymphony must not silently fall back to the default workspace root for an explicit operator-supplied path
+
 Examples:
 
 - `ABC-123` -> `ABC-123`
@@ -55,7 +59,13 @@ Recommended layout inside each issue workspace:
     conversation.json
     prompts/
       last-full-prompt.md
+      last-full-prompt.json
       last-continuation-prompt.md
+      last-continuation-prompt.json
+    runs/
+      attempt-0001/
+        prompt-full-001.md
+        prompt-full-001.json
     logs/
       worker.log
       hook.log
@@ -72,7 +82,9 @@ Notes:
 - `.opensymphony/` is OpenSymphony-owned metadata.
 - `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap.
 - The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
-- `conversation.json` remains reserved for the OpenHands session layer even though the workspace handle exposes its deterministic path.
+- `conversation.json` now uses workspace-owned path and serialization helpers, but the OpenHands issue-session runner still owns when it is created, reused, or reset.
+- `prompts/` holds the latest prompt of each kind plus JSON metadata that points back to the per-run archive.
+- `runs/attempt-####/` holds immutable per-run prompt captures for auditability without mutating repository-owned policy files.
 - The repository working tree remains otherwise untouched except by normal agent work.
 - OpenSymphony must never overwrite repository-owned `AGENTS.md`.
 
@@ -249,6 +261,7 @@ Human-readable summary for the agent and operator:
 - issue identifier and title
 - current state
 - last worker outcome
+- repository-owned `WORKFLOW.md`, `AGENTS.md`, and optional `.agents/skills/` locations
 - important constraints
 - known blockers
 - location of OpenSymphony metadata files
@@ -265,9 +278,14 @@ Machine-readable runtime summary:
 - whether the workflow prompt has been seeded into the conversation
 - last known execution status
 - last event summary
+- last run ID and status
+- last prompt kind and path
+- recent validation commands
+- last retry reason if any
 - latest worker outcome
 
 These files help continuity without altering the repository's own guidance files.
+They are additive references to repo-owned policy, not replacements for it.
 
 ## 10. Prompt artifacts
 
@@ -280,11 +298,21 @@ Why:
 - comparing full vs continuation prompt logic
 - making live tests and regressions easier to inspect
 
-Store at minimum:
+Store at minimum under `.opensymphony/prompts/`:
 
-- last full prompt
-- last continuation prompt
-- timestamp metadata
+- `last-full-prompt.md`
+- `last-full-prompt.json`
+- `last-continuation-prompt.md`
+- `last-continuation-prompt.json`
+
+Also archive every captured prompt under `.opensymphony/runs/attempt-####/` using deterministic sequence-numbered file names such as:
+
+- `prompt-full-001.md`
+- `prompt-full-001.json`
+- `prompt-continuation-001.md`
+- `prompt-continuation-001.json`
+
+The stable files in `prompts/` should always mirror the latest capture of that kind, while the per-run `runs/` archive remains append-only for that worker attempt.
 
 Current implementation detail:
 
