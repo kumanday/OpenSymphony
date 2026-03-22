@@ -88,6 +88,10 @@ async fn candidate_issues_normalize_fixture_payloads() {
         .as_str()
         .expect("query should be a string")
         .contains("includeArchived: $includeArchived"));
+    assert!(requests[0].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("labels(first: $labelFirst)"));
 }
 
 #[tokio::test]
@@ -135,6 +139,10 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
         requests[0].body["variables"]["labelFirst"],
         serde_json::json!(10)
     );
+    assert!(requests[0].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("labels(first: $labelFirst)"));
 }
 
 #[tokio::test]
@@ -219,6 +227,10 @@ async fn issues_by_state_walk_pagination() {
         .as_str()
         .expect("query should be a string")
         .contains("includeArchived: $includeArchived"));
+    assert!(requests[0].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("labels(first: $labelFirst)"));
     assert_eq!(requests[0].body["variables"]["after"], Value::Null);
     assert_eq!(
         requests[1].body["variables"]["after"],
@@ -252,10 +264,18 @@ async fn terminal_issues_include_archived_for_cleanup() {
         requests[0].body["variables"]["includeArchived"],
         Value::Bool(true)
     );
+    assert_eq!(
+        requests[0].body["variables"]["labelFirst"],
+        serde_json::json!(10)
+    );
     assert!(requests[0].body["query"]
         .as_str()
         .expect("query should be a string")
         .contains("includeArchived: $includeArchived"));
+    assert!(requests[0].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("labels(first: $labelFirst)"));
 }
 
 #[tokio::test]
@@ -497,6 +517,29 @@ async fn graphql_rate_limited_bad_request_retries_using_reset_header() {
         start.elapsed() < Duration::from_secs(1),
         "retry should use the reset header instead of the exponential backoff"
     );
+}
+
+#[tokio::test]
+async fn graphql_internal_server_error_retries_even_with_graphql_envelope() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::new(
+            StatusCode::BAD_GATEWAY,
+            r#"{"errors":[{"message":"temporary upstream failure","extensions":{"code":"INTERNAL_SERVER_ERROR"}}]}"#,
+        )
+        .with_header("content-type", "application/json"),
+        QueuedResponse::json(include_str!("fixtures/candidate_issues_page.json")),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("5xx GraphQL envelopes should stay retryable");
+
+    assert_eq!(issues.len(), 2);
+    assert_eq!(server.recorded_requests().await.len(), 2);
 }
 
 #[tokio::test]
