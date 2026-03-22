@@ -99,7 +99,7 @@ Eligibility reminders:
 
 Current adapter contract:
 
-- send GraphQL requests to the configured endpoint with `Authorization: Bearer <LINEAR_API_KEY>`
+- send GraphQL requests to the configured endpoint with `Authorization: <LINEAR_API_KEY>` because the local MVP uses personal Linear API keys rather than OAuth access tokens
 - decode GraphQL error envelopes before falling back to raw HTTP classification because Linear rate limits can arrive as HTTP 400 with GraphQL code `RATELIMITED`
 - keep GraphQL query and response structs private to `opensymphony-linear`
 - return only normalized domain models to orchestrator-facing callers
@@ -115,6 +115,7 @@ Required:
 
 Implementation note:
 
+- the adapter should reject blank `tracker.project_slug` values at client construction time so candidate/cleanup reads fail fast instead of silently querying `slugId == ""`
 - the adapter should reject blank or missing `tracker.active_states` / `tracker.terminal_states` lists at client construction time so workflow misconfiguration fails fast instead of returning empty candidate/cleanup results
 
 Optional:

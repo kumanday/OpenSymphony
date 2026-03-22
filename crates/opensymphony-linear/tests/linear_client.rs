@@ -57,10 +57,7 @@ async fn candidate_issues_normalize_fixture_payloads() {
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 1);
-    assert_eq!(
-        requests[0].authorization.as_deref(),
-        Some("Bearer test-token")
-    );
+    assert_eq!(requests[0].authorization.as_deref(), Some("test-token"));
     assert_eq!(
         requests[0].body["variables"]["projectSlug"],
         Value::String("e7b957855cb7".to_string())
@@ -256,6 +253,25 @@ fn client_configuration_requires_terminal_states() {
     match error {
         LinearError::InvalidConfiguration(message) => {
             assert!(message.contains("tracker.terminal_states"));
+        }
+        other => panic!("expected invalid configuration error, got {other:?}"),
+    }
+}
+
+#[test]
+fn client_configuration_requires_project_slug() {
+    let mut config = LinearConfig::new("test-token", "   ");
+    config.active_states = vec!["In Progress".to_string()];
+    config.terminal_states = vec!["Done".to_string()];
+
+    let error = match LinearClient::new(config) {
+        Ok(_) => panic!("blank project slug should fail"),
+        Err(error) => error,
+    };
+
+    match error {
+        LinearError::InvalidConfiguration(message) => {
+            assert!(message.contains("tracker.project_slug"));
         }
         other => panic!("expected invalid configuration error, got {other:?}"),
     }
