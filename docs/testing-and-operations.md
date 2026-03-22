@@ -145,6 +145,19 @@ Current implementation:
 - pane layout persistence
 - event log rendering
 
+Current implemented checks:
+
+- snapshot serialization in `opensymphony-domain`
+- forward-compatible snapshot decoding for unknown additive recent event kinds in `opensymphony-domain`
+- forward-compatible snapshot decoding for unknown additive `daemon.state`, `runtime_state`, and `last_outcome` values in `opensymphony-control`
+- control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
+- control-plane bootstrap snapshot timeout coverage in `opensymphony-control/tests/control_plane.rs`
+- control-plane SSE connect-establishment timeout coverage in `opensymphony-control/tests/control_plane.rs`
+- control-plane idle SSE timeout coverage in `opensymphony-control/tests/control_plane.rs`, including retry-in-place reconnect signaling
+- control-plane post-disconnect reconnect-timeout reapplication coverage in `opensymphony-control/tests/control_plane.rs`
+- control-plane monotonic lag-recovery coverage in `opensymphony-control/src/lib.rs`
+- TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, disconnect retention, and reconnect-to-live recovery coverage in `opensymphony-tui`
+
 ## 4. Fake OpenHands server requirements
 
 The fake server in `opensymphony-testkit` should emulate the minimum runtime contract:
@@ -201,12 +214,53 @@ Recommended CLI commands for the repo:
 - `opensymphony doctor`
 - `opensymphony linear-mcp`
 
+Current workspace commands:
+
+- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
+- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
+
 Possible helper commands later:
 
 - `opensymphony debug openhands`
 - `opensymphony inspect workspace <issue-id>`
 - `opensymphony inspect conversation <issue-id>`
 
+Current validation commands for the implemented observability slice:
+
+- `cargo test`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:4010 --sample-interval-ms 250`
+- `curl http://127.0.0.1:4010/api/v1/snapshot`
+- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
+- `curl http://127.0.0.1:4010/healthz`
+
+The scripted `tui --exit-after-ms` smoke path now exits `0` only when the
+final reduced control-plane state is still a real streamed
+`live control-plane stream` state. If the control plane never becomes live,
+or briefly becomes live before falling back to reconnecting again, the command
+exits non-zero instead of reporting a false-positive healthy attach.
+
+The rendered TUI header also carries the reducer-owned control-plane status
+text so reconnect and attach state remain visible even while the operator is
+focused on another pane. The `/healthz` endpoint reflects the daemon snapshot
+state instead of always returning `ok`, so local smoke checks should confirm
+that degraded or stopped snapshots surface through the endpoint.
+
+When validating reconnect behavior, confirm that a newer post-restart snapshot
+is accepted even if the reducer never saw an explicit `ConnectionLost`, and
+that the TUI does not report `live control-plane stream` until the SSE stream
+has actually begun delivering updates. Also confirm that a hung
+`/api/v1/snapshot` request times out instead of stalling the bridge forever,
+that a never-established `/api/v1/events` attach times out back into reconnect,
+that an `/api/v1/events` stream which only reaches `Open` or flushes headers
+without any bootstrap snapshot also times out on the short attach budget,
+that an idle `/api/v1/events` read also flips the bridge into reconnecting
+while the event-source retry stays in flight, that a later blackholed reopen
+is still bounded by the attach timeout, that a queued reconnect plus recovery
+snapshot still renders one reconnecting frame before returning to live, and
+that additive `recent_events[].kind` values still decode into a usable snapshot
+for the UI. For scripted smoke coverage, also confirm that an unreachable
+control plane causes `opensymphony tui --exit-after-ms ...` to exit non-zero.
 Current command set in this repository:
 
 - `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:4010 --sample-interval-ms 250`

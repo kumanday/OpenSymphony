@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use opensymphony_domain::{ControlPlaneDaemonSnapshot as DaemonSnapshot, SnapshotEnvelope};
+use opensymphony_domain::SnapshotEnvelope;
 use reqwest_eventsource::{Event as EventSourceEvent, EventSource};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,6 +20,17 @@ use tokio::{
 };
 use tracing::warn;
 use url::Url;
+
+pub use opensymphony_domain::{
+    ControlPlaneAgentServerStatus as AgentServerStatus,
+    ControlPlaneDaemonSnapshot as PublicDaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+    ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+    ControlPlaneWorkerOutcome as WorkerOutcome,
+};
+
+pub type DaemonSnapshot = PublicDaemonSnapshot;
 
 const CONTROL_PLANE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const CONTROL_PLANE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
