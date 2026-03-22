@@ -25,6 +25,7 @@ pub enum LinearError {
     Graphql {
         errors: Vec<GraphqlError>,
         summary: String,
+        retry_after: Option<Duration>,
     },
     #[error("Linear omitted requested issue IDs from state refresh: {issue_ids:?}")]
     MissingIssueIds { issue_ids: Vec<String> },
@@ -34,6 +35,13 @@ pub enum LinearError {
 
 impl LinearError {
     pub fn from_graphql_errors(errors: Vec<GraphqlError>) -> Self {
+        Self::from_graphql_errors_with_retry_after(errors, None)
+    }
+
+    pub fn from_graphql_errors_with_retry_after(
+        errors: Vec<GraphqlError>,
+        retry_after: Option<Duration>,
+    ) -> Self {
         let summary = errors
             .iter()
             .map(|error| match &error.code {
@@ -42,7 +50,11 @@ impl LinearError {
             })
             .collect::<Vec<_>>()
             .join("; ");
-        Self::Graphql { errors, summary }
+        Self::Graphql {
+            errors,
+            summary,
+            retry_after,
+        }
     }
 
     pub fn category(&self) -> TrackerErrorCategory {
@@ -65,6 +77,7 @@ impl LinearError {
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::HttpStatus { retry_after, .. } => *retry_after,
+            Self::Graphql { retry_after, .. } => *retry_after,
             _ => None,
         }
     }
@@ -168,8 +181,17 @@ mod tests {
             message: "issue not found".to_string(),
             code: Some("NOT_FOUND".to_string()),
         }]);
+        let rate_limited = LinearError::from_graphql_errors_with_retry_after(
+            vec![GraphqlError {
+                message: "rate limit exceeded".to_string(),
+                code: Some("RATELIMITED".to_string()),
+            }],
+            Some(Duration::from_secs(2)),
+        );
 
         assert_eq!(forbidden.category(), TrackerErrorCategory::PermissionDenied);
         assert_eq!(not_found.category(), TrackerErrorCategory::NotFound);
+        assert_eq!(rate_limited.category(), TrackerErrorCategory::RateLimited);
+        assert_eq!(rate_limited.retry_after(), Some(Duration::from_secs(2)));
     }
 }

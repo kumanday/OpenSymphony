@@ -2,12 +2,13 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub(super) const ISSUES_BY_STATE_QUERY: &str = r#"
-query IssuesByState($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String) {
+query IssuesByState($projectSlug: String!, $stateNames: [String!], $first: Int!, $after: String, $relationFirst: Int!) {
   issues(
     filter: {
       project: { slugId: { eq: $projectSlug } }
       state: { name: { in: $stateNames } }
     }
+    includeArchived: true
     first: $first
     after: $after
   ) {
@@ -30,7 +31,7 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $first: Int!,
           name
         }
       }
-      inverseRelations(first: 100) {
+      inverseRelations(first: $relationFirst) {
         nodes {
           type
           issue {
@@ -89,6 +90,7 @@ pub(super) const ISSUE_STATES_BY_IDS_QUERY: &str = r#"
 query IssueStatesByIds($issueIds: [String!], $first: Int!, $after: String) {
   issues(
     filter: { id: { in: $issueIds } }
+    includeArchived: true
     first: $first
     after: $after
   ) {
@@ -134,6 +136,7 @@ pub(super) struct IssuesByStateVariables {
     pub state_names: Vec<String>,
     pub first: usize,
     pub after: Option<String>,
+    pub relation_first: usize,
 }
 
 #[derive(Debug, Serialize)]
