@@ -53,12 +53,13 @@ OpenSymphony preserves the major Symphony runtime entities:
 - normalized issue record
 - run attempt
 - retry entry
-- orchestrator runtime state
+- issue execution state and transition rules
 - workspace record
 - runtime snapshot
 
 Implementation note:
 
+- the shared scheduler state machine lives in `opensymphony-domain` so downstream crates can consume one stable model
 - the agent-specific fields refer to OpenHands concepts instead of Codex fields
 - OpenSymphony adds conversation metadata such as `conversation_id`, `server_base_url`, `stream_state`, and `last_event_id`
 
@@ -68,6 +69,7 @@ Preserved exactly:
 
 - repository-root `WORKFLOW.md`
 - YAML front matter plus Markdown body
+- Markdown body preserved verbatim after the front matter delimiter
 - strict rendering
 - `issue` object available to the template
 - `attempt` available to the template for retry or continuation metadata
@@ -75,6 +77,7 @@ Preserved exactly:
 OpenSymphony extension:
 
 - `openhands` namespace in front matter for runtime-specific settings
+- unknown top-level front matter namespaces are rejected instead of ignored
 
 ## 2.5 Orchestration state machine
 
@@ -189,6 +192,8 @@ The workflow schema adds an `openhands` namespace for:
 - WebSocket settings
 - MCP server definitions
 - minimal agent payload settings
+- extension settings resolved separately from the core workflow config so non-runtime code can stay OpenHands-agnostic
+- the repo-local `codex` namespace can coexist as non-runtime metadata, while other unknown top-level namespaces still fail deterministically
 
 ### 3.2 Persistent conversation per issue
 

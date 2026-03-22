@@ -3,10 +3,21 @@ name = "opensymphony-tui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
+repository.workspace = true
 rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
 
 [lints]
 workspace = true
 
 [dependencies]
-opensymphony-control.workspace = true
+chrono.workspace = true
+ftui.workspace = true
+opensymphony-control = { path = "../opensymphony-control" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true

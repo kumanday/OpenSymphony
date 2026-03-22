@@ -57,6 +57,9 @@ Key properties:
 - host-local execution assumptions documented explicitly
 - the local supervised launch path forces OpenHands process-sandbox mode via
   `RUNTIME=process`
+- the current implementation resolves supervised-mode metadata from
+  `tools/openhands-server/{pyproject.toml,version.txt,uv.lock,run-local.sh}`
+  with a repo-owned package and lockfile pin
 - the repo-local quick-run wrapper rejects user-supplied agent-server CLI flags
   so smoke runs cannot diverge from the daemon-managed single-server topology
 
@@ -79,9 +82,9 @@ Use for:
 Repository ownership note:
 
 - `tools/openhands-server/` owns the local packaging and version pin
-- M1 bootstrap creates fail-closed placeholders only
-- OSYM-201 must replace those placeholders with the validated package version
-  and lockfile before supervised mode is treated as implemented
+- the current repository pin is the OpenHands `1.14.0` SDK bundle
+- the lockfile is resolved under the repo-local `uv` environment
+- update `docs/sources.md` whenever this version pin changes
 
 ### External server mode
 
@@ -94,6 +97,20 @@ Use for:
 - organization-managed runtime infrastructure
 
 Local MVP work starts with supervised mode, but the trait boundary must support both.
+
+Current repository implementation:
+
+- `tools/openhands-server/pyproject.toml` pins the local server environment and `tools/openhands-server/run-local.sh` starts it via `uv`
+- `opensymphony-openhands` currently implements the typed conversation create, get, send-message, run, paginated event search, readiness probe, and `RuntimeEventStream` attach/reconcile/reconnect surface used by validation and doctor flows
+- `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
+- `opensymphony doctor` now resolves the target repo `WORKFLOW.md` before probing OpenHands, so the live probe uses workflow-derived workspace, transport, conversation, and prompt inputs instead of only static CLI YAML fields
+- `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv`, enforces `uv run --directory <tool-dir> --locked --extra agent-server --module openhands.agent_server`, and rejects extra agent-server CLI flags so the pinned project works the same way from the repo root, CI, and the local supervisor
+- when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
+- explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
+- explicit `openhands.local_server.enabled: false` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
+- explicit `openhands.local_server.env` overrides are currently rejected during workflow resolution until the runtime supervisor creation path forwards workflow-owned launcher environment variables into `extra_env`
+- explicit `openhands.local_server.startup_timeout_ms` overrides are currently rejected during workflow resolution until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
+- workflow resolution rejects malformed, non-`http://`, path-bearing, query-bearing, fragment-bearing, or bracketed-IPv6 `openhands.transport.base_url` values before the daemon reaches runtime transport setup because the current readiness probes still require a bare IPv4-or-hostname `http://host:port` origin
 
 ## 4.2 Startup contract
 
@@ -112,6 +129,20 @@ Readiness probing rule:
 - otherwise use a conservative FastAPI probe such as `GET /openapi.json`
 - never rely on sleep-only startup delays
 
+Current implementation detail:
+
+- supervised mode launches `bash tools/openhands-server/run-local.sh`
+- the supervisor sets `OPENHANDS_SERVER_PORT`, while the launcher itself forces `RUNTIME=process`, loopback host `127.0.0.1`, the pinned `agent-server` extra, and `uv` lockfile enforcement
+- diagnostics record the launcher summary, resolved base URL, pinned version,
+  and launched PID for doctor output and future daemon logs
+- the doctor path renders the target repo workflow prompt with a synthetic issue
+  and sends that rendered prompt inside the probe message so prompt/template
+  regressions fail before a real issue runner lands
+- the current doctor and live-validation path uses `GET /openapi.json` as the
+  conservative readiness probe and will temporarily start a supervised local
+  server when the configured loopback base URL is down but the repo-owned pin is
+  valid
+
 ## 4.3 Shutdown contract
 
 On daemon shutdown:
@@ -122,6 +153,12 @@ On daemon shutdown:
 - stop the supervised agent-server subprocess if this daemon launched it
 
 If the daemon is using an external server, never attempt to terminate that server.
+
+Current implementation detail:
+
+- child ownership is tracked by the Rust supervisor instance
+- `stop()` only kills a `Child` handle created by `start()`
+- external mode may probe health, but stop remains a no-op
 
 ## 5. Workspace model
 
@@ -193,6 +230,8 @@ Use the smallest necessary subset of the agent-server API.
 - `GET /api/conversations/{conversation_id}/events/search`
   - sync and reconcile events
 
+The current fake-server coverage and CLI doctor implementation exercise this exact subset.
+
 ### Optional, diagnostic, or future
 
 - model and provider discovery endpoints
@@ -221,10 +260,38 @@ Required fields:
 - optional `plugins`
 - optional `mcp_config`
 
+Current workflow defaulting:
+
+- `confirmation_policy.kind` defaults to `NeverConfirm` when omitted
+- unsupported `confirmation_policy` options are rejected during workflow resolution because the current request subset only serializes `{ kind }`
+- `agent.kind` defaults to `Agent` when omitted
+- non-default `openhands.conversation.reuse_policy` values are rejected during workflow resolution until the orchestrator/runtime path can honor alternate conversation reuse behavior
+- `max_iterations` must fit the downstream OpenHands `u32` request range
+- workflow-owned `local_server.readiness_probe_path` overrides are rejected during workflow resolution until the runtime supervisor launch path consumes them
+- workflow-owned `local_server.startup_timeout_ms` overrides are rejected during workflow resolution until the runtime supervisor creation path consumes them
+- workflow-owned `websocket.enabled`, `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides are rejected during workflow resolution until the runtime readiness/reconnect path consumes them
+- `agent.llm.model` is required whenever an `llm` block is present
+- workflow-owned LLM option keys are rejected during workflow resolution until the current request subset can actually forward them
+- workflow-owned agent options such as `log_completions` and extra agent keys are rejected during workflow resolution until the current request subset can actually forward them
+- workflow-owned LLM provider env overrides such as `api_key_env` and `base_url_env` are rejected during workflow resolution until the runtime conversation-create adapter can actually forward them
+- workflow-owned `openhands.mcp.stdio_servers` entries are rejected during workflow resolution until the runtime conversation-create adapter can actually send `mcp_config`
+
 Implementation rule:
 
 - keep the orchestrator core independent of the raw OpenHands JSON model
 - all payload shaping belongs in `opensymphony-openhands`
+
+Current repository implementation:
+
+- `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
+- the current request model still serializes `agent` as only `{ kind, llm }`, and `llm` itself as only `{ model, api_key }`, so workflow-owned agent extras plus arbitrary LLM option keys are rejected before runtime launch
+- the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
+- the current supervisor readiness probe still parses only bare `http://host:port` origins, always uses its default `/openapi.json` probe path, and the CLI still constructs `SupervisedServerConfig::new(tooling)` without applying workflow-owned startup timeouts, so `https://` base URLs plus explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are rejected before runtime launch
+- the current supervisor launch path still uses runtime-owned launcher environment variables (`OPENHANDS_SERVER_PORT` and `RUNTIME=process`), so explicit workflow-owned `local_server.env` overrides are rejected before runtime launch
+- the current runtime still always opens the readiness socket and uses runtime-owned readiness/reconnect budgets, so explicit workflow-owned `websocket.enabled`, `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides are rejected before runtime launch
+- the current request model does not yet serialize `mcp_config`, so workflow-owned MCP stdio server declarations are rejected before runtime launch
+- `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`
+- `AcceptedResponse` tolerates either an explicit JSON success body or an empty successful response for `POST /events` and `POST /run`
 
 ## 9. Authentication
 
@@ -234,6 +301,7 @@ Default local mode:
 
 - bind to loopback only
 - no mandatory session API key
+- the current repository pin is the OpenHands `1.14.0` SDK bundle
 
 ## 9.2 Future-proofing
 
@@ -243,6 +311,22 @@ The Rust client should still support:
 - session API key for HTTP
 - session API key for WebSocket query-param fallback
 - optional header-based WebSocket auth for versions that support it
+
+Current repository implementation:
+
+- `TransportConfig` now carries an `AuthConfig` with explicit no-auth, query-param API key, header API key, and header-plus-WebSocket-query-fallback modes
+- REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape
+- workflow-owned auth knobs such as `openhands.transport.session_api_key_env`, `openhands.websocket.auth_mode`, and `openhands.websocket.query_param_name` are currently rejected during workflow resolution until a runtime adapter wires them into `AuthConfig`
+- `OpenHandsError` now maps invalid config, transport failures, HTTP status failures, protocol failures, and WebSocket failures into stable runtime categories without exposing `reqwest::Error` or `http::StatusCode`
+- `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, forward-compatible readiness envelopes, ready-state freshness after attach, ready-barrier persistence across later stale cache rebuilds, attach-backlog versus buffered-live ordering, explicit-close shutdown semantics, reused-conversation restart freshness over stale terminal REST state, terminal REST fallback when reconnect exhausts after completion, next-turn probe error delivery after `finished`, and non-readiness frames before the first state update
+- the doctor probe now runs through `RuntimeEventStream`, exercises a real `POST /events` plus `POST /run` path, and only reports the runtime healthy after the attached stream reaches a successful terminal `execution_status` of `finished` with no queued `ConversationErrorEvent` still pending ahead of completion or arriving on the next scheduler-turn buffered drain
+- failure-only probe streams such as `ConversationErrorEvent` or terminal `execution_status` values like `error` and `stuck` are treated as unhealthy instead of silently passing
+- once the attached stream has already observed a healthy terminal outcome, the doctor probe reuses the last successful stream-backed conversation snapshot instead of requiring one more `GET /api/conversations/{id}` that could fail during server shutdown
+- readiness snapshots are attach/reconnect barriers keyed by envelope kind, not synthetic replay events; consumers observe them through `ready_event`, and the adapter folds them into `state_mirror()` only when reconcile and REST refresh do not already expose an equal or newer decodable state update, including forward-compatible payloads that still carry a usable `state_delta`; that barrier state is also re-applied after later cache-driven mirror rebuilds so stale queued snapshots do not override a newer ready barrier, and an active `queued` or `running` ready barrier may also clear stale terminal REST fallback when a reused conversation has already restarted
+- initial attach now replays the persisted `/events/search` snapshot through `RuntimeEventStream::next_event()` so resumed conversations expose pre-existing history in timestamp order, while any immediately available live socket frames are merged into that same ordered queue before later replay items are yielded instead of relying on a fixed drain delay
+- if the socket closes after already-yieldable events have been drained into the pending queue, reconnect is deferred until that queued work has been delivered
+- `RuntimeEventStream::close()` is terminal for that stream instance: it clears deferred reconnect intent and queued replay before closing the socket so later polls do not reopen the conversation
+- the doctor probe accepts a terminal REST refresh after disconnect as authoritative completion evidence even if the follow-on WebSocket reattach exhausts
 
 Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
 

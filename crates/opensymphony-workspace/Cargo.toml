@@ -3,10 +3,18 @@ name = "opensymphony-workspace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+repository.workspace = true
 
-[lints]
-workspace = true
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
-opensymphony-domain.workspace = true
+chrono.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

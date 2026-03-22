@@ -1,17 +1,37 @@
-# Local OpenHands Agent-Server Pin
+# Pinned OpenHands Agent-Server
 
-This directory pins the local OpenHands agent-server package used by the OpenSymphony daemon in supervised local mode.
+This directory owns the pinned local trusted-machine OpenHands runtime used by the OpenSymphony MVP.
 
-- Pinned release: `v1.14.0`
-- Source of truth: [`version.txt`](./version.txt)
-- Python package: `openhands-agent-server==1.14.0`
+Current pin:
 
-The version above matches the latest GitHub release that was visible from `https://github.com/OpenHands/software-agent-sdk/releases` on March 21, 2026.
+- `version.txt` records the expected OpenHands SDK bundle version: `1.14.0`
+- `pyproject.toml` records the pinned `agent-server` extra:
+  - `openhands-agent-server==1.14.0`
+  - `openhands-sdk==1.14.0`
+  - `openhands-tools==1.14.0`
+  - `openhands-workspace==1.14.0`
+- `uv.lock` records the resolved Python dependency graph for that exact pin
+- `run-local.sh` launches the pinned server via `RUNTIME=process uv run --directory . --locked --extra agent-server --module openhands.agent_server --host 127.0.0.1 --port 8000`
 
-## Usage
+Requirements:
 
-1. Install [`uv`](https://docs.astral.sh/uv/).
-2. Run `uv sync` in this directory to create a local virtual environment.
-3. Start the server with `./run-local.sh`.
+- `uv`
+- Python `3.12.x`
 
-The Rust daemon will eventually supervise this command directly. For M1, this directory exists to make the pin and local operator workflow explicit and reviewable.
+## Provision with `uv`
+
+```bash
+cd tools/openhands-server
+uv sync --extra agent-server
+```
+
+## Run locally
+
+```bash
+./tools/openhands-server/run-local.sh
+```
+
+The launcher binds to loopback-only at `127.0.0.1:8000` by default and only accepts `OPENHANDS_SERVER_PORT` as a runtime override. It intentionally rejects extra agent-server CLI flags so smoke runs stay aligned with the daemon-managed supervised topology.
+It also fails fast if `uv` is missing, if `OPENHANDS_SERVER_PORT` is invalid, or if the pinned `uv.lock` cannot be honored through `uv run --locked`.
+
+Do not rely on a globally installed moving-target `openhands` binary for this repository.

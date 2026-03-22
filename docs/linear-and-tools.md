@@ -22,13 +22,27 @@ Fetch issues that:
 - are in configured active states
 - include enough fields to normalize issue data and eligibility
 
+Implementation note:
+
+- the GraphQL adapter filters by Linear `Project.slugId`, so workflow `tracker.project_slug` should store that stable slug value
+- candidate issue polling should exclude archived issues so archiving an active ticket releases it instead of redispatching it on the next poll
+
 ## 2.2 State refresh by IDs
 
 Fetch current states for all running issues during reconciliation.
 
+Implementation note:
+
+- by-ID reconciliation should keep the same `project_slug` filter as candidate reads so issues moved out of the tracked project fall out of orchestration instead of staying alive
+- by-ID reconciliation should exclude archived issues so operators can archive live work to release it from orchestration immediately
+
 ## 2.3 Terminal-state fetch for startup cleanup
 
 Fetch issues in terminal states when sweeping existing workspaces on startup.
+
+Implementation note:
+
+- terminal-state cleanup reads should pass `includeArchived: true` so archived terminal work remains visible during startup cleanup
 
 ## 2.4 Normalization
 
@@ -36,6 +50,7 @@ Normalize tracker payloads into a stable issue model with fields such as:
 
 - `id`
 - `identifier`
+- `url`
 - `title`
 - `description`
 - `priority`
@@ -47,15 +62,28 @@ Normalize tracker payloads into a stable issue model with fields such as:
 
 Keep the orchestrator independent of raw GraphQL response shape.
 
+Implementation note:
+
+- blocker normalization should derive `blocked_by` from `inverseRelations` entries where relation `type == "blocks"`
+- `TrackerIssue.state` should remain the workflow-facing state name string consumed by `WORKFLOW.md` and `WORKFLOW.example.md`
+- blocker and state-refresh normalization should retain both the state name and the raw Linear `WorkflowState.type` string, while also exposing a normalized `kind`, so terminal blockers remain detectable without losing the tracker's exact type value
+- issue normalization should retain the Linear issue URL because `WORKFLOW.md` renders `{{ issue.url }}` under strict template validation
+- issue normalization should preserve the raw Linear priority because prompt/UI consumers render `{{ issue.priority }}` directly
+- top-level issue pages should request only small initial `labels` and `inverseRelations` slices and page the rest per issue so connection-heavy issue metadata stays complete without blowing past Linear's query cap
+
 ## 3. Candidate sorting and eligibility
 
 The orchestrator should receive normalized issues and apply Symphony sorting and eligibility rules.
 
 Recommended sort order:
 
-1. higher priority first
+1. higher urgency first using raw Linear priority (`1` before `2`; `0` remains unprioritized)
 2. older creation time first
 3. identifier tie-breaker
+
+Implementation note:
+
+- Linear's raw priority scale is urgency-inverted (`1` is most urgent, `0` is unprioritized), so the scheduler should derive its sort key from the raw value instead of rewriting the shared issue model
 
 Eligibility reminders:
 
@@ -74,16 +102,32 @@ Eligibility reminders:
 - structured error classification
 - redaction of tokens in logs
 
+Current adapter contract:
+
+- send GraphQL requests to the configured endpoint with `Authorization: <LINEAR_API_KEY>` because the local MVP uses personal Linear API keys rather than OAuth access tokens
+- reject blank `LINEAR_API_KEY` values during client construction so startup misconfiguration fails fast instead of repeated auth failures at poll time
+- decode GraphQL error envelopes before falling back to raw HTTP classification because Linear rate limits can arrive as HTTP 400 with GraphQL code `RATELIMITED`, but keep transient HTTP 5xx responses retryable even when the body is a GraphQL error envelope
+- prefer Linear's `X-RateLimit-*-Reset` headers when calculating retry delays for rate-limited responses, falling back to `Retry-After` and then local exponential backoff only when no reset window is advertised
+- keep transient HTTP 5xx responses on the retryable HTTP-status path even when the body decodes as a GraphQL error envelope
+- keep GraphQL query and response structs private to `opensymphony-linear`
+- return only normalized domain models to orchestrator-facing callers
+
 ## 4.2 Configuration inputs
 
 Required:
 
 - `LINEAR_API_KEY`
-- workflow `tracker.project_slug`
+- workflow `tracker.kind`
+- workflow `tracker.project_slug` (the Linear `Project.slugId` value)
+- workflow `tracker.kind`
 - workflow `tracker.active_states`
 - workflow `tracker.terminal_states`
 
-Workflow loading should fail fast when a Linear-backed workflow omits any required tracker input or references an unset explicit credential env var instead of deferring the error to later candidate-fetch logic. `tracker.api_key` may be set explicitly in `WORKFLOW.md`, but the documented default is to keep the secret in the process-level `LINEAR_API_KEY`.
+Implementation note:
+
+- the adapter should reject blank `LINEAR_API_KEY` values at client construction time so missing auth fails fast before the daemon starts polling
+- the adapter should reject blank `tracker.project_slug` values at client construction time so candidate/cleanup reads fail fast instead of silently querying `slugId == ""`
+- the adapter should reject blank or missing `tracker.active_states` / `tracker.terminal_states` lists at client construction time so workflow misconfiguration fails fast instead of returning empty candidate/cleanup results
 
 Optional:
 
@@ -96,6 +140,11 @@ Optional:
 For unattended execution, the agent needs a minimal, stable write surface for Linear.
 
 OpenSymphony should provide a small stdio MCP server rather than coupling writes into the orchestrator.
+
+Current repository note:
+
+- workflow-owned OpenHands MCP stdio server declarations are rejected during workflow resolution until the current conversation-create adapter can forward `mcp_config`, so unattended sessions must provision the Linear MCP surface through the host tool environment rather than `openhands.mcp.stdio_servers`
+- `opensymphony doctor` can still resolve workflows that omit `tracker.api_key` when `linear.enabled: false`; it uses a doctor-only placeholder for the omitted fallback token so static/local runtime validation does not require live Linear credentials
 
 ## 5.1 MVP tool set
 
@@ -161,9 +210,10 @@ The Linear MCP tools should complement this, not duplicate the whole tracker dat
 struct Issue {
     id: String,
     identifier: String,
+    url: String,
     title: String,
     description: Option<String>,
-    priority: Option<i64>,
+    priority: Option<u8>,
     state: String,
     labels: Vec<String>,
     blocked_by: Vec<IssueBlocker>,
