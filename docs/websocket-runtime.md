@@ -146,6 +146,7 @@ Current repository implementation:
 
 - `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until a `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable events before readiness
 - `opensymphony-openhands::OpenHandsClient::attach_runtime_stream` performs the full attach sequence: initial REST sync, WebSocket connect, readiness barrier, and post-ready reconcile before returning a live `RuntimeEventStream`
+- the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, but replayable runtime events still come from the reconciled event cache rather than the barrier frame itself
 - `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, and reconcile path
 
@@ -243,6 +244,7 @@ Implementation recommendation:
 - maintain a small internal channel that receives terminal execution-status transitions
 - let the worker await this channel with timeout and cancellation support
 - keep REST fallback as backup, not as the main loop
+- do not report success while a queued `ConversationErrorEvent` still exists in the pending stream buffer, even if the mirrored state has already reached `finished`
 
 ## 8. Disconnect and reconnect behavior
 
@@ -276,6 +278,7 @@ Current repository implementation:
 
 - `RuntimeStreamConfig` carries readiness timeout, bounded exponential backoff, and max reconnect attempts
 - `RuntimeEventStream::next_event` reconnects on both clean socket close and transport resets, then re-runs readiness plus reconcile before resuming
+- reconnect readiness snapshots remain barriers only; they refresh `ready_event` but are not replayed as synthetic runtime events unless `/events/search` also returns them
 - `opensymphony-testkit` can now force live socket drops so reconnect coverage is deterministic in CI
 
 ## 8.3 Decode failures
