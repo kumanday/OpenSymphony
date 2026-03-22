@@ -98,12 +98,13 @@ Current implementation:
 - validate `openhands` extension namespace
 - default `openhands.local_server.command` to the absolute pinned `<opensymphony-checkout>/tools/openhands-server/run-local.sh` launcher
 - treat a leading unmatched `---` as prompt body text instead of failing front-matter parsing
-- fail on malformed or non-HTTP(S) `openhands.transport.base_url` values during workflow resolution
-- default required OpenHands conversation request fields such as `confirmation_policy` and `agent`
+- fail on malformed, non-HTTP(S), or `/api`-suffixed `openhands.transport.base_url` values during workflow resolution
+- default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
 - fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range
 - fail when `openhands.conversation.agent.llm` is present without a non-empty `model`
 - fail on malformed `agent.max_concurrent_agents_by_state` entries
 - preserve the Markdown body exactly after the front matter terminator
+- treat whitespace-only prompt bodies as absent so `DEFAULT_PROMPT_TEMPLATE` still applies
 
 ## 3.2 Workspace manager
 

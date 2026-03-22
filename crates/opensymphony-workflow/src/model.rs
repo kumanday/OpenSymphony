@@ -152,8 +152,15 @@ pub struct OpenHandsConversationFrontMatter {
     pub persistence_dir_relative: Option<String>,
     pub max_iterations: Option<IntegerLike>,
     pub stuck_detection: Option<bool>,
-    pub confirmation_policy: Option<OpenHandsConfirmationPolicy>,
+    pub confirmation_policy: Option<OpenHandsConfirmationPolicyFrontMatter>,
     pub agent: Option<OpenHandsConversationAgentFrontMatter>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct OpenHandsConfirmationPolicyFrontMatter {
+    pub kind: Option<String>,
+    #[serde(flatten)]
+    pub options: BTreeMap<String, serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
