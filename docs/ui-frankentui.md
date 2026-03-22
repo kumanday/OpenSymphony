@@ -219,8 +219,8 @@ Current reconnect behavior:
 - reapply the SSE attach-timeout guard after those retryable failures so a later blackholed reopen also falls back into reconnect instead of hanging forever
 - keep that bootstrap snapshot visible while the client is still connecting or reconnecting
 - only report `live control-plane stream` after the SSE subscription is actually yielding stream data
-- make scripted `opensymphony tui --exit-after-ms ...` runs fail if the bridge never observes that live stream state
-- if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible
+- make scripted `opensymphony tui --exit-after-ms ...` runs fail unless the final reduced control-plane state is still `live` when the timeout expires
+- if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible, and preserve that reconnecting state through at least one rendered frame even if a recovery snapshot is already queued
 - ignore regressing snapshots unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
 - refetch the current snapshot before resubscribing
 - tolerate additive `recent_events[].kind` values by preserving unknown kinds instead of rejecting the whole snapshot payload
