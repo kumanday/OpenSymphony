@@ -103,9 +103,11 @@ Current implementation:
 - fail on malformed, non-HTTP(S), or path-bearing `openhands.transport.base_url` values during workflow resolution
 - fail when `openhands.transport.session_api_key_env` or explicit OpenHands WebSocket auth knobs are configured before the runtime transport layer consumes them
 - fail when `openhands.mcp.stdio_servers` is configured before the runtime conversation-create adapter can forward `mcp_config`
+- fail when non-default `openhands.conversation.reuse_policy` values are configured before the orchestrator/runtime path can honor alternate conversation reuse behavior
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
 - fail when `openhands.conversation.confirmation_policy` includes options that cannot be represented in the current OpenHands request subset
 - fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range
+- fail when `openhands.conversation.agent.log_completions` or extra agent option keys are configured before the runtime conversation-create adapter can forward them
 - fail when `openhands.conversation.agent.llm` is present without a non-empty `model`
 - fail when `openhands.conversation.agent.llm.api_key_env` or `base_url_env` are configured before the runtime conversation-create adapter can forward them
 - fail on malformed `agent.max_concurrent_agents_by_state` entries
@@ -207,6 +209,7 @@ Suggested scenarios:
 - run the same issue twice
 - verify the same `conversation_id` is reused
 - verify continuation guidance is used instead of the full first-turn prompt
+- verify workflow validation rejects non-default `openhands.conversation.reuse_policy` values until runtime support exists
 
 ### Scenario C: WebSocket reconnect
 

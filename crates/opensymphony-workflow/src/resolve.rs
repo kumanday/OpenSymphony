@@ -441,6 +441,7 @@ fn resolve_openhands_conversation<E: Environment>(
     conversation: &OpenHandsConversationFrontMatter,
     env: &E,
 ) -> Result<OpenHandsConversationConfig, WorkflowConfigError> {
+    let reuse_policy = resolve_openhands_reuse_policy(conversation.reuse_policy.as_deref(), env)?;
     let confirmation_policy = match conversation.confirmation_policy.clone() {
         Some(policy) => resolve_openhands_confirmation_policy(policy)?,
         None => OpenHandsConfirmationPolicy {
@@ -466,12 +467,7 @@ fn resolve_openhands_conversation<E: Environment>(
     }
 
     Ok(OpenHandsConversationConfig {
-        reuse_policy: resolve_string_or_default(
-            conversation.reuse_policy.as_deref(),
-            env,
-            "openhands.conversation.reuse_policy",
-            "per_issue",
-        )?,
+        reuse_policy,
         persistence_dir_relative: resolve_relative_path(
             conversation.persistence_dir_relative.as_deref(),
             env,
@@ -520,6 +516,8 @@ fn resolve_openhands_agent<E: Environment>(
     agent: &OpenHandsConversationAgentFrontMatter,
     env: &E,
 ) -> Result<OpenHandsConversationAgentConfig, WorkflowConfigError> {
+    reject_unsupported_openhands_agent_options(agent)?;
+
     let kind = match agent.kind.as_deref() {
         Some(kind) => {
             normalize_optional(kind).ok_or_else(|| WorkflowConfigError::InvalidField {
@@ -537,9 +535,56 @@ fn resolve_openhands_agent<E: Environment>(
             .as_ref()
             .map(|llm| resolve_openhands_llm(llm, env))
             .transpose()?,
-        log_completions: agent.log_completions.unwrap_or(false),
-        options: agent.options.clone(),
+        log_completions: false,
+        options: BTreeMap::new(),
     })
+}
+
+fn resolve_openhands_reuse_policy<E: Environment>(
+    configured: Option<&str>,
+    env: &E,
+) -> Result<String, WorkflowConfigError> {
+    let reuse_policy = resolve_string_or_default(
+        configured,
+        env,
+        "openhands.conversation.reuse_policy",
+        "per_issue",
+    )?;
+    if !reuse_policy.eq_ignore_ascii_case("per_issue") {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.reuse_policy",
+            message:
+                "is not supported until the orchestrator/runtime path can honor non-default conversation reuse policies"
+                    .to_owned(),
+        });
+    }
+
+    Ok("per_issue".to_owned())
+}
+
+fn reject_unsupported_openhands_agent_options(
+    agent: &OpenHandsConversationAgentFrontMatter,
+) -> Result<(), WorkflowConfigError> {
+    if agent.log_completions.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.log_completions",
+            message:
+                "is not supported until the runtime conversation-create adapter can forward agent logging options"
+                    .to_owned(),
+        });
+    }
+
+    if !agent.options.is_empty() {
+        let unsupported = agent.options.keys().cloned().collect::<Vec<_>>().join(", ");
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent",
+            message: format!(
+                "unsupported options cannot be forwarded to the current OpenHands agent request subset: {unsupported}"
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 fn resolve_openhands_llm<E: Environment>(
