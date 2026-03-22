@@ -115,16 +115,17 @@ This keeps:
 The control-plane stream must preserve monotonically advancing snapshot sequences for slow or reconnecting consumers so the UI never rolls back to stale state after it has already rendered a newer snapshot.
 
 The control-plane snapshot contract should remain additive for read-only clients:
-unknown summarized event kinds must not invalidate the whole snapshot payload,
-and bootstrap snapshot fetches should fail fast enough that reconnect logic can
-retry instead of wedging the UI behind a hung HTTP request. SSE subscriptions
-should also use bounded connection-establishment and read timeouts so a
-blackholed or stalled `/api/v1/events` connection fails back into reconnect,
-while normal keepalive traffic keeps healthy idle streams attached. Retryable
-SSE transport failures should surface a reconnecting state to the UI before the
-next successful snapshot arrives, and the attach-timeout guard must stay active
-until the first decoded snapshot arrives on each attach or retry so an
-`Open`-only or header-only stream cannot wedge the bridge before bootstrap
+unknown summarized event kinds and unknown additive snapshot enum values such as
+`runtime_state` or `last_outcome` must not invalidate the whole snapshot
+payload, and bootstrap snapshot fetches should fail fast enough that reconnect
+logic can retry instead of wedging the UI behind a hung HTTP request. SSE
+subscriptions should also use bounded connection-establishment and read
+timeouts so a blackholed or stalled `/api/v1/events` connection fails back into
+reconnect, while normal keepalive traffic keeps healthy idle streams attached.
+Retryable SSE transport failures should surface a reconnecting state to the UI
+before the next successful snapshot arrives, and the attach-timeout guard must
+stay active until the first decoded snapshot arrives on each attach or retry so
+an `Open`-only or header-only stream cannot wedge the bridge before bootstrap
 data lands.
 
 ## 4. Runtime component model

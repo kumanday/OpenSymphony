@@ -225,6 +225,7 @@ Current reconnect behavior:
 - ignore regressing snapshots unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
 - refetch the current snapshot before resubscribing
 - tolerate additive `recent_events[].kind` values by preserving unknown kinds instead of rejecting the whole snapshot payload
+- tolerate additive `issues[].runtime_state` and `issues[].last_outcome` values by preserving unknown strings instead of rejecting the whole snapshot payload
 
 ## 11. Dependency strategy
 
@@ -253,6 +254,7 @@ Current automated coverage:
 - scripted CLI attach coverage for healthy and never-live `--exit-after-ms` runs
 - monotonic SSE lag-recovery tests for slow consumers
 - snapshot decoding coverage for unknown additive recent event kinds
+- snapshot decoding coverage for unknown additive `runtime_state` and `last_outcome` values
 
 Manual:
 

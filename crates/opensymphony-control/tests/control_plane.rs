@@ -216,6 +216,74 @@ async fn fetch_snapshot_times_out_when_snapshot_endpoint_hangs() {
     server_task.abort();
 }
 
+#[test]
+fn snapshot_envelopes_accept_unknown_runtime_and_outcome_values() {
+    let value = serde_json::json!({
+        "sequence": 7,
+        "published_at": "2026-03-22T02:00:00Z",
+        "snapshot": {
+            "generated_at": "2026-03-22T02:00:00Z",
+            "daemon": {
+                "state": "ready",
+                "last_poll_at": "2026-03-22T02:00:00Z",
+                "workspace_root": "/tmp/opensymphony",
+                "status_line": "ready"
+            },
+            "agent_server": {
+                "reachable": true,
+                "base_url": "http://127.0.0.1:3000",
+                "conversation_count": 2,
+                "status_line": "healthy"
+            },
+            "metrics": {
+                "running_issues": 1,
+                "retry_queue_depth": 0,
+                "total_tokens": 4096,
+                "total_cost_micros": 120000
+            },
+            "issues": [{
+                "identifier": "COE-255",
+                "title": "Observability and FrankenTUI",
+                "tracker_state": "In Progress",
+                "runtime_state": "paused_for_operator",
+                "last_outcome": "superseded",
+                "last_event_at": "2026-03-22T02:00:00Z",
+                "conversation_id_suffix": "c0e255",
+                "workspace_path_suffix": "COE-255",
+                "retry_count": 0,
+                "blocked": false
+            }],
+            "recent_events": [{
+                "happened_at": "2026-03-22T02:00:00Z",
+                "issue_identifier": "COE-255",
+                "kind": "snapshot_published",
+                "summary": "published step 7"
+            }]
+        }
+    });
+
+    let envelope: SnapshotEnvelope =
+        serde_json::from_value(value).expect("snapshot envelope should decode");
+    assert_eq!(
+        envelope.snapshot.issues[0].runtime_state,
+        IssueRuntimeState::Other("paused_for_operator".to_owned())
+    );
+    assert_eq!(
+        envelope.snapshot.issues[0].last_outcome,
+        WorkerOutcome::Other("superseded".to_owned())
+    );
+
+    let encoded = serde_json::to_value(&envelope).expect("snapshot envelope should encode");
+    assert_eq!(
+        encoded["snapshot"]["issues"][0]["runtime_state"],
+        serde_json::Value::String("paused_for_operator".to_owned())
+    );
+    assert_eq!(
+        encoded["snapshot"]["issues"][0]["last_outcome"],
+        serde_json::Value::String("superseded".to_owned())
+    );
+}
+
 #[tokio::test]
 async fn stream_updates_times_out_when_event_stream_goes_idle() {
     let store = SnapshotStore::new(fixture_snapshot(0));

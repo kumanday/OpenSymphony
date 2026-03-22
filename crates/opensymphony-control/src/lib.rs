@@ -89,8 +89,7 @@ pub struct IssueSnapshot {
     pub blocked: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueRuntimeState {
     Idle,
     Running,
@@ -98,10 +97,55 @@ pub enum IssueRuntimeState {
     Releasing,
     Completed,
     Failed,
+    Other(String),
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+impl IssueRuntimeState {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::RetryQueued => "retry_queued",
+            Self::Releasing => "releasing",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "idle" => Self::Idle,
+            "running" => Self::Running,
+            "retry_queued" => Self::RetryQueued,
+            "releasing" => Self::Releasing,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl Serialize for IssueRuntimeState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for IssueRuntimeState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&value))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerOutcome {
     Unknown,
     Running,
@@ -109,6 +153,52 @@ pub enum WorkerOutcome {
     Completed,
     Failed,
     Canceled,
+    Other(String),
+}
+
+impl WorkerOutcome {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Running => "running",
+            Self::Continued => "continued",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+            Self::Other(value) => value.as_str(),
+        }
+    }
+
+    fn from_wire(value: &str) -> Self {
+        match value {
+            "unknown" => Self::Unknown,
+            "running" => Self::Running,
+            "continued" => Self::Continued,
+            "completed" => Self::Completed,
+            "failed" => Self::Failed,
+            "canceled" => Self::Canceled,
+            other => Self::Other(other.to_owned()),
+        }
+    }
+}
+
+impl Serialize for WorkerOutcome {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for WorkerOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&value))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

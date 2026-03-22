@@ -715,6 +715,21 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
     } else {
         DaemonState::Ready
     };
+    let running_issues = if matches!(runtime, IssueRuntimeState::Completed) {
+        0
+    } else {
+        1
+    };
+    let retry_queue_depth = if matches!(runtime, IssueRuntimeState::RetryQueued) {
+        1
+    } else {
+        0
+    };
+    let retry_count = if matches!(runtime, IssueRuntimeState::RetryQueued) {
+        1
+    } else {
+        0
+    };
 
     DaemonSnapshot {
         generated_at: now,
@@ -731,16 +746,8 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             status_line: "local agent-server healthy".to_owned(),
         },
         metrics: MetricsSnapshot {
-            running_issues: if matches!(runtime, IssueRuntimeState::Completed) {
-                0
-            } else {
-                1
-            },
-            retry_queue_depth: if matches!(runtime, IssueRuntimeState::RetryQueued) {
-                1
-            } else {
-                0
-            },
+            running_issues,
+            retry_queue_depth,
             total_tokens: 8_000 + (step * 240),
             total_cost_micros: 340_000 + (step * 9_500),
         },
@@ -754,11 +761,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: "255-live".to_owned(),
                 workspace_path_suffix: "COE-255".to_owned(),
-                retry_count: if matches!(runtime, IssueRuntimeState::RetryQueued) {
-                    1
-                } else {
-                    0
-                },
+                retry_count,
                 blocked: false,
             },
             IssueSnapshot {
