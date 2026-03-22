@@ -298,12 +298,13 @@ Required checks:
 Current implementation notes:
 
 - the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
+- checkout-relative doctor defaults are derived from the config and tooling paths rather than the caller `cwd`, so running `opensymphony doctor` outside the repo root still validates the intended checkout and bundled `examples/target-repo`
 - the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` before reconciling events
-- when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
+- when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, switches follow-up probes to the launched supervisor base URL, then stops it again
 - failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity
 - missing `${VAR}` tokens in required config values now fail doctor during config expansion instead of silently validating the config directory as an empty fallback path
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
-- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback and the pinned launcher `cwd` behavior
+- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback outside the repo `cwd` and the pinned launcher `cwd` behavior
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials
 
 ## 8. Logging and diagnostics
