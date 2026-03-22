@@ -69,7 +69,7 @@ Implementation note:
 - blocker and state-refresh normalization should retain both the state name and the raw Linear `WorkflowState.type` string, while also exposing a normalized `kind`, so terminal blockers remain detectable without losing the tracker's exact type value
 - issue normalization should retain the Linear issue URL because `WORKFLOW.md` renders `{{ issue.url }}` under strict template validation
 - issue normalization should preserve the raw Linear priority because prompt/UI consumers render `{{ issue.priority }}` directly
-- top-level issue pages should request only a small initial `inverseRelations` slice and page the rest per issue so nested connection complexity stays under Linear's query cap
+- top-level issue pages should request only small initial `labels` and `inverseRelations` slices and page the rest per issue so connection-heavy issue metadata stays complete without blowing past Linear's query cap
 
 ## 3. Candidate sorting and eligibility
 
@@ -108,6 +108,7 @@ Current adapter contract:
 - reject blank `LINEAR_API_KEY` values during client construction so startup misconfiguration fails fast instead of repeated auth failures at poll time
 - decode GraphQL error envelopes before falling back to raw HTTP classification because Linear rate limits can arrive as HTTP 400 with GraphQL code `RATELIMITED`
 - prefer Linear's `X-RateLimit-*-Reset` headers when calculating retry delays for rate-limited responses, falling back to `Retry-After` and then local exponential backoff only when no reset window is advertised
+- keep transient HTTP 5xx responses on the retryable HTTP-status path even when the body decodes as a GraphQL error envelope
 - keep GraphQL query and response structs private to `opensymphony-linear`
 - return only normalized domain models to orchestrator-facing callers
 

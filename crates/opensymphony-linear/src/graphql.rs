@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub(super) const ISSUES_BY_STATE_QUERY: &str = r#"
-query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchived: Boolean!, $first: Int!, $after: String, $relationFirst: Int!) {
+query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchived: Boolean!, $first: Int!, $after: String, $relationFirst: Int!, $labelFirst: Int!) {
   issues(
     filter: {
       project: { slugId: { eq: $projectSlug } }
@@ -26,9 +26,13 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
         name
         type
       }
-      labels {
+      labels(first: $labelFirst) {
         nodes {
           name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
       inverseRelations(first: $relationFirst) {
@@ -54,6 +58,23 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
     pageInfo {
       hasNextPage
       endCursor
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_LABELS_QUERY: &str = r#"
+query IssueLabelsPage($issueId: String!, $first: Int!, $after: String) {
+  issue(id: $issueId) {
+    id
+    labels(first: $first, after: $after) {
+      nodes {
+        name
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
     }
   }
 }
@@ -140,6 +161,7 @@ pub(super) struct IssuesByStateVariables {
     pub first: usize,
     pub after: Option<String>,
     pub relation_first: usize,
+    pub label_first: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +176,14 @@ pub(super) struct IssueStatesByIdsVariables {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct IssueInverseRelationsVariables {
+    pub issue_id: String,
+    pub first: usize,
+    pub after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueLabelsVariables {
     pub issue_id: String,
     pub first: usize,
     pub after: Option<String>,
@@ -175,13 +205,18 @@ pub(super) struct IssueInverseRelationsData {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct IssueLabelsData {
+    pub issue: Option<LinearIssueLabelsNode>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct IssuesConnection<T> {
     pub nodes: Vec<T>,
     #[serde(rename = "pageInfo")]
     pub page_info: PageInfo,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub(super) struct PageInfo {
     #[serde(rename = "hasNextPage")]
     pub has_next_page: bool,
@@ -214,6 +249,13 @@ pub(super) struct LinearIssueRelationsNode {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct LinearIssueLabelsNode {
+    pub id: String,
+    pub labels: LinearLabelConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct LinearIssueStateNode {
     pub id: String,
     pub identifier: String,
@@ -232,6 +274,8 @@ pub(super) struct LinearWorkflowState {
 #[derive(Debug, Deserialize)]
 pub(super) struct LinearLabelConnection {
     pub nodes: Vec<LinearLabelNode>,
+    #[serde(default, rename = "pageInfo")]
+    pub page_info: PageInfo,
 }
 
 #[derive(Debug, Deserialize)]
