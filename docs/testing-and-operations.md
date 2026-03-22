@@ -98,6 +98,7 @@ Current implementation:
 - validate `openhands` extension namespace
 - leave `openhands.local_server.command` unset when omitted so the runtime-owned local tooling layer resolves the pinned launcher from the OpenSymphony checkout
 - fail when `openhands.local_server.command` is configured until the runtime supervisor can honor workflow-owned launcher overrides
+- fail when `openhands.local_server.enabled: false` is configured until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - resolve the bundled `examples/target-repo/WORKFLOW.md` file end-to-end, not just parse it
 - treat a leading unmatched `---` as prompt body text instead of failing front-matter parsing
 - fail on malformed, non-HTTP(S), or path-bearing `openhands.transport.base_url` values during workflow resolution
@@ -109,6 +110,7 @@ Current implementation:
 - fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range
 - fail when `openhands.conversation.agent.log_completions` or extra agent option keys are configured before the runtime conversation-create adapter can forward them
 - fail when `openhands.conversation.agent.llm` is present without a non-empty `model`
+- fail when `openhands.conversation.agent.llm` includes extra option keys before the runtime conversation-create adapter can forward them
 - fail when `openhands.conversation.agent.llm.api_key_env` or `base_url_env` are configured before the runtime conversation-create adapter can forward them
 - fail on malformed `agent.max_concurrent_agents_by_state` entries
 - preserve the Markdown body exactly after the front matter terminator

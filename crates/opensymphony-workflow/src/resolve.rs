@@ -232,7 +232,7 @@ fn resolve_openhands<E: Environment>(
     env: &E,
 ) -> Result<OpenHandsConfig, WorkflowConfigError> {
     reject_unsupported_openhands_transport_auth(&openhands.transport)?;
-    reject_unsupported_openhands_local_server_command(&openhands.local_server)?;
+    reject_unsupported_openhands_local_server_overrides(&openhands.local_server)?;
     reject_unsupported_openhands_websocket_auth(&openhands.websocket)?;
     reject_unsupported_openhands_mcp(&openhands.mcp)?;
 
@@ -326,9 +326,18 @@ fn reject_unsupported_openhands_transport_auth(
     Ok(())
 }
 
-fn reject_unsupported_openhands_local_server_command(
+fn reject_unsupported_openhands_local_server_overrides(
     local_server: &OpenHandsLocalServerFrontMatter,
 ) -> Result<(), WorkflowConfigError> {
+    if matches!(local_server.enabled, Some(false)) {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.local_server.enabled",
+            message:
+                "is not supported until the runtime supervisor can honor workflow-owned local-server disablement"
+                    .to_owned(),
+        });
+    }
+
     if local_server.command.is_some() {
         return Err(WorkflowConfigError::InvalidField {
             field: "openhands.local_server.command",
@@ -592,6 +601,7 @@ fn resolve_openhands_llm<E: Environment>(
     env: &E,
 ) -> Result<OpenHandsLlmConfig, WorkflowConfigError> {
     reject_unsupported_openhands_llm_provider_overrides(llm)?;
+    reject_unsupported_openhands_llm_options(llm)?;
 
     let field = "openhands.conversation.agent.llm.model";
     let model = llm
@@ -612,6 +622,22 @@ fn resolve_openhands_llm<E: Environment>(
         base_url_env: normalize_optional_literal(&llm.base_url_env),
         options: llm.options.clone(),
     })
+}
+
+fn reject_unsupported_openhands_llm_options(
+    llm: &OpenHandsLlmFrontMatter,
+) -> Result<(), WorkflowConfigError> {
+    if !llm.options.is_empty() {
+        let unsupported = llm.options.keys().cloned().collect::<Vec<_>>().join(", ");
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm",
+            message: format!(
+                "unsupported options cannot be forwarded to the current OpenHands llm request subset: {unsupported}"
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 fn reject_unsupported_openhands_llm_provider_overrides(
