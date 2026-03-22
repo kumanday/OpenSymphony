@@ -101,6 +101,7 @@ OpenSymphony creates a stable OpenHands `conversation_id` per issue and persists
 - restart recovery after daemon restarts
 
 This is stricter than the minimum Symphony requirement and intentionally optimizes continuity.
+The current issue session runner also tracks whether that conversation has already been seeded with the full workflow prompt so a reused but never-started thread can still receive the original assignment on the next attempt.
 
 ### 3.6 The UI only sees the control plane
 
@@ -258,6 +259,8 @@ Use different prompt shapes for different moments:
 
 - Fresh conversation, first turn:
   - full rendered workflow prompt
+- Existing conversation whose full workflow prompt was never successfully sent:
+  - full rendered workflow prompt
 - Existing conversation, first turn of a new worker lifetime:
   - continuation guidance only
 - Existing conversation, in-process turn 2..N:
@@ -265,6 +268,7 @@ Use different prompt shapes for different moments:
 - Conversation reset after corruption or incompatible version:
   - fresh full workflow prompt again
 
+The current runner implements continuation guidance as a small built-in resume message that tells the agent to keep working from the existing conversation and workspace context instead of replaying the workflow template.
 This follows Symphony's instruction not to resend the original full task prompt into an already live thread.
 
 ## 6. Event and state ownership

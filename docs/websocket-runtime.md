@@ -225,8 +225,9 @@ Current repository implementation:
 For each turn:
 
 1. Select prompt shape:
-   - full prompt on fresh conversation
-   - continuation guidance on resumed conversation or later turns
+   - full rendered workflow prompt on a fresh conversation
+   - full rendered workflow prompt again if a reused conversation exists locally but has never been seeded with that first assignment message
+   - built-in continuation guidance on resumed seeded conversations or later turns
 2. `POST /api/conversations/{id}/events`
    - user role
    - prompt content
