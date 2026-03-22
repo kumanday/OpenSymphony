@@ -10,12 +10,13 @@ use ftui::{
     core::geometry::Rect,
     prelude::{App, Cmd, Event, Frame, KeyCode, Model, ScreenMode},
     runtime::{Every, Subscription},
-    widgets::{Widget, paragraph::Paragraph},
+    widgets::{paragraph::Paragraph, Widget},
 };
-use opensymphony_control::{ControlPlaneClient, ControlPlaneClientError, log_stream_error};
+use opensymphony_control::{log_stream_error, ControlPlaneClient, ControlPlaneClientError};
 use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope};
 use thiserror::Error;
 use tokio::sync::watch;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use url::Url;
 
 const INLINE_UI_HEIGHT: u16 = 22;
@@ -100,8 +101,14 @@ impl TuiState {
         let generated = snapshot
             .map(|value| format_timestamp(value.snapshot.generated_at))
             .unwrap_or_else(|| "--:--:--".to_owned());
+        let daemon = snapshot
+            .map(daemon_status_summary)
+            .unwrap_or_else(|| "daemon=--".to_owned());
+        let agent = snapshot
+            .map(agent_server_status_summary)
+            .unwrap_or_else(|| "agent=--".to_owned());
         let status = format!(
-            "OpenSymphony | conn={} | focus={} | bottom={} | seq={} | issues={} | updated={} | q quit  tab focus  e toggle",
+            "OpenSymphony | {daemon} | {agent} | conn={} | focus={} | bottom={} | seq={} | issues={} | updated={} | q quit  tab focus  e toggle",
             self.connection.label(),
             self.focus.label(),
             self.timeline_mode.label(),
@@ -668,6 +675,19 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.format("%H:%M:%S").to_string()
 }
 
+fn daemon_status_summary(snapshot: &SnapshotEnvelope) -> String {
+    format!("daemon={}", snapshot.snapshot.daemon.state.as_str())
+}
+
+fn agent_server_status_summary(snapshot: &SnapshotEnvelope) -> String {
+    let agent_server = &snapshot.snapshot.agent_server;
+    if agent_server.reachable {
+        format!("agent=up/{}", agent_server.conversation_count)
+    } else {
+        "agent=down".to_owned()
+    }
+}
+
 fn pane_title(title: &str, focused: bool) -> String {
     let marker = if focused { "[x]" } else { "[ ]" };
     format!("{marker} {title}")
@@ -846,25 +866,47 @@ fn fit(value: &str, width: usize) -> String {
     }
 
     let value = single_line(value);
-    let value_length = value.chars().count();
-    if value_length == width {
+    let value_width = display_width(&value);
+    if value_width == width {
         return value;
     }
-    if value_length < width {
-        return format!("{value:<width$}");
+    if value_width < width {
+        return pad_to_width(value, width);
     }
 
     if width == 1 {
         return "~".to_owned();
     }
 
-    let mut shortened = value.chars().take(width - 1).collect::<String>();
+    let mut shortened = String::new();
+    let max_width = width - 1;
+    let mut shortened_width = 0;
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if shortened_width + ch_width > max_width {
+            break;
+        }
+        shortened.push(ch);
+        shortened_width += ch_width;
+    }
     shortened.push('~');
-    shortened
+    pad_to_width(shortened, width)
 }
 
 fn single_line(value: &str) -> String {
     value.lines().collect::<Vec<_>>().join(" ")
+}
+
+fn display_width(value: &str) -> usize {
+    UnicodeWidthStr::width(value)
+}
+
+fn pad_to_width(mut value: String, width: usize) -> String {
+    let value_width = display_width(&value);
+    if value_width < width {
+        value.push_str(&" ".repeat(width - value_width));
+    }
+    value
 }
 
 trait RuntimeStateLabel {
@@ -901,11 +943,26 @@ impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
     }
 }
 
+trait DaemonStateLabel {
+    fn as_str(&self) -> &'static str;
+}
+
+impl DaemonStateLabel for opensymphony_domain::DaemonState {
+    fn as_str(&self) -> &'static str {
+        match self {
+            opensymphony_domain::DaemonState::Starting => "starting",
+            opensymphony_domain::DaemonState::Ready => "ready",
+            opensymphony_domain::DaemonState::Degraded => "degraded",
+            opensymphony_domain::DaemonState::Stopped => "stopped",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BridgeHandle, BridgeMailbox, TuiAction, TuiState, fit, issue_window, section_layout,
-        stacked_body_layout, visible_issue_count,
+        display_width, fit, issue_window, section_layout, stacked_body_layout, visible_issue_count,
+        BridgeHandle, BridgeMailbox, TuiAction, TuiState,
     };
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
@@ -1061,6 +1118,40 @@ mod tests {
         assert_eq!(rendered.lines().count(), 22);
         assert!(rendered.contains("first line second line"));
         assert!(!rendered.contains("first line\nsecond line"));
+    }
+
+    #[test]
+    fn header_surfaces_daemon_and_agent_health() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 3);
+        snapshot.snapshot.daemon.state = DaemonState::Degraded;
+        snapshot.snapshot.agent_server.reachable = false;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.render_text(140, 22);
+        let header = rendered.lines().next().expect("header row");
+        assert!(header.contains("daemon=degraded"));
+        assert!(header.contains("agent=down"));
+    }
+
+    #[test]
+    fn fit_uses_terminal_cell_width_for_padding_and_truncation() {
+        assert_eq!(fit("界", 4), "界  ");
+        assert_eq!(fit("界abc", 4), "界a~");
+    }
+
+    #[test]
+    fn wide_glyphs_stay_within_the_frame_width_budget() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 3);
+        snapshot.snapshot.issues[0].title = "界面 dashboard".to_owned();
+        snapshot.snapshot.recent_events[0].summary = "多字节 health event".to_owned();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.render_text(40, 22);
+        assert!(rendered.lines().all(|line| display_width(line) <= 40));
+        assert!(rendered.contains("界面"));
+        assert!(rendered.contains("多字节"));
     }
 
     #[test]

@@ -126,8 +126,13 @@ Use pane-based layout so future views can expand without redesign.
 
 The implemented inline layout budgets rows per pane instead of truncating one giant body block.
 That keeps the bottom timeline visible under long issue lists, preserves the selected issue when snapshot ordering changes, and windows the issue pane around the current selection so narrower split terminals still keep the selected row and detail visible.
+The always-visible status line now leads with daemon and local agent-server health before the
+connection and focus metadata so degraded runtime state is visible even when the issue list is
+otherwise stable.
 Rendered pane text is normalized to a single visual line before fitting so
 newline-bearing snapshot fields do not silently spill past the row budget.
+Row fitting also uses terminal cell width instead of Unicode scalar counts so full-width tracker
+titles or event summaries do not bleed across pane separators in split layouts.
 
 ## 6. Interaction model
 

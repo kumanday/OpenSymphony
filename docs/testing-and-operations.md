@@ -72,6 +72,13 @@ Suggested gates:
 - `OPENSYMPHONY_LIVE_OPENHANDS=1`
 - `OPENSYMPHONY_LIVE_LINEAR=1`
 
+Current implementation:
+
+- `cargo test --workspace` exercises the fake-server contract suite in `crates/opensymphony-openhands/tests/fake_server_contract.rs`
+- `crates/opensymphony-cli/tests/doctor.rs` runs the CLI live-probe path against `opensymphony-testkit`
+- `scripts/smoke_local.sh` runs the static doctor pass
+- `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
+
 ## 3. Minimum required test coverage by subsystem
 
 ## 3.1 Workflow and config
@@ -121,21 +128,9 @@ Suggested gates:
 - snapshot derivation
 - JSON serialization
 - streaming update fanout
-- monotonic SSE delivery after lagged receivers
 - read-only client invariants
-- reconnect state that preserves the last good snapshot
-- selection stability across snapshot reordering
 - pane layout persistence
-- narrow inline rendering that keeps the selected issue row and detail visible
 - event log rendering
-
-Current implemented checks:
-
-- snapshot serialization in `opensymphony-domain`
-- control-plane HTTP plus SSE round-trip coverage in `opensymphony-control/tests/control_plane.rs`
-- control-plane lag-recovery monotonicity coverage in `opensymphony-control/src/lib.rs`
-- TUI reducer, visible-focus rendering, reconnect-state retention, stable selection across snapshot reordering, and render smoke tests in `opensymphony-tui/tests/reducer.rs`
-- TUI bridge mailbox coverage for snapshot coalescing, preserving the last good snapshot across disconnects, narrow-layout detail coverage, and newline normalization for pane rows in `opensymphony-tui/src/lib.rs`
 
 ## 4. Fake OpenHands server requirements
 
@@ -193,39 +188,30 @@ Recommended CLI commands for the repo:
 - `opensymphony doctor`
 - `opensymphony linear-mcp`
 
-Current workspace commands:
-
-- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
-- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
-
-The TUI treats `--url` as a control-plane service root. Path-prefixed deployments such as
-`http://proxy/opensymphony` and `http://proxy/opensymphony/` both resolve API requests beneath
-that prefix.
-
 Possible helper commands later:
 
 - `opensymphony debug openhands`
 - `opensymphony inspect workspace <issue-id>`
 - `opensymphony inspect conversation <issue-id>`
 
-Current validation commands for the implemented observability slice:
+Current command set in this repository:
 
-- `cargo test`
-- `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:4010 --sample-interval-ms 250`
+- `curl http://127.0.0.1:4010/healthz`
 - `curl http://127.0.0.1:4010/api/v1/snapshot`
 - `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
-- `curl http://127.0.0.1:4010/healthz`
+- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
+- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
+- `./scripts/smoke_local.sh`
+- `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
 
-When validating the control-plane stream locally, confirm that a reconnecting client still shows the last successful snapshot and that lagged consumers only advance to newer snapshot sequences.
-When validating `opensymphony-cli tui --exit-after-ms ...`, also confirm the
-control-plane bridge stops polling when the UI exits so the harness does not
-leave a background thread behind.
-When validating long issue queues, also confirm that moving the selection keeps
-the highlighted row visible and that snapshot reordering preserves focus on the
-same issue identifier.
-When validating the sample daemon payload, also confirm that `metrics.running_issues`
-and `metrics.retry_queue_depth` match the runtime states shown in the rendered issue list.
+When validating the local control-plane and TUI slice, also confirm that:
+
+- the TUI header shows daemon and agent-server health even when the issue list itself does not
+  change
+- reconnecting clients keep the last good snapshot visible instead of regressing to stale state
+- lagged SSE consumers only advance to newer snapshot sequences
+- newline-bearing or full-width tracker and event text stays within the pane row and column budget
 
 ## 7. Doctor checks
 
@@ -248,7 +234,8 @@ Required checks:
 - server responds on the expected base URL
 - a test conversation can be created with a temp `working_dir`
 - WebSocket can attach and reach readiness
-- a reconcile call succeeds
+- the doctor probe sends a real message and triggers `/run`
+- a reconcile call succeeds after the probe run starts
 
 ### External services
 
@@ -260,6 +247,15 @@ Required checks:
 - warn if server binds beyond loopback in local mode
 - warn if local mode is used with an obviously shared workspace root
 - warn if required secrets are missing
+
+Current implementation notes:
+
+- the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, and pinned-tooling files
+- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` before reconciling events
+- failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity
+- `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
+- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback and the pinned launcher `cwd` behavior
+- the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials
 
 ## 8. Logging and diagnostics
 
@@ -309,19 +305,6 @@ Include:
 - quick run script
 - note about the exact WebSocket assumptions pinned by this repo
 
-During the M1 bootstrap task, the directory may contain explicit placeholders
-for those files so the repository boundary exists before the local supervisor
-lands. Those placeholders must fail closed and must not start a server until
-the exact package version, uv dependency pin, and resolved lockfile are
-committed. Once they are replaced, the quick run script should launch the
-pinned server through the local `uv` environment and its `agent-server` extra,
-explicitly setting `RUNTIME=process`, passing `--host 127.0.0.1`, and using a
-configured `--port`.
-The wrapper should reject extra agent-server CLI flags so local smoke runs stay
-aligned with the daemon-managed single-server topology; `OPENHANDS_SERVER_PORT`
-is the only supported runtime override, and the sandbox selection stays fixed to
-host-process mode.
-
 Do not rely on a random globally installed `openhands` binary.
 
 ## 11. CI strategy
@@ -334,9 +317,11 @@ Recommended CI stages:
 4. selected integration tests
 5. optional nightly live tests on a controlled runner
 
-The bootstrap repository baseline is smaller: every PR should at least run
-`cargo fmt --check`, `cargo clippy --workspace --all-targets`, and
-`cargo test --workspace`.
+Current repo workflow:
+
+1. `cargo fmt --check`
+2. `cargo clippy --workspace --all-targets -- -D warnings`
+3. `cargo test --workspace`
 
 ## 12. Failure triage guidelines
 
@@ -356,3 +341,5 @@ This prevents noisy bug reports that mix multiple layers together.
 ## 13. Local safety note
 
 The MVP local mode runs agent activity on the host with process-level isolation. The docs, CLI help, and doctor output should state this plainly.
+
+The current `tools/openhands-server/run-local.sh` script binds OpenHands to loopback by default, and the doctor command warns when the configured base URL is not loopback in local mode.

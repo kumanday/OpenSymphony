@@ -2,10 +2,10 @@ use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use async_stream::stream;
 use axum::{
-    Json, Router,
     extract::State,
     response::sse::{Event, KeepAlive, Sse},
     routing::get,
+    Json, Router,
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
-    sync::{RwLock, broadcast},
+    sync::{broadcast, RwLock},
 };
 use tracing::warn;
 use url::Url;
@@ -311,7 +311,7 @@ mod tests {
     use tokio::time::timeout;
     use url::Url;
 
-    use super::{ControlPlaneClient, SnapshotStore, next_snapshot_envelope};
+    use super::{next_snapshot_envelope, ControlPlaneClient, SnapshotStore};
 
     fn fixture_snapshot(step: u64) -> DaemonSnapshot {
         let now = Utc

@@ -1,11 +1,24 @@
 [package]
 name = "opensymphony-openhands"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
 repository.workspace = true
-rust-version.workspace = true
-version.workspace = true
 
-[lints]
-workspace = true
+[dependencies]
+chrono.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+opensymphony-testkit = { path = "../opensymphony-testkit" }
+tokio.workspace = true
