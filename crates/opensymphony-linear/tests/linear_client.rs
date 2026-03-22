@@ -77,6 +77,10 @@ async fn candidate_issues_normalize_fixture_payloads() {
         serde_json::json!(10)
     );
     assert_eq!(
+        requests[0].body["variables"]["labelFirst"],
+        serde_json::json!(10)
+    );
+    assert_eq!(
         requests[0].body["variables"]["includeArchived"],
         Value::Bool(false)
     );
@@ -127,6 +131,47 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
         requests[0].body["variables"]["relationFirst"],
         serde_json::json!(10)
     );
+    assert_eq!(
+        requests[0].body["variables"]["labelFirst"],
+        serde_json::json!(10)
+    );
+}
+
+#[tokio::test]
+async fn candidate_issues_fetch_all_label_pages() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(include_str!(
+            "fixtures/candidate_issues_with_label_paging.json"
+        )),
+        QueuedResponse::json(include_str!("fixtures/issue_labels_page_2.json")),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("candidate query should succeed");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].identifier, "COE-260");
+    assert_eq!(issues[0].labels, vec!["backend", "urgent"]);
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("query IssueLabelsPage"));
+    assert_eq!(
+        requests[1].body["variables"]["issueId"],
+        Value::String("issue-260".to_string())
+    );
+    assert_eq!(
+        requests[1].body["variables"]["after"],
+        Value::String("labels-cursor-1".to_string())
+    );
 }
 
 #[tokio::test]
@@ -160,6 +205,10 @@ async fn issues_by_state_walk_pagination() {
         .contains("query IssuesByState"));
     assert_eq!(
         requests[0].body["variables"]["relationFirst"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        requests[0].body["variables"]["labelFirst"],
         serde_json::json!(2)
     );
     assert_eq!(
@@ -386,6 +435,29 @@ async fn graphql_rate_limited_bad_request_retries() {
         .candidate_issues()
         .await
         .expect("GraphQL rate-limited requests should retry");
+
+    assert_eq!(issues.len(), 2);
+    assert_eq!(server.recorded_requests().await.len(), 2);
+}
+
+#[tokio::test]
+async fn graphql_server_error_envelope_retries() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"errors":[{"message":"temporary upstream failure"}]}"#,
+        )
+        .with_header("content-type", "application/json"),
+        QueuedResponse::json(include_str!("fixtures/candidate_issues_page.json")),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("5xx GraphQL envelopes should stay retryable");
 
     assert_eq!(issues.len(), 2);
     assert_eq!(server.recorded_requests().await.len(), 2);

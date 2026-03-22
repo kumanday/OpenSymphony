@@ -13,9 +13,10 @@ use tracing::debug;
 use crate::error::{GraphqlError, LinearError};
 use crate::graphql::{
     GraphqlEnvelope, GraphqlErrorPayload, IssueInverseRelationsData,
-    IssueInverseRelationsVariables, IssueStatesByIdsData, IssueStatesByIdsVariables,
-    IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearRelationConnection,
-    ISSUES_BY_STATE_QUERY, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_STATES_BY_IDS_QUERY,
+    IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueStatesByIdsData,
+    IssueStatesByIdsVariables, IssuesByStateData, IssuesByStateVariables, LinearIssueNode,
+    LinearLabelConnection, LinearRelationConnection, ISSUES_BY_STATE_QUERY,
+    ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY, ISSUE_STATES_BY_IDS_QUERY,
 };
 use crate::normalize::{normalize_issue, normalize_issue_state};
 
@@ -23,6 +24,7 @@ const DEFAULT_BASE_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_PAGE_SIZE: usize = 50;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_INITIAL_RELATION_PAGE_SIZE: usize = 10;
+const MAX_INITIAL_LABEL_PAGE_SIZE: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -154,6 +156,7 @@ impl LinearClient {
                 first: self.config.page_size,
                 after: after.clone(),
                 relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
             };
             let response: IssuesByStateData = self
                 .execute_graphql(ISSUES_BY_STATE_QUERY, json!(variables))
@@ -161,7 +164,7 @@ impl LinearClient {
 
             let page_info = response.issues.page_info;
             for node in response.issues.nodes {
-                issues.push(normalize_issue(self.expand_inverse_relations(node).await?)?);
+                issues.push(normalize_issue(self.expand_issue(node).await?)?);
             }
 
             if !page_info.has_next_page {
@@ -220,14 +223,54 @@ impl LinearClient {
         }
     }
 
-    async fn expand_inverse_relations(
+    async fn expand_issue(
         &self,
         mut issue: LinearIssueNode,
     ) -> Result<LinearIssueNode, LinearError> {
+        issue.labels = self.load_all_labels(&issue.id, issue.labels).await?;
         issue.inverse_relations = self
             .load_all_inverse_relations(&issue.id, issue.inverse_relations)
             .await?;
         Ok(issue)
+    }
+
+    async fn load_all_labels(
+        &self,
+        issue_id: &str,
+        mut connection: LinearLabelConnection,
+    ) -> Result<LinearLabelConnection, LinearError> {
+        let mut after = connection.page_info.end_cursor.clone();
+
+        while connection.page_info.has_next_page {
+            let cursor = after.clone().ok_or_else(|| {
+                LinearError::InvalidResponse(format!(
+                    "Linear labels page for issue {issue_id} indicated a next page without an end cursor"
+                ))
+            })?;
+            let variables = IssueLabelsVariables {
+                issue_id: issue_id.to_string(),
+                first: self.config.page_size,
+                after: Some(cursor),
+            };
+            let response: IssueLabelsData = self
+                .execute_graphql(ISSUE_LABELS_QUERY, json!(variables))
+                .await?;
+            let issue = response.issue.ok_or_else(|| LinearError::MissingIssueIds {
+                issue_ids: vec![issue_id.to_string()],
+            })?;
+            if issue.id != issue_id {
+                return Err(LinearError::InvalidResponse(format!(
+                    "Linear labels page returned mismatched issue ID {} for {}",
+                    issue.id, issue_id
+                )));
+            }
+
+            connection.nodes.extend(issue.labels.nodes);
+            connection.page_info = issue.labels.page_info;
+            after = connection.page_info.end_cursor.clone();
+        }
+
+        Ok(connection)
     }
 
     async fn load_all_inverse_relations(
@@ -303,6 +346,20 @@ impl LinearClient {
                         .text()
                         .await
                         .map_err(|error| LinearError::Request(Box::new(error)))?;
+
+                    if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                        let error = LinearError::HttpStatus {
+                            status,
+                            body: payload,
+                            retry_after,
+                        };
+                        if self.should_retry(&error, attempt) {
+                            self.sleep_before_retry(&error, attempt).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(error);
+                    }
 
                     if let Some(error) = decode_graphql_error_response(&payload, retry_after)? {
                         if self.should_retry(&error, attempt) {
