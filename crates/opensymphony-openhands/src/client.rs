@@ -1,37 +1,178 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use reqwest::StatusCode;
-use serde::de::DeserializeOwned;
+use reqwest::{
+    RequestBuilder,
+    header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
+};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
+};
 use tracing::debug;
 use url::Url;
 use uuid::Uuid;
 
 use crate::events::{ConversationStateMirror, EventCache, KnownEvent};
 use crate::models::{
-    Conversation, ConversationCreateRequest, EventEnvelope, SearchConversationEventsResponse,
-    SendMessageRequest,
+    AcceptedResponse, Conversation, ConversationCreateRequest, ConversationRunRequest,
+    EventEnvelope, SearchConversationEventsResponse, SendMessageRequest,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiKeyAuth {
+    name: String,
+    value: String,
+}
+
+impl ApiKeyAuth {
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpAuth {
+    None,
+    QueryParam(ApiKeyAuth),
+    Header(ApiKeyAuth),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebSocketAuth {
+    None,
+    QueryParam(ApiKeyAuth),
+    Header(ApiKeyAuth),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthConfig {
+    pub http: HttpAuth,
+    pub websocket: WebSocketAuth,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl AuthConfig {
+    pub fn none() -> Self {
+        Self {
+            http: HttpAuth::None,
+            websocket: WebSocketAuth::None,
+        }
+    }
+
+    pub fn query_param_api_key(name: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = ApiKeyAuth::new(name, value);
+        Self {
+            http: HttpAuth::QueryParam(key.clone()),
+            websocket: WebSocketAuth::QueryParam(key),
+        }
+    }
+
+    pub fn header_api_key(name: impl Into<String>, value: impl Into<String>) -> Self {
+        let key = ApiKeyAuth::new(name, value);
+        Self {
+            http: HttpAuth::Header(key.clone()),
+            websocket: WebSocketAuth::Header(key),
+        }
+    }
+
+    pub fn header_api_key_with_websocket_query_fallback(
+        header_name: impl Into<String>,
+        websocket_query_param: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        let value = value.into();
+        Self {
+            http: HttpAuth::Header(ApiKeyAuth::new(header_name, value.clone())),
+            websocket: WebSocketAuth::QueryParam(ApiKeyAuth::new(websocket_query_param, value)),
+        }
+    }
+
+    fn apply_http_query(&self, url: &mut Url) {
+        if let HttpAuth::QueryParam(key) = &self.http {
+            url.query_pairs_mut().append_pair(key.name(), key.value());
+        }
+    }
+
+    fn apply_websocket_query(&self, url: &mut Url) {
+        if let WebSocketAuth::QueryParam(key) = &self.websocket {
+            url.query_pairs_mut().append_pair(key.name(), key.value());
+        }
+    }
+
+    fn apply_http_headers(
+        &self,
+        request: RequestBuilder,
+    ) -> Result<RequestBuilder, OpenHandsError> {
+        match &self.http {
+            HttpAuth::Header(key) => Ok(request.header(
+                parse_header_name(key.name())?,
+                parse_header_value(key.value())?,
+            )),
+            _ => Ok(request),
+        }
+    }
+
+    fn apply_websocket_headers(&self, headers: &mut HeaderMap) -> Result<(), OpenHandsError> {
+        if let WebSocketAuth::Header(key) = &self.websocket {
+            headers.insert(
+                parse_header_name(key.name())?,
+                parse_header_value(key.value())?,
+            );
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransportConfig {
-    pub base_url: String,
-    pub session_api_key: Option<String>,
+    base_url: String,
+    auth: AuthConfig,
 }
 
 impl TransportConfig {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into(),
-            session_api_key: None,
+            auth: AuthConfig::default(),
         }
     }
 
+    pub fn with_auth(mut self, auth: AuthConfig) -> Self {
+        self.auth = auth;
+        self
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub fn auth(&self) -> &AuthConfig {
+        &self.auth
+    }
+
     fn endpoint(&self, suffix: &str) -> Result<Url, OpenHandsError> {
-        let mut url = Url::parse(&self.base_url)?;
+        let mut url = self.parsed_base_url()?;
         let base_path = url.path().trim_end_matches('/');
         let path = format!("{base_path}{suffix}");
         let normalized = if path.is_empty() {
@@ -40,22 +181,29 @@ impl TransportConfig {
             path
         };
         url.set_path(&normalized);
-        if let Some(session_api_key) = &self.session_api_key {
-            url.query_pairs_mut()
-                .append_pair("session_api_key", session_api_key);
-        }
+        self.auth.apply_http_query(&mut url);
         Ok(url)
     }
 
-    fn ws_url(&self, conversation_id: Uuid) -> Result<Url, OpenHandsError> {
-        let mut url = Url::parse(&self.base_url)?;
+    fn websocket_request(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, OpenHandsError> {
+        let mut url = self.parsed_base_url()?;
         let scheme = match url.scheme() {
             "http" => "ws",
             "https" => "wss",
-            other => return Err(OpenHandsError::UnsupportedScheme(other.to_string())),
+            other => {
+                return Err(OpenHandsError::invalid_configuration(format!(
+                    "unsupported base URL scheme `{other}`"
+                )));
+            }
         };
-        url.set_scheme(scheme)
-            .map_err(|_| OpenHandsError::UnsupportedScheme(scheme.to_string()))?;
+        url.set_scheme(scheme).map_err(|_| {
+            OpenHandsError::invalid_configuration(format!(
+                "failed to apply websocket scheme `{scheme}`"
+            ))
+        })?;
 
         let base_path = url.path().trim_end_matches('/');
         let path = if base_path.is_empty() {
@@ -64,32 +212,58 @@ impl TransportConfig {
             format!("{base_path}/sockets/events/{conversation_id}")
         };
         url.set_path(&path);
-        if let Some(session_api_key) = &self.session_api_key {
-            url.query_pairs_mut()
-                .append_pair("session_api_key", session_api_key);
-        }
-        Ok(url)
+        self.auth.apply_websocket_query(&mut url);
+
+        let mut request = url.as_str().into_client_request().map_err(|error| {
+            OpenHandsError::invalid_configuration(format!(
+                "invalid websocket request `{url}`: {error}"
+            ))
+        })?;
+        self.auth.apply_websocket_headers(request.headers_mut())?;
+        Ok(request)
+    }
+
+    fn apply_http_auth(&self, request: RequestBuilder) -> Result<RequestBuilder, OpenHandsError> {
+        self.auth.apply_http_headers(request)
+    }
+
+    fn parsed_base_url(&self) -> Result<Url, OpenHandsError> {
+        Url::parse(&self.base_url).map_err(|error| {
+            OpenHandsError::invalid_configuration(format!(
+                "invalid base URL `{}`: {error}",
+                self.base_url
+            ))
+        })
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenHandsError {
-    #[error("request failed: {0}")]
-    Request(Box<reqwest::Error>),
-    #[error("websocket failed: {0}")]
-    WebSocket(Box<tokio_tungstenite::tungstenite::Error>),
-    #[error("url parsing failed: {0}")]
-    Url(Box<url::ParseError>),
-    #[error("json decoding failed: {0}")]
-    Json(Box<serde_json::Error>),
-    #[error("websocket event decoding failed: {error}; payload prefix: {snippet}")]
-    MalformedWebSocketEvent {
-        #[source]
-        error: Box<serde_json::Error>,
-        snippet: String,
+    #[error("invalid transport configuration: {detail}")]
+    InvalidConfiguration { detail: String },
+    #[error("{operation} transport failed: {detail}")]
+    Transport {
+        operation: &'static str,
+        detail: String,
     },
-    #[error("unexpected HTTP status {status}: {body}")]
-    HttpStatus { status: StatusCode, body: String },
+    #[error("{operation} returned HTTP {status_code}: {body}")]
+    HttpStatus {
+        operation: &'static str,
+        status_code: u16,
+        body: String,
+    },
+    #[error("{operation} protocol error: {detail}")]
+    Protocol {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("{operation} websocket failed: {detail}")]
+    WebSocketTransport {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("websocket event decoding failed: {detail}; payload prefix: {snippet}")]
+    MalformedWebSocketEvent { detail: String, snippet: String },
     #[error("websocket readiness timed out after {0:?}")]
     ReadinessTimeout(Duration),
     #[error("probe run activity was not observed after {0:?}")]
@@ -98,31 +272,34 @@ pub enum OpenHandsError {
     ProbeRunUnhealthy(String),
     #[error("websocket closed before readiness")]
     WebSocketClosed,
-    #[error("unsupported base URL scheme: {0}")]
-    UnsupportedScheme(String),
 }
 
-impl From<reqwest::Error> for OpenHandsError {
-    fn from(error: reqwest::Error) -> Self {
-        Self::Request(Box::new(error))
+impl OpenHandsError {
+    fn invalid_configuration(detail: impl Into<String>) -> Self {
+        Self::InvalidConfiguration {
+            detail: detail.into(),
+        }
     }
-}
 
-impl From<tokio_tungstenite::tungstenite::Error> for OpenHandsError {
-    fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
-        Self::WebSocket(Box::new(error))
+    fn transport(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Transport {
+            operation,
+            detail: error.to_string(),
+        }
     }
-}
 
-impl From<url::ParseError> for OpenHandsError {
-    fn from(error: url::ParseError) -> Self {
-        Self::Url(Box::new(error))
+    fn protocol(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Protocol {
+            operation,
+            detail: error.to_string(),
+        }
     }
-}
 
-impl From<serde_json::Error> for OpenHandsError {
-    fn from(error: serde_json::Error) -> Self {
-        Self::Json(Box::new(error))
+    fn websocket_transport(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::WebSocketTransport {
+            operation,
+            detail: error.to_string(),
+        }
     }
 }
 
@@ -149,70 +326,71 @@ impl OpenHandsClient {
     }
 
     pub async fn openapi_probe(&self) -> Result<(), OpenHandsError> {
-        let response = self
-            .http
-            .get(self.transport.endpoint("/openapi.json")?)
-            .send()
-            .await?;
-        ensure_success(response).await.map(|_| ())
+        let response = send(self.get_request("/openapi.json")?, "probe OpenAPI").await?;
+        read_success_body(response, "probe OpenAPI")
+            .await
+            .map(|_| ())
     }
 
     pub async fn create_conversation(
         &self,
         request: &ConversationCreateRequest,
     ) -> Result<Conversation, OpenHandsError> {
-        let response = self
-            .http
-            .post(self.transport.endpoint("/api/conversations")?)
-            .json(request)
-            .send()
-            .await?;
-        decode_json(response).await
+        let response = send(
+            self.json_request(
+                self.post_request("/api/conversations")?,
+                "create conversation",
+                request,
+            )?,
+            "create conversation",
+        )
+        .await?;
+        decode_json(response, "create conversation").await
     }
 
     pub async fn get_conversation(
         &self,
         conversation_id: Uuid,
     ) -> Result<Conversation, OpenHandsError> {
-        let response = self
-            .http
-            .get(
-                self.transport
-                    .endpoint(&format!("/api/conversations/{conversation_id}"))?,
-            )
-            .send()
-            .await?;
-        decode_json(response).await
+        let response = send(
+            self.get_request(&format!("/api/conversations/{conversation_id}"))?,
+            "fetch conversation",
+        )
+        .await?;
+        decode_json(response, "fetch conversation").await
     }
 
     pub async fn send_message(
         &self,
         conversation_id: Uuid,
         request: &SendMessageRequest,
-    ) -> Result<(), OpenHandsError> {
-        let response = self
-            .http
-            .post(
-                self.transport
-                    .endpoint(&format!("/api/conversations/{conversation_id}/events"))?,
-            )
-            .json(request)
-            .send()
-            .await?;
-        ensure_success(response).await.map(|_| ())
+    ) -> Result<AcceptedResponse, OpenHandsError> {
+        let response = send(
+            self.json_request(
+                self.post_request(&format!("/api/conversations/{conversation_id}/events"))?,
+                "send conversation event",
+                request,
+            )?,
+            "send conversation event",
+        )
+        .await?;
+        decode_accepted(response, "send conversation event").await
     }
 
-    pub async fn run_conversation(&self, conversation_id: Uuid) -> Result<(), OpenHandsError> {
-        let response = self
-            .http
-            .post(
-                self.transport
-                    .endpoint(&format!("/api/conversations/{conversation_id}/run"))?,
-            )
-            .json(&serde_json::json!({}))
-            .send()
-            .await?;
-        ensure_success(response).await.map(|_| ())
+    pub async fn run_conversation(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<AcceptedResponse, OpenHandsError> {
+        let response = send(
+            self.json_request(
+                self.post_request(&format!("/api/conversations/{conversation_id}/run"))?,
+                "trigger conversation run",
+                &ConversationRunRequest::default(),
+            )?,
+            "trigger conversation run",
+        )
+        .await?;
+        decode_accepted(response, "trigger conversation run").await
     }
 
     pub async fn search_events_page(
@@ -227,8 +405,12 @@ impl OpenHandsClient {
             url.query_pairs_mut().append_pair("page_id", page_id);
         }
 
-        let response = self.http.get(url).send().await?;
-        decode_json(response).await
+        let response = send(
+            self.transport.apply_http_auth(self.http.get(url))?,
+            "search conversation events",
+        )
+        .await?;
+        decode_json(response, "search conversation events").await
     }
 
     pub async fn search_all_events(
@@ -254,8 +436,10 @@ impl OpenHandsClient {
         conversation_id: Uuid,
         wait_timeout: Duration,
     ) -> Result<EventEnvelope, OpenHandsError> {
-        let ws_url = self.transport.ws_url(conversation_id)?;
-        let (mut stream, _) = connect_async(ws_url.as_str()).await?;
+        let ws_request = self.transport.websocket_request(conversation_id)?;
+        let (mut stream, _) = connect_async(ws_request)
+            .await
+            .map_err(|error| OpenHandsError::websocket_transport("wait for readiness", error))?;
         let deadline = Instant::now() + wait_timeout;
 
         loop {
@@ -303,7 +487,12 @@ impl OpenHandsClient {
                     debug!("ignoring raw websocket frame before readiness");
                 }
                 Some(Ok(Message::Close(_))) | None => return Err(OpenHandsError::WebSocketClosed),
-                Some(Err(error)) => return Err(OpenHandsError::WebSocket(Box::new(error))),
+                Some(Err(error)) => {
+                    return Err(OpenHandsError::websocket_transport(
+                        "wait for readiness",
+                        error,
+                    ));
+                }
             }
         }
     }
@@ -369,6 +558,30 @@ impl OpenHandsClient {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
+
+    fn get_request(&self, suffix: &str) -> Result<RequestBuilder, OpenHandsError> {
+        let url = self.transport.endpoint(suffix)?;
+        self.transport.apply_http_auth(self.http.get(url))
+    }
+
+    fn post_request(&self, suffix: &str) -> Result<RequestBuilder, OpenHandsError> {
+        let url = self.transport.endpoint(suffix)?;
+        self.transport.apply_http_auth(self.http.post(url))
+    }
+
+    fn json_request<T>(
+        &self,
+        request: RequestBuilder,
+        operation: &'static str,
+        payload: &T,
+    ) -> Result<RequestBuilder, OpenHandsError>
+    where
+        T: Serialize,
+    {
+        let body = serde_json::to_vec(payload)
+            .map_err(|error| OpenHandsError::protocol(operation, error))?;
+        Ok(request.header(CONTENT_TYPE, "application/json").body(body))
+    }
 }
 
 enum ProbeActivity {
@@ -377,35 +590,98 @@ enum ProbeActivity {
     Unhealthy(String),
 }
 
-async fn ensure_success(response: reqwest::Response) -> Result<Value, OpenHandsError> {
-    let status = response.status();
-    let body = response.text().await?;
-    if !status.is_success() {
-        return Err(OpenHandsError::HttpStatus { status, body });
-    }
-
-    serde_json::from_str(&body).map_err(OpenHandsError::from)
+async fn send(
+    request: RequestBuilder,
+    operation: &'static str,
+) -> Result<reqwest::Response, OpenHandsError> {
+    request
+        .send()
+        .await
+        .map_err(|error| OpenHandsError::transport(operation, error))
 }
 
-async fn decode_json<T>(response: reqwest::Response) -> Result<T, OpenHandsError>
+async fn read_success_body(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<Option<Value>, OpenHandsError> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| OpenHandsError::transport(operation, error))?;
+    if !status.is_success() {
+        return Err(OpenHandsError::HttpStatus {
+            operation,
+            status_code: status.as_u16(),
+            body,
+        });
+    }
+
+    if body.trim().is_empty() {
+        return Ok(None);
+    }
+
+    serde_json::from_str(&body)
+        .map(Some)
+        .map_err(|error| OpenHandsError::protocol(operation, error))
+}
+
+async fn decode_json<T>(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<T, OpenHandsError>
 where
     T: DeserializeOwned,
 {
-    let value = ensure_success(response).await?;
-    serde_json::from_value(value).map_err(OpenHandsError::from)
+    let value = read_success_body(response, operation)
+        .await?
+        .ok_or_else(|| OpenHandsError::protocol(operation, "expected JSON response body"))?;
+    serde_json::from_value(value).map_err(|error| OpenHandsError::protocol(operation, error))
+}
+
+async fn decode_accepted(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<AcceptedResponse, OpenHandsError> {
+    let Some(value) = read_success_body(response, operation).await? else {
+        return Ok(AcceptedResponse::accepted());
+    };
+
+    let accepted: AcceptedResponse = serde_json::from_value(value)
+        .map_err(|error| OpenHandsError::protocol(operation, error))?;
+    if accepted.success {
+        Ok(accepted)
+    } else {
+        Err(OpenHandsError::protocol(
+            operation,
+            "response reported `success=false`",
+        ))
+    }
 }
 
 fn parse_text_event(payload: &str) -> Result<EventEnvelope, OpenHandsError> {
     serde_json::from_str(payload).map_err(|error| OpenHandsError::MalformedWebSocketEvent {
-        error: Box::new(error),
+        detail: error.to_string(),
         snippet: payload.chars().take(160).collect(),
     })
 }
 
 fn parse_binary_event(payload: &[u8]) -> Result<EventEnvelope, OpenHandsError> {
     serde_json::from_slice(payload).map_err(|error| OpenHandsError::MalformedWebSocketEvent {
-        error: Box::new(error),
+        detail: error.to_string(),
         snippet: String::from_utf8_lossy(payload).chars().take(160).collect(),
+    })
+}
+
+fn parse_header_name(name: &str) -> Result<HeaderName, OpenHandsError> {
+    HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+        OpenHandsError::invalid_configuration(format!("invalid auth header name `{name}`: {error}"))
+    })
+}
+
+fn parse_header_value(value: &str) -> Result<HeaderValue, OpenHandsError> {
+    HeaderValue::from_str(value).map_err(|error| {
+        OpenHandsError::invalid_configuration(format!("invalid auth header value: {error}"))
     })
 }
 

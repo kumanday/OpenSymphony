@@ -177,6 +177,7 @@ async fn stream_updates_times_out_when_event_stream_goes_idle() {
     let client = ControlPlaneClient::with_timeouts(
         Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
         Duration::from_secs(5),
+        Duration::from_secs(5),
         Duration::from_millis(50),
     );
     let mut stream = client
@@ -205,6 +206,51 @@ async fn stream_updates_times_out_when_event_stream_goes_idle() {
             ));
         }
         other => panic!("expected stream timeout error, got {other:?}"),
+    }
+    assert!(started.elapsed() < Duration::from_secs(1));
+
+    stream.close();
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn stream_updates_times_out_when_event_stream_never_establishes() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should expose an address");
+    let server_task = tokio::spawn(async move {
+        let (_connection, _) = listener
+            .accept()
+            .await
+            .expect("client should connect to the hanging listener");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let client = ControlPlaneClient::with_timeouts(
+        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
+        Duration::from_secs(5),
+        Duration::from_millis(50),
+        Duration::from_secs(5),
+    );
+    let mut stream = client
+        .stream_updates()
+        .expect("client should open the update stream");
+
+    let started = tokio::time::Instant::now();
+    let error = stream
+        .next()
+        .await
+        .expect("stream establishment should surface a timeout error")
+        .expect_err("never-established stream should not decode as a snapshot");
+
+    match error {
+        ControlPlaneClientError::StreamConnectTimeout(timeout) => {
+            assert_eq!(timeout, Duration::from_millis(50));
+        }
+        other => panic!("expected stream connect timeout error, got {other:?}"),
     }
     assert!(started.elapsed() < Duration::from_secs(1));
 

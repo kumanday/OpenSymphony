@@ -182,16 +182,19 @@ pub struct ControlPlaneClient {
     base_url: Url,
     http: reqwest::Client,
     snapshot_timeout: Duration,
+    stream_connect_timeout: Duration,
 }
 
 impl ControlPlaneClient {
     const DEFAULT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+    const DEFAULT_STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
     const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 
     pub fn new(base_url: Url) -> Self {
         Self::with_timeouts(
             base_url,
             Self::DEFAULT_SNAPSHOT_TIMEOUT,
+            Self::DEFAULT_STREAM_CONNECT_TIMEOUT,
             Self::DEFAULT_STREAM_IDLE_TIMEOUT,
         )
     }
@@ -200,6 +203,7 @@ impl ControlPlaneClient {
         Self::with_timeouts(
             base_url,
             snapshot_timeout,
+            Self::DEFAULT_STREAM_CONNECT_TIMEOUT,
             Self::DEFAULT_STREAM_IDLE_TIMEOUT,
         )
     }
@@ -207,15 +211,18 @@ impl ControlPlaneClient {
     pub fn with_timeouts(
         base_url: Url,
         snapshot_timeout: Duration,
+        stream_connect_timeout: Duration,
         stream_idle_timeout: Duration,
     ) -> Self {
         Self {
             base_url,
             http: reqwest::Client::builder()
+                .connect_timeout(stream_connect_timeout)
                 .read_timeout(stream_idle_timeout)
                 .build()
                 .expect("control-plane reqwest client should build"),
             snapshot_timeout,
+            stream_connect_timeout,
         }
     }
 
@@ -234,7 +241,11 @@ impl ControlPlaneClient {
         let events_url = self.join_path("api/v1/events")?;
         let request = self.http.get(events_url);
         let inner = EventSource::new(request).map_err(ControlPlaneClientError::StreamRequest)?;
-        Ok(ControlPlaneEventStream { inner })
+        Ok(ControlPlaneEventStream {
+            inner,
+            stream_connect_timeout: self.stream_connect_timeout,
+            observed_open: false,
+        })
     }
 
     fn join_path(&self, path: &'static str) -> Result<Url, ControlPlaneClientError> {
@@ -250,14 +261,36 @@ impl ControlPlaneClient {
 
 pub struct ControlPlaneEventStream {
     inner: EventSource,
+    stream_connect_timeout: Duration,
+    observed_open: bool,
 }
 
 impl ControlPlaneEventStream {
     pub async fn next(&mut self) -> Option<Result<SnapshotEnvelope, ControlPlaneClientError>> {
-        while let Some(event) = self.inner.next().await {
+        loop {
+            let event = if self.observed_open {
+                match self.inner.next().await {
+                    Some(event) => event,
+                    None => return None,
+                }
+            } else {
+                match tokio::time::timeout(self.stream_connect_timeout, self.inner.next()).await {
+                    Ok(Some(event)) => event,
+                    Ok(None) => return None,
+                    Err(_) => {
+                        return Some(Err(ControlPlaneClientError::StreamConnectTimeout(
+                            self.stream_connect_timeout,
+                        )));
+                    }
+                }
+            };
             match event {
-                Ok(EventSourceEvent::Open) => continue,
+                Ok(EventSourceEvent::Open) => {
+                    self.observed_open = true;
+                    continue;
+                }
                 Ok(EventSourceEvent::Message(message)) => {
+                    self.observed_open = true;
                     return Some(
                         serde_json::from_str(&message.data)
                             .map_err(ControlPlaneClientError::Decode),
@@ -266,7 +299,6 @@ impl ControlPlaneEventStream {
                 Err(error) => return Some(Err(ControlPlaneClientError::Stream(Box::new(error)))),
             }
         }
-        None
     }
 
     pub fn close(&mut self) {
@@ -287,6 +319,8 @@ pub enum ControlPlaneClientError {
     Request(#[from] reqwest::Error),
     #[error("control-plane update stream failed: {0}")]
     Stream(#[source] Box<reqwest_eventsource::Error>),
+    #[error("control-plane update stream did not establish within {0:?}")]
+    StreamConnectTimeout(Duration),
     #[error("control-plane update request could not be cloned: {0}")]
     StreamRequest(reqwest_eventsource::CannotCloneRequestError),
     #[error("failed to decode control-plane payload: {0}")]
