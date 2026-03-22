@@ -262,7 +262,9 @@ Current workflow defaulting:
 - `agent.kind` defaults to `Agent` when omitted
 - non-default `openhands.conversation.reuse_policy` values are rejected during workflow resolution until the orchestrator/runtime path can honor alternate conversation reuse behavior
 - `max_iterations` must fit the downstream OpenHands `u32` request range
+- workflow-owned `local_server.readiness_probe_path` overrides are rejected during workflow resolution until the runtime supervisor launch path consumes them
 - workflow-owned `local_server.startup_timeout_ms` overrides are rejected during workflow resolution until the runtime supervisor creation path consumes them
+- workflow-owned `websocket.enabled`, `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides are rejected during workflow resolution until the runtime readiness/reconnect path consumes them
 - `agent.llm.model` is required whenever an `llm` block is present
 - workflow-owned LLM option keys are rejected during workflow resolution until the current request subset can actually forward them
 - workflow-owned agent options such as `log_completions` and extra agent keys are rejected during workflow resolution until the current request subset can actually forward them
@@ -279,7 +281,8 @@ Current repository implementation:
 - `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
 - the current request model still serializes `agent` as only `{ kind, llm }`, and `llm` itself as only `{ model, api_key }`, so workflow-owned agent extras plus arbitrary LLM option keys are rejected before runtime launch
 - the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
-- the current supervisor readiness probe still parses only bare `http://host:port` origins and the CLI still constructs `SupervisedServerConfig::new(tooling)` without applying workflow-owned startup timeouts, so `https://` base URLs and explicit `local_server.startup_timeout_ms` overrides are rejected before runtime launch
+- the current supervisor readiness probe still parses only bare `http://host:port` origins, always uses its default `/openapi.json` probe path, and the CLI still constructs `SupervisedServerConfig::new(tooling)` without applying workflow-owned startup timeouts, so `https://` base URLs plus explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are rejected before runtime launch
+- the current runtime still always opens the readiness socket and uses runtime-owned readiness/reconnect budgets, so explicit workflow-owned `websocket.enabled`, `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides are rejected before runtime launch
 - the current request model does not yet serialize `mcp_config`, so workflow-owned MCP stdio server declarations are rejected before runtime launch
 - `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`
 - `AcceptedResponse` tolerates either an explicit JSON success body or an empty successful response for `POST /events` and `POST /run`

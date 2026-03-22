@@ -233,7 +233,7 @@ fn resolve_openhands<E: Environment>(
 ) -> Result<OpenHandsConfig, WorkflowConfigError> {
     reject_unsupported_openhands_transport_auth(&openhands.transport)?;
     reject_unsupported_openhands_local_server_overrides(&openhands.local_server)?;
-    reject_unsupported_openhands_websocket_auth(&openhands.websocket)?;
+    reject_unsupported_openhands_websocket_overrides(&openhands.websocket)?;
     reject_unsupported_openhands_mcp(&openhands.mcp)?;
 
     Ok(OpenHandsConfig {
@@ -347,6 +347,15 @@ fn reject_unsupported_openhands_local_server_overrides(
         });
     }
 
+    if local_server.readiness_probe_path.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.local_server.readiness_probe_path",
+            message:
+                "is not supported until the runtime supervisor launch path consumes workflow-owned readiness probe settings"
+                    .to_owned(),
+        });
+    }
+
     if local_server.command.is_some() {
         return Err(WorkflowConfigError::InvalidField {
             field: "openhands.local_server.command",
@@ -359,9 +368,45 @@ fn reject_unsupported_openhands_local_server_overrides(
     Ok(())
 }
 
-fn reject_unsupported_openhands_websocket_auth(
+fn reject_unsupported_openhands_websocket_overrides(
     websocket: &OpenHandsWebSocketFrontMatter,
 ) -> Result<(), WorkflowConfigError> {
+    if websocket.enabled.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.websocket.enabled",
+            message:
+                "is not supported until the runtime readiness path can honor workflow-owned websocket enablement"
+                    .to_owned(),
+        });
+    }
+
+    if websocket.ready_timeout_ms.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.websocket.ready_timeout_ms",
+            message:
+                "is not supported until the runtime readiness path consumes workflow-owned websocket timeouts"
+                    .to_owned(),
+        });
+    }
+
+    if websocket.reconnect_initial_ms.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.websocket.reconnect_initial_ms",
+            message:
+                "is not supported until the runtime reconnect path consumes workflow-owned websocket backoff settings"
+                    .to_owned(),
+        });
+    }
+
+    if websocket.reconnect_max_ms.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.websocket.reconnect_max_ms",
+            message:
+                "is not supported until the runtime reconnect path consumes workflow-owned websocket backoff settings"
+                    .to_owned(),
+        });
+    }
+
     if websocket.auth_mode.is_some() {
         return Err(WorkflowConfigError::InvalidField {
             field: "openhands.websocket.auth_mode",

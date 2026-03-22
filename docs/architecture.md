@@ -194,10 +194,14 @@ Local MVP process graph:
 
 The current local supervisor implementation resolves its launch metadata from
 `tools/openhands-server/`, probes readiness with `GET /openapi.json`, and only
-terminates a process that it launched itself. Until that readiness path supports
-TLS endpoints and workflow-owned startup-timeout overrides, workflow resolution
-rejects `https://` OpenHands origins and explicit `local_server.startup_timeout_ms`
-settings.
+terminates a process that it launched itself. The runtime attach loop also still
+uses runtime-owned WebSocket readiness and reconnect budgets. Until those paths
+consume workflow-owned readiness-probe-path, startup-timeout, and websocket
+enablement/timing overrides, workflow resolution rejects explicit
+`local_server.readiness_probe_path`, `local_server.startup_timeout_ms`,
+`websocket.enabled`, `websocket.ready_timeout_ms`,
+`websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` settings, as
+well as `https://` OpenHands origins.
 
 ## 5. Worker and conversation model
 

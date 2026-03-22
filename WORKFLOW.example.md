@@ -55,7 +55,8 @@ openhands:
     # Explicit launcher overrides are rejected until the runtime can honor workflow-owned commands.
     # Explicit startup-timeout overrides are rejected until the runtime
     # supervisor creation path consumes workflow-owned timeout settings.
-    readiness_probe_path: "/openapi.json"
+    # Explicit readiness-probe-path overrides are rejected until the runtime
+    # supervisor launch path consumes workflow-owned probe settings end-to-end.
     env:
       LOG_JSON: "true"
       RUNTIME: process
@@ -82,11 +83,8 @@ openhands:
       # Workflow-owned agent extras such as `log_completions` are rejected until
       # the current conversation-create payload can actually forward them.
 
-  websocket:
-    enabled: true
-    ready_timeout_ms: 30000
-    reconnect_initial_ms: 1000
-    reconnect_max_ms: 30000
+  # Workflow-owned websocket enablement and timeout/reconnect knobs are
+  # currently rejected until the runtime readiness/reconnect path consumes them.
 
   # Workflow-owned MCP stdio server declarations are rejected until the current
   # conversation-create adapter can forward `mcp_config` to OpenHands.
