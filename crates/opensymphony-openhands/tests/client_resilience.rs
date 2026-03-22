@@ -348,6 +348,26 @@ async fn run_probe_rejects_error_events_even_when_finished_state_is_already_mirr
 }
 
 #[tokio::test]
+async fn wait_for_probe_terminal_state_polls_once_more_before_accepting_finished() {
+    let state = ProbeState::default();
+    let server = TestServer::start(finished_then_error_probe_router(state.clone())).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        Some("fake-model".to_string()),
+        Some("fake-key".to_string()),
+    );
+
+    let result = client.run_probe(&request, Duration::from_secs(2)).await;
+
+    assert!(
+        result.is_err(),
+        "probe should fail when a ConversationErrorEvent arrives on the next scheduler turn after the mirrored finished state"
+    );
+}
+
+#[tokio::test]
 async fn runtime_stream_does_not_replay_reconnect_readiness_barriers_without_new_events() {
     let state = ReadinessReplayState::default();
     let server = TestServer::start(readiness_replay_router(state)).await;
@@ -484,6 +504,41 @@ async fn attach_runtime_stream_applies_newer_reused_conversation_readiness_snaps
         stream.state_mirror().execution_status(),
         Some("running"),
         "a newer ready barrier should override stale terminal REST state when a reused conversation restarts"
+    );
+}
+
+#[tokio::test]
+async fn attach_runtime_stream_uses_ready_barrier_when_newer_persisted_state_update_is_undecodable()
+{
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(undecodable_newer_state_readiness_mirror_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    assert_eq!(
+        stream.state_mirror().execution_status(),
+        Some("running"),
+        "a newer but undecodable persisted state update should not suppress a usable ready barrier"
     );
 }
 
@@ -911,6 +966,27 @@ fn reused_conversation_readiness_mirror_router(state: ReadinessMirrorState) -> R
         .with_state(state)
 }
 
+fn undecodable_newer_state_readiness_mirror_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(undecodable_newer_state_readiness_mirror_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(readiness_mirror_events_socket),
+        )
+        .with_state(state)
+}
+
 fn ready_barrier_rebuild_regression_router(state: ReadinessMirrorState) -> Router {
     Router::new()
         .route(
@@ -986,6 +1062,26 @@ async fn readiness_mirror_search_events(
 ) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
     Ok(Json(SearchConversationEventsResponse {
         events: Vec::new(),
+        next_page_id: None,
+    }))
+}
+
+async fn undecodable_newer_state_readiness_mirror_search_events(
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    let ready_timestamp = Utc::now();
+    Ok(Json(SearchConversationEventsResponse {
+        events: vec![EventEnvelope::new(
+            "evt-unknown-later-state",
+            ready_timestamp + chrono::Duration::seconds(1),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": {
+                    "current": "queued",
+                },
+            }),
+        )],
         next_page_id: None,
     }))
 }
@@ -1817,6 +1913,32 @@ fn reconnect_error_then_finished_probe_router(state: ProbeState) -> Router {
         .with_state(state)
 }
 
+fn finished_then_error_probe_router(state: ProbeState) -> Router {
+    Router::new()
+        .route("/api/conversations", post(probe_create_conversation))
+        .route(
+            "/api/conversations/:conversation_id",
+            get(probe_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events",
+            post(probe_send_message),
+        )
+        .route(
+            "/api/conversations/:conversation_id/run",
+            post(final_refresh_failure_probe_run_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(probe_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(finished_then_error_probe_events_socket),
+        )
+        .with_state(state)
+}
+
 async fn probe_create_conversation(
     State(state): State<ProbeState>,
     Json(request): Json<ConversationCreateRequest>,
@@ -2095,6 +2217,66 @@ async fn final_refresh_failure_probe_events_socket(
                     ))
                     .await
                     .expect("finished event should send");
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let _ = socket.recv().await;
+    })
+}
+
+async fn finished_then_error_probe_events_socket(
+    State(state): State<ProbeState>,
+    websocket: WebSocketUpgrade,
+    Path(_conversation_id): Path<Uuid>,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
+                    .expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+
+        loop {
+            if *state.run_count.lock().await > 0 {
+                socket
+                    .send(Message::Text(
+                        serde_json::to_string(&EventEnvelope::new(
+                            "evt-finished",
+                            Utc::now(),
+                            "runtime",
+                            "ConversationStateUpdateEvent",
+                            json!({
+                                "execution_status": "finished",
+                                "state_delta": {
+                                    "execution_status": "finished",
+                                },
+                            }),
+                        ))
+                        .expect("finished event should serialize"),
+                    ))
+                    .await
+                    .expect("finished event should send");
+                tokio::task::yield_now().await;
+                socket
+                    .send(Message::Text(
+                        serde_json::to_string(&EventEnvelope::new(
+                            "evt-error-after-finished",
+                            Utc::now(),
+                            "runtime",
+                            "ConversationErrorEvent",
+                            json!({
+                                "message": "synthetic probe failure after finished",
+                            }),
+                        ))
+                        .expect("error event should serialize"),
+                    ))
+                    .await
+                    .expect("error event should send");
                 break;
             }
 

@@ -343,6 +343,7 @@ pub struct RuntimeEventStream {
     event_cache: EventCache,
     state_mirror: ConversationStateMirror,
     pending_events: VecDeque<EventEnvelope>,
+    pending_delivery_needs_drain: bool,
     reconnect_pending: bool,
 }
 
@@ -366,6 +367,7 @@ impl RuntimeEventStream {
             event_cache: EventCache::new(),
             state_mirror,
             pending_events: VecDeque::new(),
+            pending_delivery_needs_drain: false,
             reconnect_pending: false,
         }
     }
@@ -392,7 +394,10 @@ impl RuntimeEventStream {
                 return Ok(Some(event));
             }
 
-            if self.socket.is_none() {
+            if self.socket.is_none()
+                && self.pending_events.is_empty()
+                && !self.reconnect_pending
+            {
                 return Ok(None);
             }
         }
@@ -400,6 +405,9 @@ impl RuntimeEventStream {
 
     async fn poll_next_event_once(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
         self.absorb_buffered_socket_events().await?;
+        if self.defer_pending_event_delivery_once().await? {
+            return Ok(None);
+        }
 
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(Some(event));
@@ -408,6 +416,9 @@ impl RuntimeEventStream {
         if self.reconnect_pending {
             self.reconnect_pending = false;
             self.reconnect().await?;
+            if self.defer_pending_event_delivery_once().await? {
+                return Ok(None);
+            }
 
             if let Some(event) = self.pending_events.pop_front() {
                 return Ok(Some(event));
@@ -433,11 +444,17 @@ impl RuntimeEventStream {
             StreamRead::Closed => {
                 self.handle_reconnect_signal(Some(StreamRead::Closed))
                     .await?;
+                if self.defer_pending_event_delivery_once().await? {
+                    return Ok(None);
+                }
                 Ok(self.pending_events.pop_front())
             }
             StreamRead::Transport(error) => {
                 self.handle_reconnect_signal(Some(StreamRead::Transport(error)))
                     .await?;
+                if self.defer_pending_event_delivery_once().await? {
+                    return Ok(None);
+                }
                 Ok(self.pending_events.pop_front())
             }
         }
@@ -452,6 +469,18 @@ impl RuntimeEventStream {
         let reconnect_signal = self.drain_buffered_socket_events(&mut drained_events).await;
         self.push_new_events(drained_events, true);
         self.handle_reconnect_signal(reconnect_signal).await
+    }
+
+    async fn defer_pending_event_delivery_once(&mut self) -> Result<bool, OpenHandsError> {
+        if !self.pending_delivery_needs_drain || self.pending_events.is_empty() {
+            return Ok(false);
+        }
+
+        // Give newly queued batches one more immediate drain turn so out-of-order
+        // live frames can settle into timestamp order before delivery.
+        self.pending_delivery_needs_drain = false;
+        self.absorb_buffered_socket_events().await?;
+        Ok(true)
     }
 
     async fn drain_buffered_socket_events(
@@ -514,6 +543,7 @@ impl RuntimeEventStream {
 
     pub async fn close(&mut self) -> Result<(), OpenHandsError> {
         self.clear_ready_event();
+        self.pending_delivery_needs_drain = false;
         self.reconnect_pending = false;
         self.pending_events.clear();
         if let Some(mut socket) = self.socket.take() {
@@ -591,6 +621,7 @@ impl RuntimeEventStream {
             return 0;
         }
 
+        self.pending_delivery_needs_drain = true;
         if queue_new {
             self.queue_pending_events(&inserted);
         }
@@ -641,8 +672,11 @@ impl RuntimeEventStream {
         };
 
         let cache_already_has_same_or_newer_state = self.event_cache.items().iter().any(|event| {
-            event.kind == CONVERSATION_STATE_UPDATE_EVENT_KIND
-                && compare_pending_events(event, &self.ready_event) != Ordering::Less
+            compare_pending_events(event, &self.ready_event) != Ordering::Less
+                && matches!(
+                    KnownEvent::from_envelope(event),
+                    KnownEvent::ConversationStateUpdate(_)
+                )
         });
         if cache_already_has_same_or_newer_state {
             return;
@@ -1156,7 +1190,11 @@ async fn wait_for_probe_terminal_state(
         }
 
         match stream.state_mirror().terminal_status() {
-            Some(TerminalExecutionStatus::Finished) => return Ok(()),
+            Some(TerminalExecutionStatus::Finished) => {
+                if confirm_finished_probe_terminal_state(stream).await? {
+                    return Ok(());
+                }
+            }
             Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
                 return Err(OpenHandsError::ProbeRunUnhealthy(format!(
                     "terminal execution_status `{}`",
@@ -1195,6 +1233,45 @@ async fn wait_for_probe_terminal_state(
                 event.kind, event.id
             )));
         }
+    }
+}
+
+async fn confirm_finished_probe_terminal_state(
+    stream: &mut RuntimeEventStream,
+) -> Result<bool, OpenHandsError> {
+    // Give the socket one more scheduler turn so a failure frame that arrives
+    // just after the finished state is still observed before probe success.
+    yield_now().await;
+
+    if let Err(error) = stream.absorb_buffered_socket_events().await {
+        return match stream.state_mirror().terminal_status() {
+            Some(TerminalExecutionStatus::Finished) => Ok(true),
+            Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                    "terminal execution_status `{}`",
+                    stream.state_mirror().execution_status().unwrap_or_default()
+                )))
+            }
+            None => Err(error),
+        };
+    }
+
+    if let Some(event) = stream.pending_conversation_error_event() {
+        return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+            "received {} {} before a successful terminal status",
+            event.kind, event.id
+        )));
+    }
+
+    match stream.state_mirror().terminal_status() {
+        Some(TerminalExecutionStatus::Finished) => Ok(true),
+        Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+            Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                "terminal execution_status `{}`",
+                stream.state_mirror().execution_status().unwrap_or_default()
+            )))
+        }
+        None => Ok(false),
     }
 }
 
