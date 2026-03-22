@@ -383,8 +383,9 @@ impl BridgeMailbox {
         self.latest_snapshot = Some(Box::new(snapshot));
     }
 
-    fn push_stream_attached(&mut self) {
+    fn push_attached_snapshot(&mut self, snapshot: SnapshotEnvelope) {
         self.latest_connection_loss = None;
+        self.latest_snapshot = Some(Box::new(snapshot));
         self.stream_attached = true;
     }
 
@@ -587,10 +588,11 @@ async fn run_bridge_loop(
             match update {
                 Some(Ok(snapshot)) => {
                     if !stream_attached {
-                        push_stream_attached(&bridge);
+                        push_attached_snapshot(&bridge, snapshot);
                         stream_attached = true;
+                    } else {
+                        push_snapshot(&bridge, snapshot);
                     }
-                    push_snapshot(&bridge, snapshot);
                 }
                 Some(Err(error)) => {
                     handle_bridge_error(&bridge, &error);
@@ -962,11 +964,11 @@ fn push_snapshot(bridge: &Arc<Mutex<BridgeMailbox>>, snapshot: SnapshotEnvelope)
     bridge.push_snapshot(snapshot);
 }
 
-fn push_stream_attached(bridge: &Arc<Mutex<BridgeMailbox>>) {
+fn push_attached_snapshot(bridge: &Arc<Mutex<BridgeMailbox>>, snapshot: SnapshotEnvelope) {
     let mut bridge = bridge
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    bridge.push_stream_attached();
+    bridge.push_attached_snapshot(snapshot);
 }
 
 fn push_connection_loss(bridge: &Arc<Mutex<BridgeMailbox>>, reason: String) {
@@ -1084,8 +1086,8 @@ impl DaemonStateLabel for opensymphony_domain::ControlPlaneDaemonState {
 mod tests {
     use super::{
         display_width, fit, handle_bridge_error, issue_window, section_layout, stacked_body_layout,
-        visible_issue_count, BridgeHandle, BridgeMailbox, ControlPlaneClientError, TuiAction,
-        TuiState,
+        visible_issue_count, BridgeHandle, BridgeMailbox, ConnectionState, ControlPlaneClientError,
+        OperatorApp, TuiAction, TuiState,
     };
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
@@ -1241,12 +1243,11 @@ mod tests {
     }
 
     #[test]
-    fn delivers_stream_attached_after_the_latest_snapshot() {
+    fn delivers_attached_snapshot_before_the_live_transition() {
         let mut mailbox = BridgeMailbox::default();
         let snapshot = fixture(5, 1);
 
-        mailbox.push_snapshot(snapshot.clone());
-        mailbox.push_stream_attached();
+        mailbox.push_attached_snapshot(snapshot.clone());
 
         match mailbox.take_action() {
             Some(TuiAction::SnapshotReceived(received)) => {
@@ -1263,9 +1264,10 @@ mod tests {
 
     #[test]
     fn connection_loss_clears_pending_stream_attachment() {
-        let mut mailbox = BridgeMailbox::default();
-
-        mailbox.push_stream_attached();
+        let mut mailbox = BridgeMailbox {
+            stream_attached: true,
+            ..BridgeMailbox::default()
+        };
         mailbox.push_connection_loss("stream closed".to_owned());
 
         match mailbox.take_action() {
@@ -1273,6 +1275,34 @@ mod tests {
             other => panic!("expected reconnecting state, got {other:?}"),
         }
         assert!(mailbox.take_action().is_none());
+    }
+
+    #[test]
+    fn draining_an_attached_snapshot_never_marks_live_on_the_old_snapshot() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let mut app = OperatorApp::new(Arc::clone(&bridge), None);
+        app.state
+            .reduce(TuiAction::SnapshotReceived(Box::new(fixture(4, 1))));
+
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_attached_snapshot(fixture(5, 2));
+        }
+
+        app.drain_bridge();
+
+        assert_eq!(app.state.connection, ConnectionState::Live);
+        assert_eq!(
+            app.state
+                .latest_snapshot
+                .as_ref()
+                .expect("latest snapshot after the live transition")
+                .sequence,
+            5
+        );
+        assert_eq!(app.state.status_line, "live control-plane stream");
     }
 
     #[test]

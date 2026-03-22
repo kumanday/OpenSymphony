@@ -222,8 +222,14 @@ When validating the local control-plane and TUI slice, also confirm that:
   change
 - the TUI header also renders the computed connection and backend status text when bootstrap,
   reconnect, or degraded states need a cause string
+- bootstrap and reconnect snapshot fetches time out within the bounded snapshot watchdog budget,
+  so a hung `/api/v1/snapshot` response retries instead of pinning the UI in `connecting` or
+  `reconnecting`
 - the bootstrap snapshot stays visible with `conn=connecting` until the SSE stream actually
   attaches
+- the first streamed snapshot and the live-stream attachment signal are published atomically, so
+  `conn=live` never appears while the frame is still rendering the older bootstrap or reconnect
+  snapshot
 - reconnecting clients keep the last good snapshot visible instead of regressing to stale state
 - reconnecting clients switch the header detail to `refreshed; stream pending` once the HTTP
   refresh succeeds, even before the SSE stream is live again
