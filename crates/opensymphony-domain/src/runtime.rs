@@ -84,6 +84,14 @@ pub enum RuntimeStreamState {
 pub struct ConversationMetadata {
     pub conversation_id: ConversationId,
     pub server_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_query_param_name: Option<String>,
     pub fresh_conversation: bool,
     pub runtime_contract_version: Option<String>,
     pub stream_state: RuntimeStreamState,

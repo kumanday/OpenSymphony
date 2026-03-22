@@ -80,6 +80,7 @@ Current implementation:
 - `scripts/smoke_local.sh` runs the static doctor pass
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
 - `crates/opensymphony-openhands/tests/client_resilience.rs` and `crates/opensymphony-openhands/tests/fake_server_contract.rs` now cover readiness, attach, initial snapshot replay, attach-backlog versus buffered-live ordering, ready-barrier persistence across later stale rebuilds, explicit-close shutdown semantics, reconcile, out-of-order delivery, reused-conversation restart freshness, and reconnect recovery for the runtime stream
+- `crates/opensymphony-openhands/tests/live_pinned_server.rs` provides an opt-in live integration check against the pinned `openhands-agent-server==1.14.0` surface for external-mode auth success and failure
 
 ## 3. Minimum required test coverage by subsystem
 
@@ -108,9 +109,14 @@ Current implementation:
 - resolve the bundled `examples/target-repo/WORKFLOW.md` file end-to-end, not just parse it
 - treat a leading unmatched `---` as prompt body text instead of failing front-matter parsing
 - treat leading thematic-break-delimited non-mapping blocks as prompt body text instead of silently dropping prompt content
-- fail on malformed, non-`http://`, path-bearing, query-bearing, fragment-bearing, or bracketed-IPv6 `openhands.transport.base_url` values during workflow resolution
-- fail when explicit `openhands.websocket.enabled`, `ready_timeout_ms`, `reconnect_initial_ms`, or `reconnect_max_ms` values are configured before the runtime readiness/reconnect path consumes them
-- fail when `openhands.transport.session_api_key_env` or explicit OpenHands WebSocket auth knobs are configured before the runtime transport layer consumes them
+- fail on malformed, non-`http://`/`https://`, credential-bearing, query-bearing, fragment-bearing, or bracketed-IPv6 `openhands.transport.base_url` values during workflow resolution
+- allow `https://` and path-prefixed OpenHands transport base URLs during workflow resolution
+- fail when a non-loopback OpenHands transport base URL uses `http://`
+- fail when a non-loopback OpenHands transport base URL omits `openhands.transport.session_api_key_env`
+- resolve `openhands.transport.session_api_key_env`, `openhands.websocket.auth_mode`, and `openhands.websocket.query_param_name` into the runtime transport config
+- fail when `openhands.websocket.auth_mode` is invalid or requires a missing session API key env
+- fail when explicit `openhands.websocket.enabled` is configured before the runtime readiness path can honor disabling the socket
+- resolve `openhands.websocket.ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` into the runtime readiness and reconnect budgets
 - fail when `openhands.mcp.stdio_servers` is configured before the runtime conversation-create adapter can forward `mcp_config`
 - fail when non-default `openhands.conversation.reuse_policy` values are configured before the orchestrator/runtime path can honor alternate conversation reuse behavior
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
@@ -151,6 +157,7 @@ Current implementation:
 
 - supervised server startup and shutdown
 - HTTP client auth modes
+- external server path-prefix probes
 - conversation creation
 - initial REST sync
 - WebSocket readiness barrier
@@ -159,6 +166,7 @@ Current implementation:
 - out-of-order event insertion
 - terminal state detection
 - conversation reuse
+- pinned-server auth success and failure paths
 
 ## 3.4 Orchestrator
 
@@ -307,6 +315,7 @@ Current command set in this repository:
 - `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
+- `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_pinned_server -- --nocapture`
 - `cargo run -p opensymphony-cli -- linear-mcp`
 - `./scripts/smoke_local.sh`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
@@ -400,12 +409,13 @@ Current implementation notes:
 - checkout-relative doctor defaults are derived from the config and tooling paths rather than the caller `cwd`, so running `opensymphony doctor` outside the repo root still validates the intended checkout and bundled `examples/target-repo`
 - the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation using workflow-derived OpenHands conversation settings, attaches `RuntimeEventStream`, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a doctor message that includes the rendered workflow prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` after post-ready reconcile and reconnect-aware streaming, including terminal REST refresh fallback when a post-completion WebSocket reattach exhausts and one final scheduler-turn buffered drain before success is accepted
 - once that live doctor path has already observed terminal success on the attached stream, it reuses the last successful stream-backed conversation snapshot instead of requiring a final `GET /api/conversations/{id}` that can flap during agent-server shutdown
-- when the configured workflow loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, switches follow-up probes to the launched supervisor base URL, uses it for the probe, then stops it again
+- when the configured workflow loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server only for unauthenticated loopback root-path targets, switches follow-up probes to the launched supervisor base URL, uses it for the probe, then stops it again
 - failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity, even when a later mirrored `finished` status is already present in the same drained batch
 - missing `${VAR}` tokens in required or enabled-path config values now fail doctor during config expansion instead of silently validating the config directory as an empty fallback path
 - optional live-only placeholders such as `openhands.probe_model` and `openhands.probe_api_key_env` are treated as unset when their env-backed overrides are absent, so shared configs can keep those overrides empty during the static doctor pass
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames, authenticated REST/WebSocket requests, forward-compatible readiness envelopes, ready-state freshness after attach, ready-barrier persistence across later stale state rebuilds, buffered live frames outranking later attach replay items, explicit-close suppression of replay and reconnect, reused-conversation restart freshness over stale terminal REST state, forward-compatible `state_delta` mirror refresh, stale readiness snapshots not regressing newer probe state after reconnect, undecodable later persisted state updates not suppressing a usable ready barrier, terminal REST fallback after reconnect exhaustion, deferred reconnect after buffered delivery, non-replay of reconnect-only readiness barriers, next-turn probe error delivery after `finished`, and post-terminal probe success when a final REST refresh would fail
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs` locks in attach, initial snapshot replay, reconcile, out-of-order insertion, and reconnect recovery against `opensymphony-testkit`
+- `crates/opensymphony-openhands/tests/live_pinned_server.rs` locks in external-mode auth success plus HTTP 401 and WebSocket 403 failure mapping against the pinned `openhands-agent-server==1.14.0` process
 - `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback outside the repo `cwd`, required-env placeholder failures, optional live-only placeholder tolerance during static runs, workflow-driven runtime inputs, and the pinned launcher `cwd` behavior
 - `crates/opensymphony-cli/tests/linear_mcp.rs` drives the real `opensymphony linear-mcp` child process through MCP initialization, tool listing, and comment/transition/link/state-list calls against a local fake Linear GraphQL server
 - the current example configs carry machine-local tool/probe settings only; the repo-owned workflow now supplies the workspace root and OpenHands base URL that doctor validates

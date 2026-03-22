@@ -149,6 +149,52 @@ async fn header_api_key_with_websocket_query_fallback_authenticates_operations()
 }
 
 #[tokio::test]
+async fn path_prefixed_base_urls_preserve_rest_and_websocket_authentication() {
+    let server = TestServer::start(Router::new().nest(
+        "/runtime",
+        auth_router(AuthExpectations {
+            rest: ExpectedAuth::Header {
+                name: "x-session-api-key".to_string(),
+                value: "secret-token".to_string(),
+            },
+            websocket: ExpectedAuth::QueryParam {
+                name: "session_api_key".to_string(),
+                value: "secret-token".to_string(),
+            },
+        }),
+    ))
+    .await;
+    let client = OpenHandsClient::new(
+        TransportConfig::new(format!("{}/runtime", server.base_url())).with_auth(
+            AuthConfig::header_api_key_with_websocket_query_fallback(
+                "x-session-api-key",
+                "session_api_key",
+                "secret-token",
+            ),
+        ),
+    );
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("create should preserve the path prefix");
+    client
+        .wait_for_readiness(conversation.conversation_id, Duration::from_secs(2))
+        .await
+        .expect("websocket readiness should preserve the path prefix");
+    client
+        .run_conversation(conversation.conversation_id)
+        .await
+        .expect("run should preserve the path prefix");
+}
+
+#[tokio::test]
 async fn auth_failure_maps_to_stable_http_status_error() {
     let server = TestServer::start(auth_router(AuthExpectations {
         rest: ExpectedAuth::QueryParam {

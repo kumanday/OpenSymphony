@@ -7,7 +7,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use reqwest::{blocking::Client, redirect::Policy};
 use thiserror::Error;
+use url::Url;
 
 use crate::tooling::{LocalServerTooling, LocalToolingError, ResolvedLaunch};
 
@@ -176,7 +178,7 @@ impl LocalServerSupervisor {
 
         match &self.config {
             SupervisorConfig::External(config) => {
-                if probe_ready(&config.base_url, &config.probe)? {
+                if probe_external_ready(&config.base_url, &config.probe)? {
                     Ok(ServerStatus {
                         mode: ServerMode::External,
                         ownership: LaunchOwnership::External,
@@ -229,7 +231,7 @@ impl LocalServerSupervisor {
                         });
                     }
 
-                    if probe_ready(&launch.base_url, &config.probe)? {
+                    if probe_local_ready(&launch.base_url, &config.probe)? {
                         let pid = child.id();
                         self.launched = Some(LaunchedProcess {
                             child,
@@ -298,7 +300,7 @@ impl LocalServerSupervisor {
         self.reap_exited_child()?;
 
         if let Some(launched) = self.launched.as_mut() {
-            let ready = probe_ready(&launched.launch.base_url, self.config.probe())?;
+            let ready = probe_local_ready(&launched.launch.base_url, self.config.probe())?;
             return Ok(ServerStatus {
                 mode: ServerMode::Supervised,
                 ownership: LaunchOwnership::Launched,
@@ -328,7 +330,14 @@ impl LocalServerSupervisor {
             });
         }
 
-        let ready = probe_ready(&self.config.base_url(), self.config.probe())?;
+        let ready = match &self.config {
+            SupervisorConfig::Supervised(_) => {
+                probe_local_ready(&self.config.base_url(), self.config.probe())?
+            }
+            SupervisorConfig::External(_) => {
+                probe_external_ready(&self.config.base_url(), self.config.probe())?
+            }
+        };
         Ok(ServerStatus {
             mode: self.config.mode(),
             ownership: match self.config {
@@ -398,6 +407,10 @@ pub enum SupervisorError {
     Tooling(#[from] LocalToolingError),
     #[error("OpenHands base URL must use http://host:port with no path, found `{base_url}`")]
     InvalidBaseUrl { base_url: String },
+    #[error(
+        "OpenHands external base URL must be an absolute http or https URL without query or fragment, found `{base_url}`"
+    )]
+    InvalidExternalBaseUrl { base_url: String },
     #[error("failed to resolve socket address for `{base_url}`: {source}")]
     ResolveAddress {
         base_url: String,
@@ -448,6 +461,13 @@ pub enum SupervisorError {
         #[source]
         source: std::io::Error,
     },
+    #[error("failed readiness probe against {base_url}{path}: {source}")]
+    ProbeHttp {
+        base_url: String,
+        path: String,
+        #[source]
+        source: reqwest::Error,
+    },
 }
 
 fn kill_child(child: &mut Child) -> Result<(), SupervisorError> {
@@ -468,7 +488,7 @@ fn kill_child(child: &mut Child) -> Result<(), SupervisorError> {
     Ok(())
 }
 
-fn probe_ready(base_url: &str, probe: &ProbeConfig) -> Result<bool, SupervisorError> {
+fn probe_local_ready(base_url: &str, probe: &ProbeConfig) -> Result<bool, SupervisorError> {
     let endpoint = HttpEndpoint::parse(base_url)?;
     let addresses = endpoint.socket_addresses(base_url)?;
     probe_resolved_addresses(
@@ -478,6 +498,67 @@ fn probe_ready(base_url: &str, probe: &ProbeConfig) -> Result<bool, SupervisorEr
         &addresses,
         probe.connect_timeout,
     )
+}
+
+fn probe_external_ready(base_url: &str, probe: &ProbeConfig) -> Result<bool, SupervisorError> {
+    let endpoint = external_probe_url(base_url, &probe.path)?;
+    let client = Client::builder()
+        .no_proxy()
+        .redirect(Policy::none())
+        .timeout(probe.connect_timeout)
+        .build()
+        .map_err(|source| SupervisorError::ProbeHttp {
+            base_url: base_url.to_string(),
+            path: endpoint.path().to_string(),
+            source,
+        })?;
+
+    match client.get(endpoint.clone()).send() {
+        Ok(response) => Ok(response.status().is_success()),
+        Err(source) if source.is_timeout() => Ok(false),
+        Err(source) if source.is_connect() => Ok(false),
+        Err(source) => Err(SupervisorError::ProbeHttp {
+            base_url: base_url.to_string(),
+            path: endpoint.path().to_string(),
+            source,
+        }),
+    }
+}
+
+fn external_probe_url(base_url: &str, probe_path: &str) -> Result<Url, SupervisorError> {
+    let mut url = Url::parse(base_url).map_err(|_| SupervisorError::InvalidExternalBaseUrl {
+        base_url: base_url.to_string(),
+    })?;
+
+    match url.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(SupervisorError::InvalidExternalBaseUrl {
+                base_url: base_url.to_string(),
+            });
+        }
+    }
+
+    if url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(SupervisorError::InvalidExternalBaseUrl {
+            base_url: base_url.to_string(),
+        });
+    }
+
+    let base_path = url.path().trim_end_matches('/');
+    let probe_path = normalized_probe_path(probe_path);
+    let path = if base_path.is_empty() {
+        probe_path.to_string()
+    } else {
+        format!("{base_path}{probe_path}")
+    };
+    url.set_path(&path);
+    Ok(url)
 }
 
 fn probe_resolved_addresses(

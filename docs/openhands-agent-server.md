@@ -110,7 +110,7 @@ Current repository implementation:
 - explicit `openhands.local_server.enabled: false` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - explicit `openhands.local_server.env` overrides are currently rejected during workflow resolution until the runtime supervisor creation path forwards workflow-owned launcher environment variables into `extra_env`
 - explicit `openhands.local_server.startup_timeout_ms` overrides are currently rejected during workflow resolution until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
-- workflow resolution rejects malformed, non-`http://`, path-bearing, query-bearing, fragment-bearing, or bracketed-IPv6 `openhands.transport.base_url` values before the daemon reaches runtime transport setup because the current readiness probes still require a bare IPv4-or-hostname `http://host:port` origin
+- workflow resolution now accepts absolute `http://` and `https://` `openhands.transport.base_url` values with optional path prefixes, rejects embedded credentials plus query/fragment suffixes, still rejects bracketed IPv6 until the local readiness probe supports it, and requires `https://` plus `openhands.transport.session_api_key_env` for non-loopback targets
 
 ## 4.2 Startup contract
 
@@ -140,10 +140,10 @@ Current implementation detail:
   regressions fail before a real issue runner lands
 - the current doctor and live-validation path uses `GET /openapi.json` as the
   conservative readiness probe and will temporarily start a supervised local
-  server when the configured loopback base URL is down but the repo-owned pin is
-  valid; once it starts, doctor follows the launched supervisor's resolved base
-  URL for the rest of the probe instead of reusing the original config alias or
-  path prefix
+  server only when the configured target is an unauthenticated loopback
+  `http://` root origin and the repo-owned pin is valid; authenticated,
+  path-prefixed, or non-loopback targets stay in external mode and are probed in
+  place
 - live-only doctor overrides such as `probe_model` and `probe_api_key_env` are
   resolved lazily when `--live-openhands` is requested, so shared configs can
   leave those `${VAR}` placeholders unset during the static preflight path
@@ -194,6 +194,10 @@ Suggested persisted fields:
 - `updated_at`
 - `last_attached_at`
 - `server_base_url`
+- `transport_target`
+- `http_auth_mode`
+- `websocket_auth_mode`
+- `websocket_query_param_name`
 - `persistence_dir`
 - `fresh_conversation`
 - `workflow_prompt_seeded`
@@ -295,9 +299,12 @@ Current workflow defaulting:
 - `agent.kind` defaults to `Agent` when omitted
 - non-default `openhands.conversation.reuse_policy` values are rejected during workflow resolution until the orchestrator/runtime path can honor alternate conversation reuse behavior
 - `max_iterations` must fit the downstream OpenHands `u32` request range
+- `openhands.transport.session_api_key_env` is accepted and required for non-loopback remote targets
 - workflow-owned `local_server.readiness_probe_path` overrides are rejected during workflow resolution until the runtime supervisor launch path consumes them
 - workflow-owned `local_server.startup_timeout_ms` overrides are rejected during workflow resolution until the runtime supervisor creation path consumes them
-- workflow-owned `websocket.enabled`, `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides are rejected during workflow resolution until the runtime readiness/reconnect path consumes them
+- `openhands.websocket.auth_mode` defaults to `auto` and `openhands.websocket.query_param_name` defaults to `session_api_key`
+- workflow-owned `websocket.enabled` overrides are rejected during workflow resolution until the runtime readiness path can honor disabling the socket entirely
+- workflow-owned `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides now resolve into the runtime stream attach and reconnect budgets
 - `agent.llm.model` is required whenever an `llm` block is present
 - workflow-owned LLM option keys are rejected during workflow resolution until the current request subset can actually forward them
 - workflow-owned agent options such as `log_completions` and extra agent keys are rejected during workflow resolution until the current request subset can actually forward them
@@ -314,9 +321,10 @@ Current repository implementation:
 - `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
 - the current request model still serializes `agent` as only `{ kind, llm }`, and `llm` itself as only `{ model, api_key }`, so workflow-owned agent extras plus arbitrary LLM option keys are rejected before runtime launch
 - the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
-- the current supervisor readiness probe still parses only bare `http://host:port` origins, always uses its default `/openapi.json` probe path, and the CLI still constructs `SupervisedServerConfig::new(tooling)` without applying workflow-owned startup timeouts, so `https://` base URLs plus explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are rejected before runtime launch
+- the current transport layer preserves base-path prefixes across REST endpoints and `/sockets/events/{conversation_id}`, so the same client can target reverse-proxied external servers without code changes outside config
+- the current supervisor readiness probe still owns the local launch path and always uses `/openapi.json`, so explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are still rejected before runtime launch
 - the current supervisor launch path still uses runtime-owned launcher environment variables (`OPENHANDS_SERVER_PORT` and `RUNTIME=process`), so explicit workflow-owned `local_server.env` overrides are rejected before runtime launch
-- the current runtime still always opens the readiness socket and uses runtime-owned readiness/reconnect budgets, so explicit workflow-owned `websocket.enabled`, `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides are rejected before runtime launch
+- the current runtime now consumes workflow-owned `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` values, but still always opens the readiness socket so explicit `websocket.enabled` overrides remain rejected before runtime launch
 - the current request model does not yet serialize `mcp_config`, so workflow-owned MCP stdio server declarations are rejected before runtime launch
 - `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`
 - `AcceptedResponse` tolerates either an explicit JSON success body or an empty successful response for `POST /events` and `POST /run`
@@ -342,11 +350,13 @@ The Rust client should still support:
 
 Current repository implementation:
 
-- `TransportConfig` now carries an `AuthConfig` with explicit no-auth, query-param API key, header API key, and header-plus-WebSocket-query-fallback modes
-- REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape
-- workflow-owned auth knobs such as `openhands.transport.session_api_key_env`, `openhands.websocket.auth_mode`, and `openhands.websocket.query_param_name` are currently rejected during workflow resolution until a runtime adapter wires them into `AuthConfig`
+- `TransportConfig::from_workflow` now resolves `openhands.transport.session_api_key_env`, `openhands.websocket.auth_mode`, and `openhands.websocket.query_param_name` into `AuthConfig`
+- when a session API key is configured, REST always uses the pinned `x-session-api-key` header shape while WebSocket auth follows the workflow mode: `auto` and `query_param` use the configured query parameter name, and `header` sends the same header on the socket handshake
+- REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape, while the default `auto` mode matches the pinned 1.14.0 SDK behavior
+- non-loopback remote targets must use `https://` and provide `openhands.transport.session_api_key_env` during workflow resolution
+- `IssueSessionRunner` persists `server_base_url`, `transport_target`, `http_auth_mode`, `websocket_auth_mode`, and `websocket_query_param_name` into `conversation.json`, generated session context, and control-plane snapshots for remote troubleshooting
 - `OpenHandsError` now maps invalid config, transport failures, HTTP status failures, protocol failures, and WebSocket failures into stable runtime categories without exposing `reqwest::Error` or `http::StatusCode`
-- `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, forward-compatible readiness envelopes, ready-state freshness after attach, ready-barrier persistence across later stale cache rebuilds, attach-backlog versus buffered-live ordering, explicit-close shutdown semantics, reused-conversation restart freshness over stale terminal REST state, terminal REST fallback when reconnect exhausts after completion, next-turn probe error delivery after `finished`, and non-readiness frames before the first state update
+- `crates/opensymphony-openhands/tests/client_resilience.rs`, `crates/opensymphony-openhands/tests/transport_config.rs`, `crates/opensymphony-openhands/tests/supervisor.rs`, and the opt-in `crates/opensymphony-openhands/tests/live_pinned_server.rs` suite cover authenticated REST operations, WebSocket readiness auth, auth failure mapping, path-prefixed external targets, local-supervisor eligibility rules, external-server no-op stop behavior, and pinned-server HTTP/WebSocket auth success and failure paths
 - the doctor probe now runs through `RuntimeEventStream`, exercises a real `POST /events` plus `POST /run` path, and only reports the runtime healthy after the attached stream reaches a successful terminal `execution_status` of `finished` with no queued `ConversationErrorEvent` still pending ahead of completion or arriving on the next scheduler-turn buffered drain
 - failure-only probe streams such as `ConversationErrorEvent` or terminal `execution_status` values like `error` and `stuck` are treated as unhealthy instead of silently passing
 - once the attached stream has already observed a healthy terminal outcome, the doctor probe reuses the last successful stream-backed conversation snapshot instead of requiring one more `GET /api/conversations/{id}` that could fail during server shutdown
