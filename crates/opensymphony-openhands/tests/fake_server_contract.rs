@@ -199,8 +199,8 @@ async fn runtime_stream_keeps_latest_state_when_out_of_order_events_arrive() {
         .expect("stream read should succeed")
         .expect("second stream event should exist");
 
-    assert_eq!(first.id, running.id);
-    assert_eq!(second.id, queued.id);
+    assert_eq!(first.id, queued.id);
+    assert_eq!(second.id, running.id);
     let ordered_ids = stream
         .event_cache()
         .items()

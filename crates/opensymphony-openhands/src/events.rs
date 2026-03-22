@@ -166,10 +166,23 @@ impl ConversationStateMirror {
     }
 
     pub fn apply_conversation(&mut self, conversation: &Conversation) {
-        self.execution_status = Some(conversation.execution_status.clone());
-        self.raw_state = serde_json::json!({
-            "execution_status": conversation.execution_status,
-        });
+        self.raw_state = Value::Object(Default::default());
+        self.apply_conversation_execution_status(conversation);
+    }
+
+    pub fn apply_conversation_execution_status(&mut self, conversation: &Conversation) {
+        let status = conversation.execution_status.clone();
+        self.execution_status = Some(status.clone());
+        match &mut self.raw_state {
+            Value::Object(state) => {
+                state.insert("execution_status".to_string(), Value::String(status));
+            }
+            raw_state => {
+                *raw_state = serde_json::json!({
+                    "execution_status": status,
+                });
+            }
+        }
     }
 
     pub fn rebuild_from(&mut self, conversation: &Conversation, events: &[EventEnvelope]) {
