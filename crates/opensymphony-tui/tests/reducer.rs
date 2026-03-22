@@ -59,6 +59,11 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                     workspace_path_suffix: format!("workspace-{index}"),
                     retry_count: index as u32,
                     blocked: false,
+                    server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+                    transport_target: Some("loopback".to_owned()),
+                    http_auth_mode: Some("none".to_owned()),
+                    websocket_auth_mode: Some("none".to_owned()),
+                    websocket_query_param_name: None,
                 })
                 .collect(),
             recent_events: vec![RecentEvent {
@@ -87,6 +92,11 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
             workspace_path_suffix: format!("workspace-{index}"),
             retry_count: index as u32,
             blocked: false,
+            server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+            transport_target: Some("loopback".to_owned()),
+            http_auth_mode: Some("none".to_owned()),
+            websocket_auth_mode: Some("none".to_owned()),
+            websocket_query_param_name: None,
         })
         .collect();
     snapshot
