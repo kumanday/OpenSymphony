@@ -228,6 +228,7 @@ For each turn:
    - full rendered workflow prompt on a fresh conversation
    - full rendered workflow prompt again if a reused conversation exists locally but has never been seeded with that first assignment message
    - built-in continuation guidance on resumed seeded conversations or later turns
+   - persist the selected prompt under `.opensymphony/prompts/last-*-prompt.(md|json)` and archive the per-run capture under `.opensymphony/runs/attempt-####/`
 2. `POST /api/conversations/{id}/events`
    - user role
    - prompt content

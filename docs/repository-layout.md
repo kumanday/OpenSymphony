@@ -1,6 +1,6 @@
 # Repository Layout
 
-This document proposes the repository structure for the OpenSymphony implementation repo.
+This document records the repository structure and crate boundaries for the OpenSymphony implementation repo.
 
 ## 1. Top-level structure
 
@@ -33,6 +33,12 @@ Purpose:
 
 Keep it free of HTTP, WebSocket, and filesystem side effects.
 
+Current M1 public surface:
+
+- normalized `Issue` and `BlockerRef` models
+- `RunAttempt`, `RetryEntry`, `RuntimeSession`, and `WorkerOutcome`
+- `OrchestratorSnapshot` plus running/retry snapshot entries
+
 ## 2.2 `opensymphony-workflow`
 
 Purpose:
@@ -42,6 +48,12 @@ Purpose:
 - strict prompt rendering
 - core plus `openhands` config schema
 - env and path resolution helpers
+
+Current M1 public surface:
+
+- `WorkflowDefinition` for raw front matter plus prompt body
+- `WorkflowConfig` typed getters with defaults and OpenHands namespace validation
+- `Workflow::render_prompt(issue, attempt)` with deterministic template failures
 
 ## 2.3 `opensymphony-workspace`
 
@@ -92,6 +104,12 @@ Purpose:
 - cancellation and reconciliation
 - snapshot derivation inputs
 
+Current M1 public surface:
+
+- `SchedulerConfig` typed scheduling policy
+- `SchedulerState` claim, run, retry, reconciliation, stall-detection, and recovery transitions
+- snapshot derivation through `SchedulerState::snapshot`
+
 ## 2.8 `opensymphony-control`
 
 Purpose:
@@ -128,6 +146,10 @@ Purpose:
 - integration fixtures
 - protocol contract assertions
 
+Current M1 public surface:
+
+- downstream public-API smoke coverage proving other crates can compile against `domain`, `workflow`, and `orchestrator`
+
 ## 3. Tools and scripts
 
 Recommended layout:
@@ -162,6 +184,7 @@ examples/
   target-repo/
     WORKFLOW.md
     AGENTS.md
+    .gitignore
     .agents/skills/
   configs/
     local-dev.yaml
@@ -233,7 +256,7 @@ The implementation repo should only contain:
 
 ## 9. Dependency rules
 
-- `opensymphony-orchestrator` may depend on `domain`, `workflow`, `workspace`, `linear`, and a trait or facade from `openhands`
+- `opensymphony-orchestrator` currently depends only on `opensymphony-domain`; future runtime adapters should translate workflow, tracker, and OpenHands inputs at the boundary instead of leaking transport types into the scheduler
 - `opensymphony-tui` depends only on `control` client models, not on orchestrator internals
 - `opensymphony-openhands` must not depend on `opensymphony-tui`
 - `opensymphony-linear-mcp` can share models with `opensymphony-linear` but must remain runnable as an independent command

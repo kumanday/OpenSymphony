@@ -40,13 +40,11 @@ Current implemented local contract:
 
 - `GET /api/v1/snapshot`
 - `GET /api/v1/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
-  - lagged consumers are snapped forward to the latest published sequence instead of replaying stale snapshots out of order
-  - additive non-`snapshot` event names are ignored until the next `snapshot` so mixed-version clients do not tear down a healthy stream
-- `GET /healthz` for daemon liveness, with the returned `status` reflecting the daemon snapshot state (`ok`, `starting`, `degraded`, `stopped` for known states, while additive unknown states are preserved as-is)
+- `GET /healthz` for daemon liveness
 
-The inline header should always surface the reducer-owned control-plane status
-text so operators can see whether the client is still connecting, live on the
-stream, or retrying after a disconnect without changing focus panes.
+The implemented client treats the configured base URL as a service-root prefix, so
+`http://proxy/opensymphony` and `http://proxy/opensymphony/` both resolve API requests under
+`/opensymphony/...` instead of silently dropping the prefix.
 
 ### Explicitly out of scope
 
@@ -126,11 +124,16 @@ Recommended first layout:
 
 Use pane-based layout so future views can expand without redesign.
 
-Current inline-mode guarantees in the implemented client:
-
-- the bottom events or metrics pane keeps reserved rows in the default 22-line inline layout
-- the narrow stacked layout also reserves rows for selected issue and workspace detail instead of letting the issue list consume the whole frame
-- long issue lists render as a moving window so the active selection stays visible instead of scrolling off the visible pane
+The implemented inline layout budgets rows per pane instead of truncating one giant body block.
+That keeps the bottom timeline visible under long issue lists, preserves the selected issue when snapshot ordering changes, and windows the issue pane around the current selection so narrower split terminals still keep the selected row and detail visible.
+The always-visible status line now leads with daemon and local agent-server health before the
+connection and focus metadata so degraded runtime state is visible even when the issue list is
+otherwise stable.
+Rendered pane text is normalized to a single visual line before fitting so
+newline-bearing snapshot fields do not silently spill past the row budget.
+Row fitting also uses terminal cell width instead of Unicode scalar counts and normalizes control
+characters such as tabs before measurement so externally sourced tracker titles or event summaries
+do not bleed across pane separators in split layouts.
 
 ## 6. Interaction model
 
@@ -151,11 +154,7 @@ Current key map in the implemented client:
 - `e`: switch the bottom pane between recent events and metrics
 - `q`: quit cleanly
 
-The rendered status line and pane headers explicitly show the active focus target so inline-mode navigation stays understandable without a mouse or alternate screen.
-
-The selected issue should stay anchored by identifier across live snapshot reordering so the detail pane does not jump to a different issue just because the list order changed.
-
-When the issue list is taller than the visible pane, the rendered list should follow the active row so keyboard navigation always leaves a visible `>` marker in the issue pane.
+The rendered status line and pane headers explicitly show the active focus target, and the top header also surfaces the computed connection, daemon, and agent-server cause text when bootstrap, reconnect, or degraded states need explanation.
 
 Do not start with in-UI mutation commands unless the control plane already defines them cleanly.
 
@@ -181,6 +180,11 @@ Pipeline:
 5. let FrankenTUI diff and present
 
 Avoid embedding business logic in widget code.
+
+The control-plane bridge should follow the UI lifecycle. If inline mode exits
+early, including `--exit-after-ms` harness runs or terminal startup failures
+after bridge startup, the background bridge must stop polling and tear down
+cleanly with the app.
 
 ## 9. Suggested Rust crate boundary
 
@@ -208,25 +212,24 @@ UI requirements:
 - show stale-data indicator
 - reconnect to control plane when possible
 - never panic the terminal session on missing fields
-- degrade gracefully if optional metrics are absent
+- degrade gracefully if future metric fields are unavailable; the MVP snapshot always includes the `metrics` object
 
 Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
-- bound each bootstrap snapshot fetch so a hung `/api/v1/snapshot` cannot stall reconnect forever
-- bound SSE connection establishment so a blackholed or never-opening `/api/v1/events` attach falls back into reconnect instead of hanging forever
-- keep that short SSE attach timeout active until the first decoded bootstrap snapshot arrives, so a stream that only reaches `Open` or flushes headers cannot suppress it
-- bound SSE reads so a stalled `/api/v1/events` connection falls back into reconnect instead of hanging forever
-- treat retryable SSE transport failures as reconnecting state immediately while the same event-source object retries in the background
-- reapply that same SSE attach-timeout guard after retryable failures so a later `Open`-only or blackholed reopen also falls back into reconnect instead of hanging forever
-- keep that bootstrap snapshot visible while the client is still connecting or reconnecting
-- only report `live control-plane stream` after the SSE subscription is actually yielding stream data
-- make scripted `opensymphony tui --exit-after-ms ...` runs fail unless the final reduced control-plane state is still `live` when the timeout expires
-- if the stream closes or fails, mark the connection as reconnecting while keeping the last good snapshot visible, and preserve that reconnecting state through at least one rendered frame even if a recovery snapshot is already queued
-- ignore regressing snapshots unless they are clearly newer post-restart snapshots with fresher publish and generation timestamps
+- if `/api/v1/snapshot` accepts the connection but hangs without returning a body, fail that bootstrap or reconnect refresh within the bounded snapshot timeout and retry instead of waiting forever
+- if `/api/v1/events` never finishes attaching, including streams that open headers and then only emit keepalive comments before the first snapshot, fail that attach attempt within one bounded stream-attach timeout and retry instead of waiting forever in `conn=connecting` or `conn=reconnecting`
+- keep rendering that bootstrap snapshot with `conn=connecting` until the SSE stream yields its first snapshot
+- publish the first streamed snapshot and the `conn=live` attachment signal atomically through the bridge mailbox so the header never outruns the data it is describing
+- subscribe to the SSE stream
+- if the stream closes or fails, keep the last good snapshot visible, mark the connection as reconnecting, and surface the computed reconnect reason in the top header
+- if `/api/v1/events` goes silent for longer than the keepalive watchdog budget after the connection opens, treat that stalled stream as failed and retry instead of hanging forever on stale data
 - refetch the current snapshot before resubscribing
-- tolerate additive `recent_events[].kind` values by preserving unknown kinds instead of rejecting the whole snapshot payload
-- tolerate additive `daemon.state`, `issues[].runtime_state`, and `issues[].last_outcome` values by preserving unknown strings instead of rejecting the whole snapshot payload
+- if that refresh succeeds before the SSE stream reattaches, keep `conn=reconnecting` but switch the compact header detail to the current snapshot state such as `refreshed; stream pending`
+- while the FTUI owns terminal output, bridge reconnect failures stay inside the reducer and header state instead of printing duplicate warning lines to `stderr`
+- if the SSE consumer lags, accept the latest published snapshot immediately instead of waiting for the retained SSE backlog to drain, and ignore any older retained sequence that would roll the UI backward
+
+The implemented bridge between the SSE client and the FTUI reducer coalesces bursty snapshot traffic down to the latest value so inline-mode polling does not accumulate an unbounded backlog of stale snapshots.
 
 ## 11. Dependency strategy
 
@@ -246,16 +249,11 @@ Automated:
 Current automated coverage:
 
 - reducer selection and mode-switch tests
-- render smoke tests against serialized snapshots, including visible focus markers and narrow-layout detail preservation
-- mailbox tests for snapshot coalescing and last-good-snapshot retention across disconnects
+- render smoke tests against serialized snapshots, including visible focus markers, selection persistence across snapshot reordering, selected-row visibility in truncated issue panes, narrow-layout detail preservation, and persistent bottom-pane visibility
+- newline-normalization coverage for externally sourced event text so pane row counts stay accurate
 - control-plane snapshot plus SSE round-trip tests
-- control-plane bootstrap snapshot timeout coverage
-- control-plane SSE connect-establishment timeout coverage
-- control-plane idle SSE timeout coverage
-- scripted CLI attach coverage for healthy and never-live `--exit-after-ms` runs
-- monotonic SSE lag-recovery tests for slow consumers
-- snapshot decoding coverage for unknown additive recent event kinds
-- snapshot decoding coverage for unknown additive `daemon.state`, `runtime_state`, and `last_outcome` values
+- TUI reconnect retention and narrow-layout detail visibility tests
+- bridge and control-plane catch-up tests for snapshot coalescing, disconnect handling, and lagged SSE recovery
 
 Manual:
 

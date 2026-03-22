@@ -1,3 +1,4 @@
+mod control_plane;
 mod identifiers;
 mod issue;
 mod runtime;
@@ -8,6 +9,12 @@ mod tracker;
 
 pub const CRATE_NAME: &str = "opensymphony-domain";
 
+pub use control_plane::{
+    ControlPlaneAgentServerStatus, ControlPlaneDaemonSnapshot, ControlPlaneDaemonState,
+    ControlPlaneDaemonStatus, ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot,
+    ControlPlaneMetricsSnapshot, ControlPlaneRecentEvent, ControlPlaneRecentEventKind,
+    ControlPlaneWorkerOutcome, SnapshotEnvelope,
+};
 pub use identifiers::{
     ConversationId, IdentifierError, IssueId, IssueIdentifier, TrackerStateId, WorkerId,
     WorkspaceKey,

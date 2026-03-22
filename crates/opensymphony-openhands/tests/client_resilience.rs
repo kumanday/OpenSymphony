@@ -20,6 +20,10 @@ use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
 
+fn text_message(value: String) -> Message {
+    Message::Text(value.into())
+}
+
 #[tokio::test]
 async fn wait_for_readiness_ignores_non_state_frames_before_ready_event() {
     let server = TestServer::start(readiness_router()).await;
@@ -858,10 +862,8 @@ async fn forward_compatible_readiness_socket(
         );
 
         socket
-            .send(Message::Text(
-                serde_json::to_string(&ready)
-                    .expect("event should serialize")
-                    .into(),
+            .send(text_message(
+                serde_json::to_string(&ready).expect("event should serialize"),
             ))
             .await
             .expect("forward-compatible ready event should send");
@@ -887,18 +889,14 @@ async fn handle_readiness_socket(mut socket: WebSocket) {
         .await
         .expect("ping should send");
     socket
-        .send(Message::Text(
-            serde_json::to_string(&unrelated)
-                .expect("event should serialize")
-                .into(),
+        .send(text_message(
+            serde_json::to_string(&unrelated).expect("event should serialize"),
         ))
         .await
         .expect("unrelated event should send");
     socket
-        .send(Message::Text(
-            serde_json::to_string(&ready)
-                .expect("event should serialize")
-                .into(),
+        .send(text_message(
+            serde_json::to_string(&ready).expect("event should serialize"),
         ))
         .await
         .expect("ready event should send");
@@ -1098,7 +1096,7 @@ async fn readiness_mirror_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::new(
                     "evt-ready-running",
                     Utc::now(),
@@ -1111,8 +1109,7 @@ async fn readiness_mirror_events_socket(
                         },
                     }),
                 ))
-                .expect("ready event should serialize")
-                .into(),
+                .expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
@@ -1126,7 +1123,7 @@ async fn forward_compatible_readiness_mirror_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::new(
                     "evt-ready-running-forward-compatible",
                     Utc::now(),
@@ -1141,8 +1138,7 @@ async fn forward_compatible_readiness_mirror_events_socket(
                         },
                     }),
                 ))
-                .expect("ready event should serialize")
-                .into(),
+                .expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
@@ -1181,18 +1177,14 @@ async fn ready_barrier_rebuild_regression_events_socket(
         );
 
         socket
-            .send(Message::Text(
-                serde_json::to_string(&ready)
-                    .expect("ready event should serialize")
-                    .into(),
+            .send(text_message(
+                serde_json::to_string(&ready).expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
         socket
-            .send(Message::Text(
-                serde_json::to_string(&stale_queued)
-                    .expect("stale queued event should serialize")
-                    .into(),
+            .send(text_message(
+                serde_json::to_string(&stale_queued).expect("stale queued event should serialize"),
             ))
             .await
             .expect("stale queued event should send");
@@ -1352,10 +1344,8 @@ async fn authenticated_readiness_socket(
     Ok(websocket.on_upgrade(async move |mut socket| {
         for event in ready_events {
             socket
-                .send(Message::Text(
-                    serde_json::to_string(&event)
-                        .expect("event should serialize")
-                        .into(),
+                .send(text_message(
+                    serde_json::to_string(&event).expect("event should serialize"),
                 ))
                 .await
                 .expect("ready event should send");
@@ -1501,10 +1491,9 @@ async fn initial_replay_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "running"))
-                    .expect("ready event should serialize")
-                    .into(),
+                    .expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
@@ -1643,18 +1632,14 @@ async fn buffered_attach_ordering_events_socket(
         );
 
         socket
-            .send(Message::Text(
-                serde_json::to_string(&ready)
-                    .expect("ready event should serialize")
-                    .into(),
+            .send(text_message(
+                serde_json::to_string(&ready).expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
         socket
-            .send(Message::Text(
-                serde_json::to_string(&queued_live)
-                    .expect("buffered live event should serialize")
-                    .into(),
+            .send(text_message(
+                serde_json::to_string(&queued_live).expect("buffered live event should serialize"),
             ))
             .await
             .expect("buffered live event should send");
@@ -1742,15 +1727,14 @@ async fn deferred_reconnect_events_socket(
     websocket.on_upgrade(async move |mut socket| {
         if connection_number == 1 {
             socket
-                .send(Message::Text(
+                .send(text_message(
                     serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
-                        .expect("ready event should serialize")
-                        .into(),
+                        .expect("ready event should serialize"),
                 ))
                 .await
                 .expect("ready event should send");
             socket
-                .send(Message::Text(
+                .send(text_message(
                     serde_json::to_string(&EventEnvelope::new(
                         "evt-runtime",
                         Utc::now(),
@@ -1763,8 +1747,7 @@ async fn deferred_reconnect_events_socket(
                             },
                         }),
                     ))
-                    .expect("runtime event should serialize")
-                    .into(),
+                    .expect("runtime event should serialize"),
                 ))
                 .await
                 .expect("runtime event should send");
@@ -2157,10 +2140,9 @@ async fn probe_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
-                    .expect("ready event should serialize")
-                    .into(),
+                    .expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
@@ -2173,10 +2155,9 @@ async fn reconnect_probe_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
-                    .expect("ready event should serialize")
-                    .into(),
+                    .expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
@@ -2200,10 +2181,9 @@ async fn exhausting_reconnect_probe_events_socket(
     websocket.on_upgrade(async move |mut socket| {
         if connection_number == 1 {
             socket
-                .send(Message::Text(
+                .send(text_message(
                     serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
-                        .expect("ready event should serialize")
-                        .into(),
+                        .expect("ready event should serialize"),
                 ))
                 .await
                 .expect("ready event should send");
@@ -2223,10 +2203,9 @@ async fn final_refresh_failure_probe_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
-                    .expect("ready event should serialize")
-                    .into(),
+                    .expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
@@ -2234,7 +2213,7 @@ async fn final_refresh_failure_probe_events_socket(
         loop {
             if *state.run_count.lock().await > 0 {
                 socket
-                    .send(Message::Text(
+                    .send(text_message(
                         serde_json::to_string(&EventEnvelope::new(
                             "evt-finished",
                             Utc::now(),
@@ -2247,8 +2226,7 @@ async fn final_refresh_failure_probe_events_socket(
                                 },
                             }),
                         ))
-                        .expect("finished event should serialize")
-                        .into(),
+                        .expect("finished event should serialize"),
                     ))
                     .await
                     .expect("finished event should send");
@@ -2269,10 +2247,9 @@ async fn finished_then_error_probe_events_socket(
 ) -> impl IntoResponse {
     websocket.on_upgrade(async move |mut socket| {
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
-                    .expect("ready event should serialize")
-                    .into(),
+                    .expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");
@@ -2280,7 +2257,7 @@ async fn finished_then_error_probe_events_socket(
         loop {
             if *state.run_count.lock().await > 0 {
                 socket
-                    .send(Message::Text(
+                    .send(text_message(
                         serde_json::to_string(&EventEnvelope::new(
                             "evt-finished",
                             Utc::now(),
@@ -2293,14 +2270,13 @@ async fn finished_then_error_probe_events_socket(
                                 },
                             }),
                         ))
-                        .expect("finished event should serialize")
-                        .into(),
+                        .expect("finished event should serialize"),
                     ))
                     .await
                     .expect("finished event should send");
                 tokio::task::yield_now().await;
                 socket
-                    .send(Message::Text(
+                    .send(text_message(
                         serde_json::to_string(&EventEnvelope::new(
                             "evt-error-after-finished",
                             Utc::now(),
@@ -2310,8 +2286,7 @@ async fn finished_then_error_probe_events_socket(
                                 "message": "synthetic probe failure after finished",
                             }),
                         ))
-                        .expect("error event should serialize")
-                        .into(),
+                        .expect("error event should serialize"),
                     ))
                     .await
                     .expect("error event should send");
@@ -2409,7 +2384,7 @@ async fn readiness_replay_events_socket(
             "evt-ready-reconnect"
         };
         socket
-            .send(Message::Text(
+            .send(text_message(
                 serde_json::to_string(&EventEnvelope::new(
                     ready_id,
                     Utc::now(),
@@ -2422,8 +2397,7 @@ async fn readiness_replay_events_socket(
                         },
                     }),
                 ))
-                .expect("ready event should serialize")
-                .into(),
+                .expect("ready event should serialize"),
             ))
             .await
             .expect("ready event should send");

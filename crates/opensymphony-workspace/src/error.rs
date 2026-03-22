@@ -63,8 +63,8 @@ pub enum WorkspaceError {
     EncodeJsonArtifact { path: PathBuf, source: JsonError },
     #[error("failed to write manifest {path}: {source}")]
     WriteManifest { path: PathBuf, source: io::Error },
-    #[error("failed to write managed file {path}: {source}")]
-    WriteManagedFile { path: PathBuf, source: io::Error },
+    #[error("failed to write artifact {path}: {source}")]
+    WriteArtifact { path: PathBuf, source: io::Error },
     #[error("failed to launch hook `{hook}` in {cwd}: {source}")]
     LaunchHook {
         hook: HookKind,

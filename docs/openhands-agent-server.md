@@ -104,7 +104,7 @@ Current repository implementation:
 - `opensymphony-openhands` currently implements the typed conversation create, get, send-message, run, paginated event search, readiness probe, and `RuntimeEventStream` attach/reconcile/reconnect surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
 - `opensymphony doctor` now resolves the target repo `WORKFLOW.md` before probing OpenHands, so the live probe uses workflow-derived workspace, transport, conversation, and prompt inputs instead of only static CLI YAML fields
-- `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
+- `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv`, enforces `uv run --directory <tool-dir> --locked --extra agent-server --module openhands.agent_server`, and rejects extra agent-server CLI flags so the pinned project works the same way from the repo root, CI, and the local supervisor
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
 - explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
 - explicit `openhands.local_server.enabled: false` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
@@ -132,7 +132,7 @@ Readiness probing rule:
 Current implementation detail:
 
 - supervised mode launches `bash tools/openhands-server/run-local.sh`
-- the supervisor sets `OPENHANDS_SERVER_PORT` and `RUNTIME=process` explicitly
+- the supervisor sets `OPENHANDS_SERVER_PORT`, while the launcher itself forces `RUNTIME=process`, loopback host `127.0.0.1`, the pinned `agent-server` extra, and `uv` lockfile enforcement
 - diagnostics record the launcher summary, resolved base URL, pinned version,
   and launched PID for doctor output and future daemon logs
 - the doctor path renders the target repo workflow prompt with a synthetic issue
@@ -141,7 +141,12 @@ Current implementation detail:
 - the current doctor and live-validation path uses `GET /openapi.json` as the
   conservative readiness probe and will temporarily start a supervised local
   server when the configured loopback base URL is down but the repo-owned pin is
-  valid
+  valid; once it starts, doctor follows the launched supervisor's resolved base
+  URL for the rest of the probe instead of reusing the original config alias or
+  path prefix
+- live-only doctor overrides such as `probe_model` and `probe_api_key_env` are
+  resolved lazily when `--live-openhands` is requested, so shared configs can
+  leave those `${VAR}` placeholders unset during the static preflight path
 
 ## 4.3 Shutdown contract
 
@@ -201,6 +206,11 @@ Suggested persisted fields:
 - `last_event_kind`
 - `last_event_at`
 - `last_event_summary`
+
+Implementation note:
+
+- `opensymphony-workspace` owns the deterministic `conversation.json` path and serialization helpers
+- `opensymphony-openhands::IssueSessionRunner` decides when to create, reuse, attach, or reset the conversation and populates the runtime-facing fields above
 
 ## 6.2 Persistence directory
 

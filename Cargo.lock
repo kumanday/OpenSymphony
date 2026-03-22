@@ -1364,6 +1364,7 @@ dependencies = [
  "chrono",
  "clap",
  "opensymphony-control",
+ "opensymphony-domain",
  "opensymphony-linear-mcp",
  "opensymphony-openhands",
  "opensymphony-testkit",
@@ -1388,6 +1389,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "opensymphony-domain",
  "reqwest",
  "reqwest-eventsource",
  "serde",
@@ -1491,9 +1493,11 @@ dependencies = [
  "chrono",
  "ftui",
  "opensymphony-control",
+ "opensymphony-domain",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "unicode-width",
  "url",
 ]
 
