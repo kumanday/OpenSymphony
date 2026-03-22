@@ -311,6 +311,7 @@ impl OpenHandsError {
 
 type RuntimeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const STREAM_READ_AHEAD_WINDOW: Duration = Duration::from_millis(5);
+const CONVERSATION_STATE_UPDATE_EVENT_KIND: &str = "ConversationStateUpdateEvent";
 const UNREADY_EVENT_ID: &str = "runtime-stream-unready";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -554,6 +555,7 @@ impl RuntimeEventStream {
         let reconciled = self.client.search_all_events(self.conversation_id).await?;
         self.push_new_events(reconciled.items().iter().cloned(), true);
         self.rebuild_state_mirror();
+        self.apply_ready_event_to_state_mirror();
         Ok(())
     }
 
@@ -595,6 +597,38 @@ impl RuntimeEventStream {
         self.state_mirror
             .rebuild_from(&self.conversation, self.event_cache.items());
         self.apply_terminal_conversation_fallback();
+    }
+
+    fn apply_ready_event_to_state_mirror(&mut self) {
+        if self.ready_event.id == UNREADY_EVENT_ID
+            || self.ready_event.kind != CONVERSATION_STATE_UPDATE_EVENT_KIND
+        {
+            return;
+        }
+
+        let KnownEvent::ConversationStateUpdate(payload) =
+            KnownEvent::from_envelope(&self.ready_event)
+        else {
+            return;
+        };
+
+        let cache_already_has_same_or_newer_state = self.event_cache.items().iter().any(|event| {
+            event.kind == CONVERSATION_STATE_UPDATE_EVENT_KIND
+                && compare_pending_events(event, &self.ready_event) != Ordering::Less
+        });
+        if cache_already_has_same_or_newer_state {
+            return;
+        }
+
+        let ready_event_is_terminal = matches!(
+            payload.execution_status.as_deref(),
+            Some("finished" | "error" | "stuck")
+        );
+        if self.state_mirror.terminal_status().is_some() && !ready_event_is_terminal {
+            return;
+        }
+
+        self.state_mirror.apply_event(&self.ready_event);
     }
 
     fn apply_terminal_conversation_fallback(&mut self) {
@@ -954,12 +988,7 @@ async fn wait_for_readiness_on_stream(
 
         match next_message {
             Some(Ok(Message::Text(payload))) => match parse_text_event(&payload) {
-                Ok(event)
-                    if matches!(
-                        KnownEvent::from_envelope(&event),
-                        KnownEvent::ConversationStateUpdate(_)
-                    ) =>
-                {
+                Ok(event) if event.kind == CONVERSATION_STATE_UPDATE_EVENT_KIND => {
                     return Ok(event);
                 }
                 Ok(event) => {
@@ -970,12 +999,7 @@ async fn wait_for_readiness_on_stream(
                 }
             },
             Some(Ok(Message::Binary(payload))) => match parse_binary_event(&payload) {
-                Ok(event)
-                    if matches!(
-                        KnownEvent::from_envelope(&event),
-                        KnownEvent::ConversationStateUpdate(_)
-                    ) =>
-                {
+                Ok(event) if event.kind == CONVERSATION_STATE_UPDATE_EVENT_KIND => {
                     return Ok(event);
                 }
                 Ok(event) => {
