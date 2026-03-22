@@ -138,7 +138,7 @@ mod tests {
         );
         assert_eq!(
             workflow.prompt_template,
-            "# Assignment\n\nTicket: {{ issue.identifier }}"
+            "\n# Assignment\n\nTicket: {{ issue.identifier }}\n"
         );
     }
 
@@ -148,7 +148,7 @@ mod tests {
             .expect("prompt-only workflow should parse");
 
         assert_eq!(workflow.front_matter, super::WorkflowFrontMatter::default());
-        assert_eq!(workflow.prompt_template, "Prompt only");
+        assert_eq!(workflow.prompt_template, "\n\nPrompt only\n");
     }
 
     #[test]
@@ -170,6 +170,28 @@ mod tests {
         assert!(matches!(
             error,
             WorkflowLoadError::MissingFrontMatterTerminator
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_namespaces() {
+        let error = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+openhadns:
+  transport:
+    base_url: http://127.0.0.1:8000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect_err("unknown namespaces should fail deterministically");
+
+        assert!(matches!(
+            error,
+            WorkflowLoadError::UnknownTopLevelNamespace { namespace } if namespace == "openhadns"
         ));
     }
 
@@ -420,7 +442,7 @@ workspace:
     }
 
     #[test]
-    fn preserves_bare_workspace_roots_without_path_separators() {
+    fn resolves_bare_workspace_roots_against_workflow_directory() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -439,7 +461,10 @@ workspace:
             .resolve(Path::new("/repo/config"), &env)
             .expect("workflow should resolve");
 
-        assert_eq!(resolved.config.workspace.root, PathBuf::from("workspaces"));
+        assert_eq!(
+            resolved.config.workspace.root,
+            PathBuf::from("/repo/config/workspaces")
+        );
     }
 
     #[test]
@@ -539,7 +564,6 @@ tracker:
   kind: linear
   project_slug: sample-project
 ---
-
 "#,
         )
         .expect("workflow should parse");
@@ -556,6 +580,23 @@ tracker:
             .expect("default prompt render should succeed");
 
         assert_eq!(rendered, DEFAULT_PROMPT_TEMPLATE);
+    }
+
+    #[test]
+    fn preserves_whitespace_sensitive_prompt_body() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+---
+
+    code block
+"#,
+        )
+        .expect("workflow should parse");
+
+        assert_eq!(workflow.prompt_template, "\n    code block\n");
     }
 
     #[test]

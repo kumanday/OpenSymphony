@@ -27,7 +27,7 @@ pub(crate) fn parse_workflow(source: &str) -> Result<WorkflowDefinition, Workflo
 
     Ok(WorkflowDefinition {
         front_matter,
-        prompt_template: prompt_source.trim().to_owned(),
+        prompt_template: prompt_source.to_owned(),
     })
 }
 
@@ -37,8 +37,17 @@ fn parse_front_matter(front_matter: &str) -> Result<WorkflowFrontMatter, Workflo
 
     match parsed {
         serde_yaml::Value::Null => Ok(WorkflowFrontMatter::default()),
-        serde_yaml::Value::Mapping(_) => serde_yaml::from_value(parsed)
-            .map_err(|source| WorkflowLoadError::WorkflowParseError { source }),
+        serde_yaml::Value::Mapping(_) => {
+            let parsed: WorkflowFrontMatter = serde_yaml::from_value(parsed)
+                .map_err(|source| WorkflowLoadError::WorkflowParseError { source })?;
+
+            match parsed.extensions.keys().next() {
+                Some(namespace) => Err(WorkflowLoadError::UnknownTopLevelNamespace {
+                    namespace: namespace.clone(),
+                }),
+                None => Ok(parsed),
+            }
+        }
         _ => Err(WorkflowLoadError::WorkflowFrontMatterNotAMap),
     }
 }

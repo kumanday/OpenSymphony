@@ -68,6 +68,7 @@ Preserved exactly:
 
 - repository-root `WORKFLOW.md`
 - YAML front matter plus Markdown body
+- Markdown body preserved verbatim after the front matter delimiter
 - strict rendering
 - `issue` object available to the template
 - `attempt` available to the template for retry or continuation metadata
@@ -75,6 +76,7 @@ Preserved exactly:
 OpenSymphony extension:
 
 - `openhands` namespace in front matter for runtime-specific settings
+- unknown top-level front matter namespaces are rejected instead of ignored
 
 ## 2.5 Orchestration state machine
 
