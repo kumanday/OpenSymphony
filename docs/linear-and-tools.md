@@ -96,6 +96,10 @@ For unattended execution, the agent needs a minimal, stable write surface for Li
 
 OpenSymphony should provide a small stdio MCP server rather than coupling writes into the orchestrator.
 
+Current repository note:
+
+- workflow-owned OpenHands MCP stdio server declarations are rejected during workflow resolution until the current conversation-create adapter can forward `mcp_config`, so unattended sessions must provision the Linear MCP surface through the host tool environment rather than `openhands.mcp.stdio_servers`
+
 ## 5.1 MVP tool set
 
 Recommended tools:

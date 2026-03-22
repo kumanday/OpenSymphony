@@ -391,6 +391,7 @@ tracker:
             resolved.extensions.openhands.websocket.query_param_name,
             DEFAULT_OPENHANDS_QUERY_PARAM_NAME
         );
+        assert!(resolved.extensions.openhands.mcp.stdio_servers.is_empty());
     }
 
     #[test]
@@ -559,6 +560,8 @@ openhands:
         for invalid_base_url in [
             "localhost:8000",
             "ws://127.0.0.1:8000",
+            "http://127.0.0.1:8000/",
+            "https://example.com/runtime",
             "http://127.0.0.1:8000/api",
             "https://example.com/runtime/api/",
         ] {
@@ -593,6 +596,45 @@ openhands:
                 }
             ));
         }
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_mcp_stdio_servers() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  mcp:
+    stdio_servers:
+      - name: linear
+        command:
+          - opensymphony
+          - linear-mcp
+          - --stdio
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("workflow-owned mcp stdio servers should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.mcp.stdio_servers",
+                ..
+            }
+        ));
     }
 
     #[test]

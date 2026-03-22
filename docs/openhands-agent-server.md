@@ -106,7 +106,7 @@ Current repository implementation:
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
 - explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
-- workflow resolution rejects malformed, non-HTTP(S), or `/api`-suffixed `openhands.transport.base_url` values before the daemon reaches runtime transport setup
+- workflow resolution rejects malformed, non-HTTP(S), or path-bearing `openhands.transport.base_url` values before the daemon reaches runtime transport setup because the current readiness probes still require a bare origin
 
 ## 4.2 Startup contract
 
@@ -261,6 +261,7 @@ Current workflow defaulting:
 - `max_iterations` must fit the downstream OpenHands `u32` request range
 - `agent.llm.model` is required whenever an `llm` block is present
 - workflow-owned LLM provider env overrides such as `api_key_env` and `base_url_env` are rejected during workflow resolution until the runtime conversation-create adapter can actually forward them
+- workflow-owned `openhands.mcp.stdio_servers` entries are rejected during workflow resolution until the runtime conversation-create adapter can actually send `mcp_config`
 
 Implementation rule:
 
@@ -270,6 +271,7 @@ Implementation rule:
 Current repository implementation:
 
 - `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
+- the current request model does not yet serialize `mcp_config`, so workflow-owned MCP stdio server declarations are rejected before runtime launch
 - `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`
 - `AcceptedResponse` tolerates either an explicit JSON success body or an empty successful response for `POST /events` and `POST /run`
 

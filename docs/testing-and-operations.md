@@ -100,8 +100,9 @@ Current implementation:
 - fail when `openhands.local_server.command` is configured until the runtime supervisor can honor workflow-owned launcher overrides
 - resolve the bundled `examples/target-repo/WORKFLOW.md` file end-to-end, not just parse it
 - treat a leading unmatched `---` as prompt body text instead of failing front-matter parsing
-- fail on malformed, non-HTTP(S), or `/api`-suffixed `openhands.transport.base_url` values during workflow resolution
+- fail on malformed, non-HTTP(S), or path-bearing `openhands.transport.base_url` values during workflow resolution
 - fail when `openhands.transport.session_api_key_env` or explicit OpenHands WebSocket auth knobs are configured before the runtime transport layer consumes them
+- fail when `openhands.mcp.stdio_servers` is configured before the runtime conversation-create adapter can forward `mcp_config`
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
 - fail when `openhands.conversation.confirmation_policy` includes options that cannot be represented in the current OpenHands request subset
 - fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range

@@ -13,20 +13,19 @@ use crate::{
         OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
         OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsFrontMatter,
         OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
-        OpenHandsLocalServerFrontMatter, OpenHandsMcpConfig, OpenHandsStdioServerConfig,
-        OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig, OpenHandsTransportFrontMatter,
-        OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter,
-        ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig,
-        WorkflowDefinition, WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter,
-        DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
-        DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND,
-        DEFAULT_OPENHANDS_AUTH_MODE, DEFAULT_OPENHANDS_BASE_URL,
-        DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_MAX_ITERATIONS,
-        DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
-        DEFAULT_OPENHANDS_READINESS_PROBE_PATH, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
-        DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
-        DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS,
-        DEFAULT_WORKSPACE_ROOT,
+        OpenHandsLocalServerFrontMatter, OpenHandsMcpConfig, OpenHandsMcpFrontMatter,
+        OpenHandsTransportConfig, OpenHandsTransportFrontMatter, OpenHandsWebSocketConfig,
+        OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter, ResolvedWorkflow,
+        TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition,
+        WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter, DEFAULT_HOOK_TIMEOUT_MS,
+        DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS,
+        DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AUTH_MODE,
+        DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
+        DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
+        DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
+        DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
+        DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
+        DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT,
     },
 };
 
@@ -235,6 +234,7 @@ fn resolve_openhands<E: Environment>(
     reject_unsupported_openhands_transport_auth(&openhands.transport)?;
     reject_unsupported_openhands_local_server_command(&openhands.local_server)?;
     reject_unsupported_openhands_websocket_auth(&openhands.websocket)?;
+    reject_unsupported_openhands_mcp(&openhands.mcp)?;
 
     Ok(OpenHandsConfig {
         transport: OpenHandsTransportConfig {
@@ -365,6 +365,21 @@ fn reject_unsupported_openhands_websocket_auth(
     Ok(())
 }
 
+fn reject_unsupported_openhands_mcp(
+    mcp: &OpenHandsMcpFrontMatter,
+) -> Result<(), WorkflowConfigError> {
+    if mcp.stdio_servers.is_some() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.mcp.stdio_servers",
+            message:
+                "is not supported until the runtime conversation-create adapter can forward MCP config"
+                    .to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 fn resolve_openhands_base_url<E: Environment>(
     configured: Option<&str>,
     env: &E,
@@ -402,15 +417,20 @@ fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError
         });
     }
 
-    let normalized_path = parsed.path().trim_end_matches('/');
-    if normalized_path
-        .rsplit('/')
-        .next()
-        .is_some_and(|segment| segment == "api")
-    {
+    let without_scheme = base_url
+        .strip_prefix("http://")
+        .or_else(|| base_url.strip_prefix("https://"))
+        .ok_or_else(|| WorkflowConfigError::InvalidField {
+            field: "openhands.transport.base_url",
+            message: "must use the http or https scheme".to_owned(),
+        })?;
+
+    if without_scheme.contains('/') {
         return Err(WorkflowConfigError::InvalidField {
             field: "openhands.transport.base_url",
-            message: "must not include a trailing /api path segment".to_owned(),
+            message:
+                "must not include a path until supervisor readiness probes support prefixed base URLs"
+                    .to_owned(),
         });
     }
 
@@ -589,30 +609,6 @@ fn resolve_openhands_max_iterations(
     }
 
     Ok(max_iterations)
-}
-
-fn resolve_stdio_servers(
-    raw: Option<&[OpenHandsStdioServerFrontMatter]>,
-) -> Result<Vec<OpenHandsStdioServerConfig>, WorkflowConfigError> {
-    let Some(raw) = raw else {
-        return Ok(Vec::new());
-    };
-
-    raw.iter()
-        .map(|server| {
-            let name = require_literal(
-                Some(server.name.as_str()),
-                "openhands.mcp.stdio_servers[].name",
-            )?;
-            let command = resolve_command(
-                Some(server.command.as_slice()),
-                "openhands.mcp.stdio_servers[].command",
-                Vec::new(),
-            )?;
-
-            Ok(OpenHandsStdioServerConfig { name, command })
-        })
-        .collect()
 }
 
 fn resolve_command(
