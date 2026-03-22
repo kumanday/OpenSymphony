@@ -423,10 +423,10 @@ async fn load_config(path: &Path) -> Result<DoctorConfig, String> {
     let raw = fs::read_to_string(path)
         .await
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-    let expanded = expand_env_tokens(&raw)
-        .map_err(|error| format!("failed to expand {}: {error}", path.display()))?;
-    serde_yaml::from_str(&expanded)
-        .map_err(|error| format!("failed to parse {}: {error}", path.display()))
+    let config = serde_yaml::from_str(&raw)
+        .map_err(|error| format!("failed to parse {}: {error}", path.display()))?;
+    resolve_doctor_config(config)
+        .map_err(|error| format!("failed to expand {}: {error}", path.display()))
 }
 
 #[derive(Debug, Error)]
@@ -435,6 +435,60 @@ enum ExpandEnvTokensError {
     MissingVars { vars: String },
     #[error("unterminated environment token `${{{token}}}`")]
     UnterminatedToken { token: String },
+}
+
+#[derive(Debug, Error)]
+enum ResolveDoctorConfigError {
+    #[error("{field}: {source}")]
+    Field {
+        field: &'static str,
+        #[source]
+        source: ExpandEnvTokensError,
+    },
+}
+
+fn resolve_doctor_config(
+    mut config: DoctorConfig,
+) -> Result<DoctorConfig, ResolveDoctorConfigError> {
+    config.workspace_root =
+        resolve_required_config_value("workspace_root", &config.workspace_root)?;
+    if let Some(target_repo) = config.target_repo.take() {
+        config.target_repo = Some(resolve_required_config_value("target_repo", &target_repo)?);
+    }
+    config.openhands.base_url =
+        resolve_required_config_value("openhands.base_url", &config.openhands.base_url)?;
+    config.openhands.tool_dir =
+        resolve_required_config_value("openhands.tool_dir", &config.openhands.tool_dir)?;
+    if config.linear.enabled {
+        config.linear.api_key_env =
+            resolve_required_config_value("linear.api_key_env", &config.linear.api_key_env)?;
+    }
+    Ok(config)
+}
+
+fn resolve_required_config_value(
+    field: &'static str,
+    raw: &str,
+) -> Result<String, ResolveDoctorConfigError> {
+    expand_env_tokens(raw).map_err(|source| ResolveDoctorConfigError::Field { field, source })
+}
+
+fn resolve_optional_config_value(
+    field: &'static str,
+    raw: Option<&str>,
+) -> Result<Option<String>, ResolveDoctorConfigError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+
+    match expand_env_tokens(raw) {
+        Ok(value) => Ok(match value.trim() {
+            "" => None,
+            normalized => Some(normalized.to_owned()),
+        }),
+        Err(ExpandEnvTokensError::MissingVars { .. }) => Ok(None),
+        Err(source) => Err(ResolveDoctorConfigError::Field { field, source }),
+    }
 }
 
 fn expand_env_tokens(input: &str) -> Result<String, ExpandEnvTokensError> {
@@ -684,13 +738,31 @@ async fn run_live_openhands_checks(
     tooling: Option<&LocalServerTooling>,
 ) -> Vec<CheckResult> {
     let mut checks = Vec::new();
-    let api_key = config
-        .openhands
-        .probe_api_key_env
+    let probe_api_key_env = match resolve_optional_config_value(
+        "openhands.probe_api_key_env",
+        config.openhands.probe_api_key_env.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            checks.push(CheckResult::fail("config", error.to_string()));
+            return checks;
+        }
+    };
+    let probe_model = match resolve_optional_config_value(
+        "openhands.probe_model",
+        config.openhands.probe_model.as_deref(),
+    ) {
+        Ok(value) => value,
+        Err(error) => {
+            checks.push(CheckResult::fail("config", error.to_string()));
+            return checks;
+        }
+    };
+    let api_key = probe_api_key_env
         .as_ref()
         .and_then(|env_name| env::var(env_name).ok());
 
-    if let Some(env_name) = &config.openhands.probe_api_key_env {
+    if let Some(env_name) = &probe_api_key_env {
         if api_key.is_none() {
             checks.push(CheckResult::warn(
                 "openhands-secret",
@@ -787,7 +859,7 @@ async fn run_live_openhands_checks(
             .join(".opensymphony/openhands")
             .display()
             .to_string(),
-        normalized_option(&config.openhands.probe_model),
+        probe_model,
         api_key,
     );
 
@@ -875,13 +947,6 @@ fn maybe_start_local_supervisor(
         .start()
         .map_err(|error| format!("failed to start local OpenHands supervisor: {error}"))?;
     Ok(Some(supervisor))
-}
-
-fn normalized_option(value: &Option<String>) -> Option<String> {
-    value
-        .as_ref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
 }
 
 fn print_checks(checks: &[CheckResult]) {
