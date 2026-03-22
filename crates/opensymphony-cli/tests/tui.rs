@@ -61,17 +61,41 @@ fn opensymphony_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_opensymphony"))
 }
 
+#[cfg(target_os = "linux")]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn scripted_tui_command(url: &str, exit_after_ms: u64) -> Command {
     let mut command = Command::new("script");
-    command
-        .arg("-q")
-        .arg("/dev/null")
-        .arg(opensymphony_binary())
-        .arg("tui")
-        .arg("--url")
-        .arg(url)
-        .arg("--exit-after-ms")
-        .arg(exit_after_ms.to_string());
+    #[cfg(target_os = "linux")]
+    {
+        let binary = opensymphony_binary();
+        let command_line = format!(
+            "{} tui --url {} --exit-after-ms {}",
+            shell_quote(&binary.display().to_string()),
+            shell_quote(url),
+            exit_after_ms,
+        );
+        command
+            .arg("-q")
+            .arg("-e")
+            .arg("-c")
+            .arg(command_line)
+            .arg("/dev/null");
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        command
+            .arg("-q")
+            .arg("/dev/null")
+            .arg(opensymphony_binary())
+            .arg("tui")
+            .arg("--url")
+            .arg(url)
+            .arg("--exit-after-ms")
+            .arg(exit_after_ms.to_string());
+    }
     command
 }
 
