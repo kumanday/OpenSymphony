@@ -1,0 +1,17 @@
+{
+  "data": {
+    "issue": {
+      "id": "issue-260",
+      "labels": {
+        "nodes": [
+          { "name": "urgent" },
+          { "name": "backend" }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    }
+  }
+}
