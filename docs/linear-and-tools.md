@@ -40,6 +40,7 @@ Normalize tracker payloads into a stable issue model with fields such as:
 
 - `id`
 - `identifier`
+- `url`
 - `title`
 - `description`
 - `priority`
@@ -55,6 +56,7 @@ Implementation note:
 
 - blocker normalization should derive `blocked_by` from `inverseRelations` entries where relation `type == "blocks"`
 - issue state normalization should retain both the state name and the Linear `WorkflowState.type` string so terminal blockers remain detectable
+- issue normalization should retain the Linear issue URL because `WORKFLOW.md` renders `{{ issue.url }}` under strict template validation
 
 ## 3. Candidate sorting and eligibility
 
@@ -65,6 +67,10 @@ Recommended sort order:
 1. higher priority first
 2. older creation time first
 3. identifier tie-breaker
+
+Implementation note:
+
+- Linear's raw priority scale is urgency-inverted (`1` is most urgent, `0` is unprioritized), so the adapter should normalize it before returning scheduler-facing issues
 
 Eligibility reminders:
 
@@ -174,9 +180,10 @@ The Linear MCP tools should complement this, not duplicate the whole tracker dat
 struct Issue {
     id: String,
     identifier: String,
+    url: String,
     title: String,
     description: Option<String>,
-    priority: Option<i64>,
+    priority: Option<u8>,
     state: String,
     labels: Vec<String>,
     blocked_by: Vec<IssueBlocker>,

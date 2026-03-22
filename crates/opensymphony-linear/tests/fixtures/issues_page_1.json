@@ -5,6 +5,7 @@
         {
           "id": "issue-260",
           "identifier": "COE-260",
+          "url": "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine",
           "title": "Domain model and orchestrator state machine",
           "description": "Implement the state machine.",
           "priority": 1.0,
@@ -29,6 +30,7 @@
         {
           "id": "issue-263",
           "identifier": "COE-263",
+          "url": "https://linear.app/trilogy-ai-coe/issue/COE-263/workspace-manager-and-lifecycle-hooks",
           "title": "Workspace manager and lifecycle hooks",
           "description": "Implement workspace hooks.",
           "priority": 2.0,

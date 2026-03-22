@@ -5,6 +5,7 @@
         {
           "id": "issue-260",
           "identifier": "COE-260",
+          "url": "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine",
           "title": "Domain model and orchestrator state machine",
           "description": "Implement the shared orchestrator state machine.",
           "priority": 1.0,
@@ -60,6 +61,7 @@
         {
           "id": "issue-264",
           "identifier": "COE-264",
+          "url": "https://linear.app/trilogy-ai-coe/issue/COE-264/linear-read-adapter-and-issue-normalization",
           "title": "Linear read adapter and issue normalization",
           "description": null,
           "priority": 0.0,
