@@ -31,6 +31,10 @@ Implementation note:
 
 Fetch current states for all running issues during reconciliation.
 
+Implementation note:
+
+- by-ID reconciliation should keep the same `project_slug` filter as candidate reads so issues moved out of the tracked project fall out of orchestration instead of staying alive
+
 ## 2.3 Terminal-state fetch for startup cleanup
 
 Fetch issues in terminal states when sweeping existing workspaces on startup.
@@ -108,6 +112,10 @@ Required:
 - workflow `tracker.project_slug` (the Linear `Project.slugId` value)
 - workflow `tracker.active_states`
 - workflow `tracker.terminal_states`
+
+Implementation note:
+
+- the adapter should reject blank or missing `tracker.active_states` / `tracker.terminal_states` lists at client construction time so workflow misconfiguration fails fast instead of returning empty candidate/cleanup results
 
 Optional:
 

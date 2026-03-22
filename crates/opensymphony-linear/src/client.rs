@@ -94,6 +94,10 @@ impl LinearClient {
         if config.retry_policy.max_backoff < config.retry_policy.initial_backoff {
             config.retry_policy.max_backoff = config.retry_policy.initial_backoff;
         }
+        config.active_states =
+            normalize_required_state_names("tracker.active_states", &config.active_states)?;
+        config.terminal_states =
+            normalize_required_state_names("tracker.terminal_states", &config.terminal_states)?;
 
         let http = Client::builder()
             .timeout(config.request_timeout)
@@ -173,6 +177,7 @@ impl LinearClient {
 
         loop {
             let variables = IssueStatesByIdsVariables {
+                project_slug: self.config.project_slug.clone(),
                 issue_ids: issue_ids.clone(),
                 first: self.config.page_size,
                 after: after.clone(),
@@ -429,6 +434,23 @@ where
         }
     }
     normalized
+}
+
+fn normalize_required_state_names<S>(
+    field_name: &str,
+    values: &[S],
+) -> Result<Vec<String>, LinearError>
+where
+    S: AsRef<str>,
+{
+    let normalized = normalize_strings(values);
+    if normalized.is_empty() {
+        Err(LinearError::InvalidConfiguration(format!(
+            "workflow {field_name} must contain at least one non-empty state name"
+        )))
+    } else {
+        Ok(normalized)
+    }
 }
 
 fn ensure_complete_issue_states(
