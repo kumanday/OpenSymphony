@@ -43,6 +43,7 @@ async fn candidate_issues_normalize_fixture_payloads() {
     assert_eq!(first.labels, vec!["backend", "urgent"]);
     assert_eq!(first.blocked_by.len(), 1);
     assert!(first.blocked_by[0].is_terminal());
+    assert_eq!(first.blocked_by[0].state.tracker_type, "completed");
 
     let second = &issues[1];
     assert_eq!(second.identifier, "COE-264");
@@ -58,6 +59,7 @@ async fn candidate_issues_normalize_fixture_payloads() {
         second.blocked_by[0].state.kind,
         TrackerIssueStateKind::Started
     );
+    assert_eq!(second.blocked_by[0].state.tracker_type, "started");
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 1);
@@ -184,8 +186,10 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
     assert_eq!(snapshots.len(), 2);
     assert_eq!(snapshots[0].identifier, "COE-260");
     assert_eq!(snapshots[0].state.kind, TrackerIssueStateKind::Completed);
+    assert_eq!(snapshots[0].state.tracker_type, "completed");
     assert_eq!(snapshots[1].identifier, "COE-264");
     assert_eq!(snapshots[1].state.kind, TrackerIssueStateKind::Canceled);
+    assert_eq!(snapshots[1].state.tracker_type, "canceled");
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 1);
