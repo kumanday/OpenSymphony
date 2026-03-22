@@ -216,6 +216,9 @@ When validating the local control-plane and TUI slice, also confirm that:
 - reconnecting clients keep the last good snapshot visible instead of regressing to stale state
 - reconnecting clients switch the header detail to `refreshed; stream pending` once the HTTP
   refresh succeeds, even before the SSE stream is live again
+- event-stream clients treat a connected-but-silent `/api/v1/events` transport as failed once it
+  exceeds the keepalive watchdog budget, so the TUI retries instead of hanging forever on stale
+  bootstrap data
 - inline `opensymphony tui` reconnect failures stay inside the UI state and do not interleave raw
   bridge warning lines into terminal output
 - lagged SSE consumers only advance to newer snapshot sequences
