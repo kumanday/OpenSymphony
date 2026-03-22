@@ -13,7 +13,8 @@ use axum::{
 use chrono::Utc;
 use opensymphony_openhands::{
     AuthConfig, Conversation, ConversationCreateRequest, EventEnvelope, OpenHandsClient,
-    OpenHandsError, SearchConversationEventsResponse, SendMessageRequest, TransportConfig,
+    OpenHandsError, SearchConversationEventsResponse, SendMessageRequest, TerminalExecutionStatus,
+    TransportConfig,
 };
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
@@ -232,6 +233,32 @@ async fn run_probe_rejects_failure_only_event_streams() {
         result.is_err(),
         "probe should fail when the runtime only emits a ConversationErrorEvent"
     );
+}
+
+#[tokio::test]
+async fn run_probe_uses_refreshed_terminal_state_after_reconnect_without_new_events() {
+    let state = ProbeState::default();
+    let server = TestServer::start(reconnect_probe_router(state.clone())).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        Some("fake-model".to_string()),
+        Some("fake-key".to_string()),
+    );
+
+    let result = client
+        .run_probe(&request, Duration::from_secs(2))
+        .await
+        .expect("probe should succeed from refreshed terminal state after reconnect");
+
+    assert_eq!(result.conversation.execution_status, "finished");
+    assert_eq!(
+        result.state_mirror.terminal_status(),
+        Some(TerminalExecutionStatus::Finished)
+    );
+    assert_eq!(*state.send_count.lock().await, 1);
+    assert_eq!(*state.run_count.lock().await, 1);
 }
 
 struct TestServer {
@@ -553,6 +580,32 @@ fn failed_probe_router(state: ProbeState) -> Router {
         .with_state(state)
 }
 
+fn reconnect_probe_router(state: ProbeState) -> Router {
+    Router::new()
+        .route("/api/conversations", post(probe_create_conversation))
+        .route(
+            "/api/conversations/:conversation_id",
+            get(probe_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events",
+            post(reconnect_probe_send_message),
+        )
+        .route(
+            "/api/conversations/:conversation_id/run",
+            post(reconnect_probe_run_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(probe_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(reconnect_probe_events_socket),
+        )
+        .with_state(state)
+}
+
 async fn probe_create_conversation(
     State(state): State<ProbeState>,
     Json(request): Json<ConversationCreateRequest>,
@@ -638,6 +691,26 @@ async fn failed_probe_run_conversation(
     Ok(Json(json!({ "success": true })))
 }
 
+async fn reconnect_probe_send_message(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+    Json(_request): Json<SendMessageRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    *state.send_count.lock().await += 1;
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn reconnect_probe_run_conversation(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    *state.run_count.lock().await += 1;
+    let mut conversation = state.conversation.lock().await;
+    let conversation = conversation.as_mut().ok_or(StatusCode::NOT_FOUND)?;
+    conversation.execution_status = "finished".to_string();
+    Ok(Json(json!({ "success": true })))
+}
+
 async fn probe_search_events(
     State(state): State<ProbeState>,
     Path(_conversation_id): Path<Uuid>,
@@ -661,5 +734,24 @@ async fn probe_events_socket(
             ))
             .await
             .expect("ready event should send");
+    })
+}
+
+async fn reconnect_probe_events_socket(
+    websocket: WebSocketUpgrade,
+    Path(_conversation_id): Path<Uuid>,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
+                    .expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+        socket
+            .send(Message::Close(None))
+            .await
+            .expect("socket close should send");
     })
 }

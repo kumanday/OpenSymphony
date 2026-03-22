@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, time::Duration};
+use std::{cmp::Ordering, collections::VecDeque, time::Duration};
 
 use futures_util::StreamExt;
 use reqwest::{
@@ -9,7 +9,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use tokio::{
     net::TcpStream,
-    time::{sleep, timeout_at, Instant},
+    time::{sleep, timeout, timeout_at, Instant},
 };
 use tokio_tungstenite::{
     connect_async,
@@ -310,6 +310,7 @@ impl OpenHandsError {
 }
 
 type RuntimeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+const STREAM_READ_AHEAD_WINDOW: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStreamConfig {
@@ -383,27 +384,89 @@ impl RuntimeEventStream {
 
     pub async fn next_event(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
         loop {
-            if let Some(event) = self.pending_events.pop_front() {
+            if let Some(event) = self.poll_next_event_once().await? {
                 return Ok(Some(event));
             }
 
+            if self.socket.is_none() {
+                return Ok(None);
+            }
+        }
+    }
+
+    async fn poll_next_event_once(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
+        if let Some(event) = self.pending_events.pop_front() {
+            return Ok(Some(event));
+        }
+
+        let stream_read = {
             let Some(socket) = self.socket.as_mut() else {
                 return Ok(None);
             };
+            read_next_socket_event(socket).await
+        };
 
-            match read_next_socket_event(socket).await {
-                StreamRead::Event(event) => {
-                    self.push_new_events(std::iter::once(event), true);
+        match stream_read {
+            StreamRead::Event(event) => {
+                let mut drained_events = vec![event];
+                let reconnect_signal = self.drain_buffered_socket_events(&mut drained_events).await;
+                self.push_new_events(drained_events, true);
+
+                match reconnect_signal {
+                    Some(StreamRead::Closed) => {
+                        self.socket.take();
+                        self.reconnect().await?;
+                    }
+                    Some(StreamRead::Transport(error)) => {
+                        debug!(
+                            error = %error,
+                            "runtime websocket read failed while draining buffered events; attempting reconnect"
+                        );
+                        self.socket.take();
+                        self.reconnect().await?;
+                    }
+                    Some(StreamRead::Event(_)) => unreachable!(
+                        "draining buffered events should not return nested stream events"
+                    ),
+                    None => {}
                 }
-                StreamRead::Closed => {
-                    self.socket.take();
-                    self.reconnect().await?;
+
+                Ok(self.pending_events.pop_front())
+            }
+            StreamRead::Closed => {
+                self.socket.take();
+                self.reconnect().await?;
+                Ok(self.pending_events.pop_front())
+            }
+            StreamRead::Transport(error) => {
+                debug!(error = %error, "runtime websocket read failed; attempting reconnect");
+                self.socket.take();
+                self.reconnect().await?;
+                Ok(self.pending_events.pop_front())
+            }
+        }
+    }
+
+    async fn drain_buffered_socket_events(
+        &mut self,
+        drained_events: &mut Vec<EventEnvelope>,
+    ) -> Option<StreamRead> {
+        loop {
+            let next = {
+                let socket = self
+                    .socket
+                    .as_mut()
+                    .expect("socket should be present while draining buffered events");
+                read_buffered_socket_event(socket, STREAM_READ_AHEAD_WINDOW).await
+            };
+
+            match next {
+                Some(StreamRead::Event(event)) => drained_events.push(event),
+                Some(StreamRead::Closed) => return Some(StreamRead::Closed),
+                Some(StreamRead::Transport(error)) => {
+                    return Some(StreamRead::Transport(error));
                 }
-                StreamRead::Transport(error) => {
-                    debug!(error = %error, "runtime websocket read failed; attempting reconnect");
-                    self.socket.take();
-                    self.reconnect().await?;
-                }
+                None => return None,
             }
         }
     }
@@ -487,7 +550,7 @@ impl RuntimeEventStream {
         }
 
         if queue_new {
-            self.pending_events.extend(inserted.clone());
+            self.queue_pending_events(&inserted);
         }
         if inserted.iter().any(|event| {
             matches!(
@@ -500,10 +563,39 @@ impl RuntimeEventStream {
         inserted.len()
     }
 
+    fn queue_pending_events(&mut self, inserted: &[EventEnvelope]) {
+        for event in inserted {
+            let position = self
+                .pending_events
+                .iter()
+                .position(|pending| compare_pending_events(pending, event) == Ordering::Greater)
+                .unwrap_or(self.pending_events.len());
+            self.pending_events.insert(position, event.clone());
+        }
+    }
+
     fn rebuild_state_mirror(&mut self) {
         self.state_mirror
             .rebuild_from(&self.conversation, self.event_cache.items());
+        self.apply_terminal_conversation_fallback();
     }
+
+    fn apply_terminal_conversation_fallback(&mut self) {
+        if matches!(
+            self.conversation.execution_status.as_str(),
+            "finished" | "error" | "stuck"
+        ) && self.state_mirror.terminal_status().is_none()
+        {
+            self.state_mirror
+                .apply_conversation_execution_status(&self.conversation);
+        }
+    }
+}
+
+fn compare_pending_events(left: &EventEnvelope, right: &EventEnvelope) -> Ordering {
+    left.timestamp
+        .cmp(&right.timestamp)
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 #[derive(Debug)]
@@ -925,6 +1017,15 @@ async fn read_next_socket_event(stream: &mut RuntimeSocket) -> StreamRead {
     }
 }
 
+async fn read_buffered_socket_event(
+    stream: &mut RuntimeSocket,
+    read_ahead_window: Duration,
+) -> Option<StreamRead> {
+    timeout(read_ahead_window, read_next_socket_event(stream))
+        .await
+        .ok()
+}
+
 async fn wait_for_probe_terminal_state(
     stream: &mut RuntimeEventStream,
     wait_timeout: Duration,
@@ -932,11 +1033,22 @@ async fn wait_for_probe_terminal_state(
     let deadline = Instant::now() + wait_timeout;
 
     loop {
-        let next_event = timeout_at(deadline, stream.next_event())
+        match stream.state_mirror().terminal_status() {
+            Some(TerminalExecutionStatus::Finished) => return Ok(()),
+            Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
+                return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                    "terminal execution_status `{}`",
+                    stream.state_mirror().execution_status().unwrap_or_default()
+                )));
+            }
+            None => {}
+        }
+
+        let next_event = timeout_at(deadline, stream.poll_next_event_once())
             .await
             .map_err(|_| OpenHandsError::ProbeActivityTimeout(wait_timeout))??;
         let Some(event) = next_event else {
-            return Err(OpenHandsError::ProbeActivityTimeout(wait_timeout));
+            continue;
         };
 
         if matches!(
@@ -947,17 +1059,6 @@ async fn wait_for_probe_terminal_state(
                 "received {} {} before a successful terminal status",
                 event.kind, event.id
             )));
-        }
-
-        match stream.state_mirror().terminal_status() {
-            Some(TerminalExecutionStatus::Finished) => return Ok(()),
-            Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
-                return Err(OpenHandsError::ProbeRunUnhealthy(format!(
-                    "terminal execution_status `{}`",
-                    stream.state_mirror().execution_status().unwrap_or_default()
-                )));
-            }
-            None => {}
         }
     }
 }
