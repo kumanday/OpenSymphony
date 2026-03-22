@@ -216,6 +216,8 @@ When validating the local control-plane and TUI slice, also confirm that:
 - reconnecting clients keep the last good snapshot visible instead of regressing to stale state
 - reconnecting clients switch the header detail to `refreshed; stream pending` once the HTTP
   refresh succeeds, even before the SSE stream is live again
+- inline `opensymphony tui` reconnect failures stay inside the UI state and do not interleave raw
+  bridge warning lines into terminal output
 - lagged SSE consumers only advance to newer snapshot sequences
 - newline-bearing, control-character-bearing, or full-width tracker and event text stays within
   the pane row and column budget
