@@ -25,6 +25,7 @@ Fetch issues that:
 Implementation note:
 
 - the GraphQL adapter filters by Linear `Project.slugId`, so workflow `tracker.project_slug` should store that stable slug value
+- paginated `issues(...)` reads should pass `includeArchived: true` so cleanup and reconciliation can still observe archived terminal work
 
 ## 2.2 State refresh by IDs
 
@@ -59,6 +60,7 @@ Implementation note:
 - blocker and state-refresh normalization should retain both the state name and the Linear `WorkflowState.type` string so terminal blockers remain detectable without hardcoding active-state semantics
 - issue normalization should retain the Linear issue URL because `WORKFLOW.md` renders `{{ issue.url }}` under strict template validation
 - issue normalization should preserve the raw Linear priority because prompt/UI consumers render `{{ issue.priority }}` directly
+- top-level issue pages should request only a small initial `inverseRelations` slice and page the rest per issue so nested connection complexity stays under Linear's query cap
 
 ## 3. Candidate sorting and eligibility
 
@@ -94,6 +96,7 @@ Eligibility reminders:
 Current adapter contract:
 
 - send GraphQL requests to the configured endpoint with `Authorization: Bearer <LINEAR_API_KEY>`
+- decode GraphQL error envelopes before falling back to raw HTTP classification because Linear rate limits can arrive as HTTP 400 with GraphQL code `RATELIMITED`
 - keep GraphQL query and response structs private to `opensymphony-linear`
 - return only normalized domain models to orchestrator-facing callers
 

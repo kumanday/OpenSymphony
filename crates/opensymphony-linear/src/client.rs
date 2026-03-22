@@ -22,6 +22,7 @@ use crate::normalize::{normalize_issue, normalize_issue_state};
 const DEFAULT_BASE_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_PAGE_SIZE: usize = 50;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_INITIAL_RELATION_PAGE_SIZE: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct RetryPolicy {
@@ -132,6 +133,7 @@ impl LinearClient {
                 state_names: state_names.clone(),
                 first: self.config.page_size,
                 after: after.clone(),
+                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
             };
             let response: IssuesByStateData = self
                 .execute_graphql(ISSUES_BY_STATE_QUERY, json!(variables))
@@ -281,6 +283,15 @@ impl LinearClient {
                         .await
                         .map_err(|error| LinearError::Request(Box::new(error)))?;
 
+                    if let Some(error) = decode_graphql_error_response(&payload, retry_after)? {
+                        if self.should_retry(&error, attempt) {
+                            self.sleep_before_retry(&error, attempt).await;
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(error);
+                    }
+
                     if !status.is_success() {
                         let error = LinearError::HttpStatus {
                             status,
@@ -303,8 +314,10 @@ impl LinearClient {
                         })?;
 
                     if let Some(errors) = envelope.errors {
-                        let error =
-                            LinearError::from_graphql_errors(convert_graphql_errors(errors));
+                        let error = LinearError::from_graphql_errors_with_retry_after(
+                            convert_graphql_errors(errors),
+                            retry_after,
+                        );
                         if self.should_retry(&error, attempt) {
                             self.sleep_before_retry(&error, attempt).await;
                             attempt += 1;
@@ -382,6 +395,23 @@ fn convert_graphql_errors(errors: Vec<GraphqlErrorPayload>) -> Vec<GraphqlError>
             code: error.extensions.and_then(|extensions| extensions.code),
         })
         .collect()
+}
+
+fn decode_graphql_error_response(
+    payload: &str,
+    retry_after: Option<Duration>,
+) -> Result<Option<LinearError>, LinearError> {
+    let envelope: GraphqlEnvelope<Value> = match serde_json::from_str(payload) {
+        Ok(envelope) => envelope,
+        Err(_) => return Ok(None),
+    };
+
+    Ok(envelope.errors.map(|errors| {
+        LinearError::from_graphql_errors_with_retry_after(
+            convert_graphql_errors(errors),
+            retry_after,
+        )
+    }))
 }
 
 fn normalize_strings<S>(values: &[S]) -> Vec<String>

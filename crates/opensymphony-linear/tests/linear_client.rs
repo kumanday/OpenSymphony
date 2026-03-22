@@ -69,6 +69,14 @@ async fn candidate_issues_normalize_fixture_payloads() {
         requests[0].body["variables"]["stateNames"],
         serde_json::json!(["In Progress"])
     );
+    assert_eq!(
+        requests[0].body["variables"]["relationFirst"],
+        serde_json::json!(10)
+    );
+    assert!(requests[0].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("includeArchived: true"));
 }
 
 #[tokio::test]
@@ -108,6 +116,10 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
         requests[1].body["variables"]["after"],
         Value::String("relations-cursor-1".to_string())
     );
+    assert_eq!(
+        requests[0].body["variables"]["relationFirst"],
+        serde_json::json!(10)
+    );
 }
 
 #[tokio::test]
@@ -139,6 +151,14 @@ async fn issues_by_state_walk_pagination() {
         .as_str()
         .expect("query should be a string")
         .contains("query IssuesByState"));
+    assert_eq!(
+        requests[0].body["variables"]["relationFirst"],
+        serde_json::json!(2)
+    );
+    assert!(requests[0].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("includeArchived: true"));
     assert_eq!(requests[0].body["variables"]["after"], Value::Null);
     assert_eq!(
         requests[1].body["variables"]["after"],
@@ -172,6 +192,10 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
         .as_str()
         .expect("query should be a string")
         .contains("query IssueStatesByIds"));
+    assert!(requests[0].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("includeArchived: true"));
     assert_eq!(
         requests[0].body["variables"]["issueIds"],
         serde_json::json!(["issue-260", "issue-264"])
@@ -214,6 +238,30 @@ async fn rate_limited_requests_retry_using_retry_after() {
         .candidate_issues()
         .await
         .expect("client should retry the rate-limited request");
+
+    assert_eq!(issues.len(), 2);
+    assert_eq!(server.recorded_requests().await.len(), 2);
+}
+
+#[tokio::test]
+async fn graphql_rate_limited_bad_request_retries() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::new(
+            StatusCode::BAD_REQUEST,
+            r#"{"errors":[{"message":"rate limit exceeded","extensions":{"code":"RATELIMITED"}}]}"#,
+        )
+        .with_header("content-type", "application/json")
+        .with_header("retry-after", "0"),
+        QueuedResponse::json(include_str!("fixtures/candidate_issues_page.json")),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("GraphQL rate-limited requests should retry");
 
     assert_eq!(issues.len(), 2);
     assert_eq!(server.recorded_requests().await.len(), 2);
