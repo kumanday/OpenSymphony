@@ -9,6 +9,7 @@ repository.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
