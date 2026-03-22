@@ -118,6 +118,14 @@ The current SDK client treats the first `ConversationStateUpdateEvent` received 
 
 Implement the same rule.
 
+Do not require that the first WebSocket frame be the readiness event.
+
+The client should:
+
+- keep waiting across ping and pong traffic
+- ignore unrelated event kinds until a `ConversationStateUpdateEvent` arrives
+- ignore one malformed or forward-compatible frame and continue waiting until timeout or socket close
+
 Suggested API in Rust:
 
 ```rust
@@ -133,6 +141,12 @@ Configurable timeout:
 - default `30000 ms`
 
 If readiness is not achieved, fail the attach attempt and surface a transport error.
+
+Current repository implementation:
+
+- `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until a `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable events before readiness
+- `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
+- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness and reconcile path
 
 ## 6. Event cache and reconciliation
 
@@ -163,6 +177,12 @@ The reconcile pass should:
 - update ordering
 - return the number of new events added
 - tolerate partial failure by preserving already-cached events
+
+Current repository implementation:
+
+- `OpenHandsClient::search_all_events` paginates until `next_page_id` is absent
+- `EventCache` deduplicates by event ID and inserts by timestamp order
+- the contract suite includes a multi-page reconciliation test and an out-of-order insertion test
 
 ## 6.4 Conversation state mirror
 
@@ -299,7 +319,7 @@ The runtime stream informs, but does not define, Symphony outcomes.
 
 Mapping examples:
 
-- terminal `execution_status` with clean completion:
+- terminal `execution_status` `finished` with clean completion:
   - worker may continue another in-process turn or exit normally
 - transport failure:
   - abnormal worker exit, schedule backoff retry
@@ -328,6 +348,7 @@ Required automated scenarios:
 - disconnect before terminal status
 - reconnect plus reconcile catches missed events
 - terminal `execution_status` observed over WebSocket
+- failure-only events such as `ConversationErrorEvent` do not count as successful completion
 - REST fallback after stream uncertainty
 - unknown event kind does not crash the stream
 

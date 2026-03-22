@@ -10,23 +10,15 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.85.0
           components: clippy,rustfmt
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
         run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace
 
-      - name: Lint workspace
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
-      - name: Run workspace tests
-        run: cargo test --locked --workspace
