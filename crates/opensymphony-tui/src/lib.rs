@@ -413,6 +413,9 @@ impl BridgeMailbox {
     }
 
     fn push_connection_loss(&mut self, reason: String) {
+        // Any queued streamed snapshot was observed before the disconnect and would
+        // incorrectly flip the reducer back to `live` on the next UI tick.
+        self.latest_snapshot = None;
         self.latest_connection_loss = Some(reason);
     }
 
@@ -1087,6 +1090,82 @@ mod tests {
                 .as_ref()
                 .map(|snapshot| snapshot.snapshot.issues.len()),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn queued_connection_loss_discards_pre_disconnect_snapshot_until_recovery_arrives() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let scripted_exit = Arc::new(Mutex::new(ScriptedExitOutcome::Pending));
+        let mut app = OperatorApp::new(
+            Arc::clone(&bridge),
+            Some(Duration::from_millis(250)),
+            Arc::clone(&scripted_exit),
+        );
+
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_snapshot(fixture(1));
+        }
+        app.drain_bridge();
+        assert_eq!(app.state.connection, ConnectionState::Live);
+        assert_eq!(
+            app.state
+                .latest_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.snapshot.issues.len()),
+            Some(1)
+        );
+
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_snapshot(fixture(2));
+            mailbox.push_connection_loss("stream closed".to_owned());
+        }
+        app.drain_bridge();
+        assert_eq!(
+            app.state.connection,
+            ConnectionState::Reconnecting("stream closed".to_owned())
+        );
+        assert_eq!(
+            app.state
+                .latest_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.snapshot.issues.len()),
+            Some(1)
+        );
+
+        app.drain_bridge();
+        assert_eq!(
+            app.state.connection,
+            ConnectionState::Reconnecting("stream closed".to_owned())
+        );
+        assert_eq!(
+            app.state
+                .latest_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.snapshot.issues.len()),
+            Some(1)
+        );
+
+        {
+            let mut mailbox = bridge
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mailbox.push_snapshot(fixture(3));
+        }
+        app.drain_bridge();
+        assert_eq!(app.state.connection, ConnectionState::Live);
+        assert_eq!(
+            app.state
+                .latest_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.snapshot.issues.len()),
+            Some(3)
         );
     }
 
