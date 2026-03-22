@@ -75,9 +75,11 @@ Suggested gates:
 Current implementation:
 
 - `cargo test --workspace` exercises the fake-server contract suite in `crates/opensymphony-openhands/tests/fake_server_contract.rs`
+- `cargo test -p opensymphony-linear` exercises fixture-backed GraphQL normalization, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, archived terminal cleanup reads, non-archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
 - `crates/opensymphony-cli/tests/doctor.rs` runs the CLI live-probe path against `opensymphony-testkit`
 - `scripts/smoke_local.sh` runs the static doctor pass
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
+- `crates/opensymphony-openhands/tests/client_resilience.rs` and `crates/opensymphony-openhands/tests/fake_server_contract.rs` now cover readiness, attach, initial snapshot replay, attach-backlog versus buffered-live ordering, ready-barrier persistence across later stale rebuilds, explicit-close shutdown semantics, reconcile, out-of-order delivery, reused-conversation restart freshness, and reconnect recovery for the runtime stream
 
 ## 3. Minimum required test coverage by subsystem
 
@@ -252,16 +254,16 @@ When validating the local control-plane and TUI slice, also confirm that:
 
 `opensymphony doctor` should be a serious preflight tool, not a superficial version printer.
 
-Current implemented scope for OSYM-201:
+Current implemented scope for OSYM-201 and OSYM-203:
 
 - resolve the repo-local OpenHands wrapper metadata from `tools/openhands-server/`
 - report pin readiness from `version.txt`, `pyproject.toml`, and `uv.lock`
 - start the supervised local server when the pin is valid
 - verify HTTP readiness on the expected loopback base URL
+- create a temp conversation and attach the WebSocket runtime stream
+- reconcile events before and after readiness
+- send a real probe message, trigger `/run`, and wait for a healthy terminal stream state
 - stop the supervised child and report launch metadata
-
-Future doctor milestones should add conversation creation, WebSocket attach, and
-reconcile coverage once those runtime surfaces land.
 
 Required checks:
 
@@ -299,12 +301,14 @@ Current implementation notes:
 
 - the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
 - checkout-relative doctor defaults are derived from the config and tooling paths rather than the caller `cwd`, so running `opensymphony doctor` outside the repo root still validates the intended checkout and bundled `examples/target-repo`
-- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` before reconciling events
-- when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, switches follow-up probes to the launched supervisor base URL, then stops it again
-- failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity
+- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, attaches `RuntimeEventStream`, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` after post-ready reconcile and reconnect-aware streaming, including terminal REST refresh fallback when a post-completion WebSocket reattach exhausts and one final scheduler-turn buffered drain before success is accepted
+- once that live doctor path has already observed terminal success on the attached stream, it reuses the last successful stream-backed conversation snapshot instead of requiring a final `GET /api/conversations/{id}` that can flap during agent-server shutdown
+- when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, switches follow-up probes to the launched supervisor base URL, uses it for the probe, then stops it again
+- failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity, even when a later mirrored `finished` status is already present in the same drained batch
 - missing `${VAR}` tokens in required or enabled-path config values now fail doctor during config expansion instead of silently validating the config directory as an empty fallback path
 - optional live-only placeholders such as `openhands.probe_model` and `openhands.probe_api_key_env` are only resolved when `--live-openhands` is requested, so shared configs can keep those overrides unset during the static doctor pass
-- `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
+- `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames, authenticated REST/WebSocket requests, forward-compatible readiness envelopes, ready-state freshness after attach, ready-barrier persistence across later stale state rebuilds, buffered live frames outranking later attach replay items, explicit-close suppression of replay and reconnect, reused-conversation restart freshness over stale terminal REST state, forward-compatible `state_delta` mirror refresh, stale readiness snapshots not regressing newer probe state after reconnect, undecodable later persisted state updates not suppressing a usable ready barrier, terminal REST fallback after reconnect exhaustion, deferred reconnect after buffered delivery, non-replay of reconnect-only readiness barriers, next-turn probe error delivery after `finished`, and post-terminal probe success when a final REST refresh would fail
+- `crates/opensymphony-openhands/tests/fake_server_contract.rs` locks in attach, initial snapshot replay, reconcile, out-of-order insertion, and reconnect recovery against `opensymphony-testkit`
 - `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback outside the repo `cwd` and the pinned launcher `cwd` behavior
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials
 
