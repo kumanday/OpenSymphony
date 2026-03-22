@@ -12,8 +12,10 @@ use tracing::debug;
 
 use crate::error::{GraphqlError, LinearError};
 use crate::graphql::{
-    GraphqlEnvelope, GraphqlErrorPayload, IssueStatesByIdsData, IssueStatesByIdsVariables,
-    IssuesByStateData, IssuesByStateVariables, ISSUES_BY_STATE_QUERY, ISSUE_STATES_BY_IDS_QUERY,
+    GraphqlEnvelope, GraphqlErrorPayload, IssueInverseRelationsData,
+    IssueInverseRelationsVariables, IssueStatesByIdsData, IssueStatesByIdsVariables,
+    IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearRelationConnection,
+    ISSUES_BY_STATE_QUERY, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_STATES_BY_IDS_QUERY,
 };
 use crate::normalize::{normalize_issue, normalize_issue_state};
 
@@ -137,7 +139,7 @@ impl LinearClient {
 
             let page_info = response.issues.page_info;
             for node in response.issues.nodes {
-                issues.push(normalize_issue(node)?);
+                issues.push(normalize_issue(self.expand_inverse_relations(node).await?)?);
             }
 
             if !page_info.has_next_page {
@@ -183,7 +185,7 @@ impl LinearClient {
             }
 
             if !page_info.has_next_page {
-                return Ok(snapshots);
+                return ensure_complete_issue_states(&issue_ids, snapshots);
             }
 
             after = Some(page_info.end_cursor.ok_or_else(|| {
@@ -193,6 +195,55 @@ impl LinearClient {
                 )
             })?);
         }
+    }
+
+    async fn expand_inverse_relations(
+        &self,
+        mut issue: LinearIssueNode,
+    ) -> Result<LinearIssueNode, LinearError> {
+        issue.inverse_relations = self
+            .load_all_inverse_relations(&issue.id, issue.inverse_relations)
+            .await?;
+        Ok(issue)
+    }
+
+    async fn load_all_inverse_relations(
+        &self,
+        issue_id: &str,
+        mut connection: LinearRelationConnection,
+    ) -> Result<LinearRelationConnection, LinearError> {
+        let mut after = connection.page_info.end_cursor.clone();
+
+        while connection.page_info.has_next_page {
+            let cursor = after.clone().ok_or_else(|| {
+                LinearError::InvalidResponse(format!(
+                    "Linear inverseRelations page for issue {issue_id} indicated a next page without an end cursor"
+                ))
+            })?;
+            let variables = IssueInverseRelationsVariables {
+                issue_id: issue_id.to_string(),
+                first: self.config.page_size,
+                after: Some(cursor),
+            };
+            let response: IssueInverseRelationsData = self
+                .execute_graphql(ISSUE_INVERSE_RELATIONS_QUERY, json!(variables))
+                .await?;
+            let issue = response.issue.ok_or_else(|| LinearError::MissingIssueIds {
+                issue_ids: vec![issue_id.to_string()],
+            })?;
+            if issue.id != issue_id {
+                return Err(LinearError::InvalidResponse(format!(
+                    "Linear inverseRelations page returned mismatched issue ID {} for {}",
+                    issue.id, issue_id
+                )));
+            }
+
+            connection.nodes.extend(issue.inverse_relations.nodes);
+            connection.page_info = issue.inverse_relations.page_info;
+            after = connection.page_info.end_cursor.clone();
+        }
+
+        Ok(connection)
     }
 
     async fn execute_graphql<T>(
@@ -292,7 +343,9 @@ impl LinearClient {
                 *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
             }
             LinearError::Graphql { .. } => error.is_rate_limited(),
-            LinearError::InvalidConfiguration(_) | LinearError::InvalidResponse(_) => false,
+            LinearError::MissingIssueIds { .. }
+            | LinearError::InvalidConfiguration(_)
+            | LinearError::InvalidResponse(_) => false,
         }
     }
 
@@ -346,6 +399,26 @@ where
         }
     }
     normalized
+}
+
+fn ensure_complete_issue_states(
+    requested_issue_ids: &[String],
+    snapshots: Vec<TrackerIssueStateSnapshot>,
+) -> Result<Vec<TrackerIssueStateSnapshot>, LinearError> {
+    let mut missing_issue_ids = Vec::new();
+    for issue_id in requested_issue_ids {
+        if !snapshots.iter().any(|snapshot| snapshot.id == *issue_id) {
+            missing_issue_ids.push(issue_id.clone());
+        }
+    }
+
+    if missing_issue_ids.is_empty() {
+        Ok(snapshots)
+    } else {
+        Err(LinearError::MissingIssueIds {
+            issue_ids: missing_issue_ids,
+        })
+    }
 }
 
 fn parse_retry_after(header_value: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {

@@ -62,6 +62,45 @@ async fn candidate_issues_normalize_fixture_payloads() {
 }
 
 #[tokio::test]
+async fn candidate_issues_fetch_all_inverse_relation_pages() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(include_str!(
+            "fixtures/candidate_issues_with_relation_paging.json"
+        )),
+        QueuedResponse::json(include_str!("fixtures/issue_inverse_relations_page_2.json")),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issues()
+        .await
+        .expect("candidate query should succeed");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].identifier, "COE-264");
+    assert_eq!(issues[0].blocked_by.len(), 1);
+    assert_eq!(issues[0].blocked_by[0].identifier, "COE-258");
+    assert!(issues[0].blocked_by[0].is_terminal());
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].body["query"]
+        .as_str()
+        .expect("query should be a string")
+        .contains("query IssueInverseRelationsPage"));
+    assert_eq!(
+        requests[1].body["variables"]["issueId"],
+        Value::String("issue-264".to_string())
+    );
+    assert_eq!(
+        requests[1].body["variables"]["after"],
+        Value::String("relations-cursor-1".to_string())
+    );
+}
+
+#[tokio::test]
 async fn issues_by_state_walk_pagination() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(include_str!("fixtures/issues_page_1.json")),
@@ -124,6 +163,24 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
         requests[0].body["variables"]["issueIds"],
         serde_json::json!(["issue-260", "issue-264"])
     );
+}
+
+#[tokio::test]
+async fn issue_states_by_ids_fail_when_linear_omits_requested_ids() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
+        "fixtures/issue_states_missing_id.json"
+    ))])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let error = client
+        .issue_states_by_ids(&["issue-260".to_string(), "issue-264".to_string()])
+        .await
+        .expect_err("missing issue ids should fail reconciliation");
+
+    assert_eq!(error.category(), TrackerErrorCategory::NotFound);
+    assert!(error.to_string().contains("issue-264"));
 }
 
 #[tokio::test]

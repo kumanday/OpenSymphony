@@ -26,6 +26,8 @@ pub enum LinearError {
         errors: Vec<GraphqlError>,
         summary: String,
     },
+    #[error("Linear omitted requested issue IDs from state refresh: {issue_ids:?}")]
+    MissingIssueIds { issue_ids: Vec<String> },
     #[error("Linear API returned an invalid response: {0}")]
     InvalidResponse(String),
 }
@@ -45,6 +47,7 @@ impl LinearError {
 
     pub fn category(&self) -> TrackerErrorCategory {
         match self {
+            Self::MissingIssueIds { .. } => TrackerErrorCategory::NotFound,
             Self::InvalidConfiguration(_) | Self::InvalidResponse(_) => {
                 TrackerErrorCategory::InvalidResponse
             }

@@ -1,0 +1,50 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "issue-264",
+          "identifier": "COE-264",
+          "title": "Linear read adapter and issue normalization",
+          "description": null,
+          "priority": 0.0,
+          "createdAt": "2026-03-21T11:00:00Z",
+          "updatedAt": "2026-03-21T12:30:00Z",
+          "state": {
+            "id": "state-started",
+            "name": "In Progress",
+            "type": "started"
+          },
+          "labels": {
+            "nodes": []
+          },
+          "inverseRelations": {
+            "nodes": [
+              {
+                "type": "related",
+                "issue": {
+                  "id": "issue-999",
+                  "identifier": "COE-999",
+                  "title": "Unrelated relation on the first page",
+                  "state": {
+                    "id": "state-todo",
+                    "name": "Todo",
+                    "type": "unstarted"
+                  }
+                }
+              }
+            ],
+            "pageInfo": {
+              "hasNextPage": true,
+              "endCursor": "relations-cursor-1"
+            }
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      }
+    }
+  }
+}
