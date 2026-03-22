@@ -14,6 +14,7 @@ use opensymphony_control::{
     IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
     WorkerOutcome,
 };
+use opensymphony_linear_mcp::run_stdio_server as run_linear_mcp_stdio_server;
 use opensymphony_openhands::{
     ConversationCreateRequest, DoctorProbeConfig, LocalServerSupervisor, LocalServerTooling,
     OpenHandsClient, SupervisedServerConfig, SupervisorConfig, TransportConfig,
@@ -39,7 +40,7 @@ pub struct Cli {
 enum Command {
     Daemon(DaemonArgs),
     Tui(TuiArgs),
-    LinearMcp,
+    LinearMcp(LinearMcpArgs),
     Doctor(DoctorArgs),
 }
 
@@ -66,6 +67,9 @@ pub struct DoctorArgs {
     #[arg(long)]
     live_openhands: bool,
 }
+
+#[derive(Debug, Args)]
+pub struct LinearMcpArgs {}
 
 #[derive(Debug, Deserialize)]
 struct DoctorConfig {
@@ -185,10 +189,7 @@ pub async fn run() -> ExitCode {
         Command::Doctor(args) => run_doctor(args).await,
         Command::Daemon(args) => run_daemon(args).await,
         Command::Tui(args) => run_tui(args).await,
-        Command::LinearMcp => {
-            println!("`opensymphony linear-mcp` is scaffolded but not implemented in this branch.");
-            ExitCode::SUCCESS
-        }
+        Command::LinearMcp(args) => run_linear_mcp(args).await,
     }
 }
 
@@ -248,6 +249,18 @@ async fn run_tui_command(url: Url, exit_after_ms: Option<u64>) -> Result<(), Com
 
 async fn run_doctor(args: DoctorArgs) -> ExitCode {
     run_doctor_command(args.config, args.live_openhands).await
+}
+
+async fn run_linear_mcp(args: LinearMcpArgs) -> ExitCode {
+    let _ = args;
+
+    match run_linear_mcp_stdio_server().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("failed to start Linear MCP server: {error}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> ExitCode {
@@ -1103,7 +1116,7 @@ mod tests {
 
         match cli.command {
             Command::Daemon(args) => assert_eq!(args.sample_interval_ms.get(), 250),
-            Command::Tui(_) | Command::LinearMcp | Command::Doctor(_) => {
+            Command::Tui(_) | Command::LinearMcp(_) | Command::Doctor(_) => {
                 panic!("expected daemon command")
             }
         }
