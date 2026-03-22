@@ -132,7 +132,7 @@ data lands.
 
 ## 4.1 Core crates
 
-Recommended crate boundaries:
+Current crate boundaries:
 
 - `opensymphony-domain`
   - issue model
@@ -194,6 +194,26 @@ Recommended crate boundaries:
   - fake Linear server helpers
   - fake OpenHands agent-server
   - shared fixtures
+
+## 4.1.1 M1 public contract surface
+
+The repository now exposes three stable foundation contracts that later milestones build on:
+
+- `opensymphony-domain`
+  - normalized tracker issue model
+  - blocker references
+  - run-attempt, retry-entry, runtime-session, and worker-outcome models
+  - serialized orchestrator snapshot types
+- `opensymphony-workflow`
+  - raw `WORKFLOW.md` parsing into `{config, prompt_template}`
+  - typed config resolution with fail-fast unknown nested workflow keys plus fail-fast unknown top-level keys outside the supported opaque `codex` namespace, defaults, env indirection, path normalization, required Linear tracker credentials via either explicit `tracker.api_key` or process-level `LINEAR_API_KEY`, explicit env-backed workspace roots, and strict `openhands` extension validation
+  - strict prompt rendering over `{issue, attempt}`
+- `opensymphony-orchestrator`
+  - deterministic candidate sorting, claim logic, and claimed-to-running enforcement
+  - explicit `Claimed` / `Running` / `RetryQueued` / `Released` transitions
+  - fixed continuation retry, exponential failure backoff, stall detection, retry-start validation for `due_at`, `attempt`, latest dispatch eligibility, and bounded global/per-state capacity using the reservation's current state, reconciliation of running, retry-queued, and claimed-only issues including a claim-to-start grace window that remains independent from disabled stall detection before stale claimed-only release, freshest global rate-limit retention, and restart recovery
+
+The other crates are already present at their final ownership boundaries, but for M1 they intentionally expose only thin re-exports or placeholders rather than premature transport logic.
 
 ## 4.2 External processes
 
@@ -329,7 +349,7 @@ This slice deliberately keeps the UI on a stable read-only contract while the or
 ## 7.1 Dispatch path
 
 1. Poll tick fires.
-2. Orchestrator reconciles running issues and retry queue.
+2. Orchestrator reconciles running issues, retry queue, and claimed-only reservations.
 3. Orchestrator fetches candidate issues from Linear.
 4. Orchestrator selects eligible issues subject to concurrency.
 5. Worker starts for one issue.
