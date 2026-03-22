@@ -19,7 +19,11 @@
             "nodes": [{ "name": "backend" }]
           },
           "inverseRelations": {
-            "nodes": []
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
           }
         },
         {
@@ -39,7 +43,11 @@
             "nodes": [{ "name": "workspace" }]
           },
           "inverseRelations": {
-            "nodes": []
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
           }
         }
       ],

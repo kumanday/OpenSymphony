@@ -19,7 +19,11 @@
             "nodes": [{ "name": "tracker" }]
           },
           "inverseRelations": {
-            "nodes": []
+            "nodes": [],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
           }
         }
       ],

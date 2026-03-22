@@ -43,11 +43,42 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $first: Int!,
             }
           }
         }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
       }
     }
     pageInfo {
       hasNextPage
       endCursor
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_INVERSE_RELATIONS_QUERY: &str = r#"
+query IssueInverseRelationsPage($issueId: String!, $first: Int!, $after: String) {
+  issue(id: $issueId) {
+    id
+    inverseRelations(first: $first, after: $after) {
+      nodes {
+        type
+        issue {
+          id
+          identifier
+          title
+          state {
+            id
+            name
+            type
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
     }
   }
 }
@@ -112,6 +143,14 @@ pub(super) struct IssueStatesByIdsVariables {
     pub after: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueInverseRelationsVariables {
+    pub issue_id: String,
+    pub first: usize,
+    pub after: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct IssuesByStateData {
     pub issues: IssuesConnection<LinearIssueNode>,
@@ -120,6 +159,11 @@ pub(super) struct IssuesByStateData {
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueStatesByIdsData {
     pub issues: IssuesConnection<LinearIssueStateNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueInverseRelationsData {
+    pub issue: Option<LinearIssueRelationsNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,6 +198,13 @@ pub(super) struct LinearIssueNode {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct LinearIssueRelationsNode {
+    pub id: String,
+    pub inverse_relations: LinearRelationConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct LinearIssueStateNode {
     pub id: String,
     pub identifier: String,
@@ -183,6 +234,8 @@ pub(super) struct LinearLabelNode {
 #[serde(rename_all = "camelCase")]
 pub(super) struct LinearRelationConnection {
     pub nodes: Vec<LinearRelationNode>,
+    #[serde(rename = "pageInfo")]
+    pub page_info: PageInfo,
 }
 
 #[derive(Debug, Deserialize)]

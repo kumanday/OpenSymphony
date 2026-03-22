@@ -50,7 +50,11 @@
                   }
                 }
               }
-            ]
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
           }
         },
         {
@@ -97,7 +101,11 @@
                   }
                 }
               }
-            ]
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
           }
         }
       ],
