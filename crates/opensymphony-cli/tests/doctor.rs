@@ -136,7 +136,7 @@ fn doctor_defaults_target_repo_from_checkout_root() {
 }
 
 #[test]
-fn run_local_launcher_is_independent_of_caller_cwd() {
+fn run_local_launcher_enforces_pinned_supervised_contract() {
     let repo_root = repo_root();
     let tool_dir = repo_root.join("tools/openhands-server");
     let fake_bin_dir = TempDir::new().expect("fake bin dir should be created");
@@ -145,7 +145,8 @@ fn run_local_launcher_is_independent_of_caller_cwd() {
     std::fs::write(
         &fake_uv,
         format!(
-            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$PWD\" > \"{}\"\nprintf '%s\\n' \"$@\" >> \"{}\"\n",
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$PWD\" > \"{}\"\nprintf 'RUNTIME=%s\\n' \"${{RUNTIME:-}}\" >> \"{}\"\nprintf '%s\\n' \"$@\" >> \"{}\"\n",
+            log_path.display(),
             log_path.display(),
             log_path.display(),
         ),
@@ -164,6 +165,7 @@ fn run_local_launcher_is_independent_of_caller_cwd() {
     let status = Command::new("bash")
         .arg(tool_dir.join("run-local.sh"))
         .current_dir(&repo_root)
+        .env("OPENHANDS_SERVER_PORT", "8123")
         .env("PATH", format!("{}:{path}", fake_bin_dir.path().display()))
         .status()
         .expect("launcher should run");
@@ -175,14 +177,72 @@ fn run_local_launcher_is_independent_of_caller_cwd() {
     let log = std::fs::read_to_string(&log_path).expect("fake uv should have logged its call");
     let mut lines = log.lines();
     let observed_cwd = lines.next().unwrap_or_default();
+    let observed_runtime = lines.next().unwrap_or_default();
     let args = lines.collect::<Vec<_>>();
     let has_project_arg = args
         .windows(2)
         .any(|window| matches!(window, ["--project" | "--directory", value] if *value == tool_dir.display().to_string()));
 
+    assert_eq!(observed_runtime, "RUNTIME=process");
     assert!(
         observed_cwd == tool_dir.display().to_string() || has_project_arg,
         "launcher should either cd into the tool dir or pass it to uv; cwd={observed_cwd}, args={args:?}",
+    );
+    assert!(args.contains(&"--locked"));
+    assert!(
+        args.windows(2)
+            .any(|window| matches!(window, ["--extra", "agent-server"]))
+    );
+    assert!(
+        args.windows(2)
+            .any(|window| matches!(window, ["--module", "openhands.agent_server"]))
+    );
+    assert!(
+        args.windows(2)
+            .any(|window| matches!(window, ["--host", "127.0.0.1"]))
+    );
+    assert!(
+        args.windows(2)
+            .any(|window| matches!(window, ["--port", "8123"]))
+    );
+}
+
+#[test]
+fn run_local_launcher_rejects_extra_agent_server_flags() {
+    let repo_root = repo_root();
+    let tool_dir = repo_root.join("tools/openhands-server");
+    let fake_bin_dir = TempDir::new().expect("fake bin dir should be created");
+    let log_path = fake_bin_dir.path().join("uv.log");
+    let fake_uv = fake_bin_dir.path().join("uv");
+    std::fs::write(
+        &fake_uv,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf 'unexpected\\n' > \"{}\"\n",
+            log_path.display(),
+        ),
+    )
+    .expect("fake uv should be written");
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&fake_uv)
+            .expect("fake uv metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_uv, perms).expect("fake uv should be executable");
+    }
+
+    let path = std::env::var("PATH").unwrap_or_default();
+    let status = Command::new("bash")
+        .arg(tool_dir.join("run-local.sh"))
+        .arg("--debug")
+        .current_dir(&repo_root)
+        .env("PATH", format!("{}:{path}", fake_bin_dir.path().display()))
+        .status()
+        .expect("launcher should run");
+    assert!(!status.success(), "launcher should reject extra CLI flags");
+    assert!(
+        !log_path.exists(),
+        "launcher should fail before invoking uv when extra flags are passed"
     );
 }
 

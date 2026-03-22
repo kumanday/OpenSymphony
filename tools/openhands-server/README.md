@@ -32,5 +32,6 @@ uv sync --extra agent-server
 ```
 
 The launcher binds to loopback-only at `127.0.0.1:8000` by default and only accepts `OPENHANDS_SERVER_PORT` as a runtime override. It intentionally rejects extra agent-server CLI flags so smoke runs stay aligned with the daemon-managed supervised topology.
+It also fails fast if `uv` is missing, if `OPENHANDS_SERVER_PORT` is invalid, or if the pinned `uv.lock` cannot be honored through `uv run --locked`.
 
 Do not rely on a globally installed moving-target `openhands` binary for this repository.

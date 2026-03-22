@@ -432,6 +432,9 @@ host-process mode.
 The current implementation follows that fail-closed rule: doctor and the local
 supervisor validate the repo-owned pin files before launch and refuse to start
 if the version file, direct dependency pin, and resolved lockfile drift apart.
+The launcher itself now enforces `uv run --locked --extra agent-server`,
+exports `RUNTIME=process`, only accepts `OPENHANDS_SERVER_PORT` as a runtime
+override, and rejects extra agent-server CLI flags before `uv` is invoked.
 
 Current repository pin:
 
@@ -477,4 +480,7 @@ This prevents noisy bug reports that mix multiple layers together.
 
 The MVP local mode runs agent activity on the host with process-level isolation. The docs, CLI help, and doctor output should state this plainly.
 
-The current `tools/openhands-server/run-local.sh` script binds OpenHands to loopback by default, and the doctor command warns when the configured base URL is not loopback in local mode.
+The current `tools/openhands-server/run-local.sh` script binds OpenHands to
+loopback by default, enforces the pinned `uv.lock` in host-process mode, and
+the doctor command warns when the configured base URL is not loopback in local
+mode.
