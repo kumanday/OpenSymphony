@@ -225,6 +225,9 @@ When validating the local control-plane and TUI slice, also confirm that:
 - bootstrap and reconnect snapshot fetches time out within the bounded snapshot watchdog budget,
   so a hung `/api/v1/snapshot` response retries instead of pinning the UI in `connecting` or
   `reconnecting`
+- `/api/v1/events` connect and open attempts time out within the bounded stream-open watchdog
+  budget, so a blackholed or half-open SSE attach retries instead of pinning the UI in
+  `connecting` or `reconnecting`
 - the bootstrap snapshot stays visible with `conn=connecting` until the SSE stream actually
   attaches
 - the first streamed snapshot and the live-stream attachment signal are published atomically, so

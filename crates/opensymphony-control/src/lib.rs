@@ -10,18 +10,20 @@ use axum::{
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
 use opensymphony_domain::{ControlPlaneDaemonSnapshot as DaemonSnapshot, SnapshotEnvelope};
-use reqwest_eventsource::{Event as EventSourceEvent, EventSource};
+use reqwest_eventsource::{Event as EventSourceEvent, EventSource, ReadyState};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
     sync::{broadcast, RwLock},
+    time::timeout,
 };
 use tracing::warn;
 use url::Url;
 
 const CONTROL_PLANE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const CONTROL_PLANE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_PLANE_STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_PLANE_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Debug, Clone)]
@@ -205,6 +207,7 @@ pub struct ControlPlaneClient {
     base_url: Url,
     http: reqwest::Client,
     stream_http: reqwest::Client,
+    stream_connect_timeout: Duration,
 }
 
 impl ControlPlaneClient {
@@ -212,6 +215,7 @@ impl ControlPlaneClient {
         Self::with_timeouts(
             base_url,
             CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            CONTROL_PLANE_STREAM_CONNECT_TIMEOUT,
             CONTROL_PLANE_STREAM_READ_TIMEOUT,
         )
     }
@@ -219,12 +223,14 @@ impl ControlPlaneClient {
     fn with_timeouts(
         base_url: Url,
         snapshot_timeout: Duration,
+        stream_connect_timeout: Duration,
         stream_read_timeout: Duration,
     ) -> Self {
         Self {
             base_url,
             http: build_snapshot_http_client(snapshot_timeout),
-            stream_http: build_stream_http_client(stream_read_timeout),
+            stream_http: build_stream_http_client(stream_connect_timeout, stream_read_timeout),
+            stream_connect_timeout,
         }
     }
 
@@ -238,7 +244,10 @@ impl ControlPlaneClient {
         let events_url = self.join_path("api/v1/events")?;
         let request = self.stream_http.get(events_url);
         let inner = EventSource::new(request).map_err(ControlPlaneClientError::StreamRequest)?;
-        Ok(ControlPlaneEventStream { inner })
+        Ok(ControlPlaneEventStream {
+            inner,
+            connect_timeout: self.stream_connect_timeout,
+        })
     }
 
     fn join_path(&self, path: &'static str) -> Result<Url, ControlPlaneClientError> {
@@ -262,10 +271,14 @@ fn build_snapshot_http_client(snapshot_timeout: Duration) -> reqwest::Client {
         .expect("static snapshot timeout config should produce a reqwest client")
 }
 
-fn build_stream_http_client(stream_read_timeout: Duration) -> reqwest::Client {
-    // `reqwest-eventsource` ignores SSE comment keepalives, so idle detection has to key off
-    // raw socket reads rather than decoded message delivery.
+fn build_stream_http_client(
+    stream_connect_timeout: Duration,
+    stream_read_timeout: Duration,
+) -> reqwest::Client {
+    // Bound the connect/open phase separately from long-lived idle reads so the bridge can
+    // retry blackholed or half-open `/api/v1/events` requests without cutting off healthy SSE.
     reqwest::Client::builder()
+        .connect_timeout(stream_connect_timeout)
         .read_timeout(stream_read_timeout)
         .build()
         .expect("static stream read timeout config should produce a reqwest client")
@@ -284,11 +297,12 @@ fn normalized_base_url(base_url: &Url) -> Url {
 
 pub struct ControlPlaneEventStream {
     inner: EventSource,
+    connect_timeout: Duration,
 }
 
 impl ControlPlaneEventStream {
     pub async fn next(&mut self) -> Option<Result<SnapshotEnvelope, ControlPlaneClientError>> {
-        while let Some(event) = self.inner.next().await {
+        while let Some(event) = self.next_event().await {
             match event {
                 Ok(EventSourceEvent::Open) => continue,
                 Ok(EventSourceEvent::Message(message)) => {
@@ -297,10 +311,28 @@ impl ControlPlaneEventStream {
                             .map_err(ControlPlaneClientError::Decode),
                     );
                 }
-                Err(error) => return Some(Err(ControlPlaneClientError::Stream(Box::new(error)))),
+                Err(error) => return Some(Err(error)),
             }
         }
         None
+    }
+
+    async fn next_event(&mut self) -> Option<Result<EventSourceEvent, ControlPlaneClientError>> {
+        let next = if self.inner.ready_state() == ReadyState::Connecting {
+            match timeout(self.connect_timeout, self.inner.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    self.inner.close();
+                    return Some(Err(ControlPlaneClientError::StreamConnectTimeout(
+                        self.connect_timeout,
+                    )));
+                }
+            }
+        } else {
+            self.inner.next().await
+        };
+
+        next.map(|event| event.map_err(ControlPlaneClientError::from))
     }
 
     pub fn close(&mut self) {
@@ -321,6 +353,8 @@ pub enum ControlPlaneClientError {
     Request(#[from] reqwest::Error),
     #[error("control-plane update stream failed: {0}")]
     Stream(#[source] Box<reqwest_eventsource::Error>),
+    #[error("control-plane update stream did not open within {0:?}")]
+    StreamConnectTimeout(Duration),
     #[error("control-plane update request could not be cloned: {0}")]
     StreamRequest(reqwest_eventsource::CannotCloneRequestError),
     #[error("failed to decode control-plane payload: {0}")]
@@ -495,6 +529,7 @@ mod tests {
             base_url,
             Duration::from_millis(75),
             Duration::from_secs(1),
+            Duration::from_secs(1),
         );
         let result = timeout(Duration::from_secs(1), client.fetch_snapshot())
             .await
@@ -530,6 +565,7 @@ mod tests {
         let client = ControlPlaneClient::with_timeouts(
             base_url,
             super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            Duration::from_secs(1),
             Duration::from_millis(75),
         );
         let mut stream = client.stream_updates().expect("open event stream");
@@ -595,6 +631,7 @@ mod tests {
         let client = ControlPlaneClient::with_timeouts(
             base_url,
             super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            Duration::from_secs(1),
             Duration::from_millis(75),
         );
         let mut stream = client.stream_updates().expect("open event stream");
@@ -605,6 +642,46 @@ mod tests {
             .expect("snapshot event should decode");
 
         assert_eq!(result, expected_snapshot);
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn stream_updates_time_out_when_the_event_stream_never_opens() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept SSE client");
+            sleep(Duration::from_millis(250)).await;
+        });
+
+        let connect_timeout = Duration::from_millis(75);
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            connect_timeout,
+            Duration::from_secs(1),
+        );
+        let mut stream = client.stream_updates().expect("open event stream");
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should surface the open timeout")
+            .expect("stream should report an error after timing out")
+            .expect_err("stream open should time out");
+
+        match result {
+            ControlPlaneClientError::StreamConnectTimeout(timeout) => {
+                assert_eq!(timeout, connect_timeout);
+            }
+            other => panic!("expected a stream connect timeout, got {other:?}"),
+        }
 
         stream.close();
         server.await.expect("mock SSE server should exit cleanly");
