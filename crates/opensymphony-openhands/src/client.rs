@@ -421,7 +421,7 @@ impl RuntimeEventStream {
         self.refresh_conversation().await?;
         let initial_cache = self.client.search_all_events(self.conversation_id).await?;
         self.push_new_events(initial_cache.items().iter().cloned(), false);
-        self.connect_ready_and_reconcile(true).await?;
+        self.connect_ready_and_reconcile().await?;
         Ok(self)
     }
 
@@ -445,7 +445,7 @@ impl RuntimeEventStream {
             }
 
             let error = match self.refresh_conversation().await {
-                Ok(()) => match self.connect_ready_and_reconcile(false).await {
+                Ok(()) => match self.connect_ready_and_reconcile().await {
                     Ok(()) => return Ok(()),
                     Err(error) => error,
                 },
@@ -461,19 +461,18 @@ impl RuntimeEventStream {
         }
     }
 
-    async fn connect_ready_and_reconcile(
-        &mut self,
-        initial_attach: bool,
-    ) -> Result<(), OpenHandsError> {
+    async fn connect_ready_and_reconcile(&mut self) -> Result<(), OpenHandsError> {
         let mut socket = self.client.connect_websocket(self.conversation_id).await?;
         let ready_event =
             wait_for_readiness_on_stream(&mut socket, self.config.readiness_timeout).await?;
         self.ready_event = ready_event.clone();
         self.socket = Some(socket);
-        self.push_new_events(std::iter::once(ready_event), !initial_attach);
 
         let reconciled = self.client.search_all_events(self.conversation_id).await?;
-        self.push_new_events(reconciled.items().iter().cloned(), true);
+        self.push_new_events(
+            std::iter::once(ready_event).chain(reconciled.items().iter().cloned()),
+            true,
+        );
         self.rebuild_state_mirror();
         Ok(())
     }

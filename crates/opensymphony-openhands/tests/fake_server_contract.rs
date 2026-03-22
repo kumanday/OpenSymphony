@@ -241,9 +241,19 @@ async fn runtime_stream_reconnects_and_recovers_missed_events() {
         )
         .await
         .expect("runtime stream attach should succeed");
+    let completion_log = EventEnvelope::new(
+        "evt-log",
+        Utc::now(),
+        "llm",
+        "LLMCompletionLogEvent",
+        serde_json::json!({
+            "model": "fake-model",
+            "tokens": 7,
+        }),
+    );
     let finished = EventEnvelope::new(
         "evt-finished",
-        Utc::now() + ChronoDuration::seconds(1),
+        completion_log.timestamp + ChronoDuration::seconds(1),
         "runtime",
         "ConversationStateUpdateEvent",
         serde_json::json!({
@@ -259,26 +269,37 @@ async fn runtime_stream_reconnects_and_recovers_missed_events() {
         .await
         .expect("existing websocket should drop");
     server
+        .insert_event(conversation.conversation_id, completion_log.clone())
+        .await
+        .expect("missed log event should be persisted for reconcile");
+    server
         .insert_event(conversation.conversation_id, finished.clone())
         .await
         .expect("missed event should be persisted for reconcile");
 
-    let recovered = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let next = stream
-                .next_event()
-                .await
-                .expect("stream read should succeed")
-                .expect("recovered event should exist");
-            if next.id == finished.id {
-                break next;
-            }
-        }
-    })
-    .await
-    .expect("recovered event should arrive after reconnect");
+    let first = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("first recovered event should arrive after reconnect")
+        .expect("stream read should succeed")
+        .expect("first recovered event should exist");
+    let second = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("second recovered event should arrive after reconnect")
+        .expect("stream read should succeed")
+        .expect("second recovered event should exist");
 
-    assert_eq!(recovered.id, finished.id);
+    assert_eq!(first.id, completion_log.id);
+    assert_eq!(second.id, finished.id);
+
+    let recovered_ids = stream
+        .event_cache()
+        .items()
+        .iter()
+        .filter(|event| event.id == completion_log.id || event.id == finished.id)
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(recovered_ids, vec!["evt-log", "evt-finished"]);
+
     assert_eq!(
         stream.state_mirror().terminal_status(),
         Some(TerminalExecutionStatus::Finished)
