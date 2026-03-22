@@ -8,8 +8,8 @@ use thiserror::Error;
 
 use crate::{
     ConversationMetadata, DurationMs, IssueId, NormalizedIssue, ReleaseReason, RetryAttempt,
-    RetryEntry, RunAttempt, StallMetadata, TimestampMs, WorkerOutcomeRecord, WorkspaceKey,
-    WorkspaceRecord,
+    RetryEntry, RunAttempt, StallMetadata, TimestampMs, WorkerId, WorkerOutcomeRecord,
+    WorkspaceKey, WorkspaceRecord,
 };
 
 const MAX_RECENT_WORKER_OUTCOMES: usize = 10;
@@ -91,6 +91,14 @@ pub enum StateTransitionError {
     #[error("cannot claim issue without attached workspace; run requested path {attempted:?}")]
     WorkspaceNotAttached { attempted: PathBuf },
     #[error(
+        "workspace does not match issue identity: expected key {expected_key} at a path ending in {expected_key}, got key {actual_key} at {actual_path:?}"
+    )]
+    WorkspaceIssueMismatch {
+        expected_key: WorkspaceKey,
+        actual_key: WorkspaceKey,
+        actual_path: PathBuf,
+    },
+    #[error(
         "workspace identity mismatch: expected key {expected_key} at {expected_path:?}, got key {actual_key} at {actual_path:?}"
     )]
     WorkspaceIdentityMismatch {
@@ -101,6 +109,13 @@ pub enum StateTransitionError {
     },
     #[error("workspace path mismatch: expected {expected:?}, got {actual:?}")]
     WorkspacePathMismatch { expected: PathBuf, actual: PathBuf },
+    #[error("cannot start running issue without conversation metadata")]
+    ConversationNotAttached,
+    #[error("worker mismatch: expected {expected}, got {actual}")]
+    WorkerMismatch {
+        expected: WorkerId,
+        actual: WorkerId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +232,19 @@ impl IssueExecution {
                     actual_path,
                 });
             }
+        } else {
+            let expected_key = issue_workspace_key(&self.issue);
+            let actual_path = comparable_workspace_path(&workspace.path);
+
+            if workspace.workspace_key != expected_key
+                || !workspace_path_matches_key(&actual_path, &expected_key)
+            {
+                return Err(StateTransitionError::WorkspaceIssueMismatch {
+                    expected_key,
+                    actual_key: workspace.workspace_key.clone(),
+                    actual_path,
+                });
+            }
         }
 
         self.workspace = Some(workspace);
@@ -269,6 +297,9 @@ impl IssueExecution {
             SchedulerState::Claimed { run } => {
                 if let Some(session) = session {
                     self.conversation = Some(session);
+                }
+                if self.conversation.is_none() {
+                    return Err(StateTransitionError::ConversationNotAttached);
                 }
                 self.state = SchedulerState::Running {
                     run: run.mark_started(started_at),
@@ -331,6 +362,7 @@ impl IssueExecution {
 
         let expected_attempt = match &self.state {
             SchedulerState::Claimed { run } | SchedulerState::Running { run, .. } => {
+                self.validate_outcome_binding(run, &outcome)?;
                 RetryAttempt::after(run.attempt).ok()
             }
             _ => {
@@ -440,6 +472,38 @@ impl IssueExecution {
 
         Ok(())
     }
+
+    fn validate_outcome_binding(
+        &self,
+        run: &RunAttempt,
+        outcome: &WorkerOutcomeRecord,
+    ) -> Result<(), StateTransitionError> {
+        if outcome.worker_id != run.worker_id {
+            return Err(StateTransitionError::WorkerMismatch {
+                expected: run.worker_id.clone(),
+                actual: outcome.worker_id.clone(),
+            });
+        }
+
+        if outcome.attempt != run.attempt {
+            return Err(StateTransitionError::AttemptMismatch {
+                expected: run.attempt,
+                actual: outcome.attempt,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn issue_workspace_key(issue: &NormalizedIssue) -> WorkspaceKey {
+    WorkspaceKey::new(issue.identifier.as_str())
+        .expect("normalized issue identifiers cannot be empty")
+}
+
+fn workspace_path_matches_key(path: &Path, key: &WorkspaceKey) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == OsStr::new(key.as_str()))
 }
 
 fn comparable_workspace_path(path: &Path) -> PathBuf {
