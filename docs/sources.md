@@ -87,7 +87,7 @@ Use release notes to track:
 
 ### Pinned OpenHands version notes
 
-As of 2026-03-21, this repository pins:
+As of 2026-03-22, this repository pins:
 
 - `openhands-agent-server==1.14.0`
 - `openhands-sdk==1.14.0`
@@ -109,6 +109,11 @@ The current local supervisor assumptions validated against this pin are:
 - the CLI still accepts `--host` and `--port`
 - the default bind host remains broader than loopback, so OpenSymphony keeps the
   loopback-only wrapper
+- REST auth uses the `X-Session-API-Key` header when session API keys are configured
+- the SDK remote client still defaults WebSocket auth to the `session_api_key`
+  query parameter when an API key is present
+- the server also accepts WebSocket header auth, with query-param auth taking
+  precedence when both are present
 
 When bumping this version, re-validate the launch surface, readiness probe, HTTP
 contract assumptions, and WebSocket notes before changing the repo pin.

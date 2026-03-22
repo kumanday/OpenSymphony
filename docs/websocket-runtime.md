@@ -42,11 +42,17 @@ If the host contains a base path, preserve it.
 
 ## 2.3 Auth modes
 
-Support these modes in the Rust client:
+Support these workflow-controlled modes in the Rust client:
 
-- none
-- query-param session API key fallback
-- optional header-based auth for versions that support it
+- `auto`
+  - no auth when `openhands.transport.session_api_key_env` is unset
+  - otherwise use the pinned 1.14.0 shape: HTTP header `x-session-api-key`
+    plus WebSocket query param `session_api_key`
+- `header`
+  - keep the same HTTP header and send that header on the WebSocket handshake
+- `query_param`
+  - keep the same HTTP header and send the configured query parameter on the
+    WebSocket handshake
 
 Default local MVP behavior: none.
 
@@ -153,11 +159,12 @@ Current repository implementation:
 
 - `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until an event envelope with kind `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable frames before readiness
 - `opensymphony-openhands::OpenHandsClient::attach_runtime_stream` performs the full attach sequence: initial REST sync, WebSocket connect, readiness barrier, and post-ready reconcile before returning a live `RuntimeEventStream`
+- `TransportConfig` preserves base-path prefixes and applies REST versus WebSocket auth independently, so reverse-proxied external targets keep their `/runtime/...` style prefixes while still matching the pinned auth contract
 - the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, refreshes the in-memory state mirror only when it is newer than the reconciled state, stays authoritative across later mirror rebuilds until reconcile or REST refresh surfaces an equal or newer decodable state update, can salvage a forward-compatible `state_delta` even when the full payload shape no longer deserializes cleanly, can clear stale terminal REST fallback when a reused conversation has already restarted into an active `queued` or `running` state, and is not replayed through `next_event()` unless `/events/search` independently contains the same event ID
 - `RuntimeEventStream::next_event` now drains any immediately available live socket frames into the same ordered pending queue before yielding a later attach-backlog item, so direct consumers still observe timestamp order while replaying persisted history without relying on a fixed read-ahead delay
-- workflow-owned `openhands.websocket.enabled`, `ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` overrides are currently rejected during workflow resolution until the runtime attach/reconnect path consumes them; the live runtime still always opens the readiness socket and uses runtime-owned budgets
+- workflow-owned `openhands.websocket.ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` overrides are now consumed by the runtime attach/reconnect path; explicit `openhands.websocket.enabled` still remains rejected because the live runtime always opens the readiness socket
 - `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
-- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, and reconcile path
+- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, `crates/opensymphony-openhands/tests/live_pinned_server.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, auth, and reconcile path
 
 ## 6. Event cache and reconciliation
 

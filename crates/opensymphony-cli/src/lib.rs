@@ -20,7 +20,9 @@ use opensymphony_openhands::{
     ConversationCreateRequest, DoctorProbeConfig, LocalServerSupervisor, LocalServerTooling,
     OpenHandsClient, SupervisedServerConfig, SupervisorConfig, TransportConfig,
 };
-use opensymphony_workflow::{Environment, ResolvedWorkflow, WorkflowDefinition};
+use opensymphony_workflow::{
+    Environment, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
+};
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use thiserror::Error;
@@ -364,9 +366,7 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
 
             checks.push(check_workspace_root(&runtime.workflow.config.workspace.root).await);
             checks.push(check_tool_dir(&runtime.tool_dir).await);
-            checks.push(check_loopback_base_url(
-                &runtime.workflow.extensions.openhands.transport.base_url,
-            ));
+            checks.push(check_openhands_transport(&runtime.workflow));
             checks.push(check_linear(&config.linear, &runtime.workflow));
             (runtime, rendered_probe_prompt)
         }
@@ -549,6 +549,18 @@ fn effective_openhands_probe_base_url(
     started_supervisor_base_url
         .unwrap_or(configured_base_url)
         .to_string()
+}
+
+fn build_doctor_transport(
+    runtime: &DoctorRuntimeConfig,
+    base_url_override: Option<String>,
+) -> Result<TransportConfig, String> {
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)
+        .map_err(|error| error.to_string())?;
+    Ok(match base_url_override {
+        Some(base_url) => TransportConfig::new(base_url).with_auth(transport.auth().clone()),
+        None => transport,
+    })
 }
 
 fn resolve_doctor_runtime(
@@ -757,19 +769,40 @@ fn inspect_local_tooling(tool_dir: &Path) -> ToolingInspection {
     }
 }
 
-fn check_loopback_base_url(base_url: &str) -> CheckResult {
+fn check_openhands_transport(workflow: &ResolvedWorkflow) -> CheckResult {
+    let base_url = &workflow.extensions.openhands.transport.base_url;
     match Url::parse(base_url) {
-        Ok(url) => match url.host_str() {
-            Some("127.0.0.1") | Some("localhost") => CheckResult::pass(
-                "bind-scope",
-                format!("OpenHands base URL is loopback: {base_url}"),
-            ),
-            Some(host) => CheckResult::warn(
-                "bind-scope",
-                format!("OpenHands base URL host `{host}` is not loopback in local mode"),
-            ),
-            None => CheckResult::fail("bind-scope", format!("base URL `{base_url}` has no host")),
-        },
+        Ok(url) => {
+            let host = url.host_str().unwrap_or("<missing-host>");
+            let path = if url.path().trim_matches('/').is_empty() {
+                "root path".to_string()
+            } else {
+                format!("path prefix {}", url.path())
+            };
+            let auth_detail = workflow
+                .extensions
+                .openhands
+                .transport
+                .session_api_key_env
+                .as_deref()
+                .map(|env_name| format!("auth env {env_name}"))
+                .unwrap_or_else(|| "no session API key env".to_string());
+            let remote_target = !matches!(host, "127.0.0.1" | "localhost");
+            if remote_target {
+                CheckResult::pass(
+                    "bind-scope",
+                    format!(
+                        "OpenHands remote target {base_url} ({path}, websocket auth {}, {auth_detail})",
+                        workflow.extensions.openhands.websocket.auth_mode
+                    ),
+                )
+            } else {
+                CheckResult::pass(
+                    "bind-scope",
+                    format!("OpenHands loopback target {base_url} ({path}, {auth_detail})"),
+                )
+            }
+        }
         Err(error) => CheckResult::fail(
             "bind-scope",
             format!("invalid base URL `{base_url}`: {error}"),
@@ -831,7 +864,14 @@ async fn run_live_openhands_checks(
     let mut managed_supervisor = None;
     let mut probe_base_url = base_url.clone();
     let mut http_detail = format!("{probe_base_url} responded to /openapi.json");
-    let client = OpenHandsClient::new(TransportConfig::new(probe_base_url.clone()));
+    let mut transport = match build_doctor_transport(runtime, None) {
+        Ok(transport) => transport,
+        Err(error) => {
+            checks.push(CheckResult::fail("openhands-auth", error));
+            return checks;
+        }
+    };
+    let client = OpenHandsClient::new(transport.clone());
     if let Err(error) = client.openapi_probe().await {
         match maybe_start_local_supervisor(runtime, tooling) {
             Ok(Some(mut supervisor)) => {
@@ -856,6 +896,13 @@ async fn run_live_openhands_checks(
                 probe_base_url =
                     effective_openhands_probe_base_url(base_url, Some(&started.base_url));
                 managed_supervisor = Some(supervisor);
+                transport = match build_doctor_transport(runtime, Some(probe_base_url.clone())) {
+                    Ok(transport) => transport,
+                    Err(error) => {
+                        checks.push(CheckResult::fail("openhands-auth", error));
+                        return stop_managed_supervisor(checks, managed_supervisor);
+                    }
+                };
                 http_detail = format!(
                     "started local supervisor and {probe_base_url} responded to /openapi.json"
                 );
@@ -871,7 +918,7 @@ async fn run_live_openhands_checks(
         }
     }
 
-    let client = OpenHandsClient::new(TransportConfig::new(probe_base_url));
+    let client = OpenHandsClient::new(transport);
     match client.openapi_probe().await {
         Ok(()) => checks.push(CheckResult::pass("openhands-http", http_detail)),
         Err(error) => {
@@ -1024,9 +1071,23 @@ fn maybe_start_local_supervisor(
         ));
     }
 
+    if runtime
+        .workflow
+        .extensions
+        .openhands
+        .transport
+        .session_api_key_env
+        .is_some()
+    {
+        return Ok(None);
+    }
+
     let base_url = &runtime.workflow.extensions.openhands.transport.base_url;
     let url = Url::parse(base_url)
         .map_err(|error| format!("invalid OpenHands base URL `{base_url}`: {error}"))?;
+    if url.scheme() != "http" || !url.path().trim_matches('/').is_empty() {
+        return Ok(None);
+    }
     match url.host_str() {
         Some("127.0.0.1") | Some("localhost") => {}
         _ => return Ok(None),
@@ -1116,6 +1177,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
                 0
             },
             blocked: false,
+            server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+            transport_target: Some("loopback".to_owned()),
+            http_auth_mode: Some("none".to_owned()),
+            websocket_auth_mode: Some("none".to_owned()),
+            websocket_query_param_name: None,
         },
         IssueSnapshot {
             identifier: "OSYM-401".to_owned(),
@@ -1128,6 +1194,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             workspace_path_suffix: "OSYM-401".to_owned(),
             retry_count: 0,
             blocked: false,
+            server_base_url: Some("https://agent.example.com/runtime".to_owned()),
+            transport_target: Some("remote".to_owned()),
+            http_auth_mode: Some("header".to_owned()),
+            websocket_auth_mode: Some("query_param".to_owned()),
+            websocket_query_param_name: Some("session_api_key".to_owned()),
         },
         IssueSnapshot {
             identifier: "OSYM-402".to_owned(),
@@ -1148,6 +1219,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             workspace_path_suffix: "OSYM-402".to_owned(),
             retry_count: 0,
             blocked: false,
+            server_base_url: Some("https://agent.example.com/runtime".to_owned()),
+            transport_target: Some("remote".to_owned()),
+            http_auth_mode: Some("header".to_owned()),
+            websocket_auth_mode: Some("header".to_owned()),
+            websocket_query_param_name: None,
         },
     ];
     let running_issues = issues

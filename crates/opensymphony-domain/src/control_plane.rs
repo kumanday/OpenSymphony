@@ -69,6 +69,16 @@ pub struct ControlPlaneIssueSnapshot {
     pub workspace_path_suffix: String,
     pub retry_count: u32,
     pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_query_param_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
