@@ -241,7 +241,7 @@ When validating the local control-plane and TUI slice, also confirm that:
   bootstrap data
 - inline `opensymphony tui` reconnect failures stay inside the UI state and do not interleave raw
   bridge warning lines into terminal output
-- lagged SSE consumers only advance to newer snapshot sequences
+- lagged SSE consumers immediately fast-forward to the newest published snapshot instead of waiting for the retained broadcast backlog to go empty, and they only advance to newer snapshot sequences
 - newline-bearing, control-character-bearing, or full-width tracker and event text stays within
   the pane row and column budget
 - `opensymphony daemon --sample-interval-ms ...` keeps the initial `Starting` snapshot in place
