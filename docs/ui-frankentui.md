@@ -222,6 +222,7 @@ Current reconnect behavior:
 - if the stream closes or fails, keep the last good snapshot visible, mark the connection as reconnecting, and surface the computed reconnect reason in the top header
 - refetch the current snapshot before resubscribing
 - if that refresh succeeds before the SSE stream reattaches, keep `conn=reconnecting` but switch the compact header detail to the current snapshot state such as `refreshed; stream pending`
+- while the FTUI owns terminal output, bridge reconnect failures stay inside the reducer and header state instead of printing duplicate warning lines to `stderr`
 - if the SSE consumer lags, accept the latest published snapshot and ignore any older retained sequence that would roll the UI backward
 
 The implemented bridge between the SSE client and the FTUI reducer coalesces bursty snapshot traffic down to the latest value so inline-mode polling does not accumulate an unbounded backlog of stale snapshots.

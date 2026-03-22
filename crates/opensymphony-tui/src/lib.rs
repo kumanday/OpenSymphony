@@ -12,7 +12,7 @@ use ftui::{
     runtime::{Every, Subscription},
     widgets::{paragraph::Paragraph, Widget},
 };
-use opensymphony_control::{log_stream_error, ControlPlaneClient, ControlPlaneClientError};
+use opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
 use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope};
 use thiserror::Error;
 use tokio::sync::watch;
@@ -698,7 +698,6 @@ pub enum TuiError {
 }
 
 fn handle_bridge_error(bridge: &Arc<Mutex<BridgeMailbox>>, error: &ControlPlaneClientError) {
-    log_stream_error(error);
     push_connection_loss(bridge, error.to_string());
 }
 
@@ -1081,8 +1080,9 @@ impl DaemonStateLabel for opensymphony_domain::DaemonState {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_width, fit, issue_window, section_layout, stacked_body_layout, visible_issue_count,
-        BridgeHandle, BridgeMailbox, TuiAction, TuiState,
+        display_width, fit, handle_bridge_error, issue_window, section_layout, stacked_body_layout,
+        visible_issue_count, BridgeHandle, BridgeMailbox, ControlPlaneClientError, TuiAction,
+        TuiState,
     };
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
@@ -1090,8 +1090,45 @@ mod tests {
         IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope,
         WorkerOutcome,
     };
-    use std::{sync::mpsc, thread, time::Duration};
+    use std::{
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc, Mutex,
+        },
+        thread,
+        time::Duration,
+    };
+    use tracing::{
+        span::{Attributes, Record},
+        Event, Id, Metadata, Subscriber,
+    };
     use url::Url;
+
+    struct EventCounter {
+        events: Arc<AtomicUsize>,
+    }
+
+    impl Subscriber for EventCounter {
+        fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+
+        fn event(&self, _event: &Event<'_>) {
+            self.events.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn enter(&self, _span: &Id) {}
+
+        fn exit(&self, _span: &Id) {}
+    }
 
     fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
         let now = Utc
@@ -1362,6 +1399,32 @@ mod tests {
         assert!(!rendered.contains('\u{0007}'));
         assert!(rendered.contains("tab separated"));
         assert!(rendered.contains("bell event"));
+    }
+
+    #[test]
+    fn handle_bridge_error_only_queues_connection_loss_without_tracing_output() {
+        let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let subscriber = EventCounter {
+            events: Arc::clone(&event_count),
+        };
+        let error = ControlPlaneClientError::InvalidBaseUrl {
+            base_url: "http://127.0.0.1:4010".to_owned(),
+            path: "api/v1/events",
+            source: url::ParseError::RelativeUrlWithoutBase,
+        };
+
+        tracing::subscriber::with_default(subscriber, || handle_bridge_error(&bridge, &error));
+
+        assert_eq!(event_count.load(Ordering::SeqCst), 0);
+
+        let mut bridge = bridge
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match bridge.take_action() {
+            Some(TuiAction::ConnectionLost(reason)) => assert_eq!(reason, error.to_string()),
+            other => panic!("expected reconnecting state, got {other:?}"),
+        }
     }
 
     #[test]
