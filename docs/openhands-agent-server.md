@@ -101,7 +101,7 @@ Local MVP work starts with supervised mode, but the trait boundary must support 
 Current repository implementation:
 
 - `tools/openhands-server/pyproject.toml` pins the local server environment and `tools/openhands-server/run-local.sh` starts it via `uv`
-- `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
+- `opensymphony-openhands` currently implements the typed conversation create, get, send-message, run, paginated event search, readiness probe, and `RuntimeEventStream` attach/reconcile/reconnect surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
 
@@ -285,9 +285,15 @@ Current repository implementation:
 - `TransportConfig` now carries an `AuthConfig` with explicit no-auth, query-param API key, header API key, and header-plus-WebSocket-query-fallback modes
 - REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape
 - `OpenHandsError` now maps invalid config, transport failures, HTTP status failures, protocol failures, and WebSocket failures into stable runtime categories without exposing `reqwest::Error` or `http::StatusCode`
-- `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, and non-readiness frames before the first state update
-- the doctor probe now exercises a real `POST /events` plus `POST /run` path and only reports the runtime healthy after a successful terminal `execution_status` of `finished`
+- `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, forward-compatible readiness envelopes, ready-state freshness after attach, ready-barrier persistence across later stale cache rebuilds, attach-backlog versus buffered-live ordering, explicit-close shutdown semantics, reused-conversation restart freshness over stale terminal REST state, terminal REST fallback when reconnect exhausts after completion, next-turn probe error delivery after `finished`, and non-readiness frames before the first state update
+- the doctor probe now runs through `RuntimeEventStream`, exercises a real `POST /events` plus `POST /run` path, and only reports the runtime healthy after the attached stream reaches a successful terminal `execution_status` of `finished` with no queued `ConversationErrorEvent` still pending ahead of completion or arriving on the next scheduler-turn buffered drain
 - failure-only probe streams such as `ConversationErrorEvent` or terminal `execution_status` values like `error` and `stuck` are treated as unhealthy instead of silently passing
+- once the attached stream has already observed a healthy terminal outcome, the doctor probe reuses the last successful stream-backed conversation snapshot instead of requiring one more `GET /api/conversations/{id}` that could fail during server shutdown
+- readiness snapshots are attach/reconnect barriers keyed by envelope kind, not synthetic replay events; consumers observe them through `ready_event`, and the adapter folds them into `state_mirror()` only when reconcile and REST refresh do not already expose an equal or newer decodable state update, including forward-compatible payloads that still carry a usable `state_delta`; that barrier state is also re-applied after later cache-driven mirror rebuilds so stale queued snapshots do not override a newer ready barrier, and an active `queued` or `running` ready barrier may also clear stale terminal REST fallback when a reused conversation has already restarted
+- initial attach now replays the persisted `/events/search` snapshot through `RuntimeEventStream::next_event()` so resumed conversations expose pre-existing history in timestamp order, while any immediately available live socket frames are merged into that same ordered queue before later replay items are yielded instead of relying on a fixed drain delay
+- if the socket closes after already-yieldable events have been drained into the pending queue, reconnect is deferred until that queued work has been delivered
+- `RuntimeEventStream::close()` is terminal for that stream instance: it clears deferred reconnect intent and queued replay before closing the socket so later polls do not reopen the conversation
+- the doctor probe accepts a terminal REST refresh after disconnect as authoritative completion evidence even if the follow-on WebSocket reattach exhausts
 
 Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
 
