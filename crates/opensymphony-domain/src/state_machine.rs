@@ -11,6 +11,8 @@ use crate::{
     RetryEntry, RunAttempt, StallMetadata, TimestampMs, WorkerOutcomeRecord, WorkspaceRecord,
 };
 
+const MAX_RECENT_WORKER_OUTCOMES: usize = 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulerStatus {
@@ -343,7 +345,11 @@ impl IssueExecution {
 
     pub fn reopen(mut self, observed_at: TimestampMs) -> Result<Self, StateTransitionError> {
         match self.state {
-            SchedulerState::Released { .. } => {
+            SchedulerState::Released { reason, .. } => {
+                if !reason.preserves_reactivation_state() {
+                    self.workspace = None;
+                    self.conversation = None;
+                }
                 self.state = SchedulerState::Unclaimed { since: observed_at };
                 Ok(self)
             }
@@ -360,6 +366,9 @@ impl IssueExecution {
 
     fn record_outcome(&mut self, outcome: WorkerOutcomeRecord) {
         self.last_worker_outcome = Some(outcome.clone());
+        if self.recent_worker_outcomes.len() == MAX_RECENT_WORKER_OUTCOMES {
+            self.recent_worker_outcomes.remove(0);
+        }
         self.recent_worker_outcomes.push(outcome);
     }
 
