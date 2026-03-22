@@ -44,6 +44,8 @@ developer machine
 - no Docker container per workspace
 - host filesystem and host process access are expected
 - loopback-only bind is required by default
+- launch metadata comes from the repo-local `tools/openhands-server/` wrapper
+  and pin files, not a globally installed `openhands` binary
 
 ### Best use case
 
@@ -84,6 +86,8 @@ Examples:
 - do not attempt to stop the external server on daemon exit
 - still create issue-scoped `working_dir` values
 - still apply the same REST plus WebSocket client contract
+- health probing is allowed, but termination remains a no-op unless the daemon
+  owns the launched child process
 
 ## 4. Mode C: hosted remote agent-server mode
 
