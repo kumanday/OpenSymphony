@@ -96,7 +96,8 @@ Current implementation:
 - resolve bare relative workspace roots against the `WORKFLOW.md` directory
 - reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
-- default `openhands.local_server.command` to the pinned `tools/openhands-server/run-local.sh` launcher
+- default `openhands.local_server.command` to the absolute pinned `<workflow-root>/tools/openhands-server/run-local.sh` launcher
+- fail on malformed or non-HTTP(S) `openhands.transport.base_url` values during workflow resolution
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`
 - fail on malformed `agent.max_concurrent_agents_by_state` entries
 - preserve the Markdown body exactly after the front matter terminator

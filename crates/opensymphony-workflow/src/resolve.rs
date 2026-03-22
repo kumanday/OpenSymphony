@@ -3,6 +3,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use url::Url;
+
 use crate::{
     error::WorkflowConfigError,
     model::{
@@ -41,7 +43,7 @@ pub(crate) fn resolve_workflow<E: Environment>(
             agent: resolve_agent(&workflow.front_matter.agent)?,
         },
         extensions: WorkflowExtensions {
-            openhands: resolve_openhands(&workflow.front_matter.openhands, env)?,
+            openhands: resolve_openhands(&workflow.front_matter.openhands, base_dir, env)?,
         },
         prompt_template: workflow.prompt_template.clone(),
     })
@@ -226,16 +228,12 @@ fn resolve_state_limits(
 
 fn resolve_openhands<E: Environment>(
     openhands: &OpenHandsFrontMatter,
+    base_dir: &Path,
     env: &E,
 ) -> Result<OpenHandsConfig, WorkflowConfigError> {
     Ok(OpenHandsConfig {
         transport: OpenHandsTransportConfig {
-            base_url: resolve_string_or_default(
-                openhands.transport.base_url.as_deref(),
-                env,
-                "openhands.transport.base_url",
-                DEFAULT_OPENHANDS_BASE_URL,
-            )?,
+            base_url: resolve_openhands_base_url(openhands.transport.base_url.as_deref(), env)?,
             session_api_key_env: normalize_optional_literal(
                 &openhands.transport.session_api_key_env,
             ),
@@ -245,7 +243,7 @@ fn resolve_openhands<E: Environment>(
             command: resolve_command(
                 openhands.local_server.command.as_deref(),
                 "openhands.local_server.command",
-                default_openhands_local_server_command(),
+                default_openhands_local_server_command(base_dir),
             )?,
             startup_timeout_ms: resolve_positive_u64(
                 openhands.local_server.startup_timeout_ms.as_ref(),
@@ -299,6 +297,46 @@ fn resolve_openhands<E: Environment>(
             stdio_servers: resolve_stdio_servers(openhands.mcp.stdio_servers.as_deref())?,
         },
     })
+}
+
+fn resolve_openhands_base_url<E: Environment>(
+    configured: Option<&str>,
+    env: &E,
+) -> Result<String, WorkflowConfigError> {
+    let base_url = resolve_string_or_default(
+        configured,
+        env,
+        "openhands.transport.base_url",
+        DEFAULT_OPENHANDS_BASE_URL,
+    )?;
+    validate_openhands_base_url(&base_url)?;
+    Ok(base_url)
+}
+
+fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError> {
+    let parsed = Url::parse(base_url).map_err(|error| WorkflowConfigError::InvalidField {
+        field: "openhands.transport.base_url",
+        message: format!("must be an absolute http(s) URL: {error}"),
+    })?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => {
+            return Err(WorkflowConfigError::InvalidField {
+                field: "openhands.transport.base_url",
+                message: "must use the http or https scheme".to_owned(),
+            });
+        }
+    }
+
+    if parsed.host_str().is_none() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.transport.base_url",
+            message: "must include a host".to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn resolve_openhands_conversation<E: Environment>(
