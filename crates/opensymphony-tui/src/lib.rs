@@ -103,10 +103,11 @@ impl TuiState {
             .map(|value| format_timestamp(value.snapshot.generated_at))
             .unwrap_or_else(|| "--:--:--".to_owned());
         let status = format!(
-            "OpenSymphony | conn={} | focus={} | bottom={} | seq={} | issues={} | updated={} | q quit  tab focus  e toggle",
-            self.connection.label(),
+            "OpenSymphony | focus={} | bottom={} | conn={} | status={} | seq={} | issues={} | updated={} | q quit  tab focus  e toggle",
             self.focus.label(),
             self.timeline_mode.label(),
+            self.connection.label(),
+            self.status_line,
             sequence,
             issue_count,
             generated
@@ -957,6 +958,16 @@ mod tests {
         assert!(rendered.contains("RECENT EVENTS"));
         assert!(rendered.contains("snapshot updated"));
         assert_eq!(rendered.lines().count(), 22);
+    }
+
+    #[test]
+    fn renders_reducer_status_line_in_header() {
+        let mut state = TuiState::default();
+        state.reduce(super::TuiAction::ConnectionLost("stream closed".to_owned()));
+
+        let rendered = state.render_text(120, 22);
+
+        assert!(rendered.contains("status=reconnecting after: stream closed"));
     }
 
     #[test]

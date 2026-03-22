@@ -9,7 +9,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use opensymphony_domain::{DaemonSnapshot, SnapshotEnvelope};
+use opensymphony_domain::{DaemonSnapshot, DaemonState, SnapshotEnvelope};
 use reqwest_eventsource::{Event as EventSourceEvent, EventSource};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -102,11 +102,20 @@ pub struct HealthResponse {
 async fn health(State(store): State<SnapshotStore>) -> Json<HealthResponse> {
     let envelope = store.current().await;
     Json(HealthResponse {
-        status: "ok".to_owned(),
+        status: health_status(envelope.snapshot.daemon.state).to_owned(),
         current_sequence: envelope.sequence,
         published_at: envelope.published_at,
         issue_count: envelope.snapshot.issue_count(),
     })
+}
+
+fn health_status(state: DaemonState) -> &'static str {
+    match state {
+        DaemonState::Starting => "starting",
+        DaemonState::Ready => "ok",
+        DaemonState::Degraded => "degraded",
+        DaemonState::Stopped => "stopped",
+    }
 }
 
 async fn snapshot(State(store): State<SnapshotStore>) -> Json<SnapshotEnvelope> {

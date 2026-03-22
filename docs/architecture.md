@@ -282,12 +282,13 @@ The current repository implements the first read-only control-plane and FrankenT
   - daemon, issue, metrics, and recent-event serialization models
 - `opensymphony-control`
   - in-memory snapshot store
-  - `GET /healthz`
+  - `GET /healthz` derived from the current daemon snapshot state
   - `GET /api/v1/snapshot`
   - `GET /api/v1/events` using Server-Sent Events
 - `opensymphony-tui`
   - reducer-owned TUI state
   - REST bootstrap plus SSE reconnect loop
+  - visible header status sourced from reducer-owned control-plane connection text
   - inline-mode rendering over immutable view text
 - `opensymphony-cli`
   - `daemon` and `tui` entrypoints used for local attach and detach validation

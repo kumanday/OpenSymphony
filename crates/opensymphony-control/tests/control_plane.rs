@@ -13,6 +13,10 @@ use tokio::net::TcpListener;
 use url::Url;
 
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {
+    fixture_snapshot_with_state(step, DaemonState::Ready)
+}
+
+fn fixture_snapshot_with_state(step: u64, daemon_state: DaemonState) -> DaemonSnapshot {
     let now = Utc
         .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
         .single()
@@ -21,10 +25,10 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
     DaemonSnapshot {
         generated_at: now,
         daemon: DaemonStatus {
-            state: DaemonState::Ready,
+            state: daemon_state,
             last_poll_at: now,
             workspace_root: "/tmp/opensymphony".to_owned(),
-            status_line: "ready".to_owned(),
+            status_line: daemon_status_line(daemon_state).to_owned(),
         },
         agent_server: AgentServerStatus {
             reachable: true,
@@ -56,6 +60,15 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             kind: RecentEventKind::SnapshotPublished,
             summary: format!("published step {step}"),
         }],
+    }
+}
+
+fn daemon_status_line(state: DaemonState) -> &'static str {
+    match state {
+        DaemonState::Starting => "starting",
+        DaemonState::Ready => "ready",
+        DaemonState::Degraded => "degraded",
+        DaemonState::Stopped => "stopped",
     }
 }
 
@@ -112,6 +125,46 @@ async fn serves_snapshot_and_streams_updates() {
 
     stream.close();
     server_task.abort();
+}
+
+#[tokio::test]
+async fn health_endpoint_reflects_daemon_state() {
+    let cases = [
+        (DaemonState::Starting, "starting"),
+        (DaemonState::Ready, "ok"),
+        (DaemonState::Degraded, "degraded"),
+        (DaemonState::Stopped, "stopped"),
+    ];
+
+    for (daemon_state, expected_status) in cases {
+        let store = SnapshotStore::new(fixture_snapshot_with_state(0, daemon_state));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should expose an address");
+        let server = ControlPlaneServer::new(store);
+        let server_task = tokio::spawn(async move {
+            server
+                .serve(listener)
+                .await
+                .expect("control-plane server should run");
+        });
+
+        let response = reqwest::get(format!("http://{address}/healthz"))
+            .await
+            .expect("health endpoint should respond")
+            .error_for_status()
+            .expect("health endpoint should return success")
+            .json::<opensymphony_control::HealthResponse>()
+            .await
+            .expect("health response should decode");
+
+        assert_eq!(response.status, expected_status);
+
+        server_task.abort();
+    }
 }
 
 #[tokio::test]
