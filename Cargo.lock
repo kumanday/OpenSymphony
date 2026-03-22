@@ -1263,7 +1263,6 @@ dependencies = [
  "chrono",
  "clap",
  "opensymphony-control",
- "opensymphony-domain",
  "opensymphony-openhands",
  "opensymphony-testkit",
  "opensymphony-tui",
@@ -1285,7 +1284,6 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
- "opensymphony-domain",
  "reqwest",
  "reqwest-eventsource",
  "serde",
@@ -1300,9 +1298,9 @@ dependencies = [
 name = "opensymphony-domain"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1337,6 +1335,9 @@ dependencies = [
 [[package]]
 name = "opensymphony-orchestrator"
 version = "0.1.0"
+dependencies = [
+ "opensymphony-domain",
+]
 
 [[package]]
 name = "opensymphony-testkit"
@@ -1360,7 +1361,6 @@ dependencies = [
  "chrono",
  "ftui",
  "opensymphony-control",
- "opensymphony-domain",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

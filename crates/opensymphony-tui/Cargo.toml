@@ -14,7 +14,6 @@ workspace = true
 chrono.workspace = true
 ftui.workspace = true
 opensymphony-control = { path = "../opensymphony-control" }
-opensymphony-domain = { path = "../opensymphony-domain" }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

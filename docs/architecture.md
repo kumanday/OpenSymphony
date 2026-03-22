@@ -135,6 +135,7 @@ Recommended crate boundaries:
   - issue model
   - run-attempt model
   - retry-entry model
+  - scheduler state and transition types
   - orchestrator snapshot model
 - `opensymphony-workflow`
   - `WORKFLOW.md` loader
@@ -162,7 +163,7 @@ Recommended crate boundaries:
   - issue session runner
 - `opensymphony-orchestrator`
   - poll tick
-  - runtime state machine
+  - scheduler actor and policy decisions over the shared state machine
   - worker supervision
   - retry timers
   - reconciliation
