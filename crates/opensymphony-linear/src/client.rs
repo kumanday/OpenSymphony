@@ -2,21 +2,21 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot};
 use reqwest::{
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
     Client, StatusCode,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
 };
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::debug;
 
 use crate::error::{GraphqlError, LinearError};
 use crate::graphql::{
-    GraphqlEnvelope, GraphqlErrorPayload, IssueInverseRelationsData,
+    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
+    ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueInverseRelationsData,
     IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueStatesByIdsData,
     IssueStatesByIdsVariables, IssuesByStateData, IssuesByStateVariables, LinearIssueNode,
-    LinearLabelConnection, LinearRelationConnection, ISSUES_BY_STATE_QUERY,
-    ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY, ISSUE_STATES_BY_IDS_QUERY,
+    LinearLabelConnection, LinearRelationConnection,
 };
 use crate::normalize::{normalize_issue, normalize_issue_state};
 

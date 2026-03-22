@@ -41,6 +41,30 @@ Not in MVP:
 - replacing Symphony tracker polling with push webhooks
 - implementing against the OpenHands web-app Socket.IO API
 
+## Current implemented slice
+
+This branch now boots the first local observability vertical slice even though the rest of the orchestration stack is still being filled in.
+
+Available today:
+
+- a Cargo workspace with shared snapshot domain models
+- a read-only control-plane server with:
+  - `GET /healthz` with status derived from the daemon snapshot state
+  - `GET /api/v1/snapshot`
+  - `GET /api/v1/events` as an SSE update stream
+- a FrankenTUI client that:
+  - fetches the initial snapshot over HTTP
+  - reconnects to the SSE stream after disconnects or stalled reads, surfacing reconnecting state while retryable SSE errors are in flight
+  - keeps reconnecting state visible through a rendered frame before returning to `live` when recovery snapshots arrive
+  - renders focused issue/workspace detail plus recent event or metrics panes in inline mode
+  - shows reducer-owned connection status plus the active focus pane in the header and pane headers for keyboard-driven navigation
+- a small `opensymphony-cli` demo path so the control plane and UI can be validated without coupling the TUI to orchestrator internals
+
+Local commands:
+
+- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
+- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
+
 ## Core design decisions
 
 ### 1. Keep Symphony orchestration in Rust
@@ -141,7 +165,7 @@ global `openhands` install.
 2. Read `docs/architecture.md` and `docs/websocket-runtime.md`.
 3. Implement milestone M1 before touching runtime code.
 4. Build the OpenHands runtime adapter against a pinned server version.
-5. Keep the control-plane API stable before starting the TUI.
+5. Keep the control-plane API stable before expanding the TUI.
 6. Use the task files in `docs/tasks/` as the Linear issue source of truth.
 
 ## Current local validation entrypoints

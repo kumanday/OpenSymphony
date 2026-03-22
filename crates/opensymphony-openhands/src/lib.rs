@@ -38,7 +38,7 @@ pub fn placeholder_summary() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{crate_summary, CRATE_NAME};
+    use super::{CRATE_NAME, crate_summary};
 
     #[test]
     fn reports_its_boundary() {
