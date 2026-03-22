@@ -69,6 +69,7 @@ Preserved exactly:
 
 - repository-root `WORKFLOW.md`
 - YAML front matter plus Markdown body
+- Markdown body preserved verbatim after the front matter delimiter
 - strict rendering
 - `issue` object available to the template
 - `attempt` available to the template for retry or continuation metadata
@@ -76,6 +77,7 @@ Preserved exactly:
 OpenSymphony extension:
 
 - `openhands` namespace in front matter for runtime-specific settings
+- unknown top-level front matter namespaces are rejected instead of ignored
 
 ## 2.5 Orchestration state machine
 
@@ -190,6 +192,8 @@ The workflow schema adds an `openhands` namespace for:
 - WebSocket settings
 - MCP server definitions
 - minimal agent payload settings
+- extension settings resolved separately from the core workflow config so non-runtime code can stay OpenHands-agnostic
+- the repo-local `codex` namespace can coexist as non-runtime metadata, while other unknown top-level namespaces still fail deterministically
 
 ### 3.2 Persistent conversation per issue
 

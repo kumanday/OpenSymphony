@@ -28,8 +28,17 @@ Because this sanitization is not injective, workspace reuse must be gated by the
 ## 3. Hard safety invariants
 
 - The resolved workspace path must stay under `workspace.root`.
+- Relative workflow directories must be normalized before resolving relative `workspace.root` values so the resulting workspace root remains absolute for the workspace manager.
+- The doctor preflight must use the target repo `WORKFLOW.md` `workspace.root` rather than a duplicate CLI-only workspace root so the repo-owned policy remains authoritative.
 - The issue workspace path itself must not be a symlink when OpenSymphony reuses or validates it.
 - `cwd` for all hook commands and all OpenHands runs must equal the resolved issue workspace path unless an explicit per-command `cwd` override inside the same workspace is required.
+- When `openhands.local_server.command` is omitted, the runtime-owned local tooling layer must resolve the pinned launcher from the OpenSymphony checkout before that `cwd` switch happens. Workflow resolution must not bake a compile-time checkout path into config defaults.
+- Explicit workflow-owned `openhands.local_server.command` overrides are currently rejected until the runtime supervisor can honor them instead of always launching the pinned repo-local server wrapper.
+- Explicit workflow-owned `openhands.local_server.enabled: false` overrides are currently rejected until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness.
+- Explicit workflow-owned `openhands.local_server.env` overrides are currently rejected until the runtime supervisor creation path forwards them into the actual launcher environment instead of still using runtime-owned defaults.
+- Explicit workflow-owned `openhands.local_server.readiness_probe_path` overrides are currently rejected until the runtime supervisor launch path copies them into the probe configuration instead of always using `/openapi.json`.
+- Explicit workflow-owned `openhands.local_server.startup_timeout_ms` overrides are currently rejected until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default.
+- Explicit workflow-owned `openhands.conversation.reuse_policy` overrides are currently rejected until the orchestrator/runtime path can honor anything other than the default per-issue conversation reuse behavior.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
 

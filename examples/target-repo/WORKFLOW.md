@@ -1,14 +1,20 @@
 ---
-name: Example workflow
-description: Minimal workflow used by the local validation suite.
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+
 openhands:
   transport:
     base_url: http://127.0.0.1:8000
-  workspace:
-    root: ./var/workspaces
 ---
 
 # Example Workflow
 
 Work the assigned issue inside this repository and keep changes small and reviewable.
-
