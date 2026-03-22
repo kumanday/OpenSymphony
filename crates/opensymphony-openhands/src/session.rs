@@ -607,6 +607,7 @@ impl IssueSessionRunner {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn create_fresh_session(
         &self,
         workspace_manager: &WorkspaceManager,
@@ -958,6 +959,7 @@ impl IssueSessionRunner {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn persist_failure_without_stream(
         &self,
         workspace_manager: &WorkspaceManager,
