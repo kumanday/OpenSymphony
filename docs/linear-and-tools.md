@@ -106,7 +106,7 @@ Current adapter contract:
 
 - send GraphQL requests to the configured endpoint with `Authorization: <LINEAR_API_KEY>` because the local MVP uses personal Linear API keys rather than OAuth access tokens
 - reject blank `LINEAR_API_KEY` values during client construction so startup misconfiguration fails fast instead of repeated auth failures at poll time
-- decode GraphQL error envelopes before falling back to raw HTTP classification because Linear rate limits can arrive as HTTP 400 with GraphQL code `RATELIMITED`
+- decode GraphQL error envelopes before falling back to raw HTTP classification because Linear rate limits can arrive as HTTP 400 with GraphQL code `RATELIMITED`, but keep transient HTTP 5xx responses retryable even when the body is a GraphQL error envelope
 - prefer Linear's `X-RateLimit-*-Reset` headers when calculating retry delays for rate-limited responses, falling back to `Retry-After` and then local exponential backoff only when no reset window is advertised
 - keep transient HTTP 5xx responses on the retryable HTTP-status path even when the body decodes as a GraphQL error envelope
 - keep GraphQL query and response structs private to `opensymphony-linear`
