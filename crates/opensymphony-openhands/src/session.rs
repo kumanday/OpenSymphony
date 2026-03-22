@@ -306,52 +306,19 @@ impl IssueSessionRunner {
         workflow: &ResolvedWorkflow,
     ) -> Result<IssueSessionResult, IssueSessionError> {
         let observed_run = observed_run_for_turn(run);
-        let loaded = self
-            .load_existing_conversation_manifest(workspace_manager, workspace, issue)
-            .await?;
-        let mut reset_reason = loaded.reset_reason;
-
-        let mut active_session = if let Some(manifest) = loaded.manifest {
-            match self
-                .try_reuse_session(workspace_manager, workspace, manifest)
-                .await?
-            {
-                Ok(session) => session,
-                Err(reason) => {
-                    reset_reason = Some(reason);
-                    match self
-                        .create_fresh_session(
-                            workspace_manager,
-                            workspace,
-                            run_manifest,
-                            &observed_run,
-                            issue,
-                            workflow,
-                            reset_reason.clone(),
-                        )
-                        .await?
-                    {
-                        Ok(session) => session,
-                        Err(result) => return Ok(result),
-                    }
-                }
-            }
-        } else {
-            match self
-                .create_fresh_session(
-                    workspace_manager,
-                    workspace,
-                    run_manifest,
-                    &observed_run,
-                    issue,
-                    workflow,
-                    reset_reason.clone(),
-                )
-                .await?
-            {
-                Ok(session) => session,
-                Err(result) => return Ok(result),
-            }
+        let mut active_session = match self
+            .initialize_session(
+                workspace_manager,
+                workspace,
+                run_manifest,
+                &observed_run,
+                issue,
+                workflow,
+            )
+            .await?
+        {
+            Ok(session) => session,
+            Err(result) => return Ok(result),
         };
 
         let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind) {
@@ -511,6 +478,53 @@ impl IssueSessionRunner {
             outcome,
         )
         .await
+    }
+
+    async fn initialize_session(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        observed_run: &RunAttempt,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
+    ) -> Result<Result<ActiveSession, IssueSessionResult>, IssueSessionError> {
+        let loaded = self
+            .load_existing_conversation_manifest(workspace_manager, workspace, issue)
+            .await?;
+
+        match loaded.manifest {
+            Some(manifest) => match self
+                .try_reuse_session(workspace_manager, workspace, manifest)
+                .await?
+            {
+                Ok(session) => Ok(Ok(session)),
+                Err(reason) => {
+                    self.create_fresh_session(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        observed_run,
+                        issue,
+                        workflow,
+                        Some(reason),
+                    )
+                    .await
+                }
+            },
+            None => {
+                self.create_fresh_session(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    observed_run,
+                    issue,
+                    workflow,
+                    loaded.reset_reason,
+                )
+                .await
+            }
+        }
     }
 
     async fn load_existing_conversation_manifest(
