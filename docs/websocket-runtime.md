@@ -153,7 +153,7 @@ Current repository implementation:
 
 - `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until an event envelope with kind `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable frames before readiness
 - `opensymphony-openhands::OpenHandsClient::attach_runtime_stream` performs the full attach sequence: initial REST sync, WebSocket connect, readiness barrier, and post-ready reconcile before returning a live `RuntimeEventStream`
-- the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, refreshes the in-memory state mirror only when it is newer than the reconciled state, can salvage a forward-compatible `state_delta` even when the full payload shape no longer deserializes cleanly, and is not replayed through `next_event()` unless `/events/search` independently contains the same event ID
+- the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, refreshes the in-memory state mirror only when it is newer than the reconciled state, can salvage a forward-compatible `state_delta` even when the full payload shape no longer deserializes cleanly, can clear stale terminal REST fallback when a reused conversation has already restarted into an active `queued` or `running` state, and is not replayed through `next_event()` unless `/events/search` independently contains the same event ID
 - `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, and reconcile path
 
@@ -213,7 +213,7 @@ Current repository implementation:
 - `KnownEvent` now distinguishes `ConversationStateUpdateEvent`, `LLMCompletionLogEvent`, `ConversationErrorEvent`, and `UnknownEvent`
 - unknown event kinds retain raw JSON in the event journal instead of failing the stream
 - `ConversationStateMirror::rebuild_from` replays the timestamp-ordered cache so late state updates do not regress terminal detection
-- `RuntimeEventStream` reapplies the non-replayable readiness snapshot after attach/reconnect only when reconcile and REST refresh do not already carry an equal or newer state update, and it can still derive a minimal mirror patch from forward-compatible `state_delta` payloads even when typed state decoding would otherwise fall back
+- `RuntimeEventStream` reapplies the non-replayable readiness snapshot after attach/reconnect only when reconcile and REST refresh do not already carry an equal or newer state update, still derives a minimal mirror patch from forward-compatible `state_delta` payloads even when typed state decoding would otherwise fall back, and lets an active `queued` or `running` ready barrier clear stale terminal REST fallback for restarted reused conversations
 - `ConversationStateMirror::terminal_status` provides the current finished/error/stuck classification used by the probe and future workers
 
 ## 7. Run lifecycle over REST plus WebSocket

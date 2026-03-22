@@ -624,7 +624,14 @@ impl RuntimeEventStream {
             payload.execution_status.as_deref(),
             Some("finished" | "error" | "stuck")
         );
-        if self.state_mirror.terminal_status().is_some() && !ready_event_is_terminal {
+        let ready_event_restarts_execution = matches!(
+            payload.execution_status.as_deref(),
+            Some("queued" | "running")
+        );
+        if self.state_mirror.terminal_status().is_some()
+            && !ready_event_is_terminal
+            && !ready_event_restarts_execution
+        {
             return;
         }
 
