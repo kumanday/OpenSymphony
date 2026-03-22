@@ -169,6 +169,7 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 
 Current note:
 
+- the example doctor YAML now only carries machine-local inputs such as the OpenHands tool directory and optional probe overrides; the target repo `WORKFLOW.md` provides the workspace root, OpenHands base URL, and prompt that the doctor probe validates
 - `daemon`, `tui`, and `linear-mcp` subcommands are present so the CLI shape is stable, but they remain scaffolds until the corresponding runtime and control-plane milestones land.
 
 ## Non-negotiable implementation rules

@@ -252,14 +252,13 @@ Current command set in this repository:
 
 Current implemented scope for OSYM-201:
 
+- load and resolve the target repo `WORKFLOW.md` before any runtime probe
+- render the workflow prompt with a synthetic issue shape during doctor preflight
 - resolve the repo-local OpenHands wrapper metadata from `tools/openhands-server/`
 - report pin readiness from `version.txt`, `pyproject.toml`, and `uv.lock`
-- start the supervised local server when the pin is valid
-- verify HTTP readiness on the expected loopback base URL
-- stop the supervised child and report launch metadata
-
-Future doctor milestones should add conversation creation, WebSocket attach, and
-reconcile coverage once those runtime surfaces land.
+- start the supervised local server when the pin is valid and the workflow-derived loopback base URL is down
+- verify HTTP readiness on the workflow-derived loopback base URL
+- create a temp conversation with workflow-derived OpenHands settings, send a probe message, wait for readiness/reconcile, and stop the supervised child with launch metadata
 
 Required checks:
 
@@ -268,6 +267,8 @@ Required checks:
 - config file exists and parses
 - target repo exists
 - target repo contains `WORKFLOW.md`
+- target repo `WORKFLOW.md` resolves against the current environment
+- target repo prompt template renders against the current issue/attempt input shape
 - workspace root exists or can be created
 - OpenHands version pin files exist in `tools/openhands-server/`
 
@@ -294,13 +295,14 @@ Required checks:
 
 Current implementation notes:
 
-- the static doctor path checks config parsing, target-repo presence, workspace-root creation, loopback bind scope, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
-- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a probe prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` before reconciling events
-- when the configured loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
+- the static doctor path checks config parsing, target-repo presence, workflow load/resolve/render, workspace-root creation from the workflow, loopback bind scope from the workflow OpenHands transport, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
+- the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation using workflow-derived OpenHands conversation settings, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a doctor message that includes the rendered workflow prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` before reconciling events
+- when the configured workflow loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
 - failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames and authenticated REST requests
-- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback and the pinned launcher `cwd` behavior
-- the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials
+- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback, workflow-driven runtime inputs, and the pinned launcher `cwd` behavior
+- the current example configs carry machine-local tool/probe settings only; the repo-owned workflow now supplies the workspace root and OpenHands base URL that doctor validates
+- the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials when the workflow omits `tracker.api_key`
 
 ## 8. Logging and diagnostics
 

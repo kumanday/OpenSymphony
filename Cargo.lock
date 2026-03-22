@@ -1030,6 +1030,7 @@ dependencies = [
  "clap",
  "opensymphony-openhands",
  "opensymphony-testkit",
+ "opensymphony-workflow",
  "serde",
  "serde_yaml",
  "tempfile",

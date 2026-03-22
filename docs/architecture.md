@@ -166,6 +166,7 @@ Recommended crate boundaries:
 - `opensymphony-cli`
   - daemon startup
   - doctor command
+  - target-repo `WORKFLOW.md` resolution and prompt preflight for doctor
   - repo-root OpenHands preflight checks
   - linear-mcp command
   - config entrypoints

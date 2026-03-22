@@ -99,6 +99,7 @@ OpenSymphony should provide a small stdio MCP server rather than coupling writes
 Current repository note:
 
 - workflow-owned OpenHands MCP stdio server declarations are rejected during workflow resolution until the current conversation-create adapter can forward `mcp_config`, so unattended sessions must provision the Linear MCP surface through the host tool environment rather than `openhands.mcp.stdio_servers`
+- `opensymphony doctor` can still resolve workflows that omit `tracker.api_key` when `linear.enabled: false`; it uses a doctor-only placeholder for the omitted fallback token so static/local runtime validation does not require live Linear credentials
 
 ## 5.1 MVP tool set
 
