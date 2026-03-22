@@ -296,6 +296,7 @@ Current repository implementation:
 - reconnect-required reads now defer reconnect long enough to flush any already-queued events before surfacing exhaustion
 - reconnect readiness snapshots remain barriers only; they refresh `ready_event` but are not replayed as synthetic runtime events unless `/events/search` also returns them
 - `wait_for_probe_terminal_state` now prefers an already-refreshed terminal `state_mirror()` over surfacing `ReconnectExhausted`, so the doctor/live probe path can complete from authoritative REST state when a run is already terminal but WebSocket reattach fails afterward
+- after `wait_for_probe_terminal_state` has already succeeded, `run_probe` reuses the stream-backed conversation snapshot plus mirrored terminal `execution_status` instead of requiring one more terminal REST fetch
 - `RuntimeEventStream::close` clears any queued replay and deferred reconnect intent before closing the socket, so later polls on that stream instance stay closed instead of reopening the conversation
 - `opensymphony-testkit` can now force live socket drops so reconnect coverage is deterministic in CI
 

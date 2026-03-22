@@ -301,6 +301,33 @@ async fn run_probe_prefers_terminal_rest_refresh_over_reconnect_exhaustion() {
 }
 
 #[tokio::test]
+async fn run_probe_reuses_terminal_stream_snapshot_when_final_conversation_refresh_fails() {
+    let state = ProbeState::default();
+    let server = TestServer::start(final_refresh_failure_probe_router(state.clone())).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        Some("fake-model".to_string()),
+        Some("fake-key".to_string()),
+    );
+
+    let result = client
+        .run_probe(&request, Duration::from_secs(2))
+        .await
+        .expect(
+            "probe should succeed from the terminal stream snapshot even if the final conversation GET fails",
+        );
+
+    assert_eq!(result.conversation.execution_status, "finished");
+    assert_eq!(
+        result.state_mirror.terminal_status(),
+        Some(TerminalExecutionStatus::Finished)
+    );
+    assert_eq!(*state.get_count.lock().await, 2);
+}
+
+#[tokio::test]
 async fn run_probe_rejects_error_events_even_when_finished_state_is_already_mirrored() {
     let state = ProbeState::default();
     let server = TestServer::start(reconnect_error_then_finished_probe_router(state.clone())).await;
@@ -1523,6 +1550,7 @@ struct ProbeState {
     send_count: Arc<Mutex<usize>>,
     run_count: Arc<Mutex<usize>>,
     connect_count: Arc<Mutex<usize>>,
+    get_count: Arc<Mutex<usize>>,
 }
 
 fn probe_router(state: ProbeState) -> Router {
@@ -1623,6 +1651,32 @@ fn terminal_rest_refresh_probe_router(state: ProbeState) -> Router {
         .with_state(state)
 }
 
+fn final_refresh_failure_probe_router(state: ProbeState) -> Router {
+    Router::new()
+        .route("/api/conversations", post(probe_create_conversation))
+        .route(
+            "/api/conversations/:conversation_id",
+            get(final_refresh_failure_probe_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events",
+            post(probe_send_message),
+        )
+        .route(
+            "/api/conversations/:conversation_id/run",
+            post(final_refresh_failure_probe_run_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(probe_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(final_refresh_failure_probe_events_socket),
+        )
+        .with_state(state)
+}
+
 fn reconnect_error_then_finished_probe_router(state: ProbeState) -> Router {
     Router::new()
         .route("/api/conversations", post(probe_create_conversation))
@@ -1672,6 +1726,29 @@ async fn probe_get_conversation(
     State(state): State<ProbeState>,
     Path(_conversation_id): Path<Uuid>,
 ) -> Result<Json<Conversation>, StatusCode> {
+    *state.get_count.lock().await += 1;
+    let conversation = state
+        .conversation
+        .lock()
+        .await
+        .clone()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(conversation))
+}
+
+async fn final_refresh_failure_probe_get_conversation(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let mut get_count = state.get_count.lock().await;
+    *get_count += 1;
+    let current_get = *get_count;
+    drop(get_count);
+
+    if current_get >= 2 && *state.run_count.lock().await > 0 {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+
     let conversation = state
         .conversation
         .lock()
@@ -1751,6 +1828,14 @@ async fn reconnect_probe_run_conversation(
     let mut conversation = state.conversation.lock().await;
     let conversation = conversation.as_mut().ok_or(StatusCode::NOT_FOUND)?;
     conversation.execution_status = "finished".to_string();
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn final_refresh_failure_probe_run_conversation(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    *state.run_count.lock().await += 1;
     Ok(Json(json!({ "success": true })))
 }
 
@@ -1859,6 +1944,50 @@ async fn exhausting_reconnect_probe_events_socket(
             .send(Message::Close(None))
             .await
             .expect("socket close should send");
+    })
+}
+
+async fn final_refresh_failure_probe_events_socket(
+    State(state): State<ProbeState>,
+    websocket: WebSocketUpgrade,
+    Path(_conversation_id): Path<Uuid>,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
+                    .expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+
+        loop {
+            if *state.run_count.lock().await > 0 {
+                socket
+                    .send(Message::Text(
+                        serde_json::to_string(&EventEnvelope::new(
+                            "evt-finished",
+                            Utc::now(),
+                            "runtime",
+                            "ConversationStateUpdateEvent",
+                            json!({
+                                "execution_status": "finished",
+                                "state_delta": {
+                                    "execution_status": "finished",
+                                },
+                            }),
+                        ))
+                        .expect("finished event should serialize"),
+                    ))
+                    .await
+                    .expect("finished event should send");
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let _ = socket.recv().await;
     })
 }
 
