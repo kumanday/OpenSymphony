@@ -82,6 +82,12 @@ pub enum OpenHandsError {
         /// Short diagnostic text.
         message: String,
     },
+    /// Supervised mode detected an incompatible existing server state.
+    #[error("OpenHands supervisor conflict: {message}")]
+    SupervisorConflict {
+        /// Short diagnostic text.
+        message: String,
+    },
     /// A protocol assumption was violated.
     #[error("OpenHands protocol error: {message}")]
     Protocol {

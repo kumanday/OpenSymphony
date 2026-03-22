@@ -1,7 +1,7 @@
 //! Orchestrator-facing issue session runner built on top of the OpenHands client.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -18,6 +18,7 @@ use crate::error::Result;
 use crate::stream::AttachedConversation;
 use crate::wire::{
     ConfirmationPolicy, ConversationInfo, CreateConversationRequest, OpenHandsWorkspace,
+    RemoteExecutionStatus,
 };
 
 const CREATE_REQUEST_ARTIFACT: &str = "create-conversation-request.json";
@@ -106,6 +107,9 @@ impl IssueSessionRunner {
             self.websocket.clone(),
         )
         .await?;
+        if run_in_progress(attached.state().await.execution_status) {
+            let _ = attached.wait_for_terminal(self.run_timeout).await?;
+        }
         self.client
             .send_user_message(
                 &prepared.manifest.conversation_id,
@@ -117,10 +121,17 @@ impl IssueSessionRunner {
         prepared
             .manifest
             .save(&request.workspace.conversation_manifest_path)?;
-        let _ = self
-            .client
-            .run_conversation(&prepared.manifest.conversation_id)
-            .await?;
+        loop {
+            let run = self
+                .client
+                .run_conversation(&prepared.manifest.conversation_id)
+                .await?;
+            if !run.already_running {
+                break;
+            }
+            let _ = attached.wait_for_terminal(self.run_timeout).await?;
+        }
+        attached.clear_execution_status().await;
         let final_info = attached.wait_for_terminal(self.run_timeout).await?;
         write_json_artifact(
             request.workspace.openhands_dir.join(LAST_STATE_ARTIFACT),
@@ -153,7 +164,7 @@ impl IssueSessionRunner {
             Err(WorkspaceError::Json { .. }) => (None, true),
             Err(error) => return Err(error.into()),
         };
-        let persistence_dir = request.workspace.openhands_dir.display().to_string();
+        let persistence_dir = self.persistence_dir_string(&request.workspace);
         let server_base_url = self.client.transport().base_url.to_string();
 
         match existing {
@@ -168,7 +179,11 @@ impl IssueSessionRunner {
                     .get_conversation(&manifest.conversation_id)
                     .await?
                 {
-                    if conversation_matches_workspace(&conversation, &request.workspace) {
+                    if conversation_matches_workspace(
+                        &conversation,
+                        &request.workspace,
+                        persistence_dir.as_str(),
+                    ) {
                         manifest.last_attached_at = now;
                         manifest.fresh_conversation = false;
                         manifest.server_base_url = server_base_url;
@@ -201,15 +216,29 @@ impl IssueSessionRunner {
                     Some(manifest.conversation_id.clone()),
                 );
                 let conversation = self.client.create_conversation(&create_request).await?;
+                let rehydrated_history = conversation.id == manifest.conversation_id
+                    && !self
+                        .client
+                        .search_events_all(&conversation.id)
+                        .await?
+                        .is_empty();
                 manifest.last_attached_at = now;
-                manifest.fresh_conversation = true;
+                manifest.fresh_conversation = !rehydrated_history;
                 manifest.server_base_url = server_base_url;
                 manifest.persistence_dir = persistence_dir;
-                manifest.reset_reason = Some("conversation_missing".to_string());
+                manifest.reset_reason = if rehydrated_history {
+                    None
+                } else {
+                    Some("conversation_missing".to_string())
+                };
                 manifest.conversation_id = conversation.id;
                 Ok(PreparedConversation {
                     manifest,
-                    prompt_kind: PromptKind::Fresh,
+                    prompt_kind: if rehydrated_history {
+                        PromptKind::Continuation
+                    } else {
+                        PromptKind::Fresh
+                    },
                     create_request: Some(create_request),
                 })
             }
@@ -268,6 +297,7 @@ impl IssueSessionRunner {
         conversation_id: Option<String>,
     ) -> CreateConversationRequest {
         let mut agent = self.conversation.agent.clone();
+        let persistence_dir = self.persistence_dir_string(workspace);
         for tool in &mut agent.tools {
             tool.name = tool.registry_name();
         }
@@ -279,7 +309,7 @@ impl IssueSessionRunner {
                 extra: serde_json::Map::new(),
             },
             conversation_id: conversation_id.or_else(|| Some(Uuid::new_v4().to_string())),
-            persistence_dir: Some(workspace.openhands_dir.display().to_string()),
+            persistence_dir: Some(persistence_dir),
             confirmation_policy: if self.conversation.confirmation_policy.kind.is_empty() {
                 ConfirmationPolicy::never_confirm()
             } else {
@@ -304,6 +334,16 @@ impl IssueSessionRunner {
                 .collect(),
         }
     }
+
+    fn persistence_dir_path(&self, workspace: &WorkspaceLayout) -> PathBuf {
+        workspace
+            .issue_workspace
+            .join(&self.conversation.persistence_dir_relative)
+    }
+
+    fn persistence_dir_string(&self, workspace: &WorkspaceLayout) -> String {
+        self.persistence_dir_path(workspace).display().to_string()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -326,12 +366,12 @@ fn write_json_artifact(path: impl AsRef<Path>, value: &impl serde::Serialize) ->
 fn conversation_matches_workspace(
     conversation: &ConversationInfo,
     workspace: &WorkspaceLayout,
+    expected_persistence_dir: &str,
 ) -> bool {
     let expected_working_dir = workspace.issue_workspace.display().to_string();
-    let expected_persistence_dir = workspace.openhands_dir.display().to_string();
 
     conversation.workspace.working_dir == expected_working_dir
-        && conversation.persistence_dir.as_deref() == Some(expected_persistence_dir.as_str())
+        && conversation.persistence_dir.as_deref() == Some(expected_persistence_dir)
 }
 
 fn reset_reason(manifest: &ConversationManifest) -> String {
@@ -343,4 +383,15 @@ fn reset_reason(manifest: &ConversationManifest) -> String {
             manifest.runtime_contract_version
         )
     }
+}
+
+fn run_in_progress(status: Option<RemoteExecutionStatus>) -> bool {
+    matches!(
+        status,
+        Some(
+            RemoteExecutionStatus::Running
+                | RemoteExecutionStatus::Paused
+                | RemoteExecutionStatus::WaitingForConfirmation
+        )
+    )
 }

@@ -113,6 +113,7 @@ enum WsServerMessage {
 struct FakeState {
     session_api_key: Option<String>,
     conversation_get_delay: Duration,
+    conversation_get_not_found: HashMap<String, usize>,
     event_search_failures: HashMap<String, usize>,
     message_post_failures: usize,
     ready_event_delays: HashMap<String, VecDeque<Duration>>,
@@ -331,6 +332,28 @@ impl FakeOpenHandsServer {
         Ok(())
     }
 
+    /// Forces the next `GET /api/conversations/{id}` calls to return 404.
+    pub async fn fail_next_conversation_gets(
+        &self,
+        conversation_id: &str,
+        count: usize,
+    ) -> Result<(), TestkitError> {
+        let mut state = self.state.lock().await;
+        if !state.conversations.contains_key(conversation_id) {
+            return Err(TestkitError::MissingConversation {
+                conversation_id: conversation_id.to_string(),
+            });
+        }
+        if count == 0 {
+            state.conversation_get_not_found.remove(conversation_id);
+        } else {
+            state
+                .conversation_get_not_found
+                .insert(conversation_id.to_string(), count);
+        }
+        Ok(())
+    }
+
     /// Fails the next `POST /events` calls regardless of conversation.
     pub async fn fail_next_message_posts(&self, count: usize) {
         self.state.lock().await.message_post_failures = count;
@@ -474,10 +497,28 @@ async fn get_conversation(
     if !authorized(&app.state, &headers, None).await {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let (delay, info) = {
-        let state = app.state.lock().await;
+    let (delay, not_found, info) = {
+        let mut state = app.state.lock().await;
+        let not_found = match state.conversation_get_not_found.get_mut(&conversation_id) {
+            Some(remaining) if *remaining > 0 => {
+                *remaining -= 1;
+                true
+            }
+            _ => false,
+        };
+        if not_found
+            && state
+                .conversation_get_not_found
+                .get(&conversation_id)
+                .copied()
+                .unwrap_or_default()
+                == 0
+        {
+            state.conversation_get_not_found.remove(&conversation_id);
+        }
         (
             state.conversation_get_delay,
+            not_found,
             state
                 .conversations
                 .get(&conversation_id)
@@ -486,6 +527,9 @@ async fn get_conversation(
     };
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
+    }
+    if not_found {
+        return StatusCode::NOT_FOUND.into_response();
     }
     match info {
         Some(entry) => (StatusCode::OK, Json(entry)).into_response(),
@@ -605,6 +649,9 @@ async fn run_conversation(
         let Some(entry) = state.conversations.get_mut(&conversation_id) else {
             return StatusCode::NOT_FOUND.into_response();
         };
+        if run_in_progress(entry.info.execution_status) {
+            return StatusCode::CONFLICT.into_response();
+        }
         entry.run_count += 1;
         entry
             .runs
@@ -783,6 +830,17 @@ fn update_conversation_from_event(info: &mut ConversationInfo, event: &Value) {
     info.updated_at = Some(Utc::now().to_rfc3339());
 }
 
+fn run_in_progress(status: Option<RemoteExecutionStatus>) -> bool {
+    matches!(
+        status,
+        Some(
+            RemoteExecutionStatus::Running
+                | RemoteExecutionStatus::Paused
+                | RemoteExecutionStatus::WaitingForConfirmation
+        )
+    )
+}
+
 fn full_state_event_from_info(info: &ConversationInfo) -> Value {
     full_state_event(serde_json::json!({
         "id": info.id,
@@ -839,7 +897,8 @@ mod tests {
     use opensymphony_domain::{IssueRef, PromptSet};
     use opensymphony_openhands::{
         AgentConfig, AttachedConversation, ConfirmationPolicy, ContentBlock, IssueSessionRequest,
-        IssueSessionRunner, OpenHandsError, OpenHandsWorkspace, RemoteExecutionStatus,
+        IssueSessionRunner, LocalAgentServerSupervisor, LocalServerConfig, OpenHandsError,
+        OpenHandsWorkspace, RemoteExecutionStatus, TransportConfig, WebSocketAuthMode,
         WebSocketConfig,
     };
     use opensymphony_workspace::ConversationManifest;
@@ -864,6 +923,38 @@ mod tests {
             filter_tools_regex: None,
             mcp_config: None,
             extra: Map::new(),
+        }
+    }
+
+    fn conversation_config(
+        persistence_dir_relative: &str,
+    ) -> opensymphony_openhands::ConversationConfig {
+        opensymphony_openhands::ConversationConfig {
+            runtime_contract_version: "openhands-sdk-v1.14.0".to_string(),
+            persistence_dir_relative: persistence_dir_relative.to_string(),
+            agent: agent(),
+            confirmation_policy: ConfirmationPolicy::never_confirm(),
+            max_iterations: 500,
+            stuck_detection: true,
+            autotitle: false,
+            hook_config: None,
+            plugins: Vec::new(),
+            secrets: HashMap::new().into_iter().collect(),
+        }
+    }
+
+    fn issue_request(workspace: &opensymphony_workspace::WorkspaceLayout) -> IssueSessionRequest {
+        IssueSessionRequest {
+            issue: IssueRef {
+                issue_id: "issue-1".to_string(),
+                identifier: "COE-253".to_string(),
+                title: "Runtime adapter".to_string(),
+            },
+            workspace: workspace.clone(),
+            prompts: PromptSet {
+                full_prompt: "full prompt".to_string(),
+                continuation_prompt: "continue prompt".to_string(),
+            },
         }
     }
 
@@ -1690,6 +1781,263 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn issue_session_runner_waits_for_running_turn_then_starts_next_turn()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = Arc::new(FakeOpenHandsServer::start().await?);
+        let client = server.client();
+        let temp_dir = TempDir::new()?;
+        let workspace = opensymphony_workspace::WorkspaceLayout::new(temp_dir.path(), "COE-253")?;
+        workspace.create()?;
+
+        let conversation_id = "already-running-conv".to_string();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: workspace.issue_workspace.display().to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some(conversation_id.clone()),
+                persistence_dir: Some(workspace.openhands_dir.display().to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+        server
+            .push_event(
+                &conversation_id,
+                execution_status_event(RemoteExecutionStatus::Running),
+            )
+            .await?;
+
+        ConversationManifest {
+            issue_id: "issue-1".to_string(),
+            identifier: "COE-253".to_string(),
+            conversation_id: conversation_id.clone(),
+            server_base_url: client.transport().base_url.to_string(),
+            persistence_dir: workspace.openhands_dir.display().to_string(),
+            created_at: Utc::now(),
+            last_attached_at: Utc::now(),
+            fresh_conversation: false,
+            reset_reason: None,
+            runtime_contract_version: "openhands-sdk-v1.14.0".to_string(),
+        }
+        .save(&workspace.conversation_manifest_path)?;
+
+        let prior_run_server = Arc::clone(&server);
+        let prior_run_id = conversation_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            prior_run_server
+                .push_event(
+                    &prior_run_id,
+                    execution_status_event(RemoteExecutionStatus::Finished),
+                )
+                .await
+                .expect("prior run should finish cleanly");
+        });
+
+        server
+            .enqueue_run(
+                &conversation_id,
+                ScriptedRun::new(vec![
+                    RunStep::Emit {
+                        event: execution_status_event(RemoteExecutionStatus::Running),
+                        delay: Duration::from_millis(5),
+                    },
+                    RunStep::Emit {
+                        event: execution_status_event(RemoteExecutionStatus::Finished),
+                        delay: Duration::from_millis(5),
+                    },
+                ]),
+            )
+            .await?;
+
+        let runner = IssueSessionRunner::new(
+            client.clone(),
+            conversation_config(".opensymphony/openhands"),
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .with_run_timeout(Duration::from_secs(2));
+
+        let outcome = runner.execute(&issue_request(&workspace)).await?;
+        assert_eq!(
+            outcome.prompt_kind,
+            opensymphony_domain::PromptKind::Continuation
+        );
+
+        let record = server.conversation_record(&conversation_id).await?;
+        assert_eq!(record.run_count, 1);
+        let texts: Vec<_> = record
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["continue prompt"]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn issue_session_runner_rehydrates_missing_conversation_as_continuation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        let temp_dir = TempDir::new()?;
+        let workspace = opensymphony_workspace::WorkspaceLayout::new(temp_dir.path(), "COE-253")?;
+        workspace.create()?;
+
+        let conversation_id = "rehydrated-conv".to_string();
+        client
+            .create_conversation(&CreateConversationRequest {
+                agent: agent(),
+                workspace: OpenHandsWorkspace {
+                    working_dir: workspace.issue_workspace.display().to_string(),
+                    kind: None,
+                    extra: Map::new(),
+                },
+                conversation_id: Some(conversation_id.clone()),
+                persistence_dir: Some(workspace.openhands_dir.display().to_string()),
+                confirmation_policy: ConfirmationPolicy::never_confirm(),
+                initial_message: None,
+                max_iterations: 500,
+                stuck_detection: true,
+                autotitle: false,
+                hook_config: None,
+                plugins: Vec::new(),
+                secrets: HashMap::new().into_iter().collect(),
+                tool_module_qualnames: HashMap::new().into_iter().collect(),
+            })
+            .await?;
+        client
+            .send_user_message(
+                &conversation_id,
+                &SendMessageRequest::user_text("full prompt"),
+            )
+            .await?;
+        server
+            .fail_next_conversation_gets(&conversation_id, 1)
+            .await?;
+
+        ConversationManifest {
+            issue_id: "issue-1".to_string(),
+            identifier: "COE-253".to_string(),
+            conversation_id: conversation_id.clone(),
+            server_base_url: client.transport().base_url.to_string(),
+            persistence_dir: workspace.openhands_dir.display().to_string(),
+            created_at: Utc::now(),
+            last_attached_at: Utc::now(),
+            fresh_conversation: false,
+            reset_reason: None,
+            runtime_contract_version: "openhands-sdk-v1.14.0".to_string(),
+        }
+        .save(&workspace.conversation_manifest_path)?;
+
+        let runner = IssueSessionRunner::new(
+            client.clone(),
+            conversation_config(".opensymphony/openhands"),
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .with_run_timeout(Duration::from_secs(2));
+
+        let outcome = runner.execute(&issue_request(&workspace)).await?;
+        assert_eq!(
+            outcome.prompt_kind,
+            opensymphony_domain::PromptKind::Continuation
+        );
+
+        let record = server.conversation_record(&conversation_id).await?;
+        assert_eq!(record.create_requests.len(), 2);
+        let texts: Vec<_> = record
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                ContentBlock::Image { .. } => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["full prompt", "continue prompt"]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_request_uses_configured_persistence_dir_relative()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let client = server.client();
+        let temp_dir = TempDir::new()?;
+        let workspace = opensymphony_workspace::WorkspaceLayout::new(temp_dir.path(), "COE-253")?;
+        workspace.create()?;
+
+        let runner = IssueSessionRunner::new(
+            client.clone(),
+            conversation_config(".opensymphony/runtime-cache"),
+            WebSocketConfig {
+                ready_timeout_ms: 1_000,
+                reconnect_initial_ms: 10,
+                reconnect_max_ms: 20,
+                poll_interval_ms: 10,
+            },
+        )
+        .with_run_timeout(Duration::from_secs(2));
+
+        let first = runner.execute(&issue_request(&workspace)).await?;
+        assert_eq!(first.prompt_kind, opensymphony_domain::PromptKind::Fresh);
+
+        let expected_persistence_dir = workspace
+            .issue_workspace
+            .join(".opensymphony/runtime-cache")
+            .display()
+            .to_string();
+        let first_record = server.conversation_record(&first.conversation_id).await?;
+        assert_eq!(
+            first_record.info.persistence_dir.as_deref(),
+            Some(expected_persistence_dir.as_str())
+        );
+        assert_eq!(
+            first_record.create_requests[0].persistence_dir.as_deref(),
+            Some(expected_persistence_dir.as_str())
+        );
+
+        let second = runner.execute(&issue_request(&workspace)).await?;
+        assert_eq!(
+            second.prompt_kind,
+            opensymphony_domain::PromptKind::Continuation
+        );
+        assert_eq!(second.conversation_id, first.conversation_id);
+
+        let manifest = ConversationManifest::load(&workspace.conversation_manifest_path)?
+            .expect("conversation manifest should persist");
+        assert_eq!(manifest.persistence_dir, expected_persistence_dir);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn issue_session_runner_resets_corrupted_manifest()
     -> Result<(), Box<dyn std::error::Error>> {
         let server = FakeOpenHandsServer::start().await?;
@@ -1806,6 +2154,42 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
         tokio::time::timeout(Duration::from_millis(150), attached.close()).await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn local_supervisor_rejects_foreign_ready_server()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let server = FakeOpenHandsServer::start().await?;
+        let base_url = server.base_url();
+        let mut supervisor = LocalAgentServerSupervisor::new(
+            TransportConfig {
+                base_url,
+                http_auth: opensymphony_openhands::HttpAuth::None,
+                http_connect_timeout_ms: 1_000,
+                http_request_timeout_ms: 1_000,
+                websocket_auth: WebSocketAuthMode::None,
+                websocket_query_param_name: "session_api_key".to_string(),
+            },
+            LocalServerConfig {
+                command: vec![
+                    "/bin/sh".to_string(),
+                    "-lc".to_string(),
+                    "sleep 1".to_string(),
+                ],
+                workdir: None,
+                env: HashMap::new().into_iter().collect(),
+                startup_timeout_ms: 200,
+                readiness_probe_path: "/ready".to_string(),
+            },
+        )?;
+
+        let error = supervisor
+            .start()
+            .await
+            .expect_err("foreign ready server should block supervised start");
+        assert!(matches!(error, OpenHandsError::SupervisorConflict { .. }));
+
         Ok(())
     }
 }

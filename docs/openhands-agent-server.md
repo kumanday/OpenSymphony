@@ -95,7 +95,9 @@ Local MVP work starts with supervised mode, but the trait boundary must support 
 In supervised mode:
 
 1. Resolve the configured command and environment.
-2. Start the subprocess bound to `127.0.0.1`.
+2. Refuse supervised startup if readiness already succeeds before launch, because that indicates an
+   external server is already bound to the configured base URL.
+3. Start the subprocess bound to `127.0.0.1`.
 3. Wait for readiness by probing a known HTTP endpoint.
 4. Record server metadata in memory and logs.
 5. Reuse the server for all issue runs.
@@ -107,6 +109,7 @@ Readiness probing rule:
 - never rely on sleep-only startup delays
 - run readiness probes through the shared HTTP client auth and deadline path rather than issuing
   bespoke unauthenticated requests
+- do not claim supervisor ownership of a server that was already ready before the child launch
 
 ## 4.3 Shutdown contract
 
@@ -153,19 +156,24 @@ Suggested persisted fields:
 
 ## 6.2 Persistence directory
 
-Each issue conversation should persist under a stable path inside the issue workspace, for example:
+Each issue conversation should persist under a stable path inside the issue workspace derived from
+`conversation.persistence_dir_relative`, for example:
 
 ```text
 <issue_workspace>/.opensymphony/openhands/
 ```
 
-This keeps execution state co-located with the workspace and simplifies recovery.
+This keeps execution state co-located with the workspace and simplifies recovery while still
+allowing operators to move the OpenHands runtime cache within the issue workspace.
 
 ## 6.3 Reuse policy
 
 Default policy:
 
 - reuse the conversation for the same issue across worker lifetimes
+- if `GET /api/conversations/{id}` briefly returns `404`, retry through
+  `POST /api/conversations` with the same `conversation_id` and keep using continuation guidance
+  when the persisted thread is rehydrated with existing history
 - reset only when:
   - conversation metadata is missing or invalid
   - the server reports the conversation cannot be attached

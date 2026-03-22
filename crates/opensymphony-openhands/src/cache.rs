@@ -1,6 +1,9 @@
 //! Ordered event cache with event-id deduplication.
 
+use std::cmp::Ordering;
 use std::collections::HashSet;
+
+use chrono::DateTime;
 
 use crate::wire::RuntimeEventEnvelope;
 
@@ -17,9 +20,9 @@ impl EventCache {
         if !self.event_ids.insert(event.id.clone()) {
             return false;
         }
-        let index = self
-            .events
-            .partition_point(|existing| existing.timestamp <= event.timestamp);
+        let index = self.events.partition_point(|existing| {
+            timestamp_order(&existing.timestamp, &event.timestamp) != Ordering::Greater
+        });
         self.events.insert(index, event);
         true
     }
@@ -51,6 +54,18 @@ impl EventCache {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
+    }
+}
+
+fn timestamp_order(lhs: &str, rhs: &str) -> Ordering {
+    match (
+        DateTime::parse_from_rfc3339(lhs),
+        DateTime::parse_from_rfc3339(rhs),
+    ) {
+        (Ok(lhs), Ok(rhs)) => lhs
+            .cmp(&rhs)
+            .then_with(|| lhs.to_rfc3339().cmp(&rhs.to_rfc3339())),
+        _ => lhs.cmp(rhs),
     }
 }
 
@@ -89,5 +104,19 @@ mod tests {
             .map(|event| event.id.as_str())
             .collect();
         assert_eq!(ids, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn event_cache_orders_equivalent_rfc3339_timestamps_chronologically() {
+        let mut cache = EventCache::default();
+        assert!(cache.insert(envelope("late", "2026-03-21T16:00:02+01:00")));
+        assert!(cache.insert(envelope("early", "2026-03-21T15:00:01Z")));
+
+        let ids: Vec<_> = cache
+            .events()
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["early", "late"]);
     }
 }

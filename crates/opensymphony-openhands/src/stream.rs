@@ -163,6 +163,7 @@ pub struct AttachedConversation {
     client: OpenHandsClient,
     cache: Arc<Mutex<EventCache>>,
     state: Arc<Mutex<ConversationStateMirror>>,
+    status_tx: watch::Sender<Option<RemoteExecutionStatus>>,
     status_rx: watch::Receiver<Option<RemoteExecutionStatus>>,
     stop_tx: Option<watch::Sender<bool>>,
     task: Option<JoinHandle<()>>,
@@ -209,6 +210,7 @@ impl AttachedConversation {
 
         let initial_status = state.lock().await.execution_status;
         let (status_tx, status_rx) = watch::channel(initial_status);
+        let runtime_status_tx = status_tx.clone();
         let (stop_tx, stop_rx) = watch::channel(false);
 
         let task = tokio::spawn(
@@ -218,7 +220,7 @@ impl AttachedConversation {
                 websocket: websocket.clone(),
                 cache: cache.clone(),
                 state: state.clone(),
-                status_tx,
+                status_tx: runtime_status_tx,
                 stop_rx,
                 socket_url,
                 stream,
@@ -231,6 +233,7 @@ impl AttachedConversation {
             client,
             cache,
             state,
+            status_tx,
             status_rx,
             stop_tx: Some(stop_tx),
             task: Some(task),
@@ -257,6 +260,17 @@ impl AttachedConversation {
     /// Returns a cloned copy of the current state mirror.
     pub async fn state(&self) -> ConversationStateMirror {
         self.state.lock().await.clone()
+    }
+
+    /// Clears the cached execution status before a newly triggered run starts streaming updates.
+    pub async fn clear_execution_status(&self) {
+        {
+            let mut state = self.state.lock().await;
+            state.execution_status = None;
+            state.fields.remove("execution_status");
+            state.field_timestamps.remove("execution_status");
+        }
+        let _ = self.status_tx.send(None);
     }
 
     /// Forces an immediate reconcile pass and returns how many new events were added.
