@@ -55,7 +55,9 @@ openhands:
       RUNTIME: process
 
   conversation:
-    reuse_policy: per_issue
+    # Defaults to the current runtime-owned per-issue conversation reuse behavior.
+    # Non-default reuse-policy overrides are rejected until the orchestrator/runtime
+    # path can actually honor them end-to-end.
     # This path stays relative to the per-issue workspace; parent traversal is rejected.
     persistence_dir_relative: ".opensymphony/openhands"
     max_iterations: 500
@@ -71,7 +73,8 @@ openhands:
         # Provider-specific auth/base-url overrides are rejected until the
         # current conversation-create adapter can forward them.
         model: ${OPENHANDS_MODEL}
-      log_completions: false
+      # Workflow-owned agent extras such as `log_completions` are rejected until
+      # the current conversation-create payload can actually forward them.
 
   websocket:
     enabled: true

@@ -258,8 +258,10 @@ Current workflow defaulting:
 - `confirmation_policy.kind` defaults to `NeverConfirm` when omitted
 - unsupported `confirmation_policy` options are rejected during workflow resolution because the current request subset only serializes `{ kind }`
 - `agent.kind` defaults to `Agent` when omitted
+- non-default `openhands.conversation.reuse_policy` values are rejected during workflow resolution until the orchestrator/runtime path can honor alternate conversation reuse behavior
 - `max_iterations` must fit the downstream OpenHands `u32` request range
 - `agent.llm.model` is required whenever an `llm` block is present
+- workflow-owned agent options such as `log_completions` and extra agent keys are rejected during workflow resolution until the current request subset can actually forward them
 - workflow-owned LLM provider env overrides such as `api_key_env` and `base_url_env` are rejected during workflow resolution until the runtime conversation-create adapter can actually forward them
 - workflow-owned `openhands.mcp.stdio_servers` entries are rejected during workflow resolution until the runtime conversation-create adapter can actually send `mcp_config`
 
@@ -271,6 +273,8 @@ Implementation rule:
 Current repository implementation:
 
 - `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
+- the current request model still serializes `agent` as only `{ kind, llm }`, so workflow-owned agent extras such as `log_completions` and arbitrary agent options are rejected before runtime launch
+- the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
 - the current request model does not yet serialize `mcp_config`, so workflow-owned MCP stdio server declarations are rejected before runtime launch
 - `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`
 - `AcceptedResponse` tolerates either an explicit JSON success body or an empty successful response for `POST /events` and `POST /run`

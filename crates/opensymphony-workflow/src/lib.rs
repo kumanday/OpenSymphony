@@ -638,6 +638,95 @@ openhands:
     }
 
     #[test]
+    fn rejects_unsupported_openhands_conversation_reuse_policy_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    reuse_policy: fresh_each_run
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported reuse policies should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.conversation.reuse_policy",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_agent_option_overrides() {
+        for workflow_source in [
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      log_completions: true
+---
+{{ issue.identifier }}
+"#,
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      custom_mode: verbose
+---
+{{ issue.identifier }}
+"#,
+        ] {
+            let workflow =
+                WorkflowDefinition::parse(workflow_source).expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow
+                .resolve(Path::new("/repo"), &env)
+                .expect_err("unsupported agent options should fail during resolution");
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent.log_completions",
+                    ..
+                } | WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
     fn rejects_openhands_max_iterations_above_u32_range() {
         let workflow = WorkflowDefinition::parse(&format!(
             r#"---
