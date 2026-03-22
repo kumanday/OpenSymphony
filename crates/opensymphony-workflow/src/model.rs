@@ -25,20 +25,6 @@ pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 
-pub fn default_active_states() -> Vec<String> {
-    vec!["Todo".to_owned(), "In Progress".to_owned()]
-}
-
-pub fn default_terminal_states() -> Vec<String> {
-    vec![
-        "Closed".to_owned(),
-        "Cancelled".to_owned(),
-        "Canceled".to_owned(),
-        "Duplicate".to_owned(),
-        "Done".to_owned(),
-    ]
-}
-
 pub fn default_openhands_local_server_command() -> Vec<String> {
     vec![
         "python".to_owned(),

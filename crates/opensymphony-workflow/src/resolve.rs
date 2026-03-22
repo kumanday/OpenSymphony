@@ -6,9 +6,9 @@ use std::{
 use crate::{
     error::WorkflowConfigError,
     model::{
-        default_active_states, default_openhands_local_server_command, default_terminal_states,
-        AgentConfig, AgentFrontMatter, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
-        OpenHandsConfig, OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
+        default_openhands_local_server_command, AgentConfig, AgentFrontMatter, Environment,
+        HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig,
+        OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
         OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsFrontMatter,
         OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
         OpenHandsMcpConfig, OpenHandsStdioServerConfig, OpenHandsStdioServerFrontMatter,
@@ -74,14 +74,14 @@ fn resolve_tracker<E: Environment>(
         endpoint,
         api_key,
         project_slug,
-        active_states: tracker
-            .active_states
-            .clone()
-            .unwrap_or_else(default_active_states),
-        terminal_states: tracker
-            .terminal_states
-            .clone()
-            .unwrap_or_else(default_terminal_states),
+        active_states: resolve_state_list(
+            tracker.active_states.as_deref(),
+            "tracker.active_states",
+        )?,
+        terminal_states: resolve_state_list(
+            tracker.terminal_states.as_deref(),
+            "tracker.terminal_states",
+        )?,
     })
 }
 
@@ -156,7 +156,7 @@ fn resolve_agent(agent: &AgentFrontMatter) -> Result<AgentConfig, WorkflowConfig
         stall_timeout_ms: resolve_stall_timeout(agent.stall_timeout_ms.as_ref())?,
         max_concurrent_agents_by_state: resolve_state_limits(
             agent.max_concurrent_agents_by_state.as_ref(),
-        ),
+        )?,
     })
 }
 
@@ -175,21 +175,52 @@ fn resolve_stall_timeout(
     }
 }
 
-fn resolve_state_limits(raw: Option<&BTreeMap<String, IntegerLike>>) -> BTreeMap<String, u64> {
+fn resolve_state_list(
+    raw: Option<&[String]>,
+    field: &'static str,
+) -> Result<Vec<String>, WorkflowConfigError> {
+    let raw = raw.ok_or(WorkflowConfigError::MissingRequiredField { field })?;
+    if raw.is_empty() {
+        return Err(WorkflowConfigError::InvalidField {
+            field,
+            message: "must contain at least one state".to_owned(),
+        });
+    }
+
+    raw.iter()
+        .map(|state| {
+            normalize_optional(state).ok_or_else(|| WorkflowConfigError::InvalidField {
+                field,
+                message: "state names must not be empty".to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn resolve_state_limits(
+    raw: Option<&BTreeMap<String, IntegerLike>>,
+) -> Result<BTreeMap<String, u64>, WorkflowConfigError> {
     let mut resolved = BTreeMap::new();
     let Some(raw) = raw else {
-        return resolved;
+        return Ok(resolved);
     };
 
     for (state, value) in raw {
-        if let Ok(parsed) = parse_i64(value, "agent.max_concurrent_agents_by_state") {
-            if parsed > 0 {
-                resolved.insert(state.to_lowercase(), parsed as u64);
-            }
+        let state = normalize_optional(state).ok_or_else(|| WorkflowConfigError::InvalidField {
+            field: "agent.max_concurrent_agents_by_state",
+            message: "state names must not be empty".to_owned(),
+        })?;
+        let parsed = parse_i64(value, "agent.max_concurrent_agents_by_state")?;
+        if parsed <= 0 {
+            return Err(WorkflowConfigError::InvalidField {
+                field: "agent.max_concurrent_agents_by_state",
+                message: "state limits must be greater than zero".to_owned(),
+            });
         }
+        resolved.insert(state.to_lowercase(), parsed as u64);
     }
 
-    resolved
+    Ok(resolved)
 }
 
 fn resolve_openhands<E: Environment>(

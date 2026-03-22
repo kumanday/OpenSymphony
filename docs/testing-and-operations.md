@@ -90,10 +90,12 @@ Current implementation:
 - resolve defaults and env vars
 - fail when an explicitly referenced env token such as `tracker.api_key: $VAR` is unset
 - fall back to `LINEAR_API_KEY` when `tracker.api_key` is omitted
+- fail when `tracker.active_states` or `tracker.terminal_states` are omitted
 - resolve workflow-relative workspace paths and relative OpenHands persistence paths
 - resolve bare relative workspace roots against the `WORKFLOW.md` directory
 - reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
+- fail on malformed `agent.max_concurrent_agents_by_state` entries
 - preserve the Markdown body exactly after the front matter terminator
 
 ## 3.2 Workspace manager
