@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct TrackerIssue {
     pub id: String,
     pub identifier: String,
+    pub url: String,
     pub title: String,
     pub description: Option<String>,
     pub priority: Option<u8>,

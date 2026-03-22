@@ -13,6 +13,7 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
     Ok(TrackerIssue {
         id: node.id,
         identifier: node.identifier,
+        url: node.url,
         title: node.title,
         description: node.description,
         priority: normalize_priority(node.priority)?,
@@ -71,6 +72,8 @@ fn normalize_blocker(blocker: LinearBlockerNode) -> TrackerIssueBlocker {
     }
 }
 
+const LINEAR_PRIORITY_LOWEST_URGENCY: u64 = 4;
+
 fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
     if !priority.is_finite() || priority < 0.0 {
         return Err(LinearError::InvalidResponse(format!(
@@ -87,9 +90,11 @@ fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
 
     match rounded as u64 {
         0 => Ok(None),
-        value if value <= u8::MAX as u64 => Ok(Some(value as u8)),
+        value if value <= LINEAR_PRIORITY_LOWEST_URGENCY => {
+            Ok(Some((LINEAR_PRIORITY_LOWEST_URGENCY + 1 - value) as u8))
+        }
         value => Err(LinearError::InvalidResponse(format!(
-            "Linear priority exceeds u8 range: {value}"
+            "Linear priority must be between 0 and {LINEAR_PRIORITY_LOWEST_URGENCY}, got {value}"
         ))),
     }
 }
@@ -109,5 +114,22 @@ mod tests {
     #[test]
     fn fractional_priority_is_rejected() {
         assert!(normalize_priority(1.5).is_err());
+    }
+
+    #[test]
+    fn linear_priority_is_inverted_for_scheduler_ordering() {
+        assert_eq!(
+            normalize_priority(1.0).expect("priority should normalize"),
+            Some(4)
+        );
+        assert_eq!(
+            normalize_priority(4.0).expect("priority should normalize"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn undocumented_linear_priority_values_are_rejected() {
+        assert!(normalize_priority(5.0).is_err());
     }
 }

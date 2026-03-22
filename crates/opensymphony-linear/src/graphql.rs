@@ -14,6 +14,7 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $first: Int!,
     nodes {
       id
       identifier
+      url
       title
       description
       priority
@@ -186,6 +187,7 @@ pub(super) struct PageInfo {
 pub(super) struct LinearIssueNode {
     pub id: String,
     pub identifier: String,
+    pub url: String,
     pub title: String,
     pub description: Option<String>,
     pub priority: f64,
