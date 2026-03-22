@@ -297,6 +297,23 @@ mod tests {
     }
 
     #[test]
+    fn claim_rejects_runs_without_an_attached_workspace() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let execution = IssueExecution::new(issue.clone(), ts(30));
+        let run = sample_run(&issue, &workspace, None, ts(40));
+
+        let error = match execution.claim(run) {
+            Ok(_) => panic!("claiming without an attached workspace should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::WorkspaceNotAttached { .. }
+        ));
+    }
+
+    #[test]
     fn claim_accepts_equivalent_normalized_workspace_paths() {
         let issue = sample_issue();
         let workspace = sample_workspace();
