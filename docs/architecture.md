@@ -112,6 +112,22 @@ This keeps:
 - UI crashes from affecting execution
 - future hosted deployment options open
 
+The control-plane stream must preserve monotonically advancing snapshot sequences for slow or reconnecting consumers so the UI never rolls back to stale state after it has already rendered a newer snapshot.
+
+The control-plane snapshot contract should remain additive for read-only clients:
+unknown summarized event kinds and unknown additive snapshot enum values such as
+`daemon.state`, `runtime_state`, or `last_outcome` must not invalidate the whole snapshot
+payload, and bootstrap snapshot fetches should fail fast enough that reconnect
+logic can retry instead of wedging the UI behind a hung HTTP request. SSE
+subscriptions should also use bounded connection-establishment and read
+timeouts so a blackholed or stalled `/api/v1/events` connection fails back into
+reconnect, while normal keepalive traffic keeps healthy idle streams attached.
+Retryable SSE transport failures should surface a reconnecting state to the UI
+before the next successful snapshot arrives, and the attach-timeout guard must
+stay active until the first decoded snapshot arrives on each attach or retry so
+an `Open`-only or header-only stream cannot wedge the bridge before bootstrap
+data lands.
+
 ## 4. Runtime component model
 
 ## 4.1 Core crates
@@ -161,7 +177,7 @@ Recommended crate boundaries:
   - reconciliation
 - `opensymphony-control`
   - snapshot store
-  - local HTTP and WebSocket control-plane API
+  - local HTTP and SSE control-plane API
 - `opensymphony-cli`
   - daemon startup
   - doctor command
@@ -269,6 +285,28 @@ The control plane exposes a summarized runtime snapshot derived from:
 
 The snapshot is not just a projection of OpenHands state. It is a Symphony-specific view.
 
+## 6.3 Implemented observability slice
+
+The current repository implements the first read-only control-plane and FrankenTUI slice with these concrete boundaries:
+
+- `opensymphony-domain`
+  - `SnapshotEnvelope`
+  - daemon, issue, metrics, and recent-event serialization models
+- `opensymphony-control`
+  - in-memory snapshot store
+  - `GET /healthz` derived from the current daemon snapshot state
+  - `GET /api/v1/snapshot`
+  - `GET /api/v1/events` using Server-Sent Events
+- `opensymphony-tui`
+  - reducer-owned TUI state
+  - REST bootstrap plus SSE reconnect loop
+  - visible header status sourced from reducer-owned control-plane connection text
+  - inline-mode rendering over immutable view text
+- `opensymphony-cli`
+  - `daemon` and `tui` entrypoints used for local attach and detach validation
+
+This slice deliberately keeps the UI on a stable read-only contract while the orchestration crates continue to mature behind it.
+
 ## 7. Local MVP data flow
 
 ## 7.1 Dispatch path
@@ -309,6 +347,21 @@ PollTick
   -> Orchestrator.schedule_next_state()
   -> SnapshotPublisher.publish()
 ```
+
+## 7.3 Current local attach path
+
+The implemented local observability flow is narrower than the full future daemon path, but it already preserves the same boundary:
+
+1. `opensymphony-cli daemon` starts a local control-plane server.
+2. A snapshot store publishes immutable `SnapshotEnvelope` values.
+3. `opensymphony-cli tui` fetches `/api/v1/snapshot`.
+4. The TUI opens `/api/v1/events` and listens for SSE updates.
+5. Snapshot fetches use a bounded timeout so reconnect can retry if the HTTP endpoint hangs.
+6. SSE attach attempts use a bounded connection-establishment timeout so blackholed or never-opening streams fail back into reconnect.
+7. Until the first decoded `snapshot` arrives, additive non-`snapshot` SSE events are ignored and do not suppress the attach timeout.
+8. SSE reads also use a bounded idle timeout so wedged streams fail back into the reconnect loop.
+9. On stream failure, the TUI refetches the current snapshot before resubscribing.
+10. Detaching the UI leaves the daemon process and snapshot publication unaffected.
 
 ## 8. Recovery model
 
