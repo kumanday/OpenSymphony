@@ -172,6 +172,16 @@ mod tests {
             must_some(execution.retry(), "retry metadata must exist").attempt,
             retry.attempt
         );
+        let retry_snapshot = execution.snapshot();
+        assert_eq!(
+            must_some(
+                retry_snapshot.conversation,
+                "retry-queued snapshots must retain conversation metadata",
+            )
+            .conversation_id
+            .as_str(),
+            "conv_260"
+        );
         assert_eq!(
             must_some(
                 execution.last_worker_outcome(),
@@ -320,5 +330,54 @@ mod tests {
             json!("/tmp/workspaces/COE-260")
         );
         assert_eq!(json["issues"][0]["retry"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn replayed_runtime_events_do_not_hide_existing_stalls() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        execution.attach_workspace(workspace.clone());
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let session = ConversationMetadata {
+            conversation_id: must(super::ConversationId::new("conv_260")),
+            server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+            fresh_conversation: false,
+            runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_owned()),
+            stream_state: RuntimeStreamState::Ready,
+            last_event_id: None,
+            last_event_kind: None,
+            last_event_at: None,
+            last_event_summary: None,
+        };
+
+        let mut execution =
+            must(execution.start_running(ts(50), super::DurationMs::new(300), Some(session)));
+
+        must(execution.observe_runtime_event(
+            ts(60),
+            Some("evt_latest".to_owned()),
+            Some("conversation_state_update".to_owned()),
+            Some("ready".to_owned()),
+        ));
+        must(execution.observe_runtime_event(
+            ts(55),
+            Some("evt_old".to_owned()),
+            Some("tool_call".to_owned()),
+            Some("replayed".to_owned()),
+        ));
+
+        let conversation = must_some(
+            execution.conversation(),
+            "running execution must keep conversation metadata",
+        );
+        assert_eq!(conversation.last_event_at, Some(ts(60)));
+        assert_eq!(conversation.last_event_id.as_deref(), Some("evt_latest"));
+
+        let snapshot = execution.snapshot();
+        assert_eq!(snapshot.runtime.last_event_at, Some(ts(60)));
+        assert_eq!(snapshot.runtime.stalled_at, Some(ts(360)));
     }
 }

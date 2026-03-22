@@ -98,7 +98,6 @@ pub enum SchedulerState {
     },
     Running {
         run: RunAttempt,
-        session: Option<ConversationMetadata>,
         stall: StallMetadata,
     },
     RetryQueued {
@@ -126,6 +125,7 @@ impl SchedulerState {
 pub struct IssueExecution {
     issue: NormalizedIssue,
     workspace: Option<WorkspaceRecord>,
+    conversation: Option<ConversationMetadata>,
     state: SchedulerState,
     last_worker_outcome: Option<WorkerOutcomeRecord>,
     recent_worker_outcomes: Vec<WorkerOutcomeRecord>,
@@ -136,6 +136,7 @@ impl IssueExecution {
         Self {
             issue,
             workspace: None,
+            conversation: None,
             state: SchedulerState::Unclaimed { since: observed_at },
             last_worker_outcome: None,
             recent_worker_outcomes: Vec::new(),
@@ -174,13 +175,7 @@ impl IssueExecution {
     }
 
     pub fn conversation(&self) -> Option<&ConversationMetadata> {
-        match &self.state {
-            SchedulerState::Running {
-                session: Some(session),
-                ..
-            } => Some(session),
-            _ => None,
-        }
+        self.conversation.as_ref()
     }
 
     pub fn retry(&self) -> Option<&RetryEntry> {
@@ -234,9 +229,11 @@ impl IssueExecution {
     ) -> Result<Self, StateTransitionError> {
         match self.state {
             SchedulerState::Claimed { run } => {
+                if let Some(session) = session {
+                    self.conversation = Some(session);
+                }
                 self.state = SchedulerState::Running {
                     run: run.mark_started(started_at),
-                    session,
                     stall: StallMetadata::new(started_at, stall_timeout_ms),
                 };
                 Ok(self)
@@ -267,17 +264,17 @@ impl IssueExecution {
 
     pub fn observe_runtime_event(
         &mut self,
-        observed_at: TimestampMs,
+        event_at: TimestampMs,
         event_id: Option<String>,
         event_kind: Option<String>,
         summary: Option<String>,
     ) -> Result<(), StateTransitionError> {
         match &mut self.state {
-            SchedulerState::Running { session, stall, .. } => {
-                if let Some(session) = session {
-                    session.observe_event(observed_at, event_id, event_kind, summary);
+            SchedulerState::Running { stall, .. } => {
+                if let Some(session) = &mut self.conversation {
+                    session.observe_event(event_at, event_id, event_kind, summary);
                 }
-                stall.observe_activity(observed_at);
+                stall.observe_activity(event_at);
                 Ok(())
             }
             _ => Err(StateTransitionError::InvalidTransition {
