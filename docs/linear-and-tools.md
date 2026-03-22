@@ -25,7 +25,7 @@ Fetch issues that:
 Implementation note:
 
 - the GraphQL adapter filters by Linear `Project.slugId`, so workflow `tracker.project_slug` should store that stable slug value
-- paginated `issues(...)` reads should pass `includeArchived: true` so cleanup and reconciliation can still observe archived terminal work
+- candidate and terminal-state `issues(...)` reads should pass `includeArchived: true` so cleanup can still observe archived terminal work
 
 ## 2.2 State refresh by IDs
 
@@ -34,6 +34,7 @@ Fetch current states for all running issues during reconciliation.
 Implementation note:
 
 - by-ID reconciliation should keep the same `project_slug` filter as candidate reads so issues moved out of the tracked project fall out of orchestration instead of staying alive
+- by-ID reconciliation should exclude archived issues so operators can archive live work to release it from orchestration immediately
 
 ## 2.3 Terminal-state fetch for startup cleanup
 

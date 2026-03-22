@@ -193,7 +193,7 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
         .as_str()
         .expect("query should be a string")
         .contains("query IssueStatesByIds"));
-    assert!(requests[0].body["query"]
+    assert!(!requests[0].body["query"]
         .as_str()
         .expect("query should be a string")
         .contains("includeArchived: true"));
