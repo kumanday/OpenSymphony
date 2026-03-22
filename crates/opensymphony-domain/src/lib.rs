@@ -318,6 +318,58 @@ mod tests {
     }
 
     #[test]
+    fn start_running_requires_conversation_metadata_for_first_run() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let error = match execution.start_running(ts(50), super::DurationMs::new(300), None) {
+            Ok(_) => panic!("starting the first run without conversation metadata should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::ConversationNotAttached
+        ));
+    }
+
+    #[test]
+    fn start_running_can_reuse_retained_conversation_metadata() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(300),
+            Some(sample_conversation(false)),
+        ));
+        let execution = must(execution.release(ts(60), ReleaseReason::TrackerInactive, None));
+        let execution = must(execution.reopen(ts(70)));
+
+        let run = sample_run(&issue, &workspace, None, ts(80));
+        let execution = must(execution.claim(run));
+        let execution = must(execution.start_running(ts(90), super::DurationMs::new(300), None));
+
+        assert_eq!(
+            must_some(
+                execution.conversation(),
+                "retained conversation metadata should be reused",
+            )
+            .conversation_id
+            .as_str(),
+            "conv_260"
+        );
+        assert_eq!(execution.status(), SchedulerStatus::Running);
+    }
+
+    #[test]
     fn claim_accepts_equivalent_normalized_workspace_paths() {
         let issue = sample_issue();
         let workspace = sample_workspace();
@@ -609,6 +661,27 @@ mod tests {
     }
 
     #[test]
+    fn attach_workspace_rejects_first_binding_for_the_wrong_issue_path() {
+        let issue = sample_issue();
+        let workspace = WorkspaceRecord {
+            path: PathBuf::from("/tmp/workspaces/COE-261"),
+            workspace_key: must(WorkspaceKey::new("COE-260")),
+            ..sample_workspace()
+        };
+        let mut execution = IssueExecution::new(issue, ts(30));
+
+        let error = match execution.attach_workspace(workspace) {
+            Ok(_) => panic!("first workspace attachment for a different issue path should fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::WorkspaceIssueMismatch { .. }
+        ));
+        assert!(execution.workspace().is_none());
+    }
+
+    #[test]
     fn attach_workspace_allows_refresh_for_same_identity() {
         let issue = sample_issue();
         let workspace = sample_workspace();
@@ -653,5 +726,98 @@ mod tests {
                 .map(|worker| worker.normal_retry_count),
             Some(0)
         );
+    }
+
+    #[test]
+    fn queue_retry_rejects_outcomes_from_a_different_worker() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let outcome = WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-2")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(40),
+            finished_at: ts(41),
+            turn_count: 0,
+            summary: Some("stale worker".to_owned()),
+            error: Some("boom".to_owned()),
+        };
+        let retry = must(RetryEntry::failure(
+            &issue,
+            None,
+            0,
+            ts(41),
+            RetryReason::Failure,
+            Some("boom".to_owned()),
+            RetryPolicy::default(),
+        ));
+
+        let error = match execution.queue_retry(retry, outcome) {
+            Ok(_) => panic!("queue_retry should reject stale worker outcomes"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, StateTransitionError::WorkerMismatch { .. }));
+    }
+
+    #[test]
+    fn queue_retry_rejects_outcomes_from_a_different_attempt() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let first_run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(first_run));
+        let first_outcome = WorkerOutcomeRecord::from_run(
+            must_some(execution.current_run(), "claimed run must exist"),
+            WorkerOutcomeKind::Succeeded,
+            ts(50),
+            Some("completed".to_owned()),
+            None,
+        );
+        let first_retry = must(RetryEntry::continuation(
+            &issue,
+            None,
+            0,
+            ts(50),
+            RetryPolicy::default(),
+        ));
+        let execution = must(execution.queue_retry(first_retry.clone(), first_outcome));
+
+        let retry_run = sample_run(&issue, &workspace, Some(first_retry.attempt), ts(60));
+        let execution = must(execution.claim(retry_run));
+        let stale_outcome = WorkerOutcomeRecord {
+            worker_id: must(WorkerId::new("worker-1")),
+            attempt: None,
+            outcome: WorkerOutcomeKind::Failed,
+            started_at: ts(40),
+            finished_at: ts(61),
+            turn_count: 1,
+            summary: Some("old attempt".to_owned()),
+            error: Some("boom".to_owned()),
+        };
+        let retry = must(RetryEntry::failure(
+            &issue,
+            Some(first_retry.attempt),
+            1,
+            ts(61),
+            RetryReason::Failure,
+            Some("boom".to_owned()),
+            RetryPolicy::default(),
+        ));
+
+        let error = match execution.queue_retry(retry, stale_outcome) {
+            Ok(_) => panic!("queue_retry should reject stale attempt outcomes"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            StateTransitionError::AttemptMismatch { .. }
+        ));
     }
 }

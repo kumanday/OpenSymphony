@@ -19,9 +19,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        boundary_summary, DurationMs, IssueExecution, IssueId, IssueIdentifier, IssueState,
-        IssueStateCategory, NormalizedIssue, ReleaseReason, RunAttempt, SchedulerStatus,
-        TimestampMs, WorkerId, WorkspaceKey, WorkspaceRecord,
+        boundary_summary, ConversationId, ConversationMetadata, DurationMs, IssueExecution,
+        IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, ReleaseReason,
+        RunAttempt, RuntimeStreamState, SchedulerStatus, TimestampMs, WorkerId, WorkspaceKey,
+        WorkspaceRecord,
     };
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
@@ -74,8 +75,21 @@ mod tests {
         let mut execution = IssueExecution::new(issue, TimestampMs::new(0));
         must(execution.attach_workspace(workspace));
         let execution = must(execution.claim(run));
-        let execution =
-            must(execution.start_running(TimestampMs::new(11), DurationMs::new(300_000), None));
+        let execution = must(execution.start_running(
+            TimestampMs::new(11),
+            DurationMs::new(300_000),
+            Some(ConversationMetadata {
+                conversation_id: must(ConversationId::new("conv_260")),
+                server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+                fresh_conversation: true,
+                runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_owned()),
+                stream_state: RuntimeStreamState::Ready,
+                last_event_id: None,
+                last_event_kind: None,
+                last_event_at: None,
+                last_event_summary: None,
+            }),
+        ));
         let execution =
             must(execution.release(TimestampMs::new(12), ReleaseReason::TrackerInactive, None));
 
