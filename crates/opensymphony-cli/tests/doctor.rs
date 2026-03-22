@@ -158,6 +158,90 @@ fn doctor_defaults_target_repo_from_checkout_root() {
 }
 
 #[test]
+fn doctor_fails_when_required_env_placeholder_is_unset() {
+    let repo_root = repo_root();
+    let config_dir =
+        tempfile::tempdir_in(repo_root.join("examples/configs")).expect("config dir should exist");
+    let config_path = config_dir.path().join("doctor-missing-env.yaml");
+    let missing_var = "OSYM_TEST_MISSING_WORKSPACE_ROOT";
+    let config = serde_yaml::to_string(&Value::Mapping(
+        [
+            (
+                Value::String("workspace_root".to_string()),
+                Value::String(format!("${{{missing_var}}}")),
+            ),
+            (
+                Value::String("target_repo".to_string()),
+                Value::String(repo_root.join("examples/target-repo").display().to_string()),
+            ),
+            (
+                Value::String("openhands".to_string()),
+                Value::Mapping(
+                    [
+                        (
+                            Value::String("base_url".to_string()),
+                            Value::String("http://127.0.0.1:8000".to_string()),
+                        ),
+                        (
+                            Value::String("tool_dir".to_string()),
+                            Value::String(
+                                repo_root
+                                    .join("tools/openhands-server")
+                                    .display()
+                                    .to_string(),
+                            ),
+                        ),
+                        (Value::String("probe_model".to_string()), Value::Null),
+                        (Value::String("probe_api_key_env".to_string()), Value::Null),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ),
+            (
+                Value::String("linear".to_string()),
+                Value::Mapping(
+                    [
+                        (Value::String("enabled".to_string()), Value::Bool(false)),
+                        (
+                            Value::String("api_key_env".to_string()),
+                            Value::String("LINEAR_API_KEY".to_string()),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    ))
+    .expect("config should serialize");
+    std::fs::write(&config_path, config).expect("config should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .current_dir(&repo_root)
+        .env_remove(missing_var)
+        .output()
+        .expect("doctor command should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "doctor should fail when a required env placeholder is unset: stdout={}, stderr={stderr}",
+        stdout,
+    );
+    assert!(
+        stdout.contains(missing_var) || stderr.contains(missing_var),
+        "doctor error should mention the missing env placeholder: stdout={stdout}, stderr={stderr}",
+    );
+}
+
+#[test]
 fn run_local_launcher_is_independent_of_caller_cwd() {
     let repo_root = repo_root();
     let tool_dir = repo_root.join("tools/openhands-server");
