@@ -45,6 +45,11 @@ jobs:
           base_url="${AI_REVIEW_BASE_URL:-}"
           review_style="${AI_REVIEW_STYLE:-standard}"
           require_evidence="${AI_REVIEW_REQUIRE_EVIDENCE:-true}"
+          
+          # Trim whitespace from variables
+          provider_kind=$(echo "$provider_kind" | xargs)
+          model_id=$(echo "$model_id" | xargs)
+          base_url=$(echo "$base_url" | xargs)
 
           if [[ -z "$provider_kind" ]]; then
             echo "::error::Missing repository variable AI_REVIEW_PROVIDER_KIND"
