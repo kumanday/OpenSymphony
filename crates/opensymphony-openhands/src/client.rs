@@ -394,10 +394,7 @@ impl RuntimeEventStream {
                 return Ok(Some(event));
             }
 
-            if self.socket.is_none()
-                && self.pending_events.is_empty()
-                && !self.reconnect_pending
-            {
+            if self.socket.is_none() && self.pending_events.is_empty() && !self.reconnect_pending {
                 return Ok(None);
             }
         }
