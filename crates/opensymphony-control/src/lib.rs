@@ -20,6 +20,9 @@ use tokio::{
 use tracing::warn;
 use url::Url;
 
+const CONTROL_PLANE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const CONTROL_PLANE_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(35);
+
 #[derive(Debug, Clone)]
 pub struct SnapshotStore {
     inner: Arc<StoreState>,
@@ -134,7 +137,7 @@ async fn events(
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()
-            .interval(Duration::from_secs(15))
+            .interval(CONTROL_PLANE_KEEPALIVE_INTERVAL)
             .text("keepalive"),
     )
 }
@@ -200,13 +203,19 @@ async fn catch_up_lagged_receiver(
 pub struct ControlPlaneClient {
     base_url: Url,
     http: reqwest::Client,
+    stream_http: reqwest::Client,
 }
 
 impl ControlPlaneClient {
     pub fn new(base_url: Url) -> Self {
+        Self::with_stream_read_timeout(base_url, CONTROL_PLANE_STREAM_READ_TIMEOUT)
+    }
+
+    fn with_stream_read_timeout(base_url: Url, stream_read_timeout: Duration) -> Self {
         Self {
             base_url,
             http: reqwest::Client::new(),
+            stream_http: build_stream_http_client(stream_read_timeout),
         }
     }
 
@@ -218,7 +227,7 @@ impl ControlPlaneClient {
 
     pub fn stream_updates(&self) -> Result<ControlPlaneEventStream, ControlPlaneClientError> {
         let events_url = self.join_path("api/v1/events")?;
-        let request = self.http.get(events_url);
+        let request = self.stream_http.get(events_url);
         let inner = EventSource::new(request).map_err(ControlPlaneClientError::StreamRequest)?;
         Ok(ControlPlaneEventStream { inner })
     }
@@ -232,6 +241,15 @@ impl ControlPlaneClient {
                 source,
             })
     }
+}
+
+fn build_stream_http_client(stream_read_timeout: Duration) -> reqwest::Client {
+    // `reqwest-eventsource` ignores SSE comment keepalives, so idle detection has to key off
+    // raw socket reads rather than decoded message delivery.
+    reqwest::Client::builder()
+        .read_timeout(stream_read_timeout)
+        .build()
+        .expect("static stream read timeout config should produce a reqwest client")
 }
 
 fn normalized_base_url(base_url: &Url) -> Url {
@@ -313,10 +331,16 @@ mod tests {
         ControlPlaneWorkerOutcome as WorkerOutcome,
     };
     use std::time::Duration;
-    use tokio::time::timeout;
+    use tokio::{
+        io::AsyncWriteExt,
+        net::TcpListener,
+        time::{sleep, timeout},
+    };
     use url::Url;
 
-    use super::{next_snapshot_envelope, ControlPlaneClient, SnapshotStore};
+    use super::{
+        next_snapshot_envelope, ControlPlaneClient, ControlPlaneClientError, SnapshotStore,
+    };
 
     fn fixture_snapshot(step: u64) -> DaemonSnapshot {
         let now = Utc
@@ -416,5 +440,107 @@ mod tests {
             events_url.as_str(),
             "http://proxy/opensymphony/api/v1/events"
         );
+    }
+
+    async fn write_sse_headers(socket: &mut tokio::net::TcpStream) {
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\n",
+            )
+            .await
+            .expect("mock SSE server should write headers");
+    }
+
+    #[tokio::test]
+    async fn stream_updates_time_out_when_the_event_stream_goes_idle_after_open() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SSE client");
+            write_sse_headers(&mut socket).await;
+            sleep(Duration::from_millis(250)).await;
+        });
+
+        let client =
+            ControlPlaneClient::with_stream_read_timeout(base_url, Duration::from_millis(75));
+        let mut stream = client.stream_updates().expect("open event stream");
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should surface the idle timeout")
+            .expect("stream should report an error after going idle");
+
+        match result {
+            Err(ControlPlaneClientError::Stream(error)) => match error.as_ref() {
+                reqwest_eventsource::Error::Transport(reqwest_error) => {
+                    assert!(reqwest_error.is_timeout());
+                }
+                other => panic!("expected a transport timeout, got {other:?}"),
+            },
+            other => panic!("expected a stream timeout error, got {other:?}"),
+        }
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn stream_updates_stay_alive_when_keepalive_comments_arrive_before_a_snapshot() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let expected_snapshot = {
+            let snapshot = fixture_snapshot(5);
+            super::SnapshotEnvelope {
+                sequence: 6,
+                published_at: snapshot.generated_at,
+                snapshot,
+            }
+        };
+        let payload = serde_json::to_string(&expected_snapshot).expect("serialize snapshot");
+        let event = format!(
+            "event: snapshot\nid: {}\ndata: {payload}\n\n",
+            expected_snapshot.sequence
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SSE client");
+            write_sse_headers(&mut socket).await;
+            for _ in 0..3 {
+                sleep(Duration::from_millis(40)).await;
+                socket
+                    .write_all(b": keepalive\n\n")
+                    .await
+                    .expect("mock SSE server should write keepalive");
+            }
+            sleep(Duration::from_millis(40)).await;
+            socket
+                .write_all(event.as_bytes())
+                .await
+                .expect("mock SSE server should write snapshot event");
+        });
+
+        let client =
+            ControlPlaneClient::with_stream_read_timeout(base_url, Duration::from_millis(75));
+        let mut stream = client.stream_updates().expect("open event stream");
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should stay alive through keepalives")
+            .expect("stream should yield the next snapshot")
+            .expect("snapshot event should decode");
+
+        assert_eq!(result, expected_snapshot);
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
     }
 }

@@ -220,6 +220,7 @@ Current reconnect behavior:
 - keep rendering that bootstrap snapshot with `conn=connecting` until the SSE stream yields its first snapshot
 - subscribe to the SSE stream
 - if the stream closes or fails, keep the last good snapshot visible, mark the connection as reconnecting, and surface the computed reconnect reason in the top header
+- if `/api/v1/events` goes silent for longer than the keepalive watchdog budget after the connection opens, treat that stalled stream as failed and retry instead of hanging forever on stale data
 - refetch the current snapshot before resubscribing
 - if that refresh succeeds before the SSE stream reattaches, keep `conn=reconnecting` but switch the compact header detail to the current snapshot state such as `refreshed; stream pending`
 - while the FTUI owns terminal output, bridge reconnect failures stay inside the reducer and header state instead of printing duplicate warning lines to `stderr`
