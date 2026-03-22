@@ -2,10 +2,13 @@ mod client;
 mod events;
 mod models;
 
-pub use client::{OpenHandsClient, OpenHandsError, OpenHandsProbeResult, TransportConfig};
+pub use client::{
+    ApiKeyAuth, AuthConfig, HttpAuth, OpenHandsClient, OpenHandsError, OpenHandsProbeResult,
+    TransportConfig, WebSocketAuth,
+};
 pub use events::{ConversationStateMirror, EventCache, KnownEvent};
 pub use models::{
-    AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
-    ConversationStateUpdatePayload, EventEnvelope, LlmConfig, SearchConversationEventsResponse,
-    SendMessageRequest, TextContent, WorkspaceConfig,
+    AcceptedResponse, AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
+    ConversationRunRequest, ConversationStateUpdatePayload, EventEnvelope, LlmConfig,
+    SearchConversationEventsResponse, SendMessageRequest, TextContent, WorkspaceConfig,
 };
