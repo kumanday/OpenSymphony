@@ -7,6 +7,9 @@ use opensymphony_workspace::{
 };
 use tempfile::TempDir;
 
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+
 fn sample_issue(identifier: &str) -> IssueDescriptor {
     IssueDescriptor {
         issue_id: format!("id-{identifier}"),
@@ -69,6 +72,26 @@ fn best_effort_failure_command() -> &'static str {
     "echo after-run 1>&2 && exit /b 9"
 }
 
+#[cfg(unix)]
+fn after_create_requires_empty_workspace_command() -> &'static str {
+    "if [ -e .opensymphony ]; then echo metadata-present 1>&2; exit 17; fi; echo after_create > after_create.txt"
+}
+
+#[cfg(windows)]
+fn after_create_requires_empty_workspace_command() -> &'static str {
+    "if exist .opensymphony\\NUL (echo metadata-present 1>&2 && exit /b 17) else (echo after_create> after_create.txt)"
+}
+
+#[cfg(unix)]
+fn after_create_retry_command() -> &'static str {
+    "if [ ! -f after_create_attempt.txt ]; then echo first > after_create_attempt.txt; echo retry 1>&2; exit 23; fi; echo success > after_create_success.txt"
+}
+
+#[cfg(windows)]
+fn after_create_retry_command() -> &'static str {
+    "if not exist after_create_attempt.txt (echo first> after_create_attempt.txt && echo retry 1>&2 && exit /b 23) else (echo success> after_create_success.txt)"
+}
+
 #[tokio::test]
 async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
@@ -77,7 +100,7 @@ async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
         &workspace_root,
         HookConfig {
             after_create: Some(HookDefinition::shell(
-                "echo after_create >> .opensymphony/logs/after_create-count.txt",
+                after_create_requires_empty_workspace_command(),
             )),
             ..HookConfig::default()
         },
@@ -107,13 +130,72 @@ async fn ensure_creates_reuses_workspace_and_runs_after_create_once() {
             .expect("issue manifest should exist")
             .contains("\"sanitized_workspace_key\": \"COE-263\"")
     );
-
-    let after_create_log =
-        tokio::fs::read_to_string(first.handle.logs_dir().join("after_create-count.txt"))
+    assert_eq!(
+        tokio::fs::read_to_string(first.handle.workspace_path().join("after_create.txt"))
             .await
-            .expect("after_create hook should have written a marker");
-    let run_count = after_create_log.lines().count();
-    assert_eq!(run_count, 1);
+            .expect("after_create hook should run before metadata bootstrap")
+            .trim(),
+        "after_create"
+    );
+
+    assert!(!tokio::fs::try_exists(
+        second
+            .handle
+            .workspace_path()
+            .join("after_create_attempt.txt")
+    )
+    .await
+    .expect("attempt marker lookup should succeed"));
+}
+
+#[tokio::test]
+async fn ensure_retries_after_create_after_failed_first_bootstrap() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            after_create: Some(HookDefinition::shell(after_create_retry_command())),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-263-retry");
+
+    let first_error = manager
+        .ensure(&issue)
+        .await
+        .expect_err("first ensure should fail its after_create hook");
+    assert!(matches!(
+        first_error,
+        WorkspaceError::HookFailed {
+            hook: HookKind::AfterCreate,
+            ..
+        }
+    ));
+
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("second ensure should retry after_create and succeed");
+
+    assert!(ensured.created);
+    assert_eq!(
+        tokio::fs::read_to_string(
+            ensured
+                .handle
+                .workspace_path()
+                .join("after_create_success.txt")
+        )
+        .await
+        .expect("after_create should succeed on retry")
+        .trim(),
+        "success"
+    );
+    assert!(tokio::fs::try_exists(ensured.handle.issue_manifest_path())
+        .await
+        .expect("issue manifest lookup should succeed"));
 }
 
 #[tokio::test]
@@ -402,6 +484,56 @@ async fn hook_cwd_override_cannot_escape_workspace() {
         .start_run(&ensured.handle, &RunDescriptor::new("run-cwd", 1))
         .await
         .expect_err("escaping cwd should fail");
+
+    assert!(matches!(
+        error,
+        WorkspaceError::HookPathEscape {
+            hook: HookKind::BeforeRun,
+            ..
+        }
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hook_cwd_override_cannot_escape_workspace_through_symlink() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-263-symlink"))
+        .await
+        .expect("workspace should exist");
+
+    let outside_dir = temp_dir.path().join("outside");
+    tokio::fs::create_dir_all(&outside_dir)
+        .await
+        .expect("outside dir should exist");
+    symlink(
+        &outside_dir,
+        ensured.handle.workspace_path().join("link-out"),
+    )
+    .expect("symlink should be created");
+
+    let escaped_manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig {
+            before_run: Some(HookDefinition::shell("pwd").with_cwd("link-out")),
+            ..HookConfig::default()
+        },
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+
+    let error = escaped_manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-symlink", 1))
+        .await
+        .expect_err("symlinked cwd should be rejected");
 
     assert!(matches!(
         error,
