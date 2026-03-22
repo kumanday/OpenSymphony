@@ -510,6 +510,56 @@ async fn runtime_stream_replays_initial_snapshot_when_post_ready_reconcile_is_em
 }
 
 #[tokio::test]
+async fn runtime_stream_drains_buffered_socket_events_before_returning_later_attach_backlog() {
+    let state = BufferedAttachOrderingState::default();
+    let server = TestServer::start(buffered_attach_ordering_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    let first = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("first replayed event should arrive")
+        .expect("stream read should succeed")
+        .expect("first replayed event should exist");
+    let second = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("buffered socket event should arrive")
+        .expect("stream read should succeed")
+        .expect("buffered socket event should exist");
+    let third = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("later replayed event should arrive")
+        .expect("stream read should succeed")
+        .expect("later replayed event should exist");
+
+    assert_eq!(
+        [first.id.as_str(), second.id.as_str(), third.id.as_str()],
+        ["evt-running", "evt-queued-live", "evt-log"],
+        "buffered live socket frames should be merged before a later attach-backlog item is yielded"
+    );
+}
+
+#[tokio::test]
 async fn runtime_stream_yields_buffered_event_before_reconnect_exhaustion() {
     let state = DeferredReconnectState::default();
     let server = TestServer::start(deferred_reconnect_router(state)).await;
@@ -555,6 +605,56 @@ async fn runtime_stream_yields_buffered_event_before_reconnect_exhaustion() {
         OpenHandsError::ReconnectExhausted { attempts, .. } => assert_eq!(attempts, 1),
         other => panic!("expected reconnect exhaustion after buffered delivery, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn runtime_stream_close_clears_pending_reconnect_and_replay_state() {
+    let state = DeferredReconnectState::default();
+    let server = TestServer::start(deferred_reconnect_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                reconnect_initial_backoff: Duration::from_millis(25),
+                reconnect_max_backoff: Duration::from_millis(25),
+                max_reconnect_attempts: 1,
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let event = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("buffered event should arrive before close")
+        .expect("stream read should succeed")
+        .expect("buffered event should exist");
+    assert_eq!(event.id, "evt-runtime");
+
+    stream.close().await.expect("close should succeed");
+
+    let closed = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("closed stream should return promptly")
+        .expect("polling a closed stream should not fail");
+    assert!(
+        closed.is_none(),
+        "close should clear any queued replay or reconnect work so the stream stays closed"
+    );
 }
 
 struct TestServer {
@@ -1153,6 +1253,152 @@ async fn initial_replay_events_socket(
             ))
             .await
             .expect("ready event should send");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
+}
+
+#[derive(Clone, Default)]
+struct BufferedAttachOrderingState {
+    conversation: Arc<Mutex<Option<Conversation>>>,
+    search_count: Arc<Mutex<usize>>,
+}
+
+fn buffered_attach_ordering_router(state: BufferedAttachOrderingState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(buffered_attach_ordering_create_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id",
+            get(buffered_attach_ordering_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(buffered_attach_ordering_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(buffered_attach_ordering_events_socket),
+        )
+        .with_state(state)
+}
+
+async fn buffered_attach_ordering_create_conversation(
+    State(state): State<BufferedAttachOrderingState>,
+    Json(request): Json<ConversationCreateRequest>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = Conversation {
+        conversation_id: request.conversation_id,
+        workspace: request.workspace,
+        persistence_dir: request.persistence_dir,
+        max_iterations: request.max_iterations,
+        stuck_detection: request.stuck_detection,
+        execution_status: "running".to_string(),
+        confirmation_policy: request.confirmation_policy,
+        agent: request.agent,
+    };
+    *state.conversation.lock().await = Some(conversation.clone());
+    Ok(Json(conversation))
+}
+
+async fn buffered_attach_ordering_get_conversation(
+    State(state): State<BufferedAttachOrderingState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = state
+        .conversation
+        .lock()
+        .await
+        .clone()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(conversation))
+}
+
+async fn buffered_attach_ordering_search_events(
+    State(state): State<BufferedAttachOrderingState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    let mut search_count = state.search_count.lock().await;
+    *search_count += 1;
+    let events = if *search_count == 1 {
+        let running = EventEnvelope::new(
+            "evt-running",
+            Utc::now(),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": "running",
+                "state_delta": {
+                    "execution_status": "running",
+                },
+            }),
+        );
+        vec![
+            running.clone(),
+            EventEnvelope::new(
+                "evt-log",
+                running.timestamp + chrono::Duration::seconds(2),
+                "llm",
+                "LLMCompletionLogEvent",
+                json!({
+                    "model": "fake-model",
+                    "tokens": 42,
+                }),
+            ),
+        ]
+    } else {
+        Vec::new()
+    };
+
+    Ok(Json(SearchConversationEventsResponse {
+        events,
+        next_page_id: None,
+    }))
+}
+
+async fn buffered_attach_ordering_events_socket(
+    websocket: WebSocketUpgrade,
+    Path(_conversation_id): Path<Uuid>,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        let ready = EventEnvelope::new(
+            "evt-ready",
+            Utc::now(),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": "running",
+                "state_delta": {
+                    "execution_status": "running",
+                },
+            }),
+        );
+        let queued_live = EventEnvelope::new(
+            "evt-queued-live",
+            ready.timestamp + chrono::Duration::seconds(1),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": "queued",
+                "state_delta": {
+                    "execution_status": "queued",
+                },
+            }),
+        );
+
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&ready).expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&queued_live).expect("buffered live event should serialize"),
+            ))
+            .await
+            .expect("buffered live event should send");
         tokio::time::sleep(Duration::from_secs(1)).await;
     })
 }
