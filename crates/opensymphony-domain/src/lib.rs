@@ -9,7 +9,7 @@ pub struct TrackerIssue {
     pub title: String,
     pub description: Option<String>,
     pub priority: Option<u8>,
-    pub state: TrackerIssueState,
+    pub state: String,
     pub labels: Vec<String>,
     pub blocked_by: Vec<TrackerIssueBlocker>,
     pub created_at: DateTime<Utc>,
@@ -32,10 +32,6 @@ pub struct TrackerIssueState {
 }
 
 impl TrackerIssueState {
-    pub fn is_active(&self) -> bool {
-        self.kind.is_active()
-    }
-
     pub fn is_terminal(&self) -> bool {
         self.kind.is_terminal()
     }
@@ -78,10 +74,6 @@ impl TrackerIssueStateKind {
             "triage" | "triaged" => Self::Triage,
             other => Self::Unknown(other.to_string()),
         }
-    }
-
-    pub fn is_active(&self) -> bool {
-        matches!(self, Self::Started | Self::Triage)
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -131,8 +123,8 @@ mod tests {
     }
 
     #[test]
-    fn tracker_state_helpers_report_active_and_terminal() {
-        let active = TrackerIssueState {
+    fn tracker_state_helpers_report_terminal_only() {
+        let non_terminal = TrackerIssueState {
             id: "state-started".to_string(),
             name: "In Progress".to_string(),
             kind: TrackerIssueStateKind::Started,
@@ -143,10 +135,8 @@ mod tests {
             kind: TrackerIssueStateKind::Completed,
         };
 
-        assert!(active.is_active());
-        assert!(!active.is_terminal());
+        assert!(!non_terminal.is_terminal());
         assert!(terminal.is_terminal());
-        assert!(!terminal.is_active());
     }
 
     #[test]

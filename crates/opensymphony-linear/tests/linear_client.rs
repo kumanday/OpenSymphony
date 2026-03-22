@@ -34,7 +34,8 @@ async fn candidate_issues_normalize_fixture_payloads() {
         first.url,
         "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine"
     );
-    assert_eq!(first.priority, Some(4));
+    assert_eq!(first.priority, Some(1));
+    assert_eq!(first.state, "In Progress");
     assert_eq!(first.labels, vec!["backend", "urgent"]);
     assert_eq!(first.blocked_by.len(), 1);
     assert!(first.blocked_by[0].is_terminal());
@@ -46,6 +47,7 @@ async fn candidate_issues_normalize_fixture_payloads() {
         "https://linear.app/trilogy-ai-coe/issue/COE-264/linear-read-adapter-and-issue-normalization"
     );
     assert_eq!(second.priority, None);
+    assert_eq!(second.state, "In Progress");
     assert_eq!(second.blocked_by.len(), 1);
     assert_eq!(second.blocked_by[0].identifier, "COE-261");
     assert_eq!(
@@ -126,10 +128,10 @@ async fn issues_by_state_walk_pagination() {
 
     assert_eq!(issues.len(), 3);
     assert_eq!(issues[0].identifier, "COE-260");
-    assert_eq!(issues[0].priority, Some(4));
-    assert_eq!(issues[1].priority, Some(3));
+    assert_eq!(issues[0].priority, Some(1));
+    assert_eq!(issues[1].priority, Some(2));
     assert_eq!(issues[2].identifier, "COE-264");
-    assert_eq!(issues[2].priority, Some(4));
+    assert_eq!(issues[2].priority, Some(1));
 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 2);
