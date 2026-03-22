@@ -28,6 +28,7 @@ Because this sanitization is not injective, workspace reuse must be gated by the
 ## 3. Hard safety invariants
 
 - The resolved workspace path must stay under `workspace.root`.
+- Relative workflow directories must be normalized before resolving relative `workspace.root` values so the resulting workspace root remains absolute for the workspace manager.
 - The issue workspace path itself must not be a symlink when OpenSymphony reuses or validates it.
 - `cwd` for all hook commands and all OpenHands runs must equal the resolved issue workspace path unless an explicit per-command `cwd` override inside the same workspace is required.
 - When `openhands.local_server.command` is omitted, the runtime-owned local tooling layer must resolve the pinned launcher from the OpenSymphony checkout before that `cwd` switch happens. Workflow resolution must not bake a compile-time checkout path into config defaults.
