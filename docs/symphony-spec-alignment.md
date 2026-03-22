@@ -192,6 +192,7 @@ The workflow schema adds an `openhands` namespace for:
 - MCP server definitions
 - minimal agent payload settings
 - extension settings resolved separately from the core workflow config so non-runtime code can stay OpenHands-agnostic
+- the repo-local `codex` namespace can coexist as non-runtime metadata, while other unknown top-level namespaces still fail deterministically
 
 ### 3.2 Persistent conversation per issue
 

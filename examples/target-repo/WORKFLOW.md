@@ -1,11 +1,10 @@
 ---
-name: Example workflow
-description: Minimal workflow used by the local validation suite.
+workspace:
+  root: ./var/workspaces
+
 openhands:
   transport:
     base_url: http://127.0.0.1:8000
-  workspace:
-    root: ./var/workspaces
 ---
 
 # Example Workflow

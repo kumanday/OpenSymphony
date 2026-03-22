@@ -47,14 +47,9 @@ openhands:
 
   local_server:
     enabled: true
+    # Defaults to the pinned repo launcher when omitted.
     command:
-      - python
-      - -m
-      - openhands.agent_server
-      - --host
-      - 127.0.0.1
-      - --port
-      - "8000"
+      - tools/openhands-server/run-local.sh
     startup_timeout_ms: 30000
     readiness_probe_path: "/openapi.json"
     env:
@@ -67,9 +62,11 @@ openhands:
     persistence_dir_relative: ".opensymphony/openhands"
     max_iterations: 500
     stuck_detection: true
+    # Defaults to `NeverConfirm` when omitted.
     confirmation_policy:
       kind: NeverConfirm
     agent:
+      # Defaults to `Agent` when omitted.
       kind: Agent
       llm:
         # Exact $VAR/${VAR} tokens are resolved before runtime launch.

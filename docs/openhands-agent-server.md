@@ -101,6 +101,7 @@ Current repository implementation:
 - `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
+- when `openhands.local_server.command` is omitted, the workflow resolver defaults it to `tools/openhands-server/run-local.sh`
 
 ## 4.2 Startup contract
 
@@ -231,6 +232,11 @@ Required fields:
 - optional `secrets`
 - optional `plugins`
 - optional `mcp_config`
+
+Current workflow defaulting:
+
+- `confirmation_policy.kind` defaults to `NeverConfirm` when omitted
+- `agent.kind` defaults to `Agent` when omitted
 
 Implementation rule:
 
