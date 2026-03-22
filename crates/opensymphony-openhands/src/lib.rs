@@ -14,8 +14,8 @@ pub use events::{
 };
 pub use models::{
     AcceptedResponse, AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
-    ConversationRunRequest, ConversationStateUpdatePayload, EventEnvelope, LlmConfig,
-    SearchConversationEventsResponse, SendMessageRequest, TextContent, WorkspaceConfig,
+    ConversationRunRequest, ConversationStateUpdatePayload, DoctorProbeConfig, EventEnvelope,
+    LlmConfig, SearchConversationEventsResponse, SendMessageRequest, TextContent, WorkspaceConfig,
 };
 pub use supervisor::{
     ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, ProbeConfig, ServerMode,
