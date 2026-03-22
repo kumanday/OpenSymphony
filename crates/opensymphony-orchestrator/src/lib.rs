@@ -19,9 +19,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        DurationMs, IssueExecution, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-        NormalizedIssue, ReleaseReason, RunAttempt, SchedulerStatus, TimestampMs, WorkerId,
-        WorkspaceKey, WorkspaceRecord, boundary_summary,
+        boundary_summary, DurationMs, IssueExecution, IssueId, IssueIdentifier, IssueState,
+        IssueStateCategory, NormalizedIssue, ReleaseReason, RunAttempt, SchedulerStatus,
+        TimestampMs, WorkerId, WorkspaceKey, WorkspaceRecord,
     };
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
