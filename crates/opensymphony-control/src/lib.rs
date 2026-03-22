@@ -21,6 +21,7 @@ use tracing::warn;
 use url::Url;
 
 const CONTROL_PLANE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const CONTROL_PLANE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONTROL_PLANE_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Debug, Clone)]
@@ -208,13 +209,21 @@ pub struct ControlPlaneClient {
 
 impl ControlPlaneClient {
     pub fn new(base_url: Url) -> Self {
-        Self::with_stream_read_timeout(base_url, CONTROL_PLANE_STREAM_READ_TIMEOUT)
+        Self::with_timeouts(
+            base_url,
+            CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            CONTROL_PLANE_STREAM_READ_TIMEOUT,
+        )
     }
 
-    fn with_stream_read_timeout(base_url: Url, stream_read_timeout: Duration) -> Self {
+    fn with_timeouts(
+        base_url: Url,
+        snapshot_timeout: Duration,
+        stream_read_timeout: Duration,
+    ) -> Self {
         Self {
             base_url,
-            http: reqwest::Client::new(),
+            http: build_snapshot_http_client(snapshot_timeout),
             stream_http: build_stream_http_client(stream_read_timeout),
         }
     }
@@ -241,6 +250,16 @@ impl ControlPlaneClient {
                 source,
             })
     }
+}
+
+fn build_snapshot_http_client(snapshot_timeout: Duration) -> reqwest::Client {
+    // Bootstrap and reconnect fetches should fail fast so the UI can retry instead of hanging
+    // forever behind a partial `/api/v1/snapshot` response.
+    reqwest::Client::builder()
+        .timeout(snapshot_timeout)
+        .read_timeout(snapshot_timeout)
+        .build()
+        .expect("static snapshot timeout config should produce a reqwest client")
 }
 
 fn build_stream_http_client(stream_read_timeout: Duration) -> reqwest::Client {
@@ -452,6 +471,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_snapshot_times_out_when_response_body_never_arrives() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock snapshot listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept snapshot client");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .expect("mock snapshot server should write headers");
+            sleep(Duration::from_millis(250)).await;
+        });
+
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            Duration::from_millis(75),
+            Duration::from_secs(1),
+        );
+        let result = timeout(Duration::from_secs(1), client.fetch_snapshot())
+            .await
+            .expect("fetch should surface the snapshot timeout")
+            .expect_err("snapshot fetch should time out");
+
+        match result {
+            ControlPlaneClientError::Request(error) => assert!(error.is_timeout()),
+            other => panic!("expected a request timeout, got {other:?}"),
+        }
+
+        server
+            .await
+            .expect("mock snapshot server should exit cleanly");
+    }
+
+    #[tokio::test]
     async fn stream_updates_time_out_when_the_event_stream_goes_idle_after_open() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -467,8 +527,11 @@ mod tests {
             sleep(Duration::from_millis(250)).await;
         });
 
-        let client =
-            ControlPlaneClient::with_stream_read_timeout(base_url, Duration::from_millis(75));
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            Duration::from_millis(75),
+        );
         let mut stream = client.stream_updates().expect("open event stream");
         let result = timeout(Duration::from_secs(1), stream.next())
             .await
@@ -529,8 +592,11 @@ mod tests {
                 .expect("mock SSE server should write snapshot event");
         });
 
-        let client =
-            ControlPlaneClient::with_stream_read_timeout(base_url, Duration::from_millis(75));
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            Duration::from_millis(75),
+        );
         let mut stream = client.stream_updates().expect("open event stream");
         let result = timeout(Duration::from_secs(1), stream.next())
             .await

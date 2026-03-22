@@ -217,7 +217,9 @@ UI requirements:
 Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
+- if `/api/v1/snapshot` accepts the connection but hangs without returning a body, fail that bootstrap or reconnect refresh within the bounded snapshot timeout and retry instead of waiting forever
 - keep rendering that bootstrap snapshot with `conn=connecting` until the SSE stream yields its first snapshot
+- publish the first streamed snapshot and the `conn=live` attachment signal atomically through the bridge mailbox so the header never outruns the data it is describing
 - subscribe to the SSE stream
 - if the stream closes or fails, keep the last good snapshot visible, mark the connection as reconnecting, and surface the computed reconnect reason in the top header
 - if `/api/v1/events` goes silent for longer than the keepalive watchdog budget after the connection opens, treat that stalled stream as failed and retry instead of hanging forever on stale data
