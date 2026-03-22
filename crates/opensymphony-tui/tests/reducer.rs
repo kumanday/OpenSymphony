@@ -1,7 +1,11 @@
 use chrono::{TimeZone, Utc};
 use opensymphony_domain::{
-    AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot,
-    MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope, WorkerOutcome,
+    ControlPlaneAgentServerStatus as AgentServerStatus,
+    ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+    ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+    ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
 };
 use opensymphony_tui::{ConnectionState, FocusPane, TimelineMode, TuiAction, TuiState};
 

@@ -13,7 +13,10 @@ use ftui::{
     widgets::{paragraph::Paragraph, Widget},
 };
 use opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
-use opensymphony_domain::{IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope};
+use opensymphony_domain::{
+    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+    ControlPlaneRecentEvent as RecentEvent, SnapshotEnvelope,
+};
 use thiserror::Error;
 use tokio::sync::watch;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -1032,15 +1035,15 @@ trait RuntimeStateLabel {
     fn as_str(&self) -> &'static str;
 }
 
-impl RuntimeStateLabel for opensymphony_domain::IssueRuntimeState {
+impl RuntimeStateLabel for opensymphony_domain::ControlPlaneIssueRuntimeState {
     fn as_str(&self) -> &'static str {
         match self {
-            opensymphony_domain::IssueRuntimeState::Idle => "idle",
-            opensymphony_domain::IssueRuntimeState::Running => "running",
-            opensymphony_domain::IssueRuntimeState::RetryQueued => "retry_queued",
-            opensymphony_domain::IssueRuntimeState::Releasing => "releasing",
-            opensymphony_domain::IssueRuntimeState::Completed => "completed",
-            opensymphony_domain::IssueRuntimeState::Failed => "failed",
+            opensymphony_domain::ControlPlaneIssueRuntimeState::Idle => "idle",
+            opensymphony_domain::ControlPlaneIssueRuntimeState::Running => "running",
+            opensymphony_domain::ControlPlaneIssueRuntimeState::RetryQueued => "retry_queued",
+            opensymphony_domain::ControlPlaneIssueRuntimeState::Releasing => "releasing",
+            opensymphony_domain::ControlPlaneIssueRuntimeState::Completed => "completed",
+            opensymphony_domain::ControlPlaneIssueRuntimeState::Failed => "failed",
         }
     }
 }
@@ -1049,15 +1052,15 @@ trait WorkerOutcomeLabel {
     fn as_str(&self) -> &'static str;
 }
 
-impl WorkerOutcomeLabel for opensymphony_domain::WorkerOutcome {
+impl WorkerOutcomeLabel for opensymphony_domain::ControlPlaneWorkerOutcome {
     fn as_str(&self) -> &'static str {
         match self {
-            opensymphony_domain::WorkerOutcome::Unknown => "unknown",
-            opensymphony_domain::WorkerOutcome::Running => "running",
-            opensymphony_domain::WorkerOutcome::Continued => "continued",
-            opensymphony_domain::WorkerOutcome::Completed => "completed",
-            opensymphony_domain::WorkerOutcome::Failed => "failed",
-            opensymphony_domain::WorkerOutcome::Canceled => "canceled",
+            opensymphony_domain::ControlPlaneWorkerOutcome::Unknown => "unknown",
+            opensymphony_domain::ControlPlaneWorkerOutcome::Running => "running",
+            opensymphony_domain::ControlPlaneWorkerOutcome::Continued => "continued",
+            opensymphony_domain::ControlPlaneWorkerOutcome::Completed => "completed",
+            opensymphony_domain::ControlPlaneWorkerOutcome::Failed => "failed",
+            opensymphony_domain::ControlPlaneWorkerOutcome::Canceled => "canceled",
         }
     }
 }
@@ -1066,13 +1069,13 @@ trait DaemonStateLabel {
     fn as_str(&self) -> &'static str;
 }
 
-impl DaemonStateLabel for opensymphony_domain::DaemonState {
+impl DaemonStateLabel for opensymphony_domain::ControlPlaneDaemonState {
     fn as_str(&self) -> &'static str {
         match self {
-            opensymphony_domain::DaemonState::Starting => "starting",
-            opensymphony_domain::DaemonState::Ready => "ready",
-            opensymphony_domain::DaemonState::Degraded => "degraded",
-            opensymphony_domain::DaemonState::Stopped => "stopped",
+            opensymphony_domain::ControlPlaneDaemonState::Starting => "starting",
+            opensymphony_domain::ControlPlaneDaemonState::Ready => "ready",
+            opensymphony_domain::ControlPlaneDaemonState::Degraded => "degraded",
+            opensymphony_domain::ControlPlaneDaemonState::Stopped => "stopped",
         }
     }
 }
@@ -1086,9 +1089,13 @@ mod tests {
     };
     use chrono::{TimeZone, Utc};
     use opensymphony_domain::{
-        AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
-        IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope,
-        WorkerOutcome,
+        ControlPlaneAgentServerStatus as AgentServerStatus,
+        ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+        ControlPlaneDaemonStatus as DaemonStatus,
+        ControlPlaneIssueRuntimeState as IssueRuntimeState,
+        ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+        ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+        ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
     };
     use std::{
         sync::{

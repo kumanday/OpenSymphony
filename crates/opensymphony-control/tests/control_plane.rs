@@ -4,8 +4,12 @@ use axum::Router;
 use chrono::{TimeZone, Utc};
 use opensymphony_control::{ControlPlaneClient, ControlPlaneServer, SnapshotStore};
 use opensymphony_domain::{
-    AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot,
-    MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope, WorkerOutcome,
+    ControlPlaneAgentServerStatus as AgentServerStatus,
+    ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+    ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+    ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
 };
 use tokio::net::TcpListener;
 use url::Url;
