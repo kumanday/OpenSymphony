@@ -442,6 +442,73 @@ async fn stream_updates_surfaces_retrying_state_and_reapplies_connect_timeout() 
 }
 
 #[tokio::test]
+async fn stream_updates_ignores_non_snapshot_events_before_bootstrap_snapshot() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener should expose an address");
+    let bootstrap = SnapshotEnvelope {
+        sequence: 1,
+        published_at: Utc::now(),
+        snapshot: fixture_snapshot(0),
+    };
+    let payload = serde_json::to_string(&bootstrap).expect("bootstrap payload should encode");
+    let server_task = tokio::spawn(async move {
+        let (mut connection, _) = listener
+            .accept()
+            .await
+            .expect("client should connect for the initial stream");
+        let response = format!(
+            concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "content-type: text/event-stream\r\n",
+                "cache-control: no-cache\r\n",
+                "connection: keep-alive\r\n",
+                "\r\n",
+                "event: heartbeat\r\n",
+                "data: {{\"kind\":\"heartbeat\"}}\r\n",
+                "\r\n",
+                "event: snapshot\r\n",
+                "id: 1\r\n",
+                "data: {}\r\n",
+                "\r\n"
+            ),
+            payload
+        );
+        connection
+            .write_all(response.as_bytes())
+            .await
+            .expect("test server should write SSE payloads");
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let client = ControlPlaneClient::with_timeouts(
+        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+        Duration::from_secs(5),
+    );
+    let mut stream = client
+        .stream_updates()
+        .expect("client should open the update stream");
+
+    let initial = stream
+        .next()
+        .await
+        .expect("stream should yield the bootstrap snapshot")
+        .expect("bootstrap snapshot should decode");
+    let ControlPlaneStreamUpdate::Snapshot(initial) = initial else {
+        panic!("expected bootstrap snapshot update");
+    };
+    assert_eq!(initial.sequence, 1);
+
+    stream.close();
+    server_task.abort();
+}
+
+#[tokio::test]
 async fn stream_updates_times_out_when_event_stream_never_establishes() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

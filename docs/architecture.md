@@ -358,9 +358,10 @@ The implemented local observability flow is narrower than the full future daemon
 4. The TUI opens `/api/v1/events` and listens for SSE updates.
 5. Snapshot fetches use a bounded timeout so reconnect can retry if the HTTP endpoint hangs.
 6. SSE attach attempts use a bounded connection-establishment timeout so blackholed or never-opening streams fail back into reconnect.
-7. SSE reads also use a bounded idle timeout so wedged streams fail back into the reconnect loop.
-8. On stream failure, the TUI refetches the current snapshot before resubscribing.
-8. Detaching the UI leaves the daemon process and snapshot publication unaffected.
+7. Until the first decoded `snapshot` arrives, additive non-`snapshot` SSE events are ignored and do not suppress the attach timeout.
+8. SSE reads also use a bounded idle timeout so wedged streams fail back into the reconnect loop.
+9. On stream failure, the TUI refetches the current snapshot before resubscribing.
+10. Detaching the UI leaves the daemon process and snapshot publication unaffected.
 
 ## 8. Recovery model
 
