@@ -87,9 +87,12 @@ query IssueInverseRelationsPage($issueId: String!, $first: Int!, $after: String)
 "#;
 
 pub(super) const ISSUE_STATES_BY_IDS_QUERY: &str = r#"
-query IssueStatesByIds($issueIds: [String!], $first: Int!, $after: String) {
+query IssueStatesByIds($projectSlug: String!, $issueIds: [String!], $first: Int!, $after: String) {
   issues(
-    filter: { id: { in: $issueIds } }
+    filter: {
+      id: { in: $issueIds }
+      project: { slugId: { eq: $projectSlug } }
+    }
     includeArchived: true
     first: $first
     after: $after
@@ -142,6 +145,7 @@ pub(super) struct IssuesByStateVariables {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct IssueStatesByIdsVariables {
+    pub project_slug: String,
     pub issue_ids: Vec<String>,
     pub first: usize,
     pub after: Option<String>,

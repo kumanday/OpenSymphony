@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
 };
 use opensymphony_domain::{TrackerErrorCategory, TrackerIssueStateKind};
-use opensymphony_linear::{LinearClient, LinearConfig, RetryPolicy};
+use opensymphony_linear::{LinearClient, LinearConfig, LinearError, RetryPolicy};
 use serde_json::Value;
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 
@@ -200,6 +200,10 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
         requests[0].body["variables"]["issueIds"],
         serde_json::json!(["issue-260", "issue-264"])
     );
+    assert_eq!(
+        requests[0].body["variables"]["projectSlug"],
+        Value::String("e7b957855cb7".to_string())
+    );
 }
 
 #[tokio::test]
@@ -218,6 +222,43 @@ async fn issue_states_by_ids_fail_when_linear_omits_requested_ids() {
 
     assert_eq!(error.category(), TrackerErrorCategory::NotFound);
     assert!(error.to_string().contains("issue-264"));
+}
+
+#[test]
+fn client_configuration_requires_active_states() {
+    let mut config = LinearConfig::new("test-token", "e7b957855cb7");
+    config.terminal_states = vec!["Done".to_string()];
+
+    let error = match LinearClient::new(config) {
+        Ok(_) => panic!("missing active states should fail"),
+        Err(error) => error,
+    };
+
+    match error {
+        LinearError::InvalidConfiguration(message) => {
+            assert!(message.contains("tracker.active_states"));
+        }
+        other => panic!("expected invalid configuration error, got {other:?}"),
+    }
+}
+
+#[test]
+fn client_configuration_requires_terminal_states() {
+    let mut config = LinearConfig::new("test-token", "e7b957855cb7");
+    config.active_states = vec!["In Progress".to_string()];
+    config.terminal_states = vec![" ".to_string()];
+
+    let error = match LinearClient::new(config) {
+        Ok(_) => panic!("blank terminal states should fail"),
+        Err(error) => error,
+    };
+
+    match error {
+        LinearError::InvalidConfiguration(message) => {
+            assert!(message.contains("tracker.terminal_states"));
+        }
+        other => panic!("expected invalid configuration error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
