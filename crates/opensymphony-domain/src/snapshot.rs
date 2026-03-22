@@ -70,6 +70,7 @@ impl DaemonSnapshot {
 pub struct WorkerAttemptSnapshot {
     pub worker_id: crate::WorkerId,
     pub attempt: Option<crate::RetryAttempt>,
+    pub normal_retry_count: u32,
     pub turn_count: u32,
     pub max_turns: u32,
 }
@@ -79,6 +80,7 @@ impl From<&crate::RunAttempt> for WorkerAttemptSnapshot {
         Self {
             worker_id: run.worker_id.clone(),
             attempt: run.attempt,
+            normal_retry_count: run.normal_retry_count,
             turn_count: run.turn_count,
             max_turns: run.max_turns,
         }
@@ -152,9 +154,7 @@ impl RuntimeStateSnapshot {
                 released_at: None,
                 release_reason: None,
                 worker: Some(WorkerAttemptSnapshot::from(run)),
-                last_event_at: conversation
-                    .and_then(|conversation| conversation.last_event_at)
-                    .or(Some(stall.last_activity_at)),
+                last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: Some(stall.stalled_at),
             },
             SchedulerState::RetryQueued { .. } => Self {

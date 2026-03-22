@@ -222,6 +222,7 @@ pub struct RunAttempt {
     pub claimed_at: TimestampMs,
     pub started_at: Option<TimestampMs>,
     pub attempt: Option<RetryAttempt>,
+    pub normal_retry_count: u32,
     pub turn_count: u32,
     pub max_turns: u32,
 }
@@ -244,9 +245,15 @@ impl RunAttempt {
             claimed_at,
             started_at: None,
             attempt,
+            normal_retry_count: 0,
             turn_count: 0,
             max_turns,
         }
+    }
+
+    pub fn with_normal_retry_count(mut self, normal_retry_count: u32) -> Self {
+        self.normal_retry_count = normal_retry_count;
+        self
     }
 
     pub fn mark_started(mut self, started_at: TimestampMs) -> Self {
