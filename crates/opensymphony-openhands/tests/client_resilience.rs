@@ -275,6 +275,32 @@ async fn run_probe_uses_refreshed_terminal_state_after_reconnect_without_new_eve
 }
 
 #[tokio::test]
+async fn run_probe_prefers_terminal_rest_refresh_over_reconnect_exhaustion() {
+    let state = ProbeState::default();
+    let server = TestServer::start(terminal_rest_refresh_probe_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        Some("fake-model".to_string()),
+        Some("fake-key".to_string()),
+    );
+
+    let result = client
+        .run_probe(&request, Duration::from_secs(2))
+        .await
+        .expect(
+            "probe should succeed from terminal REST state even if websocket reconnect exhausts",
+        );
+
+    assert_eq!(result.conversation.execution_status, "finished");
+    assert_eq!(
+        result.state_mirror.terminal_status(),
+        Some(TerminalExecutionStatus::Finished)
+    );
+}
+
+#[tokio::test]
 async fn run_probe_rejects_error_events_even_when_finished_state_is_already_mirrored() {
     let state = ProbeState::default();
     let server = TestServer::start(reconnect_error_then_finished_probe_router(state.clone())).await;
@@ -362,6 +388,40 @@ async fn attach_runtime_stream_applies_readiness_snapshot_to_state_mirror() {
         stream.state_mirror().execution_status(),
         Some("running"),
         "the ready-state barrier should refresh the mirror even when REST state and reconcile lag behind it"
+    );
+}
+
+#[tokio::test]
+async fn attach_runtime_stream_applies_forward_compatible_readiness_snapshot_to_state_mirror() {
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(forward_compatible_readiness_mirror_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    assert_eq!(
+        stream.state_mirror().execution_status(),
+        Some("running"),
+        "the ready-state barrier should still refresh the mirror when the readiness frame only exposes a forward-compatible state_delta"
     );
 }
 
@@ -600,6 +660,27 @@ fn readiness_mirror_router(state: ReadinessMirrorState) -> Router {
         .with_state(state)
 }
 
+fn forward_compatible_readiness_mirror_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(readiness_mirror_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(forward_compatible_readiness_mirror_events_socket),
+        )
+        .with_state(state)
+}
+
 async fn readiness_mirror_create_conversation(
     State(state): State<ReadinessMirrorState>,
     Json(request): Json<ConversationCreateRequest>,
@@ -654,6 +735,35 @@ async fn readiness_mirror_events_socket(
                     "ConversationStateUpdateEvent",
                     json!({
                         "execution_status": "running",
+                        "state_delta": {
+                            "execution_status": "running",
+                        },
+                    }),
+                ))
+                .expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
+}
+
+async fn forward_compatible_readiness_mirror_events_socket(
+    Path(_conversation_id): Path<Uuid>,
+    websocket: WebSocketUpgrade,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&EventEnvelope::new(
+                    "evt-ready-running-forward-compatible",
+                    Utc::now(),
+                    "runtime",
+                    "ConversationStateUpdateEvent",
+                    json!({
+                        "execution_status": {
+                            "current": "running",
+                        },
                         "state_delta": {
                             "execution_status": "running",
                         },
@@ -1092,6 +1202,7 @@ struct ProbeState {
     events: Arc<Mutex<Vec<EventEnvelope>>>,
     send_count: Arc<Mutex<usize>>,
     run_count: Arc<Mutex<usize>>,
+    connect_count: Arc<Mutex<usize>>,
 }
 
 fn probe_router(state: ProbeState) -> Router {
@@ -1162,6 +1273,32 @@ fn reconnect_probe_router(state: ProbeState) -> Router {
         .route(
             "/sockets/events/:conversation_id",
             get(reconnect_probe_events_socket),
+        )
+        .with_state(state)
+}
+
+fn terminal_rest_refresh_probe_router(state: ProbeState) -> Router {
+    Router::new()
+        .route("/api/conversations", post(probe_create_conversation))
+        .route(
+            "/api/conversations/:conversation_id",
+            get(probe_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events",
+            post(reconnect_probe_send_message),
+        )
+        .route(
+            "/api/conversations/:conversation_id/run",
+            post(reconnect_probe_run_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(probe_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(exhausting_reconnect_probe_events_socket),
         )
         .with_state(state)
 }
@@ -1370,6 +1507,34 @@ async fn reconnect_probe_events_socket(
             ))
             .await
             .expect("ready event should send");
+        socket
+            .send(Message::Close(None))
+            .await
+            .expect("socket close should send");
+    })
+}
+
+async fn exhausting_reconnect_probe_events_socket(
+    State(state): State<ProbeState>,
+    websocket: WebSocketUpgrade,
+    Path(_conversation_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let mut connect_count = state.connect_count.lock().await;
+    *connect_count += 1;
+    let connection_number = *connect_count;
+    drop(connect_count);
+
+    websocket.on_upgrade(async move |mut socket| {
+        if connection_number == 1 {
+            socket
+                .send(Message::Text(
+                    serde_json::to_string(&EventEnvelope::state_update("evt-ready", "idle"))
+                        .expect("ready event should serialize"),
+                ))
+                .await
+                .expect("ready event should send");
+        }
+
         socket
             .send(Message::Close(None))
             .await
