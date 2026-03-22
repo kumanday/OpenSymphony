@@ -218,6 +218,11 @@ Current validation commands for the implemented observability slice:
 - `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
 - `curl http://127.0.0.1:4010/healthz`
 
+The scripted `tui --exit-after-ms` smoke path now exits `0` only after the
+operator has observed a real streamed `live control-plane stream` state. If
+the control plane never becomes live, the command exits non-zero instead of
+reporting a false-positive healthy attach.
+
 When validating reconnect behavior, confirm that a newer post-restart snapshot
 is accepted even if the reducer never saw an explicit `ConnectionLost`, and
 that the TUI does not report `live control-plane stream` until the SSE stream
@@ -225,7 +230,8 @@ has actually begun delivering updates. Also confirm that a hung
 `/api/v1/snapshot` request times out instead of stalling the bridge forever,
 that an idle `/api/v1/events` read also times out back into reconnect, and
 that additive `recent_events[].kind` values still decode into a usable snapshot
-for the UI.
+for the UI. For scripted smoke coverage, also confirm that an unreachable
+control plane causes `opensymphony tui --exit-after-ms ...` to exit non-zero.
 Current command set in this repository:
 
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
