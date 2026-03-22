@@ -1,7 +1,7 @@
 use std::io;
 
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
@@ -97,7 +97,7 @@ impl LinearMcpServer {
                     -32600,
                     "Invalid Request",
                     Some(json!({ "detail": error.to_string() })),
-                ))
+                ));
             }
         };
 
@@ -135,11 +135,7 @@ impl LinearMcpServer {
             _ => Some(jsonrpc_error(request.id, -32601, "Method not found", None)),
         };
 
-        if is_notification {
-            None
-        } else {
-            response
-        }
+        if is_notification { None } else { response }
     }
 
     async fn handle_initialize(&mut self, id: Value, params: Value) -> Option<Value> {
@@ -151,7 +147,7 @@ impl LinearMcpServer {
                     -32602,
                     "Invalid params",
                     Some(json!({ "detail": error.to_string() })),
-                ))
+                ));
             }
         };
 
@@ -216,7 +212,7 @@ impl LinearMcpServer {
                     -32602,
                     "Invalid params",
                     Some(json!({ "detail": error.to_string() })),
-                ))
+                ));
             }
         };
 
@@ -299,7 +295,7 @@ impl LinearMcpServer {
                     _ => {
                         return Err(ToolFailure::invalid_input(
                             "Provide exactly one of `issue` or `team`.",
-                        ))
+                        ));
                     }
                 };
                 Ok(json!({ "team": team, "states": states }))

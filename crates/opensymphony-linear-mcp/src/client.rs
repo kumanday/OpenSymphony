@@ -2,11 +2,11 @@ use std::{env, time::Duration};
 
 use opensymphony_domain::TrackerIssueStateKind;
 use reqwest::{
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
     Client,
+    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
 };
-use serde::{de::DeserializeOwned, Deserialize};
-use serde_json::{json, Value};
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -446,12 +446,12 @@ impl LinearMcpClient {
             .map_err(|error| LinearMcpError::Request(Box::new(error)))?;
 
         if !status.is_success() {
-            if let Ok(envelope) = serde_json::from_str::<GraphqlEnvelope<Value>>(&body) {
-                if let Some(errors) = envelope.errors {
-                    return Err(LinearMcpError::from_graphql_errors(
-                        errors.into_iter().map(GraphqlError::from).collect(),
-                    ));
-                }
+            if let Ok(envelope) = serde_json::from_str::<GraphqlEnvelope<Value>>(&body)
+                && let Some(errors) = envelope.errors
+            {
+                return Err(LinearMcpError::from_graphql_errors(
+                    errors.into_iter().map(GraphqlError::from).collect(),
+                ));
             }
 
             return Err(LinearMcpError::HttpStatus { status, body });
