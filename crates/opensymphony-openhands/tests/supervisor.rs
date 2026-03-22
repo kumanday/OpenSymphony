@@ -26,7 +26,7 @@ fn supervised_start_and_stop_report_owned_process_metadata() {
         .extra_env
         .insert("FAKE_SERVER_MODE".to_string(), "ready".to_string());
 
-    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(config));
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
     let started = supervisor.start().expect("server should start");
 
     assert_eq!(started.ownership, LaunchOwnership::Launched);
@@ -58,7 +58,7 @@ fn startup_timeout_kills_unready_child() {
         .extra_env
         .insert("FAKE_READY_DELAY_SECS".to_string(), "2.0".to_string());
 
-    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(config));
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
     let error = supervisor.start().expect_err("startup should time out");
 
     assert!(matches!(error, SupervisorError::StartupTimeout { .. }));
@@ -84,13 +84,49 @@ fn unexpected_exit_is_reported_before_readiness() {
         .extra_env
         .insert("FAKE_EXIT_CODE".to_string(), "41".to_string());
 
-    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(config));
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
     let error = supervisor.start().expect_err("startup should fail");
 
     assert!(matches!(
         error,
         SupervisorError::UnexpectedExit { code: Some(41), .. }
     ));
+}
+
+#[test]
+fn status_preserves_exited_state_after_supervised_child_crashes() {
+    let fixture = FakeToolingFixture::new("crash");
+    let port = free_port();
+    let mut config = SupervisedServerConfig::new(
+        LocalServerTooling::load(fixture.tool_dir()).expect("tooling should load"),
+    );
+    config.port_override = Some(port);
+    config.startup_timeout = Duration::from_secs(2);
+    config
+        .extra_env
+        .insert("FAKE_SERVER_MODE".to_string(), "crash".to_string());
+    config
+        .extra_env
+        .insert("FAKE_CRASH_DELAY_SECS".to_string(), "0.1".to_string());
+    config
+        .extra_env
+        .insert("FAKE_EXIT_CODE".to_string(), "42".to_string());
+
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
+    let started = supervisor
+        .start()
+        .expect("server should reach readiness first");
+    assert_eq!(started.state, ServerState::Ready);
+
+    for _ in 0..40 {
+        let status = supervisor.status().expect("status should work");
+        if status.state == (ServerState::Exited { code: Some(42) }) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    panic!("supervisor never reported the exited child state");
 }
 
 #[test]
@@ -158,7 +194,12 @@ name = "fixture"
 version = "0.0.0"
 
 [project.optional-dependencies]
-agent-server = ["openhands-agent-server==1.2.3"]
+agent-server = [
+  "openhands-agent-server==1.2.3",
+  "openhands-sdk==1.2.3",
+  "openhands-tools==1.2.3",
+  "openhands-workspace==1.2.3",
+]
 
 [tool.opensymphony.openhands_server]
 module = "openhands.agent_server"
@@ -172,6 +213,7 @@ launcher = "RUNTIME=process bash run-local.sh"
     let fake_server = r#"import json
 import os
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -183,6 +225,13 @@ if mode == "exit":
 
 if mode == "slow":
     time.sleep(float(os.environ.get("FAKE_READY_DELAY_SECS", "2.0")))
+
+if mode == "crash":
+    def crash_later():
+        time.sleep(float(os.environ.get("FAKE_CRASH_DELAY_SECS", "0.1")))
+        os._exit(int(os.environ.get("FAKE_EXIT_CODE", "42")))
+
+    threading.Thread(target=crash_later, daemon=True).start()
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -207,7 +256,45 @@ server.serve_forever()
 
     fs::write(tool_dir.join("run-local.sh"), run_local).expect("run-local.sh");
     fs::write(tool_dir.join("pyproject.toml"), pyproject).expect("pyproject.toml");
-    fs::write(tool_dir.join("uv.lock"), "version = 1").expect("uv.lock");
+    fs::write(
+        tool_dir.join("uv.lock"),
+        r#"version = 1
+
+[[package]]
+name = "fixture"
+version = "0.0.0"
+source = { virtual = "." }
+
+[package.optional-dependencies]
+agent-server = [
+  { name = "openhands-agent-server" },
+  { name = "openhands-sdk" },
+  { name = "openhands-tools" },
+  { name = "openhands-workspace" },
+]
+
+[[package]]
+name = "openhands-agent-server"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "openhands-sdk"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "openhands-tools"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "openhands-workspace"
+version = "1.2.3"
+source = { registry = "https://pypi.org/simple" }
+"#,
+    )
+    .expect("uv.lock");
     fs::write(tool_dir.join("version.txt"), "1.2.3").expect("version.txt");
     fs::write(tool_dir.join("fake_server.py"), fake_server).expect("fake_server.py");
 }

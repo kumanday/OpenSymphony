@@ -1,39 +1,36 @@
-# OpenHands Server Pin
+# Pinned OpenHands Agent-Server
 
-This directory owns the pinned local OpenHands agent-server packaging for
-OpenSymphony.
+This directory owns the pinned local trusted-machine OpenHands runtime used by the OpenSymphony MVP.
 
 Current pin:
 
-- `version.txt` pins the OpenHands SDK bundle to `1.14.0`
-- `pyproject.toml` records the direct dependency pin in
-  `project.optional-dependencies.agent-server`:
+- `version.txt` records the expected OpenHands SDK bundle version: `1.14.0`
+- `pyproject.toml` records the pinned `agent-server` extra:
   - `openhands-agent-server==1.14.0`
   - `openhands-sdk==1.14.0`
   - `openhands-tools==1.14.0`
   - `openhands-workspace==1.14.0`
-- `uv.lock` records the fully resolved Python dependency graph for the local
-  server launcher
-- `run-local.sh` launches the pinned server via `RUNTIME=process uv run
-  --directory . --locked --extra agent-server --module
-  openhands.agent_server --host 127.0.0.1 --port 8000`
+- `uv.lock` records the resolved Python dependency graph for that exact pin
+- `run-local.sh` launches the pinned server via `RUNTIME=process uv run --directory . --locked --extra agent-server --module openhands.agent_server --host 127.0.0.1 --port 8000`
 
-The wrapper owns the process-sandbox selection (`RUNTIME=process`) and loopback
-bind host, and uses `OPENHANDS_SERVER_PORT` to set an explicit port when the
-default `8000` needs to change. It rejects all extra agent-server CLI arguments
-so local smoke runs preserve the same single-server supervised topology and
-host-process execution mode as the daemon-managed path.
+Requirements:
 
-The local MVP uses this exact pin for:
+- `uv`
+- Python `3.12.x`
 
-- the local supervised server command
-- HTTP and WebSocket contract verification
-- doctor checks
-- live local integration tests
+## Provision with `uv`
 
-The repo currently constrains this environment to Python `3.12.x` via
-`requires-python = \">=3.12,<3.13\"` because the pinned OpenHands package line
-requires Python 3.12 or newer.
+```bash
+cd tools/openhands-server
+uv sync --extra agent-server
+```
 
-Do not rely on a globally installed moving-target `openhands` binary for this
-repository.
+## Run locally
+
+```bash
+./tools/openhands-server/run-local.sh
+```
+
+The launcher binds to loopback-only at `127.0.0.1:8000` by default and only accepts `OPENHANDS_SERVER_PORT` as a runtime override. It intentionally rejects extra agent-server CLI flags so smoke runs stay aligned with the daemon-managed supervised topology.
+
+Do not rely on a globally installed moving-target `openhands` binary for this repository.

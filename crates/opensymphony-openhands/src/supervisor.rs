@@ -90,13 +90,13 @@ impl ExternalServerConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SupervisorConfig {
-    Supervised(SupervisedServerConfig),
+    Supervised(Box<SupervisedServerConfig>),
     External(ExternalServerConfig),
 }
 
 impl SupervisorConfig {
     pub fn supervised(tooling: LocalServerTooling) -> Self {
-        Self::Supervised(SupervisedServerConfig::new(tooling))
+        Self::Supervised(Box::new(SupervisedServerConfig::new(tooling)))
     }
 
     pub fn external(base_url: impl Into<String>) -> Self {
@@ -140,6 +140,7 @@ pub struct ServerStatus {
 pub struct LocalServerSupervisor {
     config: SupervisorConfig,
     launched: Option<LaunchedProcess>,
+    last_exit: Option<ExitedProcess>,
 }
 
 struct LaunchedProcess {
@@ -148,11 +149,19 @@ struct LaunchedProcess {
     launched_at: SystemTime,
 }
 
+struct ExitedProcess {
+    launch: ResolvedLaunch,
+    launched_at: SystemTime,
+    pid: u32,
+    code: Option<i32>,
+}
+
 impl LocalServerSupervisor {
     pub fn new(config: SupervisorConfig) -> Self {
         Self {
             config,
             launched: None,
+            last_exit: None,
         }
     }
 
@@ -162,6 +171,8 @@ impl LocalServerSupervisor {
         if self.launched.is_some() {
             return self.status();
         }
+
+        self.last_exit = None;
 
         match &self.config {
             SupervisorConfig::External(config) => {
@@ -258,6 +269,7 @@ impl LocalServerSupervisor {
     pub fn stop(&mut self) -> Result<ServerStatus, SupervisorError> {
         if let Some(mut launched) = self.launched.take() {
             let pid = launched.child.id();
+            self.last_exit = None;
             if launched
                 .child
                 .try_wait()
@@ -303,6 +315,19 @@ impl LocalServerSupervisor {
             });
         }
 
+        if let Some(exited) = self.last_exit.as_ref() {
+            return Ok(ServerStatus {
+                mode: ServerMode::Supervised,
+                ownership: LaunchOwnership::Launched,
+                state: ServerState::Exited { code: exited.code },
+                base_url: exited.launch.base_url.clone(),
+                version: Some(exited.launch.version.clone()),
+                pid: Some(exited.pid),
+                launched_at: Some(exited.launched_at),
+                launcher: Some(exited.launch.launcher_summary.clone()),
+            });
+        }
+
         let ready = probe_ready(&self.config.base_url(), self.config.probe())?;
         Ok(ServerStatus {
             mode: self.config.mode(),
@@ -334,13 +359,18 @@ impl LocalServerSupervisor {
     fn reap_exited_child(&mut self) -> Result<(), SupervisorError> {
         if let Some(launched) = self.launched.as_mut() {
             let pid = launched.child.id();
-            if launched
+            if let Some(status) = launched
                 .child
                 .try_wait()
                 .map_err(|source| SupervisorError::Wait { pid, source })?
-                .is_some()
             {
-                self.launched = None;
+                let launched = self.launched.take().expect("launched process should exist");
+                self.last_exit = Some(ExitedProcess {
+                    launch: launched.launch,
+                    launched_at: launched.launched_at,
+                    pid,
+                    code: status.code(),
+                });
             }
         }
 
@@ -352,6 +382,7 @@ impl LocalServerSupervisor {
             let _ = launched.child.try_wait();
             let _ = kill_child(&mut launched.child);
         }
+        self.last_exit = None;
     }
 }
 
@@ -439,58 +470,110 @@ fn kill_child(child: &mut Child) -> Result<(), SupervisorError> {
 
 fn probe_ready(base_url: &str, probe: &ProbeConfig) -> Result<bool, SupervisorError> {
     let endpoint = HttpEndpoint::parse(base_url)?;
-    let address = endpoint.socket_address(base_url)?;
-    let stream = match TcpStream::connect_timeout(&address, probe.connect_timeout) {
+    let addresses = endpoint.socket_addresses(base_url)?;
+    probe_resolved_addresses(
+        base_url,
+        &endpoint.host,
+        normalized_probe_path(&probe.path),
+        &addresses,
+        probe.connect_timeout,
+    )
+}
+
+fn probe_resolved_addresses(
+    base_url: &str,
+    host: &str,
+    path: &str,
+    addresses: &[std::net::SocketAddr],
+    timeout: Duration,
+) -> Result<bool, SupervisorError> {
+    let mut first_fatal = None;
+
+    for address in addresses {
+        match probe_address(base_url, host, path, *address, timeout) {
+            Ok(true) => return Ok(true),
+            Ok(false) => continue,
+            Err(ProbeAttempt::Transient) => continue,
+            Err(ProbeAttempt::Fatal(error)) if first_fatal.is_none() => {
+                first_fatal = Some(error);
+            }
+            Err(ProbeAttempt::Fatal(_)) => {}
+        }
+    }
+
+    if let Some(error) = first_fatal {
+        Err(error)
+    } else {
+        Ok(false)
+    }
+}
+
+fn probe_address(
+    base_url: &str,
+    host: &str,
+    path: &str,
+    address: std::net::SocketAddr,
+    timeout: Duration,
+) -> Result<bool, ProbeAttempt> {
+    let stream = match TcpStream::connect_timeout(&address, timeout) {
         Ok(stream) => stream,
-        Err(source) if is_transient_connection_error(&source) => return Ok(false),
+        Err(source) if is_transient_connection_error(&source) => {
+            return Err(ProbeAttempt::Transient);
+        }
         Err(source) => {
-            return Err(SupervisorError::ProbeIo {
+            return Err(ProbeAttempt::Fatal(SupervisorError::ProbeIo {
                 base_url: base_url.to_string(),
-                path: probe.path.clone(),
+                path: path.to_string(),
                 source,
-            });
+            }));
         }
     };
 
-    stream
-        .set_read_timeout(Some(probe.connect_timeout))
-        .map_err(|source| SupervisorError::ProbeIo {
+    stream.set_read_timeout(Some(timeout)).map_err(|source| {
+        ProbeAttempt::Fatal(SupervisorError::ProbeIo {
             base_url: base_url.to_string(),
-            path: probe.path.clone(),
+            path: path.to_string(),
             source,
-        })?;
-    stream
-        .set_write_timeout(Some(probe.connect_timeout))
-        .map_err(|source| SupervisorError::ProbeIo {
+        })
+    })?;
+    stream.set_write_timeout(Some(timeout)).map_err(|source| {
+        ProbeAttempt::Fatal(SupervisorError::ProbeIo {
             base_url: base_url.to_string(),
-            path: probe.path.clone(),
+            path: path.to_string(),
             source,
-        })?;
+        })
+    })?;
 
     let mut stream = stream;
     write!(
         stream,
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        normalized_probe_path(&probe.path),
-        endpoint.host
+        path, host
     )
-    .map_err(|source| SupervisorError::ProbeIo {
-        base_url: base_url.to_string(),
-        path: probe.path.clone(),
-        source,
+    .map_err(|source| {
+        ProbeAttempt::Fatal(SupervisorError::ProbeIo {
+            base_url: base_url.to_string(),
+            path: path.to_string(),
+            source,
+        })
     })?;
 
     let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|source| SupervisorError::ProbeIo {
+    stream.read_to_string(&mut response).map_err(|source| {
+        ProbeAttempt::Fatal(SupervisorError::ProbeIo {
             base_url: base_url.to_string(),
-            path: probe.path.clone(),
+            path: path.to_string(),
             source,
-        })?;
+        })
+    })?;
 
     let status_line = response.lines().next().unwrap_or_default();
     Ok(status_line.contains(" 200 "))
+}
+
+enum ProbeAttempt {
+    Transient,
+    Fatal(SupervisorError),
 }
 
 fn normalized_probe_path(path: &str) -> &str {
@@ -552,18 +635,79 @@ impl HttpEndpoint {
         })
     }
 
-    fn socket_address(&self, base_url: &str) -> Result<std::net::SocketAddr, SupervisorError> {
-        let mut addresses =
-            (self.host.as_str(), self.port)
-                .to_socket_addrs()
-                .map_err(|source| SupervisorError::ResolveAddress {
-                    base_url: base_url.to_string(),
-                    source,
-                })?;
-        addresses
-            .next()
-            .ok_or_else(|| SupervisorError::InvalidBaseUrl {
+    fn socket_addresses(
+        &self,
+        base_url: &str,
+    ) -> Result<Vec<std::net::SocketAddr>, SupervisorError> {
+        let addresses: Vec<_> = (self.host.as_str(), self.port)
+            .to_socket_addrs()
+            .map_err(|source| SupervisorError::ResolveAddress {
                 base_url: base_url.to_string(),
-            })
+                source,
+            })?
+            .collect();
+        if addresses.is_empty() {
+            return Err(SupervisorError::InvalidBaseUrl {
+                base_url: base_url.to_string(),
+            });
+        }
+
+        Ok(addresses)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::{Shutdown, SocketAddr, TcpListener},
+        thread,
+        time::Duration,
+    };
+
+    use super::probe_resolved_addresses;
+
+    #[test]
+    fn probe_resolved_addresses_tries_later_candidates_after_transient_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let port = listener
+            .local_addr()
+            .expect("listener address should resolve")
+            .port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request should connect");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let bytes_read = stream.read(&mut chunk).expect("request should read");
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..bytes_read]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .expect("response should write");
+            stream.flush().expect("response should flush");
+            stream
+                .shutdown(Shutdown::Both)
+                .expect("stream should shut down");
+        });
+
+        let unreachable = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port));
+        let reachable = SocketAddr::from(([127, 0, 0, 1], port));
+        let ready = probe_resolved_addresses(
+            &format!("http://localhost:{port}"),
+            "localhost",
+            "/openapi.json",
+            &[unreachable, reachable],
+            Duration::from_millis(250),
+        )
+        .expect("probe should succeed");
+
+        assert!(ready);
+        server.join().expect("server thread should finish");
     }
 }

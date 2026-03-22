@@ -1,36 +1,40 @@
 [workspace]
 members = [
-    "crates/opensymphony-domain",
-    "crates/opensymphony-workflow",
-    "crates/opensymphony-workspace",
-    "crates/opensymphony-linear",
-    "crates/opensymphony-linear-mcp",
-    "crates/opensymphony-openhands",
-    "crates/opensymphony-orchestrator",
-    "crates/opensymphony-control",
-    "crates/opensymphony-cli",
-    "crates/opensymphony-tui",
-    "crates/opensymphony-testkit",
+  "crates/opensymphony-domain",
+  "crates/opensymphony-workflow",
+  "crates/opensymphony-workspace",
+  "crates/opensymphony-linear",
+  "crates/opensymphony-linear-mcp",
+  "crates/opensymphony-openhands",
+  "crates/opensymphony-orchestrator",
+  "crates/opensymphony-control",
+  "crates/opensymphony-cli",
+  "crates/opensymphony-tui",
+  "crates/opensymphony-testkit",
 ]
 resolver = "2"
 
 [workspace.package]
-edition = "2024"
+edition = "2021"
 license = "MIT"
 repository = "https://github.com/kumanday/OpenSymphony"
-rust-version = "1.85"
 version = "0.1.0"
 
-[workspace.lints.rust]
-rust_2018_idioms = { level = "warn", priority = -1 }
-unsafe_code = "forbid"
-unused_lifetimes = "warn"
-unused_macro_rules = "warn"
-unused_qualifications = "warn"
+[workspace.dependencies]
+axum = { version = "0.7", features = ["macros", "ws"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tempfile = "3"
+thiserror = "1"
+tokio = { version = "1", features = ["fs", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
 
-[workspace.lints.clippy]
-dbg_macro = "warn"
-manual_assert = "warn"
-todo = "warn"
-unnecessary_wraps = "warn"
-unwrap_used = "warn"

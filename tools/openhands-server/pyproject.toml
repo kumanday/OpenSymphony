@@ -1,6 +1,6 @@
 [project]
 name = "opensymphony-openhands-server"
-version = "0.0.0"
+version = "0.1.0"
 description = "Pinned local OpenHands agent-server environment for OpenSymphony."
 requires-python = ">=3.12,<3.13"
 dependencies = []
@@ -21,3 +21,6 @@ host = "127.0.0.1"
 default_port = 8000
 port_env = "OPENHANDS_SERVER_PORT"
 launcher = "RUNTIME=process uv run --directory . --locked --extra agent-server --module openhands.agent_server --host 127.0.0.1 --port 8000"
+
+[tool.uv]
+package = false
