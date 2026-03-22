@@ -19,6 +19,8 @@ use tokio::{
 use tracing::warn;
 use url::Url;
 
+const SNAPSHOT_EVENT_NAME: &str = "snapshot";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotEnvelope {
     pub sequence: u64,
@@ -476,7 +478,7 @@ fn snapshot_event(envelope: &SnapshotEnvelope) -> Option<Event> {
     let payload = serde_json::to_string(envelope).ok()?;
     Some(
         Event::default()
-            .event("snapshot")
+            .event(SNAPSHOT_EVENT_NAME)
             .id(envelope.sequence.to_string())
             .data(payload),
     )
@@ -550,6 +552,7 @@ impl ControlPlaneClient {
             inner,
             stream_connect_timeout: self.stream_connect_timeout,
             observed_snapshot: false,
+            attach_deadline: None,
         })
     }
 
@@ -568,6 +571,7 @@ pub struct ControlPlaneEventStream {
     inner: EventSource,
     stream_connect_timeout: Duration,
     observed_snapshot: bool,
+    attach_deadline: Option<tokio::time::Instant>,
 }
 
 #[derive(Debug)]
@@ -587,7 +591,10 @@ impl ControlPlaneEventStream {
                     None => return None,
                 }
             } else {
-                match tokio::time::timeout(self.stream_connect_timeout, self.inner.next()).await {
+                let deadline = *self.attach_deadline.get_or_insert_with(|| {
+                    tokio::time::Instant::now() + self.stream_connect_timeout
+                });
+                match tokio::time::timeout_at(deadline, self.inner.next()).await {
                     Ok(Some(event)) => event,
                     Ok(None) => return None,
                     Err(_) => {
@@ -600,23 +607,29 @@ impl ControlPlaneEventStream {
             match event {
                 Ok(EventSourceEvent::Open) => continue,
                 Ok(EventSourceEvent::Message(message)) => {
+                    if message.event != SNAPSHOT_EVENT_NAME {
+                        continue;
+                    }
                     let snapshot = serde_json::from_str(&message.data)
                         .map(Box::new)
                         .map(ControlPlaneStreamUpdate::Snapshot)
                         .map_err(ControlPlaneClientError::Decode);
                     if snapshot.is_ok() {
                         self.observed_snapshot = true;
+                        self.attach_deadline = None;
                     }
                     return Some(snapshot);
                 }
                 Err(error) if self.inner.ready_state() == ReadyState::Connecting => {
                     self.observed_snapshot = false;
+                    self.attach_deadline = None;
                     return Some(Ok(ControlPlaneStreamUpdate::Reconnecting(
                         ControlPlaneClientError::Stream(Box::new(error)),
                     )));
                 }
                 Err(error) => {
                     self.observed_snapshot = false;
+                    self.attach_deadline = None;
                     return Some(Err(ControlPlaneClientError::Stream(Box::new(error))));
                 }
             }
