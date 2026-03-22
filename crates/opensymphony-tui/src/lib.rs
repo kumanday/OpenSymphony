@@ -13,8 +13,8 @@ use ftui::{
     widgets::{Widget, paragraph::Paragraph},
 };
 use opensymphony_control::{
-    ControlPlaneClient, ControlPlaneClientError, ControlPlaneStreamUpdate, IssueRuntimeState,
-    IssueSnapshot, MetricsSnapshot, RecentEvent, SnapshotEnvelope, WorkerOutcome, log_stream_error,
+    ControlPlaneClient, ControlPlaneClientError, ControlPlaneStreamUpdate, IssueSnapshot,
+    MetricsSnapshot, RecentEvent, SnapshotEnvelope, log_stream_error,
 };
 use thiserror::Error;
 use url::Url;
@@ -858,40 +858,6 @@ fn visible_issue_window(
     let start = min(selected_issue.saturating_sub(visible_issues / 2), max_start);
     let end = min(start + visible_issues, total_issues);
     (start, end)
-}
-
-trait RuntimeStateLabel {
-    fn as_str(&self) -> &'static str;
-}
-
-impl RuntimeStateLabel for IssueRuntimeState {
-    fn as_str(&self) -> &'static str {
-        match self {
-            IssueRuntimeState::Idle => "idle",
-            IssueRuntimeState::Running => "running",
-            IssueRuntimeState::RetryQueued => "retry_queued",
-            IssueRuntimeState::Releasing => "releasing",
-            IssueRuntimeState::Completed => "completed",
-            IssueRuntimeState::Failed => "failed",
-        }
-    }
-}
-
-trait WorkerOutcomeLabel {
-    fn as_str(&self) -> &'static str;
-}
-
-impl WorkerOutcomeLabel for WorkerOutcome {
-    fn as_str(&self) -> &'static str {
-        match self {
-            WorkerOutcome::Unknown => "unknown",
-            WorkerOutcome::Running => "running",
-            WorkerOutcome::Continued => "continued",
-            WorkerOutcome::Completed => "completed",
-            WorkerOutcome::Failed => "failed",
-            WorkerOutcome::Canceled => "canceled",
-        }
-    }
 }
 
 #[cfg(test)]
