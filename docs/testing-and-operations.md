@@ -100,12 +100,13 @@ Current implementation:
 - leave `openhands.local_server.command` unset when omitted so the runtime-owned local tooling layer resolves the pinned launcher from the OpenSymphony checkout
 - fail when `openhands.local_server.command` is configured until the runtime supervisor can honor workflow-owned launcher overrides
 - fail when `openhands.local_server.enabled: false` is configured until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
+- fail when `openhands.local_server.env` is configured until the runtime supervisor creation path forwards workflow-owned launcher environment variables instead of always using runtime-owned defaults
 - fail when `openhands.local_server.readiness_probe_path` is configured until the runtime supervisor launch path consumes workflow-owned probe settings instead of always using `/openapi.json`
 - fail when `openhands.local_server.startup_timeout_ms` is configured until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
 - resolve the bundled `examples/target-repo/WORKFLOW.md` file end-to-end, not just parse it
 - treat a leading unmatched `---` as prompt body text instead of failing front-matter parsing
 - treat leading thematic-break-delimited non-mapping blocks as prompt body text instead of silently dropping prompt content
-- fail on malformed, non-`http://`, path-bearing, or bracketed-IPv6 `openhands.transport.base_url` values during workflow resolution
+- fail on malformed, non-`http://`, path-bearing, query-bearing, fragment-bearing, or bracketed-IPv6 `openhands.transport.base_url` values during workflow resolution
 - fail when explicit `openhands.websocket.enabled`, `ready_timeout_ms`, `reconnect_initial_ms`, or `reconnect_max_ms` values are configured before the runtime readiness/reconnect path consumes them
 - fail when `openhands.transport.session_api_key_env` or explicit OpenHands WebSocket auth knobs are configured before the runtime transport layer consumes them
 - fail when `openhands.mcp.stdio_servers` is configured before the runtime conversation-create adapter can forward `mcp_config`

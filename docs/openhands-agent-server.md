@@ -107,8 +107,9 @@ Current repository implementation:
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
 - explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
 - explicit `openhands.local_server.enabled: false` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
+- explicit `openhands.local_server.env` overrides are currently rejected during workflow resolution until the runtime supervisor creation path forwards workflow-owned launcher environment variables into `extra_env`
 - explicit `openhands.local_server.startup_timeout_ms` overrides are currently rejected during workflow resolution until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
-- workflow resolution rejects malformed, non-`http://`, path-bearing, or bracketed-IPv6 `openhands.transport.base_url` values before the daemon reaches runtime transport setup because the current readiness probes still require a bare IPv4-or-hostname `http://host:port` origin
+- workflow resolution rejects malformed, non-`http://`, path-bearing, query-bearing, fragment-bearing, or bracketed-IPv6 `openhands.transport.base_url` values before the daemon reaches runtime transport setup because the current readiness probes still require a bare IPv4-or-hostname `http://host:port` origin
 
 ## 4.2 Startup contract
 
@@ -282,6 +283,7 @@ Current repository implementation:
 - the current request model still serializes `agent` as only `{ kind, llm }`, and `llm` itself as only `{ model, api_key }`, so workflow-owned agent extras plus arbitrary LLM option keys are rejected before runtime launch
 - the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
 - the current supervisor readiness probe still parses only bare `http://host:port` origins, always uses its default `/openapi.json` probe path, and the CLI still constructs `SupervisedServerConfig::new(tooling)` without applying workflow-owned startup timeouts, so `https://` base URLs plus explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are rejected before runtime launch
+- the current supervisor launch path still uses runtime-owned launcher environment variables (`OPENHANDS_SERVER_PORT` and `RUNTIME=process`), so explicit workflow-owned `local_server.env` overrides are rejected before runtime launch
 - the current runtime still always opens the readiness socket and uses runtime-owned readiness/reconnect budgets, so explicit workflow-owned `websocket.enabled`, `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides are rejected before runtime launch
 - the current request model does not yet serialize `mcp_config`, so workflow-owned MCP stdio server declarations are rejected before runtime launch
 - `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`

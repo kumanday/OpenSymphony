@@ -43,7 +43,8 @@ agent:
 openhands:
   transport:
     # The current readiness probe path only supports bare `http://host:port`
-    # origins. `https://` and path-prefixed origins are rejected for now.
+    # origins. `https://`, path-prefixed, query-bearing, and fragment-bearing
+    # origins are rejected for now.
     base_url: "http://127.0.0.1:8000"
 
   local_server:
@@ -57,9 +58,8 @@ openhands:
     # supervisor creation path consumes workflow-owned timeout settings.
     # Explicit readiness-probe-path overrides are rejected until the runtime
     # supervisor launch path consumes workflow-owned probe settings end-to-end.
-    env:
-      LOG_JSON: "true"
-      RUNTIME: process
+    # Explicit launcher env overrides are rejected until the runtime
+    # supervisor creation path forwards workflow-owned environment variables.
 
   conversation:
     # Defaults to the current runtime-owned per-issue conversation reuse behavior.
