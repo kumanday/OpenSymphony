@@ -329,7 +329,7 @@ Why:
 
 For local MVP, the implemented MCP surface is a small Linear tool server launched via stdio:
 
-- `opensymphony linear-mcp --stdio`
+- `opensymphony linear-mcp`
 - line-delimited JSON-RPC over stdio
 - tool set:
   - `linear_get_issue`

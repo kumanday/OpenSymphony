@@ -42,10 +42,7 @@ pub struct DoctorArgs {
 }
 
 #[derive(Args)]
-pub struct LinearMcpArgs {
-    #[arg(long, required = true, help = "Run the Linear MCP server over stdio")]
-    stdio: bool,
-}
+pub struct LinearMcpArgs {}
 
 #[derive(Debug, Deserialize)]
 struct DoctorConfig {
@@ -144,7 +141,7 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
 }
 
 async fn run_linear_mcp(args: LinearMcpArgs) -> ExitCode {
-    let _ = args.stdio;
+    let _ = args;
 
     match run_linear_mcp_stdio_server().await {
         Ok(()) => ExitCode::SUCCESS,

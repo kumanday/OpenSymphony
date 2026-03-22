@@ -164,7 +164,7 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml
-cargo run -p opensymphony-cli -- linear-mcp --stdio
+cargo run -p opensymphony-cli -- linear-mcp
 ./scripts/smoke_local.sh
 OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 ```
