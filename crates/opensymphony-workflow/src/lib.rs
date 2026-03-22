@@ -467,6 +467,40 @@ openhands:
     }
 
     #[test]
+    fn rejects_unsupported_openhands_local_server_startup_timeout_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    startup_timeout_ms: 30000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported startup timeout overrides should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.startup_timeout_ms",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn explicit_tracker_api_key_env_reference_must_resolve() {
         let workflow = WorkflowDefinition::parse(
             r#"---
@@ -595,6 +629,7 @@ openhands:
             "localhost:8000",
             "ws://127.0.0.1:8000",
             "http://127.0.0.1:8000/",
+            "https://127.0.0.1:8000",
             "https://example.com/runtime",
             "http://127.0.0.1:8000/api",
             "https://example.com/runtime/api/",
@@ -630,6 +665,40 @@ openhands:
                 }
             ));
         }
+    }
+
+    #[test]
+    fn rejects_unsupported_https_openhands_transport_base_url() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: https://127.0.0.1:8000
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("https OpenHands origins should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.transport.base_url",
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -33,6 +33,7 @@ Because this sanitization is not injective, workspace reuse must be gated by the
 - When `openhands.local_server.command` is omitted, the runtime-owned local tooling layer must resolve the pinned launcher from the OpenSymphony checkout before that `cwd` switch happens. Workflow resolution must not bake a compile-time checkout path into config defaults.
 - Explicit workflow-owned `openhands.local_server.command` overrides are currently rejected until the runtime supervisor can honor them instead of always launching the pinned repo-local server wrapper.
 - Explicit workflow-owned `openhands.local_server.enabled: false` overrides are currently rejected until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness.
+- Explicit workflow-owned `openhands.local_server.startup_timeout_ms` overrides are currently rejected until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default.
 - Explicit workflow-owned `openhands.conversation.reuse_policy` overrides are currently rejected until the orchestrator/runtime path can honor anything other than the default per-issue conversation reuse behavior.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.

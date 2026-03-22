@@ -194,7 +194,10 @@ Local MVP process graph:
 
 The current local supervisor implementation resolves its launch metadata from
 `tools/openhands-server/`, probes readiness with `GET /openapi.json`, and only
-terminates a process that it launched itself.
+terminates a process that it launched itself. Until that readiness path supports
+TLS endpoints and workflow-owned startup-timeout overrides, workflow resolution
+rejects `https://` OpenHands origins and explicit `local_server.startup_timeout_ms`
+settings.
 
 ## 5. Worker and conversation model
 
