@@ -24,25 +24,24 @@ async fn doctor_live_probe_succeeds_against_fake_server() {
         .to_path_buf();
     let temp_dir = TempDir::new().expect("temp dir should be created");
     let workspace_root = temp_dir.path().join("var/workspaces");
+    let target_repo = temp_dir.path().join("target-repo");
     let config_path = temp_dir.path().join("doctor.yaml");
+    std::fs::create_dir_all(&target_repo).expect("target repo should be created");
+    std::fs::write(
+        target_repo.join("WORKFLOW.md"),
+        doctor_workflow_source(&workspace_root, server.base_url()),
+    )
+    .expect("workflow should be written");
     let config = serde_yaml::to_string(&Value::Mapping(
         [
             (
-                Value::String("workspace_root".to_string()),
-                Value::String(workspace_root.display().to_string()),
-            ),
-            (
                 Value::String("target_repo".to_string()),
-                Value::String(repo_root.join("examples/target-repo").display().to_string()),
+                Value::String(target_repo.display().to_string()),
             ),
             (
                 Value::String("openhands".to_string()),
                 Value::Mapping(
                     [
-                        (
-                            Value::String("base_url".to_string()),
-                            Value::String(server.base_url().to_string()),
-                        ),
                         (
                             Value::String("tool_dir".to_string()),
                             Value::String(
@@ -62,15 +61,9 @@ async fn doctor_live_probe_succeeds_against_fake_server() {
             (
                 Value::String("linear".to_string()),
                 Value::Mapping(
-                    [
-                        (Value::String("enabled".to_string()), Value::Bool(false)),
-                        (
-                            Value::String("api_key_env".to_string()),
-                            Value::String("LINEAR_API_KEY".to_string()),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    [(Value::String("enabled".to_string()), Value::Bool(false))]
+                        .into_iter()
+                        .collect(),
                 ),
             ),
         ]
@@ -90,22 +83,13 @@ fn doctor_defaults_target_repo_from_checkout_root_even_outside_the_repo_cwd() {
     let config_dir =
         tempfile::tempdir_in(repo_root.join("examples/configs")).expect("config dir should exist");
     let config_path = config_dir.path().join("doctor-default-target.yaml");
-    let workspace_root = config_dir.path().join("workspaces");
     let outside_repo = TempDir::new().expect("outside repo dir should be created");
     let config = serde_yaml::to_string(&Value::Mapping(
         [
             (
-                Value::String("workspace_root".to_string()),
-                Value::String(workspace_root.display().to_string()),
-            ),
-            (
                 Value::String("openhands".to_string()),
                 Value::Mapping(
                     [
-                        (
-                            Value::String("base_url".to_string()),
-                            Value::String("http://127.0.0.1:8000".to_string()),
-                        ),
                         (
                             Value::String("tool_dir".to_string()),
                             Value::String(
@@ -125,15 +109,9 @@ fn doctor_defaults_target_repo_from_checkout_root_even_outside_the_repo_cwd() {
             (
                 Value::String("linear".to_string()),
                 Value::Mapping(
-                    [
-                        (Value::String("enabled".to_string()), Value::Bool(false)),
-                        (
-                            Value::String("api_key_env".to_string()),
-                            Value::String("LINEAR_API_KEY".to_string()),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    [(Value::String("enabled".to_string()), Value::Bool(false))]
+                        .into_iter()
+                        .collect(),
                 ),
             ),
         ]
@@ -165,13 +143,9 @@ fn doctor_fails_when_required_env_placeholder_is_unset() {
     let config_dir =
         tempfile::tempdir_in(repo_root.join("examples/configs")).expect("config dir should exist");
     let config_path = config_dir.path().join("doctor-missing-env.yaml");
-    let missing_var = "OSYM_TEST_MISSING_WORKSPACE_ROOT";
+    let missing_var = "OSYM_TEST_MISSING_TOOL_DIR";
     let config = serde_yaml::to_string(&Value::Mapping(
         [
-            (
-                Value::String("workspace_root".to_string()),
-                Value::String(format!("${{{missing_var}}}")),
-            ),
             (
                 Value::String("target_repo".to_string()),
                 Value::String(repo_root.join("examples/target-repo").display().to_string()),
@@ -181,17 +155,8 @@ fn doctor_fails_when_required_env_placeholder_is_unset() {
                 Value::Mapping(
                     [
                         (
-                            Value::String("base_url".to_string()),
-                            Value::String("http://127.0.0.1:8000".to_string()),
-                        ),
-                        (
                             Value::String("tool_dir".to_string()),
-                            Value::String(
-                                repo_root
-                                    .join("tools/openhands-server")
-                                    .display()
-                                    .to_string(),
-                            ),
+                            Value::String(format!("${{{missing_var}}}")),
                         ),
                         (Value::String("probe_model".to_string()), Value::Null),
                         (Value::String("probe_api_key_env".to_string()), Value::Null),
@@ -203,15 +168,9 @@ fn doctor_fails_when_required_env_placeholder_is_unset() {
             (
                 Value::String("linear".to_string()),
                 Value::Mapping(
-                    [
-                        (Value::String("enabled".to_string()), Value::Bool(false)),
-                        (
-                            Value::String("api_key_env".to_string()),
-                            Value::String("LINEAR_API_KEY".to_string()),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    [(Value::String("enabled".to_string()), Value::Bool(false))]
+                        .into_iter()
+                        .collect(),
                 ),
             ),
         ]
@@ -234,8 +193,7 @@ fn doctor_fails_when_required_env_placeholder_is_unset() {
 
     assert!(
         !output.status.success(),
-        "doctor should fail when a required env placeholder is unset: stdout={}, stderr={stderr}",
-        stdout,
+        "doctor should fail when a required env placeholder is unset: stdout={stdout}, stderr={stderr}",
     );
     assert!(
         stdout.contains(missing_var) || stderr.contains(missing_var),
@@ -252,13 +210,8 @@ fn doctor_ignores_unset_optional_live_placeholders_without_live_openhands() {
         .path()
         .join("doctor-optional-live-placeholder.yaml");
     let missing_var = "OSYM_TEST_MISSING_PROBE_MODEL";
-    let workspace_root = config_dir.path().join("workspaces");
     let config = serde_yaml::to_string(&Value::Mapping(
         [
-            (
-                Value::String("workspace_root".to_string()),
-                Value::String(workspace_root.display().to_string()),
-            ),
             (
                 Value::String("target_repo".to_string()),
                 Value::String(repo_root.join("examples/target-repo").display().to_string()),
@@ -267,10 +220,6 @@ fn doctor_ignores_unset_optional_live_placeholders_without_live_openhands() {
                 Value::String("openhands".to_string()),
                 Value::Mapping(
                     [
-                        (
-                            Value::String("base_url".to_string()),
-                            Value::String("http://127.0.0.1:8000".to_string()),
-                        ),
                         (
                             Value::String("tool_dir".to_string()),
                             Value::String(
@@ -293,15 +242,9 @@ fn doctor_ignores_unset_optional_live_placeholders_without_live_openhands() {
             (
                 Value::String("linear".to_string()),
                 Value::Mapping(
-                    [
-                        (Value::String("enabled".to_string()), Value::Bool(false)),
-                        (
-                            Value::String("api_key_env".to_string()),
-                            Value::String("LINEAR_API_KEY".to_string()),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
+                    [(Value::String("enabled".to_string()), Value::Bool(false))]
+                        .into_iter()
+                        .collect(),
                 ),
             ),
         ]
@@ -390,4 +333,31 @@ fn repo_root() -> PathBuf {
         .parent()
         .expect("workspace root should exist")
         .to_path_buf()
+}
+
+fn doctor_workflow_source(workspace_root: &std::path::Path, base_url: &str) -> String {
+    format!(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: {}
+openhands:
+  transport:
+    base_url: {}
+---
+
+# Doctor Probe
+
+Issue: {{{{ issue.identifier }}}}
+"#,
+        workspace_root.display(),
+        base_url,
+    )
 }

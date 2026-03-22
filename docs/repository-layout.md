@@ -174,6 +174,10 @@ Use examples for:
 - sample workflow files
 - local development config
 
+The example target repository is distinct from the OpenSymphony implementation checkout.
+It intentionally does not include `tools/openhands-server/`, which remains owned by the
+implementation repo.
+
 ## 5. Docs structure
 
 ```text

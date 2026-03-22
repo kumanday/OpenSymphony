@@ -8,3 +8,10 @@ repository.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+liquid = "0.26"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+time = "=0.3.36"
+thiserror = "2"
+url.workspace = true

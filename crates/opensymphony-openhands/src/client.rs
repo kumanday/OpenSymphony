@@ -875,6 +875,20 @@ impl OpenHandsClient {
         request: &ConversationCreateRequest,
         wait_timeout: Duration,
     ) -> Result<OpenHandsProbeResult, OpenHandsError> {
+        self.run_probe_with_message(
+            request,
+            "Reply with the exact text `OpenSymphony doctor probe OK` and then finish.",
+            wait_timeout,
+        )
+        .await
+    }
+
+    pub async fn run_probe_with_message(
+        &self,
+        request: &ConversationCreateRequest,
+        prompt: &str,
+        wait_timeout: Duration,
+    ) -> Result<OpenHandsProbeResult, OpenHandsError> {
         let conversation = self.create_conversation(request).await?;
         let mut stream = self
             .attach_runtime_stream(
@@ -889,9 +903,7 @@ impl OpenHandsClient {
             .await?;
         self.send_message(
             conversation.conversation_id,
-            &SendMessageRequest::user_text(
-                "Reply with the exact text `OpenSymphony doctor probe OK` and then finish.",
-            ),
+            &SendMessageRequest::user_text(prompt),
         )
         .await?;
         self.run_conversation(conversation.conversation_id).await?;
