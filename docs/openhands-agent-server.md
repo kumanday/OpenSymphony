@@ -286,8 +286,9 @@ Current repository implementation:
 - REST auth is applied independently from WebSocket auth so remote/header deployments do not force the local query-param shape
 - `OpenHandsError` now maps invalid config, transport failures, HTTP status failures, protocol failures, and WebSocket failures into stable runtime categories without exposing `reqwest::Error` or `http::StatusCode`
 - `crates/opensymphony-openhands/tests/client_resilience.rs` covers authenticated REST operations, WebSocket readiness auth, auth failure mapping, malformed payload handling, and non-readiness frames before the first state update
-- the doctor probe now runs through `RuntimeEventStream`, exercises a real `POST /events` plus `POST /run` path, and only reports the runtime healthy after the attached stream reaches a successful terminal `execution_status` of `finished`
+- the doctor probe now runs through `RuntimeEventStream`, exercises a real `POST /events` plus `POST /run` path, and only reports the runtime healthy after the attached stream reaches a successful terminal `execution_status` of `finished` with no queued `ConversationErrorEvent` still pending ahead of completion
 - failure-only probe streams such as `ConversationErrorEvent` or terminal `execution_status` values like `error` and `stuck` are treated as unhealthy instead of silently passing
+- readiness snapshots are attach/reconnect barriers, not synthetic replay events; consumers only observe them through `ready_event` unless the same state update is also present in `/events/search`
 
 Do not assume one auth method forever. Make it configurable and covered by integration tests against the pinned version.
 

@@ -261,6 +261,63 @@ async fn run_probe_uses_refreshed_terminal_state_after_reconnect_without_new_eve
     assert_eq!(*state.run_count.lock().await, 1);
 }
 
+#[tokio::test]
+async fn run_probe_rejects_error_events_even_when_finished_state_is_already_mirrored() {
+    let state = ProbeState::default();
+    let server = TestServer::start(reconnect_error_then_finished_probe_router(state.clone())).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        Some("fake-model".to_string()),
+        Some("fake-key".to_string()),
+    );
+
+    let result = client.run_probe(&request, Duration::from_secs(2)).await;
+
+    assert!(
+        result.is_err(),
+        "probe should fail when a queued ConversationErrorEvent precedes the mirrored finished state"
+    );
+}
+
+#[tokio::test]
+async fn runtime_stream_does_not_replay_reconnect_readiness_barriers_without_new_events() {
+    let state = ReadinessReplayState::default();
+    let server = TestServer::start(readiness_replay_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            opensymphony_openhands::RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                reconnect_initial_backoff: Duration::from_millis(25),
+                reconnect_max_backoff: Duration::from_millis(100),
+                max_reconnect_attempts: 4,
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    let result = tokio::time::timeout(Duration::from_millis(200), stream.next_event()).await;
+
+    assert!(
+        result.is_err(),
+        "reconnect readiness barrier should not surface as a replayable event when search adds no new runtime activity"
+    );
+}
+
 struct TestServer {
     base_url: String,
     task: JoinHandle<()>,
@@ -606,6 +663,32 @@ fn reconnect_probe_router(state: ProbeState) -> Router {
         .with_state(state)
 }
 
+fn reconnect_error_then_finished_probe_router(state: ProbeState) -> Router {
+    Router::new()
+        .route("/api/conversations", post(probe_create_conversation))
+        .route(
+            "/api/conversations/:conversation_id",
+            get(probe_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events",
+            post(probe_send_message),
+        )
+        .route(
+            "/api/conversations/:conversation_id/run",
+            post(error_then_finished_probe_run_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(probe_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(reconnect_probe_events_socket),
+        )
+        .with_state(state)
+}
+
 async fn probe_create_conversation(
     State(state): State<ProbeState>,
     Json(request): Json<ConversationCreateRequest>,
@@ -711,6 +794,41 @@ async fn reconnect_probe_run_conversation(
     Ok(Json(json!({ "success": true })))
 }
 
+async fn error_then_finished_probe_run_conversation(
+    State(state): State<ProbeState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    *state.run_count.lock().await += 1;
+    let now = Utc::now();
+    state.events.lock().await.extend([
+        EventEnvelope::new(
+            "evt-error",
+            now,
+            "runtime",
+            "ConversationErrorEvent",
+            json!({
+                "message": "synthetic probe failure",
+            }),
+        ),
+        EventEnvelope::new(
+            "evt-finished",
+            now + chrono::Duration::seconds(1),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": "finished",
+                "state_delta": {
+                    "execution_status": "finished",
+                },
+            }),
+        ),
+    ]);
+    let mut conversation = state.conversation.lock().await;
+    let conversation = conversation.as_mut().ok_or(StatusCode::NOT_FOUND)?;
+    conversation.execution_status = "finished".to_string();
+    Ok(Json(json!({ "success": true })))
+}
+
 async fn probe_search_events(
     State(state): State<ProbeState>,
     Path(_conversation_id): Path<Uuid>,
@@ -753,5 +871,129 @@ async fn reconnect_probe_events_socket(
             .send(Message::Close(None))
             .await
             .expect("socket close should send");
+    })
+}
+
+#[derive(Clone, Default)]
+struct ReadinessReplayState {
+    conversation: Arc<Mutex<Option<Conversation>>>,
+    connect_count: Arc<Mutex<usize>>,
+}
+
+fn readiness_replay_router(state: ReadinessReplayState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(readiness_replay_create_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id",
+            get(readiness_replay_get_conversation),
+        )
+        .route(
+            "/api/conversations/:conversation_id/events/search",
+            get(readiness_replay_search_events),
+        )
+        .route(
+            "/sockets/events/:conversation_id",
+            get(readiness_replay_events_socket),
+        )
+        .with_state(state)
+}
+
+async fn readiness_replay_create_conversation(
+    State(state): State<ReadinessReplayState>,
+    Json(request): Json<ConversationCreateRequest>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = Conversation {
+        conversation_id: request.conversation_id,
+        workspace: request.workspace,
+        persistence_dir: request.persistence_dir,
+        max_iterations: request.max_iterations,
+        stuck_detection: request.stuck_detection,
+        execution_status: "idle".to_string(),
+        confirmation_policy: request.confirmation_policy,
+        agent: request.agent,
+    };
+    *state.conversation.lock().await = Some(conversation.clone());
+    Ok(Json(conversation))
+}
+
+async fn readiness_replay_get_conversation(
+    State(state): State<ReadinessReplayState>,
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let conversation = state
+        .conversation
+        .lock()
+        .await
+        .clone()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(conversation))
+}
+
+async fn readiness_replay_search_events(
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    Ok(Json(SearchConversationEventsResponse {
+        events: vec![EventEnvelope::new(
+            "evt-ready",
+            Utc::now(),
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": "idle",
+                "state_delta": {
+                    "execution_status": "idle",
+                },
+            }),
+        )],
+        next_page_id: None,
+    }))
+}
+
+async fn readiness_replay_events_socket(
+    State(state): State<ReadinessReplayState>,
+    websocket: WebSocketUpgrade,
+    Path(_conversation_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let mut connect_count = state.connect_count.lock().await;
+    *connect_count += 1;
+    let connection_number = *connect_count;
+    drop(connect_count);
+
+    websocket.on_upgrade(async move |mut socket| {
+        let ready_id = if connection_number == 1 {
+            "evt-ready"
+        } else {
+            "evt-ready-reconnect"
+        };
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&EventEnvelope::new(
+                    ready_id,
+                    Utc::now(),
+                    "runtime",
+                    "ConversationStateUpdateEvent",
+                    json!({
+                        "execution_status": "idle",
+                        "state_delta": {
+                            "execution_status": "idle",
+                        },
+                    }),
+                ))
+                .expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+
+        if connection_number == 1 {
+            socket
+                .send(Message::Close(None))
+                .await
+                .expect("first socket close should send");
+        } else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
     })
 }

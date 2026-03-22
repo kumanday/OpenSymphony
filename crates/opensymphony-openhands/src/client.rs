@@ -311,6 +311,7 @@ impl OpenHandsError {
 
 type RuntimeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const STREAM_READ_AHEAD_WINDOW: Duration = Duration::from_millis(5);
+const UNREADY_EVENT_ID: &str = "runtime-stream-unready";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStreamConfig {
@@ -350,7 +351,7 @@ impl RuntimeEventStream {
         config: RuntimeStreamConfig,
         conversation: Conversation,
     ) -> Self {
-        let ready_event = EventEnvelope::state_update("runtime-stream-unready", "idle");
+        let ready_event = EventEnvelope::state_update(UNREADY_EVENT_ID, "idle");
         let mut state_mirror = ConversationStateMirror::default();
         state_mirror.apply_conversation(&conversation);
         Self {
@@ -532,10 +533,7 @@ impl RuntimeEventStream {
         self.socket = Some(socket);
 
         let reconciled = self.client.search_all_events(self.conversation_id).await?;
-        self.push_new_events(
-            std::iter::once(ready_event).chain(reconciled.items().iter().cloned()),
-            true,
-        );
+        self.push_new_events(reconciled.items().iter().cloned(), true);
         self.rebuild_state_mirror();
         Ok(())
     }
@@ -1033,6 +1031,13 @@ async fn wait_for_probe_terminal_state(
     let deadline = Instant::now() + wait_timeout;
 
     loop {
+        if let Some(event) = stream.pending_conversation_error_event() {
+            return Err(OpenHandsError::ProbeRunUnhealthy(format!(
+                "received {} {} before a successful terminal status",
+                event.kind, event.id
+            )));
+        }
+
         match stream.state_mirror().terminal_status() {
             Some(TerminalExecutionStatus::Finished) => return Ok(()),
             Some(TerminalExecutionStatus::Error) | Some(TerminalExecutionStatus::Stuck) => {
@@ -1060,5 +1065,16 @@ async fn wait_for_probe_terminal_state(
                 event.kind, event.id
             )));
         }
+    }
+}
+
+impl RuntimeEventStream {
+    fn pending_conversation_error_event(&self) -> Option<&EventEnvelope> {
+        self.pending_events.iter().find(|event| {
+            matches!(
+                KnownEvent::from_envelope(event),
+                KnownEvent::ConversationError(_)
+            )
+        })
     }
 }
