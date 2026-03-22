@@ -104,7 +104,7 @@ Current repository implementation:
 - `opensymphony-openhands` currently implements the minimal typed conversation create, get, send-message, run, search, and WebSocket readiness probe surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv` so the pinned project works even when the caller runs it from the repo root
-- when `openhands.local_server.command` is omitted, the workflow resolver expands it to an absolute `<opensymphony-checkout>/tools/openhands-server/run-local.sh` launcher before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
+- when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
 - workflow resolution rejects malformed, non-HTTP(S), or `/api`-suffixed `openhands.transport.base_url` values before the daemon reaches runtime transport setup
 
 ## 4.2 Startup contract
@@ -254,7 +254,8 @@ Required fields:
 
 Current workflow defaulting:
 
-- `confirmation_policy.kind` defaults to `NeverConfirm` when omitted, even when the `confirmation_policy` block is present only to carry additional options
+- `confirmation_policy.kind` defaults to `NeverConfirm` when omitted
+- unsupported `confirmation_policy` options are rejected during workflow resolution because the current request subset only serializes `{ kind }`
 - `agent.kind` defaults to `Agent` when omitted
 - `max_iterations` must fit the downstream OpenHands `u32` request range
 - `agent.llm.model` is required whenever an `llm` block is present

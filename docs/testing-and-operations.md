@@ -96,10 +96,12 @@ Current implementation:
 - resolve bare relative workspace roots against the `WORKFLOW.md` directory
 - reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
-- default `openhands.local_server.command` to the absolute pinned `<opensymphony-checkout>/tools/openhands-server/run-local.sh` launcher
+- leave `openhands.local_server.command` unset when omitted so the runtime-owned local tooling layer resolves the pinned launcher from the OpenSymphony checkout
+- resolve the bundled `examples/target-repo/WORKFLOW.md` file end-to-end, not just parse it
 - treat a leading unmatched `---` as prompt body text instead of failing front-matter parsing
 - fail on malformed, non-HTTP(S), or `/api`-suffixed `openhands.transport.base_url` values during workflow resolution
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
+- fail when `openhands.conversation.confirmation_policy` includes options that cannot be represented in the current OpenHands request subset
 - fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range
 - fail when `openhands.conversation.agent.llm` is present without a non-empty `model`
 - fail on malformed `agent.max_concurrent_agents_by_state` entries

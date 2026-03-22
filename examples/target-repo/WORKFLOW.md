@@ -1,4 +1,12 @@
 ---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
 workspace:
   root: ./var/workspaces
 
