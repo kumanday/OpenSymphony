@@ -207,9 +207,19 @@ The agent already sees:
 - repository files
 - `WORKFLOW.md`
 - repo-root `AGENTS.md` if present in the target repo
+- optional repo-owned `.agents/skills/`
 - OpenSymphony-generated `.opensymphony/generated/issue-context.md`
 
+Recommended precedence:
+
+1. repo-owned `WORKFLOW.md`
+2. repo-owned `AGENTS.md`
+3. repo-owned `.agents/skills/`
+4. additive OpenSymphony-generated `.opensymphony/generated/issue-context.md`
+5. live tracker lookups through Linear MCP tools
+
 The Linear MCP tools should complement this, not duplicate the whole tracker database.
+OpenSymphony-generated files should reference repo-owned policy and latest tracker state without overwriting either one, and example target repos should ignore `.opensymphony/` locally so these artifacts remain workspace-scoped.
 
 ## 8. Suggested issue model in Rust
 

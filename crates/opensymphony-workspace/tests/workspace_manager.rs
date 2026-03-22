@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use opensymphony_workspace::{
-    CleanupConfig, CleanupDecision, HookConfig, HookDefinition, HookExecutionStatus, HookKind,
-    IssueDescriptor, IssueLifecycleState, RunDescriptor, RunStatus, WorkspaceError,
-    WorkspaceManager, WorkspaceManagerConfig,
+    CleanupConfig, CleanupDecision, ConversationManifest, HookConfig, HookDefinition,
+    HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor, IssueLifecycleState,
+    PromptCaptureDescriptor, PromptKind, RunDescriptor, RunStatus, SessionContextArtifact,
+    WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -685,6 +686,239 @@ async fn after_run_failure_is_best_effort_and_persisted() {
     assert_eq!(persisted.hooks[0].kind, HookKind::AfterRun);
     assert_eq!(persisted.hooks[0].status, HookExecutionStatus::Failed);
     assert_eq!(persisted.hooks[0].stderr.trim(), "after-run");
+}
+
+#[tokio::test]
+async fn conversation_manifest_and_generated_context_artifacts_are_persisted() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-270-artifacts"))
+        .await
+        .expect("workspace should exist");
+
+    let mut conversation = ConversationManifest::new(
+        &ensured.handle,
+        "conv-270",
+        "http://127.0.0.1:8000",
+        ensured.handle.openhands_dir(),
+        "agent-server-v1",
+    );
+    conversation.last_attached_at = Some(chrono::Utc::now());
+    conversation.fresh_conversation = false;
+    manager
+        .write_conversation_manifest(&ensured.handle, &conversation)
+        .await
+        .expect("conversation manifest should write");
+
+    let loaded = manager
+        .load_conversation_manifest(&ensured.handle)
+        .await
+        .expect("conversation manifest should load")
+        .expect("conversation manifest should exist");
+    assert_eq!(loaded, conversation);
+
+    let issue_context = IssueContextArtifact {
+        issue_id: ensured.handle.issue_id().to_string(),
+        identifier: ensured.handle.identifier().to_string(),
+        title: "Repository harness and generated context artifacts".to_string(),
+        current_state: "In Progress".to_string(),
+        repo_workflow_path: ensured.handle.workspace_path().join("WORKFLOW.md"),
+        repo_agents_path: Some(ensured.handle.workspace_path().join("AGENTS.md")),
+        repo_skills_dir: Some(ensured.handle.workspace_path().join(".agents/skills")),
+        last_run_status: Some(RunStatus::Prepared),
+        important_constraints: vec![
+            "Repo-owned policy remains authoritative.".to_string(),
+            "Generated artifacts stay under .opensymphony/.".to_string(),
+        ],
+        known_blockers: vec!["None".to_string()],
+    };
+    manager
+        .write_issue_context(&ensured.handle, &issue_context)
+        .await
+        .expect("issue context should write");
+
+    let rendered_issue_context = tokio::fs::read_to_string(ensured.handle.issue_context_path())
+        .await
+        .expect("issue context should exist");
+    assert!(rendered_issue_context.contains("Repository-owned policy remains authoritative."));
+    assert!(rendered_issue_context.contains("WORKFLOW.md"));
+    assert!(rendered_issue_context.contains(".agents/skills/"));
+    assert!(rendered_issue_context.contains(".opensymphony/conversation.json"));
+
+    let mut session_context = SessionContextArtifact::new(&ensured.handle);
+    session_context.conversation_id = Some("conv-270".to_string());
+    session_context.attempt = Some(4);
+    session_context.last_run_id = Some("run-4".to_string());
+    session_context.last_run_status = Some(RunStatus::Succeeded);
+    session_context.last_prompt_kind = Some(PromptKind::Continuation);
+    session_context.last_prompt_path =
+        Some(ensured.handle.latest_prompt_path(PromptKind::Continuation));
+    session_context.recent_validation_commands =
+        vec!["cargo test -p opensymphony-workspace".to_string()];
+    manager
+        .write_session_context(&ensured.handle, &session_context)
+        .await
+        .expect("session context should write");
+
+    let loaded_session = manager
+        .load_session_context(&ensured.handle)
+        .await
+        .expect("session context should load")
+        .expect("session context should exist");
+    assert_eq!(loaded_session, session_context);
+}
+
+#[tokio::test]
+async fn prompt_capture_writes_latest_and_per_run_artifacts() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-270-prompts"))
+        .await
+        .expect("workspace should exist");
+    let run = RunDescriptor::new("run-17", 17);
+
+    let first = manager
+        .write_prompt_capture(
+            &ensured.handle,
+            &run,
+            PromptCaptureDescriptor::new(PromptKind::Full, 1),
+            "Initial full prompt",
+        )
+        .await
+        .expect("first prompt capture should write");
+    let second = manager
+        .write_prompt_capture(
+            &ensured.handle,
+            &run,
+            PromptCaptureDescriptor::new(PromptKind::Full, 2),
+            "Updated full prompt",
+        )
+        .await
+        .expect("second prompt capture should write");
+    manager
+        .write_prompt_capture(
+            &ensured.handle,
+            &run,
+            PromptCaptureDescriptor::new(PromptKind::Continuation, 1),
+            "Continuation guidance",
+        )
+        .await
+        .expect("continuation prompt capture should write");
+
+    assert_eq!(
+        tokio::fs::read_to_string(first.archived_prompt_path.clone())
+            .await
+            .expect("archived first prompt should exist"),
+        "Initial full prompt"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(second.archived_prompt_path.clone())
+            .await
+            .expect("archived second prompt should exist"),
+        "Updated full prompt"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(ensured.handle.latest_prompt_path(PromptKind::Full))
+            .await
+            .expect("latest full prompt should exist"),
+        "Updated full prompt"
+    );
+    assert_eq!(
+        tokio::fs::read_to_string(ensured.handle.latest_prompt_path(PromptKind::Continuation))
+            .await
+            .expect("latest continuation prompt should exist"),
+        "Continuation guidance"
+    );
+
+    let latest_full_manifest =
+        serde_json::from_str::<opensymphony_workspace::PromptCaptureManifest>(
+            &tokio::fs::read_to_string(
+                ensured.handle.latest_prompt_manifest_path(PromptKind::Full),
+            )
+            .await
+            .expect("latest full prompt manifest should exist"),
+        )
+        .expect("latest full prompt manifest should decode");
+    assert_eq!(latest_full_manifest.sequence, 2);
+    assert_eq!(latest_full_manifest.attempt, 17);
+    assert_eq!(latest_full_manifest.prompt_kind, PromptKind::Full);
+
+    let archived_run_manifest =
+        serde_json::from_str::<opensymphony_workspace::PromptCaptureManifest>(
+            &tokio::fs::read_to_string(ensured.handle.run_prompt_manifest_path(
+                17,
+                PromptKind::Continuation,
+                1,
+            ))
+            .await
+            .expect("archived continuation prompt manifest should exist"),
+        )
+        .expect("archived continuation prompt manifest should decode");
+    assert_eq!(archived_run_manifest.run_id, "run-17");
+    assert_eq!(archived_run_manifest.sequence, 1);
+    assert_eq!(
+        archived_run_manifest.prompt_length_bytes,
+        "Continuation guidance".len()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn generated_issue_context_rejects_symlinked_output_paths() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-270-generated-symlink"))
+        .await
+        .expect("workspace should exist");
+
+    let outside_issue_context = temp_dir.path().join("outside-issue-context.md");
+    tokio::fs::write(&outside_issue_context, "outside")
+        .await
+        .expect("outside issue context should exist");
+    symlink(&outside_issue_context, ensured.handle.issue_context_path())
+        .expect("issue context symlink should be created");
+
+    let error = manager
+        .write_issue_context(
+            &ensured.handle,
+            &IssueContextArtifact {
+                issue_id: ensured.handle.issue_id().to_string(),
+                identifier: ensured.handle.identifier().to_string(),
+                title: "Symlink rejection".to_string(),
+                current_state: "In Progress".to_string(),
+                repo_workflow_path: ensured.handle.workspace_path().join("WORKFLOW.md"),
+                repo_agents_path: None,
+                repo_skills_dir: None,
+                last_run_status: None,
+                important_constraints: Vec::new(),
+                known_blockers: Vec::new(),
+            },
+        )
+        .await
+        .expect_err("symlinked issue context should be rejected");
+
+    assert!(matches!(error, WorkspaceError::ManagedPathSymlink { .. }));
 }
 
 #[tokio::test]
