@@ -433,6 +433,40 @@ openhands:
     }
 
     #[test]
+    fn rejects_unsupported_openhands_local_server_enabled_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  local_server:
+    enabled: false
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unsupported local server disablement should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.local_server.enabled",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn explicit_tracker_api_key_env_reference_must_resolve() {
         let workflow = WorkflowDefinition::parse(
             r#"---
@@ -1015,6 +1049,62 @@ openhands:
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn rejects_unsupported_openhands_llm_option_overrides() {
+        for workflow_source in [
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: gpt-4.1-mini
+        temperature: 0.1
+---
+{{ issue.identifier }}
+"#,
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: gpt-4.1-mini
+        reasoning_effort: high
+---
+{{ issue.identifier }}
+"#,
+        ] {
+            let workflow =
+                WorkflowDefinition::parse(workflow_source).expect("workflow should parse");
+            let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+            let error = workflow
+                .resolve(Path::new("/repo"), &env)
+                .expect_err("unsupported llm options should fail during resolution");
+
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent.llm",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

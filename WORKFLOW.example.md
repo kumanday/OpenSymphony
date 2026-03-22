@@ -45,6 +45,9 @@ openhands:
     base_url: "http://127.0.0.1:8000"
 
   local_server:
+    # Defaults to `true` when omitted. Explicit `false` is rejected until the
+    # runtime can honor workflow-owned local-server disablement instead of still
+    # deciding launch behavior from the localhost base URL plus pinned tooling.
     enabled: true
     # Omit `command` to use the pinned launcher chosen by the runtime-owned tooling layer.
     # Explicit launcher overrides are rejected until the runtime can honor workflow-owned commands.
@@ -70,8 +73,8 @@ openhands:
       kind: Agent
       llm:
         # Exact $VAR/${VAR} tokens are resolved before runtime launch.
-        # Provider-specific auth/base-url overrides are rejected until the
-        # current conversation-create adapter can forward them.
+        # Provider-specific auth/base-url overrides and extra LLM option keys are
+        # rejected until the current conversation-create adapter can forward them.
         model: ${OPENHANDS_MODEL}
       # Workflow-owned agent extras such as `log_completions` are rejected until
       # the current conversation-create payload can actually forward them.
