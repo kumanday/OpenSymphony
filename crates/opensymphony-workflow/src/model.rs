@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 use serde::{Deserialize, Serialize};
@@ -27,11 +27,20 @@ pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 
-pub fn default_openhands_local_server_command(base_dir: &Path) -> Vec<String> {
-    vec![base_dir
+pub fn default_openhands_local_server_command() -> Vec<String> {
+    vec![opensymphony_checkout_root()
         .join("tools/openhands-server/run-local.sh")
         .to_string_lossy()
         .into_owned()]
+}
+
+fn opensymphony_checkout_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crate dir should have workspace parent")
+        .parent()
+        .expect("workspace root should exist")
+        .to_path_buf()
 }
 
 #[derive(Debug, Clone, PartialEq)]

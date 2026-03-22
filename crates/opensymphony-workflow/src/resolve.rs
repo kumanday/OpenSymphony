@@ -228,7 +228,7 @@ fn resolve_state_limits(
 
 fn resolve_openhands<E: Environment>(
     openhands: &OpenHandsFrontMatter,
-    base_dir: &Path,
+    _base_dir: &Path,
     env: &E,
 ) -> Result<OpenHandsConfig, WorkflowConfigError> {
     Ok(OpenHandsConfig {
@@ -243,7 +243,7 @@ fn resolve_openhands<E: Environment>(
             command: resolve_command(
                 openhands.local_server.command.as_deref(),
                 "openhands.local_server.command",
-                default_openhands_local_server_command(base_dir),
+                default_openhands_local_server_command(),
             )?,
             startup_timeout_ms: resolve_positive_u64(
                 openhands.local_server.startup_timeout_ms.as_ref(),
