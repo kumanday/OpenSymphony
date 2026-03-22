@@ -306,7 +306,7 @@ fn resolve_openhands<E: Environment>(
             )?,
         },
         mcp: OpenHandsMcpConfig {
-            stdio_servers: resolve_stdio_servers(openhands.mcp.stdio_servers.as_deref())?,
+            stdio_servers: Vec::new(),
         },
     })
 }
