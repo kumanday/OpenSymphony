@@ -1,35 +1,32 @@
 use std::time::Duration;
 
-use axum::{Json, Router, routing::get};
+use axum::Router;
 use chrono::{TimeZone, Utc};
-use opensymphony_control::{
-    AgentServerStatus, ControlPlaneClient, ControlPlaneClientError, ControlPlaneServer,
-    ControlPlaneStreamUpdate, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
-    IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotEnvelope, SnapshotStore,
-    WorkerOutcome,
+use opensymphony_control::{ControlPlaneClient, ControlPlaneServer, SnapshotStore};
+use opensymphony_domain::{
+    ControlPlaneAgentServerStatus as AgentServerStatus,
+    ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+    ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+    ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
 };
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use url::Url;
 
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {
-    fixture_snapshot_with_state(step, DaemonState::Ready)
-}
-
-fn fixture_snapshot_with_state(step: u64, daemon_state: DaemonState) -> DaemonSnapshot {
     let now = Utc
         .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
         .single()
-        .expect("fixture timestamp should be valid")
+        .expect("valid fixed test timestamp")
         + chrono::Duration::seconds(step as i64);
-    let status_line = daemon_status_line(&daemon_state).to_owned();
     DaemonSnapshot {
         generated_at: now,
         daemon: DaemonStatus {
-            state: daemon_state,
+            state: DaemonState::Ready,
             last_poll_at: now,
             workspace_root: "/tmp/opensymphony".to_owned(),
-            status_line,
+            status_line: "ready".to_owned(),
         },
         agent_server: AgentServerStatus {
             reachable: true,
@@ -64,66 +61,48 @@ fn fixture_snapshot_with_state(step: u64, daemon_state: DaemonState) -> DaemonSn
     }
 }
 
-fn daemon_status_line(state: &DaemonState) -> &str {
-    match state {
-        DaemonState::Starting => "starting",
-        DaemonState::Ready => "ready",
-        DaemonState::Degraded => "degraded",
-        DaemonState::Stopped => "stopped",
-        DaemonState::Other(value) => value.as_str(),
-    }
-}
-
 #[tokio::test]
 async fn serves_snapshot_and_streams_updates() {
     let store = SnapshotStore::new(fixture_snapshot(0));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("test listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener should expose an address");
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
     let server = ControlPlaneServer::new(store.clone());
     let server_task = tokio::spawn(async move {
         server
             .serve(listener)
             .await
-            .expect("control-plane server should run");
+            .expect("test control-plane server should serve")
     });
 
     let client = ControlPlaneClient::new(
-        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
+        Url::parse(&format!("http://{address}/")).expect("valid root control-plane base url"),
     );
     let current = client
         .fetch_snapshot()
         .await
-        .expect("client should fetch the current snapshot");
+        .expect("fetch current snapshot from test server");
     assert_eq!(current.sequence, 1);
     assert_eq!(current.snapshot.issues[0].identifier, "COE-255");
 
     let mut stream = client
         .stream_updates()
-        .expect("client should open the update stream");
-    let initial = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .expect("open control-plane event stream");
+    let initial: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .expect("initial stream event should arrive")
-        .expect("stream should not end before the initial snapshot")
-        .expect("initial stream event should decode");
-    let ControlPlaneStreamUpdate::Snapshot(initial) = initial else {
-        panic!("expected initial snapshot update");
-    };
+        .expect("timed out waiting for initial snapshot")
+        .expect("stream should yield an initial snapshot item")
+        .expect("initial snapshot should decode");
     assert_eq!(initial.sequence, 1);
 
     let expected = store.publish(fixture_snapshot(1)).await;
 
-    let streamed = tokio::time::timeout(Duration::from_secs(5), stream.next())
+    let streamed: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .expect("streamed update should arrive")
-        .expect("stream should stay open for the published update")
-        .expect("streamed update should decode");
-    let ControlPlaneStreamUpdate::Snapshot(streamed) = streamed else {
-        panic!("expected streamed snapshot update");
-    };
+        .expect("timed out waiting for streamed snapshot")
+        .expect("stream should yield an updated snapshot item")
+        .expect("updated snapshot should decode");
 
     assert_eq!(streamed.sequence, expected.sequence);
     assert_eq!(
@@ -136,474 +115,44 @@ async fn serves_snapshot_and_streams_updates() {
 }
 
 #[tokio::test]
-async fn health_endpoint_reflects_daemon_state() {
-    let cases = [
-        (DaemonState::Starting, "starting"),
-        (DaemonState::Ready, "ok"),
-        (DaemonState::Degraded, "degraded"),
-        (DaemonState::Stopped, "stopped"),
-        (
-            DaemonState::Other("paused_for_operator".to_owned()),
-            "paused_for_operator",
-        ),
-    ];
-
-    for (daemon_state, expected_status) in cases {
-        let store = SnapshotStore::new(fixture_snapshot_with_state(0, daemon_state));
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test listener should bind");
-        let address = listener
-            .local_addr()
-            .expect("listener should expose an address");
-        let server = ControlPlaneServer::new(store);
-        let server_task = tokio::spawn(async move {
-            server
-                .serve(listener)
-                .await
-                .expect("control-plane server should run");
-        });
-
-        let response = reqwest::get(format!("http://{address}/healthz"))
-            .await
-            .expect("health endpoint should respond")
-            .error_for_status()
-            .expect("health endpoint should return success")
-            .json::<opensymphony_control::HealthResponse>()
-            .await
-            .expect("health response should decode");
-
-        assert_eq!(response.status, expected_status);
-
-        server_task.abort();
-    }
-}
-
-#[tokio::test]
-async fn fetch_snapshot_times_out_when_snapshot_endpoint_hangs() {
-    async fn stalled_snapshot() -> Json<SnapshotEnvelope> {
-        tokio::time::sleep(Duration::from_secs(30)).await;
-        Json(SnapshotEnvelope {
-            sequence: 99,
-            published_at: Utc::now(),
-            snapshot: fixture_snapshot(99),
-        })
-    }
-
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener should expose an address");
-    let server = Router::new().route("/api/v1/snapshot", get(stalled_snapshot));
-    let server_task = tokio::spawn(async move {
-        axum::serve(listener, server)
-            .await
-            .expect("stalled test server should run");
-    });
-
-    let client = ControlPlaneClient::with_snapshot_timeout(
-        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
-        Duration::from_millis(50),
-    );
-    let started = tokio::time::Instant::now();
-    let error = client
-        .fetch_snapshot()
-        .await
-        .expect_err("hung snapshot endpoint should time out");
-
-    match error {
-        ControlPlaneClientError::Request(source) => assert!(source.is_timeout()),
-        other => panic!("expected request timeout error, got {other:?}"),
-    }
-    assert!(started.elapsed() < Duration::from_secs(1));
-
-    server_task.abort();
-}
-
-#[test]
-fn snapshot_envelopes_accept_unknown_daemon_runtime_and_outcome_values() {
-    let value = serde_json::json!({
-        "sequence": 7,
-        "published_at": "2026-03-22T02:00:00Z",
-        "snapshot": {
-            "generated_at": "2026-03-22T02:00:00Z",
-            "daemon": {
-                "state": "paused_for_operator",
-                "last_poll_at": "2026-03-22T02:00:00Z",
-                "workspace_root": "/tmp/opensymphony",
-                "status_line": "ready"
-            },
-            "agent_server": {
-                "reachable": true,
-                "base_url": "http://127.0.0.1:3000",
-                "conversation_count": 2,
-                "status_line": "healthy"
-            },
-            "metrics": {
-                "running_issues": 1,
-                "retry_queue_depth": 0,
-                "total_tokens": 4096,
-                "total_cost_micros": 120000
-            },
-            "issues": [{
-                "identifier": "COE-255",
-                "title": "Observability and FrankenTUI",
-                "tracker_state": "In Progress",
-                "runtime_state": "paused_for_operator",
-                "last_outcome": "superseded",
-                "last_event_at": "2026-03-22T02:00:00Z",
-                "conversation_id_suffix": "c0e255",
-                "workspace_path_suffix": "COE-255",
-                "retry_count": 0,
-                "blocked": false
-            }],
-            "recent_events": [{
-                "happened_at": "2026-03-22T02:00:00Z",
-                "issue_identifier": "COE-255",
-                "kind": "snapshot_published",
-                "summary": "published step 7"
-            }]
-        }
-    });
-
-    let envelope: SnapshotEnvelope =
-        serde_json::from_value(value).expect("snapshot envelope should decode");
-    assert_eq!(
-        envelope.snapshot.daemon.state,
-        DaemonState::Other("paused_for_operator".to_owned())
-    );
-    assert_eq!(
-        envelope.snapshot.issues[0].runtime_state,
-        IssueRuntimeState::Other("paused_for_operator".to_owned())
-    );
-    assert_eq!(
-        envelope.snapshot.issues[0].last_outcome,
-        WorkerOutcome::Other("superseded".to_owned())
-    );
-
-    let encoded = serde_json::to_value(&envelope).expect("snapshot envelope should encode");
-    assert_eq!(
-        encoded["snapshot"]["daemon"]["state"],
-        serde_json::Value::String("paused_for_operator".to_owned())
-    );
-    assert_eq!(
-        encoded["snapshot"]["issues"][0]["runtime_state"],
-        serde_json::Value::String("paused_for_operator".to_owned())
-    );
-    assert_eq!(
-        encoded["snapshot"]["issues"][0]["last_outcome"],
-        serde_json::Value::String("superseded".to_owned())
-    );
-}
-
-#[tokio::test]
-async fn stream_updates_times_out_when_event_stream_goes_idle() {
+async fn client_handles_path_prefixed_base_url_without_trailing_slash() {
     let store = SnapshotStore::new(fixture_snapshot(0));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("test listener should bind");
+        .expect("bind prefixed test listener");
     let address = listener
         .local_addr()
-        .expect("listener should expose an address");
-    let server = ControlPlaneServer::new(store);
+        .expect("prefixed test listener address");
+    let app = Router::new().nest(
+        "/opensymphony",
+        ControlPlaneServer::new(store.clone()).router(),
+    );
     let server_task = tokio::spawn(async move {
-        server
-            .serve(listener)
+        axum::serve(listener, app)
             .await
-            .expect("control-plane server should run");
+            .expect("prefixed test server should serve")
     });
 
-    let client = ControlPlaneClient::with_timeouts(
-        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-        Duration::from_millis(50),
+    let client = ControlPlaneClient::new(
+        Url::parse(&format!("http://{address}/opensymphony"))
+            .expect("valid prefixed control-plane base url"),
     );
+    let current = client
+        .fetch_snapshot()
+        .await
+        .expect("fetch current snapshot from prefixed test server");
+    assert_eq!(current.sequence, 1);
+    assert_eq!(current.snapshot.issues[0].identifier, "COE-255");
+
     let mut stream = client
         .stream_updates()
-        .expect("client should open the update stream");
-
-    let initial = stream
-        .next()
+        .expect("open prefixed control-plane event stream");
+    let initial: SnapshotEnvelope = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await
-        .expect("stream should yield the bootstrap snapshot")
-        .expect("bootstrap snapshot should decode");
-    let ControlPlaneStreamUpdate::Snapshot(initial) = initial else {
-        panic!("expected bootstrap snapshot update");
-    };
+        .expect("timed out waiting for prefixed initial snapshot")
+        .expect("prefixed stream should yield an initial snapshot item")
+        .expect("prefixed initial snapshot should decode");
     assert_eq!(initial.sequence, 1);
-
-    let started = tokio::time::Instant::now();
-    let retrying = stream
-        .next()
-        .await
-        .expect("idle stream should surface retrying state")
-        .expect("idle timeout should remain inside the same stream");
-
-    match retrying {
-        ControlPlaneStreamUpdate::Reconnecting(ControlPlaneClientError::Stream(source)) => {
-            assert!(matches!(
-                source.as_ref(),
-                reqwest_eventsource::Error::Transport(transport) if transport.is_timeout()
-            ));
-        }
-        other => panic!("expected retrying timeout update, got {other:?}"),
-    }
-    assert!(started.elapsed() < Duration::from_secs(1));
-
-    stream.close();
-    server_task.abort();
-}
-
-#[tokio::test]
-async fn stream_updates_surfaces_retrying_state_and_reapplies_connect_timeout() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener should expose an address");
-    let bootstrap = SnapshotEnvelope {
-        sequence: 1,
-        published_at: Utc::now(),
-        snapshot: fixture_snapshot(0),
-    };
-    let payload = serde_json::to_string(&bootstrap).expect("bootstrap payload should encode");
-    let server_task = tokio::spawn(async move {
-        let (mut first, _) = listener
-            .accept()
-            .await
-            .expect("client should connect for the initial stream");
-        let response = format!(
-            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\nevent: snapshot\r\nid: 1\r\ndata: {payload}\r\n\r\n"
-        );
-        first
-            .write_all(response.as_bytes())
-            .await
-            .expect("first SSE response should write");
-        drop(first);
-
-        let (_second, _) = listener
-            .accept()
-            .await
-            .expect("client should reconnect after the stream error");
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    });
-
-    let client = ControlPlaneClient::with_timeouts(
-        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
-        Duration::from_secs(5),
-        Duration::from_millis(400),
-        Duration::from_secs(5),
-    );
-    let mut stream = client
-        .stream_updates()
-        .expect("client should open the update stream");
-
-    let initial = stream
-        .next()
-        .await
-        .expect("stream should yield the bootstrap snapshot")
-        .expect("bootstrap snapshot should decode");
-    let ControlPlaneStreamUpdate::Snapshot(initial) = initial else {
-        panic!("expected bootstrap snapshot update");
-    };
-    assert_eq!(initial.sequence, 1);
-
-    let retrying = stream
-        .next()
-        .await
-        .expect("stream should surface retrying state after the broken connection")
-        .expect("retrying state should stay inside the same stream");
-    match retrying {
-        ControlPlaneStreamUpdate::Reconnecting(ControlPlaneClientError::Stream(_)) => {}
-        other => panic!("expected retrying stream error, got {other:?}"),
-    }
-
-    let started = tokio::time::Instant::now();
-    let error = stream
-        .next()
-        .await
-        .expect("reconnect attach should surface a timeout error")
-        .expect_err("blackholed reconnect should not decode as a snapshot");
-
-    match error {
-        ControlPlaneClientError::StreamConnectTimeout(timeout) => {
-            assert_eq!(timeout, Duration::from_millis(400));
-        }
-        other => panic!("expected reconnect attach timeout, got {other:?}"),
-    }
-    assert!(started.elapsed() < Duration::from_secs(1));
-
-    stream.close();
-    server_task.abort();
-}
-
-#[tokio::test]
-async fn stream_updates_ignores_non_snapshot_events_before_bootstrap_snapshot() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener should expose an address");
-    let bootstrap = SnapshotEnvelope {
-        sequence: 1,
-        published_at: Utc::now(),
-        snapshot: fixture_snapshot(0),
-    };
-    let payload = serde_json::to_string(&bootstrap).expect("bootstrap payload should encode");
-    let server_task = tokio::spawn(async move {
-        let (mut connection, _) = listener
-            .accept()
-            .await
-            .expect("client should connect for the initial stream");
-        let response = format!(
-            concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "content-type: text/event-stream\r\n",
-                "cache-control: no-cache\r\n",
-                "connection: keep-alive\r\n",
-                "\r\n",
-                "event: heartbeat\r\n",
-                "data: {{\"kind\":\"heartbeat\"}}\r\n",
-                "\r\n",
-                "event: snapshot\r\n",
-                "id: 1\r\n",
-                "data: {}\r\n",
-                "\r\n"
-            ),
-            payload
-        );
-        connection
-            .write_all(response.as_bytes())
-            .await
-            .expect("test server should write SSE payloads");
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    });
-
-    let client = ControlPlaneClient::with_timeouts(
-        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
-        Duration::from_secs(5),
-        Duration::from_millis(200),
-        Duration::from_secs(5),
-    );
-    let mut stream = client
-        .stream_updates()
-        .expect("client should open the update stream");
-
-    let initial = stream
-        .next()
-        .await
-        .expect("stream should yield the bootstrap snapshot")
-        .expect("bootstrap snapshot should decode");
-    let ControlPlaneStreamUpdate::Snapshot(initial) = initial else {
-        panic!("expected bootstrap snapshot update");
-    };
-    assert_eq!(initial.sequence, 1);
-
-    stream.close();
-    server_task.abort();
-}
-
-#[tokio::test]
-async fn stream_updates_times_out_when_event_stream_never_establishes() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener should expose an address");
-    let server_task = tokio::spawn(async move {
-        let (_connection, _) = listener
-            .accept()
-            .await
-            .expect("client should connect to the hanging listener");
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    });
-
-    let client = ControlPlaneClient::with_timeouts(
-        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
-        Duration::from_secs(5),
-        Duration::from_millis(50),
-        Duration::from_secs(5),
-    );
-    let mut stream = client
-        .stream_updates()
-        .expect("client should open the update stream");
-
-    let started = tokio::time::Instant::now();
-    let error = stream
-        .next()
-        .await
-        .expect("stream establishment should surface a timeout error")
-        .expect_err("never-established stream should not decode as a snapshot");
-
-    match error {
-        ControlPlaneClientError::StreamConnectTimeout(timeout) => {
-            assert_eq!(timeout, Duration::from_millis(50));
-        }
-        other => panic!("expected stream connect timeout error, got {other:?}"),
-    }
-    assert!(started.elapsed() < Duration::from_secs(1));
-
-    stream.close();
-    server_task.abort();
-}
-
-#[tokio::test]
-async fn stream_updates_times_out_when_event_stream_opens_without_bootstrap_snapshot() {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("listener should expose an address");
-    let server_task = tokio::spawn(async move {
-        let (mut connection, _) = listener
-            .accept()
-            .await
-            .expect("client should connect to the hanging listener");
-        let response = concat!(
-            "HTTP/1.1 200 OK\r\n",
-            "content-type: text/event-stream\r\n",
-            "cache-control: no-cache\r\n",
-            "connection: keep-alive\r\n",
-            "\r\n"
-        );
-        connection
-            .write_all(response.as_bytes())
-            .await
-            .expect("test server should write SSE headers");
-        tokio::time::sleep(Duration::from_secs(30)).await;
-    });
-
-    let client = ControlPlaneClient::with_timeouts(
-        Url::parse(&format!("http://{address}/")).expect("test base URL should parse"),
-        Duration::from_secs(5),
-        Duration::from_millis(50),
-        Duration::from_secs(5),
-    );
-    let mut stream = client
-        .stream_updates()
-        .expect("client should open the update stream");
-
-    let started = tokio::time::Instant::now();
-    let error = stream
-        .next()
-        .await
-        .expect("header-only stream should still surface a timeout error")
-        .expect_err("opened stream without a bootstrap snapshot should not decode");
-
-    match error {
-        ControlPlaneClientError::StreamConnectTimeout(timeout) => {
-            assert_eq!(timeout, Duration::from_millis(50));
-        }
-        other => panic!("expected stream connect timeout error, got {other:?}"),
-    }
-    assert!(started.elapsed() < Duration::from_secs(1));
 
     stream.close();
     server_task.abort();

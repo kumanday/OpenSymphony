@@ -472,9 +472,11 @@ impl RuntimeEventStream {
             return Ok(false);
         }
 
-        // Give newly queued batches one more immediate drain turn so out-of-order
-        // live frames can settle into timestamp order before delivery.
+        // Give newly queued batches one more scheduler turn and drain so
+        // out-of-order live frames can settle into timestamp order before
+        // delivery.
         self.pending_delivery_needs_drain = false;
+        yield_now().await;
         self.absorb_buffered_socket_events().await?;
         Ok(true)
     }

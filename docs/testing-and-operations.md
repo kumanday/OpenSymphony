@@ -297,11 +297,47 @@ for the UI. For scripted smoke coverage, also confirm that an unreachable
 control plane causes `opensymphony tui --exit-after-ms ...` to exit non-zero.
 Current command set in this repository:
 
+- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:4010 --sample-interval-ms 250`
+- `curl http://127.0.0.1:4010/healthz`
+- `curl http://127.0.0.1:4010/api/v1/snapshot`
+- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
 - `cargo run -p opensymphony-cli -- linear-mcp`
 - `./scripts/smoke_local.sh`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
+
+When validating the local control-plane and TUI slice, also confirm that:
+
+- the TUI header shows daemon and agent-server health even when the issue list itself does not
+  change
+- the TUI header also renders the computed connection and backend status text when bootstrap,
+  reconnect, or degraded states need a cause string
+- bootstrap and reconnect snapshot fetches time out within the bounded snapshot watchdog budget,
+  so a hung `/api/v1/snapshot` response retries instead of pinning the UI in `connecting` or
+  `reconnecting`
+- `/api/v1/events` attach attempts time out within the bounded stream-attach watchdog budget,
+  including streams that flush headers and then only emit keepalive comments before their first
+  snapshot, so a blackholed, half-open, or first-message-stalled SSE attach retries instead of
+  pinning the UI in `connecting` or `reconnecting`
+- the bootstrap snapshot stays visible with `conn=connecting` until the SSE stream actually
+  attaches
+- the first streamed snapshot and the live-stream attachment signal are published atomically, so
+  `conn=live` never appears while the frame is still rendering the older bootstrap or reconnect
+  snapshot
+- reconnecting clients keep the last good snapshot visible instead of regressing to stale state
+- reconnecting clients switch the header detail to `refreshed; stream pending` once the HTTP
+  refresh succeeds, even before the SSE stream is live again
+- event-stream clients treat a connected-but-silent `/api/v1/events` transport as failed once it
+  exceeds the keepalive watchdog budget, so the TUI retries instead of hanging forever on stale
+  bootstrap data
+- inline `opensymphony tui` reconnect failures stay inside the UI state and do not interleave raw
+  bridge warning lines into terminal output
+- lagged SSE consumers immediately fast-forward to the newest published snapshot instead of waiting for the retained broadcast backlog to go empty, and they only advance to newer snapshot sequences
+- newline-bearing, control-character-bearing, or full-width tracker and event text stays within
+  the pane row and column budget
+- `opensymphony daemon --sample-interval-ms ...` keeps the initial `Starting` snapshot in place
+  until the configured interval elapses
 
 ## 7. Doctor checks
 
@@ -325,6 +361,7 @@ Required checks:
 ### Repository and config
 
 - config file exists and parses
+- required env-backed config placeholders resolve instead of silently collapsing to empty strings
 - target repo exists
 - target repo contains `WORKFLOW.md`
 - target repo `WORKFLOW.md` resolves against the current environment
@@ -356,13 +393,16 @@ Required checks:
 Current implementation notes:
 
 - the static doctor path checks config parsing, target-repo presence, workflow load/resolve/render, workspace-root creation from the workflow, loopback bind scope from the workflow OpenHands transport, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
+- checkout-relative doctor defaults are derived from the config and tooling paths rather than the caller `cwd`, so running `opensymphony doctor` outside the repo root still validates the intended checkout and bundled `examples/target-repo`
 - the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation using workflow-derived OpenHands conversation settings, attaches `RuntimeEventStream`, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a doctor message that includes the rendered workflow prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` after post-ready reconcile and reconnect-aware streaming, including terminal REST refresh fallback when a post-completion WebSocket reattach exhausts and one final scheduler-turn buffered drain before success is accepted
 - once that live doctor path has already observed terminal success on the attached stream, it reuses the last successful stream-backed conversation snapshot instead of requiring a final `GET /api/conversations/{id}` that can flap during agent-server shutdown
-- when the configured workflow loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, uses it for the probe, then stops it again
+- when the configured workflow loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server on that port, switches follow-up probes to the launched supervisor base URL, uses it for the probe, then stops it again
 - failure-only runtime events such as `ConversationErrorEvent` and terminal `execution_status` values like `error` or `stuck` fail the live doctor probe instead of counting as generic post-run activity, even when a later mirrored `finished` status is already present in the same drained batch
+- missing `${VAR}` tokens in required or enabled-path config values now fail doctor during config expansion instead of silently validating the config directory as an empty fallback path
+- optional live-only placeholders such as `openhands.probe_model` and `openhands.probe_api_key_env` are treated as unset when their env-backed overrides are absent, so shared configs can keep those overrides empty during the static doctor pass
 - `crates/opensymphony-openhands/tests/client_resilience.rs` locks in the runtime adapter regressions for pre-readiness WebSocket frames, authenticated REST/WebSocket requests, forward-compatible readiness envelopes, ready-state freshness after attach, ready-barrier persistence across later stale state rebuilds, buffered live frames outranking later attach replay items, explicit-close suppression of replay and reconnect, reused-conversation restart freshness over stale terminal REST state, forward-compatible `state_delta` mirror refresh, stale readiness snapshots not regressing newer probe state after reconnect, undecodable later persisted state updates not suppressing a usable ready barrier, terminal REST fallback after reconnect exhaustion, deferred reconnect after buffered delivery, non-replay of reconnect-only readiness barriers, next-turn probe error delivery after `finished`, and post-terminal probe success when a final REST refresh would fail
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs` locks in attach, initial snapshot replay, reconcile, out-of-order insertion, and reconnect recovery against `opensymphony-testkit`
-- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback, workflow-driven runtime inputs, and the pinned launcher `cwd` behavior
+- `crates/opensymphony-cli/tests/doctor.rs` locks in the doctor default target-repo fallback outside the repo `cwd`, required-env placeholder failures, optional live-only placeholder tolerance during static runs, workflow-driven runtime inputs, and the pinned launcher `cwd` behavior
 - `crates/opensymphony-cli/tests/linear_mcp.rs` drives the real `opensymphony linear-mcp` child process through MCP initialization, tool listing, and comment/transition/link/state-list calls against a local fake Linear GraphQL server
 - the current example configs carry machine-local tool/probe settings only; the repo-owned workflow now supplies the workspace root and OpenHands base URL that doctor validates
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials when the workflow omits `tracker.api_key`

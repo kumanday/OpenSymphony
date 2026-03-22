@@ -141,7 +141,12 @@ Current implementation detail:
 - the current doctor and live-validation path uses `GET /openapi.json` as the
   conservative readiness probe and will temporarily start a supervised local
   server when the configured loopback base URL is down but the repo-owned pin is
-  valid
+  valid; once it starts, doctor follows the launched supervisor's resolved base
+  URL for the rest of the probe instead of reusing the original config alias or
+  path prefix
+- live-only doctor overrides such as `probe_model` and `probe_api_key_env` are
+  resolved lazily when `--live-openhands` is requested, so shared configs can
+  leave those `${VAR}` placeholders unset during the static preflight path
 
 ## 4.3 Shutdown contract
 

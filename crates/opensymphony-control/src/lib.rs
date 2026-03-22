@@ -9,313 +9,33 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use reqwest_eventsource::{Event as EventSourceEvent, EventSource, ReadyState};
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use opensymphony_domain::SnapshotEnvelope;
+use reqwest_eventsource::{Event as EventSourceEvent, EventSource};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
     sync::{RwLock, broadcast},
+    time::timeout,
 };
 use tracing::warn;
 use url::Url;
 
-const SNAPSHOT_EVENT_NAME: &str = "snapshot";
+pub use opensymphony_domain::{
+    ControlPlaneAgentServerStatus as AgentServerStatus,
+    ControlPlaneDaemonSnapshot as PublicDaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
+    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+    ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+    ControlPlaneWorkerOutcome as WorkerOutcome,
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SnapshotEnvelope {
-    pub sequence: u64,
-    pub published_at: DateTime<Utc>,
-    pub snapshot: DaemonSnapshot,
-}
+pub type DaemonSnapshot = PublicDaemonSnapshot;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DaemonSnapshot {
-    pub generated_at: DateTime<Utc>,
-    pub daemon: DaemonStatus,
-    pub agent_server: AgentServerStatus,
-    pub metrics: MetricsSnapshot,
-    pub issues: Vec<IssueSnapshot>,
-    pub recent_events: Vec<RecentEvent>,
-}
-
-impl DaemonSnapshot {
-    pub fn issue_count(&self) -> usize {
-        self.issues.len()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DaemonStatus {
-    pub state: DaemonState,
-    pub last_poll_at: DateTime<Utc>,
-    pub workspace_root: String,
-    pub status_line: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DaemonState {
-    Starting,
-    Ready,
-    Degraded,
-    Stopped,
-    Other(String),
-}
-
-impl DaemonState {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Starting => "starting",
-            Self::Ready => "ready",
-            Self::Degraded => "degraded",
-            Self::Stopped => "stopped",
-            Self::Other(value) => value.as_str(),
-        }
-    }
-
-    fn from_wire(value: &str) -> Self {
-        match value {
-            "starting" => Self::Starting,
-            "ready" => Self::Ready,
-            "degraded" => Self::Degraded,
-            "stopped" => Self::Stopped,
-            other => Self::Other(other.to_owned()),
-        }
-    }
-}
-
-impl Serialize for DaemonState {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for DaemonState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self::from_wire(&value))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AgentServerStatus {
-    pub reachable: bool,
-    pub base_url: String,
-    pub conversation_count: u32,
-    pub status_line: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct MetricsSnapshot {
-    pub running_issues: u32,
-    pub retry_queue_depth: u32,
-    pub total_tokens: u64,
-    pub total_cost_micros: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IssueSnapshot {
-    pub identifier: String,
-    pub title: String,
-    pub tracker_state: String,
-    pub runtime_state: IssueRuntimeState,
-    pub last_outcome: WorkerOutcome,
-    pub last_event_at: DateTime<Utc>,
-    pub conversation_id_suffix: String,
-    pub workspace_path_suffix: String,
-    pub retry_count: u32,
-    pub blocked: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IssueRuntimeState {
-    Idle,
-    Running,
-    RetryQueued,
-    Releasing,
-    Completed,
-    Failed,
-    Other(String),
-}
-
-impl IssueRuntimeState {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Idle => "idle",
-            Self::Running => "running",
-            Self::RetryQueued => "retry_queued",
-            Self::Releasing => "releasing",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Other(value) => value.as_str(),
-        }
-    }
-
-    fn from_wire(value: &str) -> Self {
-        match value {
-            "idle" => Self::Idle,
-            "running" => Self::Running,
-            "retry_queued" => Self::RetryQueued,
-            "releasing" => Self::Releasing,
-            "completed" => Self::Completed,
-            "failed" => Self::Failed,
-            other => Self::Other(other.to_owned()),
-        }
-    }
-}
-
-impl Serialize for IssueRuntimeState {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for IssueRuntimeState {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self::from_wire(&value))
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkerOutcome {
-    Unknown,
-    Running,
-    Continued,
-    Completed,
-    Failed,
-    Canceled,
-    Other(String),
-}
-
-impl WorkerOutcome {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Unknown => "unknown",
-            Self::Running => "running",
-            Self::Continued => "continued",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::Canceled => "canceled",
-            Self::Other(value) => value.as_str(),
-        }
-    }
-
-    fn from_wire(value: &str) -> Self {
-        match value {
-            "unknown" => Self::Unknown,
-            "running" => Self::Running,
-            "continued" => Self::Continued,
-            "completed" => Self::Completed,
-            "failed" => Self::Failed,
-            "canceled" => Self::Canceled,
-            other => Self::Other(other.to_owned()),
-        }
-    }
-}
-
-impl Serialize for WorkerOutcome {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for WorkerOutcome {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self::from_wire(&value))
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RecentEvent {
-    pub happened_at: DateTime<Utc>,
-    pub issue_identifier: Option<String>,
-    pub kind: RecentEventKind,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RecentEventKind {
-    WorkerStarted,
-    WorkspacePrepared,
-    StreamAttached,
-    SnapshotPublished,
-    WorkerCompleted,
-    RetryScheduled,
-    ClientAttached,
-    ClientDetached,
-    Warning,
-    Other(String),
-}
-
-impl RecentEventKind {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::WorkerStarted => "worker_started",
-            Self::WorkspacePrepared => "workspace_prepared",
-            Self::StreamAttached => "stream_attached",
-            Self::SnapshotPublished => "snapshot_published",
-            Self::WorkerCompleted => "worker_completed",
-            Self::RetryScheduled => "retry_scheduled",
-            Self::ClientAttached => "client_attached",
-            Self::ClientDetached => "client_detached",
-            Self::Warning => "warning",
-            Self::Other(value) => value.as_str(),
-        }
-    }
-
-    fn from_wire(value: &str) -> Self {
-        match value {
-            "worker_started" => Self::WorkerStarted,
-            "workspace_prepared" => Self::WorkspacePrepared,
-            "stream_attached" => Self::StreamAttached,
-            "snapshot_published" => Self::SnapshotPublished,
-            "worker_completed" => Self::WorkerCompleted,
-            "retry_scheduled" => Self::RetryScheduled,
-            "client_attached" => Self::ClientAttached,
-            "client_detached" => Self::ClientDetached,
-            "warning" => Self::Warning,
-            other => Self::Other(other.to_owned()),
-        }
-    }
-}
-
-impl Serialize for RecentEventKind {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(self.as_str())
-    }
-}
-
-impl<'de> Deserialize<'de> for RecentEventKind {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self::from_wire(&value))
-    }
-}
+const CONTROL_PLANE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const CONTROL_PLANE_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_PLANE_STREAM_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_PLANE_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(35);
 
 #[derive(Debug, Clone)]
 pub struct SnapshotStore {
@@ -399,21 +119,11 @@ pub struct HealthResponse {
 async fn health(State(store): State<SnapshotStore>) -> Json<HealthResponse> {
     let envelope = store.current().await;
     Json(HealthResponse {
-        status: health_status(&envelope.snapshot.daemon.state).to_owned(),
+        status: "ok".to_owned(),
         current_sequence: envelope.sequence,
         published_at: envelope.published_at,
         issue_count: envelope.snapshot.issue_count(),
     })
-}
-
-fn health_status(state: &DaemonState) -> &str {
-    match state {
-        DaemonState::Starting => "starting",
-        DaemonState::Ready => "ok",
-        DaemonState::Degraded => "degraded",
-        DaemonState::Stopped => "stopped",
-        DaemonState::Other(value) => value.as_str(),
-    }
 }
 
 async fn snapshot(State(store): State<SnapshotStore>) -> Json<SnapshotEnvelope> {
@@ -426,17 +136,13 @@ async fn events(
     let mut receiver = store.subscribe();
     let initial = store.current().await;
     let stream = stream! {
-        let mut last_sequence = initial.sequence;
+        let mut last_sent_sequence = initial.sequence;
         if let Some(event) = snapshot_event(&initial) {
             yield Ok(event);
         }
-        loop {
-            let Some(envelope) =
-                recv_monotonic_snapshot(&store, &mut receiver, &mut last_sequence).await
-            else {
-                break;
-            };
-
+        while let Some(envelope) =
+            next_snapshot_envelope(&store, &mut receiver, &mut last_sent_sequence).await
+        {
             if let Some(event) = snapshot_event(&envelope) {
                 yield Ok(event);
             }
@@ -445,27 +151,40 @@ async fn events(
 
     Sse::new(stream).keep_alive(
         KeepAlive::new()
-            .interval(Duration::from_secs(15))
+            .interval(CONTROL_PLANE_KEEPALIVE_INTERVAL)
             .text("keepalive"),
     )
 }
 
-async fn recv_monotonic_snapshot(
+fn snapshot_event(envelope: &SnapshotEnvelope) -> Option<Event> {
+    let payload = serde_json::to_string(envelope).ok()?;
+    Some(
+        Event::default()
+            .event("snapshot")
+            .id(envelope.sequence.to_string())
+            .data(payload),
+    )
+}
+
+async fn next_snapshot_envelope(
     store: &SnapshotStore,
     receiver: &mut broadcast::Receiver<SnapshotEnvelope>,
-    last_sequence: &mut u64,
+    last_sent_sequence: &mut u64,
 ) -> Option<SnapshotEnvelope> {
     loop {
         match receiver.recv().await {
-            Ok(envelope) if envelope.sequence > *last_sequence => {
-                *last_sequence = envelope.sequence;
+            Ok(envelope) => {
+                if envelope.sequence <= *last_sent_sequence {
+                    continue;
+                }
+                *last_sent_sequence = envelope.sequence;
                 return Some(envelope);
             }
-            Ok(_) => continue,
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                let envelope = store.current().await;
-                if envelope.sequence > *last_sequence {
-                    *last_sequence = envelope.sequence;
+                if let Some(envelope) =
+                    catch_up_lagged_receiver(store, receiver, *last_sent_sequence).await
+                {
+                    *last_sent_sequence = envelope.sequence;
                     return Some(envelope);
                 }
             }
@@ -474,90 +193,69 @@ async fn recv_monotonic_snapshot(
     }
 }
 
-fn snapshot_event(envelope: &SnapshotEnvelope) -> Option<Event> {
-    let payload = serde_json::to_string(envelope).ok()?;
-    Some(
-        Event::default()
-            .event(SNAPSHOT_EVENT_NAME)
-            .id(envelope.sequence.to_string())
-            .data(payload),
-    )
+async fn catch_up_lagged_receiver(
+    store: &SnapshotStore,
+    _receiver: &mut broadcast::Receiver<SnapshotEnvelope>,
+    last_sent_sequence: u64,
+) -> Option<SnapshotEnvelope> {
+    // Fast-forward lagged subscribers straight to the latest published snapshot instead of
+    // draining the retained broadcast backlog. Under sustained publication that backlog may
+    // never go empty, which would otherwise stall SSE delivery indefinitely.
+    let latest = store.current().await;
+    (latest.sequence > last_sent_sequence).then_some(latest)
 }
 
 #[derive(Debug, Clone)]
 pub struct ControlPlaneClient {
     base_url: Url,
     http: reqwest::Client,
-    snapshot_timeout: Duration,
-    stream_connect_timeout: Duration,
+    stream_http: reqwest::Client,
+    stream_attach_timeout: Duration,
 }
 
 impl ControlPlaneClient {
-    const DEFAULT_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
-    const DEFAULT_STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-    const DEFAULT_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
-
     pub fn new(base_url: Url) -> Self {
         Self::with_timeouts(
             base_url,
-            Self::DEFAULT_SNAPSHOT_TIMEOUT,
-            Self::DEFAULT_STREAM_CONNECT_TIMEOUT,
-            Self::DEFAULT_STREAM_IDLE_TIMEOUT,
+            CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            CONTROL_PLANE_STREAM_ATTACH_TIMEOUT,
+            CONTROL_PLANE_STREAM_READ_TIMEOUT,
         )
     }
 
-    pub fn with_snapshot_timeout(base_url: Url, snapshot_timeout: Duration) -> Self {
-        Self::with_timeouts(
-            base_url,
-            snapshot_timeout,
-            Self::DEFAULT_STREAM_CONNECT_TIMEOUT,
-            Self::DEFAULT_STREAM_IDLE_TIMEOUT,
-        )
-    }
-
-    pub fn with_timeouts(
+    fn with_timeouts(
         base_url: Url,
         snapshot_timeout: Duration,
-        stream_connect_timeout: Duration,
-        stream_idle_timeout: Duration,
+        stream_attach_timeout: Duration,
+        stream_read_timeout: Duration,
     ) -> Self {
         Self {
             base_url,
-            http: reqwest::Client::builder()
-                .connect_timeout(stream_connect_timeout)
-                .read_timeout(stream_idle_timeout)
-                .build()
-                .expect("control-plane reqwest client should build"),
-            snapshot_timeout,
-            stream_connect_timeout,
+            http: build_snapshot_http_client(snapshot_timeout),
+            stream_http: build_stream_http_client(stream_attach_timeout, stream_read_timeout),
+            stream_attach_timeout,
         }
     }
 
     pub async fn fetch_snapshot(&self) -> Result<SnapshotEnvelope, ControlPlaneClientError> {
         let snapshot_url = self.join_path("api/v1/snapshot")?;
-        let response = self
-            .http
-            .get(snapshot_url)
-            .timeout(self.snapshot_timeout)
-            .send()
-            .await?;
+        let response = self.http.get(snapshot_url).send().await?;
         Ok(response.error_for_status()?.json().await?)
     }
 
     pub fn stream_updates(&self) -> Result<ControlPlaneEventStream, ControlPlaneClientError> {
         let events_url = self.join_path("api/v1/events")?;
-        let request = self.http.get(events_url);
+        let request = self.stream_http.get(events_url);
         let inner = EventSource::new(request).map_err(ControlPlaneClientError::StreamRequest)?;
         Ok(ControlPlaneEventStream {
             inner,
-            stream_connect_timeout: self.stream_connect_timeout,
-            observed_snapshot: false,
-            attach_deadline: None,
+            attach_timeout: self.stream_attach_timeout,
+            awaiting_first_snapshot: true,
         })
     }
 
     fn join_path(&self, path: &'static str) -> Result<Url, ControlPlaneClientError> {
-        self.base_url
+        normalized_base_url(&self.base_url)
             .join(path)
             .map_err(|source| ControlPlaneClientError::InvalidBaseUrl {
                 base_url: self.base_url.to_string(),
@@ -567,73 +265,80 @@ impl ControlPlaneClient {
     }
 }
 
-pub struct ControlPlaneEventStream {
-    inner: EventSource,
-    stream_connect_timeout: Duration,
-    observed_snapshot: bool,
-    attach_deadline: Option<tokio::time::Instant>,
+fn build_snapshot_http_client(snapshot_timeout: Duration) -> reqwest::Client {
+    // Bootstrap and reconnect fetches should fail fast so the UI can retry instead of hanging
+    // forever behind a partial `/api/v1/snapshot` response.
+    reqwest::Client::builder()
+        .timeout(snapshot_timeout)
+        .read_timeout(snapshot_timeout)
+        .build()
+        .expect("static snapshot timeout config should produce a reqwest client")
 }
 
-#[derive(Debug)]
-pub enum ControlPlaneStreamUpdate {
-    Snapshot(Box<SnapshotEnvelope>),
-    Reconnecting(ControlPlaneClientError),
+fn build_stream_http_client(
+    stream_attach_timeout: Duration,
+    stream_read_timeout: Duration,
+) -> reqwest::Client {
+    // Reuse the attach watchdog budget for the underlying TCP connect so both the socket setup
+    // and the first-snapshot wait fail fast before the longer steady-state idle timeout applies.
+    reqwest::Client::builder()
+        .connect_timeout(stream_attach_timeout)
+        .read_timeout(stream_read_timeout)
+        .build()
+        .expect("static stream read timeout config should produce a reqwest client")
+}
+
+fn normalized_base_url(base_url: &Url) -> Url {
+    let mut normalized = base_url.clone();
+    let path = normalized.path();
+    if path.is_empty() || path.ends_with('/') {
+        return normalized;
+    }
+
+    normalized.set_path(&format!("{path}/"));
+    normalized
+}
+
+pub struct ControlPlaneEventStream {
+    inner: EventSource,
+    attach_timeout: Duration,
+    awaiting_first_snapshot: bool,
 }
 
 impl ControlPlaneEventStream {
-    pub async fn next(
-        &mut self,
-    ) -> Option<Result<ControlPlaneStreamUpdate, ControlPlaneClientError>> {
-        loop {
-            let event = if self.observed_snapshot {
-                match self.inner.next().await {
-                    Some(event) => event,
-                    None => return None,
-                }
-            } else {
-                let deadline = *self.attach_deadline.get_or_insert_with(|| {
-                    tokio::time::Instant::now() + self.stream_connect_timeout
-                });
-                match tokio::time::timeout_at(deadline, self.inner.next()).await {
-                    Ok(Some(event)) => event,
-                    Ok(None) => return None,
-                    Err(_) => {
-                        return Some(Err(ControlPlaneClientError::StreamConnectTimeout(
-                            self.stream_connect_timeout,
-                        )));
-                    }
-                }
-            };
+    pub async fn next(&mut self) -> Option<Result<SnapshotEnvelope, ControlPlaneClientError>> {
+        while let Some(event) = self.next_event().await {
             match event {
                 Ok(EventSourceEvent::Open) => continue,
                 Ok(EventSourceEvent::Message(message)) => {
-                    if message.event != SNAPSHOT_EVENT_NAME {
-                        continue;
-                    }
-                    let snapshot = serde_json::from_str(&message.data)
-                        .map(Box::new)
-                        .map(ControlPlaneStreamUpdate::Snapshot)
-                        .map_err(ControlPlaneClientError::Decode);
-                    if snapshot.is_ok() {
-                        self.observed_snapshot = true;
-                        self.attach_deadline = None;
-                    }
-                    return Some(snapshot);
+                    self.awaiting_first_snapshot = false;
+                    return Some(
+                        serde_json::from_str(&message.data)
+                            .map_err(ControlPlaneClientError::Decode),
+                    );
                 }
-                Err(error) if self.inner.ready_state() == ReadyState::Connecting => {
-                    self.observed_snapshot = false;
-                    self.attach_deadline = None;
-                    return Some(Ok(ControlPlaneStreamUpdate::Reconnecting(
-                        ControlPlaneClientError::Stream(Box::new(error)),
-                    )));
-                }
-                Err(error) => {
-                    self.observed_snapshot = false;
-                    self.attach_deadline = None;
-                    return Some(Err(ControlPlaneClientError::Stream(Box::new(error))));
-                }
+                Err(error) => return Some(Err(error)),
             }
         }
+        None
+    }
+
+    async fn next_event(&mut self) -> Option<Result<EventSourceEvent, ControlPlaneClientError>> {
+        let next = if self.awaiting_first_snapshot {
+            match timeout(self.attach_timeout, self.inner.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    self.inner.close();
+                    return Some(Err(ControlPlaneClientError::StreamAttachTimeout(
+                        self.attach_timeout,
+                    )));
+                }
+            }
+        } else {
+            self.inner.next().await
+        };
+
+        next.map(|event| event.map_err(ControlPlaneClientError::from))
     }
 
     pub fn close(&mut self) {
@@ -654,8 +359,8 @@ pub enum ControlPlaneClientError {
     Request(#[from] reqwest::Error),
     #[error("control-plane update stream failed: {0}")]
     Stream(#[source] Box<reqwest_eventsource::Error>),
-    #[error("control-plane update stream did not establish within {0:?}")]
-    StreamConnectTimeout(Duration),
+    #[error("control-plane update stream did not attach within {0:?}")]
+    StreamAttachTimeout(Duration),
     #[error("control-plane update request could not be cloned: {0}")]
     StreamRequest(reqwest_eventsource::CannotCloneRequestError),
     #[error("failed to decode control-plane payload: {0}")]
@@ -674,19 +379,35 @@ pub fn log_stream_error(error: &ControlPlaneClientError) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState,
-        IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
-    };
-    use super::{SnapshotStore, recv_monotonic_snapshot};
     use chrono::{TimeZone, Utc};
+    use opensymphony_domain::{
+        ControlPlaneAgentServerStatus as AgentServerStatus,
+        ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
+        ControlPlaneDaemonStatus as DaemonStatus,
+        ControlPlaneIssueRuntimeState as IssueRuntimeState,
+        ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
+        ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
+        ControlPlaneWorkerOutcome as WorkerOutcome,
+    };
     use std::time::Duration;
+    use tokio::{
+        io::AsyncWriteExt,
+        net::TcpListener,
+        sync::broadcast,
+        time::{sleep, timeout},
+    };
+    use url::Url;
+
+    use super::{
+        ControlPlaneClient, ControlPlaneClientError, SnapshotStore, catch_up_lagged_receiver,
+        next_snapshot_envelope,
+    };
 
     fn fixture_snapshot(step: u64) -> DaemonSnapshot {
         let now = Utc
             .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
             .single()
-            .expect("fixture timestamp should be valid")
+            .expect("valid fixed test timestamp")
             + chrono::Duration::seconds(step as i64);
         DaemonSnapshot {
             generated_at: now,
@@ -699,7 +420,7 @@ mod tests {
             agent_server: AgentServerStatus {
                 reachable: true,
                 base_url: "http://127.0.0.1:3000".to_owned(),
-                conversation_count: 1,
+                conversation_count: 2,
                 status_line: "healthy".to_owned(),
             },
             metrics: MetricsSnapshot {
@@ -709,20 +430,20 @@ mod tests {
                 total_cost_micros: 120_000,
             },
             issues: vec![IssueSnapshot {
-                identifier: "COE-271".to_owned(),
-                title: "FrankenTUI operator client".to_owned(),
+                identifier: "COE-255".to_owned(),
+                title: "Observability and FrankenTUI".to_owned(),
                 tracker_state: "In Progress".to_owned(),
                 runtime_state: IssueRuntimeState::Running,
                 last_outcome: WorkerOutcome::Running,
                 last_event_at: now,
-                conversation_id_suffix: "c0e271".to_owned(),
-                workspace_path_suffix: "COE-271".to_owned(),
+                conversation_id_suffix: "c0e255".to_owned(),
+                workspace_path_suffix: "COE-255".to_owned(),
                 retry_count: 0,
                 blocked: false,
             }],
             recent_events: vec![RecentEvent {
                 happened_at: now,
-                issue_identifier: Some("COE-271".to_owned()),
+                issue_identifier: Some("COE-255".to_owned()),
                 kind: RecentEventKind::SnapshotPublished,
                 summary: format!("published step {step}"),
             }],
@@ -730,37 +451,384 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lagged_receivers_resume_with_monotonic_sequences() {
+    async fn lagged_receivers_resume_from_the_latest_snapshot_without_regressing() {
         let store = SnapshotStore::new(fixture_snapshot(0));
         let mut receiver = store.subscribe();
-        let mut last_sequence = 1;
+        let mut last_sent_sequence = store.current().await.sequence;
 
         for step in 1..=80 {
             store.publish(fixture_snapshot(step)).await;
         }
 
-        let latest = store.current().await;
-        let recovered = tokio::time::timeout(
+        let latest = next_snapshot_envelope(&store, &mut receiver, &mut last_sent_sequence)
+            .await
+            .expect("latest snapshot after lag");
+        assert_eq!(latest.sequence, 81);
+
+        let expected = store.publish(fixture_snapshot(81)).await;
+        let resumed = timeout(
             Duration::from_secs(1),
-            recv_monotonic_snapshot(&store, &mut receiver, &mut last_sequence),
+            next_snapshot_envelope(&store, &mut receiver, &mut last_sent_sequence),
         )
         .await
-        .expect("lagged receiver should recover within timeout")
-        .expect("lagged receiver should yield the latest snapshot");
+        .expect("resumed snapshot")
+        .expect("open stream");
 
-        assert_eq!(recovered.sequence, latest.sequence);
-        assert_eq!(last_sequence, latest.sequence);
+        assert_eq!(resumed.sequence, expected.sequence);
+        assert_eq!(
+            resumed.snapshot.recent_events[0].summary,
+            "published step 81"
+        );
+    }
 
-        let next = store.publish(fixture_snapshot(81)).await;
-        let resumed = tokio::time::timeout(
-            Duration::from_secs(1),
-            recv_monotonic_snapshot(&store, &mut receiver, &mut last_sequence),
+    #[tokio::test]
+    async fn lagged_catch_up_returns_before_the_broadcast_backlog_drains() {
+        let store = SnapshotStore::new(fixture_snapshot(0));
+        let mut receiver = store.subscribe();
+        let last_sent_sequence = store.current().await.sequence;
+
+        for step in 1..=80 {
+            store.publish(fixture_snapshot(step)).await;
+        }
+
+        let latest = catch_up_lagged_receiver(&store, &mut receiver, last_sent_sequence)
+            .await
+            .expect("latest snapshot after lag");
+
+        assert_eq!(latest.sequence, 81);
+
+        match receiver.try_recv() {
+            Ok(buffered) => assert!(buffered.sequence < latest.sequence),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(other) => {
+                panic!("expected catch-up to return before draining the backlog, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn control_plane_client_preserves_path_prefixes_without_trailing_slashes() {
+        let client = ControlPlaneClient::new(
+            Url::parse("http://proxy/opensymphony").expect("valid prefixed control-plane base url"),
+        );
+        let snapshot_url = client
+            .join_path("api/v1/snapshot")
+            .expect("snapshot path should resolve beneath the prefix");
+        let events_url = client
+            .join_path("api/v1/events")
+            .expect("events path should resolve beneath the prefix");
+
+        assert_eq!(
+            snapshot_url.as_str(),
+            "http://proxy/opensymphony/api/v1/snapshot"
+        );
+        assert_eq!(
+            events_url.as_str(),
+            "http://proxy/opensymphony/api/v1/events"
+        );
+    }
+
+    async fn write_sse_headers(socket: &mut tokio::net::TcpStream) {
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: keep-alive\r\n\r\n",
+            )
+            .await
+            .expect("mock SSE server should write headers");
+    }
+
+    fn fixture_snapshot_event(sequence: u64) -> String {
+        let snapshot = fixture_snapshot(sequence);
+        let envelope = super::SnapshotEnvelope {
+            sequence,
+            published_at: snapshot.generated_at,
+            snapshot,
+        };
+        let payload = serde_json::to_string(&envelope).expect("serialize snapshot");
+        format!(
+            "event: snapshot\nid: {}\ndata: {payload}\n\n",
+            envelope.sequence
         )
-        .await
-        .expect("receiver should resume within timeout")
-        .expect("receiver should yield the next snapshot");
+    }
 
-        assert_eq!(resumed.sequence, next.sequence);
-        assert!(resumed.sequence > recovered.sequence);
+    #[tokio::test]
+    async fn fetch_snapshot_times_out_when_response_body_never_arrives() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock snapshot listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept snapshot client");
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .expect("mock snapshot server should write headers");
+            sleep(Duration::from_millis(250)).await;
+        });
+
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            Duration::from_millis(75),
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        );
+        let result = timeout(Duration::from_secs(1), client.fetch_snapshot())
+            .await
+            .expect("fetch should surface the snapshot timeout")
+            .expect_err("snapshot fetch should time out");
+
+        match result {
+            ControlPlaneClientError::Request(error) => assert!(error.is_timeout()),
+            other => panic!("expected a request timeout, got {other:?}"),
+        }
+
+        server
+            .await
+            .expect("mock snapshot server should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn stream_updates_time_out_when_the_event_stream_goes_idle_after_the_first_snapshot() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let first_snapshot = fixture_snapshot_event(6);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SSE client");
+            write_sse_headers(&mut socket).await;
+            socket
+                .write_all(first_snapshot.as_bytes())
+                .await
+                .expect("mock SSE server should write initial snapshot");
+            sleep(Duration::from_millis(250)).await;
+        });
+
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            Duration::from_millis(75),
+            Duration::from_millis(75),
+        );
+        let mut stream = client.stream_updates().expect("open event stream");
+        let first = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should yield the first attached snapshot")
+            .expect("stream should yield a result")
+            .expect("stream should decode the first snapshot");
+        assert_eq!(first.sequence, 6);
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should surface the idle timeout")
+            .expect("stream should report an error after going idle");
+
+        match result {
+            Err(ControlPlaneClientError::Stream(error)) => match error.as_ref() {
+                reqwest_eventsource::Error::Transport(reqwest_error) => {
+                    assert!(reqwest_error.is_timeout());
+                }
+                other => panic!("expected a transport timeout, got {other:?}"),
+            },
+            other => panic!("expected a stream timeout error, got {other:?}"),
+        }
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn stream_updates_stay_alive_when_keepalive_comments_arrive_before_a_snapshot() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let expected_snapshot = {
+            let snapshot = fixture_snapshot(5);
+            super::SnapshotEnvelope {
+                sequence: 6,
+                published_at: snapshot.generated_at,
+                snapshot,
+            }
+        };
+        let payload = serde_json::to_string(&expected_snapshot).expect("serialize snapshot");
+        let event = format!(
+            "event: snapshot\nid: {}\ndata: {payload}\n\n",
+            expected_snapshot.sequence
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SSE client");
+            write_sse_headers(&mut socket).await;
+            for _ in 0..3 {
+                sleep(Duration::from_millis(40)).await;
+                socket
+                    .write_all(b": keepalive\n\n")
+                    .await
+                    .expect("mock SSE server should write keepalive");
+            }
+            sleep(Duration::from_millis(40)).await;
+            socket
+                .write_all(event.as_bytes())
+                .await
+                .expect("mock SSE server should write snapshot event");
+        });
+
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            Duration::from_secs(1),
+            Duration::from_millis(75),
+        );
+        let mut stream = client.stream_updates().expect("open event stream");
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should stay alive through keepalives")
+            .expect("stream should yield the next snapshot")
+            .expect("snapshot event should decode");
+
+        assert_eq!(result, expected_snapshot);
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn stream_updates_time_out_when_only_keepalive_comments_arrive_before_a_snapshot() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SSE client");
+            write_sse_headers(&mut socket).await;
+            for _ in 0..8 {
+                sleep(Duration::from_millis(20)).await;
+                if socket.write_all(b": keepalive\n\n").await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let attach_timeout = Duration::from_millis(75);
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            attach_timeout,
+            Duration::from_secs(1),
+        );
+        let mut stream = client.stream_updates().expect("open event stream");
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should surface the attach timeout")
+            .expect("stream should report an error after timing out")
+            .expect_err("stream attach should time out");
+
+        match result {
+            ControlPlaneClientError::StreamAttachTimeout(timeout) => {
+                assert_eq!(timeout, attach_timeout);
+            }
+            other => panic!("expected a stream attach timeout, got {other:?}"),
+        }
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn stream_updates_time_out_when_the_first_snapshot_never_arrives_after_open() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept SSE client");
+            write_sse_headers(&mut socket).await;
+            sleep(Duration::from_millis(250)).await;
+        });
+
+        let attach_timeout = Duration::from_millis(75);
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            attach_timeout,
+            Duration::from_secs(1),
+        );
+        let mut stream = client.stream_updates().expect("open event stream");
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should surface the attach timeout")
+            .expect("stream should report an error after timing out")
+            .expect_err("stream attach should time out");
+
+        match result {
+            ControlPlaneClientError::StreamAttachTimeout(timeout) => {
+                assert_eq!(timeout, attach_timeout);
+            }
+            other => panic!("expected a stream attach timeout, got {other:?}"),
+        }
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
+    }
+
+    #[tokio::test]
+    async fn stream_updates_time_out_when_the_event_stream_never_opens() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock SSE listener");
+        let base_url = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("mock listener address")
+        ))
+        .expect("valid control-plane base url");
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept SSE client");
+            sleep(Duration::from_millis(250)).await;
+        });
+
+        let attach_timeout = Duration::from_millis(75);
+        let client = ControlPlaneClient::with_timeouts(
+            base_url,
+            super::CONTROL_PLANE_SNAPSHOT_TIMEOUT,
+            attach_timeout,
+            Duration::from_secs(1),
+        );
+        let mut stream = client.stream_updates().expect("open event stream");
+        let result = timeout(Duration::from_secs(1), stream.next())
+            .await
+            .expect("stream should surface the open timeout")
+            .expect("stream should report an error after timing out")
+            .expect_err("stream open should time out");
+
+        match result {
+            ControlPlaneClientError::StreamAttachTimeout(timeout) => {
+                assert_eq!(timeout, attach_timeout);
+            }
+            other => panic!("expected a stream attach timeout, got {other:?}"),
+        }
+
+        stream.close();
+        server.await.expect("mock SSE server should exit cleanly");
     }
 }

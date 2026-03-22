@@ -78,11 +78,12 @@ async fn doctor_live_probe_succeeds_against_fake_server() {
 }
 
 #[test]
-fn doctor_defaults_target_repo_from_checkout_root() {
+fn doctor_defaults_target_repo_from_checkout_root_even_outside_the_repo_cwd() {
     let repo_root = repo_root();
     let config_dir =
         tempfile::tempdir_in(repo_root.join("examples/configs")).expect("config dir should exist");
     let config_path = config_dir.path().join("doctor-default-target.yaml");
+    let outside_repo = TempDir::new().expect("outside repo dir should be created");
     let config = serde_yaml::to_string(&Value::Mapping(
         [
             (
@@ -124,14 +125,153 @@ fn doctor_defaults_target_repo_from_checkout_root() {
         .arg("doctor")
         .arg("--config")
         .arg(&config_path)
-        .current_dir(&repo_root)
+        .current_dir(outside_repo.path())
         .output()
         .expect("doctor command should run");
 
     assert!(
         output.status.success(),
-        "doctor should succeed with bundled target repo fallback: {}",
-        String::from_utf8_lossy(&output.stdout)
+        "doctor should succeed with checkout-root target repo fallback from outside the repo cwd: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn doctor_fails_when_required_env_placeholder_is_unset() {
+    let repo_root = repo_root();
+    let config_dir =
+        tempfile::tempdir_in(repo_root.join("examples/configs")).expect("config dir should exist");
+    let config_path = config_dir.path().join("doctor-missing-env.yaml");
+    let missing_var = "OSYM_TEST_MISSING_TOOL_DIR";
+    let config = serde_yaml::to_string(&Value::Mapping(
+        [
+            (
+                Value::String("target_repo".to_string()),
+                Value::String(repo_root.join("examples/target-repo").display().to_string()),
+            ),
+            (
+                Value::String("openhands".to_string()),
+                Value::Mapping(
+                    [
+                        (
+                            Value::String("tool_dir".to_string()),
+                            Value::String(format!("${{{missing_var}}}")),
+                        ),
+                        (Value::String("probe_model".to_string()), Value::Null),
+                        (Value::String("probe_api_key_env".to_string()), Value::Null),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ),
+            (
+                Value::String("linear".to_string()),
+                Value::Mapping(
+                    [(Value::String("enabled".to_string()), Value::Bool(false))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    ))
+    .expect("config should serialize");
+    std::fs::write(&config_path, config).expect("config should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .current_dir(&repo_root)
+        .env_remove(missing_var)
+        .output()
+        .expect("doctor command should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "doctor should fail when a required env placeholder is unset: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains(missing_var) || stderr.contains(missing_var),
+        "doctor error should mention the missing env placeholder: stdout={stdout}, stderr={stderr}",
+    );
+}
+
+#[test]
+fn doctor_ignores_unset_optional_live_placeholders_without_live_openhands() {
+    let repo_root = repo_root();
+    let config_dir =
+        tempfile::tempdir_in(repo_root.join("examples/configs")).expect("config dir should exist");
+    let config_path = config_dir
+        .path()
+        .join("doctor-optional-live-placeholder.yaml");
+    let missing_var = "OSYM_TEST_MISSING_PROBE_MODEL";
+    let config = serde_yaml::to_string(&Value::Mapping(
+        [
+            (
+                Value::String("target_repo".to_string()),
+                Value::String(repo_root.join("examples/target-repo").display().to_string()),
+            ),
+            (
+                Value::String("openhands".to_string()),
+                Value::Mapping(
+                    [
+                        (
+                            Value::String("tool_dir".to_string()),
+                            Value::String(
+                                repo_root
+                                    .join("tools/openhands-server")
+                                    .display()
+                                    .to_string(),
+                            ),
+                        ),
+                        (
+                            Value::String("probe_model".to_string()),
+                            Value::String(format!("${{{missing_var}}}")),
+                        ),
+                        (Value::String("probe_api_key_env".to_string()), Value::Null),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ),
+            (
+                Value::String("linear".to_string()),
+                Value::Mapping(
+                    [(Value::String("enabled".to_string()), Value::Bool(false))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    ))
+    .expect("config should serialize");
+    std::fs::write(&config_path, config).expect("config should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .current_dir(&repo_root)
+        .env_remove(missing_var)
+        .output()
+        .expect("doctor command should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "doctor should ignore unset live-only placeholders when live checks are disabled: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        !stdout.contains(missing_var) && !stderr.contains(missing_var),
+        "static doctor should not fail on the unset live-only placeholder: stdout={stdout}, stderr={stderr}",
     );
 }
 
