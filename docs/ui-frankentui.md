@@ -216,6 +216,7 @@ UI requirements:
 Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
+- keep rendering that bootstrap snapshot with `conn=connecting` until the SSE stream yields its first snapshot
 - subscribe to the SSE stream
 - if the stream closes or fails, keep the last good snapshot visible and mark the connection as reconnecting
 - refetch the current snapshot before resubscribing

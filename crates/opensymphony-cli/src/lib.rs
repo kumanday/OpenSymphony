@@ -198,6 +198,7 @@ async fn run_tui(url: Url, exit_after_ms: Option<u64>) -> Result<(), CliError> {
 fn spawn_demo_updates(store: SnapshotStore, interval: Duration) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
         let mut step = 1_u64;
         loop {
             ticker.tick().await;
@@ -680,9 +681,10 @@ enum CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::{sample_snapshot, Cli, Command};
+    use super::{sample_snapshot, spawn_demo_updates, Cli, Command, SnapshotStore};
     use clap::{error::ErrorKind, Parser};
-    use opensymphony_domain::IssueRuntimeState;
+    use opensymphony_domain::{DaemonState, IssueRuntimeState};
+    use std::time::Duration;
 
     #[test]
     fn daemon_rejects_zero_sample_interval() {
@@ -723,5 +725,36 @@ mod tests {
             assert_eq!(snapshot.metrics.running_issues, running_issues);
             assert_eq!(snapshot.metrics.retry_queue_depth, retry_queue_depth);
         }
+    }
+
+    async fn wait_for_sequence(store: &SnapshotStore, target_sequence: u64) {
+        loop {
+            if store.current().await.sequence >= target_sequence {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn demo_updates_wait_for_the_first_interval_before_publishing() {
+        let store = SnapshotStore::new(sample_snapshot(0));
+        spawn_demo_updates(store.clone(), Duration::from_millis(120));
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let initial = store.current().await;
+        assert_eq!(initial.sequence, 1);
+        assert!(matches!(
+            initial.snapshot.daemon.state,
+            DaemonState::Starting
+        ));
+
+        tokio::time::timeout(Duration::from_millis(300), wait_for_sequence(&store, 2))
+            .await
+            .expect("first demo publish should occur after the configured interval");
+
+        let updated = store.current().await;
+        assert_eq!(updated.sequence, 2);
+        assert!(matches!(updated.snapshot.daemon.state, DaemonState::Ready));
     }
 }

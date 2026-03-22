@@ -53,9 +53,22 @@ impl TuiState {
                 let selected_issue_identifier =
                     self.selected_issue().map(|issue| issue.identifier.clone());
                 self.latest_snapshot = Some(*envelope);
+                if !matches!(self.connection, ConnectionState::Live) {
+                    self.status_line = match self.connection {
+                        ConnectionState::Connecting => {
+                            "bootstrap snapshot loaded; waiting for live stream".to_owned()
+                        }
+                        ConnectionState::Reconnecting(_) => {
+                            "snapshot refreshed; waiting for live stream".to_owned()
+                        }
+                        ConnectionState::Live => "live control-plane stream".to_owned(),
+                    };
+                }
+                self.restore_selection(selected_issue_identifier.as_deref());
+            }
+            TuiAction::StreamAttached => {
                 self.connection = ConnectionState::Live;
                 self.status_line = "live control-plane stream".to_owned();
-                self.restore_selection(selected_issue_identifier.as_deref());
             }
             TuiAction::ConnectionLost(reason) => {
                 self.connection = ConnectionState::Reconnecting(reason.clone());
@@ -348,6 +361,7 @@ impl ConnectionState {
 #[derive(Debug, Clone)]
 pub enum TuiAction {
     SnapshotReceived(Box<SnapshotEnvelope>),
+    StreamAttached,
     ConnectionLost(String),
     MoveSelectionUp,
     MoveSelectionDown,
@@ -358,16 +372,22 @@ pub enum TuiAction {
 #[derive(Debug, Default)]
 struct BridgeMailbox {
     latest_snapshot: Option<Box<SnapshotEnvelope>>,
+    stream_attached: bool,
     latest_connection_loss: Option<String>,
 }
 
 impl BridgeMailbox {
     fn push_snapshot(&mut self, snapshot: SnapshotEnvelope) {
-        self.latest_connection_loss = None;
         self.latest_snapshot = Some(Box::new(snapshot));
     }
 
+    fn push_stream_attached(&mut self) {
+        self.latest_connection_loss = None;
+        self.stream_attached = true;
+    }
+
     fn push_connection_loss(&mut self, reason: String) {
+        self.stream_attached = false;
         self.latest_connection_loss = Some(reason);
     }
 
@@ -376,9 +396,14 @@ impl BridgeMailbox {
             return Some(TuiAction::SnapshotReceived(snapshot));
         }
 
-        self.latest_connection_loss
-            .take()
-            .map(TuiAction::ConnectionLost)
+        if let Some(reason) = self.latest_connection_loss.take() {
+            return Some(TuiAction::ConnectionLost(reason));
+        }
+
+        self.stream_attached.then(|| {
+            self.stream_attached = false;
+            TuiAction::StreamAttached
+        })
     }
 }
 
@@ -547,6 +572,7 @@ async fn run_bridge_loop(
         };
 
         let mut should_retry = false;
+        let mut stream_attached = false;
         loop {
             let update = match next_update_or_shutdown(&mut stream, &mut shutdown).await {
                 Some(update) => update,
@@ -557,7 +583,13 @@ async fn run_bridge_loop(
             };
 
             match update {
-                Some(Ok(snapshot)) => push_snapshot(&bridge, snapshot),
+                Some(Ok(snapshot)) => {
+                    if !stream_attached {
+                        push_stream_attached(&bridge);
+                        stream_attached = true;
+                    }
+                    push_snapshot(&bridge, snapshot);
+                }
                 Some(Err(error)) => {
                     handle_bridge_error(&bridge, &error);
                     should_retry = true;
@@ -853,6 +885,13 @@ fn push_snapshot(bridge: &Arc<Mutex<BridgeMailbox>>, snapshot: SnapshotEnvelope)
     bridge.push_snapshot(snapshot);
 }
 
+fn push_stream_attached(bridge: &Arc<Mutex<BridgeMailbox>>) {
+    let mut bridge = bridge
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    bridge.push_stream_attached();
+}
+
 fn push_connection_loss(bridge: &Arc<Mutex<BridgeMailbox>>, reason: String) {
     let mut bridge = bridge
         .lock()
@@ -1074,6 +1113,41 @@ mod tests {
             Some(TuiAction::ConnectionLost(reason)) => assert_eq!(reason, "stream closed"),
             other => panic!("expected reconnecting state, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn delivers_stream_attached_after_the_latest_snapshot() {
+        let mut mailbox = BridgeMailbox::default();
+        let snapshot = fixture(5, 1);
+
+        mailbox.push_snapshot(snapshot.clone());
+        mailbox.push_stream_attached();
+
+        match mailbox.take_action() {
+            Some(TuiAction::SnapshotReceived(received)) => {
+                assert_eq!(*received, snapshot);
+            }
+            other => panic!("expected latest snapshot, got {other:?}"),
+        }
+
+        match mailbox.take_action() {
+            Some(TuiAction::StreamAttached) => {}
+            other => panic!("expected stream attachment, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connection_loss_clears_pending_stream_attachment() {
+        let mut mailbox = BridgeMailbox::default();
+
+        mailbox.push_stream_attached();
+        mailbox.push_connection_loss("stream closed".to_owned());
+
+        match mailbox.take_action() {
+            Some(TuiAction::ConnectionLost(reason)) => assert_eq!(reason, "stream closed"),
+            other => panic!("expected reconnecting state, got {other:?}"),
+        }
+        assert!(mailbox.take_action().is_none());
     }
 
     #[test]

@@ -209,9 +209,13 @@ When validating the local control-plane and TUI slice, also confirm that:
 
 - the TUI header shows daemon and agent-server health even when the issue list itself does not
   change
+- the bootstrap snapshot stays visible with `conn=connecting` until the SSE stream actually
+  attaches
 - reconnecting clients keep the last good snapshot visible instead of regressing to stale state
 - lagged SSE consumers only advance to newer snapshot sequences
 - newline-bearing or full-width tracker and event text stays within the pane row and column budget
+- `opensymphony daemon --sample-interval-ms ...` keeps the initial `Starting` snapshot in place
+  until the configured interval elapses
 
 ## 7. Doctor checks
 
