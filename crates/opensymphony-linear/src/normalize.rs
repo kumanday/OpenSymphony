@@ -17,7 +17,7 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         title: node.title,
         description: node.description,
         priority: normalize_priority(node.priority)?,
-        state: normalize_state(node.state),
+        state: node.state.name,
         labels: normalize_labels(node.labels.nodes),
         blocked_by: normalize_blockers(node.inverse_relations.nodes),
         created_at: node.created_at,
@@ -72,7 +72,7 @@ fn normalize_blocker(blocker: LinearBlockerNode) -> TrackerIssueBlocker {
     }
 }
 
-const LINEAR_PRIORITY_LOWEST_URGENCY: u64 = 4;
+const LINEAR_MAX_PRIORITY: u64 = 4;
 
 fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
     if !priority.is_finite() || priority < 0.0 {
@@ -90,11 +90,9 @@ fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
 
     match rounded as u64 {
         0 => Ok(None),
-        value if value <= LINEAR_PRIORITY_LOWEST_URGENCY => {
-            Ok(Some((LINEAR_PRIORITY_LOWEST_URGENCY + 1 - value) as u8))
-        }
+        value if value <= LINEAR_MAX_PRIORITY => Ok(Some(value as u8)),
         value => Err(LinearError::InvalidResponse(format!(
-            "Linear priority must be between 0 and {LINEAR_PRIORITY_LOWEST_URGENCY}, got {value}"
+            "Linear priority must be between 0 and {LINEAR_MAX_PRIORITY}, got {value}"
         ))),
     }
 }
@@ -117,14 +115,14 @@ mod tests {
     }
 
     #[test]
-    fn linear_priority_is_inverted_for_scheduler_ordering() {
+    fn linear_priority_is_preserved_for_prompt_consumers() {
         assert_eq!(
             normalize_priority(1.0).expect("priority should normalize"),
-            Some(4)
+            Some(1)
         );
         assert_eq!(
             normalize_priority(4.0).expect("priority should normalize"),
-            Some(1)
+            Some(4)
         );
     }
 

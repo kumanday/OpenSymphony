@@ -55,8 +55,10 @@ Keep the orchestrator independent of raw GraphQL response shape.
 Implementation note:
 
 - blocker normalization should derive `blocked_by` from `inverseRelations` entries where relation `type == "blocks"`
-- issue state normalization should retain both the state name and the Linear `WorkflowState.type` string so terminal blockers remain detectable
+- `TrackerIssue.state` should remain the workflow-facing state name string consumed by `WORKFLOW.md` and `WORKFLOW.example.md`
+- blocker and state-refresh normalization should retain both the state name and the Linear `WorkflowState.type` string so terminal blockers remain detectable without hardcoding active-state semantics
 - issue normalization should retain the Linear issue URL because `WORKFLOW.md` renders `{{ issue.url }}` under strict template validation
+- issue normalization should preserve the raw Linear priority because prompt/UI consumers render `{{ issue.priority }}` directly
 
 ## 3. Candidate sorting and eligibility
 
@@ -64,13 +66,13 @@ The orchestrator should receive normalized issues and apply Symphony sorting and
 
 Recommended sort order:
 
-1. higher priority first
+1. higher urgency first using raw Linear priority (`1` before `2`; `0` remains unprioritized)
 2. older creation time first
 3. identifier tie-breaker
 
 Implementation note:
 
-- Linear's raw priority scale is urgency-inverted (`1` is most urgent, `0` is unprioritized), so the adapter should normalize it before returning scheduler-facing issues
+- Linear's raw priority scale is urgency-inverted (`1` is most urgent, `0` is unprioritized), so the scheduler should derive its sort key from the raw value instead of rewriting the shared issue model
 
 Eligibility reminders:
 
