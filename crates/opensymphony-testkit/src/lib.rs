@@ -852,7 +852,10 @@ mod tests {
         assert_eq!(conversation.max_iterations, request.max_iterations);
         assert_eq!(conversation.stuck_detection, request.stuck_detection);
         assert_eq!(conversation.execution_status, "running");
-        assert_eq!(conversation.confirmation_policy, request.confirmation_policy);
+        assert_eq!(
+            conversation.confirmation_policy,
+            request.confirmation_policy
+        );
         assert_eq!(conversation.agent, request.agent);
     }
 
@@ -866,7 +869,10 @@ mod tests {
         let state = fixtures.state_update_at("evt-state", -1_000, "queued");
         let log = fixtures.llm_completion_at("evt-log", 2_000, "fake-model", 42);
 
-        assert_eq!(state.timestamp, base - chrono::Duration::milliseconds(1_000));
+        assert_eq!(
+            state.timestamp,
+            base - chrono::Duration::milliseconds(1_000)
+        );
         assert_eq!(log.timestamp, base + chrono::Duration::milliseconds(2_000));
         assert!(matches!(
             KnownEvent::from_envelope(&state),
