@@ -20,7 +20,7 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use crate::{filter_issues_for_dispatch, sort_issues_for_dispatch};
+use crate::filter_issues_for_dispatch;
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
 
@@ -366,11 +366,11 @@ where
 
         let active_ids = active
             .iter()
-            .map(|issue| issue.id.clone())
+            .map(|issue| issue.id.as_str())
             .collect::<HashSet<_>>();
         let terminal_ids = terminal
             .iter()
-            .map(|issue| issue.id.clone())
+            .map(|issue| issue.id.as_str())
             .collect::<HashSet<_>>();
 
         let mut lookup_ids = self
@@ -385,7 +385,18 @@ where
                     .map(|record| record.issue.id.as_str().to_string()),
             );
         }
-        lookup_ids.retain(|id| !active_ids.contains(id) && !terminal_ids.contains(id));
+        lookup_ids
+            .retain(|id| !active_ids.contains(id.as_str()) && !terminal_ids.contains(id.as_str()));
+
+        let active_index = active
+            .iter()
+            .enumerate()
+            .map(|(index, issue)| (issue.id.clone(), index))
+            .collect();
+        let terminal_state_by_id = terminal
+            .into_iter()
+            .map(|issue| (issue.id, issue.state))
+            .collect();
 
         let state_by_id = if lookup_ids.is_empty() {
             HashMap::new()
@@ -402,16 +413,8 @@ where
         };
 
         Ok(TrackerSnapshot {
-            active_by_id: active
-                .iter()
-                .cloned()
-                .map(|issue| (issue.id.clone(), issue))
-                .collect(),
-            terminal_by_id: terminal
-                .iter()
-                .cloned()
-                .map(|issue| (issue.id.clone(), issue))
-                .collect(),
+            active_index,
+            terminal_state_by_id,
             state_by_id,
             active,
         })
@@ -433,16 +436,13 @@ where
 
         for record in records {
             let issue_id = record.issue.id.clone();
-            if let Some(active_issue) = tracker_snapshot.active_by_id.get(issue_id.as_str()) {
+            if let Some(active_issue) = tracker_snapshot.active_issue(&issue_id) {
                 let normalized = normalize_tracker_issue(active_issue, &self.config)?;
                 self.upsert_active_execution(normalized, observed_at, Some(record.workspace))?;
                 continue;
             }
 
-            if tracker_snapshot
-                .terminal_by_id
-                .contains_key(issue_id.as_str())
-            {
+            if tracker_snapshot.contains_terminal(issue_id.as_str()) {
                 self.workspace
                     .cleanup_workspace(&record.workspace, true)
                     .await
@@ -472,22 +472,25 @@ where
         tracker_snapshot: &TrackerSnapshot,
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
-        for tracker_issue in tracker_snapshot.active_by_id.values() {
+        for tracker_issue in &tracker_snapshot.active {
             let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
             self.upsert_active_execution(normalized, observed_at, None)?;
         }
 
         let existing_ids = self.executions.keys().cloned().collect::<Vec<_>>();
         for issue_id in existing_ids {
-            if tracker_snapshot
-                .active_by_id
-                .contains_key(issue_id.as_str())
-            {
+            if tracker_snapshot.contains_active(issue_id.as_str()) {
                 continue;
             }
 
-            if let Some(tracker_issue) = tracker_snapshot.terminal_by_id.get(issue_id.as_str()) {
-                let normalized = normalize_tracker_issue(tracker_issue, &self.config)?;
+            if let Some(terminal_state_name) =
+                tracker_snapshot.terminal_state_name(issue_id.as_str())
+            {
+                let Some(existing) = self.executions.get(&issue_id) else {
+                    continue;
+                };
+                let mut normalized = existing.issue().clone();
+                normalized.state = issue_state_from_name(terminal_state_name, &self.config);
                 self.release_issue(
                     issue_id.clone(),
                     normalized,
@@ -547,9 +550,8 @@ where
         active_issues: &[TrackerIssue],
         observed_at: TimestampMs,
     ) -> Result<(), SchedulerError> {
-        let mut ready =
+        let ready =
             filter_issues_for_dispatch(active_issues.to_vec(), &self.config.terminal_state_set());
-        sort_issues_for_dispatch(&mut ready);
 
         for tracker_issue in ready {
             if self.worker_index.len()
@@ -830,76 +832,41 @@ where
         outcome: WorkerOutcomeRecord,
         observed_at: TimestampMs,
     ) -> Result<IssueExecution, SchedulerError> {
-        let active = execution.issue().state.category == IssueStateCategory::Active;
-        if !active {
-            let reason = match execution.issue().state.category {
-                IssueStateCategory::Terminal => ReleaseReason::TrackerTerminal,
-                IssueStateCategory::NonActive => ReleaseReason::TrackerInactive,
-                IssueStateCategory::Active => ReleaseReason::Completed,
-            };
+        if let Some(reason) = non_active_release_reason(execution.issue().state.category.clone()) {
             return Ok(execution.release(observed_at, reason, Some(outcome))?);
         }
 
-        match outcome.outcome {
-            WorkerOutcomeKind::Succeeded => {
-                let run = execution
-                    .current_run()
-                    .expect("running execution must have a run");
-                let retry = RetryEntry::continuation(
-                    execution.issue(),
-                    run.attempt,
-                    run.normal_retry_count,
-                    observed_at,
-                    self.config.retry_policy,
-                )?;
-                Ok(execution.queue_retry(retry, outcome)?)
-            }
-            WorkerOutcomeKind::Failed | WorkerOutcomeKind::TimedOut => {
-                let run = execution
-                    .current_run()
-                    .expect("running execution must have a run");
-                let retry = RetryEntry::failure(
-                    execution.issue(),
-                    run.attempt,
-                    run.normal_retry_count,
-                    observed_at,
-                    RetryReason::Failure,
-                    outcome.error.clone().or(outcome.summary.clone()),
-                    self.config.retry_policy,
-                )?;
-                Ok(execution.queue_retry(retry, outcome)?)
-            }
-            WorkerOutcomeKind::Stalled => {
-                let run = execution
-                    .current_run()
-                    .expect("running execution must have a run");
-                let retry = RetryEntry::failure(
-                    execution.issue(),
-                    run.attempt,
-                    run.normal_retry_count,
-                    observed_at,
-                    RetryReason::Stalled,
-                    outcome.error.clone().or(outcome.summary.clone()),
-                    self.config.retry_policy,
-                )?;
-                Ok(execution.queue_retry(retry, outcome)?)
-            }
-            WorkerOutcomeKind::Cancelled => {
-                let run = execution
-                    .current_run()
-                    .expect("running execution must have a run");
-                let retry = RetryEntry::failure(
-                    execution.issue(),
-                    run.attempt,
-                    run.normal_retry_count,
-                    observed_at,
-                    RetryReason::Cancelled,
-                    outcome.error.clone().or(outcome.summary.clone()),
-                    self.config.retry_policy,
-                )?;
-                Ok(execution.queue_retry(retry, outcome)?)
-            }
-        }
+        self.queue_retry_for_outcome(execution, outcome, observed_at)
+    }
+
+    fn queue_retry_for_outcome(
+        &self,
+        execution: IssueExecution,
+        outcome: WorkerOutcomeRecord,
+        observed_at: TimestampMs,
+    ) -> Result<IssueExecution, SchedulerError> {
+        let run = execution
+            .current_run()
+            .expect("running execution must have a run");
+        let retry = match retry_reason_for_outcome(outcome.outcome) {
+            None => RetryEntry::continuation(
+                execution.issue(),
+                run.attempt,
+                run.normal_retry_count,
+                observed_at,
+                self.config.retry_policy,
+            )?,
+            Some(reason) => RetryEntry::failure(
+                execution.issue(),
+                run.attempt,
+                run.normal_retry_count,
+                observed_at,
+                reason,
+                outcome.error.clone().or(outcome.summary.clone()),
+                self.config.retry_policy,
+            )?,
+        };
+        Ok(execution.queue_retry(retry, outcome)?)
     }
 
     fn next_worker_id(&mut self) -> Result<WorkerId, SchedulerError> {
@@ -911,9 +878,29 @@ where
 
 struct TrackerSnapshot {
     active: Vec<TrackerIssue>,
-    active_by_id: HashMap<String, TrackerIssue>,
-    terminal_by_id: HashMap<String, TrackerIssue>,
+    active_index: HashMap<String, usize>,
+    terminal_state_by_id: HashMap<String, String>,
     state_by_id: HashMap<String, TrackerIssueStateSnapshot>,
+}
+
+impl TrackerSnapshot {
+    fn active_issue(&self, issue_id: &IssueId) -> Option<&TrackerIssue> {
+        self.active_index
+            .get(issue_id.as_str())
+            .and_then(|index| self.active.get(*index))
+    }
+
+    fn contains_active(&self, issue_id: &str) -> bool {
+        self.active_index.contains_key(issue_id)
+    }
+
+    fn contains_terminal(&self, issue_id: &str) -> bool {
+        self.terminal_state_by_id.contains_key(issue_id)
+    }
+
+    fn terminal_state_name(&self, issue_id: &str) -> Option<&str> {
+        self.terminal_state_by_id.get(issue_id).map(String::as_str)
+    }
 }
 
 fn normalize_tracker_issue(
@@ -1007,6 +994,23 @@ fn state_limit_for(limits: &BTreeMap<String, u32>, state_name: &str) -> Option<u
     limits
         .iter()
         .find_map(|(state, limit)| state.eq_ignore_ascii_case(state_name).then_some(*limit))
+}
+
+fn non_active_release_reason(category: IssueStateCategory) -> Option<ReleaseReason> {
+    match category {
+        IssueStateCategory::Terminal => Some(ReleaseReason::TrackerTerminal),
+        IssueStateCategory::NonActive => Some(ReleaseReason::TrackerInactive),
+        IssueStateCategory::Active => None,
+    }
+}
+
+fn retry_reason_for_outcome(outcome: WorkerOutcomeKind) -> Option<RetryReason> {
+    match outcome {
+        WorkerOutcomeKind::Succeeded => None,
+        WorkerOutcomeKind::Failed | WorkerOutcomeKind::TimedOut => Some(RetryReason::Failure),
+        WorkerOutcomeKind::Stalled => Some(RetryReason::Stalled),
+        WorkerOutcomeKind::Cancelled => Some(RetryReason::Cancelled),
+    }
 }
 
 fn normalized_state_set(states: &[String]) -> HashSet<String> {
