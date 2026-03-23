@@ -198,6 +198,12 @@ impl LocalServerSupervisor {
                 let launch = config
                     .tooling
                     .resolve_launch(config.port_override, &config.extra_env)?;
+                if probe_ready(&launch.base_url, &config.probe)? {
+                    return Err(SupervisorError::ExistingReadyServer {
+                        base_url: launch.base_url,
+                        path: config.probe.path.clone(),
+                    });
+                }
                 let mut command = Command::new(&launch.program);
                 command
                     .args(&launch.args)
@@ -429,6 +435,10 @@ pub enum SupervisorError {
     },
     #[error("external OpenHands server is not ready at {base_url}{path}")]
     ExternalServerUnavailable { base_url: String, path: String },
+    #[error(
+        "refusing to launch supervised OpenHands server because another ready server is already responding at {base_url}{path}"
+    )]
+    ExistingReadyServer { base_url: String, path: String },
     #[error("failed to wait for local OpenHands server pid {pid}: {source}")]
     Wait {
         pid: u32,
