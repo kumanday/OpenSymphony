@@ -34,6 +34,7 @@ pub struct Scheduler {
     workspace: Arc<WorkspaceManager>,
     running: HashMap<String, RunningWorker>,
     retry_queue: Vec<RetryEntry>,
+    stale_reports: HashSet<(String, u32)>,
     reports_tx: mpsc::UnboundedSender<WorkerReport>,
     reports_rx: mpsc::UnboundedReceiver<WorkerReport>,
     progress_tx: mpsc::UnboundedSender<IssueRunProgress>,
@@ -79,6 +80,7 @@ impl Scheduler {
             workspace,
             running: HashMap::new(),
             retry_queue: vec![],
+            stale_reports: HashSet::new(),
             reports_tx,
             reports_rx,
             progress_tx,
@@ -278,6 +280,12 @@ impl Scheduler {
 
     async fn drain_reports(&mut self) -> Result<(), SchedulerError> {
         while let Ok(report) = self.reports_rx.try_recv() {
+            if self
+                .stale_reports
+                .remove(&(report.issue.id.clone(), report.attempt))
+            {
+                continue;
+            }
             let tracker_state = match self.current_issue_state(&report.issue.id).await {
                 Ok(state) => state,
                 Err(error) => {
@@ -443,6 +451,7 @@ impl Scheduler {
             if let Some(worker) = self.running.remove(&issue.id) {
                 worker.task.abort();
             }
+            self.stale_reports.insert((issue.id.clone(), attempt));
             let outcome = if cleanup_terminal {
                 WorkerOutcome::released(detail)
             } else if detail == "worker stalled" {
@@ -972,12 +981,68 @@ EOF"#
         assert!(scheduler.running.contains_key(&issue.id));
         assert!(scheduler.retry_queue.is_empty());
 
-        sleep(Duration::from_millis(60)).await;
-        scheduler.tick().await.expect("completion should reconcile");
+        for _ in 0..10 {
+            sleep(Duration::from_millis(20)).await;
+            scheduler.tick().await.expect("completion should reconcile");
+            if !scheduler.running.contains_key(&issue.id) {
+                break;
+            }
+        }
 
         assert!(!scheduler.running.contains_key(&issue.id));
         assert_eq!(scheduler.retry_queue.len(), 1);
         assert_eq!(scheduler.retry_queue[0].reason, RetryReason::Continuation);
+    }
+
+    #[tokio::test]
+    async fn ignores_late_worker_reports_after_terminal_release() {
+        let issue = make_issue("1", "ABC-1", "Todo", Some(1), timestamp(0));
+        let tracker = Arc::new(MemoryTracker::new(
+            vec![issue.clone()],
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["Todo".to_string(), "Done".to_string()],
+        ));
+        let runner = Arc::new(ScriptedRunner::default());
+        runner.set_plan(&issue.id, vec![ScriptedRun::success(200)]);
+
+        let tempdir = tempdir().expect("tempdir should exist");
+        let workspace_root = tempdir.path().to_path_buf();
+        let mut scheduler = scheduler(tracker.clone(), runner, workspace_root.clone(), true, None);
+
+        scheduler.tick().await.expect("dispatch should succeed");
+        tracker
+            .transition_issue(&issue.id, "Done")
+            .expect("transition should succeed");
+        scheduler
+            .tick()
+            .await
+            .expect("terminal release should reconcile");
+        assert!(!workspace_root.join("1").exists());
+
+        scheduler
+            .reports_tx
+            .send(WorkerReport {
+                issue: issue.clone(),
+                attempt: 1,
+                workspace_path: workspace_root.join("1"),
+                prompt_mode: PromptMode::Fresh,
+                conversation_id_hint: Some("conversation-ABC-1".to_string()),
+                result: Ok(IssueRunResult {
+                    outcome: WorkerOutcome::success(),
+                    conversation_id: "conversation-ABC-1".to_string(),
+                    prompt_mode: PromptMode::Fresh,
+                }),
+            })
+            .expect("late report should enqueue");
+
+        scheduler
+            .tick()
+            .await
+            .expect("late report should be ignored after release");
+
+        assert!(scheduler.retry_queue.is_empty());
+        assert!(!workspace_root.join("1").exists());
     }
 
     #[tokio::test]

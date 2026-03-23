@@ -52,6 +52,7 @@ Components to fake:
 - OpenHands agent-server
 - Linear GraphQL responses
 - transient non-JSON `429` and `5xx` Linear responses
+- GraphQL `RATELIMITED` responses and archived issue-ID refreshes
 - local control-plane API consumer
 
 Why fakes matter:
@@ -92,6 +93,7 @@ Suggested gates:
 - refuse path escape
 - canonicalize the configured workspace root before containment checks when possible
 - reject existing workspace-leaf symlinks that resolve outside the configured root
+- reject legacy identifier-keyed workspace paths found during `issue_id` scans when they resolve outside the configured root
 - create and reuse workspace
 - migrate identifier-keyed legacy workspaces onto stable issue-ID paths
 - rerun `after_create` after partial bootstrap failure without rerunning it after successful bootstrap
@@ -127,6 +129,7 @@ Suggested gates:
 - stall detection
 - long-running workers that keep reporting progress do not get marked stalled
 - active-state refresh
+- archived terminal issues still surface during explicit issue-ID refreshes
 - post-run retries only occur while the tracker still reports the issue active
 - transient tracker refresh failures do not drop completed worker reports before retry or cleanup bookkeeping
 - worker failures after conversation attach still preserve conversation metadata for the next retry

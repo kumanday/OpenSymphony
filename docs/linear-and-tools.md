@@ -27,6 +27,7 @@ Use Linear relation fields, not deprecated shortcut fields, when deriving blocke
 ## 2.2 State refresh by IDs
 
 Fetch current states for all running issues during reconciliation.
+Explicit issue-ID refreshes must pass `includeArchived: true` so a terminal issue that is archived between ticks still surfaces for cleanup and retry-manifest removal.
 
 ## 2.3 Terminal-state fetch for startup cleanup
 
@@ -81,6 +82,7 @@ Eligibility reminders:
 - explicit pagination support
 - rate-limit aware retries where appropriate
 - structured error classification
+- personal API keys sent with `Authorization: <API_KEY>` while OAuth tokens use `Authorization: Bearer <ACCESS_TOKEN>`
 - transient HTTP status classification even when the response body is not valid JSON
 - redaction of tokens in logs
 
@@ -205,6 +207,7 @@ Recommended Linear error categories:
 
 These categories should be shared by the read adapter and the MCP server where sensible.
 For retryable failures, status-based classification must win even when the response body is plain text or HTML. In practice this means `429` stays `rate_limited`, gateway timeouts stay `timeout`, and `5xx` responses stay `transport` instead of degrading into `invalid_response`.
+GraphQL error classification must also treat Linear throttle responses such as `errors[].extensions.code = RATELIMITED` as retryable `rate_limited` failures.
 
 ## 10. Testing plan
 
@@ -214,7 +217,10 @@ For retryable failures, status-based classification must win even when the respo
 - normalization of missing optional fields
 - blocker handling
 - active vs terminal state fetch
+- explicit issue-ID refresh includes archived issues
 - retry on transient HTTP failures
+- personal API key auth header uses `Authorization: <API_KEY>`
+- GraphQL `RATELIMITED` responses stay retryable
 
 ### MCP server
 

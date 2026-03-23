@@ -294,6 +294,8 @@ The snapshot is not just a projection of OpenHands state. It is a Symphony-speci
 15. Orchestrator refreshes tracker state, then schedules a continuation retry, failure retry, release, or cleanup.
 16. If one issue fails before the worker starts, the scheduler records retry state for that issue and keeps dispatching later eligible candidates in the same tick.
 17. If tracker refresh fails after a worker exits, the scheduler preserves that completion report and retries the bookkeeping path on the next tick.
+18. Forced release paths mark the current attempt stale so a late `WorkerReport` for the same attempt is ignored instead of recording the run twice.
+19. Explicit issue-ID refreshes include archived issues so terminal cleanup still runs after an issue is archived.
 
 ## 7.2 ASCII sequence
 
