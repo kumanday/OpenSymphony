@@ -340,6 +340,12 @@ Recommended CLI commands for the repo:
 - `opensymphony doctor`
 - `opensymphony linear-mcp`
 
+Recommended first-run sequence:
+
+- `./tools/openhands-server/install.sh`
+- `cargo run -p opensymphony-cli -- --help`
+- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
+
 Current workspace commands:
 
 - `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
@@ -389,6 +395,7 @@ for the UI. For scripted smoke coverage, also confirm that an unreachable
 control plane causes `opensymphony tui --exit-after-ms ...` to exit non-zero.
 Current command set in this repository:
 
+- `./tools/openhands-server/install.sh`
 - `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:4010 --sample-interval-ms 250`
 - `curl http://127.0.0.1:4010/healthz`
 - `curl http://127.0.0.1:4010/api/v1/snapshot`
@@ -456,13 +463,14 @@ Required checks:
 ### Repository and config
 
 - config file exists and parses
+- required local commands (`cargo`, `curl`, `git`, and `uv`) are present on `PATH`
 - required env-backed config placeholders resolve instead of silently collapsing to empty strings
 - target repo exists
 - target repo contains `WORKFLOW.md`
 - target repo `WORKFLOW.md` resolves against the current environment
 - target repo prompt template renders against the current issue/attempt input shape
 - workspace root exists or can be created
-- OpenHands version pin files exist in `tools/openhands-server/`
+- OpenHands version pin files and helper scripts exist in `tools/openhands-server/`
 
 ### Local runtime
 
@@ -488,8 +496,10 @@ Required checks:
 Current implementation notes:
 
 - the static doctor path checks config parsing, target-repo presence, workflow load/resolve/render, workspace-root creation from the workflow, loopback bind scope from the workflow OpenHands transport, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
+- the static doctor path also checks that `cargo`, `curl`, `git`, and `uv` are present on `PATH`, so local operations docs and machine readiness stay aligned
 - checkout-relative doctor defaults are derived from the config and tooling paths rather than the caller `cwd`, so running `opensymphony doctor` outside the repo root still validates the intended checkout and bundled `examples/target-repo`
 - the live doctor and supervised local-server paths normalize the configured `openhands.tool_dir` to an absolute path before launch, so checked-in configs such as `examples/configs/local-dev.with-live-openhands.yaml` can keep repo-relative tooling paths without depending on the caller `cwd`
+- doctor prints an explicit trusted-machine warning on every run and warns when the configured OpenHands target is not loopback, so local safety posture remains visible during setup and troubleshooting
 - the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation using workflow-derived OpenHands conversation settings, attaches `RuntimeEventStream`, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a doctor message that includes the rendered workflow prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` after post-ready reconcile and reconnect-aware streaming, including terminal REST refresh fallback when a post-completion WebSocket reattach exhausts and one final scheduler-turn buffered drain before success is accepted
 - once that live doctor path has already observed terminal success on the attached stream, it reuses the last successful stream-backed conversation snapshot instead of requiring a final `GET /api/conversations/{id}` that can flap during agent-server shutdown
 - when the configured workflow loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server only for unauthenticated loopback root-path targets, switches follow-up probes to the launched supervisor base URL, uses it for the probe, then stops it again
@@ -585,6 +595,9 @@ host-process mode.
 The current implementation follows that fail-closed rule: doctor and the local
 supervisor validate the repo-owned pin files before launch and refuse to start
 if the version file, direct dependency pin, and resolved lockfile drift apart.
+The packaged tool directory now also carries `install.sh`, which runs the
+locked `uv sync --extra agent-server` flow that the README and doctor-guided
+setup path expect.
 The launcher itself now enforces `uv run --locked --extra agent-server`,
 exports `RUNTIME=process`, only accepts `OPENHANDS_SERVER_PORT` as a runtime
 override, and rejects extra agent-server CLI flags before `uv` is invoked.
@@ -635,5 +648,6 @@ The MVP local mode runs agent activity on the host with process-level isolation.
 
 The current `tools/openhands-server/run-local.sh` script binds OpenHands to
 loopback by default, enforces the pinned `uv.lock` in host-process mode, and
-the doctor command warns when the configured base URL is not loopback in local
-mode.
+the doctor command now always prints an explicit trusted-machine warning before
+reporting readiness. It also warns when the configured base URL is not loopback
+in local mode.
