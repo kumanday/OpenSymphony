@@ -3,14 +3,21 @@ name = "opensymphony-linear-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
 opensymphony-domain = { path = "../opensymphony-domain" }
-opensymphony-linear = { path = "../opensymphony-linear" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
-opensymphony-testkit = { path = "../opensymphony-testkit" }
+axum.workspace = true
+tokio.workspace = true

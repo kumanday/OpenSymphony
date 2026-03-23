@@ -3,9 +3,18 @@ name = "opensymphony-domain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
 
 [dependencies]
-async-trait.workspace = true
 chrono.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

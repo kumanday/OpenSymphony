@@ -9,31 +9,44 @@ Preserve the Symphony workspace contract while adapting it to OpenHands conversa
 Each issue maps to exactly one workspace path:
 
 ```text
-<workspace.root>/<sanitized_issue_id>
+<workspace.root>/<sanitized_issue_identifier>
 ```
-
-The directory key comes from the stable tracker `issue.id`, not the mutable human-facing `identifier`. If older workspaces were keyed by identifier, the workspace manager should locate them by persisted `issue_id` metadata and migrate them onto the stable-ID path before reuse.
 
 Sanitization rule:
 
 - keep `[A-Za-z0-9._-]`
 - replace every other character with `_`
 
+Configuration rule:
+
+- if `workspace.root` is provided through env indirection such as `$WORKSPACE_ROOT`, that env var must resolve during workflow loading; OpenSymphony must not silently fall back to the default workspace root for an explicit operator-supplied path
+
 Examples:
 
-- `1a2b3c` -> `1a2b3c`
+- `ABC-123` -> `ABC-123`
 - `feature/42` -> `feature_42`
 - `Bug: weird path` -> `Bug__weird_path`
+
+Because this sanitization is not injective, workspace reuse must be gated by the persisted issue manifest for the current path. If an existing current-path manifest claims the same sanitized key for a different issue, OpenSymphony must refuse reuse instead of silently aliasing two issues onto one workspace.
 
 ## 3. Hard safety invariants
 
 - The resolved workspace path must stay under `workspace.root`.
+- Relative workflow directories must be normalized before resolving relative `workspace.root` values so the resulting workspace root remains absolute for the workspace manager.
+- The doctor preflight must use the target repo `WORKFLOW.md` `workspace.root` rather than a duplicate CLI-only workspace root so the repo-owned policy remains authoritative.
+- The issue workspace path itself must not be a symlink when OpenSymphony reuses or validates it.
 - `cwd` for all hook commands and all OpenHands runs must equal the resolved issue workspace path unless an explicit per-command `cwd` override inside the same workspace is required.
+- When `openhands.local_server.command` is omitted, the runtime-owned local tooling layer must resolve the pinned launcher from the OpenSymphony checkout before that `cwd` switch happens. Workflow resolution must not bake a compile-time checkout path into config defaults.
+- Non-loopback remote `openhands.transport.base_url` targets must use `https://` and set `openhands.transport.session_api_key_env`.
+- Only unauthenticated loopback `http://` root origins are eligible for daemon-managed local supervision. Authenticated or path-prefixed loopback targets must be treated as external connections even when they still point at `127.0.0.1` or `localhost`.
+- Explicit workflow-owned `openhands.local_server.command` overrides are currently rejected until the runtime supervisor can honor them instead of always launching the pinned repo-local server wrapper.
+- Explicit workflow-owned `openhands.local_server.enabled: false` overrides are currently rejected until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness.
+- Explicit workflow-owned `openhands.local_server.env` overrides are currently rejected until the runtime supervisor creation path forwards them into the actual launcher environment instead of still using runtime-owned defaults.
+- Explicit workflow-owned `openhands.local_server.readiness_probe_path` overrides are currently rejected until the runtime supervisor launch path copies them into the probe configuration instead of always using `/openapi.json`.
+- Explicit workflow-owned `openhands.local_server.startup_timeout_ms` overrides are currently rejected until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default.
+- Explicit workflow-owned `openhands.conversation.reuse_policy` overrides are currently rejected until the orchestrator/runtime path can honor anything other than the default per-issue conversation reuse behavior.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
-- Resolve `workspace.root` through existing ancestors and symlinks when possible before joining the sanitized workspace key.
-- If the resolved issue-workspace leaf already exists, canonicalize that leaf before reuse and reject it if it escapes `workspace.root` through a symlink target.
-- If a legacy identifier-keyed workspace is discovered by scanning persisted `issue_id` metadata, canonicalize that discovered path before reading or reusing it and reject it if it escapes `workspace.root`.
 
 ## 4. Workspace directory layout
 
@@ -41,14 +54,20 @@ Recommended layout inside each issue workspace:
 
 ```text
 <issue_workspace>/
+  .opensymphony.after_create.json
   .opensymphony/
-    bootstrap.ok
     issue.json
+    run.json
     conversation.json
-    retry.json
     prompts/
       last-full-prompt.md
+      last-full-prompt.json
       last-continuation-prompt.md
+      last-continuation-prompt.json
+    runs/
+      attempt-0001/
+        prompt-full-001.md
+        prompt-full-001.json
     logs/
       worker.log
       hook.log
@@ -63,6 +82,11 @@ Recommended layout inside each issue workspace:
 Notes:
 
 - `.opensymphony/` is OpenSymphony-owned metadata.
+- `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap.
+- The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
+- `conversation.json` now uses workspace-owned path and serialization helpers, but the OpenHands issue-session runner still owns when it is created, reused, or reset.
+- `prompts/` holds the latest prompt of each kind plus JSON metadata that points back to the per-run archive.
+- `runs/attempt-####/` holds immutable per-run prompt captures for auditability without mutating repository-owned policy files.
 - The repository working tree remains otherwise untouched except by normal agent work.
 - OpenSymphony must never overwrite repository-owned `AGENTS.md`.
 
@@ -85,7 +109,9 @@ Preserve the Symphony hook model.
 
 ## 6.1 `after_create`
 
-Runs once after a workspace has been bootstrapped successfully.
+Runs once after a brand-new issue workspace is created.
+
+On first bootstrap, this hook runs before OpenSymphony creates `.opensymphony/` so repository bootstrap commands such as `git clone <repo> .` or `git worktree add <path>` can target an otherwise empty workspace directory.
 
 Use for:
 
@@ -95,7 +121,12 @@ Use for:
 - creating ignored helper files
 
 Do not rerun it on every worker attempt.
-If the first bootstrap attempt fails after the directory already exists, the next attempt must rerun `after_create` until bootstrap completes. A successful bootstrap should persist a local marker under `.opensymphony/` so later worker attempts can reuse the workspace without replaying creation hooks.
+
+If the first `after_create` attempt fails before bootstrap completes, the next `ensure` attempt should retry `after_create` instead of treating the partially initialized workspace directory as fully reusable.
+
+After a successful first-time `after_create`, OpenSymphony must persist a root-scoped bootstrap receipt before it starts creating `.opensymphony/` metadata. If later bootstrap steps fail, the next `ensure` should resume metadata bootstrap without rerunning `after_create`.
+
+Steady-state workspace ownership is still determined by a decodable OpenSymphony-owned `issue.json` whose workspace path and sanitized key match the current workspace, not by raw file existence. Repository-provided, copied, or undecodable `.opensymphony/issue.json` or `.opensymphony.after_create.json` artifacts must not suppress a required first-bootstrap retry.
 
 ## 6.2 `before_run`
 
@@ -129,17 +160,19 @@ Use for:
 - archiving evidence
 - safe cleanup steps
 
-Retained terminal workspaces should not run `before_remove`; that hook is only for actual workspace deletion.
-
 ## 6.5 Hook execution rules
 
 - Hooks execute inside the issue workspace unless explicitly documented otherwise.
+- Workspace-handle validation must reject symlinked workspace roots before hook execution, cleanup, or manifest I/O can proceed.
+- Any explicit hook `cwd` override must still resolve inside the same issue workspace.
+- Containment checks for explicit hook `cwd` overrides should use canonicalized paths so symlinked subdirectories cannot escape the workspace.
+- OpenSymphony-managed metadata paths under `.opensymphony/` must reject symlinked directories or files before any manifest read or write.
+- Unix hook commands should run via a non-login `sh -c` shell so host profile startup files cannot change `cwd` or fail the hook before the configured command runs.
 - Hook timeouts use the configured `hooks.timeout_ms`.
-- Timed-out hook subprocesses are terminated before the timeout error is returned.
+- When a hook times out, OpenSymphony must terminate the entire spawned process tree rather than only the direct shell wrapper process.
 - Hook failures are categorized and surfaced with issue context.
 - `after_run` and `before_remove` are best effort by default.
 - `after_create` and `before_run` failures fail the current worker attempt.
-- A failed `after_create`, `before_run`, or prompt render must not abort later eligible dispatches in the same scheduler tick.
 
 ## 7. Issue metadata manifest
 
@@ -162,6 +195,40 @@ Use cases:
 - restart recovery
 - operator debugging
 - workspace introspection
+- authoritative ownership check for non-injective sanitized workspace keys
+
+Current repository implementation:
+
+- the scheduler recovery path consumes manifest-derived records that include the normalized issue identity plus the attached workspace record
+- recovered active issues reuse that workspace attachment on the next scheduler poll instead of recreating the workspace path
+
+## 7.1 Run metadata manifest
+
+Persist the latest worker-lifetime manifest under `.opensymphony/run.json`.
+
+Suggested fields:
+
+- `run_id`
+- `attempt`
+- `issue_id`
+- `identifier`
+- `sanitized_workspace_key`
+- `workspace_path`
+- `status`
+- `status_detail`
+- `hooks`
+- `created_at`
+- `updated_at`
+
+Use cases:
+
+- capture `before_run` and `after_run` hook outcomes with stdout/stderr for diagnostics
+- explain the latest worker-lifetime state during restart recovery
+- make cleanup and retry decisions inspectable without daemon memory
+
+Current repository note:
+
+- the run manifest is currently explanatory recovery evidence for operators and future adapters; the generic scheduler core already reuses workspace ownership from recovery records, while persisted retry-queue reconstruction remains a later follow-on
 
 ## 8. Conversation metadata manifest
 
@@ -173,12 +240,26 @@ Suggested fields:
 - `identifier`
 - `conversation_id`
 - `server_base_url`
+- `transport_target`
+- `http_auth_mode`
+- `websocket_auth_mode`
+- `websocket_query_param_name`
 - `persistence_dir`
 - `created_at`
+- `updated_at`
 - `last_attached_at`
 - `fresh_conversation`
+- `workflow_prompt_seeded`
 - `reset_reason`
 - `runtime_contract_version`
+- `last_prompt_kind`
+- `last_prompt_at`
+- `last_prompt_path`
+- `last_execution_status`
+- `last_event_id`
+- `last_event_kind`
+- `last_event_at`
+- `last_event_summary`
 
 This file is the bridge between Symphony issue ownership and OpenHands conversation reuse.
 
@@ -195,6 +276,7 @@ Human-readable summary for the agent and operator:
 - issue identifier and title
 - current state
 - last worker outcome
+- repository-owned `WORKFLOW.md`, `AGENTS.md`, and optional `.agents/skills/` locations
 - important constraints
 - known blockers
 - location of OpenSymphony metadata files
@@ -204,13 +286,22 @@ Human-readable summary for the agent and operator:
 Machine-readable runtime summary:
 
 - conversation ID
+- server base URL plus transport/auth diagnostics
+- run ID
 - attempt number
-- last worker timestamps
+- worker ID
+- prompt kind and prompt artifact path
+- whether the workflow prompt has been seeded into the conversation
 - last known execution status
+- last event summary
+- last run ID and status
+- last prompt kind and path
 - recent validation commands
 - last retry reason if any
+- latest worker outcome
 
 These files help continuity without altering the repository's own guidance files.
+They are additive references to repo-owned policy, not replacements for it.
 
 ## 10. Prompt artifacts
 
@@ -223,14 +314,27 @@ Why:
 - comparing full vs continuation prompt logic
 - making live tests and regressions easier to inspect
 
-Store at minimum:
+Store at minimum under `.opensymphony/prompts/`:
 
-- last full prompt
-- last continuation prompt
-- timestamp metadata
+- `last-full-prompt.md`
+- `last-full-prompt.json`
+- `last-continuation-prompt.md`
+- `last-continuation-prompt.json`
 
-Fresh prompt renders should omit continuation-only template context, while continuation renders should preserve enough attempt context for repo-owned `WORKFLOW.md` templates to emit resume-only guidance without replaying the original assignment.
-Every runnable issue workspace must contain a valid repo-owned `WORKFLOW.md`; if it is missing at dispatch time, OpenSymphony fails that attempt instead of inventing a fallback prompt.
+Also archive every captured prompt under `.opensymphony/runs/attempt-####/` using deterministic sequence-numbered file names such as:
+
+- `prompt-full-001.md`
+- `prompt-full-001.json`
+- `prompt-continuation-001.md`
+- `prompt-continuation-001.json`
+
+The stable files in `prompts/` should always mirror the latest capture of that kind, while the per-run `runs/` archive remains append-only for that worker attempt.
+
+Current implementation detail:
+
+- the full workflow prompt is rendered from `WORKFLOW.md`
+- continuation guidance is a separate built-in resume prompt, not a rerender of the workflow template
+- `conversation.json` records which prompt shape last ran and whether the workflow prompt has been successfully seeded into the reused conversation
 
 ## 11. Conversation lifetime policy inside the workspace
 
@@ -239,7 +343,6 @@ Default policy:
 - one conversation per issue
 - conversation persistence is stored under the issue workspace
 - reused across worker lifetimes
-- invalid persisted conversation metadata is cleared and treated as a fresh reset on the next dispatch
 - reset only on explicit error or incompatible-version policy
 
 Reset handling:
@@ -255,9 +358,7 @@ Symphony requires a short continuation retry after normal worker exit.
 OpenSymphony implementation:
 
 - worker may already have run multiple in-process turns on the same conversation
-- when the worker finally exits cleanly, the orchestrator refreshes tracker state and schedules the short retry only if the issue remains active
-- if the worker fails after attaching to a known conversation, preserve that `conversation_id` so the next retry resumes the same thread instead of forcing a fresh prompt
-- if that tracker refresh fails transiently, the completed worker report stays pending until the next tick can finish the bookkeeping path
+- when the worker finally exits cleanly, the orchestrator schedules the short retry
 - the next worker reattaches to the same workspace and usually the same conversation
 - because the conversation already contains the original assignment, the next worker sends continuation guidance instead of replaying the full prompt
 
@@ -268,15 +369,10 @@ OpenSymphony implementation:
 When the tracker says an issue is terminal:
 
 - cancel any active worker
-- run `before_remove` best effort only when the workspace will actually be deleted
-- clear stale retry metadata even if the workspace directory is retained for debugging
+- run `before_remove` best effort
 - delete the workspace if configured to do so
 
-This same terminal cleanup path also applies when a queued retry ages out but the tracker has already moved the issue to a terminal state before dispatch.
-
 Keep cleanup policy configurable enough to allow retention during debugging.
-
-After any worker report, OpenSymphony refreshes tracker state before scheduling retries. Inactive issues do not receive continuation or failure retries, and terminal issues run the same cleanup path even if the worker exited normally before the next reconcile loop. If the tracker refresh fails transiently, OpenSymphony keeps that worker report pending and retries the bookkeeping path on the next tick instead of dropping completion state.
 
 ## 13.2 Non-active, non-terminal issues
 
@@ -307,10 +403,24 @@ A future hosted mode can keep the same workspace ownership model while moving ac
 
 ```rust
 trait WorkspaceManager {
-    fn workspace_path_for(&self, issue_id: &str) -> Result<PathBuf>;
-    async fn ensure(&self, issue: &Issue) -> Result<WorkspaceHandle>;
-    async fn run_hook(&self, hook: HookKind, workspace: &WorkspaceHandle) -> Result<()>;
-    async fn remove(&self, workspace: &WorkspaceHandle) -> Result<()>;
+    fn workspace_path_for(&self, issue_identifier: &str) -> Result<PathBuf>;
+    async fn ensure(&self, issue: &IssueDescriptor) -> Result<EnsureWorkspaceResult>;
+    async fn start_run(
+        &self,
+        workspace: &WorkspaceHandle,
+        run: &RunDescriptor,
+    ) -> Result<RunManifest>;
+    async fn finish_run(
+        &self,
+        workspace: &WorkspaceHandle,
+        run: &mut RunManifest,
+        status: RunStatus,
+    ) -> Result<()>;
+    async fn cleanup(
+        &self,
+        workspace: &WorkspaceHandle,
+        state: IssueLifecycleState,
+    ) -> Result<CleanupOutcome>;
 }
 ```
 
@@ -320,21 +430,22 @@ trait WorkspaceManager {
 - `identifier`
 - `workspace_path`
 - `metadata_dir`
+- `issue_manifest_path`
+- `run_manifest_path`
 - `conversation_manifest_path`
 
 ## 16. Tests required
 
-- sanitize workspace-key edge cases
+- sanitize identifier edge cases
 - canonical path containment
 - create vs reuse
-- stable-ID workspace reuse even when the tracker identifier changes
 - `after_create` only once
+- clone/worktree-compatible fresh bootstrap before `.opensymphony/` exists
+- retry `after_create` after a failed first bootstrap
 - `before_run` every worker lifetime
-- startup failure does not starve later dispatch candidates
 - timeout on hook
-- timed-out hook subprocesses are terminated before the timeout returns
-- no continuation retry after worker exit if tracker state is no longer active
-- transient tracker refresh failure after worker exit preserves the completion report for a later retry
+- hook stderr capture
+- canonical `cwd` containment for symlinked subdirectories
 - terminal cleanup
-- metadata file write and reload
+- issue and run metadata file write and reload
 - conversation reset path preserves workspace safety

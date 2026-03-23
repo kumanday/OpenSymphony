@@ -3,14 +3,15 @@ name = "opensymphony-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [dependencies]
-async-trait.workspace = true
+axum.workspace = true
 chrono.workspace = true
-opensymphony-domain = { path = "../opensymphony-domain" }
-opensymphony-linear = { path = "../opensymphony-linear" }
-opensymphony-openhands = { path = "../opensymphony-openhands" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+opensymphony-openhands = { path = "../opensymphony-openhands" }

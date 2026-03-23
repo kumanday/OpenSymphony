@@ -1,0 +1,28 @@
+{
+  "data": {
+    "issue": {
+      "id": "issue-264",
+      "inverseRelations": {
+        "nodes": [
+          {
+            "type": "blocks",
+            "issue": {
+              "id": "issue-258",
+              "identifier": "COE-258",
+              "title": "Bootstrap workspace and crate boundaries",
+              "state": {
+                "id": "state-done",
+                "name": "Done",
+                "type": "completed"
+              }
+            }
+          }
+        ],
+        "pageInfo": {
+          "hasNextPage": false,
+          "endCursor": null
+        }
+      }
+    }
+  }
+}
