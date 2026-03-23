@@ -203,7 +203,7 @@ fn doctor_probe_request(workspace_root: &std::path::Path) -> ConversationCreateR
     ConversationCreateRequest::doctor_probe(
         working_dir.display().to_string(),
         persistence_dir.display().to_string(),
-        Some("gpt-4.1-mini".to_string()),
+        Some("gpt-5.4-mini".to_string()),
         None,
     )
 }

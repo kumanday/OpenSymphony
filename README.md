@@ -46,30 +46,42 @@ cargo run -p opensymphony-cli -- doctor
 
 ### Configuration
 
-Create a `WORKFLOW.md` in your target repository:
+Copy `WORKFLOW.example.md` from this repository to your target repository as `WORKFLOW.md` and modify the values:
+
+```bash
+# From your target repository:
+cp /path/to/OpenSymphony/WORKFLOW.example.md ./WORKFLOW.md
+```
+
+Key values to customize:
+
+| Field | Description | Env Var | Example |
+|-------|-------------|---------|---------|
+| `tracker.project_slug` | Your Linear project identifier | - | `my-team/my-project` |
+| `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
+| `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/gpt-5.4` |
+
+**Environment Variables**
+
+OpenSymphony uses standard OpenHands environment variable names:
+
+```bash
+# Required: LLM configuration
+export LLM_MODEL="openai/gpt-5.4"
+export LLM_API_KEY="sk-..."
+
+# Optional: Custom base URL for non-OpenAI providers (e.g., Fireworks)
+export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
+```
+
+The workflow supports `${VAR}` syntax for environment variable substitution in the front matter:
 
 ```yaml
----
-tracker:
-  kind: linear
-  project_slug: your-project
-  active_states:
-    - Todo
-    - In Progress
-  terminal_states:
-    - Done
-    - Closed
-
-workspace:
-  root: ./workspaces
-
 openhands:
-  transport:
-    base_url: http://127.0.0.1:8000
----
-
-# Your workflow prompt here
-Work the assigned issue following the repository's AGENTS.md guidelines.
+  conversation:
+    agent:
+      llm:
+        model: ${LLM_MODEL}
 ```
 
 ### Running the Daemon

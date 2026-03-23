@@ -382,6 +382,7 @@ mod tests {
                 llm: LlmConfig {
                     model: "fake-model".to_string(),
                     api_key: Some("fake-key".to_string()),
+                    base_url: None,
                 },
             },
         };
