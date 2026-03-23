@@ -178,6 +178,18 @@ impl IssueExecution {
         &self.issue
     }
 
+    pub fn refresh_issue(&mut self, issue: NormalizedIssue) -> Result<(), StateTransitionError> {
+        if issue.id != self.issue.id {
+            return Err(StateTransitionError::IssueMismatch {
+                expected: self.issue.id.clone(),
+                actual: issue.id,
+            });
+        }
+
+        self.issue = issue;
+        Ok(())
+    }
+
     pub fn workspace(&self) -> Option<&WorkspaceRecord> {
         self.workspace.as_ref()
     }

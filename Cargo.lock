@@ -1473,8 +1473,11 @@ dependencies = [
  "chrono",
  "opensymphony-domain",
  "opensymphony-linear",
+ "opensymphony-workflow",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
