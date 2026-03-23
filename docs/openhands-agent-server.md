@@ -38,7 +38,7 @@ OpenSymphony keeps all Symphony-specific scheduling rules in Rust and uses OpenH
 ## 3. Local MVP topology
 
 ```text
-opensymphony daemon
+opensymphony run
   ├─ orchestrator
   ├─ workspace manager
   ├─ linear adapter

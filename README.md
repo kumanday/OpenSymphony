@@ -37,11 +37,11 @@ OpenSymphony automates software development workflows by:
 git clone https://github.com/kumanday/OpenSymphony.git
 cd OpenSymphony
 
-# Build the project
-cargo build --release
+# Install the CLI as `opensymphony`
+cargo install --path .
 
-# Run preflight checks
-cargo run -p opensymphony-cli -- doctor
+# Inspect the command surface
+opensymphony --help
 ```
 
 ### Configuration
@@ -84,18 +84,38 @@ openhands:
         model: ${LLM_MODEL}
 ```
 
-### Running the Daemon
+Add a `config.yaml` file next to your target repository `WORKFLOW.md`. A minimal local-supervised config looks like this:
+
+```yaml
+control_plane:
+  bind: 127.0.0.1:3000
+
+openhands:
+  tool_dir: /absolute/path/to/OpenSymphony/tools/openhands-server
+```
+
+When your workflow points at an external OpenHands agent-server with `openhands.transport.session_api_key_env`, `config.yaml` can omit `openhands.tool_dir`.
+
+See [`examples/target-repo/config.yaml`](examples/target-repo/config.yaml) for a checked-in example.
+
+### Running the Orchestrator
 
 ```bash
-# Start the OpenHands server (in one terminal)
-./tools/openhands-server/run-local.sh
+# Run preflight checks from the OpenSymphony checkout
+opensymphony doctor --config examples/configs/local-dev.yaml
 
-# Start OpenSymphony (in another terminal)
-cargo run -p opensymphony-cli -- daemon --config /path/to/config.yaml
+# Start the orchestrator from the target repository
+cd /path/to/target-repo
+opensymphony run
+
+# Or point at an explicit runtime config file
+opensymphony run --config ./config.yaml
 
 # Optional: Start the TUI for monitoring
-cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/
+opensymphony tui --url http://127.0.0.1:3000/
 ```
+
+The legacy `opensymphony daemon` command is still available as a demo control-plane publisher for smoke tests, but it is not the real orchestrator entrypoint.
 
 ## Architecture
 
@@ -142,7 +162,7 @@ cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/
 | `opensymphony-workspace` | Workspace lifecycle, hooks, containment |
 | `opensymphony-control` | Control plane API and snapshot derivation |
 | `opensymphony-tui` | FrankenTUI operator client |
-| `opensymphony-cli` | CLI entrypoints: daemon, tui, doctor, linear-mcp |
+| `opensymphony-cli` | CLI entrypoints: run, daemon (demo), tui, doctor, linear-mcp |
 
 ## Deployment Modes
 
