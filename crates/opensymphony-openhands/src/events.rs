@@ -391,6 +391,7 @@ mod tests {
                 llm: LlmConfig {
                     model: "openai/gpt-5.4".to_string(),
                     api_key: None,
+                    base_url: None,
                 },
             },
         };

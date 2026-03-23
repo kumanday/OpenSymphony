@@ -665,12 +665,12 @@ agent:
     In Review: 2
 openhands:
   transport:
-    base_url: ${OPENHANDS_BASE_URL}
+    base_url: ${LLM_BASE_URL}
   conversation:
     persistence_dir_relative: .cache/openhands
     agent:
       llm:
-        model: ${OPENHANDS_MODEL}
+        model: ${LLM_MODEL}
 ---
 {{ issue.identifier }}
 "#,
@@ -679,8 +679,8 @@ openhands:
         let env = env([
             ("LINEAR_API_KEY", "linear-token"),
             ("WORKSPACE_ROOT", "/tmp/workspaces"),
-            ("OPENHANDS_BASE_URL", "http://localhost:8000"),
-            ("OPENHANDS_MODEL", "gpt-4.1-mini"),
+            ("LLM_BASE_URL", "http://localhost:8000"),
+            ("LLM_MODEL", "gpt-5.4-mini"),
         ]);
 
         let resolved = workflow
@@ -725,7 +725,7 @@ openhands:
                 .expect("llm config should exist")
                 .model
                 .as_deref(),
-            Some("gpt-4.1-mini")
+            Some("gpt-5.4-mini")
         );
         assert_eq!(
             resolved.extensions.openhands.conversation.agent.kind,
@@ -1465,17 +1465,14 @@ openhands:
   conversation:
     agent:
       llm:
-        model: ${OPENHANDS_MODEL}
+        model: ${LLM_MODEL}
         api_key_env: OPENHANDS_API_KEY
 ---
 {{ issue.identifier }}
 "#,
         )
         .expect("workflow should parse");
-        let env = env([
-            ("LINEAR_API_KEY", "linear-token"),
-            ("OPENHANDS_MODEL", "gpt-4.1"),
-        ]);
+        let env = env([("LINEAR_API_KEY", "linear-token"), ("LLM_MODEL", "gpt-5.4")]);
 
         let error = workflow
             .resolve(Path::new("/repo"), &env)
@@ -1505,7 +1502,7 @@ openhands:
   conversation:
     agent:
       llm:
-        model: gpt-4.1-mini
+        model: gpt-5.4-mini
         temperature: 0.1
 ---
 {{ issue.identifier }}
@@ -1522,7 +1519,7 @@ openhands:
   conversation:
     agent:
       llm:
-        model: gpt-4.1-mini
+        model: gpt-5.4-mini
         reasoning_effort: high
 ---
 {{ issue.identifier }}
@@ -1561,17 +1558,14 @@ openhands:
   conversation:
     agent:
       llm:
-        model: ${OPENHANDS_MODEL}
+        model: ${LLM_MODEL}
         base_url_env: OPENHANDS_BASE_URL
 ---
 {{ issue.identifier }}
 "#,
         )
         .expect("workflow should parse");
-        let env = env([
-            ("LINEAR_API_KEY", "linear-token"),
-            ("OPENHANDS_MODEL", "gpt-4.1"),
-        ]);
+        let env = env([("LINEAR_API_KEY", "linear-token"), ("LLM_MODEL", "gpt-5.4")]);
 
         let error = workflow
             .resolve(Path::new("/repo"), &env)
@@ -2065,7 +2059,7 @@ openhands:
     persistence_dir_relative: .opensymphony/openhands
     agent:
       llm:
-        model: ${OPENHANDS_MODEL}
+        model: ${LLM_MODEL}
 ---
 
 # Assignment

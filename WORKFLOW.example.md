@@ -79,7 +79,7 @@ openhands:
         # Exact $VAR/${VAR} tokens are resolved before runtime launch.
         # Provider-specific auth/base-url overrides and extra LLM option keys are
         # rejected until the current conversation-create adapter can forward them.
-        model: ${OPENHANDS_MODEL}
+        model: ${LLM_MODEL}
       # Workflow-owned agent extras such as `log_completions` are rejected until
       # the current conversation-create payload can actually forward them.
 
