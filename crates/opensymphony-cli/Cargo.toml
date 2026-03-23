@@ -18,12 +18,15 @@ workspace = true
 [dependencies]
 chrono.workspace = true
 clap.workspace = true
+opensymphony-linear = { path = "../opensymphony-linear" }
 opensymphony-linear-mcp = { path = "../opensymphony-linear-mcp" }
 opensymphony-control = { path = "../opensymphony-control" }
 opensymphony-domain = { path = "../opensymphony-domain" }
 opensymphony-openhands = { path = "../opensymphony-openhands" }
+opensymphony-orchestrator = { path = "../opensymphony-orchestrator" }
 opensymphony-workflow = { path = "../opensymphony-workflow" }
 opensymphony-tui = { path = "../opensymphony-tui" }
+opensymphony-workspace = { path = "../opensymphony-workspace" }
 serde.workspace = true
 serde_yaml.workspace = true
 tempfile.workspace = true
@@ -36,5 +39,6 @@ url.workspace = true
 [dev-dependencies]
 axum.workspace = true
 opensymphony-testkit = { path = "../opensymphony-testkit" }
+reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

@@ -20,8 +20,9 @@ pub use models::{
     LlmConfig, SearchConversationEventsResponse, SendMessageRequest, TextContent, WorkspaceConfig,
 };
 pub use session::{
-    IssueConversationManifest, IssueSessionContext, IssueSessionError, IssueSessionPromptKind,
-    IssueSessionResult, IssueSessionRunner, IssueSessionRunnerConfig, RUNTIME_CONTRACT_VERSION,
+    IssueConversationManifest, IssueSessionContext, IssueSessionError, IssueSessionObserver,
+    IssueSessionPromptKind, IssueSessionResult, IssueSessionRunner, IssueSessionRunnerConfig,
+    RUNTIME_CONTRACT_VERSION,
 };
 pub use supervisor::{
     ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, ProbeConfig, ServerMode,

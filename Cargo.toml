@@ -1,3 +1,11 @@
+[package]
+name = "opensymphony"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
 [workspace]
 members = [
     "crates/opensymphony-domain",
@@ -13,6 +21,13 @@ members = [
     "crates/opensymphony-testkit",
 ]
 resolver = "2"
+
+[lints]
+workspace = true
+
+[dependencies]
+opensymphony-cli = { path = "crates/opensymphony-cli" }
+tokio.workspace = true
 
 [workspace.package]
 edition = "2024"
