@@ -5,7 +5,10 @@ use opensymphony_openhands::{
     ConversationCreateRequest, EventCache, EventEnvelope, KnownEvent, OpenHandsClient,
     OpenHandsError, RuntimeStreamConfig, TerminalExecutionStatus, TransportConfig,
 };
-use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
+use opensymphony_testkit::{
+    FakeEventStreamBuilder, FakeOpenHandsConfig, FakeOpenHandsServer, FakeSearchScript,
+    FakeSocketScript,
+};
 
 #[tokio::test]
 async fn fake_server_runtime_stream_attaches_reconciles_and_detects_terminal_state() {
@@ -454,6 +457,156 @@ async fn attach_runtime_stream_replays_initial_persisted_snapshot() {
 }
 
 #[tokio::test]
+async fn scripted_fake_server_replays_initial_snapshot_when_post_ready_reconcile_is_empty() {
+    let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
+        initial_execution_status: "running",
+        ..FakeOpenHandsConfig::default()
+    })
+    .await
+    .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+    let fixtures = FakeEventStreamBuilder::new(Utc::now());
+    let running = fixtures.state_update_at("evt-running", 0, "running");
+    let log = fixtures.llm_completion_at("evt-log", 1_000, "fake-model", 42);
+    let ready = fixtures.state_update_at("evt-ready", 2_000, "running");
+
+    server
+        .script_search_responses(
+            conversation.conversation_id,
+            FakeSearchScript::new()
+                .response(vec![running.clone(), log.clone()])
+                .response(vec![]),
+        )
+        .await
+        .expect("search script should be configured");
+    server
+        .script_socket_connections(
+            conversation.conversation_id,
+            vec![FakeSocketScript::new().event(ready)],
+        )
+        .await
+        .expect("socket script should be configured");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    let first = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("first replayed snapshot event should arrive")
+        .expect("stream read should succeed")
+        .expect("first replayed snapshot event should exist");
+    let second = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("second replayed snapshot event should arrive")
+        .expect("stream read should succeed")
+        .expect("second replayed snapshot event should exist");
+
+    assert_eq!(
+        [first.id.as_str(), second.id.as_str()],
+        ["evt-running", "evt-log"]
+    );
+    let no_extra = tokio::time::timeout(Duration::from_millis(200), stream.next_event()).await;
+    assert!(
+        no_extra.is_err(),
+        "stream should wait for future websocket activity once the scripted initial snapshot replay is drained"
+    );
+}
+
+#[tokio::test]
+async fn scripted_fake_server_drains_buffered_socket_events_before_later_attach_backlog() {
+    let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
+        initial_execution_status: "running",
+        ..FakeOpenHandsConfig::default()
+    })
+    .await
+    .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+    let fixtures = FakeEventStreamBuilder::new(Utc::now());
+    let running = fixtures.state_update_at("evt-running", 0, "running");
+    let queued_live = fixtures.state_update_at("evt-queued-live", 1_000, "queued");
+    let log = fixtures.llm_completion_at("evt-log", 2_000, "fake-model", 42);
+    let ready = fixtures.state_update_at("evt-ready", 0, "running");
+
+    server
+        .script_search_responses(
+            conversation.conversation_id,
+            FakeSearchScript::new()
+                .response(vec![running.clone(), log.clone()])
+                .response(vec![]),
+        )
+        .await
+        .expect("search script should be configured");
+    server
+        .script_socket_connections(
+            conversation.conversation_id,
+            vec![FakeSocketScript::new().event(ready).event(queued_live)],
+        )
+        .await
+        .expect("socket script should be configured");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    let first = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("first replayed event should arrive")
+        .expect("stream read should succeed")
+        .expect("first replayed event should exist");
+    let second = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("buffered socket event should arrive")
+        .expect("stream read should succeed")
+        .expect("buffered socket event should exist");
+    let third = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("later replayed event should arrive")
+        .expect("stream read should succeed")
+        .expect("later replayed event should exist");
+
+    assert_eq!(
+        [first.id.as_str(), second.id.as_str(), third.id.as_str()],
+        ["evt-running", "evt-queued-live", "evt-log"],
+        "buffered live socket frames should be merged before a later attach-backlog item is yielded"
+    );
+}
+
+#[tokio::test]
 async fn runtime_stream_reconnects_and_recovers_missed_events() {
     let server = FakeOpenHandsServer::start()
         .await
@@ -557,5 +710,147 @@ async fn runtime_stream_reconnects_and_recovers_missed_events() {
             .items()
             .iter()
             .any(|event| event.id == finished.id)
+    );
+}
+
+#[tokio::test]
+async fn scripted_fake_server_yields_buffered_event_before_reconnect_exhaustion() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+    let fixtures = FakeEventStreamBuilder::new(Utc::now());
+    let ready = fixtures.state_update_at("evt-ready", 0, "idle");
+    let runtime = fixtures.state_update_at("evt-runtime", 1_000, "running");
+
+    server
+        .script_search_responses(
+            conversation.conversation_id,
+            FakeSearchScript::new().response(vec![]).response(vec![]),
+        )
+        .await
+        .expect("search script should be configured");
+    server
+        .script_socket_connections(
+            conversation.conversation_id,
+            vec![
+                FakeSocketScript::new().event(ready).event(runtime).close(),
+                FakeSocketScript::new().close(),
+            ],
+        )
+        .await
+        .expect("socket script should be configured");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                reconnect_initial_backoff: Duration::from_millis(25),
+                reconnect_max_backoff: Duration::from_millis(25),
+                max_reconnect_attempts: 1,
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let event = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("buffered event should arrive")
+        .expect("stream read should succeed")
+        .expect("buffered event should exist");
+    assert_eq!(event.id, "evt-runtime");
+
+    let error = stream
+        .next_event()
+        .await
+        .expect_err("reconnect exhaustion should surface after buffered delivery");
+    match error {
+        OpenHandsError::ReconnectExhausted { attempts, .. } => assert_eq!(attempts, 1),
+        other => panic!("expected reconnect exhaustion after buffered delivery, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn scripted_fake_server_close_clears_pending_reconnect_and_replay_state() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+    let fixtures = FakeEventStreamBuilder::new(Utc::now());
+    let ready = fixtures.state_update_at("evt-ready", 0, "idle");
+    let runtime = fixtures.state_update_at("evt-runtime", 1_000, "running");
+
+    server
+        .script_search_responses(
+            conversation.conversation_id,
+            FakeSearchScript::new().response(vec![]).response(vec![]),
+        )
+        .await
+        .expect("search script should be configured");
+    server
+        .script_socket_connections(
+            conversation.conversation_id,
+            vec![
+                FakeSocketScript::new().event(ready).event(runtime).close(),
+                FakeSocketScript::new().close(),
+            ],
+        )
+        .await
+        .expect("socket script should be configured");
+
+    let mut stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                reconnect_initial_backoff: Duration::from_millis(25),
+                reconnect_max_backoff: Duration::from_millis(25),
+                max_reconnect_attempts: 1,
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let event = tokio::time::timeout(Duration::from_secs(2), stream.next_event())
+        .await
+        .expect("buffered event should arrive before close")
+        .expect("stream read should succeed")
+        .expect("buffered event should exist");
+    assert_eq!(event.id, "evt-runtime");
+
+    stream.close().await.expect("close should succeed");
+
+    let closed = tokio::time::timeout(Duration::from_millis(200), stream.next_event())
+        .await
+        .expect("closed stream should return promptly")
+        .expect("polling a closed stream should not fail");
+    assert!(
+        closed.is_none(),
+        "close should clear any queued replay or reconnect work so the stream stays closed"
     );
 }
