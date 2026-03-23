@@ -241,33 +241,95 @@ It should be scriptable enough to produce:
 
 ## 5. Live local acceptance suite
 
-The live local suite should prove the MVP can actually run on a developer machine.
+The live local suite proves the MVP runtime path can execute on a prepared
+developer machine against the pinned local OpenHands server.
 
-Suggested scenarios:
+Implemented entrypoints:
 
-### Scenario A: workflow parse and local run smoke
+- `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_local_suite -- --ignored --nocapture --test-threads=1`
+- `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
 
-- launch daemon
-- start local supervised OpenHands server
-- create temp target repo with example `WORKFLOW.md`
-- inject one fake or test Linear issue
-- verify workspace creation, conversation creation, run, and snapshot publication
+Required machine inputs:
+
+- `uv`, `git`, `curl`, and the Rust toolchain
+- `OPENSYMPHONY_OPENHANDS_MODEL`
+- `OPENSYMPHONY_OPENHANDS_API_KEY` for the live `doctor` probe
+- the provider environment expected by the pinned OpenHands server for normal
+  issue-session runs; `scripts/live_e2e.sh` sets `OPENAI_API_KEY` from
+  `OPENSYMPHONY_OPENHANDS_API_KEY` only when `OPENAI_API_KEY` is otherwise unset
+
+The repository-owned script performs the full live flow:
+
+- runs `opensymphony doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
+- launches the pinned local OpenHands server on `OPENSYMPHONY_LIVE_SUITE_SERVER_PORT` (default `8010`)
+- runs the ignored `live_local_suite` integration tests serially
+- writes logs and scenario artifacts under `target/live-local/<timestamp>/` unless
+  `OPENSYMPHONY_LIVE_SUITE_OUTPUT_ROOT` overrides the root
+
+### Scenario A: checklist-driven issue lifecycle
+
+- generate a temp target repo with repo-owned `WORKFLOW.md`, `AGENTS.md`, `.gitignore`, and a two-step checklist
+- populate the issue workspace through the documented `after_create` clone hook
+- run one issue through the real `WorkspaceManager` plus `IssueSessionRunner` path
+- verify workspace creation, prompt capture, conversation creation, and a deterministic first-run assistant reply
+
+Expected artifacts:
+
+- `lifecycle/summary.json`
+- `lifecycle/workspaces/COE-LIVE-273/notes/live-suite-checklist.md`
+- `lifecycle/workspaces/COE-LIVE-273/.opensymphony/conversation.json`
+- `lifecycle/workspaces/COE-LIVE-273/.opensymphony/generated/session-context.json`
+
+Expected assertions:
+
+- the first run uses the full workflow prompt
+- the first run records the exact assistant reply `run 1: workspace-created`
+- `.opensymphony/` manifests and prompt captures exist for debugging
 
 ### Scenario B: conversation reuse
 
-- run the same issue twice
+- run the same issue a second time against the same workspace
 - verify the same `conversation_id` is reused
-- verify continuation guidance is used instead of the full first-turn prompt
-- verify a reused-but-unseeded conversation still receives the full workflow prompt
-- verify a reused conversation that is already `running` or `queued` is allowed to finish before the next prompt is sent
-- verify a missing conversation can be re-created with the same `conversation_id` and still stay on continuation guidance when persisted history exists
-- verify non-default `openhands.conversation.persistence_dir_relative` values land under the issue workspace and still allow reuse
-- verify workflow validation rejects non-default `openhands.conversation.reuse_policy` values until runtime support exists
+- verify continuation guidance is selected instead of a second full prompt
+- verify the second deterministic assistant reply appears only after the reused conversation resumes
+
+Expected artifacts:
+
+- `lifecycle/summary.json`
+- `lifecycle/workspaces/COE-LIVE-273/.opensymphony/prompts/last-continuation-prompt.md`
+- `lifecycle/workspaces/COE-LIVE-273/.opensymphony/logs/git-status-after.txt`
+
+The `git-status-after.txt` artifact comes from the workflow `after_run` hook, so the suite also
+proves that worker finalization is routing through the workspace manager's `finish_run` path.
+
+Expected assertions:
+
+- first and second runs report the same `conversation_id`
+- `last_prompt_kind` in `conversation.json` becomes `continuation`
+- the recorded assistant replies end with:
+
+```text
+run 1: workspace-created
+run 2: conversation-reused
+```
 
 ### Scenario C: WebSocket reconnect
 
-- interrupt the WebSocket connection
-- verify backoff, reattach, reconcile, and continued completion detection
+- place a local fault-injecting proxy in front of the pinned server
+- drop the first WebSocket connection immediately after the readiness barrier
+- verify the client reconnects, reconciles, and still observes terminal completion
+
+Expected artifacts:
+
+- `reconnect/summary.json`
+- `reconnect/proxy.log`
+
+Expected assertions:
+
+- the proxy records at least two websocket connections
+- exactly one injected drop is recorded
+- the terminal runtime status is still reached after reconnect
+- the final message history includes `OpenSymphony reconnect probe OK`
 
 ## 6. Operational commands
 
@@ -334,6 +396,7 @@ Current command set in this repository:
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
 - `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_pinned_server -- --nocapture`
+- `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_local_suite -- --ignored --nocapture --test-threads=1`
 - `cargo run -p opensymphony-cli -- linear-mcp`
 - `./scripts/smoke_local.sh`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
