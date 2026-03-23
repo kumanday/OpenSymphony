@@ -59,7 +59,7 @@ Update the type spec:
 
 ### 2. `lib/symphony_elixir/linear/client.ex`
 
-Extend the GraphQL query to fetch sub-issues:
+Extend the GraphQL query to fetch child issues:
 
 ```elixir
 @query """
@@ -87,7 +87,7 @@ query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first:
       parent {
         id
       }
-      subIssues(first: 50) {
+      children(first: 50) {
         nodes {
           id
           identifier
@@ -123,7 +123,7 @@ query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first:
 Add extraction functions:
 
 ```elixir
-defp extract_sub_issues(%{"subIssues" => %{"nodes" => sub_issues}})
+defp extract_sub_issues(%{"children" => %{"nodes" => sub_issues}})
      when is_list(sub_issues) do
   sub_issues
   |> Enum.map(fn issue ->
@@ -245,7 +245,7 @@ test "normalize_issue extracts sub-issues" do
     "id" => "issue-1",
     "identifier" => "TEAM-1",
     "title" => "Parent Issue",
-    "subIssues" => %{
+    "children" => %{
       "nodes" => [
         %{
           "id" => "sub-1",

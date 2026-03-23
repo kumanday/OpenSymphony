@@ -1,13 +1,21 @@
+mod selection;
+
 pub const CRATE_NAME: &str = "opensymphony-orchestrator";
 
 pub use opensymphony_domain::{
     ComponentHealthSnapshot, ConversationId, ConversationMetadata, DaemonSnapshot, DurationMs,
-    HealthStatus, IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueSnapshot,
-    IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot, ReleaseReason,
-    RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt,
-    RuntimeStreamState, RuntimeUsageTotals, SchedulerState, SchedulerStatus, StallMetadata,
-    StateTransitionError, TimestampMs, TrackerStateId, TransitionAction, WorkerAttemptSnapshot,
-    WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
+    HealthStatus, IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueRef,
+    IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,
+    ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy, RetryReason,
+    RunAttempt, RuntimeStreamState, RuntimeUsageTotals, SchedulerState, SchedulerStatus,
+    StallMetadata, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueBlocker,
+    TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
+    TrackerStateId, TransitionAction, WorkerAttemptSnapshot, WorkerId, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
+};
+pub use selection::{
+    filter_issues_for_dispatch, issue_blocked_by_non_terminal_blockers,
+    parent_issue_blocked_by_incomplete_children, should_dispatch_issue, sort_issues_for_dispatch,
 };
 
 pub fn boundary_summary() -> &'static str {
@@ -20,7 +28,7 @@ mod tests {
 
     use super::{
         ConversationId, ConversationMetadata, DurationMs, IssueExecution, IssueId, IssueIdentifier,
-        IssueState, IssueStateCategory, NormalizedIssue, ReleaseReason, RunAttempt,
+        IssueRef, IssueState, IssueStateCategory, NormalizedIssue, ReleaseReason, RunAttempt,
         RuntimeStreamState, SchedulerStatus, TimestampMs, WorkerId, WorkspaceKey, WorkspaceRecord,
         boundary_summary,
     };
@@ -48,7 +56,13 @@ mod tests {
             branch_name: None,
             url: None,
             labels: Vec::new(),
+            parent_id: None,
             blocked_by: Vec::new(),
+            sub_issues: vec![IssueRef {
+                id: must(IssueId::new("lin_261")),
+                identifier: must(IssueIdentifier::new("COE-261")),
+                state: "Done".to_owned(),
+            }],
             created_at: None,
             updated_at: None,
         };
