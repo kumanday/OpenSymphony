@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use opensymphony_domain::{
@@ -13,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 use tokio::time::{Instant, timeout, timeout_at};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -172,10 +177,10 @@ impl IssueConversationManifest {
         }
     }
 
-    fn is_reusable_for(&self, issue: &NormalizedIssue, workspace: &WorkspaceHandle) -> bool {
+    fn is_reusable_for(&self, issue: &NormalizedIssue, expected_persistence_dir: &Path) -> bool {
         self.issue_id == issue.id
             && self.identifier == issue.identifier
-            && self.persistence_dir == workspace.openhands_dir()
+            && self.persistence_dir == expected_persistence_dir
             && self.runtime_contract_version.as_deref() == Some(RUNTIME_CONTRACT_VERSION)
     }
 
@@ -326,6 +331,7 @@ struct PreparedTurn {
     conversation_id: Uuid,
     prompt: String,
     baseline_event_ids: HashSet<String>,
+    waited_for_prior_turn: bool,
 }
 
 #[derive(Default)]
@@ -377,7 +383,7 @@ impl IssueSessionRunner {
             Step::EarlyResult(result) => return Ok(*result),
         };
 
-        let (mut active_session, prepared_turn) = match self
+        let (mut active_session, mut prepared_turn) = match self
             .prepare_turn(
                 workspace_manager,
                 workspace,
@@ -401,7 +407,7 @@ impl IssueSessionRunner {
                 run_manifest,
                 &observed_run,
                 active_session,
-                &prepared_turn,
+                &mut prepared_turn,
             )
             .await?
         {
@@ -436,12 +442,12 @@ impl IssueSessionRunner {
         workflow: &ResolvedWorkflow,
     ) -> Result<Step<ActiveSession>, IssueSessionError> {
         let loaded = self
-            .load_existing_conversation_manifest(workspace_manager, workspace, issue)
+            .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
             .await?;
 
         match loaded.manifest {
             Some(manifest) => match self
-                .try_reuse_session(workspace_manager, workspace, manifest)
+                .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
                 .await?
             {
                 ReuseSession::Active(session) => Ok(Step::Continue(*session)),
@@ -485,6 +491,36 @@ impl IssueSessionRunner {
         run: &RunAttempt,
         mut active_session: ActiveSession,
     ) -> Result<Step<(ActiveSession, PreparedTurn)>, IssueSessionError> {
+        let mut waited_for_prior_turn = false;
+        if let Some(status) = active_session.stream.state_mirror().execution_status()
+            && turn_is_in_progress(status)
+        {
+            if let Err(error) = self
+                .wait_for_active_turn_to_finish(&mut active_session.stream)
+                .await
+            {
+                return self
+                    .finalize_active_session(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        observed_run,
+                        active_session,
+                        failed_outcome(
+                            "previous OpenHands turn did not finish before retrying",
+                            error.to_string(),
+                        ),
+                    )
+                    .await
+                    .map(Box::new)
+                    .map(Step::EarlyResult);
+            }
+            waited_for_prior_turn = true;
+            active_session
+                .manifest
+                .apply_runtime_snapshot(&active_session.stream);
+        }
+
         let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind) {
             Ok(prompt) => prompt,
             Err(detail) => {
@@ -561,6 +597,7 @@ impl IssueSessionRunner {
                 conversation_id,
                 prompt,
                 baseline_event_ids,
+                waited_for_prior_turn,
             },
         )))
     }
@@ -572,7 +609,7 @@ impl IssueSessionRunner {
         run_manifest: &mut RunManifest,
         observed_run: &RunAttempt,
         mut active_session: ActiveSession,
-        prepared_turn: &PreparedTurn,
+        prepared_turn: &mut PreparedTurn,
     ) -> Result<Step<ActiveSession>, IssueSessionError> {
         if let Err(error) = self
             .client
@@ -603,24 +640,82 @@ impl IssueSessionRunner {
         if active_session.prompt_kind == IssueSessionPromptKind::Full {
             active_session.manifest.workflow_prompt_seeded = true;
         }
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &active_session.manifest,
+            )
+            .await?;
 
-        if let Err(error) = self
-            .client
-            .run_conversation(prepared_turn.conversation_id)
-            .await
-        {
-            return self
-                .finalize_active_session(
-                    workspace_manager,
-                    workspace,
-                    run_manifest,
-                    observed_run,
-                    active_session,
-                    failed_outcome("failed to trigger OpenHands run", error.to_string()),
-                )
+        let mut had_run_conflict = false;
+        loop {
+            match self
+                .client
+                .run_conversation(prepared_turn.conversation_id)
                 .await
-                .map(Box::new)
-                .map(Step::EarlyResult);
+            {
+                Ok(_) => break,
+                Err(OpenHandsError::HttpStatus {
+                    status_code: 409, ..
+                }) => {
+                    had_run_conflict = true;
+                    if let Err(error) = self
+                        .wait_for_active_turn_to_finish(&mut active_session.stream)
+                        .await
+                    {
+                        return self
+                            .finalize_active_session(
+                                workspace_manager,
+                                workspace,
+                                run_manifest,
+                                observed_run,
+                                active_session,
+                                failed_outcome(
+                                    "previous OpenHands turn did not finish after run retry conflict",
+                                    error.to_string(),
+                                ),
+                            )
+                            .await
+                            .map(Box::new)
+                            .map(Step::EarlyResult);
+                    }
+                    active_session
+                        .manifest
+                        .apply_runtime_snapshot(&active_session.stream);
+                    prepared_turn.baseline_event_ids.extend(
+                        active_session
+                            .stream
+                            .event_cache()
+                            .items()
+                            .iter()
+                            .map(|event| event.id.clone()),
+                    );
+                }
+                Err(error) => {
+                    return self
+                        .finalize_active_session(
+                            workspace_manager,
+                            workspace,
+                            run_manifest,
+                            observed_run,
+                            active_session,
+                            failed_outcome("failed to trigger OpenHands run", error.to_string()),
+                        )
+                        .await
+                        .map(Box::new)
+                        .map(Step::EarlyResult);
+                }
+            }
+        }
+        if (prepared_turn.waited_for_prior_turn || had_run_conflict)
+            && let Err(error) = active_session.stream.reconcile_events().await
+        {
+            debug!(
+                %error,
+                conversation_id = %active_session.manifest.conversation_id,
+                "post-conflict reconcile failed, proceeding anyway"
+            );
         }
 
         run_manifest.status = RunStatus::Running;
@@ -655,6 +750,7 @@ impl IssueSessionRunner {
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
         issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
     ) -> Result<LoadedManifest, IssueSessionError> {
         let Some(raw) = workspace_manager
             .read_text_artifact(workspace, &workspace.conversation_manifest_path())
@@ -673,7 +769,8 @@ impl IssueSessionRunner {
             }
         };
 
-        if !manifest.is_reusable_for(issue, workspace) {
+        let expected_persistence_dir = configured_persistence_dir(workflow, workspace);
+        if !manifest.is_reusable_for(issue, &expected_persistence_dir) {
             return Ok(LoadedManifest {
                 manifest: None,
                 reset_reason: Some(format!(
@@ -693,8 +790,11 @@ impl IssueSessionRunner {
         &self,
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
         mut manifest: IssueConversationManifest,
     ) -> Result<ReuseSession, IssueSessionError> {
+        let manifest_conversation_id = manifest.conversation_id.clone();
         let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
             Ok(conversation_id) => conversation_id,
             Err(error) => return Ok(ReuseSession::Reset(error)),
@@ -705,12 +805,25 @@ impl IssueSessionRunner {
             .await
         {
             Ok(stream) => stream,
-            Err(error) => {
-                return Ok(ReuseSession::Reset(format!(
-                    "failed to attach existing conversation {}: {error}",
-                    manifest.conversation_id
-                )));
-            }
+            Err(error) => match self
+                .rehydrate_existing_session(
+                    workspace_manager,
+                    workspace,
+                    issue,
+                    workflow,
+                    manifest,
+                    conversation_id,
+                )
+                .await?
+            {
+                Some(session) => return Ok(ReuseSession::Active(Box::new(session))),
+                None => {
+                    return Ok(ReuseSession::Reset(format!(
+                        "failed to attach existing conversation {}: {error}",
+                        manifest_conversation_id
+                    )));
+                }
+            },
         };
 
         let attached_at = Utc::now();
@@ -757,7 +870,7 @@ impl IssueSessionRunner {
         workflow: &ResolvedWorkflow,
         reset_reason: Option<String>,
     ) -> Result<Step<ActiveSession>, IssueSessionError> {
-        let request = match build_conversation_create_request(workflow, workspace) {
+        let request = match build_conversation_create_request(workflow, workspace, None) {
             Ok(request) => request,
             Err(detail) => {
                 return self
@@ -853,7 +966,7 @@ impl IssueSessionRunner {
             issue.identifier.clone(),
             ConversationId::new(conversation.conversation_id.to_string())
                 .expect("UUID-backed conversation ID should not be empty"),
-            workspace.openhands_dir(),
+            configured_persistence_dir(workflow, workspace),
             attached_at,
             reset_reason,
         );
@@ -884,6 +997,113 @@ impl IssueSessionRunner {
         }))
     }
 
+    async fn rehydrate_existing_session(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
+        mut manifest: IssueConversationManifest,
+        conversation_id: Uuid,
+    ) -> Result<Option<ActiveSession>, IssueSessionError> {
+        let request =
+            match build_conversation_create_request(workflow, workspace, Some(conversation_id)) {
+                Ok(request) => request,
+                Err(error) => {
+                    debug!(
+                        %error,
+                        %conversation_id,
+                        "skipping session rehydrate because create request construction failed"
+                    );
+                    return Ok(None);
+                }
+            };
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &create_conversation_request_path(workspace),
+                &request,
+            )
+            .await?;
+
+        let conversation = match self.client.create_conversation(&request).await {
+            Ok(conversation) => conversation,
+            Err(error) => {
+                debug!(
+                    %error,
+                    %conversation_id,
+                    "skipping session rehydrate because conversation recreation failed"
+                );
+                return Ok(None);
+            }
+        };
+        if conversation.conversation_id != conversation_id {
+            debug!(
+                %conversation_id,
+                recreated_conversation_id = %conversation.conversation_id,
+                "skipping session rehydrate because recreated conversation id changed"
+            );
+            return Ok(None);
+        }
+
+        let stream = match self
+            .client
+            .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                debug!(
+                    %error,
+                    %conversation_id,
+                    "skipping session rehydrate because runtime stream attach failed"
+                );
+                return Ok(None);
+            }
+        };
+        if !stream_has_persisted_history(&stream) {
+            debug!(
+                %conversation_id,
+                "skipping session rehydrate because recreated conversation has no persisted history"
+            );
+            return Ok(None);
+        }
+
+        let attached_at = Utc::now();
+        manifest.issue_id = issue.id.clone();
+        manifest.identifier = issue.identifier.clone();
+        manifest.fresh_conversation = false;
+        manifest.workflow_prompt_seeded = true;
+        manifest.server_base_url = Some(self.client.base_url().to_string());
+        manifest.persistence_dir = configured_persistence_dir(workflow, workspace);
+        manifest.last_attached_at = attached_at;
+        manifest.updated_at = attached_at;
+        manifest.reset_reason = None;
+        manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
+        manifest.apply_runtime_snapshot(&stream);
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &manifest,
+            )
+            .await?;
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &last_conversation_state_path(workspace),
+                &conversation_snapshot(&stream),
+            )
+            .await?;
+
+        Ok(Some(ActiveSession {
+            prompt_kind: manifest.prompt_kind(),
+            stream,
+            manifest,
+            prompt_path: None,
+        }))
+    }
+
     fn render_prompt(
         &self,
         workflow: &ResolvedWorkflow,
@@ -896,6 +1116,58 @@ impl IssueSessionRunner {
                 .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
                 .map_err(|error| error.to_string()),
             IssueSessionPromptKind::Continuation => Ok(build_continuation_guidance(issue, run)),
+        }
+    }
+
+    async fn wait_for_active_turn_to_finish(
+        &self,
+        stream: &mut RuntimeEventStream,
+    ) -> Result<(), OpenHandsError> {
+        if stream
+            .state_mirror()
+            .execution_status()
+            .is_none_or(turn_has_stopped)
+        {
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + self.config.terminal_wait_timeout;
+        loop {
+            if stream
+                .state_mirror()
+                .execution_status()
+                .is_some_and(turn_has_stopped)
+            {
+                return Ok(());
+            }
+
+            match timeout_at(deadline, stream.next_event()).await {
+                Err(_) => {
+                    let status = stream
+                        .state_mirror()
+                        .execution_status()
+                        .unwrap_or("unknown");
+                    return Err(OpenHandsError::Protocol {
+                        operation: "wait for active turn to finish",
+                        detail: format!(
+                            "execution_status `{status}` did not stop within {} ms",
+                            self.config.terminal_wait_timeout.as_millis()
+                        ),
+                    });
+                }
+                Ok(Ok(Some(_))) | Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    if stream
+                        .state_mirror()
+                        .execution_status()
+                        .is_some_and(turn_has_stopped)
+                        && finished_stream_error_is_tolerable(&error)
+                    {
+                        return Ok(());
+                    }
+                    return Err(error);
+                }
+            }
         }
     }
 
@@ -917,6 +1189,17 @@ impl IssueSessionRunner {
             let next_event = timeout_at(deadline, stream.next_event()).await;
             match next_event {
                 Err(_) => {
+                    if let Ok(inserted) = stream.reconcile_events().await
+                        && inserted > 0
+                    {
+                        if let Some(outcome) = self
+                            .terminal_outcome_from_state(stream, baseline_event_ids)
+                            .await
+                        {
+                            return outcome;
+                        }
+                        continue;
+                    }
                     return NormalizedOutcome {
                         kind: WorkerOutcomeKind::Stalled,
                         summary: "runtime did not reach a terminal state before the stall timeout"
@@ -1148,6 +1431,7 @@ impl IssueSessionRunner {
 fn build_conversation_create_request(
     workflow: &ResolvedWorkflow,
     workspace: &WorkspaceHandle,
+    conversation_id: Option<Uuid>,
 ) -> Result<ConversationCreateRequest, String> {
     let conversation = &workflow.extensions.openhands.conversation;
     let max_iterations = u32::try_from(conversation.max_iterations).map_err(|_| {
@@ -1159,12 +1443,14 @@ fn build_conversation_create_request(
     })?;
 
     Ok(ConversationCreateRequest {
-        conversation_id: Uuid::new_v4(),
+        conversation_id: conversation_id.unwrap_or_else(Uuid::new_v4),
         workspace: WorkspaceConfig {
             working_dir: workspace.workspace_path().display().to_string(),
             kind: "LocalWorkspace".to_string(),
         },
-        persistence_dir: workspace.openhands_dir().display().to_string(),
+        persistence_dir: configured_persistence_dir(workflow, workspace)
+            .display()
+            .to_string(),
         max_iterations,
         stuck_detection: conversation.stuck_detection,
         confirmation_policy: ConfirmationPolicy {
@@ -1180,6 +1466,30 @@ fn build_conversation_create_request(
             }),
         },
     })
+}
+
+fn configured_persistence_dir(workflow: &ResolvedWorkflow, workspace: &WorkspaceHandle) -> PathBuf {
+    workspace.workspace_path().join(
+        &workflow
+            .extensions
+            .openhands
+            .conversation
+            .persistence_dir_relative,
+    )
+}
+
+fn turn_is_in_progress(status: &str) -> bool {
+    !matches!(status, "idle" | "finished" | "error" | "stuck")
+}
+
+fn turn_has_stopped(status: &str) -> bool {
+    !turn_is_in_progress(status)
+}
+
+fn stream_has_persisted_history(stream: &RuntimeEventStream) -> bool {
+    // Fresh conversations emit only the initial state snapshot, while rehydrated
+    // conversations replay that snapshot plus prior history.
+    stream.event_cache().items().len() > 1
 }
 
 fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) -> String {

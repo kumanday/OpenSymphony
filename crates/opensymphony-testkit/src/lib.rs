@@ -46,6 +46,7 @@ struct AppState {
 
 struct Inner {
     conversations: HashMap<Uuid, FakeConversation>,
+    conversation_get_not_found: HashMap<Uuid, usize>,
     search_page_size: usize,
     run_terminal_status: String,
     next_event_index: u64,
@@ -78,6 +79,7 @@ impl FakeOpenHandsServer {
         let state = AppState {
             inner: Arc::new(Mutex::new(Inner {
                 conversations: HashMap::new(),
+                conversation_get_not_found: HashMap::new(),
                 search_page_size: config.search_page_size,
                 run_terminal_status: config.run_terminal_status.to_string(),
                 next_event_index: 1,
@@ -174,6 +176,25 @@ impl FakeOpenHandsServer {
         Ok(conversation.events.len())
     }
 
+    pub async fn fail_next_conversation_gets(
+        &self,
+        conversation_id: Uuid,
+        count: usize,
+    ) -> Result<(), FakeServerError> {
+        let mut inner = self.state.inner.lock().await;
+        if !inner.conversations.contains_key(&conversation_id) {
+            return Err(FakeServerError::ConversationNotFound(conversation_id));
+        }
+        if count == 0 {
+            inner.conversation_get_not_found.remove(&conversation_id);
+        } else {
+            inner
+                .conversation_get_not_found
+                .insert(conversation_id, count);
+        }
+        Ok(())
+    }
+
     pub async fn drop_websocket_connections(
         &self,
         conversation_id: Uuid,
@@ -215,6 +236,10 @@ async fn create_conversation(
     Json(request): Json<ConversationCreateRequest>,
 ) -> Result<Json<Conversation>, StatusCode> {
     let mut inner = state.inner.lock().await;
+    if let Some(existing) = inner.conversations.get(&request.conversation_id) {
+        return Ok(Json(existing.summary.clone()));
+    }
+
     let summary = Conversation {
         conversation_id: request.conversation_id,
         workspace: request.workspace,
@@ -258,7 +283,28 @@ async fn get_conversation(
     State(state): State<AppState>,
     Path(conversation_id): Path<Uuid>,
 ) -> Result<Json<Conversation>, StatusCode> {
-    let inner = state.inner.lock().await;
+    let mut inner = state.inner.lock().await;
+    let not_found = match inner.conversation_get_not_found.get_mut(&conversation_id) {
+        Some(remaining) if *remaining > 0 => {
+            *remaining -= 1;
+            true
+        }
+        _ => false,
+    };
+    if not_found
+        && inner
+            .conversation_get_not_found
+            .get(&conversation_id)
+            .copied()
+            .unwrap_or_default()
+            == 0
+    {
+        inner.conversation_get_not_found.remove(&conversation_id);
+    }
+    if not_found {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
     let conversation = inner
         .conversations
         .get(&conversation_id)
@@ -293,6 +339,14 @@ async fn run_conversation(
     Path(conversation_id): Path<Uuid>,
 ) -> Result<Json<Value>, StatusCode> {
     let mut inner = state.inner.lock().await;
+    let already_running = inner
+        .conversations
+        .get(&conversation_id)
+        .map(|conversation| run_in_progress(&conversation.summary.execution_status))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if already_running {
+        return Err(StatusCode::CONFLICT);
+    }
     let terminal_status = inner.run_terminal_status.clone();
     let running_event = EventEnvelope::new(
         next_event_id(&mut inner),
@@ -495,4 +549,8 @@ fn next_event_id(inner: &mut Inner) -> String {
     let current = inner.next_event_index;
     inner.next_event_index += 1;
     format!("evt-{current}")
+}
+
+fn run_in_progress(status: &str) -> bool {
+    !matches!(status, "idle" | "finished" | "error" | "stuck")
 }

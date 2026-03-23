@@ -70,8 +70,17 @@ Use this source only for details that are underspecified or absent in the docs, 
 - dedupe and ordering strategy
 - reconnect backoff pattern
 - current query-param auth fallback
+- current `tool_module_qualnames` and `agent_definitions` forwarding in the start-conversation payload
 
-Pin the OpenHands version before implementation and re-validate all wire-level assumptions against that pinned version.
+Pinned implementation source:
+
+- release: `v1.14.0`
+- server entrypoint: `openhands-agent-server/openhands/agent_server/__main__.py`
+- API router: `openhands-agent-server/openhands/agent_server/api.py`
+- WebSocket router: `openhands-agent-server/openhands/agent_server/sockets.py`
+- server readiness endpoints: `openhands-agent-server/openhands/agent_server/server_details_router.py`
+
+Re-validate all wire-level assumptions against that pinned version before changing the adapter contract.
 
 ### OpenHands release notes
 

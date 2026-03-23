@@ -81,6 +81,8 @@ Current implementation:
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
 - `crates/opensymphony-openhands/tests/client_resilience.rs` and `crates/opensymphony-openhands/tests/fake_server_contract.rs` now cover readiness, attach, initial snapshot replay, attach-backlog versus buffered-live ordering, ready-barrier persistence across later stale rebuilds, explicit-close shutdown semantics, reconcile, out-of-order delivery, reused-conversation restart freshness, and reconnect recovery for the runtime stream
 - `crates/opensymphony-openhands/tests/live_pinned_server.rs` provides an opt-in live integration check against the pinned `openhands-agent-server==1.14.0` surface for external-mode auth success and failure
+- `crates/opensymphony-openhands/tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, missing-conversation rehydration that stays on continuation guidance, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
+- `crates/opensymphony-openhands/tests/supervisor.rs` now covers startup rejection when a foreign ready server is already bound to the supervised target port
 
 ## 3. Minimum required test coverage by subsystem
 
@@ -167,6 +169,10 @@ Current implementation:
 - terminal state detection
 - conversation reuse
 - pinned-server auth success and failure paths
+- reuse after an already-active turn or `/run` conflict
+- rehydration of a missing conversation with persisted history
+- workflow-owned `persistence_dir_relative` mapping
+- supervised-mode rejection of foreign ready servers
 
 ## 3.4 Orchestrator
 
@@ -244,6 +250,9 @@ Suggested scenarios:
 - verify the same `conversation_id` is reused
 - verify continuation guidance is used instead of the full first-turn prompt
 - verify a reused-but-unseeded conversation still receives the full workflow prompt
+- verify a reused conversation that is already `running` or `queued` is allowed to finish before the next prompt is sent
+- verify a missing conversation can be re-created with the same `conversation_id` and still stay on continuation guidance when persisted history exists
+- verify non-default `openhands.conversation.persistence_dir_relative` values land under the issue workspace and still allow reuse
 - verify workflow validation rejects non-default `openhands.conversation.reuse_policy` values until runtime support exists
 
 ### Scenario C: WebSocket reconnect
@@ -363,6 +372,7 @@ Current implemented scope for OSYM-201 and OSYM-203:
 - resolve the repo-local OpenHands wrapper metadata from `tools/openhands-server/`
 - report pin readiness from `version.txt`, `pyproject.toml`, and `uv.lock`
 - start the supervised local server when the pin is valid and the workflow-derived loopback base URL is down
+- refuse to launch supervised mode when a different ready server is already answering on the configured loopback base URL
 - verify HTTP readiness on the workflow-derived loopback base URL
 - create a temp conversation with workflow-derived OpenHands settings and attach the WebSocket runtime stream
 - reconcile events before and after readiness
@@ -407,6 +417,7 @@ Current implementation notes:
 
 - the static doctor path checks config parsing, target-repo presence, workflow load/resolve/render, workspace-root creation from the workflow, loopback bind scope from the workflow OpenHands transport, pinned-tooling files, launcher metadata, and pin consistency across `version.txt`, `pyproject.toml`, and `uv.lock`
 - checkout-relative doctor defaults are derived from the config and tooling paths rather than the caller `cwd`, so running `opensymphony doctor` outside the repo root still validates the intended checkout and bundled `examples/target-repo`
+- the live doctor and supervised local-server paths normalize the configured `openhands.tool_dir` to an absolute path before launch, so checked-in configs such as `examples/configs/local-dev.with-live-openhands.yaml` can keep repo-relative tooling paths without depending on the caller `cwd`
 - the live doctor path additionally probes `GET /openapi.json`, creates a temp conversation using workflow-derived OpenHands conversation settings, attaches `RuntimeEventStream`, waits through non-readiness WebSocket traffic until the readiness barrier is observed, sends a doctor message that includes the rendered workflow prompt, triggers `/run`, and waits for a healthy terminal `execution_status` of `finished` after post-ready reconcile and reconnect-aware streaming, including terminal REST refresh fallback when a post-completion WebSocket reattach exhausts and one final scheduler-turn buffered drain before success is accepted
 - once that live doctor path has already observed terminal success on the attached stream, it reuses the last successful stream-backed conversation snapshot instead of requiring a final `GET /api/conversations/{id}` that can flap during agent-server shutdown
 - when the configured workflow loopback base URL is down but the repo-owned tooling pin is ready, the live doctor path temporarily starts the local supervised server only for unauthenticated loopback root-path targets, switches follow-up probes to the launched supervisor base URL, uses it for the probe, then stops it again
