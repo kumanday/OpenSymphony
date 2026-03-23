@@ -56,6 +56,8 @@ The Rust daemon owns all scheduler semantics that Symphony specifies:
 
 OpenHands conversation state is informative, not authoritative for scheduling.
 
+Hierarchy-aware task selection is part of issue eligibility. Parent issues stay blocked until every child issue in the latest tracker snapshot is terminal, and ready leaf issues sort ahead of ready parents within the same priority bucket.
+
 ### 3.2 OpenHands agent-server is an execution adapter
 
 OpenHands is used as the agent execution backend because it exposes:
@@ -189,6 +191,7 @@ The repository now exposes three stable foundation contracts that later mileston
 - `opensymphony-domain`
   - normalized tracker issue model
   - blocker references
+  - parent/sub-issue references for hierarchy-aware dispatch
   - run-attempt, retry-entry, runtime-session, and worker-outcome models
   - serialized orchestrator snapshot types
 - `opensymphony-workflow`
@@ -196,7 +199,9 @@ The repository now exposes three stable foundation contracts that later mileston
   - typed config resolution with fail-fast unknown nested workflow keys plus fail-fast unknown top-level keys outside the supported opaque `codex` namespace, defaults, env indirection, path normalization, required Linear tracker credentials via either explicit `tracker.api_key` or process-level `LINEAR_API_KEY`, explicit env-backed workspace roots, and strict `openhands` extension validation
   - strict prompt rendering over `{issue, attempt}`
 - `opensymphony-orchestrator`
-  - deterministic candidate sorting, claim logic, and claimed-to-running enforcement
+  - deterministic candidate sorting with leaf-before-parent ordering
+  - blocker-aware and hierarchy-aware dispatch eligibility helpers
+  - claim logic and claimed-to-running enforcement
   - explicit `Claimed` / `Running` / `RetryQueued` / `Released` transitions
   - fixed continuation retry, exponential failure backoff, stall detection, retry-start validation for `due_at`, `attempt`, latest dispatch eligibility, and bounded global/per-state capacity using the reservation's current state, reconciliation of running, retry-queued, and claimed-only issues including a claim-to-start grace window that remains independent from disabled stall detection before stale claimed-only release, freshest global rate-limit retention, and restart recovery
 

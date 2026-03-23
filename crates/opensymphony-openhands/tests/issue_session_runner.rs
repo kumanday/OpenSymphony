@@ -33,7 +33,9 @@ fn sample_issue(identifier: &str) -> NormalizedIssue {
         branch_name: None,
         url: None,
         labels: vec!["runtime".to_string()],
+        parent_id: None,
         blocked_by: Vec::new(),
+        sub_issues: Vec::new(),
         created_at: Some(TimestampMs::new(1)),
         updated_at: Some(TimestampMs::new(2)),
     }

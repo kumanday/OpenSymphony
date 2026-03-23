@@ -21,7 +21,7 @@ repo_paths:
   - crates/opensymphony-orchestrator/
 definition_of_ready:
   - OSYM-302 and OSYM-304 are merged
-  - Linear GraphQL schema for sub-issues is documented
+  - Linear GraphQL `children` schema for issue hierarchy is documented
   - Decision made on parent vs sub-issue dispatch ordering
 ---
 
@@ -44,7 +44,7 @@ The current orchestrator (OSYM-304) treats all issues as independent tasks. Howe
 ### In Scope
 
 - Add `sub_issues` field to the normalized issue model
-- Extend Linear GraphQL queries to fetch `subIssues` relationship
+- Extend Linear GraphQL queries to fetch the `children` relationship
 - Add hierarchy check to candidate filtering logic
 - Update `should_dispatch_issue?` to skip parents with incomplete sub-issues
 - Add topological sorting: prefer leaves over parents when both are ready
@@ -64,7 +64,7 @@ The current orchestrator (OSYM-304) treats all issues as independent tasks. Howe
    - Define `IssueRef` type with `id`, `identifier`, `state`
 
 2. **Linear adapter updates** (`opensymphony-linear`):
-   - Extend GraphQL query to fetch `subIssues` with their states
+   - Extend GraphQL query to fetch `children` with their states
    - Extend `normalize_issue` to extract sub-issue references
    - Add test fixtures for hierarchical issue structures
 
@@ -114,7 +114,7 @@ The current orchestrator (OSYM-304) treats all issues as independent tasks. Howe
 Add to the existing issue query:
 
 ```graphql
-subIssues(first: 50) {
+children(first: 50) {
   nodes {
     id
     identifier
@@ -161,6 +161,6 @@ Update `sort_issues_for_dispatch` to include hierarchy depth:
 
 ## References
 
-- Linear GraphQL API: `subIssues` field on Issue type
+- Linear GraphQL API: `children` field on Issue type
 - Symphony spec: "The orchestrator is the source of truth for scheduling state"
 - AGENTS.md: "Parent issues and sub-issues represent hierarchical decomposition"

@@ -10,3 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 opensymphony-domain = { path = "../opensymphony-domain" }
+
+[dev-dependencies]
+axum = { workspace = true }
+chrono = { workspace = true }
+opensymphony-linear = { path = "../opensymphony-linear" }
+serde_json = { workspace = true }
+tokio = { workspace = true }

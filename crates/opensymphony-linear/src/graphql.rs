@@ -26,6 +26,18 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
         name
         type
       }
+      parent {
+        id
+      }
+      children(first: 50) {
+        nodes {
+          id
+          identifier
+          state {
+            name
+          }
+        }
+      }
       labels(first: $labelFirst) {
         nodes {
           name
@@ -236,6 +248,10 @@ pub(super) struct LinearIssueNode {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub state: LinearWorkflowState,
+    #[serde(default)]
+    pub parent: Option<LinearParentNode>,
+    #[serde(default)]
+    pub children: LinearChildConnection,
     pub labels: LinearLabelConnection,
     pub inverse_relations: LinearRelationConnection,
 }
@@ -269,6 +285,28 @@ pub(super) struct LinearWorkflowState {
     pub name: String,
     #[serde(rename = "type")]
     pub kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearParentNode {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct LinearChildConnection {
+    pub nodes: Vec<LinearChildNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearChildNode {
+    pub id: String,
+    pub identifier: String,
+    pub state: LinearIssueRefState,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearIssueRefState {
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize)]
