@@ -58,7 +58,7 @@ Key properties:
 - the local supervised launch path forces OpenHands process-sandbox mode via
   `RUNTIME=process`
 - the current implementation resolves supervised-mode metadata from
-  `tools/openhands-server/{pyproject.toml,version.txt,uv.lock,run-local.sh}`
+  `tools/openhands-server/{pyproject.toml,version.txt,uv.lock,install.sh,run-local.sh}`
   with a repo-owned package and lockfile pin
 - the repo-local quick-run wrapper rejects user-supplied agent-server CLI flags
   so smoke runs cannot diverge from the daemon-managed single-server topology
@@ -100,10 +100,11 @@ Local MVP work starts with supervised mode, but the trait boundary must support 
 
 Current repository implementation:
 
-- `tools/openhands-server/pyproject.toml` pins the local server environment and `tools/openhands-server/run-local.sh` starts it via `uv`
+- `tools/openhands-server/pyproject.toml` pins the local server environment, `tools/openhands-server/install.sh` performs the locked `uv sync --extra agent-server` bootstrap, and `tools/openhands-server/run-local.sh` starts it via `uv`
 - `opensymphony-openhands` currently implements the typed conversation create, get, send-message, run, paginated event search, readiness probe, and `RuntimeEventStream` attach/reconcile/reconnect surface used by validation and doctor flows
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage and now supports scripted `/events/search` responses plus per-connection WebSocket frame sequences so attach/reconcile race windows, buffered live events, and reconnect drops can be reproduced without bespoke inline servers
 - `opensymphony doctor` now resolves the target repo `WORKFLOW.md` before probing OpenHands, so the live probe uses workflow-derived workspace, transport, conversation, and prompt inputs instead of only static CLI YAML fields
+- `opensymphony doctor` now checks for `cargo`, `curl`, `git`, and `uv` on `PATH`, prints the trusted-machine local-safety warning on every run, and warns when a local deployment points at a non-loopback OpenHands target
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv`, enforces `uv run --directory <tool-dir> --locked --extra agent-server --module openhands.agent_server`, and rejects extra agent-server CLI flags so the pinned project works the same way from the repo root, CI, and the local supervisor
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
 - explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
