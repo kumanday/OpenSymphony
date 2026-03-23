@@ -220,6 +220,19 @@ impl LocalServerTooling {
             self.metadata.runtime_env.clone(),
             self.metadata.runtime.clone(),
         );
+        // Pass through LLM configuration from parent environment
+        for key in [
+            "LLM_MODEL",
+            "LLM_BASE_URL",
+            "LLM_API_KEY",
+            "FIREWORKS_API_KEY",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                if !value.is_empty() {
+                    env.insert(key.to_string(), value);
+                }
+            }
+        }
         env.extend(
             extra_env
                 .iter()

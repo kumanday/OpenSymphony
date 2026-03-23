@@ -23,13 +23,14 @@ pub struct LlmConfig {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentConfig {
     pub kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub llm: Option<LlmConfig>,
+    pub llm: LlmConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -51,6 +52,7 @@ pub struct DoctorProbeConfig {
     pub agent_kind: String,
     pub model: Option<String>,
     pub api_key: Option<String>,
+    pub base_url: Option<String>,
 }
 
 impl Default for DoctorProbeConfig {
@@ -62,6 +64,7 @@ impl Default for DoctorProbeConfig {
             agent_kind: "Agent".to_string(),
             model: None,
             api_key: None,
+            base_url: None,
         }
     }
 }
@@ -89,6 +92,7 @@ impl ConversationCreateRequest {
         persistence_dir: impl Into<String>,
         config: DoctorProbeConfig,
     ) -> Self {
+        let model = config.model.unwrap_or_else(|| "openai/gpt-5.4".to_string());
         Self {
             conversation_id: Uuid::new_v4(),
             workspace: WorkspaceConfig {
@@ -103,10 +107,11 @@ impl ConversationCreateRequest {
             },
             agent: AgentConfig {
                 kind: config.agent_kind,
-                llm: config.model.map(|model| LlmConfig {
+                llm: LlmConfig {
                     model,
                     api_key: config.api_key,
-                }),
+                    base_url: config.base_url,
+                },
             },
         }
     }
@@ -374,10 +379,10 @@ mod tests {
             },
             agent: AgentConfig {
                 kind: "Agent".to_string(),
-                llm: Some(LlmConfig {
+                llm: LlmConfig {
                     model: "fake-model".to_string(),
                     api_key: Some("fake-key".to_string()),
-                }),
+                },
             },
         };
 

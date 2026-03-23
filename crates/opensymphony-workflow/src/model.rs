@@ -26,6 +26,7 @@ pub const DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS: u64 = 1_000;
 pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
+pub const DEFAULT_OPENHANDS_LLM_MODEL: &str = "openai/gpt-5.4";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowDefinition {

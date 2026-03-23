@@ -100,6 +100,7 @@ struct OpenHandsDoctorConfig {
     tool_dir: String,
     probe_model: Option<String>,
     probe_api_key_env: Option<String>,
+    probe_llm_base_url_env: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -115,6 +116,7 @@ struct DoctorRuntimeConfig {
     tool_dir: PathBuf,
     probe_model: Option<String>,
     probe_api_key_env: Option<String>,
+    probe_llm_base_url_env: Option<String>,
 }
 
 struct DoctorWorkflowEnvironment {
@@ -609,6 +611,7 @@ fn resolve_doctor_runtime(
         tool_dir: resolve_path(config_root, &config.openhands.tool_dir),
         probe_model: config.openhands.probe_model.clone(),
         probe_api_key_env: config.openhands.probe_api_key_env.clone(),
+        probe_llm_base_url_env: config.openhands.probe_llm_base_url_env.clone(),
     })
 }
 
@@ -945,6 +948,10 @@ async fn run_live_openhands_checks(
         .probe_api_key_env
         .as_ref()
         .and_then(|env_name| env::var(env_name).ok());
+    let llm_base_url = runtime
+        .probe_llm_base_url_env
+        .as_ref()
+        .and_then(|env_name| env::var(env_name).ok());
 
     if let Some(env_name) = &runtime.probe_api_key_env {
         if api_key.is_none() {
@@ -958,6 +965,23 @@ async fn run_live_openhands_checks(
         } else {
             checks.push(CheckResult::pass(
                 "openhands-secret",
+                format!("found {}", env_name),
+            ));
+        }
+    }
+
+    if let Some(env_name) = &runtime.probe_llm_base_url_env {
+        if llm_base_url.is_none() {
+            checks.push(CheckResult::warn(
+                "openhands-llm-base-url",
+                format!(
+                    "{} is not set; live probe will rely on provider default endpoint",
+                    env_name
+                ),
+            ));
+        } else {
+            checks.push(CheckResult::pass(
+                "openhands-llm-base-url",
                 format!("found {}", env_name),
             ));
         }
@@ -1059,14 +1083,19 @@ async fn run_live_openhands_checks(
         return stop_managed_supervisor(checks, managed_supervisor);
     }
 
-    let request =
-        match build_doctor_probe_request(runtime, &probe_workspace, &persistence_dir, api_key) {
-            Ok(request) => request,
-            Err(error) => {
-                checks.push(CheckResult::fail("openhands-probe", error));
-                return stop_managed_supervisor(checks, managed_supervisor);
-            }
-        };
+    let request = match build_doctor_probe_request(
+        runtime,
+        &probe_workspace,
+        &persistence_dir,
+        api_key,
+        llm_base_url,
+    ) {
+        Ok(request) => request,
+        Err(error) => {
+            checks.push(CheckResult::fail("openhands-probe", error));
+            return stop_managed_supervisor(checks, managed_supervisor);
+        }
+    };
 
     let probe_message = format!(
         "This is an OpenSymphony doctor health check. Do not inspect the repository, do not modify files, and do not call external tools. Confirm that the rendered workflow prompt below arrived successfully, then reply with the exact text `OpenSymphony doctor probe OK` and finish.\n\n--- BEGIN RENDERED WORKFLOW PROMPT ---\n{rendered_probe_prompt}\n--- END RENDERED WORKFLOW PROMPT ---"
@@ -1104,6 +1133,7 @@ fn build_doctor_probe_request(
     probe_workspace: &Path,
     persistence_dir: &Path,
     api_key: Option<String>,
+    llm_base_url: Option<String>,
 ) -> Result<ConversationCreateRequest, String> {
     let conversation = &runtime.workflow.extensions.openhands.conversation;
     let model = runtime.probe_model.clone().or_else(|| {
@@ -1131,6 +1161,7 @@ fn build_doctor_probe_request(
             agent_kind: conversation.agent.kind.clone(),
             model,
             api_key,
+            base_url: llm_base_url,
         },
     ))
 }
@@ -1513,8 +1544,9 @@ mod tests {
 
         let probe_workspace = PathBuf::from("/tmp/doctor-probe-workspace");
         let persistence_dir = probe_workspace.join("sessions");
-        let error = build_doctor_probe_request(&runtime, &probe_workspace, &persistence_dir, None)
-            .expect_err("oversized doctor probe max_iterations should fail");
+        let error =
+            build_doctor_probe_request(&runtime, &probe_workspace, &persistence_dir, None, None)
+                .expect_err("oversized doctor probe max_iterations should fail");
 
         assert_eq!(
             error,
@@ -1639,6 +1671,7 @@ openhands:
             tool_dir: temp_dir.path().join("tools/openhands-server"),
             probe_model: None,
             probe_api_key_env: None,
+            probe_llm_base_url_env: None,
         }
     }
 }

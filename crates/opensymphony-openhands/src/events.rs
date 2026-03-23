@@ -271,7 +271,7 @@ mod tests {
     };
     use crate::models::{
         AgentConfig, ConfirmationPolicy, Conversation, ConversationStateUpdatePayload,
-        EventEnvelope, WorkspaceConfig,
+        EventEnvelope, LlmConfig, WorkspaceConfig,
     };
 
     #[test]
@@ -388,7 +388,10 @@ mod tests {
             },
             agent: AgentConfig {
                 kind: "Agent".to_string(),
-                llm: None,
+                llm: LlmConfig {
+                    model: "openai/gpt-5.4".to_string(),
+                    api_key: None,
+                },
             },
         };
         let running = EventEnvelope::new(

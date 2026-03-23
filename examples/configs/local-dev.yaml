@@ -1,7 +1,8 @@
 target_repo: ../target-repo
 openhands:
   tool_dir: ../../tools/openhands-server
-  probe_model: null
-  probe_api_key_env: null
+  probe_model: ${OPENSYMPHONY_OPENHANDS_MODEL}
+  probe_api_key_env: OPENSYMPHONY_OPENHANDS_API_KEY
+  probe_llm_base_url_env: OPENSYMPHONY_OPENHANDS_BASE_URL
 linear:
   enabled: false
