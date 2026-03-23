@@ -81,6 +81,144 @@ A successful conversion produces:
 13. Create dependency-free issues concurrently only when none of them reference each other by blocker, parent/sub-issue relationship, or inline related-issue text that must be resolved at creation time.
 14. Treat issue creation and blocker assignment as separate phases unless all referenced issue IDs are already known and verified.
 
+## Parent/Sub-Issue Work Boundaries
+
+When creating parent issues and sub-issues, establish clear work boundaries to prevent duplicate work and ambiguity:
+
+### Parent issue scope
+
+Parent issues should contain:
+- **High-level acceptance criteria** that define when the parent is complete
+- **References to all sub-issues** that must be completed
+- **Integration requirements** that can only be verified after sub-issues merge
+- **NO implementation details** that belong in sub-issues
+
+Parent issues should NOT contain:
+- Detailed implementation steps (belongs in sub-issues)
+- Code changes (work happens in sub-issue branches)
+- Unit tests for specific components (belongs in sub-issues)
+
+### Sub-issue scope
+
+Sub-issues should contain:
+- **Specific, implementable scope** with clear deliverables
+- **Acceptance criteria** that can be verified independently
+- **Test plan** for the specific component
+- **Definition of Done** that includes PR merge to main
+
+Sub-issues should NOT contain:
+- Dependencies on other sub-issues being merged first (use blockers)
+- Integration testing that requires parent completion
+- Vague references to "parent issue work" - be specific
+
+### Preventing duplicate work
+
+To avoid the anti-pattern where work is done in the parent issue while child issues remain open:
+
+1. **Parent issue acceptance criteria must reference sub-issue completion**
+   - Example: "All sub-issues (COE-263, COE-264, COE-267, COE-268, COE-270) are in Done state"
+   - Example: "Integration tests pass after all sub-issue PRs are merged"
+
+2. **Sub-issues must have independent Definition of Ready**
+   - Each sub-issue should be implementable without reading the parent issue body
+   - Cross-reference related sub-issues but don't duplicate their content
+
+3. **Parent issue state reflects sub-issue aggregate state**
+   - Parent stays in Todo until first sub-issue moves to In Progress
+   - Parent moves to In Progress when integration work begins
+   - Parent cannot move to Done until all sub-issues are Done
+
+4. **Orchestrator behavior with hierarchy**
+   - Parent issues are blocked from dispatch while any sub-issue is in non-terminal state
+   - Sub-issues are preferred over parent issues in dispatch ordering
+   - This ensures children complete before parent integration work begins
+
+### Avoiding circular dependencies
+
+**Critical**: Never create a blocker relationship between a parent and its own child. This creates a deadlock:
+
+```
+COE-268 (Parent)          COE-277 (Child)
+     │                          │
+     │◄──── blocked by ──────────┘
+     │                          │
+     └──── sub-issue ───────────►│
+```
+
+**The deadlock**:
+1. Parent can't dispatch because child is incomplete (hierarchy check)
+2. Child can't dispatch because it's blocked by parent (blocker check)
+3. Result: Neither can ever be dispatched
+
+**Correct patterns**:
+
+| Relationship | Meaning | Blocker Needed? |
+|--------------|---------|-----------------|
+| Parent → Child | Parent contains/aggregates child work | NO - hierarchy handles this |
+| Child A → Child B | Sibling dependency (A must complete before B) | YES - use blockers |
+| Issue → External | Depends on external issue | YES - use blockers |
+
+**Rule**: The parent-child relationship already implies "parent depends on child completion". Adding a blocker from child to parent creates a circular dependency.
+
+### Example: Correct parent/sub-issue split
+
+**Parent Issue (COE-254): Linear MCP tools for issue and project management**
+
+```markdown
+## Summary
+Implement Linear MCP tools for issue and project management operations.
+
+## Acceptance Criteria
+- [ ] All sub-issues are completed and merged:
+  - [COE-263](...) - Create issue tool
+  - [COE-264](...) - Update issue tool
+  - [COE-267](...) - Get project tool
+  - [COE-268](...) - Save project tool
+  - [COE-270](...) - List issues tool
+- [ ] Integration tests verify all tools work together
+- [ ] Documentation is updated with tool reference
+
+## Scope
+### In scope
+- Coordination of sub-issue implementation
+- Integration testing after sub-issues merge
+- Documentation updates
+
+### Out of scope
+- Individual tool implementation (in sub-issues)
+- Unit tests for specific tools (in sub-issues)
+```
+
+**Sub-Issue (COE-268): Implement linear_save_project tool**
+
+```markdown
+## Summary
+Implement the `linear_save_project` MCP tool for updating Linear project descriptions.
+
+## Acceptance Criteria
+- [ ] Tool accepts project ID and new description
+- [ ] Tool validates description length limits
+- [ ] Tool returns success/failure with error details
+- [ ] Unit tests cover validation logic
+- [ ] PR is merged to main
+
+## Scope
+### In scope
+- Tool implementation in opensymphony-linear-mcp crate
+- Input validation
+- Error handling
+- Unit tests
+
+### Out of scope
+- Other Linear tools (in sibling sub-issues)
+- Integration testing (in parent issue)
+- Documentation (in parent issue)
+
+## Context
+- Parent issue: [COE-254](...)
+- Related sub-issues: COE-267 (get project), COE-263 (create issue)
+```
+
 ## Recommended issue body structure
 
 Use a predictable structure in each Linear issue body:
