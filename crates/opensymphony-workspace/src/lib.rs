@@ -180,23 +180,7 @@ impl WorkspaceManager {
         let sanitized = Self::sanitize_issue_identifier(identifier);
         let root = self.resolved_root()?;
         let candidate = root.join(&sanitized);
-        if let Ok(metadata) = fs::symlink_metadata(&candidate) {
-            if metadata.file_type().is_symlink() || candidate.exists() {
-                let resolved_candidate = candidate
-                    .canonicalize()
-                    .map_err(|error| WorkspaceError::Io(error.to_string()))?;
-                if !resolved_candidate.starts_with(&root) {
-                    return Err(WorkspaceError::PathEscape(
-                        resolved_candidate.display().to_string(),
-                    ));
-                }
-                return Ok(resolved_candidate);
-            }
-        }
-        if candidate.parent() != Some(root.as_path()) {
-            return Err(WorkspaceError::PathEscape(candidate.display().to_string()));
-        }
-        Ok(candidate)
+        self.validate_workspace_path(&root, candidate)
     }
 
     pub async fn ensure_workspace(
@@ -672,15 +656,14 @@ impl WorkspaceManager {
         &self,
         issue_id: &str,
     ) -> Result<Option<PathBuf>, WorkspaceError> {
-        if !self.config.root.exists() {
+        let root = self.resolved_root()?;
+        if !root.exists() {
             return Ok(None);
         }
 
-        for entry in fs::read_dir(&self.config.root)
-            .map_err(|error| WorkspaceError::Io(error.to_string()))?
-        {
+        for entry in fs::read_dir(&root).map_err(|error| WorkspaceError::Io(error.to_string()))? {
             let entry = entry.map_err(|error| WorkspaceError::Io(error.to_string()))?;
-            let path = entry.path();
+            let path = self.validate_workspace_path(&root, entry.path())?;
             let manifest_path = path.join(".opensymphony/issue.json");
             let Some(manifest) = read_optional_json::<IssueManifest>(manifest_path)? else {
                 continue;
@@ -691,6 +674,30 @@ impl WorkspaceManager {
         }
 
         Ok(None)
+    }
+
+    fn validate_workspace_path(
+        &self,
+        root: &Path,
+        candidate: PathBuf,
+    ) -> Result<PathBuf, WorkspaceError> {
+        if fs::symlink_metadata(&candidate).is_ok() {
+            let resolved_candidate = candidate
+                .canonicalize()
+                .map_err(|error| WorkspaceError::Io(error.to_string()))?;
+            if !resolved_candidate.starts_with(root) {
+                return Err(WorkspaceError::PathEscape(
+                    resolved_candidate.display().to_string(),
+                ));
+            }
+            return Ok(resolved_candidate);
+        }
+
+        if candidate.parent() != Some(root) {
+            return Err(WorkspaceError::PathEscape(candidate.display().to_string()));
+        }
+
+        Ok(candidate)
     }
 }
 
@@ -1033,6 +1040,28 @@ mod tests {
                 .expect("issue manifest should exist");
         assert_eq!(issue_manifest.identifier, "ABC-99");
         assert_eq!(issue_manifest.sanitized_workspace_key, "1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_legacy_workspace_symlink_that_escapes_root_on_issue_id_lookup() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("tempdir should exist");
+        let outside = tempdir().expect("outside tempdir should exist");
+        symlink(outside.path(), root.path().join("ABC-legacy"))
+            .expect("legacy workspace symlink should exist");
+
+        let manager = WorkspaceManager::new(WorkspaceConfig {
+            root: root.path().to_path_buf(),
+            cleanup_terminal_workspaces: false,
+            hooks: HookConfig::default(),
+        });
+
+        let error = manager
+            .load_conversation_manifest("1")
+            .expect_err("escaped legacy workspace lookup should fail");
+        assert!(matches!(error, WorkspaceError::PathEscape(_)));
     }
 
     #[tokio::test]

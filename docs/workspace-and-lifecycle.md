@@ -33,6 +33,7 @@ Examples:
 - Path checks must operate on canonicalized paths when possible.
 - Resolve `workspace.root` through existing ancestors and symlinks when possible before joining the sanitized workspace key.
 - If the resolved issue-workspace leaf already exists, canonicalize that leaf before reuse and reject it if it escapes `workspace.root` through a symlink target.
+- If a legacy identifier-keyed workspace is discovered by scanning persisted `issue_id` metadata, canonicalize that discovered path before reading or reusing it and reject it if it escapes `workspace.root`.
 
 ## 4. Workspace directory layout
 

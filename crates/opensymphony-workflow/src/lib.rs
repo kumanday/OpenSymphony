@@ -147,7 +147,8 @@ impl WorkflowDocument {
     }
 
     pub fn load_from_str(contents: &str) -> Result<Self, WorkflowError> {
-        let Some(rest) = contents.strip_prefix("---\n") else {
+        let normalized = contents.replace("\r\n", "\n");
+        let Some(rest) = normalized.strip_prefix("---\n") else {
             return Err(WorkflowError::MissingFrontMatter);
         };
 
@@ -331,6 +332,17 @@ mod tests {
         )
         .expect_err("unknown openhands keys should fail");
         assert!(matches!(error, WorkflowError::InvalidFrontMatter(_)));
+    }
+
+    #[test]
+    fn parses_crlf_front_matter() {
+        let workflow = WorkflowDocument::load_from_str(
+            "---\r\ntracker:\r\n  project_slug: demo\r\n  active_states: [Todo]\r\n  terminal_states: [Done]\r\n---\r\n# Assignment\r\n",
+        )
+        .expect("CRLF workflow should parse");
+
+        assert_eq!(workflow.front_matter.tracker.project_slug, "demo");
+        assert_eq!(workflow.body, "# Assignment\n");
     }
 
     #[test]

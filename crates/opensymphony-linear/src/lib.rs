@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use opensymphony_domain::{
     compare_issues, Issue, IssueBlocker, IssueStateSnapshot, IssueTracker, TrackerError,
 };
-use reqwest::{blocking::Client as BlockingClient, Client as AsyncClient, StatusCode};
+use reqwest::{
+    blocking::Client as BlockingClient, header::AUTHORIZATION, Client as AsyncClient, StatusCode,
+};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -50,7 +52,12 @@ query CandidateIssues($projectSlug: String!, $states: [String!]!, $first: Int!, 
 
 const QUERY_ISSUE_STATES: &str = r#"
 query IssueStates($issueIds: [ID!]!, $first: Int!, $after: String) {
-  issues(filter: { id: { in: $issueIds } }, first: $first, after: $after) {
+  issues(
+    filter: { id: { in: $issueIds } }
+    first: $first
+    after: $after
+    includeArchived: true
+  ) {
     nodes {
       id
       identifier
@@ -356,7 +363,10 @@ impl LinearTransport for ReqwestLinearTransport {
         let response = self
             .client
             .post(&self.config.base_url)
-            .bearer_auth(&self.config.api_key)
+            .header(
+                AUTHORIZATION,
+                personal_api_key_authorization(&self.config.api_key),
+            )
             .json(&json!({ "query": query, "variables": variables }))
             .send()
             .await
@@ -393,7 +403,10 @@ impl LinearGraphqlWriteClient {
         let response = self
             .client
             .post(&self.config.base_url)
-            .bearer_auth(&self.config.api_key)
+            .header(
+                AUTHORIZATION,
+                personal_api_key_authorization(&self.config.api_key),
+            )
             .json(&json!({ "query": query, "variables": variables }))
             .send()
             .map_err(classify_reqwest_error)?;
@@ -714,6 +727,10 @@ fn decode_graphql_value(status: StatusCode, body: &str) -> Result<Value, LinearE
         }
     };
 
+    if status_overrides_graphql_errors(status) {
+        return Err(classify_status_error(status, body));
+    }
+
     let errors = response
         .get("errors")
         .cloned()
@@ -759,12 +776,27 @@ fn classify_status_error(status: StatusCode, body: &str) -> LinearError {
     }
 }
 
+fn status_overrides_graphql_errors(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::UNAUTHORIZED
+            | StatusCode::FORBIDDEN
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::REQUEST_TIMEOUT
+            | StatusCode::GATEWAY_TIMEOUT
+    ) || status.is_server_error()
+}
+
 fn classify_reqwest_error(error: reqwest::Error) -> LinearError {
     if error.is_timeout() {
         LinearError::Timeout(error.to_string())
     } else {
         LinearError::Transport(error.to_string())
     }
+}
+
+fn personal_api_key_authorization(api_key: &str) -> &str {
+    api_key
 }
 
 fn classify_graphql_errors(errors: &[GraphqlError]) -> LinearError {
@@ -790,6 +822,15 @@ fn classify_graphql_errors(errors: &[GraphqlError]) -> LinearError {
         )
     }) {
         return LinearError::PermissionDenied(detail);
+    }
+
+    if errors.iter().any(|error| {
+        matches!(
+            error.extensions.code.as_deref(),
+            Some("RATELIMITED" | "RATE_LIMITED")
+        )
+    }) {
+        return LinearError::RateLimited(detail);
     }
 
     if errors.iter().any(|error| {
@@ -1135,11 +1176,15 @@ struct LinearWorkflowStateNode {
 mod tests {
     use super::*;
     use std::collections::{HashMap, VecDeque};
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
-    #[derive(Default)]
+    type FakeResponses = HashMap<String, VecDeque<Result<Value, LinearError>>>;
+    type Shared<T> = Arc<Mutex<T>>;
+
+    #[derive(Clone, Default)]
     struct FakeTransport {
-        responses: Mutex<HashMap<String, VecDeque<Result<Value, LinearError>>>>,
+        responses: Shared<FakeResponses>,
+        calls: Shared<Vec<(String, Value)>>,
     }
 
     impl FakeTransport {
@@ -1151,11 +1196,19 @@ mod tests {
                 .or_default()
                 .push_back(response);
         }
+
+        fn calls(&self) -> Vec<(String, Value)> {
+            self.calls.lock().expect("lock should succeed").clone()
+        }
     }
 
     #[async_trait]
     impl LinearTransport for FakeTransport {
-        async fn execute(&self, query: &str, _variables: Value) -> Result<Value, LinearError> {
+        async fn execute(&self, query: &str, variables: Value) -> Result<Value, LinearError> {
+            self.calls
+                .lock()
+                .expect("lock should succeed")
+                .push((query.to_string(), variables));
             let operation = if query.contains("CandidateIssues") {
                 "CandidateIssues"
             } else if query.contains("TerminalIssues") {
@@ -1321,7 +1374,7 @@ mod tests {
             })),
         );
         let adapter = LinearAdapter::new(
-            transport,
+            transport.clone(),
             LinearConfig {
                 page_size: 1,
                 active_states: vec!["Todo".to_string()],
@@ -1339,6 +1392,10 @@ mod tests {
             .map(|state| state.identifier)
             .collect::<Vec<_>>();
         assert_eq!(identifiers, vec!["ABC-1", "ABC-2"]);
+        let calls = transport.calls();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].0.contains("includeArchived: true"));
+        assert_eq!(calls[0].1["issueIds"], json!(["1", "2"]));
     }
 
     #[tokio::test]
@@ -1410,5 +1467,33 @@ mod tests {
         let error = decode_graphql_value(StatusCode::SERVICE_UNAVAILABLE, "<html>retry</html>")
             .expect_err("5xx should be retryable even without JSON");
         assert!(matches!(error, LinearError::Transport(detail) if detail == "<html>retry</html>"));
+    }
+
+    #[test]
+    fn classifies_json_rate_limits_by_http_status_before_graphql_errors() {
+        let error = decode_graphql_value(
+            StatusCode::TOO_MANY_REQUESTS,
+            r#"{"errors":[{"message":"slow down","extensions":{"code":"BAD_USER_INPUT"}}]}"#,
+        )
+        .expect_err("429 JSON payload should still be retryable");
+        assert!(matches!(error, LinearError::RateLimited(detail) if detail.contains("slow down")));
+    }
+
+    #[test]
+    fn classifies_graphql_ratelimited_errors_as_rate_limited() {
+        let error = decode_graphql_value(
+            StatusCode::BAD_REQUEST,
+            r#"{"errors":[{"message":"slow down","extensions":{"code":"RATELIMITED"}}]}"#,
+        )
+        .expect_err("RATELIMITED GraphQL payload should be retryable");
+        assert!(matches!(error, LinearError::RateLimited(detail) if detail.contains("slow down")));
+    }
+
+    #[test]
+    fn uses_plain_authorization_header_for_personal_api_keys() {
+        assert_eq!(
+            personal_api_key_authorization("linear-api-key"),
+            "linear-api-key"
+        );
     }
 }
