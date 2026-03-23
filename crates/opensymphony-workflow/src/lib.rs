@@ -738,14 +738,10 @@ openhands:
         for invalid_base_url in [
             "localhost:8000",
             "ws://127.0.0.1:8000",
-            "http://127.0.0.1:8000/",
-            "https://127.0.0.1:8000",
-            "https://example.com/runtime",
-            "http://127.0.0.1:8000/api",
-            "https://example.com/runtime/api/",
             "http://[::1]:8000",
             "http://127.0.0.1:8000?session=abc",
             "http://127.0.0.1:8000#fragment",
+            "https://user:pass@example.com/runtime",
         ] {
             let workflow = WorkflowDefinition::parse(&format!(
                 r#"---
@@ -820,7 +816,7 @@ openhands:
     }
 
     #[test]
-    fn rejects_unsupported_https_openhands_transport_base_url() {
+    fn rejects_non_loopback_http_openhands_transport_base_url() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -832,7 +828,8 @@ tracker:
     - Done
 openhands:
   transport:
-    base_url: https://127.0.0.1:8000
+    base_url: http://agent.example.com:8000
+    session_api_key_env: OPENHANDS_SESSION_API_KEY
 ---
 {{ issue.identifier }}
 "#,
@@ -842,12 +839,110 @@ openhands:
 
         let error = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("https OpenHands origins should fail during resolution");
+            .expect_err("non-loopback http OpenHands origins should fail during resolution");
 
         assert!(matches!(
             error,
             WorkflowConfigError::InvalidField {
                 field: "openhands.transport.base_url",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolves_remote_https_openhands_transport_with_path_and_auth() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: https://agent.example.com/runtime/api/
+    session_api_key_env: OPENHANDS_SESSION_API_KEY
+  websocket:
+    ready_timeout_ms: 45000
+    reconnect_initial_ms: 1500
+    reconnect_max_ms: 45000
+    auth_mode: header
+    query_param_name: openhands_token
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("remote https transport should resolve");
+
+        assert_eq!(
+            resolved.extensions.openhands.transport.base_url,
+            "https://agent.example.com/runtime/api/"
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .transport
+                .session_api_key_env
+                .as_deref(),
+            Some("OPENHANDS_SESSION_API_KEY")
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.ready_timeout_ms,
+            45000
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.reconnect_initial_ms,
+            1500
+        );
+        assert_eq!(
+            resolved.extensions.openhands.websocket.reconnect_max_ms,
+            45000
+        );
+        assert_eq!(resolved.extensions.openhands.websocket.auth_mode, "header");
+        assert_eq!(
+            resolved.extensions.openhands.websocket.query_param_name,
+            "openhands_token"
+        );
+    }
+
+    #[test]
+    fn rejects_remote_https_openhands_transport_without_auth_env() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: https://agent.example.com/runtime/api/
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("remote https transport should require auth");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.transport.session_api_key_env",
                 ..
             }
         ));
@@ -1131,7 +1226,7 @@ openhands:
     }
 
     #[test]
-    fn rejects_unsupported_openhands_transport_session_api_key_env() {
+    fn resolves_openhands_transport_session_api_key_env() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1151,21 +1246,23 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-        let error = workflow
+        let resolved = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("transport auth overrides should fail during resolution");
+            .expect("transport auth env should resolve");
 
-        assert!(matches!(
-            error,
-            WorkflowConfigError::InvalidField {
-                field: "openhands.transport.session_api_key_env",
-                ..
-            }
-        ));
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .transport
+                .session_api_key_env
+                .as_deref(),
+            Some("OPENHANDS_SESSION_API_KEY")
+        );
     }
 
     #[test]
-    fn rejects_unsupported_openhands_websocket_auth_mode_override() {
+    fn resolves_openhands_websocket_auth_mode_override() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1176,6 +1273,8 @@ tracker:
   terminal_states:
     - Done
 openhands:
+  transport:
+    session_api_key_env: OPENHANDS_SESSION_API_KEY
   websocket:
     auth_mode: header
 ---
@@ -1185,41 +1284,17 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-        let error = workflow
+        let resolved = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("websocket auth mode overrides should fail during resolution");
+            .expect("websocket auth mode should resolve");
 
-        assert!(matches!(
-            error,
-            WorkflowConfigError::InvalidField {
-                field: "openhands.websocket.auth_mode",
-                ..
-            }
-        ));
+        assert_eq!(resolved.extensions.openhands.websocket.auth_mode, "header");
     }
 
     #[test]
-    fn rejects_unsupported_openhands_websocket_runtime_overrides() {
-        for (workflow_source, field) in [
-            (
-                r#"---
-tracker:
-  kind: linear
-  project_slug: sample-project
-  active_states:
-    - Todo
-  terminal_states:
-    - Done
-openhands:
-  websocket:
-    enabled: false
----
-{{ issue.identifier }}
-"#,
-                "openhands.websocket.enabled",
-            ),
-            (
-                r#"---
+    fn resolves_openhands_websocket_runtime_overrides() {
+        for workflow_source in [
+            r#"---
 tracker:
   kind: linear
   project_slug: sample-project
@@ -1233,10 +1308,7 @@ openhands:
 ---
 {{ issue.identifier }}
 "#,
-                "openhands.websocket.ready_timeout_ms",
-            ),
-            (
-                r#"---
+            r#"---
 tracker:
   kind: linear
   project_slug: sample-project
@@ -1250,10 +1322,7 @@ openhands:
 ---
 {{ issue.identifier }}
 "#,
-                "openhands.websocket.reconnect_initial_ms",
-            ),
-            (
-                r#"---
+            r#"---
 tracker:
   kind: linear
   project_slug: sample-project
@@ -1267,26 +1336,19 @@ openhands:
 ---
 {{ issue.identifier }}
 "#,
-                "openhands.websocket.reconnect_max_ms",
-            ),
         ] {
             let workflow =
                 WorkflowDefinition::parse(workflow_source).expect("workflow should parse");
             let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-            let error = workflow.resolve(Path::new("/repo"), &env).expect_err(
-                "unsupported websocket runtime overrides should fail during resolution",
-            );
-
-            assert!(matches!(
-                error,
-                WorkflowConfigError::InvalidField { field: actual, .. } if actual == field
-            ));
+            workflow
+                .resolve(Path::new("/repo"), &env)
+                .expect("websocket runtime overrides should resolve when supported");
         }
     }
 
     #[test]
-    fn rejects_unsupported_openhands_websocket_query_param_override() {
+    fn rejects_unsupported_openhands_websocket_enabled_override() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1298,7 +1360,7 @@ tracker:
     - Done
 openhands:
   websocket:
-    query_param_name: openhands_token
+    enabled: false
 ---
 {{ issue.identifier }}
 "#,
@@ -1308,12 +1370,81 @@ openhands:
 
         let error = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("websocket query-param overrides should fail during resolution");
+            .expect_err("workflow-owned websocket enablement should still fail");
 
         assert!(matches!(
             error,
             WorkflowConfigError::InvalidField {
-                field: "openhands.websocket.query_param_name",
+                field: "openhands.websocket.enabled",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolves_openhands_websocket_query_param_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    session_api_key_env: OPENHANDS_SESSION_API_KEY
+  websocket:
+    query_param_name: openhands_token
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("websocket query-param overrides should resolve");
+
+        assert_eq!(
+            resolved.extensions.openhands.websocket.query_param_name,
+            "openhands_token"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_openhands_websocket_auth_mode_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    session_api_key_env: OPENHANDS_SESSION_API_KEY
+  websocket:
+    auth_mode: browser_magic
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("invalid websocket auth mode should fail during resolution");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "openhands.websocket.auth_mode",
                 ..
             }
         ));

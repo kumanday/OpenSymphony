@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{Read, Write},
     net::TcpListener,
     path::Path,
     process::{Child, Command, Stdio},
@@ -154,6 +155,56 @@ fn stopping_external_mode_never_kills_the_server() {
 
     child.kill().expect("kill child");
     child.wait().expect("wait child");
+}
+
+#[test]
+fn external_mode_supports_path_prefixed_base_urls() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+    let address = listener
+        .local_addr()
+        .expect("listener address should resolve");
+    let server = thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("request should connect");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let bytes_read = stream.read(&mut chunk).expect("request should read");
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..bytes_read]);
+            }
+
+            let request = String::from_utf8(request).expect("request should be valid UTF-8");
+            assert!(
+                request.starts_with("GET /runtime/openapi.json HTTP/1.1\r\n"),
+                "unexpected request: {request:?}"
+            );
+
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+            )
+            .expect("response should write");
+            stream.flush().expect("response should flush");
+        }
+    });
+
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::External(
+        ExternalServerConfig::new(format!("http://{address}/runtime")),
+    ));
+
+    let started = supervisor
+        .start()
+        .expect("path-prefixed external server should be reachable");
+    assert_eq!(started.state, ServerState::Ready);
+    assert_eq!(started.ownership, LaunchOwnership::External);
+
+    let status = supervisor.status().expect("status should work");
+    assert_eq!(status.state, ServerState::Ready);
+
+    server.join().expect("server thread should finish");
 }
 
 #[test]

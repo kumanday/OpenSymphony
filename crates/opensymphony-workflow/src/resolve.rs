@@ -22,10 +22,10 @@ use crate::{
         OpenHandsConversationConfig, OpenHandsConversationFrontMatter, OpenHandsFrontMatter,
         OpenHandsLlmConfig, OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig,
         OpenHandsLocalServerFrontMatter, OpenHandsMcpConfig, OpenHandsMcpFrontMatter,
-        OpenHandsTransportConfig, OpenHandsTransportFrontMatter, OpenHandsWebSocketConfig,
-        OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter, ResolvedWorkflow,
-        TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition,
-        WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter,
+        OpenHandsTransportConfig, OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter,
+        PollingConfig, PollingFrontMatter, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter,
+        TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkspaceConfig,
+        WorkspaceFrontMatter,
     },
 };
 
@@ -231,17 +231,56 @@ fn resolve_openhands<E: Environment>(
     _base_dir: &Path,
     env: &E,
 ) -> Result<OpenHandsConfig, WorkflowConfigError> {
-    reject_unsupported_openhands_transport_auth(&openhands.transport)?;
     reject_unsupported_openhands_local_server_overrides(&openhands.local_server)?;
     reject_unsupported_openhands_websocket_overrides(&openhands.websocket)?;
     reject_unsupported_openhands_mcp(&openhands.mcp)?;
 
+    let transport_base_url =
+        resolve_openhands_base_url(openhands.transport.base_url.as_deref(), env)?;
+    let session_api_key_env = normalize_optional_literal(&openhands.transport.session_api_key_env);
+    let websocket_auth_mode = resolve_string_or_default(
+        openhands.websocket.auth_mode.as_deref(),
+        env,
+        "openhands.websocket.auth_mode",
+        DEFAULT_OPENHANDS_AUTH_MODE,
+    )?;
+    validate_openhands_websocket_auth_mode(&websocket_auth_mode)?;
+    let websocket_query_param_name = resolve_string_or_default(
+        openhands.websocket.query_param_name.as_deref(),
+        env,
+        "openhands.websocket.query_param_name",
+        DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
+    )?;
+    let websocket = OpenHandsWebSocketConfig {
+        enabled: openhands.websocket.enabled.unwrap_or(true),
+        ready_timeout_ms: resolve_positive_u64(
+            openhands.websocket.ready_timeout_ms.as_ref(),
+            "openhands.websocket.ready_timeout_ms",
+            DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+        )?,
+        reconnect_initial_ms: resolve_positive_u64(
+            openhands.websocket.reconnect_initial_ms.as_ref(),
+            "openhands.websocket.reconnect_initial_ms",
+            DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
+        )?,
+        reconnect_max_ms: resolve_positive_u64(
+            openhands.websocket.reconnect_max_ms.as_ref(),
+            "openhands.websocket.reconnect_max_ms",
+            DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+        )?,
+        auth_mode: websocket_auth_mode,
+        query_param_name: websocket_query_param_name,
+    };
+    validate_remote_openhands_transport_requirements(
+        &transport_base_url,
+        session_api_key_env.as_deref(),
+        &websocket,
+    )?;
+
     Ok(OpenHandsConfig {
         transport: OpenHandsTransportConfig {
-            base_url: resolve_openhands_base_url(openhands.transport.base_url.as_deref(), env)?,
-            session_api_key_env: normalize_optional_literal(
-                &openhands.transport.session_api_key_env,
-            ),
+            base_url: transport_base_url,
+            session_api_key_env,
         },
         local_server: OpenHandsLocalServerConfig {
             enabled: openhands.local_server.enabled.unwrap_or(true),
@@ -275,55 +314,11 @@ fn resolve_openhands<E: Environment>(
             )?,
         },
         conversation: resolve_openhands_conversation(&openhands.conversation, env)?,
-        websocket: OpenHandsWebSocketConfig {
-            enabled: openhands.websocket.enabled.unwrap_or(true),
-            ready_timeout_ms: resolve_positive_u64(
-                openhands.websocket.ready_timeout_ms.as_ref(),
-                "openhands.websocket.ready_timeout_ms",
-                DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
-            )?,
-            reconnect_initial_ms: resolve_positive_u64(
-                openhands.websocket.reconnect_initial_ms.as_ref(),
-                "openhands.websocket.reconnect_initial_ms",
-                DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
-            )?,
-            reconnect_max_ms: resolve_positive_u64(
-                openhands.websocket.reconnect_max_ms.as_ref(),
-                "openhands.websocket.reconnect_max_ms",
-                DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
-            )?,
-            auth_mode: resolve_string_or_default(
-                openhands.websocket.auth_mode.as_deref(),
-                env,
-                "openhands.websocket.auth_mode",
-                DEFAULT_OPENHANDS_AUTH_MODE,
-            )?,
-            query_param_name: resolve_string_or_default(
-                openhands.websocket.query_param_name.as_deref(),
-                env,
-                "openhands.websocket.query_param_name",
-                DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
-            )?,
-        },
+        websocket,
         mcp: OpenHandsMcpConfig {
             stdio_servers: Vec::new(),
         },
     })
-}
-
-fn reject_unsupported_openhands_transport_auth(
-    transport: &OpenHandsTransportFrontMatter,
-) -> Result<(), WorkflowConfigError> {
-    if transport.session_api_key_env.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.transport.session_api_key_env",
-            message:
-                "is not supported until the runtime transport layer wires workflow auth into AuthConfig"
-                    .to_owned(),
-        });
-    }
-
-    Ok(())
 }
 
 fn reject_unsupported_openhands_local_server_overrides(
@@ -389,51 +384,6 @@ fn reject_unsupported_openhands_websocket_overrides(
         });
     }
 
-    if websocket.ready_timeout_ms.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.websocket.ready_timeout_ms",
-            message:
-                "is not supported until the runtime readiness path consumes workflow-owned websocket timeouts"
-                    .to_owned(),
-        });
-    }
-
-    if websocket.reconnect_initial_ms.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.websocket.reconnect_initial_ms",
-            message:
-                "is not supported until the runtime reconnect path consumes workflow-owned websocket backoff settings"
-                    .to_owned(),
-        });
-    }
-
-    if websocket.reconnect_max_ms.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.websocket.reconnect_max_ms",
-            message:
-                "is not supported until the runtime reconnect path consumes workflow-owned websocket backoff settings"
-                    .to_owned(),
-        });
-    }
-
-    if websocket.auth_mode.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.websocket.auth_mode",
-            message:
-                "is not supported until the runtime transport layer wires workflow auth into AuthConfig"
-                    .to_owned(),
-        });
-    }
-
-    if websocket.query_param_name.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.websocket.query_param_name",
-            message:
-                "is not supported until the runtime transport layer wires workflow auth into AuthConfig"
-                    .to_owned(),
-        });
-    }
-
     Ok(())
 }
 
@@ -469,17 +419,15 @@ fn resolve_openhands_base_url<E: Environment>(
 fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError> {
     let parsed = Url::parse(base_url).map_err(|error| WorkflowConfigError::InvalidField {
         field: "openhands.transport.base_url",
-        message: format!("must be an absolute http URL: {error}"),
+        message: format!("must be an absolute http or https URL: {error}"),
     })?;
 
     match parsed.scheme() {
-        "http" => {}
+        "http" | "https" => {}
         _ => {
             return Err(WorkflowConfigError::InvalidField {
                 field: "openhands.transport.base_url",
-                message:
-                    "must use the http scheme until supervisor readiness probes support TLS endpoints"
-                        .to_owned(),
+                message: "must use the http or https scheme".to_owned(),
             });
         }
     }
@@ -502,33 +450,68 @@ fn validate_openhands_base_url(base_url: &str) -> Result<(), WorkflowConfigError
         }
     }
 
-    let without_scheme =
-        base_url
-            .strip_prefix("http://")
-            .ok_or_else(|| {
-                WorkflowConfigError::InvalidField {
-            field: "openhands.transport.base_url",
-            message:
-                "must use the http scheme until supervisor readiness probes support TLS endpoints"
-                    .to_owned(),
-        }
-            })?;
-
-    if without_scheme.contains('/') {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(WorkflowConfigError::InvalidField {
             field: "openhands.transport.base_url",
-            message:
-                "must not include a path until supervisor readiness probes support prefixed base URLs"
-                    .to_owned(),
+            message: "must not embed credentials".to_owned(),
         });
     }
 
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err(WorkflowConfigError::InvalidField {
             field: "openhands.transport.base_url",
-            message:
-                "must not include query or fragment suffixes until supervisor readiness probes support origin-only base URLs"
-                    .to_owned(),
+            message: "must not include query or fragment suffixes".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_openhands_websocket_auth_mode(auth_mode: &str) -> Result<(), WorkflowConfigError> {
+    match auth_mode.trim().to_ascii_lowercase().as_str() {
+        "auto" | "header" | "query_param" => Ok(()),
+        _ => Err(WorkflowConfigError::InvalidField {
+            field: "openhands.websocket.auth_mode",
+            message: "must be one of `auto`, `header`, or `query_param`".to_owned(),
+        }),
+    }
+}
+
+fn validate_remote_openhands_transport_requirements(
+    base_url: &str,
+    session_api_key_env: Option<&str>,
+    websocket: &OpenHandsWebSocketConfig,
+) -> Result<(), WorkflowConfigError> {
+    let parsed = Url::parse(base_url).map_err(|error| WorkflowConfigError::InvalidField {
+        field: "openhands.transport.base_url",
+        message: format!("must be an absolute http or https URL: {error}"),
+    })?;
+
+    let loopback_target = match parsed.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+
+    if !loopback_target && parsed.scheme() != "https" {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.transport.base_url",
+            message: "must use https for non-loopback remote agent-server targets".to_owned(),
+        });
+    }
+
+    if !loopback_target && session_api_key_env.is_none() {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.transport.session_api_key_env",
+            message: "is required for non-loopback remote agent-server targets".to_owned(),
+        });
+    }
+
+    if session_api_key_env.is_none() && websocket.auth_mode != DEFAULT_OPENHANDS_AUTH_MODE {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.websocket.auth_mode",
+            message: "requires `openhands.transport.session_api_key_env`".to_owned(),
         });
     }
 

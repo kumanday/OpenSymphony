@@ -47,6 +47,11 @@ fn fixture() -> SnapshotEnvelope {
                 workspace_path_suffix: "COE-269".to_owned(),
                 retry_count: 1,
                 blocked: false,
+                server_base_url: Some("https://agent.example.com/runtime".to_owned()),
+                transport_target: Some("remote".to_owned()),
+                http_auth_mode: Some("header".to_owned()),
+                websocket_auth_mode: Some("query_param".to_owned()),
+                websocket_query_param_name: Some("session_api_key".to_owned()),
             }],
             recent_events: vec![RecentEvent {
                 happened_at: now,
@@ -72,6 +77,11 @@ fn snapshot_envelope_round_trips_through_json() {
         encoded["snapshot"]["issues"][0]["last_outcome"],
         "continued"
     );
+    assert_eq!(
+        encoded["snapshot"]["issues"][0]["transport_target"],
+        "remote"
+    );
+    assert_eq!(encoded["snapshot"]["issues"][0]["http_auth_mode"], "header");
     assert_eq!(
         encoded["snapshot"]["recent_events"][0]["kind"],
         "snapshot_published"

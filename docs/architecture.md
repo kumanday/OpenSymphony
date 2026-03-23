@@ -228,15 +228,16 @@ The current local supervisor implementation resolves its launch metadata from
 terminates a process that it launched itself. In supervised mode it also refuses
 to launch when another ready server is already responding on the configured
 base URL, so the daemon never silently adopts a foreign process as its owned
-child. The runtime attach loop also still
-uses runtime-owned WebSocket readiness and reconnect budgets. Until those paths
-consume workflow-owned launch env, readiness-probe-path, startup-timeout, and
-websocket enablement/timing overrides, workflow resolution rejects explicit
-`local_server.env`, `local_server.readiness_probe_path`,
-`local_server.startup_timeout_ms`, `websocket.enabled`,
-`websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and
-`websocket.reconnect_max_ms` settings, as well as `https://`, path-bearing,
-query-bearing, fragment-bearing, and bracketed-IPv6 OpenHands origins.
+child. Workflow resolution now accepts absolute `http://` and `https://`
+OpenHands origins with optional path prefixes, rejects embedded credentials plus
+query/fragment suffixes, and still rejects bracketed IPv6 until the local
+readiness probe grows that support. Non-loopback targets must use `https://`
+and configure `openhands.transport.session_api_key_env`. The runtime attach
+loop now consumes workflow-owned WebSocket readiness and reconnect budgets.
+Until the local supervisor creation path consumes workflow-owned launcher
+overrides, disablement, env, readiness-probe-path, and startup-timeout
+settings, those fields and explicit `websocket.enabled` remain rejected during
+workflow resolution.
 
 ## 5. Worker and conversation model
 
@@ -317,6 +318,7 @@ The control plane exposes a summarized runtime snapshot derived from:
 - aggregated token and usage totals
 - recent OpenHands event summaries
 - local agent-server health
+- per-issue OpenHands server base URL plus transport and auth diagnostics
 
 The snapshot is not just a projection of OpenHands state. It is a Symphony-specific view.
 
@@ -326,7 +328,9 @@ The current repository implements the first read-only control-plane and FrankenT
 
 - `opensymphony-domain`
   - `SnapshotEnvelope`
-  - daemon, issue, metrics, and recent-event serialization models
+  - daemon, issue, metrics, and recent-event serialization models, including
+    `server_base_url`, `transport_target`, `http_auth_mode`,
+    `websocket_auth_mode`, and `websocket_query_param_name`
 - `opensymphony-control`
   - in-memory snapshot store
   - `GET /healthz`
