@@ -162,11 +162,11 @@ Current crate boundaries:
   - event cache
   - issue session runner
 - `opensymphony-orchestrator`
-  - poll tick
-  - scheduler actor and policy decisions over the shared state machine
-  - worker supervision
-  - retry timers
-  - reconciliation
+  - poll tick and long-running scheduler loop
+  - generic `Scheduler<TTracker, TWorkspace, TWorker>` core over tracker, workspace, and worker backends
+  - worker registry plus worker-report ingestion
+  - retry timers, stall handling, and state reconciliation
+  - manifest-backed restart recovery for workspace reuse
 - `opensymphony-control`
   - snapshot store
   - local HTTP and WebSocket control-plane API
@@ -201,9 +201,9 @@ The repository now exposes three stable foundation contracts that later mileston
 - `opensymphony-orchestrator`
   - deterministic candidate sorting with leaf-before-parent ordering
   - blocker-aware and hierarchy-aware dispatch eligibility helpers
-  - claim logic and claimed-to-running enforcement
-  - explicit `Claimed` / `Running` / `RetryQueued` / `Released` transitions
-  - fixed continuation retry, exponential failure backoff, stall detection, retry-start validation for `due_at`, `attempt`, latest dispatch eligibility, and bounded global/per-state capacity using the reservation's current state, reconciliation of running, retry-queued, and claimed-only issues including a claim-to-start grace window that remains independent from disabled stall detection before stale claimed-only release, freshest global rate-limit retention, and restart recovery
+  - generic scheduler configuration sourced from workflow polling, concurrency, retry, and stall settings
+  - explicit `Claimed` / `Running` / `RetryQueued` / `Released` transitions driven only by orchestrator-owned commands and worker reports
+  - fixed continuation retry, exponential failure backoff, bounded global/per-state capacity, running-worker reconciliation, terminal cleanup, and manifest-backed restart recovery for workspace reuse
 
 The other crates are already present at their final ownership boundaries, but for M1 they intentionally expose only thin re-exports or placeholders rather than premature transport logic.
 
@@ -367,9 +367,9 @@ This slice deliberately keeps the UI on a stable read-only contract while the or
 9. OpenHands runtime attaches WebSocket stream and reconciles event history.
 10. Prompt is chosen and sent as a user event.
 11. OpenHands run is triggered.
-12. Runtime events stream back over WebSocket and are mirrored into state and logs.
+12. Runtime events stream back over WebSocket and are mirrored into state, logs, and scheduler worker reports.
 13. Worker decides whether to do another in-process turn.
-14. Worker exits and reports success, failure, timeout, stall, or cancellation.
+14. Worker backend reports runtime progress and the terminal worker outcome to the scheduler.
 15. Orchestrator schedules a continuation retry, failure retry, release, or cleanup.
 
 ## 7.2 ASCII sequence
@@ -415,10 +415,16 @@ On startup:
 - initialize control-plane state
 - clean up terminal-state workspaces if configured
 - load known issue metadata from workspace manifests if present
-- rebuild retry queue from persisted retry metadata if implemented
+- reuse recovered workspace attachments for still-active issues on the next scheduler poll
+- rebuild retry queue from persisted retry metadata if implemented in a later milestone
 - treat OpenHands conversations as attachable resources, not as scheduler truth
 
 If a conversation exists but its issue is no longer active, the orchestrator does not resume it.
+
+Current repository implementation:
+
+- `opensymphony-orchestrator::Scheduler` recovers workspace ownership from manifest-derived `RecoveryRecord` entries and uses tracker state to decide whether recovered work should be redispatched, retained as inactive, or cleaned up as terminal
+- retry scheduling itself is still derived in memory from live worker outcomes rather than a separately persisted retry journal
 
 ## 8.2 WebSocket disconnect
 
