@@ -56,6 +56,8 @@ developer machine
 ### Security posture
 
 This is a trusted-machine mode. Treat it as process-level isolation, not sandbox isolation.
+`opensymphony doctor` repeats that warning during setup and warns when a local
+deployment points at a non-loopback OpenHands target.
 
 ## 3. Mode B: external local server mode
 

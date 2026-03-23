@@ -16,13 +16,24 @@ Current pin:
 Requirements:
 
 - `uv`
+- `git`
+- `curl`
+- Rust stable toolchain
 - Python `3.12.x`
 
-## Provision with `uv`
+## Install the pinned environment
+
+Recommended first-run command:
+
+```bash
+./tools/openhands-server/install.sh
+```
+
+Equivalent raw `uv` command:
 
 ```bash
 cd tools/openhands-server
-uv sync --extra agent-server
+uv sync --locked --extra agent-server
 ```
 
 ## Run locally
@@ -30,6 +41,9 @@ uv sync --extra agent-server
 ```bash
 ./tools/openhands-server/run-local.sh
 ```
+
+The helper `install.sh` keeps the provisioning path aligned with the same
+tool directory that `opensymphony doctor` and the local supervisor validate.
 
 The launcher binds to loopback-only at `127.0.0.1:8000` by default and only accepts `OPENHANDS_SERVER_PORT` as a runtime override. It intentionally rejects extra agent-server CLI flags so smoke runs stay aligned with the daemon-managed supervised topology.
 It also fails fast if `uv` is missing, if `OPENHANDS_SERVER_PORT` is invalid, or if the pinned `uv.lock` cannot be honored through `uv run --locked`.
