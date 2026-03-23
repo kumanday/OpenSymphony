@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+};
 
 use axum::{
     Json, Router,
@@ -12,8 +15,9 @@ use axum::{
 };
 use chrono::Utc;
 use opensymphony_openhands::{
-    Conversation, ConversationCreateRequest, ConversationStateUpdatePayload, EventEnvelope,
-    KnownEvent, SearchConversationEventsResponse, SendMessageRequest,
+    AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
+    ConversationStateUpdatePayload, EventEnvelope, KnownEvent, SearchConversationEventsResponse,
+    SendMessageRequest, WorkspaceConfig,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -28,6 +32,7 @@ use uuid::Uuid;
 pub struct FakeOpenHandsConfig {
     pub search_page_size: usize,
     pub run_terminal_status: &'static str,
+    pub initial_execution_status: &'static str,
 }
 
 impl Default for FakeOpenHandsConfig {
@@ -35,7 +40,214 @@ impl Default for FakeOpenHandsConfig {
         Self {
             search_page_size: 2,
             run_terminal_status: "finished",
+            initial_execution_status: "idle",
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FakeConversationBuilder {
+    workspace: WorkspaceConfig,
+    persistence_dir: String,
+    max_iterations: u32,
+    stuck_detection: bool,
+    execution_status: String,
+    confirmation_policy: ConfirmationPolicy,
+    agent: AgentConfig,
+}
+
+impl FakeConversationBuilder {
+    pub fn from_request(request: &ConversationCreateRequest) -> Self {
+        Self {
+            workspace: request.workspace.clone(),
+            persistence_dir: request.persistence_dir.clone(),
+            max_iterations: request.max_iterations,
+            stuck_detection: request.stuck_detection,
+            execution_status: "idle".to_string(),
+            confirmation_policy: request.confirmation_policy.clone(),
+            agent: request.agent.clone(),
+        }
+    }
+
+    pub fn execution_status(mut self, execution_status: impl Into<String>) -> Self {
+        self.execution_status = execution_status.into();
+        self
+    }
+
+    pub fn build(self, conversation_id: Uuid) -> Conversation {
+        Conversation {
+            conversation_id,
+            workspace: self.workspace,
+            persistence_dir: self.persistence_dir,
+            max_iterations: self.max_iterations,
+            stuck_detection: self.stuck_detection,
+            execution_status: self.execution_status,
+            confirmation_policy: self.confirmation_policy,
+            agent: self.agent,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct FakeEventStreamBuilder {
+    base_timestamp: chrono::DateTime<Utc>,
+}
+
+impl Default for FakeEventStreamBuilder {
+    fn default() -> Self {
+        Self {
+            base_timestamp: Utc::now(),
+        }
+    }
+}
+
+impl FakeEventStreamBuilder {
+    pub fn new(base_timestamp: chrono::DateTime<Utc>) -> Self {
+        Self { base_timestamp }
+    }
+
+    pub fn custom_at(
+        &self,
+        id: impl Into<String>,
+        offset_ms: i64,
+        source: impl Into<String>,
+        kind: impl Into<String>,
+        payload: Value,
+    ) -> EventEnvelope {
+        EventEnvelope::new(
+            id,
+            self.base_timestamp + chrono::Duration::milliseconds(offset_ms),
+            source,
+            kind,
+            payload,
+        )
+    }
+
+    pub fn state_update_at(
+        &self,
+        id: impl Into<String>,
+        offset_ms: i64,
+        execution_status: impl Into<String>,
+    ) -> EventEnvelope {
+        let execution_status = execution_status.into();
+        self.custom_at(
+            id,
+            offset_ms,
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": execution_status,
+                "state_delta": {
+                    "execution_status": execution_status,
+                },
+            }),
+        )
+    }
+
+    pub fn llm_completion_at(
+        &self,
+        id: impl Into<String>,
+        offset_ms: i64,
+        model: impl Into<String>,
+        tokens: u64,
+    ) -> EventEnvelope {
+        self.custom_at(
+            id,
+            offset_ms,
+            "llm",
+            "LLMCompletionLogEvent",
+            json!({
+                "model": model.into(),
+                "tokens": tokens,
+            }),
+        )
+    }
+
+    pub fn conversation_error_at(
+        &self,
+        id: impl Into<String>,
+        offset_ms: i64,
+        message: impl Into<String>,
+    ) -> EventEnvelope {
+        self.custom_at(
+            id,
+            offset_ms,
+            "runtime",
+            "ConversationErrorEvent",
+            json!({
+                "message": message.into(),
+            }),
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FakeSearchScript {
+    responses: Vec<SearchConversationEventsResponse>,
+}
+
+impl FakeSearchScript {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn response(mut self, events: Vec<EventEnvelope>) -> Self {
+        self.responses.push(SearchConversationEventsResponse {
+            events,
+            next_page_id: None,
+        });
+        self
+    }
+
+    pub fn paged_response(
+        mut self,
+        events: Vec<EventEnvelope>,
+        next_page_id: Option<String>,
+    ) -> Self {
+        self.responses.push(SearchConversationEventsResponse {
+            events,
+            next_page_id,
+        });
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum FakeSocketAction {
+    Event(EventEnvelope),
+    Text(String),
+    Ping(Vec<u8>),
+    Close,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FakeSocketScript {
+    actions: Vec<FakeSocketAction>,
+}
+
+impl FakeSocketScript {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn event(mut self, event: EventEnvelope) -> Self {
+        self.actions.push(FakeSocketAction::Event(event));
+        self
+    }
+
+    pub fn text(mut self, payload: impl Into<String>) -> Self {
+        self.actions.push(FakeSocketAction::Text(payload.into()));
+        self
+    }
+
+    pub fn ping(mut self, payload: impl Into<Vec<u8>>) -> Self {
+        self.actions.push(FakeSocketAction::Ping(payload.into()));
+        self
+    }
+
+    pub fn close(mut self) -> Self {
+        self.actions.push(FakeSocketAction::Close);
+        self
     }
 }
 
@@ -49,6 +261,7 @@ struct Inner {
     conversation_get_not_found: HashMap<Uuid, usize>,
     search_page_size: usize,
     run_terminal_status: String,
+    initial_execution_status: String,
     next_event_index: u64,
 }
 
@@ -57,6 +270,8 @@ struct FakeConversation {
     events: Vec<EventEnvelope>,
     sender: broadcast::Sender<EventEnvelope>,
     control_sender: broadcast::Sender<SocketControl>,
+    scripted_search_responses: VecDeque<SearchConversationEventsResponse>,
+    socket_scripts: VecDeque<FakeSocketScript>,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +297,7 @@ impl FakeOpenHandsServer {
                 conversation_get_not_found: HashMap::new(),
                 search_page_size: config.search_page_size,
                 run_terminal_status: config.run_terminal_status.to_string(),
+                initial_execution_status: config.initial_execution_status.to_string(),
                 next_event_index: 1,
             })),
         };
@@ -207,6 +423,34 @@ impl FakeOpenHandsServer {
         let _ = conversation.control_sender.send(SocketControl::Close);
         Ok(())
     }
+
+    pub async fn script_search_responses(
+        &self,
+        conversation_id: Uuid,
+        script: FakeSearchScript,
+    ) -> Result<(), FakeServerError> {
+        let mut inner = self.state.inner.lock().await;
+        let conversation = inner
+            .conversations
+            .get_mut(&conversation_id)
+            .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
+        conversation.scripted_search_responses = script.responses.into();
+        Ok(())
+    }
+
+    pub async fn script_socket_connections(
+        &self,
+        conversation_id: Uuid,
+        scripts: Vec<FakeSocketScript>,
+    ) -> Result<(), FakeServerError> {
+        let mut inner = self.state.inner.lock().await;
+        let conversation = inner
+            .conversations
+            .get_mut(&conversation_id)
+            .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
+        conversation.socket_scripts = scripts.into();
+        Ok(())
+    }
 }
 
 impl Drop for FakeOpenHandsServer {
@@ -240,16 +484,9 @@ async fn create_conversation(
         return Ok(Json(existing.summary.clone()));
     }
 
-    let summary = Conversation {
-        conversation_id: request.conversation_id,
-        workspace: request.workspace,
-        persistence_dir: request.persistence_dir,
-        max_iterations: request.max_iterations,
-        stuck_detection: request.stuck_detection,
-        execution_status: "idle".to_string(),
-        confirmation_policy: request.confirmation_policy,
-        agent: request.agent,
-    };
+    let summary = FakeConversationBuilder::from_request(&request)
+        .execution_status(inner.initial_execution_status.clone())
+        .build(request.conversation_id);
 
     let (sender, _) = broadcast::channel(32);
     let (control_sender, _) = broadcast::channel(8);
@@ -259,9 +496,9 @@ async fn create_conversation(
         "runtime",
         "ConversationStateUpdateEvent",
         json!({
-            "execution_status": "idle",
+            "execution_status": summary.execution_status.clone(),
             "state_delta": {
-                "execution_status": "idle",
+                "execution_status": summary.execution_status.clone(),
             },
         }),
     );
@@ -273,6 +510,8 @@ async fn create_conversation(
             events: vec![ready_event],
             sender,
             control_sender,
+            scripted_search_responses: VecDeque::new(),
+            socket_scripts: VecDeque::new(),
         },
     );
 
@@ -403,18 +642,21 @@ async fn search_events(
     Path(conversation_id): Path<Uuid>,
     Query(query): Query<SearchQuery>,
 ) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
-    let inner = state.inner.lock().await;
-    let conversation = inner
-        .conversations
-        .get(&conversation_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
     let offset = query
         .page_id
         .as_deref()
         .unwrap_or("0")
         .parse::<usize>()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let mut inner = state.inner.lock().await;
     let page_size = inner.search_page_size;
+    let conversation = inner
+        .conversations
+        .get_mut(&conversation_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if let Some(response) = conversation.scripted_search_responses.pop_front() {
+        return Ok(Json(response));
+    }
     let page = conversation
         .events
         .iter()
@@ -447,9 +689,9 @@ async fn events_socket(
 }
 
 async fn handle_socket(state: AppState, conversation_id: Uuid, mut socket: WebSocket) {
-    let (mut receiver, mut control_receiver, ready_event) = {
-        let inner = state.inner.lock().await;
-        let conversation = match inner.conversations.get(&conversation_id) {
+    let (mut receiver, mut control_receiver, ready_event, script) = {
+        let mut inner = state.inner.lock().await;
+        let conversation = match inner.conversations.get_mut(&conversation_id) {
             Some(conversation) => conversation,
             None => return,
         };
@@ -457,10 +699,39 @@ async fn handle_socket(state: AppState, conversation_id: Uuid, mut socket: WebSo
             conversation.sender.subscribe(),
             conversation.control_sender.subscribe(),
             latest_state_event(conversation),
+            conversation.socket_scripts.pop_front(),
         )
     };
 
-    if socket
+    if let Some(script) = script {
+        for action in script.actions {
+            match action {
+                FakeSocketAction::Event(event) => {
+                    let payload = match serde_json::to_string(&event) {
+                        Ok(payload) => payload,
+                        Err(_) => continue,
+                    };
+                    if socket.send(Message::Text(payload.into())).await.is_err() {
+                        return;
+                    }
+                }
+                FakeSocketAction::Text(payload) => {
+                    if socket.send(Message::Text(payload.into())).await.is_err() {
+                        return;
+                    }
+                }
+                FakeSocketAction::Ping(payload) => {
+                    if socket.send(Message::Ping(payload.into())).await.is_err() {
+                        return;
+                    }
+                }
+                FakeSocketAction::Close => {
+                    let _ = socket.send(Message::Close(None)).await;
+                    return;
+                }
+            }
+        }
+    } else if socket
         .send(Message::Text(
             serde_json::to_string(&ready_event)
                 .expect("serializing ready event should succeed")
@@ -553,4 +824,61 @@ fn next_event_id(inner: &mut Inner) -> String {
 
 fn run_in_progress(status: &str) -> bool {
     !matches!(status, "idle" | "finished" | "error" | "stuck")
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+
+    use super::{FakeConversationBuilder, FakeEventStreamBuilder};
+    use opensymphony_openhands::{ConversationCreateRequest, KnownEvent};
+
+    #[test]
+    fn conversation_builder_preserves_request_fields_and_overrides_status() {
+        let request = ConversationCreateRequest::doctor_probe(
+            "/tmp/workspace",
+            "/tmp/workspace/.opensymphony/openhands",
+            Some("gpt-test".to_string()),
+            Some("secret".to_string()),
+        );
+
+        let conversation = FakeConversationBuilder::from_request(&request)
+            .execution_status("running")
+            .build(request.conversation_id);
+
+        assert_eq!(conversation.conversation_id, request.conversation_id);
+        assert_eq!(conversation.workspace, request.workspace);
+        assert_eq!(conversation.persistence_dir, request.persistence_dir);
+        assert_eq!(conversation.max_iterations, request.max_iterations);
+        assert_eq!(conversation.stuck_detection, request.stuck_detection);
+        assert_eq!(conversation.execution_status, "running");
+        assert_eq!(
+            conversation.confirmation_policy,
+            request.confirmation_policy
+        );
+        assert_eq!(conversation.agent, request.agent);
+    }
+
+    #[test]
+    fn event_stream_builder_emits_deterministic_offsets() {
+        let base = chrono::Utc
+            .with_ymd_and_hms(2026, 3, 23, 12, 0, 0)
+            .single()
+            .expect("timestamp should be valid");
+        let fixtures = FakeEventStreamBuilder::new(base);
+        let state = fixtures.state_update_at("evt-state", -1_000, "queued");
+        let log = fixtures.llm_completion_at("evt-log", 2_000, "fake-model", 42);
+
+        assert_eq!(
+            state.timestamp,
+            base - chrono::Duration::milliseconds(1_000)
+        );
+        assert_eq!(log.timestamp, base + chrono::Duration::milliseconds(2_000));
+        assert!(matches!(
+            KnownEvent::from_envelope(&state),
+            KnownEvent::ConversationStateUpdate(_)
+        ));
+        assert_eq!(log.kind, "LLMCompletionLogEvent");
+        assert_eq!(log.payload["tokens"], 42);
+    }
 }

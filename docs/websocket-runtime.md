@@ -167,8 +167,8 @@ Current repository implementation:
 - the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, refreshes the in-memory state mirror only when it is newer than the reconciled state, stays authoritative across later mirror rebuilds until reconcile or REST refresh surfaces an equal or newer decodable state update, can salvage a forward-compatible `state_delta` even when the full payload shape no longer deserializes cleanly, can clear stale terminal REST fallback when a reused conversation has already restarted into an active `queued` or `running` state, and is not replayed through `next_event()` unless `/events/search` independently contains the same event ID
 - `RuntimeEventStream::next_event` now drains any immediately available live socket frames into the same ordered pending queue before yielding a later attach-backlog item, so direct consumers still observe timestamp order while replaying persisted history without relying on a fixed read-ahead delay
 - workflow-owned `openhands.websocket.ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` overrides are now consumed by the runtime attach/reconnect path; explicit `openhands.websocket.enabled` still remains rejected because the live runtime always opens the readiness socket
-- `opensymphony-testkit` sends a state-update event immediately on WebSocket attach so readiness behavior is deterministic in CI
-- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, `crates/opensymphony-openhands/tests/live_pinned_server.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, auth, and reconcile path
+- `opensymphony-testkit` sends a state-update event immediately on default WebSocket attach and can now override individual `/events/search` calls plus per-connection WebSocket frame sequences, so attach/reconcile race windows stay deterministic in CI without standing up ad hoc inline servers for each scenario
+- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, `crates/opensymphony-openhands/tests/live_pinned_server.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, auth, and reconcile path, with the shared fake-server contract suite now absorbing the scripted initial-replay, buffered-live ordering, reconnect-exhaustion, and explicit-close cases
 
 ## 6. Event cache and reconciliation
 
@@ -341,7 +341,7 @@ Current repository implementation:
 - `wait_for_probe_terminal_state` also gives the stream one extra scheduler-turn buffered drain before accepting `finished`, so a just-arrived `ConversationErrorEvent` still fails the probe instead of being skipped after the terminal state update
 - after `wait_for_probe_terminal_state` has already succeeded, `run_probe` reuses the stream-backed conversation snapshot plus mirrored terminal `execution_status` instead of requiring one more terminal REST fetch
 - `RuntimeEventStream::close` clears any queued replay and deferred reconnect intent before closing the socket, so later polls on that stream instance stay closed instead of reopening the conversation
-- `opensymphony-testkit` can now force live socket drops so reconnect coverage is deterministic in CI
+- `opensymphony-testkit` can now force live socket drops and script per-connection frame sequences so reconnect and buffered-delivery coverage stay deterministic in CI
 
 ## 8.3 Decode failures
 
