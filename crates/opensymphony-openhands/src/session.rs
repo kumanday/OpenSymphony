@@ -16,7 +16,7 @@ use opensymphony_workspace::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::time::{Instant, timeout, timeout_at};
+use tokio::time::{Instant, timeout_at};
 use tracing::debug;
 use uuid::Uuid;
 
@@ -1210,7 +1210,26 @@ impl IssueSessionRunner {
                         )),
                     };
                 }
-                Ok(Ok(Some(_))) | Ok(Ok(None)) => {}
+                Ok(Ok(Some(_))) => {}
+                Ok(Ok(None)) => {
+                    if let Ok(inserted) = stream.reconcile_events().await
+                        && inserted > 0
+                        && let Some(outcome) = self
+                            .terminal_outcome_from_state(stream, baseline_event_ids)
+                            .await
+                    {
+                        return outcome;
+                    }
+
+                    return NormalizedOutcome {
+                        kind: WorkerOutcomeKind::Failed,
+                        summary: "runtime event stream ended before terminal status".to_string(),
+                        error: Some(
+                            "runtime event stream closed before a terminal state was observed"
+                                .to_string(),
+                        ),
+                    };
+                }
                 Ok(Err(error)) => {
                     if let Some(outcome) = self
                         .terminal_outcome_from_state(stream, baseline_event_ids)
@@ -1299,18 +1318,25 @@ impl IssueSessionRunner {
         stream: &mut RuntimeEventStream,
         baseline_event_ids: &HashSet<String>,
     ) -> bool {
-        let drained = timeout(self.config.finished_drain_timeout, stream.next_event()).await;
-        match drained {
-            Err(_) => latest_current_turn_error(stream.event_cache().items(), baseline_event_ids)
-                .is_none(),
-            Ok(Ok(Some(_))) | Ok(Ok(None)) => false,
-            Ok(Err(error)) => {
-                matches!(
-                    stream.state_mirror().terminal_status(),
-                    Some(TerminalExecutionStatus::Finished)
-                ) && latest_current_turn_error(stream.event_cache().items(), baseline_event_ids)
-                    .is_none()
-                    && finished_stream_error_is_tolerable(&error)
+        let deadline = Instant::now() + self.config.finished_drain_timeout;
+
+        loop {
+            if latest_current_turn_error(stream.event_cache().items(), baseline_event_ids).is_some()
+            {
+                return false;
+            }
+            if !matches!(
+                stream.state_mirror().terminal_status(),
+                Some(TerminalExecutionStatus::Finished)
+            ) {
+                return false;
+            }
+
+            match timeout_at(deadline, stream.next_event()).await {
+                Err(_) => return true,
+                Ok(Ok(Some(_))) => continue,
+                Ok(Ok(None)) => return true,
+                Ok(Err(error)) => return finished_stream_error_is_tolerable(&error),
             }
         }
     }
@@ -1342,7 +1368,7 @@ impl IssueSessionRunner {
                 .unwrap_or_else(|| outcome.summary.clone()),
         );
         workspace_manager
-            .write_run_manifest(workspace, run_manifest)
+            .finish_run(workspace, run_manifest, run_status)
             .await?;
 
         let worker_outcome = WorkerOutcomeRecord::from_run(
@@ -1408,7 +1434,7 @@ impl IssueSessionRunner {
                 .unwrap_or_else(|| outcome.summary.clone()),
         );
         workspace_manager
-            .write_run_manifest(workspace, run_manifest)
+            .finish_run(workspace, run_manifest, run_status)
             .await?;
 
         let worker_outcome = WorkerOutcomeRecord::from_run(
@@ -1678,4 +1704,83 @@ fn finished_stream_error_is_tolerable(error: &OpenHandsError) -> bool {
         error,
         OpenHandsError::ReconnectExhausted { .. } | OpenHandsError::WebSocketClosed
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use opensymphony_domain::WorkerOutcomeKind;
+    use opensymphony_testkit::FakeOpenHandsServer;
+
+    use super::*;
+    use crate::TransportConfig;
+
+    #[tokio::test]
+    async fn await_terminal_outcome_accepts_reconciled_finished_state_after_stream_close() {
+        let server = FakeOpenHandsServer::start()
+            .await
+            .expect("fake server should start");
+        let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+        let conversation = client
+            .create_conversation(&ConversationCreateRequest::doctor_probe(
+                "/tmp/opensymphony-live",
+                "/tmp/opensymphony-live/.opensymphony/openhands",
+                Some("fake-model".to_string()),
+                None,
+            ))
+            .await
+            .expect("conversation should be created");
+        let mut stream = client
+            .attach_runtime_stream(
+                conversation.conversation_id,
+                RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_secs(2),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                },
+            )
+            .await
+            .expect("runtime stream should attach");
+        let baseline_event_ids = stream
+            .event_cache()
+            .items()
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
+
+        server
+            .emit_state_update(conversation.conversation_id, "running")
+            .await
+            .expect("running state should be recorded");
+        server
+            .emit_state_update(conversation.conversation_id, "finished")
+            .await
+            .expect("finished state should be recorded");
+        stream.close().await.expect("stream should close cleanly");
+
+        let runner = IssueSessionRunner::new(
+            client,
+            IssueSessionRunnerConfig {
+                runtime_stream: RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_secs(2),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                },
+                terminal_wait_timeout: Duration::from_millis(25),
+                finished_drain_timeout: Duration::from_millis(25),
+            },
+        );
+        let outcome = runner
+            .await_terminal_outcome(&mut stream, &baseline_event_ids)
+            .await;
+
+        assert_eq!(outcome.kind, WorkerOutcomeKind::Succeeded);
+        assert_eq!(
+            stream.state_mirror().terminal_status(),
+            Some(TerminalExecutionStatus::Finished)
+        );
+    }
 }

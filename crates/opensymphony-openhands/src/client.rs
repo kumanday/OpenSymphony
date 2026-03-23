@@ -864,10 +864,21 @@ impl RuntimeEventStream {
     }
 
     fn apply_terminal_conversation_fallback(&mut self) {
+        let latest_cached_execution_status = self.event_cache.items().iter().rev().find_map(
+            |event| match KnownEvent::from_envelope(event) {
+                KnownEvent::ConversationStateUpdate(payload) => payload.execution_status,
+                _ => None,
+            },
+        );
+        let cached_state_restarts_execution = matches!(
+            latest_cached_execution_status.as_deref(),
+            Some("queued" | "running")
+        );
         if matches!(
             self.conversation.execution_status.as_str(),
             "finished" | "error" | "stuck"
-        ) && self.state_mirror.terminal_status().is_none()
+        ) && !cached_state_restarts_execution
+            && self.state_mirror.terminal_status().is_none()
         {
             self.state_mirror
                 .apply_conversation_execution_status(&self.conversation);

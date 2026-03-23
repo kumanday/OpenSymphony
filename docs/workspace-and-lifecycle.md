@@ -142,6 +142,8 @@ Use for:
 ## 6.3 `after_run`
 
 Runs after each worker lifetime regardless of outcome, best effort.
+Run finalization must flow through the workspace manager's `finish_run` path so the final
+`run.json` and any generated artifacts include `after_run` hook receipts.
 
 Use for:
 

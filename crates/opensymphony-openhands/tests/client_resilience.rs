@@ -558,6 +558,41 @@ async fn attach_runtime_stream_applies_newer_reused_conversation_readiness_snaps
 }
 
 #[tokio::test]
+async fn attach_runtime_stream_prefers_cached_running_state_over_stale_terminal_conversation_summary()
+ {
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(reused_conversation_cached_running_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let stream = client
+        .attach_runtime_stream(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+        )
+        .await
+        .expect("runtime stream attach should succeed");
+
+    assert_eq!(
+        stream.state_mirror().execution_status(),
+        Some("running"),
+        "a newer cached running state should win over a stale terminal conversation summary"
+    );
+}
+
+#[tokio::test]
 async fn attach_runtime_stream_uses_ready_barrier_when_newer_persisted_state_update_is_undecodable()
 {
     let state = ReadinessMirrorState::default();
@@ -819,6 +854,27 @@ fn reused_conversation_readiness_mirror_router(state: ReadinessMirrorState) -> R
         .with_state(state)
 }
 
+fn reused_conversation_cached_running_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(reused_conversation_readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}/events/search",
+            get(reused_conversation_running_search_events),
+        )
+        .route(
+            "/sockets/events/{conversation_id}",
+            get(idle_readiness_mirror_events_socket),
+        )
+        .with_state(state)
+}
+
 fn undecodable_newer_state_readiness_mirror_router(state: ReadinessMirrorState) -> Router {
     Router::new()
         .route(
@@ -939,6 +995,27 @@ async fn undecodable_newer_state_readiness_mirror_search_events(
     }))
 }
 
+async fn reused_conversation_running_search_events(
+    Path(_conversation_id): Path<Uuid>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    let running_timestamp = Utc::now() + chrono::Duration::seconds(1);
+    Ok(Json(SearchConversationEventsResponse {
+        events: vec![EventEnvelope::new(
+            "evt-running-from-search",
+            running_timestamp,
+            "runtime",
+            "ConversationStateUpdateEvent",
+            json!({
+                "execution_status": "running",
+                "state_delta": {
+                    "execution_status": "running",
+                },
+            }),
+        )],
+        next_page_id: None,
+    }))
+}
+
 async fn readiness_mirror_events_socket(
     Path(_conversation_id): Path<Uuid>,
     websocket: WebSocketUpgrade,
@@ -955,6 +1032,33 @@ async fn readiness_mirror_events_socket(
                         "execution_status": "running",
                         "state_delta": {
                             "execution_status": "running",
+                        },
+                    }),
+                ))
+                .expect("ready event should serialize"),
+            ))
+            .await
+            .expect("ready event should send");
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
+}
+
+async fn idle_readiness_mirror_events_socket(
+    Path(_conversation_id): Path<Uuid>,
+    websocket: WebSocketUpgrade,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        socket
+            .send(text_message(
+                serde_json::to_string(&EventEnvelope::new(
+                    "evt-ready-idle",
+                    Utc::now(),
+                    "runtime",
+                    "ConversationStateUpdateEvent",
+                    json!({
+                        "execution_status": "idle",
+                        "state_delta": {
+                            "execution_status": "idle",
                         },
                     }),
                 ))
