@@ -37,6 +37,8 @@ Because this sanitization is not injective, workspace reuse must be gated by the
 - The issue workspace path itself must not be a symlink when OpenSymphony reuses or validates it.
 - `cwd` for all hook commands and all OpenHands runs must equal the resolved issue workspace path unless an explicit per-command `cwd` override inside the same workspace is required.
 - When `openhands.local_server.command` is omitted, the runtime-owned local tooling layer must resolve the pinned launcher from the OpenSymphony checkout before that `cwd` switch happens. Workflow resolution must not bake a compile-time checkout path into config defaults.
+- Non-loopback remote `openhands.transport.base_url` targets must use `https://` and set `openhands.transport.session_api_key_env`.
+- Only unauthenticated loopback `http://` root origins are eligible for daemon-managed local supervision. Authenticated or path-prefixed loopback targets must be treated as external connections even when they still point at `127.0.0.1` or `localhost`.
 - Explicit workflow-owned `openhands.local_server.command` overrides are currently rejected until the runtime supervisor can honor them instead of always launching the pinned repo-local server wrapper.
 - Explicit workflow-owned `openhands.local_server.enabled: false` overrides are currently rejected until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness.
 - Explicit workflow-owned `openhands.local_server.env` overrides are currently rejected until the runtime supervisor creation path forwards them into the actual launcher environment instead of still using runtime-owned defaults.
@@ -229,6 +231,10 @@ Suggested fields:
 - `identifier`
 - `conversation_id`
 - `server_base_url`
+- `transport_target`
+- `http_auth_mode`
+- `websocket_auth_mode`
+- `websocket_query_param_name`
 - `persistence_dir`
 - `created_at`
 - `updated_at`
@@ -271,6 +277,7 @@ Human-readable summary for the agent and operator:
 Machine-readable runtime summary:
 
 - conversation ID
+- server base URL plus transport/auth diagnostics
 - run ID
 - attempt number
 - worker ID

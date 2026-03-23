@@ -96,6 +96,14 @@ pub struct IssueConversationManifest {
     pub identifier: IssueIdentifier,
     pub conversation_id: ConversationId,
     pub server_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_query_param_name: Option<String>,
     pub persistence_dir: PathBuf,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -138,6 +146,10 @@ impl IssueConversationManifest {
             identifier,
             conversation_id,
             server_base_url: None,
+            transport_target: None,
+            http_auth_mode: None,
+            websocket_auth_mode: None,
+            websocket_query_param_name: None,
             persistence_dir,
             created_at: attached_at,
             updated_at: attached_at,
@@ -200,10 +212,30 @@ impl IssueConversationManifest {
         self.updated_at = Utc::now();
     }
 
+    fn apply_transport_diagnostics(
+        &mut self,
+        diagnostics: Option<&crate::TransportDiagnostics>,
+        server_base_url: &str,
+    ) {
+        self.server_base_url = Some(server_base_url.to_string());
+        self.transport_target =
+            diagnostics.map(|diagnostics| diagnostics.target_kind.as_str().to_string());
+        self.http_auth_mode =
+            diagnostics.map(|diagnostics| diagnostics.http_auth_kind.as_str().to_string());
+        self.websocket_auth_mode =
+            diagnostics.map(|diagnostics| diagnostics.websocket_auth_kind.as_str().to_string());
+        self.websocket_query_param_name =
+            diagnostics.and_then(|diagnostics| diagnostics.websocket_query_param_name.clone());
+    }
+
     fn to_domain_metadata(&self, stream_state: RuntimeStreamState) -> ConversationMetadata {
         ConversationMetadata {
             conversation_id: self.conversation_id.clone(),
             server_base_url: self.server_base_url.clone(),
+            transport_target: self.transport_target.clone(),
+            http_auth_mode: self.http_auth_mode.clone(),
+            websocket_auth_mode: self.websocket_auth_mode.clone(),
+            websocket_query_param_name: self.websocket_query_param_name.clone(),
             fresh_conversation: self.fresh_conversation,
             runtime_contract_version: self.runtime_contract_version.clone(),
             stream_state,
@@ -233,6 +265,14 @@ pub struct IssueSessionContext {
     pub fresh_conversation: bool,
     pub workflow_prompt_seeded: bool,
     pub server_base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub http_auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_auth_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub websocket_query_param_name: Option<String>,
     pub persistence_dir: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_execution_status: Option<String>,
@@ -788,7 +828,9 @@ impl IssueSessionRunner {
 
         let attached_at = Utc::now();
         manifest.fresh_conversation = false;
-        manifest.server_base_url = Some(self.client.base_url().to_string());
+        let transport_diagnostics = self.client.transport_diagnostics().ok();
+        manifest
+            .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
         manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
         manifest.last_attached_at = attached_at;
         manifest.updated_at = attached_at;
@@ -902,6 +944,8 @@ impl IssueSessionRunner {
                             &conversation,
                             true,
                             RuntimeStreamState::Failed,
+                            self.client.transport_diagnostics().ok().as_ref(),
+                            self.client.base_url(),
                         )),
                         NormalizedOutcome {
                             kind: WorkerOutcomeKind::Failed,
@@ -926,7 +970,9 @@ impl IssueSessionRunner {
             attached_at,
             reset_reason,
         );
-        manifest.server_base_url = Some(self.client.base_url().to_string());
+        let transport_diagnostics = self.client.transport_diagnostics().ok();
+        manifest
+            .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
         manifest.apply_runtime_snapshot(&stream);
         workspace_manager
             .write_json_artifact(
@@ -1481,6 +1527,10 @@ fn build_session_context(
         fresh_conversation: manifest.fresh_conversation,
         workflow_prompt_seeded: manifest.workflow_prompt_seeded,
         server_base_url: manifest.server_base_url.clone(),
+        transport_target: manifest.transport_target.clone(),
+        http_auth_mode: manifest.http_auth_mode.clone(),
+        websocket_auth_mode: manifest.websocket_auth_mode.clone(),
+        websocket_query_param_name: manifest.websocket_query_param_name.clone(),
         persistence_dir: manifest.persistence_dir.clone(),
         last_execution_status: manifest.last_execution_status.clone(),
         last_event_id: manifest.last_event_id.clone(),
@@ -1504,11 +1554,21 @@ fn build_summary_metadata(
     conversation: &Conversation,
     fresh_conversation: bool,
     stream_state: RuntimeStreamState,
+    diagnostics: Option<&crate::TransportDiagnostics>,
+    server_base_url: &str,
 ) -> ConversationMetadata {
     ConversationMetadata {
         conversation_id: ConversationId::new(conversation.conversation_id.to_string())
             .expect("UUID-backed conversation ID should not be empty"),
-        server_base_url: None,
+        server_base_url: Some(server_base_url.to_string()),
+        transport_target: diagnostics
+            .map(|diagnostics| diagnostics.target_kind.as_str().to_string()),
+        http_auth_mode: diagnostics
+            .map(|diagnostics| diagnostics.http_auth_kind.as_str().to_string()),
+        websocket_auth_mode: diagnostics
+            .map(|diagnostics| diagnostics.websocket_auth_kind.as_str().to_string()),
+        websocket_query_param_name: diagnostics
+            .and_then(|diagnostics| diagnostics.websocket_query_param_name.clone()),
         fresh_conversation,
         runtime_contract_version: Some(RUNTIME_CONTRACT_VERSION.to_string()),
         stream_state,

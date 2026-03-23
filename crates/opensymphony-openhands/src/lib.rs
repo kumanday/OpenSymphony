@@ -7,7 +7,8 @@ mod tooling;
 
 pub use client::{
     ApiKeyAuth, AuthConfig, HttpAuth, OpenHandsClient, OpenHandsError, OpenHandsProbeResult,
-    RuntimeEventStream, RuntimeStreamConfig, TransportConfig, WebSocketAuth,
+    RuntimeEventStream, RuntimeStreamConfig, TransportAuthKind, TransportConfig,
+    TransportDiagnostics, TransportTargetKind, WebSocketAuth,
 };
 pub use events::{
     ConversationErrorEvent, ConversationStateMirror, EventCache, KnownEvent, LlmCompletionLogEvent,

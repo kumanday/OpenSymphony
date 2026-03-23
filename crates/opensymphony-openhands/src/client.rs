@@ -1,6 +1,7 @@
 use std::{cmp::Ordering, collections::VecDeque, time::Duration};
 
 use futures_util::StreamExt;
+use opensymphony_workflow::{Environment, ResolvedWorkflow};
 use reqwest::{
     RequestBuilder,
     header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
@@ -17,7 +18,7 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use tracing::debug;
-use url::Url;
+use url::{Host, Url};
 use uuid::Uuid;
 
 use crate::events::{ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus};
@@ -25,6 +26,69 @@ use crate::models::{
     AcceptedResponse, Conversation, ConversationCreateRequest, ConversationRunRequest,
     EventEnvelope, SearchConversationEventsResponse, SendMessageRequest,
 };
+
+const SESSION_API_KEY_HEADER_NAME: &str = "x-session-api-key";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportTargetKind {
+    Loopback,
+    Remote,
+}
+
+impl TransportTargetKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Loopback => "loopback",
+            Self::Remote => "remote",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportAuthKind {
+    None,
+    Header,
+    QueryParam,
+}
+
+impl TransportAuthKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Header => "header",
+            Self::QueryParam => "query_param",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportDiagnostics {
+    pub target_kind: TransportTargetKind,
+    pub http_auth_kind: TransportAuthKind,
+    pub websocket_auth_kind: TransportAuthKind,
+    pub websocket_query_param_name: Option<String>,
+    pub managed_local_server_candidate: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowWebSocketAuthMode {
+    Auto,
+    Header,
+    QueryParam,
+}
+
+impl WorkflowWebSocketAuthMode {
+    fn parse(mode: &str) -> Result<Self, OpenHandsError> {
+        match mode.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "header" => Ok(Self::Header),
+            "query_param" => Ok(Self::QueryParam),
+            other => Err(OpenHandsError::invalid_configuration(format!(
+                "unsupported websocket auth mode `{other}`"
+            ))),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiKeyAuth {
@@ -146,6 +210,29 @@ impl AuthConfig {
 
         Ok(())
     }
+
+    fn http_auth_kind(&self) -> TransportAuthKind {
+        match self.http {
+            HttpAuth::None => TransportAuthKind::None,
+            HttpAuth::Header(_) => TransportAuthKind::Header,
+            HttpAuth::QueryParam(_) => TransportAuthKind::QueryParam,
+        }
+    }
+
+    fn websocket_auth_kind(&self) -> TransportAuthKind {
+        match self.websocket {
+            WebSocketAuth::None => TransportAuthKind::None,
+            WebSocketAuth::Header(_) => TransportAuthKind::Header,
+            WebSocketAuth::QueryParam(_) => TransportAuthKind::QueryParam,
+        }
+    }
+
+    fn websocket_query_param_name(&self) -> Option<&str> {
+        match &self.websocket {
+            WebSocketAuth::QueryParam(key) => Some(key.name()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +249,23 @@ impl TransportConfig {
         }
     }
 
+    pub fn from_workflow<E: Environment>(
+        workflow: &ResolvedWorkflow,
+        env: &E,
+    ) -> Result<Self, OpenHandsError> {
+        let transport = &workflow.extensions.openhands.transport;
+        let websocket = &workflow.extensions.openhands.websocket;
+        let auth = build_workflow_auth_config(
+            transport.session_api_key_env.as_deref(),
+            websocket.auth_mode.as_str(),
+            websocket.query_param_name.as_str(),
+            env,
+        )?;
+        let config = Self::new(transport.base_url.clone()).with_auth(auth);
+        config.parsed_base_url()?;
+        Ok(config)
+    }
+
     pub fn with_auth(mut self, auth: AuthConfig) -> Self {
         self.auth = auth;
         self
@@ -173,6 +277,30 @@ impl TransportConfig {
 
     pub fn auth(&self) -> &AuthConfig {
         &self.auth
+    }
+
+    pub fn diagnostics(&self) -> Result<TransportDiagnostics, OpenHandsError> {
+        let url = self.parsed_base_url()?;
+        let target_kind = if is_loopback_host(url.host()) {
+            TransportTargetKind::Loopback
+        } else {
+            TransportTargetKind::Remote
+        };
+
+        Ok(TransportDiagnostics {
+            target_kind,
+            http_auth_kind: self.auth.http_auth_kind(),
+            websocket_auth_kind: self.auth.websocket_auth_kind(),
+            websocket_query_param_name: self
+                .auth
+                .websocket_query_param_name()
+                .map(ToOwned::to_owned),
+            managed_local_server_candidate: target_kind == TransportTargetKind::Loopback
+                && url.scheme() == "http"
+                && base_url_path_is_root(&url)
+                && self.auth.http_auth_kind() == TransportAuthKind::None
+                && self.auth.websocket_auth_kind() == TransportAuthKind::None,
+        })
     }
 
     fn endpoint(&self, suffix: &str) -> Result<Url, OpenHandsError> {
@@ -232,12 +360,44 @@ impl TransportConfig {
     }
 
     fn parsed_base_url(&self) -> Result<Url, OpenHandsError> {
-        Url::parse(&self.base_url).map_err(|error| {
+        let url = Url::parse(&self.base_url).map_err(|error| {
             OpenHandsError::invalid_configuration(format!(
                 "invalid base URL `{}`: {error}",
                 self.base_url
             ))
-        })
+        })?;
+
+        match url.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Err(OpenHandsError::invalid_configuration(format!(
+                    "unsupported base URL scheme `{other}`"
+                )));
+            }
+        }
+
+        if url.host().is_none() {
+            return Err(OpenHandsError::invalid_configuration(format!(
+                "base URL `{}` must include a host",
+                self.base_url
+            )));
+        }
+
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(OpenHandsError::invalid_configuration(format!(
+                "base URL `{}` must not embed credentials",
+                self.base_url
+            )));
+        }
+
+        if url.query().is_some() || url.fragment().is_some() {
+            return Err(OpenHandsError::invalid_configuration(format!(
+                "base URL `{}` must not include query or fragment suffixes",
+                self.base_url
+            )));
+        }
+
+        Ok(url)
     }
 }
 
@@ -754,6 +914,10 @@ impl OpenHandsClient {
         self.transport.base_url()
     }
 
+    pub fn transport_diagnostics(&self) -> Result<TransportDiagnostics, OpenHandsError> {
+        self.transport.diagnostics()
+    }
+
     pub async fn openapi_probe(&self) -> Result<(), OpenHandsError> {
         let response = send(self.get_request("/openapi.json")?, "probe OpenAPI").await?;
         read_success_body(response, "probe OpenAPI")
@@ -968,6 +1132,73 @@ impl OpenHandsClient {
             OpenHandsError::websocket_transport("connect runtime stream", error)
         })?;
         Ok(stream)
+    }
+}
+
+fn build_workflow_auth_config<E: Environment>(
+    session_api_key_env: Option<&str>,
+    websocket_auth_mode: &str,
+    websocket_query_param_name: &str,
+    env: &E,
+) -> Result<AuthConfig, OpenHandsError> {
+    let websocket_auth_mode = WorkflowWebSocketAuthMode::parse(websocket_auth_mode)?;
+    let Some(session_api_key_env) = session_api_key_env else {
+        return match websocket_auth_mode {
+            WorkflowWebSocketAuthMode::Auto => Ok(AuthConfig::none()),
+            WorkflowWebSocketAuthMode::Header | WorkflowWebSocketAuthMode::QueryParam => {
+                Err(OpenHandsError::invalid_configuration(format!(
+                    "websocket auth mode `{}` requires a configured session API key env",
+                    websocket_auth_mode_label(websocket_auth_mode)
+                )))
+            }
+        };
+    };
+
+    let session_api_key = env
+        .get(session_api_key_env)
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            OpenHandsError::invalid_configuration(format!(
+                "session API key env `{session_api_key_env}` is not set or is blank"
+            ))
+        })?;
+
+    let http = HttpAuth::Header(ApiKeyAuth::new(
+        SESSION_API_KEY_HEADER_NAME,
+        session_api_key.clone(),
+    ));
+    let websocket = match websocket_auth_mode {
+        WorkflowWebSocketAuthMode::Auto | WorkflowWebSocketAuthMode::QueryParam => {
+            WebSocketAuth::QueryParam(ApiKeyAuth::new(websocket_query_param_name, session_api_key))
+        }
+        WorkflowWebSocketAuthMode::Header => WebSocketAuth::Header(ApiKeyAuth::new(
+            SESSION_API_KEY_HEADER_NAME,
+            session_api_key,
+        )),
+    };
+
+    Ok(AuthConfig { http, websocket })
+}
+
+fn websocket_auth_mode_label(mode: WorkflowWebSocketAuthMode) -> &'static str {
+    match mode {
+        WorkflowWebSocketAuthMode::Auto => "auto",
+        WorkflowWebSocketAuthMode::Header => "header",
+        WorkflowWebSocketAuthMode::QueryParam => "query_param",
+    }
+}
+
+fn base_url_path_is_root(url: &Url) -> bool {
+    url.path().trim_matches('/').is_empty()
+}
+
+fn is_loopback_host(host: Option<Host<&str>>) -> bool {
+    match host {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
     }
 }
 

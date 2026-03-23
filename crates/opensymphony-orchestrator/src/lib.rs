@@ -81,6 +81,10 @@ mod tests {
             Some(ConversationMetadata {
                 conversation_id: must(ConversationId::new("conv_260")),
                 server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+                transport_target: Some("loopback".to_owned()),
+                http_auth_mode: Some("none".to_owned()),
+                websocket_auth_mode: Some("none".to_owned()),
+                websocket_query_param_name: None,
                 fresh_conversation: true,
                 runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_owned()),
                 stream_state: RuntimeStreamState::Ready,

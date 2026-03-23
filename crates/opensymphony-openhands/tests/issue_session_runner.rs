@@ -243,6 +243,33 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
             .expect("conversation metadata should exist")
             .fresh_conversation
     );
+    assert_eq!(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .transport_target
+            .as_deref(),
+        Some("loopback")
+    );
+    assert_eq!(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .http_auth_mode
+            .as_deref(),
+        Some("none")
+    );
+    assert_eq!(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .websocket_auth_mode
+            .as_deref(),
+        Some("none")
+    );
 
     let first_conversation = read_conversation_manifest(&manager, &ensured.handle).await;
     assert!(first_conversation.workflow_prompt_seeded);
@@ -368,6 +395,12 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
         session_context.prompt_kind,
         IssueSessionPromptKind::Continuation
     );
+    assert_eq!(
+        session_context.transport_target.as_deref(),
+        Some("loopback")
+    );
+    assert_eq!(session_context.http_auth_mode.as_deref(), Some("none"));
+    assert_eq!(session_context.websocket_auth_mode.as_deref(), Some("none"));
     assert_eq!(
         session_context
             .worker_outcome
