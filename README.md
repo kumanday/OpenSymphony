@@ -251,5 +251,5 @@ See `tools/openhands-server/` for the pinned environment.
 ## Acknowledgments
 
 - [OpenAI Symphony](https://github.com/openai/symphony) - The specification this implements
-- [OpenHands](https://github.com/All-Hands-AI/OpenHands) - The agent runtime
+- [OpenHands](https://github.com/OpenHands/OpenHands) - The agent runtime
 - [FrankenTUI](https://github.com/Dicklesworthstone/frankentui) - Terminal UI framework

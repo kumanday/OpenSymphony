@@ -21,7 +21,7 @@ if (( $# > 0 )); then
   exit 1
 fi
 
-exec env RUNTIME=process \
+RUNTIME=process \
   uv run \
   --directory "${SCRIPT_DIR}" \
   --locked \
