@@ -1,231 +1,255 @@
 # OpenSymphony
 
-OpenSymphony is a Rust implementation of the OpenAI Symphony design that uses OpenHands agent-server as the coding-agent runtime and FrankenTUI as the optional terminal operator UI.
+OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) for issue tracking and uses [OpenHands](https://github.com/OpenHands/OpenHands) as the agent runtime.
 
-The first target is a local MVP for trusted developer machines:
+## What is OpenSymphony?
 
-- one Rust daemon owns Symphony orchestration
-- one local OpenHands agent-server subprocess provides agent execution
-- each issue gets its own deterministic stable-ID workspace path and OpenHands `working_dir`
-- OpenHands runtime events are consumed through a WebSocket-first client from day one
-- Linear polling, retries, reconciliation, and workspace lifecycle remain Symphony responsibilities
-- FrankenTUI is an observer over a local control plane, not the source of truth
+OpenSymphony automates software development workflows by:
 
-## Why this shape
+1. **Polling Linear** for issues in active states (Todo, In Progress, etc.)
+2. **Creating isolated workspaces** for each issue with lifecycle hooks
+3. **Dispatching AI agents** via OpenHands to work on issues autonomously
+4. **Managing retries, reconciliation, and cleanup** based on issue state changes
+5. **Providing a terminal UI** (FrankenTUI) for monitoring and operator control
 
-Symphony is explicitly a language-agnostic service specification and the upstream repository encourages people to build it in the language of their choice. The Elixir/Codex codebase is an experimental reference implementation, not the definition of Symphony. OpenHands agent-server exposes the right execution primitives for a direct Rust integration: conversation creation over HTTP, per-conversation `workspace.working_dir`, background `run`, event search for reconciliation, and real-time streaming over WebSocket. FrankenTUI is a strong fit for the optional status surface because it is designed around deterministic diff-based terminal rendering, inline mode, and pane workspaces.
+### Key Features
 
-## MVP scope
+- **Hierarchy-aware scheduling**: Parent issues wait for sub-issues to complete
+- **WebSocket-first runtime**: Real-time agent updates with REST reconciliation
+- **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
+- **Linear MCP integration**: Agent-side Linear writes (comments, state transitions)
+- **Conversation reuse**: Persistent OpenHands conversations across retry attempts
+- **Local-first MVP**: Trusted-machine deployment with optional hosted mode
 
-The MVP is intentionally local-first and trusted-environment-first.
+## Quick Start
 
-Included:
+### Prerequisites
 
-- Symphony-faithful workflow loading from `WORKFLOW.md`
-- typed config with an `openhands` extension namespace
-- direct Linear read adapter for orchestration
-- agent-side Linear writes via a small MCP server
-- per-issue workspace manager with hooks and cleanup
-- one local OpenHands agent-server process shared across issues
-- one persistent OpenHands conversation per issue by default
-- WebSocket-first runtime event handling with REST reconciliation
-- read-only local control plane
-- FrankenTUI client over the control plane
-- deterministic tests plus live local integration tests
+- Rust toolchain (stable)
+- Python 3.12+ with `uv` for OpenHands server
+- Linear API key (for tracker integration)
+- OpenAI API key (for agent runtime)
 
-Not in MVP:
-
-- multi-tenant hosted control plane
-- centralized remote sandbox fleet
-- browser UI
-- replacing Symphony tracker polling with push webhooks
-- implementing against the OpenHands web-app Socket.IO API
-
-## Current implemented slice
-
-This branch now boots the first local observability vertical slice even though the rest of the orchestration stack is still being filled in.
-
-Available today:
-
-- a Cargo workspace with shared snapshot domain models
-- a read-only control-plane server with:
-  - `GET /healthz`
-  - `GET /api/v1/snapshot`
-  - `GET /api/v1/events` as an SSE update stream
-- a FrankenTUI client that:
-  - fetches the initial snapshot over HTTP
-  - reconnects to the SSE stream after disconnect
-  - renders focused issue/workspace detail plus recent event or metrics panes in inline mode
-  - shows the active focus pane in the status line and pane headers for keyboard-driven navigation
-- a packaged `opensymphony` CLI so the control plane, preflight checks, and Linear MCP surface can be validated without coupling the TUI to orchestrator internals
-
-Local commands:
-
-- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
-- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
-- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
-- `cargo run -p opensymphony-cli -- linear-mcp`
-
-## Core design decisions
-
-### 1. Keep Symphony orchestration in Rust
-
-Rust owns:
-
-- poll loop
-- runtime state
-- workspace lifecycle
-- retries and backoff
-- Linear reconciliation
-- status snapshots
-- local control plane
-
-OpenHands owns:
-
-- agent execution
-- tool use
-- model provider access
-- conversation persistence
-- event generation
-
-### 2. Treat the SDK agent-server API as the integration contract
-
-The integration targets the SDK agent-server surface, not `openhands serve` and not the web app Socket.IO protocol. Operations are HTTP REST. Real-time updates are a plain WebSocket event stream.
-
-The current local pin is `OpenHands/software-agent-sdk` `v1.14.0`, provisioned through `tools/openhands-server/`.
-
-### 3. Go WebSocket-first for agent updates
-
-Symphony still polls Linear because the specification requires it. The change here is narrower: OpenHands agent-session updates use WebSockets first, with REST used for creation, command operations, recovery, and event reconciliation.
-
-### 4. Use one conversation per issue by default
-
-OpenSymphony persists a stable OpenHands `conversation_id` inside the issue workspace and reuses it across worker lifetimes. This is a deliberate implementation choice that preserves agent context across clean continuation runs while keeping the Symphony scheduler state in Rust.
-
-### 5. Keep the UI optional
-
-FrankenTUI is a consumer of the control-plane snapshot and event stream. The daemon must be fully correct without it.
-
-## Document map
-
-- `AGENTS.md`: persistent implementation rules for coding agents
-- `WORKFLOW.example.md`: example repo workflow file with `openhands` extension config
-- `docs/architecture.md`: high-level runtime design
-- `docs/symphony-spec-alignment.md`: section-by-section mapping from Symphony spec to OpenSymphony
-- `docs/openhands-agent-server.md`: chosen OpenHands integration surface
-- `docs/websocket-runtime.md`: detailed WebSocket-first runtime contract
-- `docs/workspace-and-lifecycle.md`: workspace layout, hooks, issue conversation policy
-- `docs/linear-and-tools.md`: Linear read adapter and MCP write surface
-- `docs/ui-frankentui.md`: operator UI design
-- `docs/repository-layout.md`: crate ownership and repository boundaries
-- `docs/deployment-modes.md`: local MVP mode and hosted follow-on mode
-- `docs/testing-and-operations.md`: testing matrix, local ops, doctor checks
-- `docs/sources.md`: primary references and trust notes
-- `docs/implementation-plan.md`: milestone and dependency view
-- `docs/tasks/`: issue-ready work items with Linear-friendly metadata
-
-## Implementation milestones
-
-### M1 Foundation and contracts
-Workspace bootstrap, workflow/config loader, domain model, state machine.
-
-### M2 OpenHands runtime adapter
-Local server supervisor, REST client, WebSocket stream, session runner.
-
-### M3 Symphony orchestration core
-Workspace manager, Linear adapter, Linear MCP, orchestrator scheduler.
-
-### M4 Operator UX and repo harness
-Snapshot/control plane, FrankenTUI client, workspace-generated context artifacts.
-
-### M5 Validation and local packaging
-Fake agent-server, live local E2E suite, doctor command, packaging.
-
-### M6 Hosted deployment follow-on
-Remote agent-server mode, auth hardening, centralized deployment docs.
-
-## Current bootstrap checks
-
-The repository bootstrap keeps a compiling Rust workspace in place before the
-runtime crates gain real behavior.
-
-Current required checks:
-
-- `cargo fmt --check`
-- `cargo clippy --workspace --all-targets`
-- `cargo test --workspace`
-
-The local OpenHands tooling boundary lives in `tools/openhands-server/`. During
-M1 it is intentionally fail-closed: the directory exists, the pin files are
-reserved, and the launcher refuses to run until a validated package version and
-lockfile are committed. Once those placeholders are replaced, the launcher uses
-the pinned local `uv` environment and its `agent-server` extra instead of a
-global `openhands` install.
-
-## Local MVP quick-start for implementers
-
-1. Read `AGENTS.md`.
-2. Read `docs/architecture.md` and `docs/websocket-runtime.md`.
-3. Implement milestone M1 before touching runtime code.
-4. Build the OpenHands runtime adapter against a pinned server version.
-5. Keep the control-plane API stable before expanding the TUI.
-6. Use the task files in `docs/tasks/` as the Linear issue source of truth.
-
-## Current local validation entrypoints
-
-This repository now includes the local validation scaffolding for M5:
-
-- a Rust workspace with the documented crate boundaries
-- `opensymphony-openhands` for minimal conversation, search, and WebSocket readiness probes
-- `opensymphony-linear-mcp` for a schema-tested Linear stdio MCP server
-- `opensymphony-testkit` with an in-memory fake OpenHands server
-- `opensymphony` CLI with a meaningful `doctor` command
-- pinned OpenHands tooling under `tools/openhands-server/`
-- example config and target-repo fixtures under `examples/`
-- smoke and live validation scripts under `scripts/`
-
-Useful commands:
+### Installation
 
 ```bash
-./tools/openhands-server/install.sh
-cargo run -p opensymphony-cli -- --help
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
+# Clone the repository
+git clone https://github.com/kumanday/OpenSymphony.git
+cd OpenSymphony
+
+# Build the project
+cargo build --release
+
+# Run preflight checks
+cargo run -p opensymphony-cli -- doctor
+```
+
+### Configuration
+
+Create a `WORKFLOW.md` in your target repository:
+
+```yaml
+---
+tracker:
+  kind: linear
+  project_slug: your-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+    - Closed
+
+workspace:
+  root: ./workspaces
+
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+---
+
+# Your workflow prompt here
+Work the assigned issue following the repository's AGENTS.md guidelines.
+```
+
+### Running the Daemon
+
+```bash
+# Start the OpenHands server (in one terminal)
+./tools/openhands-server/run-local.sh
+
+# Start OpenSymphony (in another terminal)
+cargo run -p opensymphony-cli -- daemon --config /path/to/config.yaml
+
+# Optional: Start the TUI for monitoring
+cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/
+```
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     OpenSymphony Daemon                      │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │ Orchestrator│  │   Linear    │  │   OpenHands Client  │  │
+│  │  Scheduler  │  │   Adapter   │  │  (REST + WebSocket) │  │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
+│         │                │                    │             │
+│  ┌──────▼────────────────▼────────────────────▼──────────┐  │
+│  │              Workspace Manager                        │  │
+│  │   (per-issue directories, hooks, manifests)         │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                           │                                 │
+│  ┌────────────────────────▼────────────────────────────┐  │
+│  │           Control Plane API (read-only)              │  │
+│  │     GET /healthz, /api/v1/snapshot, /api/v1/events  │  │
+│  └────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
+         │                           │
+         ▼                           ▼
+┌─────────────┐              ┌─────────────────┐
+│   Linear    │              │  OpenHands      │
+│   (Issues)  │              │  Agent-Server    │
+└─────────────┘              └─────────────────┘
+         ▲                           ▲
+         │                           │
+    ┌────┴────┐                 ┌────┴────┐
+    │   MCP   │                 │  Agent  │
+    │  Tools  │                 │ Runtime │
+    └─────────┘                 └─────────┘
+```
+
+### Component Overview
+
+| Component | Responsibility |
+|-----------|----------------|
+| `opensymphony-orchestrator` | Poll loop, scheduling, retries, state machine |
+| `opensymphony-linear` | GraphQL client for Linear read operations |
+| `opensymphony-linear-mcp` | MCP server for agent-side Linear writes |
+| `opensymphony-openhands` | REST/WebSocket client for agent runtime |
+| `opensymphony-workspace` | Workspace lifecycle, hooks, containment |
+| `opensymphony-control` | Control plane API and snapshot derivation |
+| `opensymphony-tui` | FrankenTUI operator client |
+| `opensymphony-cli` | CLI entrypoints: daemon, tui, doctor, linear-mcp |
+
+## Deployment Modes
+
+### Local Supervised Mode (MVP)
+
+The default mode for individual developers:
+
+- One OpenHands server subprocess managed by the daemon
+- Host filesystem access (process-level isolation)
+- Loopback-only binding
+- No auth by default
+
+```yaml
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+```
+
+### External Local Mode
+
+For debugging or CI with a manually managed server:
+
+```yaml
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+    session_api_key_env: OPENHANDS_API_KEY
+```
+
+### Hosted Remote Mode (Future)
+
+For organizational deployment with stronger isolation:
+
+```yaml
+openhands:
+  transport:
+    base_url: https://agent-server.example.com
+    session_api_key_env: OPENHANDS_API_KEY
+  websocket:
+    auth_mode: header
+```
+
+See [docs/deployment-modes.md](docs/deployment-modes.md) for full details.
+
+## Workspace Lifecycle
+
+Each issue gets a deterministic workspace:
+
+```
+<workspace_root>/<issue_identifier>/
+├── .opensymphony/
+│   ├── issue.json              # Issue metadata
+│   ├── conversation.json       # OpenHands conversation ID
+│   └── openhands/
+│       └── create-conversation-request.json
+├── .opensymphony.after_create.json  # Hook receipt
+├── <repo_files>                # Cloned repository
+└── logs/                       # Execution logs
+```
+
+### Lifecycle Hooks
+
+- `after_create`: Clone repository, setup environment
+- `before_run`: Pre-execution checks
+- `after_run`: Post-execution cleanup
+- `before_remove`: Final cleanup before workspace deletion
+
+## Testing
+
+```bash
+# Unit tests
 cargo test --workspace
-cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml
-cargo run -p opensymphony-cli -- linear-mcp
+
+# Static validation
+cargo run -p opensymphony-cli -- doctor
+
+# Live tests (requires OpenHands server)
+OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands
+
+# Smoke test
 ./scripts/smoke_local.sh
-OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_local_suite -- --ignored --nocapture --test-threads=1
+
+# Live E2E test
 OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 ```
 
-Current note:
+## Documentation
 
-- `./tools/openhands-server/install.sh` runs the pinned `uv sync --locked --extra agent-server` flow for the trusted-machine OpenHands toolchain
-- the example doctor YAML now only carries machine-local inputs such as the OpenHands tool directory and optional probe overrides; the target repo `WORKFLOW.md` provides the workspace root, OpenHands base URL, and prompt that the doctor probe validates
-- `opensymphony doctor` now checks for `cargo`, `curl`, `git`, and `uv` on `PATH`, validates the pinned tool directory packaging, prints the trusted-machine safety warning on every run, and warns when a local deployment points at a non-loopback OpenHands target
-- `scripts/live_e2e.sh` now performs the full opt-in live suite: doctor preflight, pinned local server launch, ignored `live_local_suite` integration tests, and artifact capture under `target/live-local/`
-- `linear-mcp` exposes the documented Linear tool surface over stdio, `daemon` serves the current control-plane demo stream for smoke coverage, and `tui` attaches to any compatible local control-plane URL
+- [Architecture](docs/architecture.md) - High-level design and component interactions
+- [Deployment Modes](docs/deployment-modes.md) - Local vs hosted deployment
+- [Testing and Operations](docs/testing-and-operations.md) - Test strategy and local ops
+- [AGENTS.md](AGENTS.md) - Repository guidelines for coding agents
+- [Development Guide](docs/DEVELOPMENT.md) - Contributing and development details
 
-## Local trusted-machine quick start
+## Safety and Security
 
-1. Install the machine prerequisites: Rust stable, `uv`, `git`, and `curl`.
-2. Provision the pinned OpenHands environment with `./tools/openhands-server/install.sh`.
-3. Review the command surface with `cargo run -p opensymphony-cli -- --help`.
-4. Run the static preflight with `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`.
-5. Use `tools/openhands-server/run-local.sh` only after the static doctor run is green.
+**Local Mode**: The MVP runs with process-level isolation on trusted developer machines. Agent code executes on the host filesystem. This is suitable for:
+- Solo development on trusted repositories
+- Local experimentation
+- CI on controlled runners
 
-Safety note:
+**Hosted Mode** (future): Will provide stronger isolation with container-backed workspaces and mandatory auth.
 
-- the local MVP runs agent activity on the host with process-level isolation only
-- it is not a sandbox
-- `opensymphony doctor` repeats that warning in its output so the local posture stays explicit during setup
+## Version Pinning
 
-## Non-negotiable implementation rules
+OpenSymphony pins exact versions for reproducibility:
 
-- Do not collapse Symphony orchestration into OpenHands conversation state.
-- Do not make FrankenTUI depend on internal orchestrator locks or structs.
-- Do not implement against OpenHands web-app Socket.IO docs for this project.
-- Do not assume WebSockets remove the need for REST reconciliation.
-- Do not launch agent work outside the sanitized per-issue workspace path.
-- Do not overwrite repository-owned `AGENTS.md` files inside target repos.
+- `openhands-agent-server==1.14.0`
+- `openhands-sdk==1.14.0`
+- Rust stable toolchain
+
+See `tools/openhands-server/` for the pinned environment.
+
+## License
+
+[LICENSE](LICENSE)
+
+## Acknowledgments
+
+- [OpenAI Symphony](https://github.com/openai/symphony) - The specification this implements
+- [OpenHands](https://github.com/All-Hands-AI/OpenHands) - The agent runtime
+- [FrankenTUI](https://github.com/Dicklesworthstone/frankentui) - Terminal UI framework
