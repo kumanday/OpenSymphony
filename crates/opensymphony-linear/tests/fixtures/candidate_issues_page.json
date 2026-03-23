@@ -1,0 +1,152 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "issue-260",
+          "identifier": "COE-260",
+          "url": "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine",
+          "title": "Domain model and orchestrator state machine",
+          "description": "Implement the shared orchestrator state machine.",
+          "priority": 1.0,
+          "createdAt": "2026-03-20T10:00:00Z",
+          "updatedAt": "2026-03-21T12:00:00Z",
+          "state": {
+            "id": "state-started",
+            "name": "In Progress",
+            "type": "started"
+          },
+          "parent": null,
+          "children": {
+            "nodes": []
+          },
+          "labels": {
+            "nodes": [
+              { "name": "urgent" },
+              { "name": "backend" },
+              { "name": "backend" }
+            ]
+          },
+          "inverseRelations": {
+            "nodes": [
+              {
+                "type": "blocks",
+                "issue": {
+                  "id": "issue-258",
+                  "identifier": "COE-258",
+                  "title": "Bootstrap workspace and crate boundaries",
+                  "state": {
+                    "id": "state-done",
+                    "name": "Done",
+                    "type": "completed"
+                  }
+                }
+              },
+              {
+                "type": "related",
+                "issue": {
+                  "id": "issue-999",
+                  "identifier": "COE-999",
+                  "title": "Ignore this relation",
+                  "state": {
+                    "id": "state-todo",
+                    "name": "Todo",
+                    "type": "unstarted"
+                  }
+                }
+              }
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          }
+        },
+        {
+          "id": "issue-264",
+          "identifier": "COE-264",
+          "url": "https://linear.app/trilogy-ai-coe/issue/COE-264/linear-read-adapter-and-issue-normalization",
+          "title": "Linear read adapter and issue normalization",
+          "description": null,
+          "priority": 0.0,
+          "createdAt": "2026-03-21T11:00:00Z",
+          "updatedAt": "2026-03-21T12:30:00Z",
+          "state": {
+            "id": "state-started",
+            "name": "In Progress",
+            "type": "started"
+          },
+          "parent": {
+            "id": "issue-254"
+          },
+          "children": {
+            "nodes": [
+              {
+                "id": "issue-277",
+                "identifier": "COE-277",
+                "state": {
+                  "name": "Todo"
+                }
+              },
+              {
+                "id": "issue-266",
+                "identifier": "COE-266",
+                "state": {
+                  "name": "Done"
+                }
+              },
+              {
+                "id": "issue-277",
+                "identifier": "COE-277",
+                "state": {
+                  "name": "Todo"
+                }
+              }
+            ]
+          },
+          "labels": {
+            "nodes": []
+          },
+          "inverseRelations": {
+            "nodes": [
+              {
+                "type": "blocks",
+                "issue": {
+                  "id": "issue-261",
+                  "identifier": "COE-261",
+                  "title": "Current blocker",
+                  "state": {
+                    "id": "state-started",
+                    "name": "In Progress",
+                    "type": "started"
+                  }
+                }
+              },
+              {
+                "type": "blocks",
+                "issue": {
+                  "id": "issue-261",
+                  "identifier": "COE-261",
+                  "title": "Current blocker",
+                  "state": {
+                    "id": "state-started",
+                    "name": "In Progress",
+                    "type": "started"
+                  }
+                }
+              }
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      }
+    }
+  }
+}

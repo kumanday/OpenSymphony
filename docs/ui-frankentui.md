@@ -36,6 +36,16 @@ FrankenTUI should talk only to the local OpenSymphony control plane.
 - control-plane WebSocket or SSE stream for updates
 - optional log-file tail view through the daemon, not by opening private files directly
 
+Current implemented local contract:
+
+- `GET /api/v1/snapshot`
+- `GET /api/v1/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
+- `GET /healthz` for daemon liveness
+
+The implemented client treats the configured base URL as a service-root prefix, so
+`http://proxy/opensymphony` and `http://proxy/opensymphony/` both resolve API requests under
+`/opensymphony/...` instead of silently dropping the prefix.
+
 ### Explicitly out of scope
 
 - direct connection to OpenHands WebSocket streams
@@ -114,6 +124,17 @@ Recommended first layout:
 
 Use pane-based layout so future views can expand without redesign.
 
+The implemented inline layout budgets rows per pane instead of truncating one giant body block.
+That keeps the bottom timeline visible under long issue lists, preserves the selected issue when snapshot ordering changes, and windows the issue pane around the current selection so narrower split terminals still keep the selected row and detail visible.
+The always-visible status line now leads with daemon and local agent-server health before the
+connection and focus metadata so degraded runtime state is visible even when the issue list is
+otherwise stable.
+Rendered pane text is normalized to a single visual line before fitting so
+newline-bearing snapshot fields do not silently spill past the row budget.
+Row fitting also uses terminal cell width instead of Unicode scalar counts and normalizes control
+characters such as tabs before measurement so externally sourced tracker titles or event summaries
+do not bleed across pane separators in split layouts.
+
 ## 6. Interaction model
 
 MVP interaction should remain intentionally small.
@@ -121,12 +142,19 @@ MVP interaction should remain intentionally small.
 Recommended commands:
 
 - move selection
-- filter by runtime state
-- filter by tracker state
-- toggle issue-detail sections
-- switch between events and logs
-- refresh snapshot
+- cycle focus
+- switch between events and metrics
 - quit cleanly
+
+Current key map in the implemented client:
+
+- `j` or down arrow: move selection down
+- `k` or up arrow: move selection up
+- `tab`: cycle focus between issue list, detail, and timeline panes
+- `e`: switch the bottom pane between recent events and metrics
+- `q`: quit cleanly
+
+The rendered status line and pane headers explicitly show the active focus target, and the top header also surfaces the computed connection, daemon, and agent-server cause text when bootstrap, reconnect, or degraded states need explanation.
 
 Do not start with in-UI mutation commands unless the control plane already defines them cleanly.
 
@@ -152,6 +180,11 @@ Pipeline:
 5. let FrankenTUI diff and present
 
 Avoid embedding business logic in widget code.
+
+The control-plane bridge should follow the UI lifecycle. If inline mode exits
+early, including `--exit-after-ms` harness runs or terminal startup failures
+after bridge startup, the background bridge must stop polling and tear down
+cleanly with the app.
 
 ## 9. Suggested Rust crate boundary
 
@@ -179,11 +212,30 @@ UI requirements:
 - show stale-data indicator
 - reconnect to control plane when possible
 - never panic the terminal session on missing fields
-- degrade gracefully if optional metrics are absent
+- degrade gracefully if future metric fields are unavailable; the MVP snapshot always includes the `metrics` object
+
+Current reconnect behavior:
+
+- fetch the latest snapshot over HTTP on startup
+- if `/api/v1/snapshot` accepts the connection but hangs without returning a body, fail that bootstrap or reconnect refresh within the bounded snapshot timeout and retry instead of waiting forever
+- if `/api/v1/events` never finishes attaching, including streams that open headers and then only emit keepalive comments before the first snapshot, fail that attach attempt within one bounded stream-attach timeout and retry instead of waiting forever in `conn=connecting` or `conn=reconnecting`
+- keep rendering that bootstrap snapshot with `conn=connecting` until the SSE stream yields its first snapshot
+- publish the first streamed snapshot and the `conn=live` attachment signal atomically through the bridge mailbox so the header never outruns the data it is describing
+- subscribe to the SSE stream
+- if the stream closes or fails, keep the last good snapshot visible, mark the connection as reconnecting, and surface the computed reconnect reason in the top header
+- if `/api/v1/events` goes silent for longer than the keepalive watchdog budget after the connection opens, treat that stalled stream as failed and retry instead of hanging forever on stale data
+- refetch the current snapshot before resubscribing
+- if that refresh succeeds before the SSE stream reattaches, keep `conn=reconnecting` but switch the compact header detail to the current snapshot state such as `refreshed; stream pending`
+- while the FTUI owns terminal output, bridge reconnect failures stay inside the reducer and header state instead of printing duplicate warning lines to `stderr`
+- if the SSE consumer lags, accept the latest published snapshot immediately instead of waiting for the retained SSE backlog to drain, and ignore any older retained sequence that would roll the UI backward
+
+The implemented bridge between the SSE client and the FTUI reducer coalesces bursty snapshot traffic down to the latest value so inline-mode polling does not accumulate an unbounded backlog of stale snapshots.
 
 ## 11. Dependency strategy
 
-FrankenTUI currently appears to be easiest to consume through workspace or path dependencies for the full stack. Reflect that reality in repository setup and CI until the full crate set is readily published and stable.
+The current implementation uses the published `ftui` facade from crates.io with the `crossterm` feature enabled.
+
+This keeps the OpenSymphony workspace self-contained while preserving the option to move to a path dependency later if a future FrankenTUI feature requires unpublished workspace crates.
 
 ## 12. Testing approach
 
@@ -193,6 +245,15 @@ Automated:
 - snapshot-to-view-model tests
 - simple rendering smoke tests
 - control-plane client reconnection tests
+
+Current automated coverage:
+
+- reducer selection and mode-switch tests
+- render smoke tests against serialized snapshots, including visible focus markers, selection persistence across snapshot reordering, selected-row visibility in truncated issue panes, narrow-layout detail preservation, and persistent bottom-pane visibility
+- newline-normalization coverage for externally sourced event text so pane row counts stay accurate
+- control-plane snapshot plus SSE round-trip tests
+- TUI reconnect retention and narrow-layout detail visibility tests
+- bridge and control-plane catch-up tests for snapshot coalescing, disconnect handling, and lagged SSE recovery
 
 Manual:
 

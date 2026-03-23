@@ -1,37 +1,27 @@
 ---
 tracker:
-  project_slug: "example-project"
+  kind: linear
+  project_slug: sample-project
   active_states:
     - Todo
     - In Progress
   terminal_states:
     - Done
-    - Cancelled
-agent:
-  max_turns: 3
+workspace:
+  root: ./var/workspaces
+
 openhands:
-  conversation:
-    reuse_policy: per_issue
-    max_iterations: 32
+  transport:
+    base_url: http://127.0.0.1:8000
 ---
 
-{% if attempt is defined and attempt and attempt.continuation %}
-## Continuation
+# Example Workflow
 
-You are continuing issue `{{ issue.identifier }}` after attempt {{ attempt.number }}.
-Resume from the current workspace state and prior conversation history.
-Do not restate the original assignment unless the workspace indicates it is missing.
-{% else %}
-# Assignment
+Work the assigned issue inside this repository and keep changes small and reviewable.
 
-You are working on issue `{{ issue.identifier }}`.
+Repository context precedence for this example target repo:
 
-## Task
-- Title: {{ issue.title }}
-- State: {{ issue.state }}
-
-{% if issue.description %}
-## Description
-{{ issue.description }}
-{% endif %}
-{% endif %}
+1. Follow this `WORKFLOW.md`.
+2. Respect repo-owned `AGENTS.md` and any repo-owned `.agents/skills/`.
+3. Treat `.opensymphony/generated/issue-context.md` and other `.opensymphony/` files as additive context and audit artifacts.
+4. Do not rewrite repo-owned policy files to make the run succeed.

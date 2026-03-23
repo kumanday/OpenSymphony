@@ -1,3 +1,7 @@
-workspace_root: "./tmp/workspaces"
-target_repo: "./examples/target-repo"
-linear_fixture: "./examples/configs/linear-fixture.json"
+target_repo: ../target-repo
+openhands:
+  tool_dir: ../../tools/openhands-server
+  probe_model: null
+  probe_api_key_env: null
+linear:
+  enabled: false

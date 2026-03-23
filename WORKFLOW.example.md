@@ -2,6 +2,7 @@
 tracker:
   kind: linear
   project_slug: "example-project-slug"
+  # tracker.api_key is optional here; the loader falls back to LINEAR_API_KEY.
   active_states:
     - Todo
     - In Progress
@@ -18,6 +19,8 @@ polling:
   interval_ms: 5000
 
 workspace:
+  # `~` and exact $VAR/${VAR} tokens are expanded during config resolution.
+  # Any non-absolute path here is resolved relative to the repository's WORKFLOW.md.
   root: ~/.opensymphony/workspaces
 
 hooks:
@@ -39,55 +42,54 @@ agent:
 
 openhands:
   transport:
+    # The current readiness probe path only supports bare `http://host:port`
+    # origins. `https://`, path-prefixed, query-bearing, and fragment-bearing
+    # origins are rejected for now.
     base_url: "http://127.0.0.1:8000"
-    session_api_key_env: null
 
   local_server:
+    # Defaults to `true` when omitted. Explicit `false` is rejected until the
+    # runtime can honor workflow-owned local-server disablement instead of still
+    # deciding launch behavior from the localhost base URL plus pinned tooling.
     enabled: true
-    command:
-      - python
-      - -m
-      - openhands.agent_server
-      - --host
-      - 127.0.0.1
-      - --port
-      - "8000"
-    startup_timeout_ms: 30000
-    readiness_probe_path: "/openapi.json"
-    env:
-      LOG_JSON: "true"
-      RUNTIME: process
+    # Omit `command` to use the pinned launcher chosen by the runtime-owned tooling layer.
+    # Explicit launcher overrides are rejected until the runtime can honor workflow-owned commands.
+    # Explicit startup-timeout overrides are rejected until the runtime
+    # supervisor creation path consumes workflow-owned timeout settings.
+    # Explicit readiness-probe-path overrides are rejected until the runtime
+    # supervisor launch path consumes workflow-owned probe settings end-to-end.
+    # Explicit launcher env overrides are rejected until the runtime
+    # supervisor creation path forwards workflow-owned environment variables.
 
   conversation:
-    reuse_policy: per_issue
+    # Defaults to the current runtime-owned per-issue conversation reuse behavior.
+    # Non-default reuse-policy overrides are rejected until the orchestrator/runtime
+    # path can actually honor them end-to-end.
+    # This path stays relative to the per-issue workspace; parent traversal is rejected.
     persistence_dir_relative: ".opensymphony/openhands"
     max_iterations: 500
     stuck_detection: true
+    # Defaults to `NeverConfirm` when omitted.
     confirmation_policy:
       kind: NeverConfirm
     agent:
+      # Defaults to `Agent` when omitted.
       kind: Agent
       llm:
+        # Exact $VAR/${VAR} tokens are resolved before runtime launch.
+        # Provider-specific auth/base-url overrides and extra LLM option keys are
+        # rejected until the current conversation-create adapter can forward them.
         model: ${OPENHANDS_MODEL}
-        api_key_env: OPENHANDS_LLM_API_KEY
-        base_url_env: OPENHANDS_LLM_BASE_URL
-      log_completions: false
+      # Workflow-owned agent extras such as `log_completions` are rejected until
+      # the current conversation-create payload can actually forward them.
 
-  websocket:
-    enabled: true
-    ready_timeout_ms: 30000
-    reconnect_initial_ms: 1000
-    reconnect_max_ms: 30000
-    auth_mode: auto
-    query_param_name: session_api_key
+  # Workflow-owned websocket enablement and timeout/reconnect knobs are
+  # currently rejected until the runtime readiness/reconnect path consumes them.
 
-  mcp:
-    stdio_servers:
-      - name: linear
-        command:
-          - opensymphony
-          - linear-mcp
-          - --stdio
+  # Workflow-owned MCP stdio server declarations are rejected until the current
+  # conversation-create adapter can forward `mcp_config` to OpenHands.
+  # Provision `opensymphony linear-mcp` through the host tool environment until
+  # that adapter wiring lands.
 ---
 
 # Assignment

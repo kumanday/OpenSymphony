@@ -1,405 +1,556 @@
-use async_trait::async_trait;
+use std::{collections::HashMap, sync::Arc};
+
+use axum::{
+    Json, Router,
+    extract::{
+        Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+};
 use chrono::Utc;
-use opensymphony_domain::{
-    Issue, IssueStateSnapshot, IssueTracker, RetryReason, TrackerError, WorkerOutcome,
-    WorkerOutcomeKind,
-};
-use opensymphony_linear::{LinearError, LinearWriteOperations};
 use opensymphony_openhands::{
-    IssueRunProgress, IssueRunRequest, IssueRunResult, IssueSessionError, IssueSessionRunner,
+    Conversation, ConversationCreateRequest, ConversationStateUpdatePayload, EventEnvelope,
+    KnownEvent, SearchConversationEventsResponse, SendMessageRequest,
 };
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::fs;
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use tokio::time::{sleep, Duration};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::{
+    net::TcpListener,
+    sync::{Mutex, broadcast},
+    task::JoinHandle,
+};
+use uuid::Uuid;
 
-#[derive(Debug, Clone, Default)]
-pub struct MemoryTracker {
-    inner: Arc<Mutex<MemoryTrackerState>>,
+#[derive(Debug, Clone, Copy)]
+pub struct FakeOpenHandsConfig {
+    pub search_page_size: usize,
+    pub run_terminal_status: &'static str,
 }
 
-#[derive(Debug, Default)]
-struct MemoryTrackerState {
-    issues: BTreeMap<String, Issue>,
-    comments: HashMap<String, Vec<String>>,
-    links: HashMap<String, Vec<String>>,
-    active_states: Vec<String>,
-    terminal_states: Vec<String>,
-    project_states: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FixtureStore {
-    pub issues: Vec<Issue>,
-    pub active_states: Vec<String>,
-    pub terminal_states: Vec<String>,
-    pub project_states: Vec<String>,
-}
-
-impl MemoryTracker {
-    pub fn new(
-        issues: Vec<Issue>,
-        active_states: Vec<String>,
-        terminal_states: Vec<String>,
-        project_states: Vec<String>,
-    ) -> Self {
-        let mut issue_map = BTreeMap::new();
-        for issue in issues {
-            issue_map.insert(issue.id.clone(), issue);
-        }
-
+impl Default for FakeOpenHandsConfig {
+    fn default() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(MemoryTrackerState {
-                issues: issue_map,
-                comments: HashMap::new(),
-                links: HashMap::new(),
-                active_states,
-                terminal_states,
-                project_states,
+            search_page_size: 2,
+            run_terminal_status: "finished",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AppState {
+    inner: Arc<Mutex<Inner>>,
+}
+
+struct Inner {
+    conversations: HashMap<Uuid, FakeConversation>,
+    conversation_get_not_found: HashMap<Uuid, usize>,
+    search_page_size: usize,
+    run_terminal_status: String,
+    next_event_index: u64,
+}
+
+struct FakeConversation {
+    summary: Conversation,
+    events: Vec<EventEnvelope>,
+    sender: broadcast::Sender<EventEnvelope>,
+    control_sender: broadcast::Sender<SocketControl>,
+}
+
+#[derive(Clone, Debug)]
+enum SocketControl {
+    Close,
+}
+
+pub struct FakeOpenHandsServer {
+    base_url: String,
+    state: AppState,
+    task: JoinHandle<()>,
+}
+
+impl FakeOpenHandsServer {
+    pub async fn start() -> std::io::Result<Self> {
+        Self::start_with_config(FakeOpenHandsConfig::default()).await
+    }
+
+    pub async fn start_with_config(config: FakeOpenHandsConfig) -> std::io::Result<Self> {
+        let state = AppState {
+            inner: Arc::new(Mutex::new(Inner {
+                conversations: HashMap::new(),
+                conversation_get_not_found: HashMap::new(),
+                search_page_size: config.search_page_size,
+                run_terminal_status: config.run_terminal_status.to_string(),
+                next_event_index: 1,
             })),
-        }
-    }
-
-    pub fn from_fixture_path(path: &Path) -> Result<Self, LinearError> {
-        let fixture = fs::read_to_string(path)
-            .map_err(|error| LinearError::InvalidResponse(error.to_string()))?;
-        let store = serde_json::from_str::<FixtureStore>(&fixture)
-            .map_err(|error| LinearError::InvalidResponse(error.to_string()))?;
-        Ok(Self::new(
-            store.issues,
-            store.active_states,
-            store.terminal_states,
-            store.project_states,
-        ))
-    }
-
-    pub fn comments_for(&self, issue_id: &str) -> Vec<String> {
-        let state = self.inner.lock().expect("lock should succeed");
-        state.comments.get(issue_id).cloned().unwrap_or_default()
-    }
-
-    pub fn links_for(&self, issue_id: &str) -> Vec<String> {
-        let state = self.inner.lock().expect("lock should succeed");
-        state.links.get(issue_id).cloned().unwrap_or_default()
-    }
-
-    fn snapshot_for(state: &MemoryTrackerState, issue: &Issue) -> IssueStateSnapshot {
-        IssueStateSnapshot {
-            id: issue.id.clone(),
-            identifier: issue.identifier.clone(),
-            state: issue.state.clone(),
-            is_active: state.active_states.contains(&issue.state),
-            is_terminal: state.terminal_states.contains(&issue.state),
-        }
-    }
-}
-
-#[async_trait]
-impl IssueTracker for MemoryTracker {
-    async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
-        let state = self.inner.lock().expect("lock should succeed");
-        Ok(state
-            .issues
-            .values()
-            .filter(|issue| state.active_states.contains(&issue.state))
-            .cloned()
-            .collect())
-    }
-
-    async fn fetch_states_by_issue_ids(
-        &self,
-        issue_ids: &[String],
-    ) -> Result<Vec<IssueStateSnapshot>, TrackerError> {
-        let state = self.inner.lock().expect("lock should succeed");
-        Ok(issue_ids
-            .iter()
-            .filter_map(|issue_id| {
-                state
-                    .issues
-                    .get(issue_id)
-                    .map(|issue| Self::snapshot_for(&state, issue))
-            })
-            .collect())
-    }
-
-    async fn fetch_terminal_issues(&self) -> Result<Vec<Issue>, TrackerError> {
-        let state = self.inner.lock().expect("lock should succeed");
-        Ok(state
-            .issues
-            .values()
-            .filter(|issue| state.terminal_states.contains(&issue.state))
-            .cloned()
-            .collect())
-    }
-}
-
-impl LinearWriteOperations for MemoryTracker {
-    fn get_issue(&self, query: &str) -> Result<Issue, LinearError> {
-        let state = self.inner.lock().expect("lock should succeed");
-        state
-            .issues
-            .values()
-            .find(|issue| issue.id == query || issue.identifier == query)
-            .cloned()
-            .ok_or_else(|| LinearError::NotFound(query.to_string()))
-    }
-
-    fn comment_issue(&self, issue_id: &str, body: &str) -> Result<Issue, LinearError> {
-        let mut state = self.inner.lock().expect("lock should succeed");
-        let issue = state
-            .issues
-            .get(issue_id)
-            .cloned()
-            .ok_or_else(|| LinearError::NotFound(issue_id.to_string()))?;
-        state
-            .comments
-            .entry(issue_id.to_string())
-            .or_default()
-            .push(body.to_string());
-        Ok(issue)
-    }
-
-    fn transition_issue(&self, issue_id: &str, state_name: &str) -> Result<Issue, LinearError> {
-        let mut state = self.inner.lock().expect("lock should succeed");
-        if !state.project_states.iter().any(|state| state == state_name) {
-            return Err(LinearError::InvalidStateTransition(state_name.to_string()));
-        }
-
-        let issue = state
-            .issues
-            .get_mut(issue_id)
-            .ok_or_else(|| LinearError::NotFound(issue_id.to_string()))?;
-        issue.state = state_name.to_string();
-        issue.updated_at = Utc::now();
-        Ok(issue.clone())
-    }
-
-    fn link_pr(
-        &self,
-        issue_id: &str,
-        url: &str,
-        title: Option<&str>,
-    ) -> Result<Issue, LinearError> {
-        let mut state = self.inner.lock().expect("lock should succeed");
-        let issue = state
-            .issues
-            .get(issue_id)
-            .cloned()
-            .ok_or_else(|| LinearError::NotFound(issue_id.to_string()))?;
-        let link = match title {
-            Some(title) => format!("{title}: {url}"),
-            None => url.to_string(),
-        };
-        state
-            .links
-            .entry(issue_id.to_string())
-            .or_default()
-            .push(link);
-        Ok(issue)
-    }
-
-    fn list_project_states(&self, _project_slug: &str) -> Result<Vec<String>, LinearError> {
-        let state = self.inner.lock().expect("lock should succeed");
-        Ok(state.project_states.clone())
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ScriptedRun {
-    pub delay_ms: u64,
-    pub progress_every_ms: Option<u64>,
-    pub outcome_kind: WorkerOutcomeKind,
-    pub detail: Option<String>,
-    pub conversation_id: Option<String>,
-    pub session_error: Option<IssueSessionError>,
-}
-
-impl ScriptedRun {
-    pub fn success(delay_ms: u64) -> Self {
-        Self {
-            delay_ms,
-            progress_every_ms: None,
-            outcome_kind: WorkerOutcomeKind::Success,
-            detail: None,
-            conversation_id: None,
-            session_error: None,
-        }
-    }
-
-    pub fn failure(delay_ms: u64, detail: impl Into<String>) -> Self {
-        Self {
-            delay_ms,
-            progress_every_ms: None,
-            outcome_kind: WorkerOutcomeKind::Failure,
-            detail: Some(detail.into()),
-            conversation_id: None,
-            session_error: None,
-        }
-    }
-
-    pub fn stalled(delay_ms: u64, detail: impl Into<String>) -> Self {
-        Self {
-            delay_ms,
-            progress_every_ms: None,
-            outcome_kind: WorkerOutcomeKind::Stalled,
-            detail: Some(detail.into()),
-            conversation_id: None,
-            session_error: None,
-        }
-    }
-
-    pub fn transport_error(delay_ms: u64, detail: impl Into<String>) -> Self {
-        Self {
-            delay_ms,
-            progress_every_ms: None,
-            outcome_kind: WorkerOutcomeKind::Failure,
-            detail: None,
-            conversation_id: None,
-            session_error: Some(IssueSessionError::transport(detail)),
-        }
-    }
-
-    pub fn transport_error_with_conversation(
-        delay_ms: u64,
-        detail: impl Into<String>,
-        conversation_id: impl Into<String>,
-    ) -> Self {
-        Self {
-            delay_ms,
-            progress_every_ms: None,
-            outcome_kind: WorkerOutcomeKind::Failure,
-            detail: None,
-            conversation_id: None,
-            session_error: Some(
-                IssueSessionError::transport(detail).with_conversation_id(conversation_id),
-            ),
-        }
-    }
-
-    pub fn with_progress_every(mut self, progress_every_ms: u64) -> Self {
-        self.progress_every_ms = Some(progress_every_ms);
-        self
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ScriptedRunner {
-    plans: Arc<Mutex<HashMap<String, VecDeque<ScriptedRun>>>>,
-    requests: Arc<Mutex<Vec<IssueRunRequest>>>,
-}
-
-impl ScriptedRunner {
-    pub fn set_plan(&self, issue_id: &str, runs: Vec<ScriptedRun>) {
-        let mut plans = self.plans.lock().expect("lock should succeed");
-        plans.insert(issue_id.to_string(), runs.into());
-    }
-
-    pub fn requests(&self) -> Vec<IssueRunRequest> {
-        self.requests.lock().expect("lock should succeed").clone()
-    }
-}
-
-#[async_trait]
-impl IssueSessionRunner for ScriptedRunner {
-    async fn run_issue(
-        &self,
-        request: IssueRunRequest,
-        progress_tx: tokio::sync::mpsc::UnboundedSender<IssueRunProgress>,
-    ) -> Result<IssueRunResult, IssueSessionError> {
-        self.requests
-            .lock()
-            .expect("lock should succeed")
-            .push(request.clone());
-
-        let scripted = {
-            let mut plans = self.plans.lock().expect("lock should succeed");
-            plans
-                .entry(request.issue.id.clone())
-                .or_default()
-                .pop_front()
-                .unwrap_or_else(|| ScriptedRun::success(0))
         };
 
-        let mut remaining_ms = scripted.delay_ms;
-        if let Some(progress_every_ms) = scripted.progress_every_ms.filter(|value| *value > 0) {
-            while remaining_ms > progress_every_ms {
-                sleep(Duration::from_millis(progress_every_ms)).await;
-                remaining_ms -= progress_every_ms;
-                let _ = progress_tx.send(IssueRunProgress {
-                    issue_id: request.issue.id.clone(),
-                    conversation_id: scripted.conversation_id.clone(),
-                });
-            }
-        }
-        sleep(Duration::from_millis(remaining_ms)).await;
+        let app = Router::new()
+            .route("/openapi.json", get(openapi))
+            .route("/api/conversations", post(create_conversation))
+            .route(
+                "/api/conversations/{conversation_id}",
+                get(get_conversation),
+            )
+            .route(
+                "/api/conversations/{conversation_id}/events",
+                post(send_message),
+            )
+            .route(
+                "/api/conversations/{conversation_id}/run",
+                post(run_conversation),
+            )
+            .route(
+                "/api/conversations/{conversation_id}/events/search",
+                get(search_events),
+            )
+            .route("/sockets/events/{conversation_id}", get(events_socket))
+            .with_state(state.clone());
 
-        if let Some(error) = scripted.session_error {
-            return Err(error);
-        }
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fake OpenHands server should stay up");
+        });
 
-        let outcome = match scripted.outcome_kind {
-            WorkerOutcomeKind::Success => WorkerOutcome::success(),
-            WorkerOutcomeKind::Failure => WorkerOutcome::failure(
-                scripted
-                    .detail
-                    .unwrap_or_else(|| "scripted failure".to_string()),
-            ),
-            WorkerOutcomeKind::Cancelled => WorkerOutcome::cancelled(
-                scripted
-                    .detail
-                    .unwrap_or_else(|| "scripted cancel".to_string()),
-            ),
-            WorkerOutcomeKind::Stalled => WorkerOutcome::stalled(
-                scripted
-                    .detail
-                    .unwrap_or_else(|| "scripted stall".to_string()),
-            ),
-            WorkerOutcomeKind::Released => WorkerOutcome::released(
-                scripted
-                    .detail
-                    .unwrap_or_else(|| "scripted release".to_string()),
-            ),
-        };
-
-        Ok(IssueRunResult {
-            outcome,
-            conversation_id: scripted
-                .conversation_id
-                .unwrap_or_else(|| format!("conversation-{}", request.issue.identifier)),
-            prompt_mode: request.prompt_mode,
+        Ok(Self {
+            base_url: format!("http://{address}"),
+            state,
+            task,
         })
     }
-}
 
-pub fn make_issue(
-    id: &str,
-    identifier: &str,
-    state: &str,
-    priority: Option<u8>,
-    created_at: chrono::DateTime<chrono::Utc>,
-) -> Issue {
-    Issue {
-        id: id.to_string(),
-        identifier: identifier.to_string(),
-        title: format!("Issue {identifier}"),
-        description: Some("Fixture issue".to_string()),
-        priority,
-        state: state.to_string(),
-        labels: vec!["fixture".to_string()],
-        blocked_by: vec![],
-        created_at,
-        updated_at: created_at,
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    pub async fn emit_state_update(
+        &self,
+        conversation_id: Uuid,
+        execution_status: impl Into<String>,
+    ) -> Result<(), FakeServerError> {
+        let execution_status = execution_status.into();
+        let event = {
+            let mut inner = self.state.inner.lock().await;
+            let id = next_event_id(&mut inner);
+            EventEnvelope::new(
+                id,
+                Utc::now(),
+                "runtime",
+                "ConversationStateUpdateEvent",
+                json!({
+                    "execution_status": execution_status,
+                    "state_delta": {
+                        "execution_status": execution_status,
+                    },
+                }),
+            )
+        };
+
+        self.insert_event(conversation_id, event).await
+    }
+
+    pub async fn insert_event(
+        &self,
+        conversation_id: Uuid,
+        event: EventEnvelope,
+    ) -> Result<(), FakeServerError> {
+        let mut inner = self.state.inner.lock().await;
+        let conversation = inner
+            .conversations
+            .get_mut(&conversation_id)
+            .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
+        apply_event_to_conversation(conversation, event);
+        Ok(())
+    }
+
+    pub async fn event_count(&self, conversation_id: Uuid) -> Result<usize, FakeServerError> {
+        let inner = self.state.inner.lock().await;
+        let conversation = inner
+            .conversations
+            .get(&conversation_id)
+            .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
+        Ok(conversation.events.len())
+    }
+
+    pub async fn fail_next_conversation_gets(
+        &self,
+        conversation_id: Uuid,
+        count: usize,
+    ) -> Result<(), FakeServerError> {
+        let mut inner = self.state.inner.lock().await;
+        if !inner.conversations.contains_key(&conversation_id) {
+            return Err(FakeServerError::ConversationNotFound(conversation_id));
+        }
+        if count == 0 {
+            inner.conversation_get_not_found.remove(&conversation_id);
+        } else {
+            inner
+                .conversation_get_not_found
+                .insert(conversation_id, count);
+        }
+        Ok(())
+    }
+
+    pub async fn drop_websocket_connections(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<(), FakeServerError> {
+        let inner = self.state.inner.lock().await;
+        let conversation = inner
+            .conversations
+            .get(&conversation_id)
+            .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
+        let _ = conversation.control_sender.send(SocketControl::Close);
+        Ok(())
     }
 }
 
-pub fn retry_reason_label(reason: RetryReason) -> &'static str {
-    match reason {
-        RetryReason::Continuation => "continuation",
-        RetryReason::Failure => "failure",
-        RetryReason::Stall => "stall",
-        RetryReason::Recovery => "recovery",
-        RetryReason::Reconcile => "reconcile",
+impl Drop for FakeOpenHandsServer {
+    fn drop(&mut self) {
+        self.task.abort();
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum FakeServerError {
+    #[error("conversation not found: {0}")]
+    ConversationNotFound(Uuid),
+}
+
+async fn openapi() -> Json<Value> {
+    Json(json!({
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Fake OpenHands agent-server",
+            "version": "0.1.0",
+        }
+    }))
+}
+
+async fn create_conversation(
+    State(state): State<AppState>,
+    Json(request): Json<ConversationCreateRequest>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let mut inner = state.inner.lock().await;
+    if let Some(existing) = inner.conversations.get(&request.conversation_id) {
+        return Ok(Json(existing.summary.clone()));
+    }
+
+    let summary = Conversation {
+        conversation_id: request.conversation_id,
+        workspace: request.workspace,
+        persistence_dir: request.persistence_dir,
+        max_iterations: request.max_iterations,
+        stuck_detection: request.stuck_detection,
+        execution_status: "idle".to_string(),
+        confirmation_policy: request.confirmation_policy,
+        agent: request.agent,
+    };
+
+    let (sender, _) = broadcast::channel(32);
+    let (control_sender, _) = broadcast::channel(8);
+    let ready_event = EventEnvelope::new(
+        next_event_id(&mut inner),
+        Utc::now(),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        json!({
+            "execution_status": "idle",
+            "state_delta": {
+                "execution_status": "idle",
+            },
+        }),
+    );
+
+    inner.conversations.insert(
+        summary.conversation_id,
+        FakeConversation {
+            summary: summary.clone(),
+            events: vec![ready_event],
+            sender,
+            control_sender,
+        },
+    );
+
+    Ok(Json(summary))
+}
+
+async fn get_conversation(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<Json<Conversation>, StatusCode> {
+    let mut inner = state.inner.lock().await;
+    let not_found = match inner.conversation_get_not_found.get_mut(&conversation_id) {
+        Some(remaining) if *remaining > 0 => {
+            *remaining -= 1;
+            true
+        }
+        _ => false,
+    };
+    if not_found
+        && inner
+            .conversation_get_not_found
+            .get(&conversation_id)
+            .copied()
+            .unwrap_or_default()
+            == 0
+    {
+        inner.conversation_get_not_found.remove(&conversation_id);
+    }
+    if not_found {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let conversation = inner
+        .conversations
+        .get(&conversation_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(conversation.summary.clone()))
+}
+
+async fn send_message(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<Uuid>,
+    Json(request): Json<SendMessageRequest>,
+) -> Result<Json<Value>, StatusCode> {
+    let mut inner = state.inner.lock().await;
+    let event = EventEnvelope::new(
+        next_event_id(&mut inner),
+        Utc::now(),
+        "user",
+        "MessageEvent",
+        serde_json::to_value(request).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+
+    let conversation = inner
+        .conversations
+        .get_mut(&conversation_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    apply_event_to_conversation(conversation, event);
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn run_conversation(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    let mut inner = state.inner.lock().await;
+    let already_running = inner
+        .conversations
+        .get(&conversation_id)
+        .map(|conversation| run_in_progress(&conversation.summary.execution_status))
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if already_running {
+        return Err(StatusCode::CONFLICT);
+    }
+    let terminal_status = inner.run_terminal_status.clone();
+    let running_event = EventEnvelope::new(
+        next_event_id(&mut inner),
+        Utc::now(),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        json!({
+            "execution_status": "running",
+            "state_delta": {
+                "execution_status": "running",
+            },
+        }),
+    );
+    let completion_event = EventEnvelope::new(
+        next_event_id(&mut inner),
+        Utc::now(),
+        "llm",
+        "LLMCompletionLogEvent",
+        json!({
+            "model": "fake-model",
+            "tokens": 42,
+        }),
+    );
+    let finished_event = EventEnvelope::new(
+        next_event_id(&mut inner),
+        Utc::now(),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        json!({
+            "execution_status": terminal_status.clone(),
+            "state_delta": {
+                "execution_status": terminal_status,
+            },
+        }),
+    );
+
+    let conversation = inner
+        .conversations
+        .get_mut(&conversation_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    apply_event_to_conversation(conversation, running_event);
+    apply_event_to_conversation(conversation, completion_event);
+    apply_event_to_conversation(conversation, finished_event);
+    Ok(Json(json!({ "success": true })))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    page_id: Option<String>,
+}
+
+async fn search_events(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<Uuid>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    let inner = state.inner.lock().await;
+    let conversation = inner
+        .conversations
+        .get(&conversation_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let offset = query
+        .page_id
+        .as_deref()
+        .unwrap_or("0")
+        .parse::<usize>()
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let page_size = inner.search_page_size;
+    let page = conversation
+        .events
+        .iter()
+        .skip(offset)
+        .take(page_size)
+        .cloned()
+        .collect::<Vec<_>>();
+    let next_offset = offset + page.len();
+    let next_page_id = (next_offset < conversation.events.len()).then(|| next_offset.to_string());
+
+    Ok(Json(SearchConversationEventsResponse {
+        events: page,
+        next_page_id,
+    }))
+}
+
+async fn events_socket(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<Uuid>,
+    websocket: WebSocketUpgrade,
+) -> Result<impl IntoResponse, StatusCode> {
+    {
+        let inner = state.inner.lock().await;
+        if !inner.conversations.contains_key(&conversation_id) {
+            return Err(StatusCode::NOT_FOUND);
+        }
+    }
+
+    Ok(websocket.on_upgrade(move |socket| handle_socket(state, conversation_id, socket)))
+}
+
+async fn handle_socket(state: AppState, conversation_id: Uuid, mut socket: WebSocket) {
+    let (mut receiver, mut control_receiver, ready_event) = {
+        let inner = state.inner.lock().await;
+        let conversation = match inner.conversations.get(&conversation_id) {
+            Some(conversation) => conversation,
+            None => return,
+        };
+        (
+            conversation.sender.subscribe(),
+            conversation.control_sender.subscribe(),
+            latest_state_event(conversation),
+        )
+    };
+
+    if socket
+        .send(Message::Text(
+            serde_json::to_string(&ready_event)
+                .expect("serializing ready event should succeed")
+                .into(),
+        ))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    loop {
+        tokio::select! {
+            received = receiver.recv() => {
+                let event = match received {
+                    Ok(event) => event,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                };
+                let payload = match serde_json::to_string(&event) {
+                    Ok(payload) => payload,
+                    Err(_) => continue,
+                };
+
+                if socket.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+            control = control_receiver.recv() => {
+                match control {
+                    Ok(SocketControl::Close) => {
+                        let _ = socket.send(Message::Close(None)).await;
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    }
+}
+
+fn latest_state_event(conversation: &FakeConversation) -> EventEnvelope {
+    conversation
+        .events
+        .iter()
+        .filter(|event| event.kind == "ConversationStateUpdateEvent")
+        .max_by(|left, right| compare_events(left, right))
+        .cloned()
+        .unwrap_or_else(|| {
+            EventEnvelope::state_update("ws-ready", conversation.summary.execution_status.clone())
+        })
+}
+
+fn apply_event_to_conversation(conversation: &mut FakeConversation, event: EventEnvelope) {
+    conversation.events.push(event.clone());
+    refresh_summary_state(conversation);
+    let _ = conversation.sender.send(event);
+}
+
+fn refresh_summary_state(conversation: &mut FakeConversation) {
+    if let Some(execution_status) = conversation
+        .events
+        .iter()
+        .filter_map(|event| match KnownEvent::from_envelope(event) {
+            KnownEvent::ConversationStateUpdate(ConversationStateUpdatePayload {
+                execution_status: Some(execution_status),
+                ..
+            }) => Some((event.timestamp, event.id.as_str(), execution_status)),
+            _ => None,
+        })
+        .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(right.1)))
+        .map(|(_, _, execution_status)| execution_status)
+    {
+        conversation.summary.execution_status = execution_status;
+    }
+}
+
+fn compare_events(left: &EventEnvelope, right: &EventEnvelope) -> std::cmp::Ordering {
+    left.timestamp
+        .cmp(&right.timestamp)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn next_event_id(inner: &mut Inner) -> String {
+    let current = inner.next_event_index;
+    inner.next_event_index += 1;
+    format!("evt-{current}")
+}
+
+fn run_in_progress(status: &str) -> bool {
+    !matches!(status, "idle" | "finished" | "error" | "stuck")
 }

@@ -44,6 +44,8 @@ developer machine
 - no Docker container per workspace
 - host filesystem and host process access are expected
 - loopback-only bind is required by default
+- launch metadata comes from the repo-local `tools/openhands-server/` wrapper
+  and pin files, not a globally installed `openhands` binary
 
 ### Best use case
 
@@ -84,6 +86,10 @@ Examples:
 - do not attempt to stop the external server on daemon exit
 - still create issue-scoped `working_dir` values
 - still apply the same REST plus WebSocket client contract
+- allow absolute `http://` or `https://` base URLs with optional path prefixes
+- keep authenticated loopback targets in external mode instead of auto-starting the local supervisor
+- health probing is allowed, but termination remains a no-op unless the daemon
+  owns the launched child process
 
 ## 4. Mode C: hosted remote agent-server mode
 
@@ -178,15 +184,18 @@ Defaults:
 Defaults:
 
 - explicit base URL required
+- path prefixes supported
 - auth configurable
 - TLS optional but supported if present
+- doctor and the runtime treat authenticated or path-prefixed loopback targets as external rather than supervisor-owned
 
 ## 7.3 Hosted remote
 
 Requirements:
 
 - TLS required
-- auth required
+- `openhands.transport.session_api_key_env` required
+- current default auth shape is HTTP header plus WebSocket query-param fallback, with explicit WebSocket header mode available when the pinned server supports it
 - version pinning required
 - structured audit logging required
 
@@ -217,6 +226,6 @@ Support external local server mode for debugging and CI.
 
 ### Phase 3
 
-Add hosted remote mode with hardened auth and stronger workspace isolation.
+Harden hosted remote mode beyond the current transport/auth support, including stronger workspace isolation and broader hosted-operations concerns.
 
 This sequencing gives the project the fastest path to a working developer-focused MVP while preserving the right long-term boundaries.

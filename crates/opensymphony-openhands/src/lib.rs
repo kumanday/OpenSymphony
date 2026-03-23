@@ -1,138 +1,54 @@
-use async_trait::async_trait;
-use opensymphony_domain::{Issue, WorkerOutcome};
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use thiserror::Error;
-use tokio::sync::mpsc;
+mod client;
+mod events;
+mod models;
+mod session;
+mod supervisor;
+mod tooling;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum PromptMode {
-    Fresh,
-    Continuation,
+pub use client::{
+    ApiKeyAuth, AuthConfig, HttpAuth, OpenHandsClient, OpenHandsError, OpenHandsProbeResult,
+    RuntimeEventStream, RuntimeStreamConfig, TransportAuthKind, TransportConfig,
+    TransportDiagnostics, TransportTargetKind, WebSocketAuth,
+};
+pub use events::{
+    ConversationErrorEvent, ConversationStateMirror, EventCache, KnownEvent, LlmCompletionLogEvent,
+    TerminalExecutionStatus, UnknownEvent,
+};
+pub use models::{
+    AcceptedResponse, AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
+    ConversationRunRequest, ConversationStateUpdatePayload, DoctorProbeConfig, EventEnvelope,
+    LlmConfig, SearchConversationEventsResponse, SendMessageRequest, TextContent, WorkspaceConfig,
+};
+pub use session::{
+    IssueConversationManifest, IssueSessionContext, IssueSessionError, IssueSessionPromptKind,
+    IssueSessionResult, IssueSessionRunner, IssueSessionRunnerConfig, RUNTIME_CONTRACT_VERSION,
+};
+pub use supervisor::{
+    ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, ProbeConfig, ServerMode,
+    ServerState, ServerStatus, SupervisedServerConfig, SupervisorConfig, SupervisorError,
+};
+pub use tooling::{
+    LocalServerTooling, LocalToolingError, LocalToolingLayout, PinStatus, ResolvedLaunch,
+    ToolingMetadata,
+};
+
+pub const CRATE_NAME: &str = "opensymphony-openhands";
+
+pub fn crate_summary() -> &'static str {
+    "REST client, WebSocket event stream, event cache/state mirror, local server supervisor, repo-local tooling resolution, conservative readiness probes, doctor diagnostics, issue session runner, and protocol error mapping"
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IssueRunRequest {
-    pub issue: Issue,
-    pub attempt: u32,
-    pub workspace_path: PathBuf,
-    pub prompt_mode: PromptMode,
-    pub prompt: String,
-    pub max_turns: u32,
+pub fn placeholder_summary() -> &'static str {
+    crate_summary()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IssueRunResult {
-    pub outcome: WorkerOutcome,
-    pub conversation_id: String,
-    pub prompt_mode: PromptMode,
-}
+#[cfg(test)]
+mod tests {
+    use super::{CRATE_NAME, crate_summary};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IssueRunProgress {
-    pub issue_id: String,
-    pub conversation_id: Option<String>,
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum IssueSessionError {
-    #[error("runtime transport error: {detail}")]
-    Transport {
-        detail: String,
-        conversation_id: Option<String>,
-    },
-    #[error("runtime protocol error: {detail}")]
-    Protocol {
-        detail: String,
-        conversation_id: Option<String>,
-    },
-    #[error("runtime timeout: {detail}")]
-    Timeout {
-        detail: String,
-        conversation_id: Option<String>,
-    },
-    #[error("runtime execution error: {detail}")]
-    Execution {
-        detail: String,
-        conversation_id: Option<String>,
-    },
-}
-
-impl IssueSessionError {
-    pub fn transport(detail: impl Into<String>) -> Self {
-        Self::Transport {
-            detail: detail.into(),
-            conversation_id: None,
-        }
+    #[test]
+    fn reports_its_boundary() {
+        assert_eq!(CRATE_NAME, "opensymphony-openhands");
+        assert!(crate_summary().contains("local server supervisor"));
     }
-
-    pub fn protocol(detail: impl Into<String>) -> Self {
-        Self::Protocol {
-            detail: detail.into(),
-            conversation_id: None,
-        }
-    }
-
-    pub fn timeout(detail: impl Into<String>) -> Self {
-        Self::Timeout {
-            detail: detail.into(),
-            conversation_id: None,
-        }
-    }
-
-    pub fn execution(detail: impl Into<String>) -> Self {
-        Self::Execution {
-            detail: detail.into(),
-            conversation_id: None,
-        }
-    }
-
-    pub fn with_conversation_id(mut self, conversation_id: impl Into<String>) -> Self {
-        let conversation_id = Some(conversation_id.into());
-        match &mut self {
-            Self::Transport {
-                conversation_id: slot,
-                ..
-            }
-            | Self::Protocol {
-                conversation_id: slot,
-                ..
-            }
-            | Self::Timeout {
-                conversation_id: slot,
-                ..
-            }
-            | Self::Execution {
-                conversation_id: slot,
-                ..
-            } => *slot = conversation_id,
-        }
-        self
-    }
-
-    pub fn conversation_id(&self) -> Option<&str> {
-        match self {
-            Self::Transport {
-                conversation_id, ..
-            }
-            | Self::Protocol {
-                conversation_id, ..
-            }
-            | Self::Timeout {
-                conversation_id, ..
-            }
-            | Self::Execution {
-                conversation_id, ..
-            } => conversation_id.as_deref(),
-        }
-    }
-}
-
-#[async_trait]
-pub trait IssueSessionRunner: Send + Sync {
-    async fn run_issue(
-        &self,
-        request: IssueRunRequest,
-        progress_tx: mpsc::UnboundedSender<IssueRunProgress>,
-    ) -> Result<IssueRunResult, IssueSessionError>;
 }
