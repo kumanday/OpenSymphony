@@ -49,12 +49,14 @@ Support these workflow-controlled modes in the Rust client:
   - otherwise use the pinned 1.14.0 shape: HTTP header `x-session-api-key`
     plus WebSocket query param `session_api_key`
 - `header`
-  - keep the same HTTP header and send that header on the WebSocket handshake
+  - keep the same HTTP header and send `X-Session-API-Key` on the WebSocket
+    handshake for non-browser clients
 - `query_param`
   - keep the same HTTP header and send the configured query parameter on the
     WebSocket handshake
 
-Default local MVP behavior: none.
+Default local MVP behavior: `auto`, which behaves as none when no session API
+key env is configured.
 
 ## 3. Event model
 
@@ -102,7 +104,7 @@ Use this sequence whenever attaching to a conversation, both fresh and existing.
 
 1. Ensure `conversation_id` is known.
 2. Perform an initial full event sync with `GET /api/conversations/{id}/events/search`.
-3. Start the WebSocket connection.
+3. Start the WebSocket connection with the configured handshake timeout.
 4. Wait for the readiness barrier.
 5. Reconcile events again with `GET /events/search`.
 6. Only after readiness and reconcile is the stream considered attached.
@@ -126,7 +128,7 @@ This is why the Rust runtime should intentionally copy the high-level behavior o
 
 ## 5. Readiness barrier
 
-The current SDK client treats the first `ConversationStateUpdateEvent` received after subscription as proof that the subscription is ready.
+The current SDK client treats the first `ConversationStateUpdateEvent` received after subscription as proof that the subscription is ready. On the pinned `v1.14.0` server this is a full-state snapshot with `key == "full_state"`.
 
 Implement the same rule.
 
@@ -154,6 +156,8 @@ Configurable timeout:
 - default `30000 ms`
 
 If readiness is not achieved, fail the attach attempt and surface a transport error.
+Apply the same timeout budget to the WebSocket handshake itself so a blackholed socket does not
+wait on kernel TCP timeouts.
 
 Current repository implementation:
 
@@ -216,6 +220,8 @@ Wire-level compatibility note:
 
 - the pinned source may emit both full-state snapshots and single-key state updates
 - the Rust client should support both without depending on undocumented fields leaking into orchestrator code
+- per-field ordering should compare parsed RFC3339 timestamps, not raw strings, so equivalent
+  offset spellings such as `Z` and `+01:00` do not rewind newer state
 
 Current repository implementation:
 
@@ -236,12 +242,16 @@ For each turn:
    - full rendered workflow prompt again if a reused conversation exists locally but has never been seeded with that first assignment message
    - built-in continuation guidance on resumed seeded conversations or later turns
    - persist the selected prompt under `.opensymphony/prompts/last-*-prompt.(md|json)` and archive the per-run capture under `.opensymphony/runs/attempt-####/`
-2. `POST /api/conversations/{id}/events`
+2. If the reused conversation is already `queued` or `running`, wait for that
+   turn to reach a terminal state before sending the next prompt.
+3. `POST /api/conversations/{id}/events`
    - user role
    - prompt content
    - `run=false`
-3. `POST /api/conversations/{id}/run`
-4. Observe progress through the WebSocket event stream
+4. `POST /api/conversations/{id}/run`
+   - if the server returns `409 Conflict`, wait for the active turn to finish,
+     reconcile the attached backlog, then retry `POST /run` on the same conversation
+5. Observe progress through the WebSocket event stream
 
 ## 7.2 Waiting for completion
 
@@ -253,7 +263,11 @@ Primary mechanism:
 Fallback mechanism:
 
 - refresh `GET /api/conversations/{id}` if stream health is uncertain
-- reconcile events after refresh
+- reconcile events after refresh, but treat that final reconcile as best-effort once the
+  authoritative REST snapshot has already confirmed a terminal state
+- if the stream reaches the stall timeout without a terminal state, run one final
+  `GET /events/search` reconcile before classifying the turn as stalled so
+  persisted-but-missed terminal events can still be recovered
 - classify the worker if the authoritative state is terminal
 
 ## 7.3 Terminal state queue
@@ -287,8 +301,9 @@ Use bounded exponential backoff:
 On reconnect:
 
 1. refresh conversation info with REST
-2. reconnect WebSocket
+2. reconnect WebSocket with the configured handshake timeout
 3. wait for readiness
+4. reconcile `events/search` again before trusting the resumed stream
 4. reconcile events
 5. resume streaming
 
@@ -299,6 +314,10 @@ Buffered-delivery rule:
 - if reconnect later exhausts policy limits, surface that failure on the following poll instead of dropping buffered runtime activity
 
 If reconnection exhausts policy limits or the worker deadline, fail the worker and let the orchestrator schedule retry.
+If shutdown or cancellation arrives during a reconnect handshake, abort that attempt immediately
+instead of waiting for the transport timeout to expire.
+Apply the same stop-aware behavior after the socket is accepted but before the first readiness event
+arrives, so reconnect shutdown does not wait for `ready_timeout_ms` to expire.
 
 Current repository implementation:
 
@@ -379,7 +398,8 @@ Mapping examples:
 - transport failure:
   - abnormal worker exit, schedule backoff retry
 - no events for longer than `stall_timeout_ms`:
-  - classify as stalled, terminate worker, schedule retry
+  - run one final REST event reconcile
+  - if no recovered terminal state appears, classify as stalled, terminate worker, schedule retry
 - issue becomes terminal in Linear while stream is healthy:
   - orchestrator cancels worker regardless of OpenHands status
 

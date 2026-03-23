@@ -547,6 +547,11 @@ impl RuntimeEventStream {
         &self.state_mirror
     }
 
+    pub async fn reconcile_events(&mut self) -> Result<usize, OpenHandsError> {
+        let reconciled = self.client.search_all_events(self.conversation_id).await?;
+        Ok(self.push_new_events(reconciled.items().iter().cloned(), true))
+    }
+
     pub async fn next_event(&mut self) -> Result<Option<EventEnvelope>, OpenHandsError> {
         loop {
             if let Some(event) = self.poll_next_event_once().await? {

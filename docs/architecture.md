@@ -102,6 +102,7 @@ OpenSymphony creates a stable OpenHands `conversation_id` per issue and persists
 
 This is stricter than the minimum Symphony requirement and intentionally optimizes continuity.
 The current issue session runner also tracks whether that conversation has already been seeded with the full workflow prompt so a reused but never-started thread can still receive the original assignment on the next attempt.
+The persisted OpenHands state directory is derived from the workflow-owned `openhands.conversation.persistence_dir_relative` path inside the issue workspace, and a missing-but-recreatable conversation that still has persisted history stays on continuation guidance instead of replaying the full workflow template.
 
 ### 3.6 The UI only sees the control plane
 
@@ -224,17 +225,19 @@ Local MVP process graph:
 
 The current local supervisor implementation resolves its launch metadata from
 `tools/openhands-server/`, probes readiness with `GET /openapi.json`, and only
-terminates a process that it launched itself. Workflow resolution now accepts
-absolute `http://` and `https://` OpenHands origins with optional path
-prefixes, rejects embedded credentials plus query/fragment suffixes, and still
-rejects bracketed IPv6 until the local readiness probe grows that support.
-Non-loopback targets must use `https://` and configure
-`openhands.transport.session_api_key_env`. The runtime attach loop now consumes
-workflow-owned WebSocket readiness and reconnect budgets. Until the local
-supervisor creation path consumes workflow-owned launcher overrides,
-disablement, env, readiness-probe-path, and startup-timeout settings, those
-fields and explicit `websocket.enabled` remain rejected during workflow
-resolution.
+terminates a process that it launched itself. In supervised mode it also refuses
+to launch when another ready server is already responding on the configured
+base URL, so the daemon never silently adopts a foreign process as its owned
+child. Workflow resolution now accepts absolute `http://` and `https://`
+OpenHands origins with optional path prefixes, rejects embedded credentials plus
+query/fragment suffixes, and still rejects bracketed IPv6 until the local
+readiness probe grows that support. Non-loopback targets must use `https://`
+and configure `openhands.transport.session_api_key_env`. The runtime attach
+loop now consumes workflow-owned WebSocket readiness and reconnect budgets.
+Until the local supervisor creation path consumes workflow-owned launcher
+overrides, disablement, env, readiness-probe-path, and startup-timeout
+settings, those fields and explicit `websocket.enabled` remain rejected during
+workflow resolution.
 
 ## 5. Worker and conversation model
 
@@ -263,9 +266,14 @@ For each issue:
 1. Ensure workspace exists.
 2. Load or create stable conversation metadata.
 3. Attach WebSocket stream and reconcile events.
-4. Execute one or more turns on the same conversation up to `agent.max_turns`.
-5. Exit worker normally or abnormally.
-6. Let the orchestrator decide continuation retry, failure retry, release, or cancellation.
+4. If that reused conversation is already `queued` or `running`, wait for it to
+   reach a terminal state before sending the next prompt.
+5. Execute one or more turns on the same conversation up to `agent.max_turns`.
+   If `POST /run` races with an already-active turn and returns `409 Conflict`,
+   wait for that active turn to finish, refresh the event backlog, and retry the
+   run on the same conversation.
+6. Exit worker normally or abnormally.
+7. Let the orchestrator decide continuation retry, failure retry, release, or cancellation.
 
 ### 5.4 Prompt policy
 

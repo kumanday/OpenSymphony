@@ -126,6 +126,7 @@ impl LocalServerTooling {
         ensure_exists(&layout.pyproject)?;
         ensure_exists(&layout.lockfile)?;
         ensure_exists(&layout.version_file)?;
+        let layout = LocalToolingLayout::from_tool_dir(canonicalize_path(&layout.tool_dir)?);
 
         let pyproject_contents = read_to_string(&layout.pyproject)?;
         let parsed: Pyproject = toml::from_str(&pyproject_contents).map_err(|source| {
@@ -241,6 +242,12 @@ impl LocalServerTooling {
 pub enum LocalToolingError {
     #[error("required local OpenHands tooling file is missing: {path}")]
     MissingFile { path: PathBuf },
+    #[error("failed to canonicalize local OpenHands tooling path {path}: {source}")]
+    CanonicalizePath {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("failed to read local OpenHands tooling file {path}: {source}")]
     ReadFile {
         path: PathBuf,
@@ -344,6 +351,13 @@ fn ensure_exists(path: &Path) -> Result<(), LocalToolingError> {
             path: path.to_path_buf(),
         })
     }
+}
+
+fn canonicalize_path(path: &Path) -> Result<PathBuf, LocalToolingError> {
+    fs::canonicalize(path).map_err(|source| LocalToolingError::CanonicalizePath {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn read_to_string(path: &Path) -> Result<String, LocalToolingError> {

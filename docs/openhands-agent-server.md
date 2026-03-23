@@ -133,6 +133,7 @@ Current implementation detail:
 
 - supervised mode launches `bash tools/openhands-server/run-local.sh`
 - the supervisor sets `OPENHANDS_SERVER_PORT`, while the launcher itself forces `RUNTIME=process`, loopback host `127.0.0.1`, the pinned `agent-server` extra, and `uv` lockfile enforcement
+- before spawning, supervised mode probes the resolved base URL and fails fast if another ready server is already responding there, so the daemon never treats a foreign process as its owned child
 - diagnostics record the launcher summary, resolved base URL, pinned version,
   and launched PID for doctor output and future daemon logs
 - the doctor path renders the target repo workflow prompt with a synthetic issue
@@ -226,6 +227,13 @@ Each issue conversation should persist under a stable path inside the issue work
 
 This keeps execution state co-located with the workspace and simplifies recovery.
 
+Current implementation detail:
+
+- the adapter derives `persistence_dir` from `openhands.conversation.persistence_dir_relative`
+  joined under the sanitized issue workspace root
+- conversation reuse checks compare the persisted manifest path against that resolved
+  workflow-owned directory instead of hard-coding `.opensymphony/openhands`
+
 ## 6.3 Reuse policy
 
 Default policy:
@@ -243,6 +251,8 @@ Current implementation detail:
 - fresh conversations start with `workflow_prompt_seeded = false`
 - the full workflow prompt is selected until a `POST /events` call accepts that first assignment message
 - once seeded, later worker lifetimes send built-in continuation guidance instead of rerendering the workflow template
+- if `GET /api/conversations/{id}` or the initial attach fails for a reused conversation, the runner retries `POST /api/conversations` with the same stable `conversation_id`; when that re-created thread still exposes persisted history, the runner keeps continuation guidance instead of downgrading to a fresh full prompt
+- if a reused conversation is already active, the runner waits for that turn to finish before sending the next prompt, and it retries `POST /run` after a `409 Conflict` on the same attached stream
 - each fresh create also snapshots `create-conversation-request.json`, `last-conversation-state.json`, and `generated/session-context.json` inside the issue workspace for recovery and observability
 
 ## 7. REST endpoints used by OpenSymphony

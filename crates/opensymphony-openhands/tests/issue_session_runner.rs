@@ -1,12 +1,13 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use opensymphony_domain::{
     IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RetryAttempt,
     RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
 };
 use opensymphony_openhands::{
-    EventEnvelope, IssueConversationManifest, IssueSessionContext, IssueSessionPromptKind,
-    IssueSessionRunner, IssueSessionRunnerConfig, OpenHandsClient, TransportConfig,
+    ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
+    IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig, OpenHandsClient,
+    TransportConfig,
 };
 use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
@@ -58,6 +59,14 @@ fn workspace_manager(root: &Path, hooks: HookConfig) -> WorkspaceManager {
 }
 
 fn workflow_for(workspace_root: &Path, base_url: &str) -> ResolvedWorkflow {
+    workflow_for_with_persistence_dir(workspace_root, base_url, ".opensymphony/openhands")
+}
+
+fn workflow_for_with_persistence_dir(
+    workspace_root: &Path,
+    base_url: &str,
+    persistence_dir_relative: &str,
+) -> ResolvedWorkflow {
     let workflow = WorkflowDefinition::parse(&format!(
         r#"---
 tracker:
@@ -72,6 +81,8 @@ workspace:
 openhands:
   transport:
     base_url: {}
+  conversation:
+    persistence_dir_relative: {}
 ---
 
 # Assignment
@@ -82,6 +93,7 @@ Title: {{{{ issue.title }}}}
 "#,
         workspace_root.display(),
         base_url,
+        persistence_dir_relative,
     ))
     .expect("workflow should parse");
 
@@ -155,6 +167,23 @@ async fn read_session_context(
         .expect("session context should be readable")
         .expect("session context should exist");
     serde_json::from_str(&raw).expect("session context should decode")
+}
+
+async fn read_create_conversation_request(
+    manager: &WorkspaceManager,
+    handle: &opensymphony_workspace::WorkspaceHandle,
+) -> ConversationCreateRequest {
+    let raw = manager
+        .read_text_artifact(
+            handle,
+            &handle
+                .openhands_dir()
+                .join("create-conversation-request.json"),
+        )
+        .await
+        .expect("create request should be readable")
+        .expect("create request should exist");
+    serde_json::from_str(&raw).expect("create request should decode")
 }
 
 #[tokio::test]
@@ -448,6 +477,365 @@ async fn issue_session_runner_reports_failure_when_current_turn_terminal_error_i
             .as_deref()
             .expect("failure error should be persisted")
             .contains("error")
+    );
+}
+
+#[tokio::test]
+async fn issue_session_runner_waits_for_an_already_running_turn_before_retrying() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-253-running");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client.clone(), runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut first_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("first run manifest should prepare");
+    let first_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    let first_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut first_manifest,
+            &issue,
+            &first_run,
+            &workflow,
+        )
+        .await
+        .expect("first issue session run should succeed");
+    let conversation_id = uuid::Uuid::parse_str(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("conversation ID should parse");
+
+    server
+        .emit_state_update(conversation_id, "running")
+        .await
+        .expect("conversation should become active");
+
+    let mut second_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-2", 2))
+        .await
+        .expect("second run manifest should prepare");
+    let second_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-2",
+        Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
+        max_turns,
+    );
+
+    let (second_result, _) = tokio::join!(
+        runner.run(
+            &manager,
+            &ensured.handle,
+            &mut second_manifest,
+            &issue,
+            &second_run,
+            &workflow,
+        ),
+        async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            server
+                .emit_state_update(conversation_id, "finished")
+                .await
+                .expect("active turn should finish");
+        }
+    );
+    let second_result = second_result.expect("second issue session run should succeed");
+    assert_eq!(
+        second_result.prompt_kind,
+        IssueSessionPromptKind::Continuation
+    );
+    assert_eq!(
+        second_result.run_status,
+        opensymphony_workspace::RunStatus::Succeeded
+    );
+    assert_eq!(
+        second_result.worker_outcome.outcome,
+        WorkerOutcomeKind::Succeeded
+    );
+
+    let messages = latest_message_texts(
+        client
+            .search_all_events(conversation_id)
+            .await
+            .expect("events should be searchable after retry")
+            .items(),
+    );
+    assert_eq!(messages.len(), 2);
+    assert!(messages[1].contains("The original workflow prompt is already present"));
+}
+
+#[tokio::test]
+async fn issue_session_runner_rehydrates_a_missing_conversation_without_downgrading_to_full_prompt()
+{
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-253-rehydrate");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client.clone(), runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut first_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("first run manifest should prepare");
+    let first_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    let first_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut first_manifest,
+            &issue,
+            &first_run,
+            &workflow,
+        )
+        .await
+        .expect("first issue session run should succeed");
+    let conversation_id = uuid::Uuid::parse_str(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("conversation ID should parse");
+
+    server
+        .fail_next_conversation_gets(conversation_id, 1)
+        .await
+        .expect("fake server should fail one fetch");
+
+    let mut second_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-2", 2))
+        .await
+        .expect("second run manifest should prepare");
+    let second_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-2",
+        Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
+        max_turns,
+    );
+    let second_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut second_manifest,
+            &issue,
+            &second_run,
+            &workflow,
+        )
+        .await
+        .expect("rehydrated issue session run should succeed");
+
+    assert_eq!(
+        second_result.prompt_kind,
+        IssueSessionPromptKind::Continuation
+    );
+    assert_eq!(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("first conversation metadata should exist")
+            .conversation_id,
+        second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .conversation_id
+    );
+    assert!(
+        !second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .fresh_conversation
+    );
+
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    assert_eq!(create_request.conversation_id, conversation_id);
+
+    let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert!(manifest.workflow_prompt_seeded);
+    assert_eq!(
+        manifest.last_prompt_kind,
+        Some(IssueSessionPromptKind::Continuation)
+    );
+
+    let messages = latest_message_texts(
+        client
+            .search_all_events(conversation_id)
+            .await
+            .expect("events should be searchable after rehydrate")
+            .items(),
+    );
+    assert_eq!(messages.len(), 2);
+    assert!(messages[1].contains("The original workflow prompt is already present"));
+}
+
+#[tokio::test]
+async fn issue_session_runner_uses_the_configured_persistence_dir_for_create_and_reuse() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for_with_persistence_dir(
+        &workspace_root,
+        server.base_url(),
+        ".opensymphony/runtime-cache",
+    );
+    let issue = sample_issue("COE-253-persistence");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client.clone(), runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut first_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("first run manifest should prepare");
+    let first_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    let first_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut first_manifest,
+            &issue,
+            &first_run,
+            &workflow,
+        )
+        .await
+        .expect("first issue session run should succeed");
+    let expected_persistence_dir = ensured
+        .handle
+        .workspace_path()
+        .join(".opensymphony/runtime-cache");
+    let first_conversation_id = uuid::Uuid::parse_str(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("conversation ID should parse");
+
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    assert_eq!(
+        Path::new(&create_request.persistence_dir),
+        expected_persistence_dir.as_path()
+    );
+
+    let first_conversation = client
+        .get_conversation(first_conversation_id)
+        .await
+        .expect("conversation should be fetchable");
+    assert_eq!(
+        Path::new(&first_conversation.persistence_dir),
+        expected_persistence_dir.as_path()
+    );
+
+    let first_manifest_state = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert_eq!(
+        first_manifest_state.persistence_dir,
+        expected_persistence_dir
+    );
+
+    let mut second_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-2", 2))
+        .await
+        .expect("second run manifest should prepare");
+    let second_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-2",
+        Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
+        max_turns,
+    );
+    let second_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut second_manifest,
+            &issue,
+            &second_run,
+            &workflow,
+        )
+        .await
+        .expect("second issue session run should succeed");
+
+    assert_eq!(
+        second_result.prompt_kind,
+        IssueSessionPromptKind::Continuation
+    );
+    assert_eq!(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("first conversation metadata should exist")
+            .conversation_id,
+        second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .conversation_id
+    );
+
+    let second_manifest_state = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert_eq!(
+        second_manifest_state.persistence_dir,
+        expected_persistence_dir
     );
 }
 

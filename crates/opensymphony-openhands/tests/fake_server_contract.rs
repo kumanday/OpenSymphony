@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::{Duration as ChronoDuration, Utc};
 use opensymphony_openhands::{
     ConversationCreateRequest, EventCache, EventEnvelope, KnownEvent, OpenHandsClient,
-    RuntimeStreamConfig, TerminalExecutionStatus, TransportConfig,
+    OpenHandsError, RuntimeStreamConfig, TerminalExecutionStatus, TransportConfig,
 };
 use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 
@@ -306,6 +306,91 @@ async fn runtime_stream_keeps_latest_state_when_out_of_order_events_arrive() {
     assert_eq!(ordered_ids.first().copied(), Some("evt-queued"));
     assert_eq!(ordered_ids.last().copied(), Some("evt-running"));
     assert_eq!(stream.state_mirror().execution_status(), Some("running"));
+}
+
+#[tokio::test]
+async fn create_conversation_reuses_existing_requested_id_without_losing_history() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+    let persisted = EventEnvelope::new(
+        "evt-persisted",
+        Utc::now(),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        serde_json::json!({
+            "execution_status": "running",
+            "state_delta": {
+                "execution_status": "running",
+            },
+        }),
+    );
+    server
+        .insert_event(conversation.conversation_id, persisted.clone())
+        .await
+        .expect("persisted history should be stored");
+
+    let recreated = client
+        .create_conversation(&request)
+        .await
+        .expect("recreate by requested ID should succeed");
+    let events = client
+        .search_all_events(conversation.conversation_id)
+        .await
+        .expect("history should still be searchable");
+
+    assert_eq!(recreated.conversation_id, conversation.conversation_id);
+    assert!(
+        events.items().iter().any(|event| event.id == persisted.id),
+        "same-ID create should not drop persisted history"
+    );
+}
+
+#[tokio::test]
+async fn run_conversation_returns_conflict_while_execution_is_already_active() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    server
+        .emit_state_update(conversation.conversation_id, "running")
+        .await
+        .expect("conversation should become active");
+
+    let error = client
+        .run_conversation(conversation.conversation_id)
+        .await
+        .expect_err("active conversation should reject a second run");
+
+    assert!(matches!(
+        error,
+        OpenHandsError::HttpStatus {
+            status_code: 409,
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
