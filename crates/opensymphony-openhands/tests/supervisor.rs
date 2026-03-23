@@ -182,6 +182,38 @@ fn supervised_mode_rejects_a_foreign_ready_server_on_its_target_port() {
     foreign.wait().expect("wait child");
 }
 
+#[test]
+fn supervised_start_supports_relative_tool_dir_paths() {
+    let current_dir = std::env::current_dir().expect("cwd should resolve");
+    let temp_dir = tempfile::tempdir_in(&current_dir).expect("temp dir");
+    let python = resolve_python();
+    write_tooling_fixture(temp_dir.path(), &python, "ready");
+    let relative_tool_dir = temp_dir
+        .path()
+        .strip_prefix(&current_dir)
+        .expect("fixture should live under the test cwd");
+    let port = free_port();
+    let mut config = SupervisedServerConfig::new(
+        LocalServerTooling::load(relative_tool_dir).expect("tooling should load"),
+    );
+    config.port_override = Some(port);
+    config.startup_timeout = Duration::from_secs(3);
+    config
+        .extra_env
+        .insert("FAKE_SERVER_MODE".to_string(), "ready".to_string());
+
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
+    let started = supervisor
+        .start()
+        .expect("relative tooling path should still start the pinned launcher");
+
+    assert_eq!(started.ownership, LaunchOwnership::Launched);
+    assert_eq!(started.state, ServerState::Ready);
+
+    let stopped = supervisor.stop().expect("stop should work");
+    assert_eq!(stopped.state, ServerState::Stopped);
+}
+
 struct FakeToolingFixture {
     temp_dir: TempDir,
     python: String,
