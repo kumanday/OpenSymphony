@@ -231,6 +231,18 @@ Current repository implementation:
 - `RuntimeEventStream` reapplies the non-replayable readiness snapshot after attach/reconnect and after later cache-driven mirror rebuilds only when reconcile and REST refresh do not already carry an equal or newer decodable state update, still derives a minimal mirror patch from forward-compatible `state_delta` payloads even when typed state decoding would otherwise fall back, and lets an active `queued` or `running` ready barrier clear stale terminal REST fallback for restarted reused conversations
 - `ConversationStateMirror::terminal_status` provides the current finished/error/stuck classification used by the probe and future workers
 
+## 6.5 Scheduler-facing event handoff
+
+The orchestrator does not need the full OpenHands wire contract at its boundary.
+
+The worker backend that bridges `RuntimeEventStream` into the scheduler should surface:
+
+- launch-time `ConversationMetadata`
+- ordered runtime-event updates carrying `event_id`, `event_kind`, `summary`, and `observed_at`
+- a terminal worker outcome once the stream resolves to `finished`, `error`, `stuck`, or another final condition
+
+This keeps WebSocket protocol churn isolated inside `opensymphony-openhands` while still giving the orchestrator enough information for stall detection, reconciliation, and snapshot derivation.
+
 ## 7. Run lifecycle over REST plus WebSocket
 
 ## 7.1 Sending a turn

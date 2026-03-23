@@ -197,6 +197,11 @@ Use cases:
 - workspace introspection
 - authoritative ownership check for non-injective sanitized workspace keys
 
+Current repository implementation:
+
+- the scheduler recovery path consumes manifest-derived records that include the normalized issue identity plus the attached workspace record
+- recovered active issues reuse that workspace attachment on the next scheduler poll instead of recreating the workspace path
+
 ## 7.1 Run metadata manifest
 
 Persist the latest worker-lifetime manifest under `.opensymphony/run.json`.
@@ -220,6 +225,10 @@ Use cases:
 - capture `before_run` and `after_run` hook outcomes with stdout/stderr for diagnostics
 - explain the latest worker-lifetime state during restart recovery
 - make cleanup and retry decisions inspectable without daemon memory
+
+Current repository note:
+
+- the run manifest is currently explanatory recovery evidence for operators and future adapters; the generic scheduler core already reuses workspace ownership from recovery records, while persisted retry-queue reconstruction remains a later follow-on
 
 ## 8. Conversation metadata manifest
 

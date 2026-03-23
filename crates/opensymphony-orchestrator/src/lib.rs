@@ -1,3 +1,4 @@
+mod scheduler;
 mod selection;
 
 pub const CRATE_NAME: &str = "opensymphony-orchestrator";
@@ -12,6 +13,10 @@ pub use opensymphony_domain::{
     TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
     TrackerStateId, TransitionAction, WorkerAttemptSnapshot, WorkerId, WorkerOutcomeKind,
     WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
+};
+pub use scheduler::{
+    RecoveryRecord, Scheduler, SchedulerConfig, SchedulerError, TrackerBackend, WorkerAbortReason,
+    WorkerBackend, WorkerLaunch, WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
 };
 pub use selection::{
     filter_issues_for_dispatch, issue_blocked_by_non_terminal_blockers,
