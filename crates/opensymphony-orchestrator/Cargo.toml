@@ -9,7 +9,12 @@ repository.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+chrono = { workspace = true }
 opensymphony-domain = { path = "../opensymphony-domain" }
+opensymphony-workflow = { path = "../opensymphony-workflow" }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

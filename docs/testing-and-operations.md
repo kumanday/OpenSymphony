@@ -76,7 +76,7 @@ Current implementation:
 
 - `cargo test --workspace` exercises the fake-server contract suite in `crates/opensymphony-openhands/tests/fake_server_contract.rs`
 - `cargo test -p opensymphony-linear` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, archived terminal cleanup reads, non-archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
-- `cargo test -p opensymphony-orchestrator` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, and dynamic child-addition reblocking against normalized tracker issues
+- `cargo test -p opensymphony-orchestrator` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, and manifest-backed workspace recovery against fake tracker/workspace/worker backends
 - `crates/opensymphony-cli/tests/doctor.rs` runs the CLI live-probe path against `opensymphony-testkit`
 - `scripts/smoke_local.sh` runs the static doctor pass
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
@@ -187,6 +187,10 @@ Current implementation:
 - active-state refresh
 - terminal cleanup
 - restart recovery from manifests
+
+Current repository implementation:
+
+- `crates/opensymphony-orchestrator/tests/scheduler.rs` covers continuation retry, failure backoff, per-state dispatch limits, runtime-event-fed stall detection, terminal reconciliation with cleanup, and manifest-backed workspace recovery using fake backends
 
 ## 3.5 Control plane and TUI
 

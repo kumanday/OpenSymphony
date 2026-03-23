@@ -255,6 +255,22 @@ Current implementation detail:
 - if a reused conversation is already active, the runner waits for that turn to finish before sending the next prompt, and it retries `POST /run` after a `409 Conflict` on the same attached stream
 - each fresh create also snapshots `create-conversation-request.json`, `last-conversation-state.json`, and `generated/session-context.json` inside the issue workspace for recovery and observability
 
+## 6.4 Scheduler handoff contract
+
+The orchestrator does not consume raw OpenHands protocol frames directly.
+
+The scheduler-facing worker boundary should provide:
+
+- a launch acknowledgment that includes `ConversationMetadata` so the issue can move into `Running`
+- incremental runtime-event reports used to refresh last-event timestamps and stall deadlines
+- one terminal worker outcome report used to schedule continuation retry, failure backoff, or release
+
+Current repository implementation:
+
+- `opensymphony-openhands::IssueSessionRunner` still owns the concrete attach/create/send/run/await flow
+- `opensymphony-orchestrator::Scheduler` is now implemented as a generic core over a worker backend that emits the launch plus runtime/outcome reports above
+- fake-backend scheduler tests currently lock down the orchestration semantics while a thin production adapter from `IssueSessionRunner` into that worker contract remains follow-on wiring
+
 ## 7. REST endpoints used by OpenSymphony
 
 Use the smallest necessary subset of the agent-server API.
