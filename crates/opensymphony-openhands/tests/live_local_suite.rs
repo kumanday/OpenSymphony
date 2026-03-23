@@ -143,7 +143,7 @@ enum LiveServer {
     },
     Managed {
         base_url: String,
-        supervisor: LocalServerSupervisor,
+        supervisor: Box<LocalServerSupervisor>,
     },
 }
 
@@ -165,7 +165,7 @@ impl LiveServer {
 
         Self::Managed {
             base_url: status.base_url,
-            supervisor,
+            supervisor: Box::new(supervisor),
         }
     }
 
@@ -1280,7 +1280,7 @@ fn should_drop_after_ready(message: &TungsteniteMessage) -> bool {
 
 fn axum_to_tungstenite(message: AxumMessage) -> Option<TungsteniteMessage> {
     match message {
-        AxumMessage::Text(text) => Some(TungsteniteMessage::Text(text.to_string().into())),
+        AxumMessage::Text(text) => Some(TungsteniteMessage::Text(text.to_string())),
         AxumMessage::Binary(data) => Some(TungsteniteMessage::Binary(data.to_vec())),
         AxumMessage::Ping(data) => Some(TungsteniteMessage::Ping(data.to_vec())),
         AxumMessage::Pong(data) => Some(TungsteniteMessage::Pong(data.to_vec())),

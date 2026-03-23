@@ -1214,13 +1214,11 @@ impl IssueSessionRunner {
                 Ok(Ok(None)) => {
                     if let Ok(inserted) = stream.reconcile_events().await
                         && inserted > 0
-                    {
-                        if let Some(outcome) = self
+                        && let Some(outcome) = self
                             .terminal_outcome_from_state(stream, baseline_event_ids)
                             .await
-                        {
-                            return outcome;
-                        }
+                    {
+                        return outcome;
                     }
 
                     return NormalizedOutcome {
