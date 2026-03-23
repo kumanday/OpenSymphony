@@ -191,12 +191,14 @@ cargo test --workspace
 cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml
 cargo run -p opensymphony-cli -- linear-mcp
 ./scripts/smoke_local.sh
+OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_local_suite -- --ignored --nocapture --test-threads=1
 OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 ```
 
 Current note:
 
 - the example doctor YAML now only carries machine-local inputs such as the OpenHands tool directory and optional probe overrides; the target repo `WORKFLOW.md` provides the workspace root, OpenHands base URL, and prompt that the doctor probe validates
+- `scripts/live_e2e.sh` now performs the full opt-in live suite: doctor preflight, pinned local server launch, ignored `live_local_suite` integration tests, and artifact capture under `target/live-local/`
 - `linear-mcp` is implemented and exposes the documented Linear tool surface over stdio; `daemon` and `tui` remain scaffolds until their runtime and control-plane milestones land.
 
 ## Non-negotiable implementation rules

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -184,46 +184,15 @@ pub struct ConversationStateUpdatePayload {
     pub state_delta: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EventEnvelope {
     pub id: String,
-    #[serde(with = "flexible_timestamp")]
     pub timestamp: DateTime<Utc>,
-    #[serde(default)]
     pub source: String,
     pub kind: String,
-    #[serde(default)]
     pub payload: Value,
-    #[serde(default)]
     pub key: Option<String>,
-    #[serde(default)]
     pub value: Option<Value>,
-}
-
-mod flexible_timestamp {
-    use chrono::{DateTime, NaiveDateTime, Utc};
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&value.to_rfc3339())
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<DateTime<Utc>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        if let Ok(timestamp) = DateTime::parse_from_rfc3339(&value) {
-            return Ok(timestamp.with_timezone(&Utc));
-        }
-
-        let naive = NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S%.f")
-            .map_err(serde::de::Error::custom)?;
-        Ok(DateTime::from_naive_utc_and_offset(naive, Utc))
-    }
 }
 
 impl EventEnvelope {
@@ -262,6 +231,117 @@ impl EventEnvelope {
             value: None,
         }
     }
+}
+
+impl Serialize for EventEnvelope {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("id", &self.id)?;
+        map.serialize_entry("timestamp", &self.timestamp.to_rfc3339())?;
+        map.serialize_entry("source", &self.source)?;
+        map.serialize_entry("kind", &self.kind)?;
+        if let Some(key) = &self.key {
+            map.serialize_entry("key", key)?;
+        }
+        if let Some(value) = &self.value {
+            map.serialize_entry("value", value)?;
+        }
+
+        match &self.payload {
+            Value::Object(payload) => {
+                for (key, value) in payload {
+                    map.serialize_entry(key, value)?;
+                }
+            }
+            Value::Null => {}
+            other => {
+                map.serialize_entry("payload", other)?;
+            }
+        }
+
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for EventEnvelope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut raw = serde_json::Map::<String, Value>::deserialize(deserializer)?;
+        let id = take_required_string(&mut raw, "id")?;
+        let timestamp = take_required_timestamp(&mut raw, "timestamp")?;
+        let source = take_optional_string(&mut raw, "source").unwrap_or_default();
+        let kind = take_required_string(&mut raw, "kind")?;
+        let key = take_optional_string(&mut raw, "key");
+        let value = raw.remove("value");
+        let nested_payload = raw.remove("payload");
+        let payload = match (nested_payload, raw.is_empty()) {
+            (Some(Value::Object(payload)), true) => Value::Object(payload),
+            (Some(Value::Null), true) | (None, true) => Value::Object(raw),
+            (Some(payload), true) => payload,
+            (Some(payload), false) => {
+                raw.insert("payload".to_string(), payload);
+                Value::Object(raw)
+            }
+            (None, false) => Value::Object(raw),
+        };
+
+        Ok(Self {
+            id,
+            timestamp,
+            source,
+            kind,
+            payload,
+            key,
+            value,
+        })
+    }
+}
+
+fn take_required_string<E>(
+    raw: &mut serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<String, E>
+where
+    E: serde::de::Error,
+{
+    raw.remove(field)
+        .ok_or_else(|| E::custom(format!("missing required field `{field}`")))?
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| E::custom(format!("expected `{field}` to be a string")))
+}
+
+fn take_optional_string(raw: &mut serde_json::Map<String, Value>, field: &str) -> Option<String> {
+    raw.remove(field)
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+}
+
+fn take_required_timestamp<E>(
+    raw: &mut serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<DateTime<Utc>, E>
+where
+    E: serde::de::Error,
+{
+    let value = raw
+        .remove(field)
+        .ok_or_else(|| E::custom(format!("missing required field `{field}`")))?;
+    let raw_timestamp = value
+        .as_str()
+        .ok_or_else(|| E::custom(format!("expected `{field}` to be a string timestamp")))?;
+
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(raw_timestamp) {
+        return Ok(timestamp.with_timezone(&Utc));
+    }
+
+    chrono::NaiveDateTime::parse_from_str(raw_timestamp, "%Y-%m-%dT%H:%M:%S%.f")
+        .map(|naive| DateTime::from_naive_utc_and_offset(naive, Utc))
+        .map_err(E::custom)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -334,5 +414,76 @@ mod tests {
             .expect("request should serialize");
 
         assert_eq!(value, json!({}));
+    }
+
+    #[test]
+    fn event_envelope_deserializes_flattened_agent_server_events() {
+        let value = json!({
+            "id": "evt-message",
+            "timestamp": "2026-03-23T12:07:58.942514",
+            "source": "user",
+            "kind": "MessageEvent",
+            "llm_message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "hello",
+                        "cache_prompt": false,
+                    }
+                ],
+                "thinking_blocks": [],
+            },
+            "activated_skills": [],
+            "extended_content": [],
+        });
+
+        let event: EventEnvelope =
+            serde_json::from_value(value).expect("flattened event should decode");
+
+        assert_eq!(event.kind, "MessageEvent");
+        assert_eq!(
+            event
+                .payload
+                .get("llm_message")
+                .and_then(|value| value.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|entry| entry.get("text"))
+                .and_then(Value::as_str),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn event_envelope_round_trips_nested_payload_state_updates() {
+        let event = EventEnvelope::state_update("evt-state", "finished");
+
+        let encoded = serde_json::to_value(&event).expect("event should encode");
+        assert_eq!(
+            encoded,
+            json!({
+                "id": "evt-state",
+                "timestamp": event.timestamp.to_rfc3339(),
+                "source": "runtime",
+                "kind": "ConversationStateUpdateEvent",
+                "execution_status": "finished",
+                "state_delta": {
+                    "execution_status": "finished",
+                },
+            })
+        );
+
+        let decoded: EventEnvelope =
+            serde_json::from_value(encoded).expect("state update should decode");
+        assert_eq!(
+            decoded.payload,
+            json!({
+                "execution_status": "finished",
+                "state_delta": {
+                    "execution_status": "finished",
+                },
+            })
+        );
     }
 }
