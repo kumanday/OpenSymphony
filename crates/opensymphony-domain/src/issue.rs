@@ -27,6 +27,13 @@ pub struct BlockerRef {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueRef {
+    pub id: IssueId,
+    pub identifier: IssueIdentifier,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NormalizedIssue {
     pub id: IssueId,
     pub identifier: IssueIdentifier,
@@ -37,7 +44,11 @@ pub struct NormalizedIssue {
     pub branch_name: Option<String>,
     pub url: Option<String>,
     pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<IssueId>,
     pub blocked_by: Vec<BlockerRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_issues: Vec<IssueRef>,
     pub created_at: Option<TimestampMs>,
     pub updated_at: Option<TimestampMs>,
 }

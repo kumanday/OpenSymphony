@@ -56,7 +56,9 @@ Normalize tracker payloads into a stable issue model with fields such as:
 - `priority`
 - `state`
 - `labels`
+- `parent_id`
 - `blocked_by`
+- `sub_issues`
 - `created_at`
 - `updated_at`
 
@@ -65,8 +67,10 @@ Keep the orchestrator independent of raw GraphQL response shape.
 Implementation note:
 
 - blocker normalization should derive `blocked_by` from `inverseRelations` entries where relation `type == "blocks"`
+- hierarchy normalization should derive `parent_id` from `parent.id` and `sub_issues` from `children.nodes`
 - `TrackerIssue.state` should remain the workflow-facing state name string consumed by `WORKFLOW.md` and `WORKFLOW.example.md`
 - blocker and state-refresh normalization should retain both the state name and the raw Linear `WorkflowState.type` string, while also exposing a normalized `kind`, so terminal blockers remain detectable without losing the tracker's exact type value
+- sub-issue normalization only needs the child `id`, `identifier`, and state `name` because hierarchy gating compares child state names against the workflow-configured terminal-state names
 - issue normalization should retain the Linear issue URL because `WORKFLOW.md` renders `{{ issue.url }}` under strict template validation
 - issue normalization should preserve the raw Linear priority because prompt/UI consumers render `{{ issue.priority }}` directly
 - top-level issue pages should request only small initial `labels` and `inverseRelations` slices and page the rest per issue so connection-heavy issue metadata stays complete without blowing past Linear's query cap
@@ -78,12 +82,14 @@ The orchestrator should receive normalized issues and apply Symphony sorting and
 Recommended sort order:
 
 1. higher urgency first using raw Linear priority (`1` before `2`; `0` remains unprioritized)
-2. older creation time first
-3. identifier tie-breaker
+2. leaf issues before parents when both are otherwise dispatchable
+3. older creation time first
+4. identifier tie-breaker
 
 Implementation note:
 
 - Linear's raw priority scale is urgency-inverted (`1` is most urgent, `0` is unprioritized), so the scheduler should derive its sort key from the raw value instead of rewriting the shared issue model
+- parent issues should remain ineligible while any `sub_issues` entry is in a non-terminal state, even if blocker relations are otherwise clear
 
 Eligibility reminders:
 
@@ -233,13 +239,16 @@ struct Issue {
     priority: Option<u8>,
     state: String,
     labels: Vec<String>,
+    parent_id: Option<String>,
     blocked_by: Vec<IssueBlocker>,
+    sub_issues: Vec<IssueRef>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
 ```
 
 `IssueBlocker` should include enough information to decide whether the blocker is terminal.
+`IssueRef` should include enough information to decide whether a child issue is terminal from the poll snapshot alone.
 
 ## 9. Error categories
 

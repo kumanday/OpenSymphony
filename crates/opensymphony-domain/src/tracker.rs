@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +13,11 @@ pub struct TrackerIssue {
     pub priority: Option<u8>,
     pub state: String,
     pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
     pub blocked_by: Vec<TrackerIssueBlocker>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_issues: Vec<TrackerIssueRef>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -50,6 +56,22 @@ pub struct TrackerIssueBlocker {
 impl TrackerIssueBlocker {
     pub fn is_terminal(&self) -> bool {
         self.state.is_terminal()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerIssueRef {
+    pub id: String,
+    pub identifier: String,
+    pub state: String,
+}
+
+impl TrackerIssueRef {
+    pub fn is_terminal(&self, terminal_states: &HashSet<String>) -> bool {
+        let state = self.state.trim();
+        terminal_states
+            .iter()
+            .any(|terminal_state| terminal_state.trim().eq_ignore_ascii_case(state))
     }
 }
 
@@ -98,7 +120,9 @@ pub enum TrackerErrorCategory {
 
 #[cfg(test)]
 mod tests {
-    use super::{TrackerErrorCategory, TrackerIssueState, TrackerIssueStateKind};
+    use std::collections::HashSet;
+
+    use super::{TrackerErrorCategory, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind};
 
     #[test]
     fn tracker_state_kind_maps_known_linear_types() {
@@ -172,5 +196,17 @@ mod tests {
         ];
 
         assert_eq!(categories.len(), 8);
+    }
+
+    #[test]
+    fn tracker_issue_ref_matches_terminal_states_case_insensitively() {
+        let issue = TrackerIssueRef {
+            id: "issue-1".to_string(),
+            identifier: "COE-1".to_string(),
+            state: "done".to_string(),
+        };
+        let terminal_states = HashSet::from([String::from("Done"), String::from("Canceled")]);
+
+        assert!(issue.is_terminal(&terminal_states));
     }
 }

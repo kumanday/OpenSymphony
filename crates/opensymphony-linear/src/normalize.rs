@@ -1,12 +1,12 @@
 use opensymphony_domain::{
-    TrackerIssue, TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind,
+    TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
     TrackerIssueStateSnapshot,
 };
 
 use crate::error::LinearError;
 use crate::graphql::{
-    LinearBlockerNode, LinearIssueNode, LinearIssueStateNode, LinearLabelNode, LinearRelationNode,
-    LinearWorkflowState,
+    LinearBlockerNode, LinearChildNode, LinearIssueNode, LinearIssueStateNode, LinearLabelNode,
+    LinearParentNode, LinearRelationNode, LinearWorkflowState,
 };
 
 pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, LinearError> {
@@ -19,7 +19,9 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         priority: normalize_priority(node.priority)?,
         state: node.state.name,
         labels: normalize_labels(node.labels.nodes),
+        parent_id: normalize_parent_id(node.parent),
         blocked_by: normalize_blockers(node.inverse_relations.nodes),
+        sub_issues: normalize_sub_issues(node.children.nodes),
         created_at: node.created_at,
         updated_at: node.updated_at,
     })
@@ -71,6 +73,24 @@ fn normalize_blocker(blocker: LinearBlockerNode) -> TrackerIssueBlocker {
         title: blocker.title,
         state: normalize_state(blocker.state),
     }
+}
+
+fn normalize_parent_id(parent: Option<LinearParentNode>) -> Option<String> {
+    parent.map(|parent| parent.id)
+}
+
+fn normalize_sub_issues(children: Vec<LinearChildNode>) -> Vec<TrackerIssueRef> {
+    let mut sub_issues = children
+        .into_iter()
+        .map(|child| TrackerIssueRef {
+            id: child.id,
+            identifier: child.identifier,
+            state: child.state.name,
+        })
+        .collect::<Vec<_>>();
+    sub_issues.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+    sub_issues.dedup_by(|left, right| left.id == right.id);
+    sub_issues
 }
 
 const LINEAR_MAX_PRIORITY: u64 = 4;

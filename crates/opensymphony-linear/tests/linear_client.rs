@@ -41,6 +41,8 @@ async fn candidate_issues_normalize_fixture_payloads() {
     assert_eq!(first.priority, Some(1));
     assert_eq!(first.state, "In Progress");
     assert_eq!(first.labels, vec!["backend", "urgent"]);
+    assert_eq!(first.parent_id, None);
+    assert!(first.sub_issues.is_empty());
     assert_eq!(first.blocked_by.len(), 1);
     assert!(first.blocked_by[0].is_terminal());
     assert_eq!(first.blocked_by[0].state.tracker_type, "completed");
@@ -53,6 +55,12 @@ async fn candidate_issues_normalize_fixture_payloads() {
     );
     assert_eq!(second.priority, None);
     assert_eq!(second.state, "In Progress");
+    assert_eq!(second.parent_id.as_deref(), Some("issue-254"));
+    assert_eq!(second.sub_issues.len(), 2);
+    assert_eq!(second.sub_issues[0].identifier, "COE-266");
+    assert_eq!(second.sub_issues[0].state, "Done");
+    assert_eq!(second.sub_issues[1].identifier, "COE-277");
+    assert_eq!(second.sub_issues[1].state, "Todo");
     assert_eq!(second.blocked_by.len(), 1);
     assert_eq!(second.blocked_by[0].identifier, "COE-261");
     assert_eq!(
@@ -95,6 +103,18 @@ async fn candidate_issues_normalize_fixture_payloads() {
             .as_str()
             .expect("query should be a string")
             .contains("labels(first: $labelFirst)")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("children(first: 50)")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("parent {")
     );
 }
 
