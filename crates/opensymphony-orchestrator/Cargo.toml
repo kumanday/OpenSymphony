@@ -10,3 +10,6 @@ path = "src/lib.rs"
 
 [dependencies]
 opensymphony-domain = { path = "../opensymphony-domain" }
+
+[dev-dependencies]
+chrono = { workspace = true }

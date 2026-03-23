@@ -19,7 +19,7 @@ pub use identifiers::{
     ConversationId, IdentifierError, IssueId, IssueIdentifier, TrackerStateId, WorkerId,
     WorkspaceKey,
 };
-pub use issue::{BlockerRef, IssueState, IssueStateCategory, NormalizedIssue};
+pub use issue::{BlockerRef, IssueRef, IssueState, IssueStateCategory, NormalizedIssue};
 pub use runtime::{
     ConversationMetadata, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry,
     RetryPolicy, RetryReason, RunAttempt, RuntimeStreamState, StallMetadata, WorkerOutcomeKind,
@@ -34,7 +34,7 @@ pub use state_machine::{
 };
 pub use time::{DurationMs, TimestampMs};
 pub use tracker::{
-    TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueState,
+    TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
     TrackerIssueStateKind, TrackerIssueStateSnapshot,
 };
 
@@ -53,7 +53,7 @@ mod tests {
 
     use super::{
         ComponentHealthSnapshot, ConversationMetadata, HealthStatus, IssueExecution, IssueId,
-        IssueIdentifier, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
+        IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
         OrchestratorSnapshot, ReleaseReason, RetryAttempt, RetryEntry, RetryPolicy, RetryReason,
         RunAttempt, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
         TimestampMs, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
@@ -124,7 +124,13 @@ mod tests {
                     .to_owned(),
             ),
             labels: vec!["foundation".to_owned(), "contracts".to_owned()],
+            parent_id: None,
             blocked_by: Vec::new(),
+            sub_issues: vec![IssueRef {
+                id: must(IssueId::new("lin_261")),
+                identifier: must(IssueIdentifier::new("COE-261")),
+                state: "Done".to_owned(),
+            }],
             created_at: Some(ts(10)),
             updated_at: Some(ts(20)),
         }

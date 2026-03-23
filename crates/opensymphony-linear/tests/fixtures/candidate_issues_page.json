@@ -16,6 +16,10 @@
             "name": "In Progress",
             "type": "started"
           },
+          "parent": null,
+          "children": {
+            "nodes": []
+          },
           "labels": {
             "nodes": [
               { "name": "urgent" },
@@ -71,6 +75,34 @@
             "id": "state-started",
             "name": "In Progress",
             "type": "started"
+          },
+          "parent": {
+            "id": "issue-254"
+          },
+          "children": {
+            "nodes": [
+              {
+                "id": "issue-277",
+                "identifier": "COE-277",
+                "state": {
+                  "name": "Todo"
+                }
+              },
+              {
+                "id": "issue-266",
+                "identifier": "COE-266",
+                "state": {
+                  "name": "Done"
+                }
+              },
+              {
+                "id": "issue-277",
+                "identifier": "COE-277",
+                "state": {
+                  "name": "Todo"
+                }
+              }
+            ]
           },
           "labels": {
             "nodes": []
