@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsString,
     path::PathBuf,
     process::{Command, ExitCode},
 };
@@ -276,6 +277,99 @@ fn doctor_ignores_unset_optional_live_placeholders_without_live_openhands() {
 }
 
 #[test]
+fn doctor_reports_local_safety_warning_and_repo_root_path() {
+    let repo_root = repo_root();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .arg("doctor")
+        .arg("--config")
+        .arg("examples/configs/local-dev.yaml")
+        .current_dir(&repo_root)
+        .output()
+        .expect("doctor command should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "doctor should succeed in the repo fixture environment: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("[WARN] local-safety: trusted-machine mode only"),
+        "doctor output should state the trusted-machine limitation: stdout={stdout}",
+    );
+    assert!(
+        stdout.contains(&format!(
+            "[PASS] repo: found Cargo workspace at {}",
+            repo_root.display()
+        )),
+        "doctor should print the resolved repo root path instead of an empty detail: stdout={stdout}",
+    );
+}
+
+#[test]
+fn doctor_fails_when_required_prerequisite_is_missing() {
+    let repo_root = repo_root();
+    let fake_bin_dir = TempDir::new().expect("fake bin dir should be created");
+
+    for command in ["cargo", "curl", "git"] {
+        write_fake_executable(fake_bin_dir.path().join(command));
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .arg("doctor")
+        .arg("--config")
+        .arg("examples/configs/local-dev.yaml")
+        .current_dir(&repo_root)
+        .env("PATH", path_only(fake_bin_dir.path()))
+        .output()
+        .expect("doctor command should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "doctor should fail when a required prerequisite is missing: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("[FAIL] prereq-uv: uv is not on PATH"),
+        "doctor should name the missing prerequisite explicitly: stdout={stdout}",
+    );
+}
+
+#[test]
+fn doctor_accepts_present_prerequisites_from_path() {
+    let repo_root = repo_root();
+    let fake_bin_dir = TempDir::new().expect("fake bin dir should be created");
+
+    for command in ["cargo", "curl", "git", "uv"] {
+        write_fake_executable(fake_bin_dir.path().join(command));
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .arg("doctor")
+        .arg("--config")
+        .arg("examples/configs/local-dev.yaml")
+        .current_dir(&repo_root)
+        .env("PATH", path_only(fake_bin_dir.path()))
+        .output()
+        .expect("doctor command should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "doctor should succeed when required prerequisites are present: stdout={stdout}, stderr={stderr}",
+    );
+    for check in ["prereq-cargo", "prereq-curl", "prereq-git", "prereq-uv"] {
+        assert!(
+            stdout.contains(&format!("[PASS] {check}:")),
+            "doctor should report a passing prerequisite check for {check}: stdout={stdout}",
+        );
+    }
+}
+
+#[test]
 fn run_local_launcher_enforces_pinned_supervised_contract() {
     let repo_root = repo_root();
     let tool_dir = repo_root.join("tools/openhands-server");
@@ -393,6 +487,22 @@ fn repo_root() -> PathBuf {
         .parent()
         .expect("workspace root should exist")
         .to_path_buf()
+}
+
+fn path_only(path: &std::path::Path) -> OsString {
+    std::env::join_paths([path]).expect("path should join")
+}
+
+fn write_fake_executable(path: PathBuf) {
+    std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("fake executable should be written");
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&path)
+            .expect("fake executable metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("fake executable should be executable");
+    }
 }
 
 fn doctor_workflow_source(workspace_root: &std::path::Path, base_url: &str) -> String {

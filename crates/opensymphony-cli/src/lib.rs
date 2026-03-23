@@ -33,7 +33,10 @@ use url::Url;
 
 #[derive(Debug, Parser)]
 #[command(name = "opensymphony")]
-#[command(about = "OpenSymphony local MVP CLI")]
+#[command(about = "Operate the OpenSymphony local MVP on a trusted machine")]
+#[command(
+    long_about = "Operate the OpenSymphony local MVP on a trusted machine.\n\nUse this CLI to run local control-plane demos, preflight checks, and the Linear MCP bridge.\n\nSafety: local OpenSymphony runs agent activity on the host with process-level isolation only. It is not sandboxed."
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -41,32 +44,42 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Serve the local control-plane demo stream")]
     Daemon(DaemonArgs),
+    #[command(about = "Attach the FrankenTUI operator client to a control plane")]
     Tui(TuiArgs),
+    #[command(about = "Start the stdio Linear MCP server for agent-side writes")]
     LinearMcp(LinearMcpArgs),
+    #[command(about = "Run local preflight checks for trusted-machine deployment")]
     Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Args)]
 struct DaemonArgs {
+    #[arg(help = "Socket address for the local control-plane HTTP and SSE server")]
     #[arg(long, default_value = "127.0.0.1:3000")]
     bind: SocketAddr,
+    #[arg(help = "Milliseconds between sample snapshot updates")]
     #[arg(long, default_value = "1200")]
     sample_interval_ms: NonZeroU64,
 }
 
 #[derive(Debug, Args)]
 struct TuiArgs {
+    #[arg(help = "Control-plane base URL")]
     #[arg(long, default_value = "http://127.0.0.1:3000/")]
     url: Url,
+    #[arg(help = "Exit after the specified number of milliseconds; useful for smoke tests")]
     #[arg(long)]
     exit_after_ms: Option<u64>,
 }
 
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
+    #[arg(help = "Doctor config YAML path")]
     #[arg(long, default_value = "examples/configs/local-dev.yaml")]
     config: PathBuf,
+    #[arg(help = "Run the live OpenHands probe instead of static preflight only")]
     #[arg(long)]
     live_openhands: bool,
 }
@@ -366,6 +379,8 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
 
             checks.push(check_workspace_root(&runtime.workflow.config.workspace.root).await);
             checks.push(check_tool_dir(&runtime.tool_dir).await);
+            checks.extend(check_required_commands());
+            checks.push(check_local_safety());
             checks.push(check_openhands_transport(&runtime.workflow));
             checks.push(check_linear(&config.linear, &runtime.workflow));
             (runtime, rendered_probe_prompt)
@@ -539,7 +554,15 @@ fn find_cargo_workspace_root(path: &Path) -> Option<PathBuf> {
     start
         .ancestors()
         .find(|candidate| candidate.join("Cargo.toml").is_file())
-        .map(|candidate| candidate.to_path_buf())
+        .map(normalize_workspace_root)
+}
+
+fn normalize_workspace_root(path: &Path) -> PathBuf {
+    if path.as_os_str().is_empty() {
+        env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
 }
 
 fn effective_openhands_probe_base_url(
@@ -708,24 +731,104 @@ async fn check_workspace_root(workspace_root: &Path) -> CheckResult {
 async fn check_tool_dir(tool_dir: &Path) -> CheckResult {
     let version = tool_dir.join("version.txt");
     let pyproject = tool_dir.join("pyproject.toml");
+    let installer = tool_dir.join("install.sh");
     let runner = tool_dir.join("run-local.sh");
 
-    if version.exists() && pyproject.exists() && runner.exists() {
+    if version.exists() && pyproject.exists() && installer.exists() && runner.exists() {
         CheckResult::pass(
             "openhands-tooling",
-            format!("pin files found in {}", tool_dir.display()),
+            format!(
+                "pin files and helper scripts found in {}",
+                tool_dir.display()
+            ),
         )
     } else {
         CheckResult::fail(
             "openhands-tooling",
             format!(
-                "expected {}, {}, and {}",
+                "expected {}, {}, {}, and {}",
                 version.display(),
                 pyproject.display(),
+                installer.display(),
                 runner.display()
             ),
         )
     }
+}
+
+fn check_required_commands() -> Vec<CheckResult> {
+    [
+        (
+            "cargo",
+            "Rust workspace builds, tests, and CLI smoke checks",
+        ),
+        ("curl", "local control-plane and agent-server smoke probes"),
+        ("git", "workspace hooks and local repository operations"),
+        (
+            "uv",
+            "the pinned OpenHands environment under tools/openhands-server",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, purpose)| match find_executable(name) {
+        Some(path) => CheckResult::pass(
+            command_check_name(name),
+            format!("found {} at {} ({purpose})", name, path.display()),
+        ),
+        None => CheckResult::fail(
+            command_check_name(name),
+            format!("{} is not on PATH ({purpose})", name),
+        ),
+    })
+    .collect()
+}
+
+fn command_check_name(name: &'static str) -> &'static str {
+    match name {
+        "cargo" => "prereq-cargo",
+        "curl" => "prereq-curl",
+        "git" => "prereq-git",
+        "uv" => "prereq-uv",
+        _ => "prereq",
+    }
+}
+
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    let suffixes = executable_suffixes();
+
+    for directory in env::split_paths(&path) {
+        for suffix in &suffixes {
+            let candidate = directory.join(format!("{name}{suffix}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    None
+}
+
+fn executable_suffixes() -> Vec<String> {
+    if cfg!(windows) {
+        env::var_os("PATHEXT")
+            .map(|value| {
+                env::split_paths(&value)
+                    .map(|entry| entry.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|suffixes| !suffixes.is_empty())
+            .unwrap_or_else(|| vec![".EXE".to_string(), ".BAT".to_string(), ".CMD".to_string()])
+    } else {
+        vec![String::new()]
+    }
+}
+
+fn check_local_safety() -> CheckResult {
+    CheckResult::warn(
+        "local-safety",
+        "trusted-machine mode only; agent runs with host filesystem and host process access, with process-level isolation but no sandbox boundary",
+    )
 }
 
 fn inspect_local_tooling(tool_dir: &Path) -> ToolingInspection {
@@ -789,10 +892,10 @@ fn check_openhands_transport(workflow: &ResolvedWorkflow) -> CheckResult {
                 .unwrap_or_else(|| "no session API key env".to_string());
             let remote_target = !matches!(host, "127.0.0.1" | "localhost");
             if remote_target {
-                CheckResult::pass(
+                CheckResult::warn(
                     "bind-scope",
                     format!(
-                        "OpenHands remote target {base_url} ({path}, websocket auth {}, {auth_detail})",
+                        "OpenHands target {base_url} is not loopback; local trusted-machine mode treats it as an external trusted server ({path}, websocket auth {}, {auth_detail})",
                         workflow.extensions.openhands.websocket.auth_mode
                     ),
                 )
@@ -1321,8 +1424,9 @@ mod tests {
 
     use super::{
         Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
-        discover_checkout_root, effective_openhands_probe_base_url, find_cargo_workspace_root,
-        resolve_doctor_workflow, sample_snapshot, spawn_demo_updates,
+        command_check_name, discover_checkout_root, effective_openhands_probe_base_url,
+        executable_suffixes, find_cargo_workspace_root, resolve_doctor_workflow, sample_snapshot,
+        spawn_demo_updates,
     };
 
     #[test]
@@ -1434,12 +1538,17 @@ mod tests {
             .expect("Cargo.toml should exist");
 
         let config_path = config_root.join("local-dev.yaml");
+        let canonical_repo_root =
+            fs::canonicalize(&repo_root).expect("repo root should canonicalize");
 
         assert_eq!(
             find_cargo_workspace_root(&config_path),
-            Some(repo_root.clone())
+            Some(canonical_repo_root.clone())
         );
-        assert_eq!(find_cargo_workspace_root(&tool_dir), Some(repo_root));
+        assert_eq!(
+            find_cargo_workspace_root(&tool_dir),
+            Some(canonical_repo_root)
+        );
     }
 
     #[test]
@@ -1454,11 +1563,13 @@ mod tests {
         fs::create_dir_all(&target_repo).expect("target repo should exist");
         fs::write(repo_root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
             .expect("Cargo.toml should exist");
+        let canonical_repo_root =
+            fs::canonicalize(&repo_root).expect("repo root should canonicalize");
 
         let discovered = discover_checkout_root(&config_root, Some(&target_repo), &tool_dir)
             .expect("repo root should be discovered");
 
-        assert_eq!(discovered, repo_root);
+        assert_eq!(discovered, canonical_repo_root);
     }
 
     #[test]
@@ -1473,6 +1584,22 @@ mod tests {
         assert_eq!(
             effective_openhands_probe_base_url("http://localhost:8000/opensymphony", None),
             "http://localhost:8000/opensymphony"
+        );
+    }
+
+    #[test]
+    fn command_check_names_are_stable() {
+        assert_eq!(command_check_name("cargo"), "prereq-cargo");
+        assert_eq!(command_check_name("curl"), "prereq-curl");
+        assert_eq!(command_check_name("git"), "prereq-git");
+        assert_eq!(command_check_name("uv"), "prereq-uv");
+    }
+
+    #[test]
+    fn executable_suffixes_are_non_empty() {
+        assert!(
+            !executable_suffixes().is_empty(),
+            "executable lookup should always have at least one suffix"
         );
     }
 

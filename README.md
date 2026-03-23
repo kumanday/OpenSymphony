@@ -57,12 +57,14 @@ Available today:
   - reconnects to the SSE stream after disconnect
   - renders focused issue/workspace detail plus recent event or metrics panes in inline mode
   - shows the active focus pane in the status line and pane headers for keyboard-driven navigation
-- a small `opensymphony-cli` demo path so the control plane and UI can be validated without coupling the TUI to orchestrator internals
+- a packaged `opensymphony` CLI so the control plane, preflight checks, and Linear MCP surface can be validated without coupling the TUI to orchestrator internals
 
 Local commands:
 
 - `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
 - `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
+- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
+- `cargo run -p opensymphony-cli -- linear-mcp`
 
 ## Core design decisions
 
@@ -185,6 +187,8 @@ This repository now includes the local validation scaffolding for M5:
 Useful commands:
 
 ```bash
+./tools/openhands-server/install.sh
+cargo run -p opensymphony-cli -- --help
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
@@ -197,9 +201,25 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 
 Current note:
 
+- `./tools/openhands-server/install.sh` runs the pinned `uv sync --locked --extra agent-server` flow for the trusted-machine OpenHands toolchain
 - the example doctor YAML now only carries machine-local inputs such as the OpenHands tool directory and optional probe overrides; the target repo `WORKFLOW.md` provides the workspace root, OpenHands base URL, and prompt that the doctor probe validates
+- `opensymphony doctor` now checks for `cargo`, `curl`, `git`, and `uv` on `PATH`, validates the pinned tool directory packaging, prints the trusted-machine safety warning on every run, and warns when a local deployment points at a non-loopback OpenHands target
 - `scripts/live_e2e.sh` now performs the full opt-in live suite: doctor preflight, pinned local server launch, ignored `live_local_suite` integration tests, and artifact capture under `target/live-local/`
-- `linear-mcp` is implemented and exposes the documented Linear tool surface over stdio; `daemon` and `tui` remain scaffolds until their runtime and control-plane milestones land.
+- `linear-mcp` exposes the documented Linear tool surface over stdio, `daemon` serves the current control-plane demo stream for smoke coverage, and `tui` attaches to any compatible local control-plane URL
+
+## Local trusted-machine quick start
+
+1. Install the machine prerequisites: Rust stable, `uv`, `git`, and `curl`.
+2. Provision the pinned OpenHands environment with `./tools/openhands-server/install.sh`.
+3. Review the command surface with `cargo run -p opensymphony-cli -- --help`.
+4. Run the static preflight with `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`.
+5. Use `tools/openhands-server/run-local.sh` only after the static doctor run is green.
+
+Safety note:
+
+- the local MVP runs agent activity on the host with process-level isolation only
+- it is not a sandbox
+- `opensymphony doctor` repeats that warning in its output so the local posture stays explicit during setup
 
 ## Non-negotiable implementation rules
 
