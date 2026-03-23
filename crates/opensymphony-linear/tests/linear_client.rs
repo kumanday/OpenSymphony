@@ -349,7 +349,7 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
             .contains("query IssueStatesByIds")
     );
     assert!(
-        !requests[0].body["query"]
+        requests[0].body["query"]
             .as_str()
             .expect("query should be a string")
             .contains("includeArchived: true")

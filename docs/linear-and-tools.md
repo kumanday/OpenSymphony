@@ -39,7 +39,7 @@ Fetch current states for all running issues during reconciliation.
 Implementation note:
 
 - by-ID reconciliation should keep the same `project_slug` filter as candidate reads so issues moved out of the tracked project fall out of orchestration instead of staying alive
-- by-ID reconciliation should exclude archived issues so operators can archive live work to release it from orchestration immediately
+- by-ID reconciliation should pass `includeArchived: true` so archived terminal issues still surface for cleanup and stale retry-manifest removal
 
 ## 2.3 Terminal-state fetch for startup cleanup
 

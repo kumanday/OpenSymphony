@@ -126,6 +126,7 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [String!], $first: Int!
       id: { in: $issueIds }
       project: { slugId: { eq: $projectSlug } }
     }
+    includeArchived: true
     first: $first
     after: $after
   ) {
