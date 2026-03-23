@@ -176,6 +176,8 @@ The local server guide shows that a remote `Workspace` can be created with both 
 
 OpenSymphony therefore sets `workspace.working_dir` to the deterministic issue workspace path on every conversation creation request.
 
+The runtime adapter must also surface progress heartbeats from the WebSocket event stream back to the orchestrator so stall detection is based on time since the last observed runtime event, not just time since the worker launched.
+
 ## 6. Conversation model
 
 ## 6.1 Stable conversation identity
@@ -239,6 +241,9 @@ Current implementation detail:
 Default policy:
 
 - reuse the conversation for the same issue across worker lifetimes
+- when reusing a conversation, send continuation-only guidance instead of replaying the full assignment body
+- if a run fails after attach, preserve the known `conversation_id` in workspace metadata so the next retry can resume the same conversation instead of forcing a fresh thread
+- if persisted conversation metadata is invalid locally, clear it and treat the next dispatch as a fresh reset instead of retrying the corrupt manifest forever
 - reset only when:
   - conversation metadata is missing or invalid
   - the server reports the conversation cannot be attached
