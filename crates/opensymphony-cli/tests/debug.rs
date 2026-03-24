@@ -6,7 +6,7 @@ use opensymphony_openhands::{
     TransportConfig,
 };
 use opensymphony_testkit::FakeOpenHandsServer;
-use opensymphony_workflow::WorkflowDefinition;
+use opensymphony_workflow::{ProcessEnvironment, WorkflowDefinition};
 use opensymphony_workspace::{
     CleanupConfig, HookConfig, IssueDescriptor, WorkspaceManager, WorkspaceManagerConfig,
 };
@@ -62,11 +62,14 @@ async fn debug_resumes_existing_conversation_history_and_sends_follow_up_input()
     let launch_profile =
         ConversationLaunchProfile::from_workflow(&workflow).expect("launch profile should build");
     let conversation_id = Uuid::new_v4();
-    let request = launch_profile.to_create_request(
-        ensured.handle.workspace_path(),
-        &ensured.handle.openhands_dir(),
-        Some(conversation_id),
-    );
+    let request = launch_profile
+        .to_create_request(
+            &ProcessEnvironment,
+            ensured.handle.workspace_path(),
+            &ensured.handle.openhands_dir(),
+            Some(conversation_id),
+        )
+        .expect("create request should build");
     let conversation = client
         .create_conversation(&request)
         .await
