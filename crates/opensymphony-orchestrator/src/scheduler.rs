@@ -202,6 +202,7 @@ pub struct Scheduler<T, W, M> {
     worker: M,
     config: SchedulerConfig,
     executions: BTreeMap<IssueId, IssueExecution>,
+    running_counts_by_state: HashMap<String, usize>,
     worker_index: HashMap<WorkerId, IssueId>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
     recovered: bool,
@@ -223,6 +224,7 @@ where
             worker,
             config,
             executions: BTreeMap::new(),
+            running_counts_by_state: HashMap::new(),
             worker_index: HashMap::new(),
             pending_recovery: None,
             recovered: false,
@@ -581,18 +583,7 @@ where
                 &self.config.max_concurrent_agents_by_state,
                 &normalized.state.name,
             ) {
-                let running_in_state = self
-                    .executions
-                    .values()
-                    .filter(|execution| {
-                        execution.status() == SchedulerStatus::Running
-                            && execution
-                                .issue()
-                                .state
-                                .name
-                                .eq_ignore_ascii_case(&normalized.state.name)
-                    })
-                    .count();
+                let running_in_state = self.running_count_for_state(&normalized.state.name);
                 if running_in_state >= usize::try_from(limit).unwrap_or(usize::MAX) {
                     continue;
                 }
@@ -624,8 +615,7 @@ where
             );
 
             let mut execution = self
-                .executions
-                .remove(&issue_id)
+                .remove_execution(&issue_id)
                 .unwrap_or_else(|| IssueExecution::new(normalized.clone(), observed_at));
             execution.refresh_issue(normalized.clone())?;
             execution.attach_workspace(workspace.clone())?;
@@ -664,7 +654,7 @@ where
                 }
             }
 
-            self.executions.insert(issue_id, execution);
+            self.insert_execution(issue_id, execution);
         }
 
         Ok(())
@@ -699,13 +689,13 @@ where
                     let Some(issue_id) = self.worker_index.remove(&worker_id) else {
                         continue;
                     };
-                    let Some(execution) = self.executions.remove(&issue_id) else {
+                    let Some(execution) = self.remove_execution(&issue_id) else {
                         continue;
                     };
                     let finished_at = outcome.finished_at;
                     let execution =
                         self.resolve_finished_execution(execution, outcome, finished_at)?;
-                    self.executions.insert(issue_id, execution);
+                    self.insert_execution(issue_id, execution);
                 }
             }
         }
@@ -732,11 +722,11 @@ where
             .collect::<Vec<_>>();
 
         for issue_id in stalled {
-            let Some(mut execution) = self.executions.remove(&issue_id) else {
+            let Some(mut execution) = self.remove_execution(&issue_id) else {
                 continue;
             };
             let Some(run) = execution.current_run().cloned() else {
-                self.executions.insert(issue_id, execution);
+                self.insert_execution(issue_id, execution);
                 continue;
             };
 
@@ -750,7 +740,7 @@ where
                 Some("scheduler stall timeout reached".to_string()),
             );
             execution = self.resolve_finished_execution(execution, outcome, observed_at)?;
-            self.executions.insert(issue_id, execution);
+            self.insert_execution(issue_id, execution);
         }
 
         Ok(())
@@ -763,7 +753,7 @@ where
         recovered_workspace: Option<WorkspaceRecord>,
     ) -> Result<(), SchedulerError> {
         let issue_id = issue.id.clone();
-        let mut execution = match self.executions.remove(&issue_id) {
+        let mut execution = match self.remove_execution(&issue_id) {
             Some(existing) => existing,
             None => IssueExecution::new(issue.clone(), observed_at),
         };
@@ -774,7 +764,7 @@ where
         if let Some(workspace) = recovered_workspace {
             execution.attach_workspace(workspace)?;
         }
-        self.executions.insert(issue_id, execution);
+        self.insert_execution(issue_id, execution);
         Ok(())
     }
 
@@ -787,7 +777,7 @@ where
         cleanup_terminal: bool,
         abort_reason: Option<WorkerAbortReason>,
     ) -> Result<(), SchedulerError> {
-        let Some(mut execution) = self.executions.remove(&issue_id) else {
+        let Some(mut execution) = self.remove_execution(&issue_id) else {
             return Ok(());
         };
 
@@ -808,7 +798,7 @@ where
                     detail: error.to_string(),
                 })?;
         }
-        self.executions.insert(issue_id, execution);
+        self.insert_execution(issue_id, execution);
         Ok(())
     }
 
@@ -873,6 +863,58 @@ where
         self.next_worker_ordinal = self.next_worker_ordinal.saturating_add(1);
         WorkerId::new(format!("scheduler-worker-{}", self.next_worker_ordinal))
             .map_err(SchedulerError::Identifier)
+    }
+
+    fn remove_execution(&mut self, issue_id: &IssueId) -> Option<IssueExecution> {
+        let execution = self.executions.remove(issue_id)?;
+        self.decrement_running_count(&execution);
+        self.debug_assert_running_counts();
+        Some(execution)
+    }
+
+    fn insert_execution(&mut self, issue_id: IssueId, execution: IssueExecution) {
+        let current_key = running_state_key_for_execution(&execution);
+        if let Some(previous) = self.executions.insert(issue_id, execution) {
+            self.decrement_running_count(&previous);
+        }
+        if let Some(state_key) = current_key {
+            *self.running_counts_by_state.entry(state_key).or_default() += 1;
+        }
+        self.debug_assert_running_counts();
+    }
+
+    fn running_count_for_state(&self, state_name: &str) -> usize {
+        self.running_counts_by_state
+            .get(&normalized_state_name(state_name))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn decrement_running_count(&mut self, execution: &IssueExecution) {
+        let Some(state_key) = running_state_key_for_execution(execution) else {
+            return;
+        };
+        let count = self
+            .running_counts_by_state
+            .get_mut(&state_key)
+            .expect("running execution must have a cached count");
+        *count -= 1;
+        if *count == 0 {
+            self.running_counts_by_state.remove(&state_key);
+        }
+    }
+
+    fn debug_assert_running_counts(&self) {
+        #[cfg(debug_assertions)]
+        {
+            let mut expected = HashMap::new();
+            for execution in self.executions.values() {
+                if let Some(state_key) = running_state_key_for_execution(execution) {
+                    *expected.entry(state_key).or_insert(0) += 1;
+                }
+            }
+            debug_assert_eq!(self.running_counts_by_state, expected);
+        }
     }
 }
 
@@ -991,9 +1033,10 @@ fn state_category_from_name(name: &str, config: &SchedulerConfig) -> IssueStateC
 }
 
 fn state_limit_for(limits: &BTreeMap<String, u32>, state_name: &str) -> Option<u32> {
+    let normalized = normalized_state_name(state_name);
     limits
         .iter()
-        .find_map(|(state, limit)| state.eq_ignore_ascii_case(state_name).then_some(*limit))
+        .find_map(|(state, limit)| (normalized_state_name(state) == normalized).then_some(*limit))
 }
 
 fn non_active_release_reason(category: IssueStateCategory) -> Option<ReleaseReason> {
@@ -1016,15 +1059,24 @@ fn retry_reason_for_outcome(outcome: WorkerOutcomeKind) -> Option<RetryReason> {
 fn normalized_state_set(states: &[String]) -> HashSet<String> {
     states
         .iter()
-        .map(|state| state.trim().to_ascii_lowercase())
+        .map(|state| normalized_state_name(state))
         .collect()
 }
 
 fn matches_state_name(name: &str, states: &[String]) -> bool {
-    let name = name.trim().to_ascii_lowercase();
+    let normalized = normalized_state_name(name);
     states
         .iter()
-        .any(|state| state.trim().eq_ignore_ascii_case(&name))
+        .any(|state| normalized_state_name(state) == normalized)
+}
+
+fn running_state_key_for_execution(execution: &IssueExecution) -> Option<String> {
+    (execution.status() == SchedulerStatus::Running)
+        .then(|| normalized_state_name(&execution.issue().state.name))
+}
+
+fn normalized_state_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
 }
 
 fn effective_stall_timeout(stall_timeout_ms: Option<u64>) -> DurationMs {
