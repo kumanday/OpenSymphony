@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "opensymphony-e7b957855cb7"
+  project_slug: "opensymphony-bootstrap-e7b957855cb7"
   active_states:
     - Todo
     - In Progress
