@@ -1574,8 +1574,8 @@ fn build_conversation_create_request(
                 .and_then(|llm| llm.model.as_ref())
                 .map(|model| LlmConfig {
                     model: model.clone(),
-                    api_key: None,
-                    base_url: None,
+                    api_key: std::env::var("LLM_API_KEY").ok(),
+                    base_url: std::env::var("LLM_BASE_URL").ok(),
                 })
                 .ok_or_else(|| {
                     "workflow openhands.conversation.agent.llm.model is required".to_string()
