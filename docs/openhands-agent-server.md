@@ -197,6 +197,7 @@ Suggested persisted fields:
 - `created_at`
 - `updated_at`
 - `last_attached_at`
+- `launch_profile`
 - `server_base_url`
 - `transport_target`
 - `http_auth_mode`
@@ -214,6 +215,15 @@ Suggested persisted fields:
 - `last_event_kind`
 - `last_event_at`
 - `last_event_summary`
+
+`launch_profile` should capture the OpenHands conversation settings that need to survive restarts and interactive debug reuse, including:
+
+- `workspace_kind`
+- `confirmation_policy_kind`
+- `agent_kind`
+- `llm_model`
+- `max_iterations`
+- `stuck_detection`
 
 Implementation note:
 
@@ -258,6 +268,21 @@ Current implementation detail:
 - the full workflow prompt is selected until a `POST /events` call accepts that first assignment message
 - once seeded, later worker lifetimes send built-in continuation guidance instead of rerendering the workflow template
 - if `GET /api/conversations/{id}` or the initial attach fails for a reused conversation, the runner retries `POST /api/conversations` with the same stable `conversation_id`; when that re-created thread still exposes persisted history, the runner keeps continuation guidance instead of downgrading to a fresh full prompt
+- the runner persists the conversation launch profile on first create and backfills older manifests on reuse so later rehydration and interactive debug sessions can recreate the same thread settings without guessing from mutable runtime state
+
+## 6.4 Interactive debug resumption
+
+`opensymphony debug <issue-id>` resolves the managed workspace for an issue, reads
+`conversation.json`, and attaches to the recorded `conversation_id` from the original
+working directory.
+
+Current implementation detail:
+
+- external configured transports are reused as-is
+- local-supervised workflows probe the configured base URL first and reuse any ready server already responding there
+- if no ready local server exists, the debug command can launch the pinned repo-local supervisor and then reattach
+- if the server no longer has the conversation but the persisted history directory still exists, the CLI recreates the same `conversation_id` using the stored `launch_profile` and then resumes the thread
+- operators should avoid unrelated standalone `openhands` CLI sessions on the same port so the orchestrator-managed transport remains the single source of truth
 - if a reused conversation is already active, the runner waits for that turn to finish before sending the next prompt, and it retries `POST /run` after a `409 Conflict` on the same attached stream
 - each fresh create also snapshots `create-conversation-request.json`, `last-conversation-state.json`, and `generated/session-context.json` inside the issue workspace for recovery and observability
 

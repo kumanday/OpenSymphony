@@ -28,6 +28,7 @@ opensymphony-workflow = { path = "../opensymphony-workflow" }
 opensymphony-tui = { path = "../opensymphony-tui" }
 opensymphony-workspace = { path = "../opensymphony-workspace" }
 serde.workspace = true
+serde_json.workspace = true
 serde_yaml.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
@@ -35,6 +36,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

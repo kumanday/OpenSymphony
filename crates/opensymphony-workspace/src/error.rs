@@ -51,6 +51,8 @@ pub enum WorkspaceError {
     CreateDirectory { path: PathBuf, source: io::Error },
     #[error("failed to canonicalize {path}: {source}")]
     Canonicalize { path: PathBuf, source: io::Error },
+    #[error("failed to read directory {path}: {source}")]
+    ReadDirectory { path: PathBuf, source: io::Error },
     #[error("failed to read manifest {path}: {source}")]
     ReadManifest { path: PathBuf, source: io::Error },
     #[error("failed to read managed file {path}: {source}")]

@@ -106,6 +106,76 @@ impl IssueSessionPromptKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationLaunchProfile {
+    pub workspace_kind: String,
+    pub confirmation_policy_kind: String,
+    pub agent_kind: String,
+    pub llm_model: String,
+    pub max_iterations: u32,
+    pub stuck_detection: bool,
+}
+
+impl ConversationLaunchProfile {
+    pub fn from_workflow(workflow: &ResolvedWorkflow) -> Result<Self, String> {
+        let conversation = &workflow.extensions.openhands.conversation;
+        let max_iterations = u32::try_from(conversation.max_iterations).map_err(|_| {
+            format!(
+                "workflow max_iterations {} exceeds u32::MAX ({})",
+                conversation.max_iterations,
+                u32::MAX
+            )
+        })?;
+        let llm_model = conversation
+            .agent
+            .llm
+            .as_ref()
+            .and_then(|llm| llm.model.as_ref())
+            .cloned()
+            .ok_or_else(|| {
+                "workflow openhands.conversation.agent.llm.model is required".to_string()
+            })?;
+
+        Ok(Self {
+            workspace_kind: "LocalWorkspace".to_string(),
+            confirmation_policy_kind: conversation.confirmation_policy.kind.clone(),
+            agent_kind: conversation.agent.kind.clone(),
+            llm_model,
+            max_iterations,
+            stuck_detection: conversation.stuck_detection,
+        })
+    }
+
+    pub fn to_create_request(
+        &self,
+        working_dir: &Path,
+        persistence_dir: &Path,
+        conversation_id: Option<Uuid>,
+    ) -> ConversationCreateRequest {
+        ConversationCreateRequest {
+            conversation_id: conversation_id.unwrap_or_else(Uuid::new_v4),
+            workspace: WorkspaceConfig {
+                working_dir: working_dir.display().to_string(),
+                kind: self.workspace_kind.clone(),
+            },
+            persistence_dir: persistence_dir.display().to_string(),
+            max_iterations: self.max_iterations,
+            stuck_detection: self.stuck_detection,
+            confirmation_policy: ConfirmationPolicy {
+                kind: self.confirmation_policy_kind.clone(),
+            },
+            agent: AgentConfig {
+                kind: self.agent_kind.clone(),
+                llm: LlmConfig {
+                    model: self.llm_model.clone(),
+                    api_key: std::env::var("LLM_API_KEY").ok(),
+                    base_url: std::env::var("LLM_BASE_URL").ok(),
+                },
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueConversationManifest {
     pub issue_id: IssueId,
     pub identifier: IssueIdentifier,
@@ -123,6 +193,8 @@ pub struct IssueConversationManifest {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_attached_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_profile: Option<ConversationLaunchProfile>,
     pub fresh_conversation: bool,
     pub workflow_prompt_seeded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -155,6 +227,7 @@ impl IssueConversationManifest {
         persistence_dir: PathBuf,
         attached_at: DateTime<Utc>,
         reset_reason: Option<String>,
+        launch_profile: ConversationLaunchProfile,
     ) -> Self {
         Self {
             issue_id,
@@ -169,6 +242,7 @@ impl IssueConversationManifest {
             created_at: attached_at,
             updated_at: attached_at,
             last_attached_at: attached_at,
+            launch_profile: Some(launch_profile),
             fresh_conversation: true,
             workflow_prompt_seeded: false,
             reset_reason,
@@ -887,6 +961,9 @@ impl IssueSessionRunner {
 
         let attached_at = Utc::now();
         manifest.fresh_conversation = false;
+        if manifest.launch_profile.is_none() {
+            manifest.launch_profile = ConversationLaunchProfile::from_workflow(workflow).ok();
+        }
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
@@ -929,8 +1006,8 @@ impl IssueSessionRunner {
         workflow: &ResolvedWorkflow,
         reset_reason: Option<String>,
     ) -> Result<Step<ActiveSession>, IssueSessionError> {
-        let request = match build_conversation_create_request(workflow, workspace, None) {
-            Ok(request) => request,
+        let launch_profile = match ConversationLaunchProfile::from_workflow(workflow) {
+            Ok(launch_profile) => launch_profile,
             Err(detail) => {
                 return self
                     .persist_failure_without_stream(
@@ -942,7 +1019,7 @@ impl IssueSessionRunner {
                         None,
                         NormalizedOutcome {
                             kind: WorkerOutcomeKind::Failed,
-                            summary: "failed to build conversation create request".to_string(),
+                            summary: "failed to build conversation launch profile".to_string(),
                             error: Some(detail),
                         },
                     )
@@ -951,6 +1028,11 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        let request = launch_profile.to_create_request(
+            workspace.workspace_path(),
+            &configured_persistence_dir(workflow, workspace),
+            None,
+        );
         workspace_manager
             .write_json_artifact(
                 workspace,
@@ -1028,6 +1110,7 @@ impl IssueSessionRunner {
             configured_persistence_dir(workflow, workspace),
             attached_at,
             reset_reason,
+            launch_profile,
         );
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
@@ -1065,18 +1148,22 @@ impl IssueSessionRunner {
         mut manifest: IssueConversationManifest,
         conversation_id: Uuid,
     ) -> Result<Option<ActiveSession>, IssueSessionError> {
-        let request =
-            match build_conversation_create_request(workflow, workspace, Some(conversation_id)) {
-                Ok(request) => request,
-                Err(error) => {
-                    debug!(
-                        %error,
-                        %conversation_id,
-                        "skipping session rehydrate because create request construction failed"
-                    );
-                    return Ok(None);
-                }
-            };
+        let Some(launch_profile) = manifest
+            .launch_profile
+            .clone()
+            .or_else(|| ConversationLaunchProfile::from_workflow(workflow).ok())
+        else {
+            debug!(
+                %conversation_id,
+                "skipping session rehydrate because no launch profile is available"
+            );
+            return Ok(None);
+        };
+        let request = launch_profile.to_create_request(
+            workspace.workspace_path(),
+            &configured_persistence_dir(workflow, workspace),
+            Some(conversation_id),
+        );
         workspace_manager
             .write_json_artifact(
                 workspace,
@@ -1137,6 +1224,7 @@ impl IssueSessionRunner {
         manifest.persistence_dir = configured_persistence_dir(workflow, workspace);
         manifest.last_attached_at = attached_at;
         manifest.updated_at = attached_at;
+        manifest.launch_profile.get_or_insert(launch_profile);
         manifest.reset_reason = None;
         manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
         manifest.apply_runtime_snapshot(&stream);
@@ -1535,53 +1623,6 @@ impl IssueSessionRunner {
             run_status,
         })
     }
-}
-
-fn build_conversation_create_request(
-    workflow: &ResolvedWorkflow,
-    workspace: &WorkspaceHandle,
-    conversation_id: Option<Uuid>,
-) -> Result<ConversationCreateRequest, String> {
-    let conversation = &workflow.extensions.openhands.conversation;
-    let max_iterations = u32::try_from(conversation.max_iterations).map_err(|_| {
-        format!(
-            "workflow max_iterations {} exceeds u32::MAX ({})",
-            conversation.max_iterations,
-            u32::MAX
-        )
-    })?;
-
-    Ok(ConversationCreateRequest {
-        conversation_id: conversation_id.unwrap_or_else(Uuid::new_v4),
-        workspace: WorkspaceConfig {
-            working_dir: workspace.workspace_path().display().to_string(),
-            kind: "LocalWorkspace".to_string(),
-        },
-        persistence_dir: configured_persistence_dir(workflow, workspace)
-            .display()
-            .to_string(),
-        max_iterations,
-        stuck_detection: conversation.stuck_detection,
-        confirmation_policy: ConfirmationPolicy {
-            kind: conversation.confirmation_policy.kind.clone(),
-        },
-        agent: AgentConfig {
-            kind: conversation.agent.kind.clone(),
-            llm: conversation
-                .agent
-                .llm
-                .as_ref()
-                .and_then(|llm| llm.model.as_ref())
-                .map(|model| LlmConfig {
-                    model: model.clone(),
-                    api_key: std::env::var("LLM_API_KEY").ok(),
-                    base_url: std::env::var("LLM_BASE_URL").ok(),
-                })
-                .ok_or_else(|| {
-                    "workflow openhands.conversation.agent.llm.model is required".to_string()
-                })?,
-        },
-    })
 }
 
 fn configured_persistence_dir(workflow: &ResolvedWorkflow, workspace: &WorkspaceHandle) -> PathBuf {
