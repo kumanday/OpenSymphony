@@ -1242,7 +1242,7 @@ mod tests {
 
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
         let source = format!(
-            "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n",
+            "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  api_key: test-linear-key\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n",
             workspace_root.display()
         );
         WorkflowDefinition::parse(&source)
