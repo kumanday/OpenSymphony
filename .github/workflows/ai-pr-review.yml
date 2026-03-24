@@ -45,7 +45,7 @@ jobs:
           base_url="${AI_REVIEW_BASE_URL:-}"
           review_style="${AI_REVIEW_STYLE:-standard}"
           require_evidence="${AI_REVIEW_REQUIRE_EVIDENCE:-true}"
-          
+
           # Trim whitespace from variables
           provider_kind=$(echo "$provider_kind" | xargs)
           model_id=$(echo "$model_id" | xargs)
@@ -87,12 +87,12 @@ jobs:
           echo "require_evidence=$require_evidence" >> "$GITHUB_OUTPUT"
 
       - name: Run OpenHands PR Review
-        uses: OpenHands/extensions/plugins/pr-review@e1c0496636c36a35e3e238f87f81dce6bbe767a2
+        uses: OpenHands/extensions/plugins/pr-review@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           llm-api-key: ${{ secrets.FIREWORKS_API_KEY }}
           llm-model: ${{ steps.llm.outputs.model }}
           llm-base-url: ${{ steps.llm.outputs.base_url }}
-          extensions-version: e1c0496636c36a35e3e238f87f81dce6bbe767a2
+          extensions-version: main
           review-style: ${{ steps.llm.outputs.style }}
           require-evidence: ${{ steps.llm.outputs.require_evidence }}
