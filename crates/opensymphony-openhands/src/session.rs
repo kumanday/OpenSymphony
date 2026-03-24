@@ -35,6 +35,21 @@ pub struct IssueSessionRunnerConfig {
     pub finished_drain_timeout: Duration,
 }
 
+pub trait IssueSessionObserver {
+    fn on_launch(&mut self, _conversation: &ConversationMetadata) {}
+
+    fn on_runtime_event(
+        &mut self,
+        _observed_at: TimestampMs,
+        _event_id: Option<String>,
+        _event_kind: Option<String>,
+        _summary: Option<String>,
+    ) {
+    }
+}
+
+impl IssueSessionObserver for () {}
+
 impl Default for IssueSessionRunnerConfig {
     fn default() -> Self {
         Self {
@@ -367,6 +382,32 @@ impl IssueSessionRunner {
         run: &RunAttempt,
         workflow: &ResolvedWorkflow,
     ) -> Result<IssueSessionResult, IssueSessionError> {
+        self.run_with_observer(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            issue,
+            run,
+            workflow,
+            &mut (),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_with_observer<O>(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        issue: &NormalizedIssue,
+        run: &RunAttempt,
+        workflow: &ResolvedWorkflow,
+        observer: &mut O,
+    ) -> Result<IssueSessionResult, IssueSessionError>
+    where
+        O: IssueSessionObserver,
+    {
         let observed_run = observed_run_for_turn(run);
         let active_session = match self
             .initialize_session(
@@ -393,6 +434,7 @@ impl IssueSessionRunner {
                 issue,
                 run,
                 active_session,
+                observer,
             )
             .await?
         {
@@ -408,6 +450,7 @@ impl IssueSessionRunner {
                 &observed_run,
                 active_session,
                 &mut prepared_turn,
+                observer,
             )
             .await?
         {
@@ -419,6 +462,7 @@ impl IssueSessionRunner {
             .await_terminal_outcome(
                 &mut active_session.stream,
                 &prepared_turn.baseline_event_ids,
+                observer,
             )
             .await;
         self.finalize_active_session(
@@ -480,7 +524,7 @@ impl IssueSessionRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn prepare_turn(
+    async fn prepare_turn<O>(
         &self,
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
@@ -490,13 +534,17 @@ impl IssueSessionRunner {
         issue: &NormalizedIssue,
         run: &RunAttempt,
         mut active_session: ActiveSession,
-    ) -> Result<Step<(ActiveSession, PreparedTurn)>, IssueSessionError> {
+        observer: &mut O,
+    ) -> Result<Step<(ActiveSession, PreparedTurn)>, IssueSessionError>
+    where
+        O: IssueSessionObserver,
+    {
         let mut waited_for_prior_turn = false;
         if let Some(status) = active_session.stream.state_mirror().execution_status()
             && turn_is_in_progress(status)
         {
             if let Err(error) = self
-                .wait_for_active_turn_to_finish(&mut active_session.stream)
+                .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
                 .await
             {
                 return self
@@ -602,7 +650,8 @@ impl IssueSessionRunner {
         )))
     }
 
-    async fn start_turn(
+    #[allow(clippy::too_many_arguments)]
+    async fn start_turn<O>(
         &self,
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
@@ -610,7 +659,11 @@ impl IssueSessionRunner {
         observed_run: &RunAttempt,
         mut active_session: ActiveSession,
         prepared_turn: &mut PreparedTurn,
-    ) -> Result<Step<ActiveSession>, IssueSessionError> {
+        observer: &mut O,
+    ) -> Result<Step<ActiveSession>, IssueSessionError>
+    where
+        O: IssueSessionObserver,
+    {
         if let Err(error) = self
             .client
             .send_message(
@@ -661,7 +714,7 @@ impl IssueSessionRunner {
                 }) => {
                     had_run_conflict = true;
                     if let Err(error) = self
-                        .wait_for_active_turn_to_finish(&mut active_session.stream)
+                        .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
                         .await
                     {
                         return self
@@ -741,6 +794,12 @@ impl IssueSessionRunner {
                 ),
             )
             .await?;
+
+        observer.on_launch(
+            &active_session
+                .manifest
+                .to_domain_metadata(RuntimeStreamState::Ready),
+        );
 
         Ok(Step::Continue(active_session))
     }
@@ -1119,10 +1178,14 @@ impl IssueSessionRunner {
         }
     }
 
-    async fn wait_for_active_turn_to_finish(
+    async fn wait_for_active_turn_to_finish<O>(
         &self,
         stream: &mut RuntimeEventStream,
-    ) -> Result<(), OpenHandsError> {
+        observer: &mut O,
+    ) -> Result<(), OpenHandsError>
+    where
+        O: IssueSessionObserver,
+    {
         if stream
             .state_mirror()
             .execution_status()
@@ -1155,7 +1218,8 @@ impl IssueSessionRunner {
                         ),
                     });
                 }
-                Ok(Ok(Some(_))) | Ok(Ok(None)) => {}
+                Ok(Ok(Some(event))) => observe_event(observer, &event),
+                Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     if stream
                         .state_mirror()
@@ -1171,16 +1235,20 @@ impl IssueSessionRunner {
         }
     }
 
-    async fn await_terminal_outcome(
+    async fn await_terminal_outcome<O>(
         &self,
         stream: &mut RuntimeEventStream,
         baseline_event_ids: &HashSet<String>,
-    ) -> NormalizedOutcome {
+        observer: &mut O,
+    ) -> NormalizedOutcome
+    where
+        O: IssueSessionObserver,
+    {
         let deadline = Instant::now() + self.config.terminal_wait_timeout;
 
         loop {
             if let Some(outcome) = self
-                .terminal_outcome_from_state(stream, baseline_event_ids)
+                .terminal_outcome_from_state(stream, baseline_event_ids, observer)
                 .await
             {
                 return outcome;
@@ -1192,8 +1260,9 @@ impl IssueSessionRunner {
                     if let Ok(inserted) = stream.reconcile_events().await
                         && inserted > 0
                     {
+                        observe_latest_event(observer, stream);
                         if let Some(outcome) = self
-                            .terminal_outcome_from_state(stream, baseline_event_ids)
+                            .terminal_outcome_from_state(stream, baseline_event_ids, observer)
                             .await
                         {
                             return outcome;
@@ -1210,15 +1279,18 @@ impl IssueSessionRunner {
                         )),
                     };
                 }
-                Ok(Ok(Some(_))) => {}
+                Ok(Ok(Some(event))) => observe_event(observer, &event),
                 Ok(Ok(None)) => {
                     if let Ok(inserted) = stream.reconcile_events().await
                         && inserted > 0
-                        && let Some(outcome) = self
-                            .terminal_outcome_from_state(stream, baseline_event_ids)
-                            .await
                     {
-                        return outcome;
+                        observe_latest_event(observer, stream);
+                        if let Some(outcome) = self
+                            .terminal_outcome_from_state(stream, baseline_event_ids, observer)
+                            .await
+                        {
+                            return outcome;
+                        }
                     }
 
                     return NormalizedOutcome {
@@ -1232,7 +1304,7 @@ impl IssueSessionRunner {
                 }
                 Ok(Err(error)) => {
                     if let Some(outcome) = self
-                        .terminal_outcome_from_state(stream, baseline_event_ids)
+                        .terminal_outcome_from_state(stream, baseline_event_ids, observer)
                         .await
                     {
                         return outcome;
@@ -1248,11 +1320,15 @@ impl IssueSessionRunner {
         }
     }
 
-    async fn terminal_outcome_from_state(
+    async fn terminal_outcome_from_state<O>(
         &self,
         stream: &mut RuntimeEventStream,
         baseline_event_ids: &HashSet<String>,
-    ) -> Option<NormalizedOutcome> {
+        observer: &mut O,
+    ) -> Option<NormalizedOutcome>
+    where
+        O: IssueSessionObserver,
+    {
         let has_current_turn_activity = stream
             .event_cache()
             .items()
@@ -1275,7 +1351,7 @@ impl IssueSessionRunner {
         match stream.state_mirror().terminal_status() {
             Some(TerminalExecutionStatus::Finished) => {
                 if self
-                    .confirm_finished_terminal_state(stream, baseline_event_ids)
+                    .confirm_finished_terminal_state(stream, baseline_event_ids, observer)
                     .await
                 {
                     Some(NormalizedOutcome {
@@ -1313,11 +1389,15 @@ impl IssueSessionRunner {
         }
     }
 
-    async fn confirm_finished_terminal_state(
+    async fn confirm_finished_terminal_state<O>(
         &self,
         stream: &mut RuntimeEventStream,
         baseline_event_ids: &HashSet<String>,
-    ) -> bool {
+        observer: &mut O,
+    ) -> bool
+    where
+        O: IssueSessionObserver,
+    {
         let deadline = Instant::now() + self.config.finished_drain_timeout;
 
         loop {
@@ -1334,7 +1414,10 @@ impl IssueSessionRunner {
 
             match timeout_at(deadline, stream.next_event()).await {
                 Err(_) => return true,
-                Ok(Ok(Some(_))) => continue,
+                Ok(Ok(Some(event))) => {
+                    observe_event(observer, &event);
+                    continue;
+                }
                 Ok(Ok(None)) => return true,
                 Ok(Err(error)) => return finished_stream_error_is_tolerable(&error),
             }
@@ -1612,6 +1695,27 @@ fn build_summary_metadata(
     }
 }
 
+fn observe_event<O>(observer: &mut O, event: &EventEnvelope)
+where
+    O: IssueSessionObserver,
+{
+    observer.on_runtime_event(
+        timestamp_ms_from_datetime(event.timestamp),
+        Some(event.id.clone()),
+        Some(event.kind.clone()),
+        Some(summarize_event(event)),
+    );
+}
+
+fn observe_latest_event<O>(observer: &mut O, stream: &RuntimeEventStream)
+where
+    O: IssueSessionObserver,
+{
+    if let Some(event) = stream.event_cache().items().last() {
+        observe_event(observer, event);
+    }
+}
+
 fn failed_outcome(summary: impl Into<String>, error: impl Into<String>) -> NormalizedOutcome {
     NormalizedOutcome {
         kind: WorkerOutcomeKind::Failed,
@@ -1781,7 +1885,7 @@ mod tests {
             },
         );
         let outcome = runner
-            .await_terminal_outcome(&mut stream, &baseline_event_ids)
+            .await_terminal_outcome(&mut stream, &baseline_event_ids, &mut ())
             .await;
 
         assert_eq!(outcome.kind, WorkerOutcomeKind::Succeeded);

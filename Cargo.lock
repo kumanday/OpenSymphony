@@ -1358,6 +1358,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
+name = "opensymphony"
+version = "0.1.0"
+dependencies = [
+ "opensymphony-cli",
+ "tokio",
+]
+
+[[package]]
 name = "opensymphony-cli"
 version = "0.1.0"
 dependencies = [
@@ -1366,11 +1374,15 @@ dependencies = [
  "clap",
  "opensymphony-control",
  "opensymphony-domain",
+ "opensymphony-linear",
  "opensymphony-linear-mcp",
  "opensymphony-openhands",
+ "opensymphony-orchestrator",
  "opensymphony-testkit",
  "opensymphony-tui",
  "opensymphony-workflow",
+ "opensymphony-workspace",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",

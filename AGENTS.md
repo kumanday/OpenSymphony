@@ -60,6 +60,12 @@ Do not silently invent behavior when the upstream spec or chosen integration con
 - The UI consumes the control-plane snapshot and event stream only.
 - UI code must not reach into orchestrator internals directly.
 
+### CLI surface
+
+- `opensymphony run` is the real local orchestrator entrypoint.
+- `opensymphony daemon` is demo-only and exists for smoke tests or UI-focused development.
+- When documenting, validating, or operating the system, prefer `opensymphony run` unless the task is specifically about the demo control-plane publisher.
+
 ## Design rules
 
 ### Keep boundaries explicit
