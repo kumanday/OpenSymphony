@@ -490,7 +490,7 @@ async fn attach_or_rehydrate_stream(
         .await
     {
         Ok(stream) => Ok(stream),
-        Err(_) => {
+        Err(error) if should_rehydrate_after_attach_failure(&error) => {
             let launch_profile = resolve_launch_profile(manifest, workflow)
                 .map_err(|detail| DebugCommandError::LaunchProfile { detail })?;
             let request = launch_profile.to_create_request(
@@ -515,7 +515,18 @@ async fn attach_or_rehydrate_stream(
 
             Ok(stream)
         }
+        Err(error) => Err(error.into()),
     }
+}
+
+fn should_rehydrate_after_attach_failure(error: &OpenHandsError) -> bool {
+    matches!(
+        error,
+        OpenHandsError::HttpStatus {
+            status_code: 404,
+            ..
+        }
+    )
 }
 
 fn resolve_launch_profile(
@@ -874,4 +885,34 @@ fn turn_is_in_progress(status: &str) -> bool {
 
 fn turn_has_stopped(status: &str) -> bool {
     !turn_is_in_progress(status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_rehydrate_after_attach_failure;
+    use opensymphony_openhands::OpenHandsError;
+
+    #[test]
+    fn rehydrate_only_when_conversation_is_missing() {
+        assert!(should_rehydrate_after_attach_failure(
+            &OpenHandsError::HttpStatus {
+                operation: "fetch conversation",
+                status_code: 404,
+                body: "missing".to_string(),
+            }
+        ));
+        assert!(!should_rehydrate_after_attach_failure(
+            &OpenHandsError::HttpStatus {
+                operation: "fetch conversation",
+                status_code: 401,
+                body: "unauthorized".to_string(),
+            }
+        ));
+        assert!(!should_rehydrate_after_attach_failure(
+            &OpenHandsError::Transport {
+                operation: "fetch conversation",
+                detail: "connection refused".to_string(),
+            }
+        ));
+    }
 }
