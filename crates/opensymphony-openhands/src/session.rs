@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -9,7 +10,7 @@ use opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, NormalizedIssue, RunAttempt,
     RuntimeStreamState, TimestampMs, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord,
 };
-use opensymphony_workflow::ResolvedWorkflow;
+use opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use opensymphony_workspace::{
     RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager,
 };
@@ -111,6 +112,10 @@ pub struct ConversationLaunchProfile {
     pub confirmation_policy_kind: String,
     pub agent_kind: String,
     pub llm_model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_api_key_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_base_url_env: Option<String>,
     pub max_iterations: u32,
     pub stuck_detection: bool,
 }
@@ -140,6 +145,16 @@ impl ConversationLaunchProfile {
             confirmation_policy_kind: conversation.confirmation_policy.kind.clone(),
             agent_kind: conversation.agent.kind.clone(),
             llm_model,
+            llm_api_key_env: conversation
+                .agent
+                .llm
+                .as_ref()
+                .and_then(|llm| llm.api_key_env.clone()),
+            llm_base_url_env: conversation
+                .agent
+                .llm
+                .as_ref()
+                .and_then(|llm| llm.base_url_env.clone()),
             max_iterations,
             stuck_detection: conversation.stuck_detection,
         })
@@ -147,11 +162,25 @@ impl ConversationLaunchProfile {
 
     pub fn to_create_request(
         &self,
+        env: &dyn Environment,
         working_dir: &Path,
         persistence_dir: &Path,
         conversation_id: Option<Uuid>,
-    ) -> ConversationCreateRequest {
-        ConversationCreateRequest {
+    ) -> Result<ConversationCreateRequest, String> {
+        let api_key = resolve_provider_override(
+            env,
+            "openhands.conversation.agent.llm.api_key_env",
+            self.llm_api_key_env.as_deref(),
+        )?
+        .or_else(|| normalize_environment_value(env.get("LLM_API_KEY")));
+        let base_url = resolve_provider_override(
+            env,
+            "openhands.conversation.agent.llm.base_url_env",
+            self.llm_base_url_env.as_deref(),
+        )?
+        .or_else(|| normalize_environment_value(env.get("LLM_BASE_URL")));
+
+        Ok(ConversationCreateRequest {
             conversation_id: conversation_id.unwrap_or_else(Uuid::new_v4),
             workspace: WorkspaceConfig {
                 working_dir: working_dir.display().to_string(),
@@ -167,12 +196,35 @@ impl ConversationLaunchProfile {
                 kind: self.agent_kind.clone(),
                 llm: LlmConfig {
                     model: self.llm_model.clone(),
-                    api_key: std::env::var("LLM_API_KEY").ok(),
-                    base_url: std::env::var("LLM_BASE_URL").ok(),
+                    api_key,
+                    base_url,
                 },
             },
-        }
+        })
     }
+}
+
+fn resolve_provider_override(
+    env: &dyn Environment,
+    field: &'static str,
+    env_name: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(env_name) = env_name else {
+        return Ok(None);
+    };
+
+    normalize_environment_value(env.get(env_name)).ok_or_else(|| {
+        format!(
+            "{field} references environment variable `{env_name}`, but it is not set or is blank"
+        )
+    })
+    .map(Some)
+}
+
+fn normalize_environment_value(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -432,11 +484,27 @@ struct LoadedManifest {
 pub struct IssueSessionRunner {
     client: OpenHandsClient,
     config: IssueSessionRunnerConfig,
+    environment: Arc<dyn Environment + Send + Sync>,
 }
 
 impl IssueSessionRunner {
     pub fn new(client: OpenHandsClient, config: IssueSessionRunnerConfig) -> Self {
-        Self { client, config }
+        Self::with_environment(client, config, ProcessEnvironment)
+    }
+
+    pub fn with_environment<E>(
+        client: OpenHandsClient,
+        config: IssueSessionRunnerConfig,
+        environment: E,
+    ) -> Self
+    where
+        E: Environment + Send + Sync + 'static,
+    {
+        Self {
+            client,
+            config,
+            environment: Arc::new(environment),
+        }
     }
 
     pub fn client(&self) -> &OpenHandsClient {
@@ -1028,11 +1096,34 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
-        let request = launch_profile.to_create_request(
+        let request = match launch_profile.to_create_request(
+            self.environment.as_ref(),
             workspace.workspace_path(),
             &configured_persistence_dir(workflow, workspace),
             None,
-        );
+        ) {
+            Ok(request) => request,
+            Err(detail) => {
+                return self
+                    .persist_failure_without_stream(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        observed_run,
+                        IssueSessionPromptKind::Full,
+                        None,
+                        NormalizedOutcome {
+                            kind: WorkerOutcomeKind::Failed,
+                            summary: "failed to build OpenHands conversation create request"
+                                .to_string(),
+                            error: Some(detail),
+                        },
+                    )
+                    .await
+                    .map(Box::new)
+                    .map(Step::EarlyResult);
+            }
+        };
         workspace_manager
             .write_json_artifact(
                 workspace,
@@ -1159,11 +1250,22 @@ impl IssueSessionRunner {
             );
             return Ok(None);
         };
-        let request = launch_profile.to_create_request(
+        let request = match launch_profile.to_create_request(
+            self.environment.as_ref(),
             workspace.workspace_path(),
             &configured_persistence_dir(workflow, workspace),
             Some(conversation_id),
-        );
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                debug!(
+                    %error,
+                    %conversation_id,
+                    "skipping session rehydrate because provider configuration is invalid"
+                );
+                return Ok(None);
+            }
+        };
         workspace_manager
             .write_json_artifact(
                 workspace,

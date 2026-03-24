@@ -204,6 +204,7 @@ impl LocalServerTooling {
         &self,
         port_override: Option<u16>,
         extra_env: &BTreeMap<String, String>,
+        command_override: Option<&[String]>,
     ) -> Result<ResolvedLaunch, LocalToolingError> {
         if !self.pin_status.is_ready() {
             return Err(LocalToolingError::UnresolvedPin {
@@ -239,14 +240,30 @@ impl LocalServerTooling {
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
 
+        let (program, args, launcher_summary) = match command_override {
+            Some(command) => (
+                command
+                    .first()
+                    .expect("workflow-local server command should not be empty")
+                    .clone(),
+                command.iter().skip(1).cloned().collect(),
+                format!("workflow override: {}", command.join(" ")),
+            ),
+            None => (
+                "bash".to_string(),
+                vec![self.layout.run_local_script.display().to_string()],
+                self.metadata.launcher.clone(),
+            ),
+        };
+
         Ok(ResolvedLaunch {
-            program: "bash".to_string(),
-            args: vec![self.layout.run_local_script.display().to_string()],
+            program,
+            args,
             env,
             working_dir: self.layout.tool_dir.clone(),
             base_url: self.base_url(port_override),
             version: self.version.clone(),
-            launcher_summary: self.metadata.launcher.clone(),
+            launcher_summary,
         })
     }
 }
@@ -410,7 +427,7 @@ mod tests {
 
         let tooling = LocalServerTooling::load(temp_dir.path()).expect("load should succeed");
         let error = tooling
-            .resolve_launch(None, &BTreeMap::new())
+            .resolve_launch(None, &BTreeMap::new(), None)
             .expect_err("resolve should fail");
 
         assert!(matches!(error, LocalToolingError::UnresolvedPin { .. }));

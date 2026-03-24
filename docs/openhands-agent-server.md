@@ -107,7 +107,7 @@ Current repository implementation:
 - `opensymphony doctor` now checks for `cargo`, `curl`, `git`, and `uv` on `PATH`, prints the trusted-machine local-safety warning on every run, and warns when a local deployment points at a non-loopback OpenHands target
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv`, enforces `uv run --directory <tool-dir> --locked --extra agent-server --module openhands.agent_server`, and rejects extra agent-server CLI flags so the pinned project works the same way from the repo root, CI, and the local supervisor
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
-- explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
+- workflow-owned `openhands.local_server.command` overrides now survive workflow resolution and are honored only when the runtime is using managed local supervision; external, authenticated, path-prefixed, or `local_server.enabled: false` targets fail deterministically at the runtime boundary instead of silently ignoring the override
 - explicit `openhands.local_server.enabled: false` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - explicit `openhands.local_server.env` overrides are currently rejected during workflow resolution until the runtime supervisor creation path forwards workflow-owned launcher environment variables into `extra_env`
 - explicit `openhands.local_server.startup_timeout_ms` overrides are currently rejected during workflow resolution until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
@@ -132,7 +132,8 @@ Readiness probing rule:
 
 Current implementation detail:
 
-- supervised mode launches `bash tools/openhands-server/run-local.sh`
+- supervised mode launches `bash tools/openhands-server/run-local.sh` when `openhands.local_server.command` is omitted
+- when `openhands.local_server.command` is configured for a managed local target, supervised mode executes that command from the configured tooling directory while still injecting the runtime-owned `OPENHANDS_SERVER_PORT` and `RUNTIME=process` environment needed by the pinned local MVP
 - the supervisor sets `OPENHANDS_SERVER_PORT`, while the launcher itself forces `RUNTIME=process`, loopback host `127.0.0.1`, the pinned `agent-server` extra, and `uv` lockfile enforcement
 - before spawning, supervised mode probes the resolved base URL and fails fast if another ready server is already responding there, so the daemon never treats a foreign process as its owned child
 - diagnostics record the launcher summary, resolved base URL, pinned version,
@@ -357,15 +358,16 @@ Current workflow defaulting:
 - non-default `openhands.conversation.reuse_policy` values are rejected during workflow resolution until the orchestrator/runtime path can honor alternate conversation reuse behavior
 - `max_iterations` must fit the downstream OpenHands `u32` request range
 - `openhands.transport.session_api_key_env` is accepted and required for non-loopback remote targets
+- workflow-owned `local_server.command` overrides are accepted during workflow resolution and are only valid for managed local-supervisor targets
 - workflow-owned `local_server.readiness_probe_path` overrides are rejected during workflow resolution until the runtime supervisor launch path consumes them
 - workflow-owned `local_server.startup_timeout_ms` overrides are rejected during workflow resolution until the runtime supervisor creation path consumes them
 - `openhands.websocket.auth_mode` defaults to `auto` and `openhands.websocket.query_param_name` defaults to `session_api_key`
 - workflow-owned `websocket.enabled` overrides are rejected during workflow resolution until the runtime readiness path can honor disabling the socket entirely
 - workflow-owned `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides now resolve into the runtime stream attach and reconnect budgets
 - `agent.llm.model` is required whenever an `llm` block is present
+- workflow-owned `agent.llm.api_key_env` and `agent.llm.base_url_env` overrides are accepted during workflow resolution and resolved lazily at runtime so missing or blank provider envs fail with deterministic runtime-boundary errors
 - workflow-owned LLM option keys are rejected during workflow resolution until the current request subset can actually forward them
 - workflow-owned agent options such as `log_completions` and extra agent keys are rejected during workflow resolution until the current request subset can actually forward them
-- workflow-owned LLM provider env overrides such as `api_key_env` and `base_url_env` are rejected during workflow resolution until the runtime conversation-create adapter can actually forward them
 - workflow-owned `openhands.mcp.stdio_servers` entries are rejected during workflow resolution until the runtime conversation-create adapter can actually send `mcp_config`
 
 Implementation rule:
@@ -376,11 +378,13 @@ Implementation rule:
 Current repository implementation:
 
 - `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
-- the current request model still serializes `agent` as only `{ kind, llm }`, and `llm` itself as only `{ model, api_key }`, so workflow-owned agent extras plus arbitrary LLM option keys are rejected before runtime launch
+- the current request model still serializes `agent` as only `{ kind, llm }`, and `llm` itself as only `{ model, api_key, base_url }`, so workflow-owned agent extras plus arbitrary LLM option keys are still rejected before runtime launch
 - the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
 - the current transport layer preserves base-path prefixes across REST endpoints and `/sockets/events/{conversation_id}`, so the same client can target reverse-proxied external servers without code changes outside config
+- the current session launch profile now persists workflow-owned `agent.llm.api_key_env` and `agent.llm.base_url_env` names so fresh and rehydrated conversation-create requests resolve the same provider env contract
 - the current supervisor readiness probe still owns the local launch path and always uses `/openapi.json`, so explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are still rejected before runtime launch
 - the current supervisor launch path still uses runtime-owned launcher environment variables (`OPENHANDS_SERVER_PORT` and `RUNTIME=process`), so explicit workflow-owned `local_server.env` overrides are rejected before runtime launch
+- the current supervisor launch path now threads workflow-owned `local_server.command` into the actual subprocess launch only for managed local targets; otherwise the runtime rejects that override instead of silently discarding it
 - the current runtime now consumes workflow-owned `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` values, but still always opens the readiness socket so explicit `websocket.enabled` overrides remain rejected before runtime launch
 - the current request model does not yet serialize `mcp_config`, so workflow-owned MCP stdio server declarations are rejected before runtime launch
 - `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`
