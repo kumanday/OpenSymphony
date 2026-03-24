@@ -167,8 +167,8 @@ impl ConversationLaunchProfile {
                 kind: self.agent_kind.clone(),
                 llm: LlmConfig {
                     model: self.llm_model.clone(),
-                    api_key: None,
-                    base_url: None,
+                    api_key: std::env::var("LLM_API_KEY").ok(),
+                    base_url: std::env::var("LLM_BASE_URL").ok(),
                 },
             },
         }
