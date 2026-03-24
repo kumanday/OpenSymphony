@@ -279,6 +279,15 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
         first_conversation.last_prompt_kind,
         Some(IssueSessionPromptKind::Full)
     );
+    let launch_profile = first_conversation
+        .launch_profile
+        .as_ref()
+        .expect("conversation manifest should persist a launch profile");
+    assert_eq!(launch_profile.workspace_kind, "LocalWorkspace");
+    assert_eq!(launch_profile.confirmation_policy_kind, "NeverConfirm");
+    assert_eq!(launch_profile.agent_kind, "Agent");
+    assert_eq!(launch_profile.llm_model, "openai/gpt-5.4");
+    assert!(launch_profile.stuck_detection);
     let first_prompt = manager
         .read_text_artifact(
             &ensured.handle,

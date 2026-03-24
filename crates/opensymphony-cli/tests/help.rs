@@ -17,6 +17,7 @@ fn top_level_help_describes_commands_and_safety_posture() {
         "Operate the OpenSymphony local MVP on a trusted machine",
         "process-level isolation only",
         "Run the real orchestrator against the current project workflow",
+        "Resume an issue conversation for interactive debugging",
         "Serve the local control-plane demo stream",
         "Attach the FrankenTUI operator client to a control plane",
         "Run local preflight checks for trusted-machine deployment",
@@ -50,6 +51,31 @@ fn doctor_help_explains_config_and_live_probe_options() {
         assert!(
             stdout.contains(snippet),
             "doctor help should include `{snippet}`: stdout={stdout}",
+        );
+    }
+}
+
+#[test]
+fn debug_help_explains_issue_lookup_and_config() {
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["debug", "--help"])
+        .output()
+        .expect("debug help should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "debug help should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    for snippet in [
+        "Resume an issue conversation for interactive debugging",
+        "Linear issue identifier or persisted issue ID to resume",
+        "Runtime config YAML path; defaults to ./config.yaml when present",
+    ] {
+        assert!(
+            stdout.contains(snippet),
+            "debug help should include `{snippet}`: stdout={stdout}",
         );
     }
 }

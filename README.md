@@ -111,6 +111,9 @@ opensymphony run
 # Or point at an explicit runtime config file
 opensymphony run --config ./config.yaml
 
+# Resume the persisted OpenHands conversation for one issue
+opensymphony debug COE-284
+
 # Optional: Start the TUI for monitoring
 opensymphony tui --url http://127.0.0.1:3000/
 ```
@@ -215,13 +218,36 @@ Each issue gets a deterministic workspace:
 <workspace_root>/<issue_identifier>/
 ├── .opensymphony/
 │   ├── issue.json              # Issue metadata
-│   ├── conversation.json       # OpenHands conversation ID
+│   ├── conversation.json       # Conversation registry and launch profile
 │   └── openhands/
 │       └── create-conversation-request.json
 ├── .opensymphony.after_create.json  # Hook receipt
 ├── <repo_files>                # Cloned repository
 └── logs/                       # Execution logs
 ```
+
+## Debugging Sessions
+
+Use `opensymphony debug <issue-id>` to reopen the OpenHands conversation that OpenSymphony used for that issue:
+
+```bash
+cd /path/to/target-repo
+opensymphony debug COE-284
+```
+
+The command resolves the issue reference to its managed workspace, reads
+`.opensymphony/conversation.json`, and resumes the same `conversation_id` from the
+original working directory. The conversation registry persists the issue reference,
+stable OpenHands conversation ID, timestamps, transport details, and the launch
+profile that created the session so a missing-but-recoverable thread can be
+rehydrated without losing continuity.
+
+When the workflow uses the local supervised OpenHands server, `opensymphony debug`
+targets the same configured base URL as the orchestrator. If a ready server is
+already listening there, the debug command reuses it; otherwise it starts a local
+server for the session. For the most predictable behavior, prefer the
+orchestrator-managed server and avoid leaving unrelated standalone `openhands`
+CLI sessions bound to the same port.
 
 ### Lifecycle Hooks
 

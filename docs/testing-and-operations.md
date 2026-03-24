@@ -336,6 +336,7 @@ Expected assertions:
 Recommended CLI commands for the repo:
 
 - `opensymphony run`
+- `opensymphony debug <issue-id>`
 - `opensymphony tui`
 - `opensymphony doctor`
 - `opensymphony linear-mcp`
@@ -351,11 +352,11 @@ Current workspace commands:
 
 - `cd /path/to/target-repo && opensymphony run`
 - `cd /path/to/target-repo && opensymphony run --config ./config.yaml`
+- `cd /path/to/target-repo && opensymphony debug COE-284`
 - `opensymphony tui --url http://127.0.0.1:3000/`
 
 Possible helper commands later:
 
-- `opensymphony debug openhands`
 - `opensymphony inspect workspace <issue-id>`
 - `opensymphony inspect conversation <issue-id>`
 
@@ -363,11 +364,21 @@ Current validation commands for the implemented orchestrator and observability s
 
 - `cargo test`
 - `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test -p opensymphony-cli --test debug`
 - `cargo install --path . --locked --root /tmp/opensymphony-install-check`
 - `cd /path/to/target-repo && /tmp/opensymphony-install-check/bin/opensymphony run`
+- `cd /path/to/target-repo && /tmp/opensymphony-install-check/bin/opensymphony debug COE-284`
 - `curl http://127.0.0.1:3000/api/v1/snapshot`
 - `opensymphony tui --url http://127.0.0.1:3000/ --exit-after-ms 1200`
 - `curl http://127.0.0.1:3000/healthz`
+
+The debug command is intentionally workspace-backed rather than tracker-backed: it
+finds the managed issue workspace, loads `.opensymphony/conversation.json`, and
+resumes the recorded OpenHands conversation from the original working directory.
+For local-supervised workflows it reuses any ready server already bound to the
+configured base URL and only launches the pinned repo-local server when nothing
+ready is already serving there. Avoid leaving unrelated standalone `openhands`
+CLI sessions on that port when validating orchestrator-managed resume behavior.
 
 The scripted `tui --exit-after-ms` smoke path now exits `0` only when the
 final reduced control-plane state is still a real streamed
@@ -569,7 +580,7 @@ Each issue workspace should expose enough local artifacts to debug recovery:
     session-context.json
 ```
 
-These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, `run.json` retains the latest hook/status evidence for the worker lifetime, `conversation.json` records reuse plus prompt-seeding state, and the OpenHands plus generated snapshots preserve the exact create request, latest mirrored conversation state, last dispatched prompt artifacts, and latest normalized runner context without reconstructing daemon state.
+These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, `run.json` retains the latest hook/status evidence for the worker lifetime, `conversation.json` records issue ownership, reuse state, prompt-seeding state, and the persisted launch profile used by `opensymphony debug`, and the OpenHands plus generated snapshots preserve the exact create request, latest mirrored conversation state, last dispatched prompt artifacts, and latest normalized runner context without reconstructing daemon state.
 
 ## 10. Version pinning
 
