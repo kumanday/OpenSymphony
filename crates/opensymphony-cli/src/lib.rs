@@ -20,8 +20,9 @@ use opensymphony_control::{
 };
 use opensymphony_linear_mcp::run_stdio_server as run_linear_mcp_stdio_server;
 use opensymphony_openhands::{
-    ConversationCreateRequest, DoctorProbeConfig, LocalServerSupervisor, LocalServerTooling,
-    OpenHandsClient, SupervisedServerConfig, SupervisorConfig, TransportConfig,
+    ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, McpConfig,
+    McpStdioServerConfig, OpenHandsClient, SupervisedServerConfig, SupervisorConfig,
+    TransportConfig,
 };
 use opensymphony_workflow::{
     Environment, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
@@ -1009,7 +1010,7 @@ async fn run_live_openhands_checks(
     };
     let client = OpenHandsClient::new(transport.clone());
     if let Err(error) = client.openapi_probe().await {
-        match maybe_start_local_supervisor(runtime, tooling) {
+        match maybe_start_local_supervisor(runtime, tooling, &transport) {
             Ok(Some(mut supervisor)) => {
                 let started = match supervisor.status() {
                     Ok(status) => status,
@@ -1159,11 +1160,32 @@ fn build_doctor_probe_request(
             u32::MAX
         )
     })?;
-
+    let mcp_config = McpConfig::from_stdio_servers(
+        runtime
+            .workflow
+            .extensions
+            .openhands
+            .mcp
+            .stdio_servers
+            .iter()
+            .map(|server| {
+                let (command, args) = server
+                    .command
+                    .split_first()
+                    .expect("workflow stdio server commands should be validated during resolution");
+                McpStdioServerConfig {
+                    name: server.name.clone(),
+                    command: command.clone(),
+                    args: args.to_vec(),
+                    env: Default::default(),
+                }
+            })
+            .collect(),
+    );
     Ok(ConversationCreateRequest::doctor_probe_with_config(
         probe_workspace.display().to_string(),
         persistence_dir.display().to_string(),
-        DoctorProbeConfig {
+        opensymphony_openhands::DoctorProbeConfig {
             max_iterations,
             stuck_detection: conversation.stuck_detection,
             confirmation_policy_kind: conversation.confirmation_policy.kind.clone(),
@@ -1171,6 +1193,7 @@ fn build_doctor_probe_request(
             model,
             api_key,
             base_url: llm_base_url,
+            mcp_config,
         },
     ))
 }
@@ -1198,6 +1221,7 @@ fn stop_managed_supervisor(
 fn maybe_start_local_supervisor(
     runtime: &DoctorRuntimeConfig,
     tooling: Option<&LocalServerTooling>,
+    transport: &TransportConfig,
 ) -> Result<Option<LocalServerSupervisor>, String> {
     if !runtime.workflow.extensions.openhands.local_server.enabled {
         return Ok(None);
@@ -1214,27 +1238,14 @@ fn maybe_start_local_supervisor(
         ));
     }
 
-    if runtime
-        .workflow
-        .extensions
-        .openhands
-        .transport
-        .session_api_key_env
-        .is_some()
-    {
+    let Some(supervisor_base_url) = transport
+        .managed_local_server_base_url()
+        .map_err(|error| error.to_string())?
+    else {
         return Ok(None);
-    }
-
-    let base_url = &runtime.workflow.extensions.openhands.transport.base_url;
-    let url = Url::parse(base_url)
-        .map_err(|error| format!("invalid OpenHands base URL `{base_url}`: {error}"))?;
-    if url.scheme() != "http" || !url.path().trim_matches('/').is_empty() {
-        return Ok(None);
-    }
-    match url.host_str() {
-        Some("127.0.0.1") | Some("localhost") => {}
-        _ => return Ok(None),
-    }
+    };
+    let url = Url::parse(&supervisor_base_url)
+        .map_err(|error| format!("invalid OpenHands base URL `{supervisor_base_url}`: {error}"))?;
 
     let mut supervisor_config = SupervisedServerConfig::new(tooling.clone());
     supervisor_config.extra_env = runtime
@@ -1259,10 +1270,9 @@ fn maybe_start_local_supervisor(
         .local_server
         .readiness_probe_path
         .clone();
-    supervisor_config.port_override = Some(
-        url.port_or_known_default()
-            .ok_or_else(|| format!("OpenHands base URL `{base_url}` does not include a port"))?,
-    );
+    supervisor_config.port_override = Some(url.port_or_known_default().ok_or_else(|| {
+        format!("OpenHands base URL `{supervisor_base_url}` does not include a port")
+    })?);
 
     let mut supervisor =
         LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(supervisor_config)));
@@ -1568,6 +1578,38 @@ mod tests {
                 u64::from(u32::MAX) + 1,
                 u32::MAX
             )
+        );
+    }
+
+    #[test]
+    fn build_doctor_probe_request_forwards_mcp_stdio_servers() {
+        let mut runtime = sample_doctor_runtime();
+        runtime.workflow.extensions.openhands.mcp.stdio_servers =
+            vec![opensymphony_workflow::OpenHandsStdioServerConfig {
+                name: "linear".to_string(),
+                command: vec![
+                    "opensymphony".to_string(),
+                    "linear-mcp".to_string(),
+                    "--stdio".to_string(),
+                ],
+            }];
+
+        let probe_workspace = PathBuf::from("/tmp/doctor-probe-workspace");
+        let persistence_dir = probe_workspace.join("sessions");
+        let request =
+            build_doctor_probe_request(&runtime, &probe_workspace, &persistence_dir, None, None)
+                .expect("doctor probe request should build");
+
+        assert_eq!(
+            request.mcp_config,
+            Some(opensymphony_openhands::McpConfig {
+                stdio_servers: vec![opensymphony_openhands::McpStdioServerConfig {
+                    name: "linear".to_string(),
+                    command: "opensymphony".to_string(),
+                    args: vec!["linear-mcp".to_string(), "--stdio".to_string()],
+                    env: Default::default(),
+                }],
+            })
         );
     }
 

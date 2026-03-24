@@ -17,7 +17,8 @@ pub use events::{
 pub use models::{
     AcceptedResponse, AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
     ConversationRunRequest, ConversationStateUpdatePayload, DoctorProbeConfig, EventEnvelope,
-    LlmConfig, SearchConversationEventsResponse, SendMessageRequest, TextContent, WorkspaceConfig,
+    LlmConfig, McpConfig, McpStdioServerConfig, SearchConversationEventsResponse,
+    SendMessageRequest, TextContent, WorkspaceConfig,
 };
 pub use session::{
     ConversationLaunchProfile, IssueConversationManifest, IssueSessionContext, IssueSessionError,

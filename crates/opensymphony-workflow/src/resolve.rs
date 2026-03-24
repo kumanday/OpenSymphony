@@ -233,7 +233,6 @@ fn resolve_openhands<E: Environment>(
 ) -> Result<OpenHandsConfig, WorkflowConfigError> {
     reject_unsupported_openhands_local_server_overrides(&openhands.local_server)?;
     reject_unsupported_openhands_websocket_overrides(&openhands.websocket)?;
-    reject_unsupported_openhands_mcp(&openhands.mcp)?;
 
     let transport_base_url =
         resolve_openhands_base_url(openhands.transport.base_url.as_deref(), env)?;
@@ -315,9 +314,7 @@ fn resolve_openhands<E: Environment>(
         },
         conversation: resolve_openhands_conversation(&openhands.conversation, env)?,
         websocket,
-        mcp: OpenHandsMcpConfig {
-            stdio_servers: Vec::new(),
-        },
+        mcp: resolve_openhands_mcp(&openhands.mcp)?,
     })
 }
 
@@ -387,19 +384,38 @@ fn reject_unsupported_openhands_websocket_overrides(
     Ok(())
 }
 
-fn reject_unsupported_openhands_mcp(
+fn resolve_openhands_mcp(
     mcp: &OpenHandsMcpFrontMatter,
-) -> Result<(), WorkflowConfigError> {
-    if mcp.stdio_servers.is_some() {
+) -> Result<OpenHandsMcpConfig, WorkflowConfigError> {
+    let stdio_servers = mcp
+        .stdio_servers
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(resolve_openhands_stdio_server)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(OpenHandsMcpConfig { stdio_servers })
+}
+
+fn resolve_openhands_stdio_server(
+    server: &crate::OpenHandsStdioServerFrontMatter,
+) -> Result<crate::OpenHandsStdioServerConfig, WorkflowConfigError> {
+    let name = server.name.trim();
+    if name.is_empty() {
         return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.mcp.stdio_servers",
-            message:
-                "is not supported until the runtime conversation-create adapter can forward MCP config"
-                    .to_owned(),
+            field: "openhands.mcp.stdio_servers[].name",
+            message: "must not be empty".to_owned(),
         });
     }
 
-    Ok(())
+    Ok(crate::OpenHandsStdioServerConfig {
+        name: name.to_owned(),
+        command: resolve_command(
+            Some(server.command.as_slice()),
+            "openhands.mcp.stdio_servers[].command",
+            Vec::new(),
+        )?,
+    })
 }
 
 fn resolve_openhands_base_url<E: Environment>(

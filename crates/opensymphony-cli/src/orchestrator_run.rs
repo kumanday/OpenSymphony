@@ -536,17 +536,17 @@ async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
-    if !requires_supervisor(&runtime.workflow) {
+    let Some(supervisor_base_url) = transport.managed_local_server_base_url()? else {
         return Ok((transport, None));
-    }
+    };
 
     let tool_dir = runtime
         .tool_dir
         .clone()
         .ok_or(RunCommandError::MissingToolDir)?;
     let tooling = LocalServerTooling::load(tool_dir)?;
-    let base_url = &runtime.workflow.extensions.openhands.transport.base_url;
-    let url = Url::parse(base_url).expect("validated transport base URL should parse");
+    let url =
+        Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);
     config.extra_env = runtime
         .workflow
@@ -576,22 +576,6 @@ async fn build_runtime_transport(
     let status = supervisor.start()?;
     let transport = TransportConfig::new(status.base_url).with_auth(transport.auth().clone());
     Ok((transport, Some(supervisor)))
-}
-
-fn requires_supervisor(workflow: &ResolvedWorkflow) -> bool {
-    let transport = &workflow.extensions.openhands.transport;
-    if transport.session_api_key_env.is_some()
-        || !workflow.extensions.openhands.local_server.enabled
-    {
-        return false;
-    }
-
-    let Ok(url) = Url::parse(&transport.base_url) else {
-        return false;
-    };
-    url.scheme() == "http"
-        && url.path().trim_matches('/').is_empty()
-        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
 }
 
 impl TrackerBackend for RuntimeTrackerBackend {

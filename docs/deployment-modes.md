@@ -189,7 +189,7 @@ Defaults:
 - path prefixes supported
 - auth configurable
 - TLS optional but supported if present
-- doctor and the runtime treat authenticated or path-prefixed loopback targets as external rather than supervisor-owned
+- doctor and the runtime treat authenticated loopback targets as external; unauthenticated path-prefixed loopback targets normalize back to the origin before any managed local supervisor is started
 
 ## 7.3 Hosted remote
 
