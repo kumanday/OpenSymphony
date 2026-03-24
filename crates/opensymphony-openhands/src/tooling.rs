@@ -227,10 +227,10 @@ impl LocalServerTooling {
             "LLM_API_KEY",
             "FIREWORKS_API_KEY",
         ] {
-            if let Ok(value) = std::env::var(key) {
-                if !value.is_empty() {
-                    env.insert(key.to_string(), value);
-                }
+            if let Ok(value) = std::env::var(key)
+                && !value.is_empty()
+            {
+                env.insert(key.to_string(), value);
             }
         }
         env.extend(

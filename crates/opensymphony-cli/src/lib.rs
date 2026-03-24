@@ -1,3 +1,5 @@
+mod orchestrator_run;
+
 use std::{
     collections::BTreeSet,
     env,
@@ -35,7 +37,7 @@ use url::Url;
 #[command(name = "opensymphony")]
 #[command(about = "Operate the OpenSymphony local MVP on a trusted machine")]
 #[command(
-    long_about = "Operate the OpenSymphony local MVP on a trusted machine.\n\nUse this CLI to run local control-plane demos, preflight checks, and the Linear MCP bridge.\n\nSafety: local OpenSymphony runs agent activity on the host with process-level isolation only. It is not sandboxed."
+    long_about = "Operate the OpenSymphony local MVP on a trusted machine.\n\nUse this CLI to run the orchestrator, local control-plane demos, preflight checks, and the Linear MCP bridge.\n\nSafety: local OpenSymphony runs agent activity on the host with process-level isolation only. It is not sandboxed."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -44,6 +46,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Run the real orchestrator against the current project workflow")]
+    Run(orchestrator_run::RunArgs),
     #[command(about = "Serve the local control-plane demo stream")]
     Daemon(DaemonArgs),
     #[command(about = "Attach the FrankenTUI operator client to a control plane")]
@@ -222,6 +226,7 @@ pub async fn run() -> ExitCode {
     init_tracing();
     let cli = Cli::parse();
     match cli.command {
+        Command::Run(args) => orchestrator_run::run_command(args).await,
         Command::Doctor(args) => run_doctor(args).await,
         Command::Daemon(args) => run_daemon(args).await,
         Command::Tui(args) => run_tui(args).await,
@@ -1475,7 +1480,7 @@ mod tests {
 
         match cli.command {
             Command::Daemon(args) => assert_eq!(args.sample_interval_ms.get(), 250),
-            Command::Tui(_) | Command::LinearMcp(_) | Command::Doctor(_) => {
+            Command::Run(_) | Command::Tui(_) | Command::LinearMcp(_) | Command::Doctor(_) => {
                 panic!("expected daemon command")
             }
         }

@@ -26,7 +26,7 @@ This is the MVP target.
 
 ```text
 developer machine
-  ├─ opensymphony daemon
+  ├─ opensymphony run
   │   ├─ orchestrator
   │   ├─ workspace manager
   │   ├─ linear adapter
@@ -67,7 +67,7 @@ This mode uses the same Rust runtime adapter but skips local subprocess supervis
 
 ```text
 developer machine
-  ├─ opensymphony daemon
+  ├─ opensymphony run
   └─ external OpenHands agent-server
 ```
 
@@ -101,11 +101,11 @@ This is the primary follow-on after the local MVP.
 
 ```text
 developer laptop
-  ├─ opensymphony daemon or thin client
+  ├─ opensymphony run or thin client
   └─ remote OpenSymphony control plane
 
 server side
-  ├─ opensymphony daemon
+  ├─ opensymphony run
   ├─ remote OpenHands agent-server fleet
   ├─ remote workspace isolation layer
   └─ shared observability and auth

@@ -335,21 +335,23 @@ Expected assertions:
 
 Recommended CLI commands for the repo:
 
-- `opensymphony daemon`
+- `opensymphony run`
 - `opensymphony tui`
 - `opensymphony doctor`
 - `opensymphony linear-mcp`
 
 Recommended first-run sequence:
 
+- `cargo install --path .`
 - `./tools/openhands-server/install.sh`
-- `cargo run -p opensymphony-cli -- --help`
-- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
+- `opensymphony --help`
+- `opensymphony doctor --config examples/configs/local-dev.yaml`
 
 Current workspace commands:
 
-- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:3000`
-- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:3000/`
+- `cd /path/to/target-repo && opensymphony run`
+- `cd /path/to/target-repo && opensymphony run --config ./config.yaml`
+- `opensymphony tui --url http://127.0.0.1:3000/`
 
 Possible helper commands later:
 
@@ -357,14 +359,15 @@ Possible helper commands later:
 - `opensymphony inspect workspace <issue-id>`
 - `opensymphony inspect conversation <issue-id>`
 
-Current validation commands for the implemented observability slice:
+Current validation commands for the implemented orchestrator and observability slice:
 
 - `cargo test`
 - `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:4010 --sample-interval-ms 250`
-- `curl http://127.0.0.1:4010/api/v1/snapshot`
-- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
-- `curl http://127.0.0.1:4010/healthz`
+- `cargo install --path . --locked --root /tmp/opensymphony-install-check`
+- `cd /path/to/target-repo && /tmp/opensymphony-install-check/bin/opensymphony run`
+- `curl http://127.0.0.1:3000/api/v1/snapshot`
+- `opensymphony tui --url http://127.0.0.1:3000/ --exit-after-ms 1200`
+- `curl http://127.0.0.1:3000/healthz`
 
 The scripted `tui --exit-after-ms` smoke path now exits `0` only when the
 final reduced control-plane state is still a real streamed
@@ -396,15 +399,16 @@ control plane causes `opensymphony tui --exit-after-ms ...` to exit non-zero.
 Current command set in this repository:
 
 - `./tools/openhands-server/install.sh`
-- `cargo run -p opensymphony-cli -- daemon --bind 127.0.0.1:4010 --sample-interval-ms 250`
-- `curl http://127.0.0.1:4010/healthz`
-- `curl http://127.0.0.1:4010/api/v1/snapshot`
-- `cargo run -p opensymphony-cli -- tui --url http://127.0.0.1:4010/ --exit-after-ms 1200`
-- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml`
-- `cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
+- `cargo install --path .`
+- `cd /path/to/target-repo && opensymphony run --config ./config.yaml`
+- `curl http://127.0.0.1:3000/healthz`
+- `curl http://127.0.0.1:3000/api/v1/snapshot`
+- `opensymphony tui --url http://127.0.0.1:3000/ --exit-after-ms 1200`
+- `opensymphony doctor --config examples/configs/local-dev.yaml`
+- `opensymphony doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_pinned_server -- --nocapture`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_local_suite -- --ignored --nocapture --test-threads=1`
-- `cargo run -p opensymphony-cli -- linear-mcp`
+- `opensymphony linear-mcp`
 - `./scripts/smoke_local.sh`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
 
@@ -437,8 +441,8 @@ When validating the local control-plane and TUI slice, also confirm that:
 - lagged SSE consumers immediately fast-forward to the newest published snapshot instead of waiting for the retained broadcast backlog to go empty, and they only advance to newer snapshot sequences
 - newline-bearing, control-character-bearing, or full-width tracker and event text stays within
   the pane row and column budget
-- `opensymphony daemon --sample-interval-ms ...` keeps the initial `Starting` snapshot in place
-  until the configured interval elapses
+- the demo-only `opensymphony daemon --sample-interval-ms ...` command keeps the initial
+  `Starting` snapshot in place until the configured interval elapses
 
 ## 7. Doctor checks
 
