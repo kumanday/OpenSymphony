@@ -85,6 +85,7 @@ Notes:
 - `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap.
 - The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
 - `conversation.json` now uses workspace-owned path and serialization helpers, but the OpenHands issue-session runner still owns when it is created, reused, or reset.
+- `conversation.json` is the issue-to-session registry: it stores the issue reference, stable `conversation_id`, timestamps, transport diagnostics, and the launch profile needed to resume or rehydrate the same OpenHands thread later through `opensymphony debug`.
 - `prompts/` holds the latest prompt of each kind plus JSON metadata that points back to the per-run archive.
 - `runs/attempt-####/` holds immutable per-run prompt captures for auditability without mutating repository-owned policy files.
 - The repository working tree remains otherwise untouched except by normal agent work.
@@ -250,6 +251,7 @@ Suggested fields:
 - `created_at`
 - `updated_at`
 - `last_attached_at`
+- `launch_profile`
 - `fresh_conversation`
 - `workflow_prompt_seeded`
 - `reset_reason`
@@ -264,6 +266,9 @@ Suggested fields:
 - `last_event_summary`
 
 This file is the bridge between Symphony issue ownership and OpenHands conversation reuse.
+It also makes conversational debugging deterministic: `opensymphony debug <issue-id>`
+uses the stored issue reference plus `launch_profile` to find the workspace, resume the
+same thread, and preserve context across orchestrator restarts or retry attempts.
 
 ## 9. Generated context artifacts
 
@@ -345,6 +350,7 @@ Default policy:
 - one conversation per issue
 - conversation persistence is stored under the issue workspace
 - reused across worker lifetimes
+- retained after worker completion so the issue remains debuggable until workspace cleanup
 - reset only on explicit error or incompatible-version policy
 
 Reset handling:

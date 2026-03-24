@@ -1,3 +1,4 @@
+mod debug_session;
 mod orchestrator_run;
 
 use std::{
@@ -48,6 +49,8 @@ pub struct Cli {
 enum Command {
     #[command(about = "Run the real orchestrator against the current project workflow")]
     Run(orchestrator_run::RunArgs),
+    #[command(about = "Resume an issue conversation for interactive debugging")]
+    Debug(debug_session::DebugArgs),
     #[command(about = "Serve the local control-plane demo stream")]
     Daemon(DaemonArgs),
     #[command(about = "Attach the FrankenTUI operator client to a control plane")]
@@ -227,6 +230,7 @@ pub async fn run() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Run(args) => orchestrator_run::run_command(args).await,
+        Command::Debug(args) => debug_session::run_command(args).await,
         Command::Doctor(args) => run_doctor(args).await,
         Command::Daemon(args) => run_daemon(args).await,
         Command::Tui(args) => run_tui(args).await,
@@ -1480,7 +1484,11 @@ mod tests {
 
         match cli.command {
             Command::Daemon(args) => assert_eq!(args.sample_interval_ms.get(), 250),
-            Command::Run(_) | Command::Tui(_) | Command::LinearMcp(_) | Command::Doctor(_) => {
+            Command::Run(_)
+            | Command::Debug(_)
+            | Command::Tui(_)
+            | Command::LinearMcp(_)
+            | Command::Doctor(_) => {
                 panic!("expected daemon command")
             }
         }

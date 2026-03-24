@@ -303,6 +303,59 @@ async fn ensure_retries_after_create_when_foreign_issue_manifest_preexists() {
 }
 
 #[tokio::test]
+async fn find_workspace_by_issue_reference_returns_identifier_match() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let ensured = manager
+        .ensure(&sample_issue("COE-287"))
+        .await
+        .expect("workspace should exist");
+
+    let found = manager
+        .find_workspace_by_issue_reference("COE-287")
+        .await
+        .expect("lookup should succeed")
+        .expect("workspace should be found");
+
+    assert_eq!(found.issue_id(), ensured.handle.issue_id());
+    assert_eq!(found.identifier(), ensured.handle.identifier());
+    assert_eq!(found.workspace_path(), ensured.handle.workspace_path());
+}
+
+#[tokio::test]
+async fn find_workspace_by_issue_reference_scans_issue_ids() {
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = WorkspaceManager::new(manager_config(
+        &workspace_root,
+        HookConfig::default(),
+        CleanupConfig::default(),
+    ))
+    .expect("manager should build");
+    let issue = sample_issue("COE-288");
+    let ensured = manager
+        .ensure(&issue)
+        .await
+        .expect("workspace should exist");
+
+    let found = manager
+        .find_workspace_by_issue_reference(&issue.issue_id)
+        .await
+        .expect("lookup should succeed")
+        .expect("workspace should be found");
+
+    assert_eq!(found.issue_id(), ensured.handle.issue_id());
+    assert_eq!(found.identifier(), ensured.handle.identifier());
+    assert_eq!(found.workspace_path(), ensured.handle.workspace_path());
+}
+
+#[tokio::test]
 async fn ensure_retries_after_create_when_copied_malformed_issue_manifest_preexists() {
     let temp_dir = TempDir::new().expect("temp dir should exist");
     let workspace_root = temp_dir.path().join("workspaces");

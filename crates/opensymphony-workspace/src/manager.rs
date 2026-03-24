@@ -254,6 +254,63 @@ impl WorkspaceManager {
             .await
     }
 
+    pub async fn find_workspace_by_issue_reference(
+        &self,
+        issue_reference: &str,
+    ) -> Result<Option<WorkspaceHandle>, WorkspaceError> {
+        self.create_directory(&self.config.root).await?;
+
+        match crate::workspace_path_for_root(&self.config.root, issue_reference) {
+            Ok(candidate) => {
+                if let Some((handle, manifest)) =
+                    self.load_workspace_from_directory(&candidate).await?
+                    && workspace_matches_issue_reference(&manifest, issue_reference)
+                {
+                    return Ok(Some(handle));
+                }
+            }
+            Err(WorkspaceError::EmptyIdentifier | WorkspaceError::InvalidWorkspaceKey { .. }) => {}
+            Err(error) => return Err(error),
+        }
+
+        let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {
+            WorkspaceError::ReadDirectory {
+                path: self.config.root.clone(),
+                source,
+            }
+        })?;
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|source| WorkspaceError::ReadDirectory {
+                    path: self.config.root.clone(),
+                    source,
+                })?
+        {
+            let file_type =
+                entry
+                    .file_type()
+                    .await
+                    .map_err(|source| WorkspaceError::ReadDirectory {
+                        path: entry.path(),
+                        source,
+                    })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            if let Some((handle, manifest)) =
+                self.load_workspace_from_directory(&entry.path()).await?
+                && workspace_matches_issue_reference(&manifest, issue_reference)
+            {
+                return Ok(Some(handle));
+            }
+        }
+
+        Ok(None)
+    }
+
     pub async fn write_issue_manifest(
         &self,
         workspace: &WorkspaceHandle,
@@ -574,6 +631,48 @@ impl WorkspaceManager {
                 }
             }
         }
+    }
+
+    async fn load_workspace_from_directory(
+        &self,
+        workspace_path: &Path,
+    ) -> Result<Option<(WorkspaceHandle, IssueManifest)>, WorkspaceError> {
+        self.reject_symlinked_workspace_root(workspace_path).await?;
+        if !path_exists(workspace_path).await? {
+            return Ok(None);
+        }
+
+        let canonical_root = self.canonicalize_path(&self.config.root).await?;
+        let canonical_workspace = self.canonicalize_path(workspace_path).await?;
+        ensure_descendant(&canonical_root, &canonical_workspace)?;
+
+        let issue_manifest_path = canonical_workspace.join(".opensymphony").join("issue.json");
+        let raw = match fs::read_to_string(&issue_manifest_path).await {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => {
+                return Err(WorkspaceError::ReadManifest {
+                    path: issue_manifest_path,
+                    source,
+                });
+            }
+        };
+        let manifest = match serde_json::from_str::<IssueManifest>(&raw) {
+            Ok(manifest) => manifest,
+            Err(_) => return Ok(None),
+        };
+
+        let handle = WorkspaceHandle::new(
+            manifest.issue_id.clone(),
+            manifest.identifier.clone(),
+            manifest.sanitized_workspace_key.clone(),
+            canonical_workspace,
+        );
+        if !issue_manifest_claims_workspace(&handle, &manifest) {
+            return Ok(None);
+        }
+
+        Ok(Some((handle, manifest)))
     }
 
     async fn execute_hook(
@@ -1165,6 +1264,10 @@ fn ownership_claim_from_after_create_receipt(
         issue_id: receipt.issue_id,
         identifier: receipt.identifier,
     }
+}
+
+fn workspace_matches_issue_reference(manifest: &IssueManifest, issue_reference: &str) -> bool {
+    manifest.identifier == issue_reference || manifest.issue_id == issue_reference
 }
 
 fn ensure_descendant(root: &Path, candidate: &Path) -> Result<(), WorkspaceError> {
