@@ -22,9 +22,9 @@ use opensymphony_domain::{
 };
 use opensymphony_linear::{LinearClient, LinearConfig, LinearError};
 use opensymphony_openhands::{
-    IssueSessionObserver, IssueSessionRunner, IssueSessionRunnerConfig, LocalServerSupervisor,
-    LocalServerTooling, OpenHandsClient, OpenHandsError, SupervisedServerConfig, SupervisorConfig,
-    TransportConfig,
+    IssueSessionError, IssueSessionObserver, IssueSessionResult, IssueSessionRunner,
+    IssueSessionRunnerConfig, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
+    OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
 };
 use opensymphony_orchestrator::{
     RecoveryRecord, Scheduler, SchedulerConfig, SchedulerError, TrackerBackend, WorkerAbortReason,
@@ -146,6 +146,10 @@ enum RunCommandError {
         "workflow config requires a local OpenHands server, but no `openhands.tool_dir` was provided via config"
     )]
     MissingToolDir,
+    #[error(
+        "OpenHands transport URL `{value}` does not include an explicit port and has no default port"
+    )]
+    MissingTransportPort { value: String },
 }
 
 #[derive(Debug, Error)]
@@ -168,10 +172,18 @@ enum CliWorkerError {
     Workspace(#[from] WorkspaceError),
     #[error("worker launch timed out after {0:?}")]
     LaunchTimeout(Duration),
+    #[error("worker failed before reporting a conversation launch: {0}")]
+    LaunchFailed(String),
     #[error("worker exited before reporting a conversation launch")]
     LaunchChannelClosed,
     #[error("worker task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
+}
+
+#[derive(Debug)]
+enum LaunchReport {
+    Conversation(Box<ConversationMetadata>),
+    Failed(String),
 }
 
 struct RuntimeTrackerBackend {
@@ -200,20 +212,14 @@ struct ActiveWorkerTask {
 
 struct SchedulerObserver {
     worker_id: String,
-    launch_tx: Option<oneshot::Sender<ConversationMetadata>>,
+    launch_tx: Option<oneshot::Sender<LaunchReport>>,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
-}
-
-impl SchedulerObserver {
-    fn mark_launched(&mut self) -> bool {
-        self.launch_tx.is_none()
-    }
 }
 
 impl IssueSessionObserver for SchedulerObserver {
     fn on_launch(&mut self, conversation: &ConversationMetadata) {
         if let Some(sender) = self.launch_tx.take() {
-            let _ = sender.send(conversation.clone());
+            let _ = sender.send(LaunchReport::Conversation(Box::new(conversation.clone())));
         }
     }
 
@@ -564,10 +570,7 @@ async fn build_runtime_transport(
         .local_server
         .readiness_probe_path
         .clone();
-    config.port_override = Some(
-        url.port_or_known_default()
-            .ok_or(RunCommandError::MissingToolDir)?,
-    );
+    config.port_override = Some(transport_port_override(&url)?);
 
     let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
     let status = supervisor.start()?;
@@ -681,6 +684,39 @@ impl RuntimeWorkerBackend {
     }
 }
 
+fn transport_port_override(url: &Url) -> Result<u16, RunCommandError> {
+    url.port_or_known_default()
+        .ok_or_else(|| RunCommandError::MissingTransportPort {
+            value: url.as_str().to_string(),
+        })
+}
+
+fn report_launch_failure(
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+    detail: impl Into<String>,
+) {
+    if let Some(sender) = launch_tx.take() {
+        let _ = sender.send(LaunchReport::Failed(detail.into()));
+    }
+}
+
+fn pending_launch_failure_detail(result: &Result<IssueSessionResult, IssueSessionError>) -> String {
+    match result {
+        Ok(result) => {
+            let detail = result
+                .worker_outcome
+                .error
+                .clone()
+                .or_else(|| result.worker_outcome.summary.clone())
+                .unwrap_or_else(|| {
+                    "worker finished before reporting a conversation launch".to_string()
+                });
+            format!("worker finished before reporting a conversation launch: {detail}")
+        }
+        Err(error) => format!("worker failed before reporting a conversation launch: {error}"),
+    }
+}
+
 impl WorkerBackend for RuntimeWorkerBackend {
     type Error = CliWorkerError;
 
@@ -700,9 +736,16 @@ impl WorkerBackend for RuntimeWorkerBackend {
         let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
+            let mut launch_tx = Some(launch_tx);
             let ensured = match workspace_manager.ensure(&issue_descriptor(&issue)).await {
                 Ok(ensured) => ensured,
-                Err(_) => return,
+                Err(error) => {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!("failed to ensure workspace: {error}"),
+                    );
+                    return;
+                }
             };
             let attempt = run.attempt.map(|attempt| attempt.get()).unwrap_or(1);
             let run_descriptor = RunDescriptor::new(format!("run-{launch_worker_id}"), attempt);
@@ -711,12 +754,18 @@ impl WorkerBackend for RuntimeWorkerBackend {
                 .await
             {
                 Ok(run_manifest) => run_manifest,
-                Err(_) => return,
+                Err(error) => {
+                    report_launch_failure(
+                        &mut launch_tx,
+                        format!("failed to prepare workspace run: {error}"),
+                    );
+                    return;
+                }
             };
 
             let mut observer = SchedulerObserver {
                 worker_id: observer_worker_id.to_string(),
-                launch_tx: Some(launch_tx),
+                launch_tx,
                 updates_tx: updates_tx.clone(),
             };
             let result = runner
@@ -731,7 +780,11 @@ impl WorkerBackend for RuntimeWorkerBackend {
                 )
                 .await;
 
-            if !observer.mark_launched() {
+            if observer.launch_tx.is_some() {
+                report_launch_failure(
+                    &mut observer.launch_tx,
+                    pending_launch_failure_detail(&result),
+                );
                 return;
             }
 
@@ -760,7 +813,15 @@ impl WorkerBackend for RuntimeWorkerBackend {
         );
 
         match timeout(self.launch_timeout, launch_rx).await {
-            Ok(Ok(conversation)) => Ok(WorkerLaunch { conversation }),
+            Ok(Ok(LaunchReport::Conversation(conversation))) => Ok(WorkerLaunch {
+                conversation: *conversation,
+            }),
+            Ok(Ok(LaunchReport::Failed(detail))) => {
+                if let Some(task) = self.tasks.remove(worker_id.as_str()) {
+                    task.handle.await?;
+                }
+                Err(CliWorkerError::LaunchFailed(detail))
+            }
             Ok(Err(_)) => {
                 if let Some(task) = self.tasks.remove(worker_id.as_str()) {
                     task.handle.await?;
@@ -1096,4 +1157,131 @@ fn datetime_to_timestamp_ms(value: DateTime<Utc>) -> TimestampMs {
 
 fn now_timestamp() -> TimestampMs {
     TimestampMs::new(Utc::now().timestamp_millis().max(0) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    use opensymphony_domain::{
+        IssueId, IssueState, IssueStateCategory, RunAttempt, WorkerId, WorkspaceKey,
+    };
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn transport_port_override_reports_missing_port_separately() {
+        let url = Url::parse("custom-scheme://openhands.local").expect("URL should parse");
+
+        let error = transport_port_override(&url).expect_err("custom scheme should need a port");
+
+        assert!(matches!(
+            error,
+            RunCommandError::MissingTransportPort { value }
+                if value == "custom-scheme://openhands.local"
+        ));
+    }
+
+    #[tokio::test]
+    async fn start_worker_reports_workspace_setup_failures_before_launch() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let blocked_root = tempdir.path().join("workspace-root");
+        fs::write(&blocked_root, "not a directory").expect("blocking file should be created");
+
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &blocked_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+        );
+
+        let issue = sample_issue();
+        let workspace = sample_workspace(&blocked_root);
+        let run = RunAttempt::new(
+            WorkerId::new("worker-1").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            workspace.path.clone(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+
+        let error = backend
+            .start_worker(WorkerStartRequest {
+                issue,
+                workspace,
+                run,
+            })
+            .await
+            .expect_err("workspace setup failure should fail the launch immediately");
+
+        assert!(matches!(
+            error,
+            CliWorkerError::LaunchFailed(detail)
+                if detail.contains("failed to ensure workspace")
+        ));
+        assert!(
+            backend.tasks.is_empty(),
+            "failed launches should not leave worker tasks behind"
+        );
+        assert!(
+            backend
+                .poll_updates()
+                .await
+                .expect("poll_updates should succeed")
+                .is_empty(),
+            "launch failures should be surfaced through start_worker, not queued as runtime updates",
+        );
+    }
+
+    fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
+        let source = format!(
+            "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n",
+            workspace_root.display()
+        );
+        WorkflowDefinition::parse(&source)
+            .expect("workflow should parse")
+            .resolve_with_process_env(base_dir)
+            .expect("workflow should resolve")
+    }
+
+    fn sample_issue() -> NormalizedIssue {
+        NormalizedIssue {
+            id: IssueId::new("issue-1").expect("issue id should be valid"),
+            identifier: IssueIdentifier::new("COE-284").expect("issue identifier should be valid"),
+            title: "Test issue".to_string(),
+            description: None,
+            priority: None,
+            state: IssueState {
+                id: None,
+                name: "In Progress".to_string(),
+                category: IssueStateCategory::Active,
+            },
+            branch_name: None,
+            url: None,
+            labels: Vec::new(),
+            parent_id: None,
+            blocked_by: Vec::new(),
+            sub_issues: Vec::new(),
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    fn sample_workspace(workspace_root: &Path) -> WorkspaceRecord {
+        WorkspaceRecord {
+            path: workspace_root.join("COE-284"),
+            workspace_key: WorkspaceKey::new("COE-284").expect("workspace key should be valid"),
+            created_now: false,
+            created_at: None,
+            updated_at: None,
+            last_seen_tracker_refresh_at: None,
+        }
+    }
 }
