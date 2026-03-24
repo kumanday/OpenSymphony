@@ -636,16 +636,17 @@ fn resolve_openhands_reuse_policy<E: Environment>(
         "openhands.conversation.reuse_policy",
         "per_issue",
     )?;
-    if !reuse_policy.eq_ignore_ascii_case("per_issue") {
-        return Err(WorkflowConfigError::InvalidField {
+    let normalized =
+        normalize_optional(&reuse_policy).ok_or_else(|| WorkflowConfigError::InvalidField {
             field: "openhands.conversation.reuse_policy",
-            message:
-                "is not supported until the orchestrator/runtime path can honor non-default conversation reuse policies"
-                    .to_owned(),
-        });
-    }
+            message: "must not be empty".to_owned(),
+        })?;
 
-    Ok("per_issue".to_owned())
+    match normalized.to_ascii_lowercase().as_str() {
+        "per_issue" => Ok("per_issue".to_owned()),
+        "fresh_each_run" => Ok("fresh_each_run".to_owned()),
+        other => Ok(other.to_owned()),
+    }
 }
 
 fn reject_unsupported_openhands_agent_options(

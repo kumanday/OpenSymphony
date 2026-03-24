@@ -105,7 +105,8 @@ OpenSymphony creates a stable OpenHands `conversation_id` per issue and persists
 This is stricter than the minimum Symphony requirement and intentionally optimizes continuity.
 The current issue session runner also tracks whether that conversation has already been seeded with the full workflow prompt so a reused but never-started thread can still receive the original assignment on the next attempt.
 The persisted OpenHands state directory is derived from the workflow-owned `openhands.conversation.persistence_dir_relative` path inside the issue workspace, and a missing-but-recreatable conversation that still has persisted history stays on continuation guidance instead of replaying the full workflow template.
-The persisted conversation manifest also records the owning issue reference, creation and attach timestamps, and the launch profile used to create the thread so `opensymphony debug <issue-id>` can reattach to the same session or rehydrate the same `conversation_id` with matching runtime settings.
+The workflow-owned `openhands.conversation.reuse_policy` can override that default with `fresh_each_run`, which forces a new conversation and a full prompt on every worker lifetime. Unsupported policy names now fail from the OpenHands runtime boundary instead of being silently dropped during workflow resolution.
+The persisted conversation manifest also records the owning issue reference, active reuse policy, creation and attach timestamps, and the launch profile used to create the thread so `opensymphony debug <issue-id>` can reattach to the same session or rehydrate the same `conversation_id` with matching runtime settings. Persisting the policy keeps recovery deterministic when the workflow later changes from one policy to another.
 
 ### 3.6 The UI only sees the control plane
 

@@ -121,7 +121,7 @@ Current implementation:
 - fail when explicit `openhands.websocket.enabled` is configured before the runtime readiness path can honor disabling the socket
 - resolve `openhands.websocket.ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` into the runtime readiness and reconnect budgets
 - fail when `openhands.mcp.stdio_servers` is configured before the runtime conversation-create adapter can forward `mcp_config`
-- fail when non-default `openhands.conversation.reuse_policy` values are configured before the orchestrator/runtime path can honor alternate conversation reuse behavior
+- resolve `openhands.conversation.reuse_policy` for runtime consumers instead of rejecting non-default values during workflow loading
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
 - fail when `openhands.conversation.confirmation_policy` includes options that cannot be represented in the current OpenHands request subset
 - fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range
@@ -168,7 +168,10 @@ Current implementation:
 - reconnect with backoff
 - out-of-order event insertion
 - terminal state detection
-- conversation reuse
+- conversation reuse for `per_issue`
+- `fresh_each_run` reset/new-conversation behavior
+- runtime rejection of unsupported reuse-policy values
+- persisted policy-drift resets
 - pinned-server auth success and failure paths
 - reuse after an already-active turn or `/run` conflict
 - rehydration of a missing conversation with persisted history
@@ -289,7 +292,7 @@ Expected assertions:
 ### Scenario B: conversation reuse
 
 - run the same issue a second time against the same workspace
-- verify the same `conversation_id` is reused
+- verify the default `per_issue` policy reuses the same `conversation_id`
 - verify continuation guidance is selected instead of a second full prompt
 - verify the second deterministic assistant reply appears only after the reused conversation resumes
 
