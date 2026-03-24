@@ -44,7 +44,7 @@ Because this sanitization is not injective, workspace reuse must be gated by the
 - Explicit workflow-owned `openhands.local_server.env` overrides are currently rejected until the runtime supervisor creation path forwards them into the actual launcher environment instead of still using runtime-owned defaults.
 - Explicit workflow-owned `openhands.local_server.readiness_probe_path` overrides are currently rejected until the runtime supervisor launch path copies them into the probe configuration instead of always using `/openapi.json`.
 - Explicit workflow-owned `openhands.local_server.startup_timeout_ms` overrides are currently rejected until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default.
-- Explicit workflow-owned `openhands.conversation.reuse_policy` overrides are currently rejected until the orchestrator/runtime path can honor anything other than the default per-issue conversation reuse behavior.
+- Workflow-owned `openhands.conversation.reuse_policy` values resolve into the runtime-owned issue-session path. The current runtime supports `per_issue` and `fresh_each_run`, persists the active policy in `conversation.json`, and treats any other configured value as an explicit runtime compatibility failure.
 - OpenSymphony must never run agent work directly in `workspace.root`.
 - Path checks must operate on canonicalized paths when possible.
 
@@ -85,7 +85,7 @@ Notes:
 - `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap.
 - The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
 - `conversation.json` now uses workspace-owned path and serialization helpers, but the OpenHands issue-session runner still owns when it is created, reused, or reset.
-- `conversation.json` is the issue-to-session registry: it stores the issue reference, stable `conversation_id`, timestamps, transport diagnostics, and the launch profile needed to resume or rehydrate the same OpenHands thread later through `opensymphony debug`.
+- `conversation.json` is the issue-to-session registry: it stores the issue reference, stable `conversation_id`, active reuse policy, timestamps, transport diagnostics, and the launch profile needed to resume or rehydrate the same OpenHands thread later through `opensymphony debug`.
 - `prompts/` holds the latest prompt of each kind plus JSON metadata that points back to the per-run archive.
 - `runs/attempt-####/` holds immutable per-run prompt captures for auditability without mutating repository-owned policy files.
 - The repository working tree remains otherwise untouched except by normal agent work.
@@ -242,6 +242,7 @@ Suggested fields:
 - `issue_id`
 - `identifier`
 - `conversation_id`
+- `reuse_policy`
 - `server_base_url`
 - `transport_target`
 - `http_auth_mode`
@@ -293,6 +294,7 @@ Human-readable summary for the agent and operator:
 Machine-readable runtime summary:
 
 - conversation ID
+- reuse policy
 - server base URL plus transport/auth diagnostics
 - run ID
 - attempt number
@@ -341,22 +343,27 @@ Current implementation detail:
 
 - the full workflow prompt is rendered from `WORKFLOW.md`
 - continuation guidance is a separate built-in resume prompt, not a rerender of the workflow template
-- `conversation.json` records which prompt shape last ran and whether the workflow prompt has been successfully seeded into the reused conversation
+- `conversation.json` records which prompt shape last ran, which reuse policy produced the current conversation, and whether the workflow prompt has been successfully seeded into the reused conversation
 
 ## 11. Conversation lifetime policy inside the workspace
 
-Default policy:
+Supported policies:
 
-- one conversation per issue
-- conversation persistence is stored under the issue workspace
-- reused across worker lifetimes
-- retained after worker completion so the issue remains debuggable until workspace cleanup
-- reset only on explicit error or incompatible-version policy
+- `per_issue`
+  - one conversation per issue
+  - conversation persistence is stored under the issue workspace
+  - reused across worker lifetimes
+  - retained after worker completion so the issue remains debuggable until workspace cleanup
+- `fresh_each_run`
+  - the issue workspace still keeps the latest `conversation.json` for observability
+  - every worker lifetime creates a new OpenHands conversation and resends the full workflow prompt
+  - the next run must not reuse the previous `conversation_id` even if the old manifest is still present locally
 
 Reset handling:
 
 - archive old metadata if useful
 - write a reset reason
+- reset when the persisted `reuse_policy` no longer matches the current workflow
 - resend full prompt on the next fresh run
 
 ## 12. Clean exit and continuation
