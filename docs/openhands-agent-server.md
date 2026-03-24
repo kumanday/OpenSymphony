@@ -364,7 +364,8 @@ Current workflow defaulting:
 - workflow-owned `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides now resolve into the runtime stream attach and reconnect budgets
 - `agent.llm.model` is required whenever an `llm` block is present
 - workflow-owned LLM option keys are rejected during workflow resolution until the current request subset can actually forward them
-- workflow-owned agent options such as `log_completions` and extra agent keys are rejected during workflow resolution until the current request subset can actually forward them
+- `openhands.conversation.agent.condenser` is the only workflow-owned agent extension currently forwarded by the conversation-create adapter; it defaults to disabled when omitted, and enabled condensers use the agent LLM config plus `max_size: 240` / `keep_first: 2` unless overridden
+- workflow-owned agent options such as `log_completions` and extra agent keys other than `condenser` are rejected during workflow resolution until the current request subset can actually forward them
 - workflow-owned LLM provider env overrides such as `api_key_env` and `base_url_env` are rejected during workflow resolution until the runtime conversation-create adapter can actually forward them
 - workflow-owned `openhands.mcp.stdio_servers` entries are rejected during workflow resolution until the runtime conversation-create adapter can actually send `mcp_config`
 
@@ -376,7 +377,8 @@ Implementation rule:
 Current repository implementation:
 
 - `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
-- the current request model still serializes `agent` as only `{ kind, llm }`, and `llm` itself as only `{ model, api_key }`, so workflow-owned agent extras plus arbitrary LLM option keys are rejected before runtime launch
+- the current request model serializes `agent` as `{ kind, llm, condenser? }`; when the workflow enables `agent.condenser`, the runtime forwards `agent.condenser` as `{ kind: LLMSummarizingCondenser, llm, max_size, keep_first }` and reuses the conversation agent LLM settings for the summarizer
+- `llm` still serializes as only `{ model, api_key, base_url? }`, so arbitrary LLM option keys plus agent extras other than `condenser` are rejected before runtime launch
 - the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
 - the current transport layer preserves base-path prefixes across REST endpoints and `/sockets/events/{conversation_id}`, so the same client can target reverse-proxied external servers without code changes outside config
 - the current supervisor readiness probe still owns the local launch path and always uses `/openapi.json`, so explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are still rejected before runtime launch
