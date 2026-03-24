@@ -215,6 +215,7 @@ Local MVP process graph:
 
 - `opensymphony run`
   - owns orchestrator and control plane
+  - aborts any still-tracked CLI worker tasks when the runtime worker backend is dropped during graceful shutdown
   - may spawn:
     - `bash tools/openhands-server/run-local.sh`
 - `opensymphony debug <issue-id>`

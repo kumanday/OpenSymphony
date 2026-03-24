@@ -191,6 +191,7 @@ Current implementation:
 Current repository implementation:
 
 - `crates/opensymphony-orchestrator/tests/scheduler.rs` covers continuation retry, failure backoff, per-state dispatch limits, runtime-event-fed stall detection, terminal reconciliation with cleanup, and manifest-backed workspace recovery using fake backends
+- `crates/opensymphony-cli/src/orchestrator_run.rs` covers immediate launch-failure cleanup and abort-on-drop cleanup for tracked runtime worker tasks in the production CLI adapter
 
 ## 3.5 Control plane and TUI
 
