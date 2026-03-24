@@ -22,8 +22,9 @@ use uuid::Uuid;
 
 use crate::{
     AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest, EventEnvelope,
-    KnownEvent, LlmConfig, OpenHandsClient, OpenHandsError, RuntimeEventStream,
-    RuntimeStreamConfig, SendMessageRequest, TerminalExecutionStatus, WorkspaceConfig,
+    KnownEvent, LlmConfig, McpConfig, McpStdioServerConfig, OpenHandsClient, OpenHandsError,
+    RuntimeEventStream, RuntimeStreamConfig, SendMessageRequest, TerminalExecutionStatus,
+    WorkspaceConfig,
 };
 
 pub const RUNTIME_CONTRACT_VERSION: &str = "openhands-sdk-agent-server-v1";
@@ -113,6 +114,8 @@ pub struct ConversationLaunchProfile {
     pub llm_model: String,
     pub max_iterations: u32,
     pub stuck_detection: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_stdio_servers: Vec<McpStdioServerConfig>,
 }
 
 impl ConversationLaunchProfile {
@@ -142,6 +145,14 @@ impl ConversationLaunchProfile {
             llm_model,
             max_iterations,
             stuck_detection: conversation.stuck_detection,
+            mcp_stdio_servers: workflow
+                .extensions
+                .openhands
+                .mcp
+                .stdio_servers
+                .iter()
+                .map(launch_profile_stdio_server)
+                .collect(),
         })
     }
 
@@ -171,7 +182,23 @@ impl ConversationLaunchProfile {
                     base_url: std::env::var("LLM_BASE_URL").ok(),
                 },
             },
+            mcp_config: McpConfig::from_stdio_servers(self.mcp_stdio_servers.clone()),
         }
+    }
+}
+
+fn launch_profile_stdio_server(
+    server: &opensymphony_workflow::OpenHandsStdioServerConfig,
+) -> McpStdioServerConfig {
+    let (command, args) = server
+        .command
+        .split_first()
+        .expect("workflow stdio server commands should be validated during resolution");
+    McpStdioServerConfig {
+        name: server.name.clone(),
+        command: command.clone(),
+        args: args.to_vec(),
+        env: Default::default(),
     }
 }
 

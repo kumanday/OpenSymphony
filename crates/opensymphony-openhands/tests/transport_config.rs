@@ -109,7 +109,44 @@ openhands:
 }
 
 #[test]
-fn path_prefixed_or_authenticated_loopback_transports_do_not_autostart_local_supervision() {
+fn path_prefixed_unauthenticated_loopback_transports_normalize_to_managed_local_supervision() {
+    let workflow = resolve_workflow(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000/runtime
+---
+{{ issue.identifier }}
+"#,
+        BTreeMap::from([("LINEAR_API_KEY".to_string(), "linear-token".to_string())]),
+    );
+
+    let transport = TransportConfig::from_workflow(&workflow, &BTreeMap::<String, String>::new())
+        .expect("transport should resolve");
+    let diagnostics = transport.diagnostics().expect("diagnostics should resolve");
+
+    assert_eq!(diagnostics.target_kind, TransportTargetKind::Loopback);
+    assert_eq!(diagnostics.http_auth_kind, TransportAuthKind::None);
+    assert_eq!(diagnostics.websocket_auth_kind, TransportAuthKind::None);
+    assert!(diagnostics.managed_local_server_candidate);
+    assert_eq!(
+        transport
+            .managed_local_server_base_url()
+            .expect("managed local server base URL should resolve")
+            .as_deref(),
+        Some("http://127.0.0.1:8000")
+    );
+}
+
+#[test]
+fn authenticated_loopback_transports_stay_outside_managed_local_supervision() {
     let workflow = resolve_workflow(
         r#"---
 tracker:
@@ -151,6 +188,12 @@ openhands:
     assert_eq!(diagnostics.http_auth_kind, TransportAuthKind::Header);
     assert_eq!(diagnostics.websocket_auth_kind, TransportAuthKind::Header);
     assert!(!diagnostics.managed_local_server_candidate);
+    assert_eq!(
+        transport
+            .managed_local_server_base_url()
+            .expect("managed local server base URL should resolve"),
+        None
+    );
 }
 
 #[test]

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
@@ -33,6 +35,32 @@ pub struct AgentConfig {
     pub llm: LlmConfig,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stdio_servers: Vec<McpStdioServerConfig>,
+}
+
+impl McpConfig {
+    pub fn from_stdio_servers(stdio_servers: Vec<McpStdioServerConfig>) -> Option<Self> {
+        if stdio_servers.is_empty() {
+            None
+        } else {
+            Some(Self { stdio_servers })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct McpStdioServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationCreateRequest {
     pub conversation_id: Uuid,
@@ -42,6 +70,8 @@ pub struct ConversationCreateRequest {
     pub stuck_detection: bool,
     pub confirmation_policy: ConfirmationPolicy,
     pub agent: AgentConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_config: Option<McpConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +83,7 @@ pub struct DoctorProbeConfig {
     pub model: Option<String>,
     pub api_key: Option<String>,
     pub base_url: Option<String>,
+    pub mcp_config: Option<McpConfig>,
 }
 
 impl Default for DoctorProbeConfig {
@@ -65,6 +96,7 @@ impl Default for DoctorProbeConfig {
             model: None,
             api_key: None,
             base_url: None,
+            mcp_config: None,
         }
     }
 }
@@ -113,6 +145,7 @@ impl ConversationCreateRequest {
                     base_url: config.base_url,
                 },
             },
+            mcp_config: config.mcp_config,
         }
     }
 }
@@ -385,6 +418,7 @@ mod tests {
                     base_url: None,
                 },
             },
+            mcp_config: None,
         };
 
         let value = serde_json::to_value(&request).expect("request should serialize");
@@ -409,6 +443,75 @@ mod tests {
                         "model": "fake-model",
                         "api_key": "fake-key",
                     },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn conversation_create_request_serializes_mcp_stdio_subset() {
+        let request = ConversationCreateRequest {
+            conversation_id: Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+                .expect("uuid should parse"),
+            workspace: WorkspaceConfig {
+                working_dir: "/tmp/workspace".to_string(),
+                kind: "LocalWorkspace".to_string(),
+            },
+            persistence_dir: "/tmp/workspace/.opensymphony/openhands".to_string(),
+            max_iterations: 7,
+            stuck_detection: true,
+            confirmation_policy: ConfirmationPolicy {
+                kind: "NeverConfirm".to_string(),
+            },
+            agent: AgentConfig {
+                kind: "Agent".to_string(),
+                llm: LlmConfig {
+                    model: "fake-model".to_string(),
+                    api_key: Some("fake-key".to_string()),
+                    base_url: None,
+                },
+            },
+            mcp_config: Some(McpConfig {
+                stdio_servers: vec![McpStdioServerConfig {
+                    name: "linear".to_string(),
+                    command: "opensymphony".to_string(),
+                    args: vec!["linear-mcp".to_string()],
+                    env: BTreeMap::new(),
+                }],
+            }),
+        };
+
+        let value = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "conversation_id": "11111111-2222-3333-4444-555555555555",
+                "workspace": {
+                    "working_dir": "/tmp/workspace",
+                    "kind": "LocalWorkspace",
+                },
+                "persistence_dir": "/tmp/workspace/.opensymphony/openhands",
+                "max_iterations": 7,
+                "stuck_detection": true,
+                "confirmation_policy": {
+                    "kind": "NeverConfirm",
+                },
+                "agent": {
+                    "kind": "Agent",
+                    "llm": {
+                        "model": "fake-model",
+                        "api_key": "fake-key",
+                    },
+                },
+                "mcp_config": {
+                    "stdio_servers": [
+                        {
+                            "name": "linear",
+                            "command": "opensymphony",
+                            "args": ["linear-mcp"],
+                        }
+                    ],
                 },
             })
         );
