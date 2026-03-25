@@ -974,6 +974,16 @@ impl OpenHandsClient {
         decode_json(response, "fetch conversation").await
     }
 
+    pub async fn delete_conversation(&self, conversation_id: Uuid) -> Result<(), OpenHandsError> {
+        let response = send(
+            self.delete_request(&format!("/api/conversations/{conversation_id}"))?,
+            "delete conversation",
+        )
+        .await?;
+        read_success_body(response, "delete conversation").await?;
+        Ok(())
+    }
+
     pub async fn send_message(
         &self,
         conversation_id: Uuid,
@@ -1128,6 +1138,11 @@ impl OpenHandsClient {
     fn post_request(&self, suffix: &str) -> Result<RequestBuilder, OpenHandsError> {
         let url = self.transport.endpoint(suffix)?;
         self.transport.apply_http_auth(self.http.post(url))
+    }
+
+    fn delete_request(&self, suffix: &str) -> Result<RequestBuilder, OpenHandsError> {
+        let url = self.transport.endpoint(suffix)?;
+        self.transport.apply_http_auth(self.http.delete(url))
     }
 
     fn json_request<T>(
