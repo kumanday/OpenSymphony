@@ -164,6 +164,7 @@ If the daemon is using an external server, never attempt to terminate that serve
 
 Current implementation detail:
 
+- the CLI runtime worker backend aborts every still-tracked worker task from its `Drop` path, so `opensymphony run` does not rely on process teardown alone to stop in-flight issue workers
 - child ownership is tracked by the Rust supervisor instance
 - `stop()` only kills a `Child` handle created by `start()`
 - external mode may probe health, but stop remains a no-op
