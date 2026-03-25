@@ -221,7 +221,6 @@ Suggested persisted fields:
 - `last_event_kind`
 - `last_event_at`
 - `last_event_summary`
-- `llm_config_fingerprint`
 
 `launch_profile` should capture the OpenHands conversation settings that need to survive restarts and interactive debug reuse, including:
 
@@ -229,8 +228,6 @@ Suggested persisted fields:
 - `confirmation_policy_kind`
 - `agent_kind`
 - `llm_model`
-- `llm_api_key_env`
-- `llm_base_url_env`
 - `agent_tools`
 - `agent_include_default_tools`
 - `max_iterations`
@@ -291,9 +288,6 @@ Current implementation detail:
 - if `GET /api/conversations/{id}` or the initial attach fails for a reused conversation, the runner retries `POST /api/conversations` with the same stable `conversation_id`; when that re-created thread still exposes persisted history, the runner keeps continuation guidance instead of downgrading to a fresh full prompt
 - the runner persists the active `reuse_policy` alongside the launch profile and treats policy drift as manifest incompatibility so later recovery or interactive debug sessions do not silently reuse a thread created under different semantics
 - the runner persists the conversation launch profile on first create and backfills older manifests on reuse so later rehydration and interactive debug sessions can recreate the same thread settings, including agent tool selection, without guessing from mutable runtime state
-- the runner also persists a hashed LLM configuration fingerprint `{ model, api_key_hash, base_url_hash }` in `conversation.json`; it compares that fingerprint against the current workflow-resolved create request before attach and treats drift as a hard recreation signal
-- hard recreation for LLM config drift uses `DELETE /api/conversations/{id}` followed by `POST /api/conversations` with the same stable `conversation_id`, because same-ID `POST` alone preserves history but does not update the stored provider config
-- because that delete-plus-recreate path loses OpenHands event history, the runner seeds the recreated conversation as a fresh thread and appends Linear workpad recovery context to the first full prompt instead of sending continuation-only guidance
 
 ## 6.4 Interactive debug resumption
 
@@ -408,7 +402,6 @@ Current repository implementation:
 - the current orchestrator/runtime path consumes workflow-owned `reuse_policy` values: `per_issue` reuses the persisted manifest, `fresh_each_run` always creates a new conversation, and policy drift or unsupported values are surfaced explicitly instead of being silently ignored
 - the current transport layer preserves base-path prefixes across REST endpoints and `/sockets/events/{conversation_id}` for external or authenticated targets, while managed unauthenticated loopback targets normalize any configured path prefix back to the origin before supervisor startup and client reuse
 - the current session launch profile now persists workflow-owned `agent.llm.api_key_env` and `agent.llm.base_url_env` names so fresh and rehydrated conversation-create requests resolve the same provider env contract
-- the current runtime now exposes `DELETE /api/conversations/{conversation_id}` through `OpenHandsClient::delete_conversation()` and uses it only for LLM-config-drift recreation, not for normal attach recovery
 - the current supervisor readiness probe still owns the local launch path and always uses `/openapi.json`, so explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are still rejected before runtime launch
 - the current supervisor launch path still uses runtime-owned launcher environment variables (`OPENHANDS_SERVER_PORT` and `RUNTIME=process`), so explicit workflow-owned `local_server.env` overrides are rejected before runtime launch
 - the current supervisor launch path now threads workflow-owned `local_server.command` into the actual subprocess launch only for managed local targets; otherwise the runtime rejects that override instead of silently discarding it

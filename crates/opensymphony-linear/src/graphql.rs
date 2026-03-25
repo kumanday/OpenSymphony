@@ -148,26 +148,6 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [String!], $first: Int!
 }
 "#;
 
-pub(super) const ISSUE_COMMENTS_QUERY: &str = r#"
-query IssueCommentsPage($issueId: String!, $first: Int!, $after: String) {
-  issue(id: $issueId) {
-    id
-    comments(first: $first, after: $after) {
-      nodes {
-        id
-        body
-        updatedAt
-        resolvedAt
-      }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-    }
-  }
-}
-"#;
-
 #[derive(Debug, Deserialize)]
 pub(super) struct GraphqlEnvelope<T> {
     pub data: Option<T>,
@@ -222,14 +202,6 @@ pub(super) struct IssueLabelsVariables {
     pub after: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct IssueCommentsVariables {
-    pub issue_id: String,
-    pub first: usize,
-    pub after: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 pub(super) struct IssuesByStateData {
     pub issues: IssuesConnection<LinearIssueNode>,
@@ -248,11 +220,6 @@ pub(super) struct IssueInverseRelationsData {
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueLabelsData {
     pub issue: Option<LinearIssueLabelsNode>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(super) struct IssueCommentsData {
-    pub issue: Option<LinearIssueCommentsNode>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,13 +273,6 @@ pub(super) struct LinearIssueLabelsNode {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct LinearIssueCommentsNode {
-    pub id: String,
-    pub comments: LinearCommentConnection,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct LinearIssueStateNode {
     pub id: String,
     pub identifier: String,
@@ -360,23 +320,6 @@ pub(super) struct LinearLabelConnection {
 #[derive(Debug, Deserialize)]
 pub(super) struct LinearLabelNode {
     pub name: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct LinearCommentConnection {
-    pub nodes: Vec<LinearCommentNode>,
-    #[serde(default, rename = "pageInfo")]
-    pub page_info: PageInfo,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct LinearCommentNode {
-    pub id: String,
-    pub body: String,
-    pub updated_at: DateTime<Utc>,
-    pub resolved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]

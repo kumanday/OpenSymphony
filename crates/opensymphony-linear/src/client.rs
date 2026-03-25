@@ -12,12 +12,11 @@ use tracing::debug;
 
 use crate::error::{GraphqlError, LinearError};
 use crate::graphql::{
-    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_COMMENTS_QUERY, ISSUE_INVERSE_RELATIONS_QUERY,
-    ISSUE_LABELS_QUERY, ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueCommentsData,
-    IssueCommentsVariables, IssueInverseRelationsData, IssueInverseRelationsVariables,
-    IssueLabelsData, IssueLabelsVariables, IssueStatesByIdsData, IssueStatesByIdsVariables,
-    IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
-    LinearRelationConnection,
+    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
+    ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueInverseRelationsData,
+    IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueStatesByIdsData,
+    IssueStatesByIdsVariables, IssuesByStateData, IssuesByStateVariables, LinearIssueNode,
+    LinearLabelConnection, LinearRelationConnection,
 };
 use crate::normalize::{normalize_issue, normalize_issue_state};
 
@@ -75,13 +74,6 @@ impl LinearConfig {
 pub struct LinearClient {
     http: Client,
     config: LinearConfig,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkpadComment {
-    pub id: String,
-    pub body: String,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl LinearClient {
@@ -227,62 +219,6 @@ impl LinearClient {
                     "Linear issue-state page indicated a next page without an end cursor"
                         .to_string(),
                 )
-            })?);
-        }
-    }
-
-    pub async fn fetch_workpad_comment(
-        &self,
-        issue_id: &str,
-    ) -> Result<Option<WorkpadComment>, LinearError> {
-        let issue_id = normalize_required_string("issue_id", issue_id)?;
-        let mut after = None;
-        let mut latest = None;
-
-        loop {
-            let variables = IssueCommentsVariables {
-                issue_id: issue_id.clone(),
-                first: self.config.page_size,
-                after: after.clone(),
-            };
-            let response: IssueCommentsData = self
-                .execute_graphql(ISSUE_COMMENTS_QUERY, json!(variables))
-                .await?;
-            let issue = response.issue.ok_or_else(|| LinearError::MissingIssueIds {
-                issue_ids: vec![issue_id.clone()],
-            })?;
-            if issue.id != issue_id {
-                return Err(LinearError::InvalidResponse(format!(
-                    "Linear comments page returned mismatched issue ID {} for {}",
-                    issue.id, issue_id
-                )));
-            }
-
-            for comment in issue.comments.nodes {
-                if comment.resolved_at.is_some() || !contains_workpad_marker(&comment.body) {
-                    continue;
-                }
-
-                let candidate = WorkpadComment {
-                    id: comment.id,
-                    body: comment.body,
-                    updated_at: comment.updated_at,
-                };
-                if latest.as_ref().is_none_or(|existing: &WorkpadComment| {
-                    candidate.updated_at > existing.updated_at
-                }) {
-                    latest = Some(candidate);
-                }
-            }
-
-            if !issue.comments.page_info.has_next_page {
-                return Ok(latest);
-            }
-
-            after = Some(issue.comments.page_info.end_cursor.ok_or_else(|| {
-                LinearError::InvalidResponse(format!(
-                    "Linear comments page for issue {issue_id} indicated a next page without an end cursor"
-                ))
             })?);
         }
     }
@@ -599,11 +535,6 @@ fn normalize_required_string(field_name: &str, value: &str) -> Result<String, Li
     } else {
         Ok(normalized.to_string())
     }
-}
-
-fn contains_workpad_marker(body: &str) -> bool {
-    body.lines()
-        .any(|line| line.trim_start().starts_with("## Codex Workpad"))
 }
 
 fn ensure_complete_issue_states(

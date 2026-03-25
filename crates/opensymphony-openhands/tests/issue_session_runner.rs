@@ -1,7 +1,5 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use opensymphony_domain::{
     IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RetryAttempt,
     RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
@@ -9,9 +7,8 @@ use opensymphony_domain::{
 use opensymphony_openhands::{
     ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
     IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig,
-    LLM_SUMMARIZING_CONDENSER_KIND, LlmConfigFingerprint, McpConfig, McpStdioServerConfig,
-    OpenHandsClient, TransportConfig, WorkpadComment as SessionWorkpadComment,
-    WorkpadCommentSource,
+    LLM_SUMMARIZING_CONDENSER_KIND, McpConfig, McpStdioServerConfig, OpenHandsClient,
+    TransportConfig,
 };
 use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
@@ -20,21 +17,6 @@ use opensymphony_workspace::{
     WorkspaceManagerConfig,
 };
 use tempfile::TempDir;
-
-#[derive(Clone)]
-struct StaticWorkpadCommentSource {
-    comment: Option<SessionWorkpadComment>,
-}
-
-#[async_trait]
-impl WorkpadCommentSource for StaticWorkpadCommentSource {
-    async fn fetch_workpad_comment(
-        &self,
-        _issue_id: &str,
-    ) -> Result<Option<SessionWorkpadComment>, String> {
-        Ok(self.comment.clone())
-    }
-}
 
 fn sample_issue(identifier: &str) -> NormalizedIssue {
     NormalizedIssue {
@@ -410,16 +392,6 @@ async fn read_create_conversation_request(
         .expect("create request should be readable")
         .expect("create request should exist");
     serde_json::from_str(&raw).expect("create request should decode")
-}
-
-fn workpad_comment(body: &str) -> SessionWorkpadComment {
-    SessionWorkpadComment {
-        id: "comment-workpad".to_string(),
-        body: body.to_string(),
-        updated_at: DateTime::parse_from_rfc3339("2026-03-25T22:10:00Z")
-            .expect("timestamp should parse")
-            .with_timezone(&Utc),
-    }
 }
 
 #[tokio::test]
@@ -1669,180 +1641,6 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
         launch_profile.llm_base_url_env.as_deref(),
         Some("WORKFLOW_OPENHANDS_BASE_URL")
     );
-    assert_eq!(
-        manifest.llm_config_fingerprint,
-        Some(LlmConfigFingerprint::from_llm_config(
-            &create_request.agent.llm
-        ))
-    );
-    assert_ne!(
-        manifest
-            .llm_config_fingerprint
-            .as_ref()
-            .and_then(|fingerprint| fingerprint.api_key_hash.as_deref()),
-        Some("provider-secret")
-    );
-}
-
-#[tokio::test]
-async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes_and_recovers_workpad_context()
- {
-    let server = FakeOpenHandsServer::start()
-        .await
-        .expect("fake server should start");
-    let temp_dir = TempDir::new().expect("temp dir should exist");
-    let workspace_root = temp_dir.path().join("workspaces");
-    let manager = workspace_manager(&workspace_root, HookConfig::default());
-    let workflow = workflow_with_llm_provider_overrides(
-        &workspace_root,
-        server.base_url(),
-        Some("WORKFLOW_OPENHANDS_API_KEY"),
-        None,
-    );
-    let issue = sample_issue("COE-294-provider-rotation");
-    let ensured = manager
-        .ensure(&issue_descriptor(&issue))
-        .await
-        .expect("workspace should exist");
-    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
-    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
-
-    let mut first_run_manifest = manager
-        .start_run(&ensured.handle, &RunDescriptor::new("provider-run-1", 1))
-        .await
-        .expect("first run manifest should prepare");
-    let first_run = run_attempt(
-        &issue,
-        ensured.handle.workspace_path(),
-        "worker-provider-1",
-        None,
-        max_turns,
-    );
-    let first_result = IssueSessionRunner::with_environment(
-        client.clone(),
-        runner_config(&workflow),
-        BTreeMap::from([(
-            "WORKFLOW_OPENHANDS_API_KEY".to_string(),
-            "old-secret".to_string(),
-        )]),
-    )
-    .run(
-        &manager,
-        &ensured.handle,
-        &mut first_run_manifest,
-        &issue,
-        &first_run,
-        &workflow,
-    )
-    .await
-    .expect("initial provider-backed session run should succeed");
-    let conversation_id = uuid::Uuid::parse_str(
-        first_result
-            .conversation
-            .as_ref()
-            .expect("conversation metadata should exist")
-            .conversation_id
-            .as_str(),
-    )
-    .expect("conversation ID should parse");
-
-    let mut second_run_manifest = manager
-        .start_run(&ensured.handle, &RunDescriptor::new("provider-run-2", 2))
-        .await
-        .expect("second run manifest should prepare");
-    let second_run = run_attempt(
-        &issue,
-        ensured.handle.workspace_path(),
-        "worker-provider-2",
-        Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
-        max_turns,
-    );
-    let second_result = IssueSessionRunner::with_environment(
-        client.clone(),
-        runner_config(&workflow),
-        BTreeMap::from([(
-            "WORKFLOW_OPENHANDS_API_KEY".to_string(),
-            "new-secret".to_string(),
-        )]),
-    )
-    .with_workpad_comment_source(Arc::new(StaticWorkpadCommentSource {
-        comment: Some(workpad_comment(
-            "## Codex Workpad\n\n- Investigated provider rotation\n- Workspace state is already prepared",
-        )),
-    }))
-    .run(
-        &manager,
-        &ensured.handle,
-        &mut second_run_manifest,
-        &issue,
-        &second_run,
-        &workflow,
-    )
-    .await
-    .expect("config-drift session recreation should succeed");
-
-    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Full);
-    assert_eq!(
-        first_result
-            .conversation
-            .as_ref()
-            .expect("first conversation metadata should exist")
-            .conversation_id,
-        second_result
-            .conversation
-            .as_ref()
-            .expect("second conversation metadata should exist")
-            .conversation_id
-    );
-    assert!(
-        second_result
-            .conversation
-            .as_ref()
-            .expect("second conversation metadata should exist")
-            .fresh_conversation
-    );
-
-    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
-    assert_eq!(create_request.conversation_id, conversation_id);
-    assert_eq!(
-        create_request.agent.llm.api_key.as_deref(),
-        Some("new-secret")
-    );
-
-    let recreated_conversation = client
-        .get_conversation(conversation_id)
-        .await
-        .expect("recreated conversation should be fetchable");
-    assert_eq!(
-        recreated_conversation.agent.llm.api_key.as_deref(),
-        Some("new-secret")
-    );
-
-    let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
-    assert_eq!(
-        manifest.llm_config_fingerprint,
-        Some(LlmConfigFingerprint::from_llm_config(
-            &create_request.agent.llm
-        ))
-    );
-    assert!(manifest.workflow_prompt_seeded);
-    assert_eq!(
-        manifest.last_prompt_kind,
-        Some(IssueSessionPromptKind::Full)
-    );
-
-    let messages = latest_message_texts(
-        client
-            .search_all_events(conversation_id)
-            .await
-            .expect("events should be searchable after config-drift recreation")
-            .items(),
-    );
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("Issue: COE-294-provider-rotation"));
-    assert!(messages[0].contains("## Runtime Rehydration"));
-    assert!(messages[0].contains("## Previous Progress (from Linear Codex Workpad)"));
-    assert!(messages[0].contains("Investigated provider rotation"));
 }
 
 #[tokio::test]
