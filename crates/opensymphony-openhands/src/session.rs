@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, NormalizedIssue, RunAttempt,
@@ -18,9 +19,10 @@ use opensymphony_workspace::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
-use tracing::debug;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -33,6 +35,8 @@ use crate::{
 pub const RUNTIME_CONTRACT_VERSION: &str = "openhands-sdk-agent-server-v1";
 const DEFAULT_REUSE_POLICY: &str = "per_issue";
 const FRESH_EACH_RUN_REUSE_POLICY: &str = "fresh_each_run";
+const LLM_CONFIG_REHYDRATE_RESET_REASON: &str =
+    "recreated conversation after LLM configuration drift";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueSessionReusePolicy {
@@ -65,6 +69,19 @@ pub struct IssueSessionRunnerConfig {
     pub runtime_stream: RuntimeStreamConfig,
     pub terminal_wait_timeout: Duration,
     pub finished_drain_timeout: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkpadComment {
+    pub id: String,
+    pub body: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[async_trait]
+pub trait WorkpadCommentSource: Send + Sync {
+    async fn fetch_workpad_comment(&self, issue_id: &str)
+    -> Result<Option<WorkpadComment>, String>;
 }
 
 pub trait IssueSessionObserver {
@@ -330,6 +347,25 @@ fn tool_config_from_workflow(tool: &OpenHandsConversationToolConfig) -> ToolConf
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmConfigFingerprint {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url_hash: Option<String>,
+    pub model: String,
+}
+
+impl LlmConfigFingerprint {
+    pub fn from_llm_config(llm: &LlmConfig) -> Self {
+        Self {
+            api_key_hash: hash_llm_config_value(llm.api_key.as_deref()),
+            base_url_hash: hash_llm_config_value(llm.base_url.as_deref()),
+            model: llm.model.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IssueConversationManifest {
     pub issue_id: IssueId,
     pub identifier: IssueIdentifier,
@@ -351,6 +387,8 @@ pub struct IssueConversationManifest {
     pub last_attached_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_profile: Option<ConversationLaunchProfile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_config_fingerprint: Option<LlmConfigFingerprint>,
     pub fresh_conversation: bool,
     pub workflow_prompt_seeded: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -402,6 +440,7 @@ impl IssueConversationManifest {
             updated_at: attached_at,
             last_attached_at: attached_at,
             launch_profile: Some(launch_profile),
+            llm_config_fingerprint: None,
             fresh_conversation: true,
             workflow_prompt_seeded: false,
             reset_reason,
@@ -600,6 +639,7 @@ pub struct IssueSessionRunner {
     client: OpenHandsClient,
     config: IssueSessionRunnerConfig,
     environment: Arc<dyn Environment + Send + Sync>,
+    workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
 }
 
 impl IssueSessionRunner {
@@ -619,7 +659,16 @@ impl IssueSessionRunner {
             client,
             config,
             environment: Arc::new(environment),
+            workpad_comment_source: None,
         }
+    }
+
+    pub fn with_workpad_comment_source(
+        mut self,
+        workpad_comment_source: Arc<dyn WorkpadCommentSource>,
+    ) -> Self {
+        self.workpad_comment_source = Some(workpad_comment_source);
+        self
     }
 
     pub fn client(&self) -> &OpenHandsClient {
@@ -869,7 +918,8 @@ impl IssueSessionRunner {
                 .apply_runtime_snapshot(&active_session.stream);
         }
 
-        let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind) {
+        let mut prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind)
+        {
             Ok(prompt) => prompt,
             Err(detail) => {
                 let summary = format!(
@@ -890,6 +940,13 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
+        if let Some(rehydration_context) = self
+            .build_rehydration_context(issue, &active_session.manifest, active_session.prompt_kind)
+            .await
+        {
+            prompt.push_str("\n\n");
+            prompt.push_str(&rehydration_context);
+        }
 
         let prompt_path = active_session.prompt_kind.artifact_path(workspace);
         workspace_manager
@@ -1167,6 +1224,97 @@ impl IssueSessionRunner {
             Ok(conversation_id) => conversation_id,
             Err(error) => return Ok(ReuseSession::Reset(error)),
         };
+        let current_launch_profile = match ConversationLaunchProfile::from_workflow(workflow) {
+            Ok(launch_profile) => launch_profile,
+            Err(error) => {
+                return Ok(ReuseSession::Reset(format!(
+                    "failed to build current conversation launch profile while checking LLM config drift: {error}"
+                )));
+            }
+        };
+        let current_request = match current_launch_profile.to_create_request(
+            self.environment.as_ref(),
+            workspace.workspace_path(),
+            &configured_persistence_dir(workflow, workspace),
+            Some(conversation_id),
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                return Ok(ReuseSession::Reset(format!(
+                    "failed to build current OpenHands conversation request while checking LLM config drift: {error}"
+                )));
+            }
+        };
+        let current_fingerprint = LlmConfigFingerprint::from_llm_config(&current_request.agent.llm);
+
+        let known_fingerprint = match self.client.get_conversation(conversation_id).await {
+            Ok(conversation) => {
+                Some(manifest.llm_config_fingerprint.clone().unwrap_or_else(|| {
+                    LlmConfigFingerprint::from_llm_config(&conversation.agent.llm)
+                }))
+            }
+            Err(error) if should_rehydrate_after_attach_failure(&error) => {
+                return match self
+                    .rehydrate_existing_session(
+                        workspace_manager,
+                        workspace,
+                        issue,
+                        workflow,
+                        manifest,
+                        conversation_id,
+                    )
+                    .await?
+                {
+                    Some(session) => Ok(ReuseSession::Active(Box::new(session))),
+                    None => Ok(ReuseSession::Reset(format!(
+                        "failed to attach existing conversation {}: {error}",
+                        manifest_conversation_id
+                    ))),
+                };
+            }
+            Err(error) => {
+                debug!(
+                    %error,
+                    %conversation_id,
+                    issue_id = %issue.id,
+                    "unable to fetch conversation before checking LLM config drift; falling back to the persisted manifest"
+                );
+                manifest.llm_config_fingerprint.clone()
+            }
+        };
+        if let Some(applied_fingerprint) = known_fingerprint.clone() {
+            if applied_fingerprint != current_fingerprint {
+                warn!(
+                    issue_id = %issue.id,
+                    conversation_id = %conversation_id,
+                    stored_model = %applied_fingerprint.model,
+                    current_model = %current_fingerprint.model,
+                    "LLM config drift detected; recreating the conversation with the current provider settings"
+                );
+                return match self
+                    .rehydrate_session_for_llm_config_change(
+                        workspace_manager,
+                        workspace,
+                        issue,
+                        workflow,
+                        manifest,
+                        conversation_id,
+                        current_launch_profile,
+                        current_request,
+                        current_fingerprint,
+                    )
+                    .await?
+                {
+                    Some(session) => Ok(ReuseSession::Active(Box::new(session))),
+                    None => Ok(ReuseSession::Reset(format!(
+                        "failed to recreate conversation {} after LLM configuration drift was detected",
+                        manifest_conversation_id
+                    ))),
+                };
+            }
+
+            manifest.llm_config_fingerprint = Some(applied_fingerprint);
+        }
         let stream = match self
             .client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
@@ -1198,8 +1346,11 @@ impl IssueSessionRunner {
         manifest.fresh_conversation = false;
         manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
         if manifest.launch_profile.is_none() {
-            manifest.launch_profile = ConversationLaunchProfile::from_workflow(workflow).ok();
+            manifest.launch_profile = Some(current_launch_profile);
         }
+        manifest.llm_config_fingerprint.get_or_insert_with(|| {
+            LlmConfigFingerprint::from_llm_config(&stream.conversation().agent.llm)
+        });
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
@@ -1372,6 +1523,8 @@ impl IssueSessionRunner {
             reset_reason,
             launch_profile,
         );
+        manifest.llm_config_fingerprint =
+            Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
@@ -1392,6 +1545,125 @@ impl IssueSessionRunner {
             .await?;
 
         Ok(Step::Continue(ActiveSession {
+            prompt_kind: manifest.prompt_kind(),
+            stream,
+            manifest,
+            prompt_path: None,
+        }))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn rehydrate_session_for_llm_config_change(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
+        mut manifest: IssueConversationManifest,
+        conversation_id: Uuid,
+        launch_profile: ConversationLaunchProfile,
+        request: ConversationCreateRequest,
+        current_fingerprint: LlmConfigFingerprint,
+    ) -> Result<Option<ActiveSession>, IssueSessionError> {
+        match self.client.delete_conversation(conversation_id).await {
+            Ok(()) => {}
+            Err(OpenHandsError::HttpStatus {
+                status_code: 404, ..
+            }) => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    %conversation_id,
+                    issue_id = %issue.id,
+                    "failed to delete the existing conversation before recreating it with updated LLM config"
+                );
+                return Ok(None);
+            }
+        }
+
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &create_conversation_request_path(workspace),
+                &request,
+            )
+            .await?;
+
+        let conversation = match self.client.create_conversation(&request).await {
+            Ok(conversation) => conversation,
+            Err(error) => {
+                warn!(
+                    %error,
+                    %conversation_id,
+                    issue_id = %issue.id,
+                    "failed to recreate the conversation after deleting it for LLM config drift"
+                );
+                return Ok(None);
+            }
+        };
+        if conversation.conversation_id != conversation_id {
+            warn!(
+                %conversation_id,
+                recreated_conversation_id = %conversation.conversation_id,
+                issue_id = %issue.id,
+                "recreated conversation id changed after LLM config drift reset"
+            );
+            return Ok(None);
+        }
+
+        let stream = match self
+            .client
+            .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
+            .await
+        {
+            Ok(stream) => stream,
+            Err(error) => {
+                warn!(
+                    %error,
+                    %conversation_id,
+                    issue_id = %issue.id,
+                    "failed to attach the recreated conversation after LLM config drift reset"
+                );
+                return Ok(None);
+            }
+        };
+
+        let attached_at = Utc::now();
+        manifest.issue_id = issue.id.clone();
+        manifest.identifier = issue.identifier.clone();
+        manifest.fresh_conversation = true;
+        manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
+        manifest.workflow_prompt_seeded = false;
+        manifest.persistence_dir = configured_persistence_dir(workflow, workspace);
+        manifest.last_attached_at = attached_at;
+        manifest.updated_at = attached_at;
+        manifest.launch_profile = Some(launch_profile);
+        manifest.llm_config_fingerprint = Some(current_fingerprint);
+        manifest.reset_reason = Some(LLM_CONFIG_REHYDRATE_RESET_REASON.to_string());
+        manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
+        manifest.last_prompt_kind = None;
+        manifest.last_prompt_at = None;
+        manifest.last_prompt_path = None;
+        let transport_diagnostics = self.client.transport_diagnostics().ok();
+        manifest
+            .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
+        manifest.apply_runtime_snapshot(&stream);
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &manifest,
+            )
+            .await?;
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &last_conversation_state_path(workspace),
+                &conversation_snapshot(&stream),
+            )
+            .await?;
+
+        Ok(Some(ActiveSession {
             prompt_kind: manifest.prompt_kind(),
             stream,
             manifest,
@@ -1492,13 +1764,18 @@ impl IssueSessionRunner {
         manifest.fresh_conversation = false;
         manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
         manifest.workflow_prompt_seeded = true;
-        manifest.server_base_url = Some(self.client.base_url().to_string());
         manifest.persistence_dir = configured_persistence_dir(workflow, workspace);
         manifest.last_attached_at = attached_at;
         manifest.updated_at = attached_at;
         manifest.launch_profile.get_or_insert(launch_profile);
+        manifest
+            .llm_config_fingerprint
+            .get_or_insert_with(|| LlmConfigFingerprint::from_llm_config(&request.agent.llm));
         manifest.reset_reason = None;
         manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
+        let transport_diagnostics = self.client.transport_diagnostics().ok();
+        manifest
+            .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
         manifest.apply_runtime_snapshot(&stream);
         workspace_manager
             .write_json_artifact(
@@ -1536,6 +1813,39 @@ impl IssueSessionRunner {
                 .map_err(|error| error.to_string()),
             IssueSessionPromptKind::Continuation => Ok(build_continuation_guidance(issue, run)),
         }
+    }
+
+    async fn build_rehydration_context(
+        &self,
+        issue: &NormalizedIssue,
+        manifest: &IssueConversationManifest,
+        prompt_kind: IssueSessionPromptKind,
+    ) -> Option<String> {
+        if prompt_kind != IssueSessionPromptKind::Full
+            || manifest.reset_reason.as_deref() != Some(LLM_CONFIG_REHYDRATE_RESET_REASON)
+        {
+            return None;
+        }
+
+        let workpad = match &self.workpad_comment_source {
+            Some(source) => match source.fetch_workpad_comment(issue.id.as_str()).await {
+                Ok(Some(comment)) => RehydrationWorkpadState::Found(comment),
+                Ok(None) => RehydrationWorkpadState::Missing,
+                Err(error) => {
+                    warn!(
+                        issue_id = %issue.id,
+                        %error,
+                        "failed to load the active Linear Codex workpad during conversation recreation"
+                    );
+                    RehydrationWorkpadState::Unavailable(error)
+                }
+            },
+            None => RehydrationWorkpadState::Unavailable(
+                "no workpad comment source configured".to_string(),
+            ),
+        };
+
+        Some(render_rehydration_context(issue, workpad))
     }
 
     async fn wait_for_active_turn_to_finish<O>(
@@ -1921,6 +2231,33 @@ fn stream_has_persisted_history(stream: &RuntimeEventStream) -> bool {
     stream.event_cache().items().len() > 1
 }
 
+enum RehydrationWorkpadState {
+    Found(WorkpadComment),
+    Missing,
+    Unavailable(String),
+}
+
+fn render_rehydration_context(issue: &NormalizedIssue, workpad: RehydrationWorkpadState) -> String {
+    let base = format!(
+        "## Runtime Rehydration\nThis fresh OpenHands conversation was recreated for issue {}: {} because the configured LLM provider settings changed.\nThe workspace state is preserved, but the previous OpenHands conversation history was reset.\n",
+        issue.identifier, issue.title,
+    );
+
+    match workpad {
+        RehydrationWorkpadState::Found(comment) => format!(
+            "{base}\n## Previous Progress (from Linear Codex Workpad)\nLast updated: {}\n\n{}\n\nResume from the preserved workspace state after incorporating this progress.\n",
+            comment.updated_at.to_rfc3339(),
+            comment.body
+        ),
+        RehydrationWorkpadState::Missing => format!(
+            "{base}\nNo active `## Codex Workpad` comment was found in Linear. Inspect the preserved workspace state directly and create a fresh workpad update once context has been re-established.\n"
+        ),
+        RehydrationWorkpadState::Unavailable(error) => format!(
+            "{base}\nThe Linear Codex workpad could not be loaded for this run ({error}). Inspect the preserved workspace state directly before continuing.\n"
+        ),
+    }
+}
+
 fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) -> String {
     let attempt = run
         .attempt
@@ -2112,6 +2449,14 @@ fn parse_uuid(value: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(|error| format!("invalid UUID `{value}`: {error}"))
 }
 
+fn hash_llm_config_value(value: Option<&str>) -> Option<String> {
+    value.map(|value| {
+        let digest = Sha256::digest(value.as_bytes());
+        let hex = format!("{digest:x}");
+        hex[..16].to_string()
+    })
+}
+
 fn create_conversation_request_path(workspace: &WorkspaceHandle) -> PathBuf {
     workspace
         .openhands_dir()
@@ -2132,6 +2477,16 @@ fn finished_stream_error_is_tolerable(error: &OpenHandsError) -> bool {
     matches!(
         error,
         OpenHandsError::ReconnectExhausted { .. } | OpenHandsError::WebSocketClosed
+    )
+}
+
+fn should_rehydrate_after_attach_failure(error: &OpenHandsError) -> bool {
+    matches!(
+        error,
+        OpenHandsError::HttpStatus {
+            status_code: 404,
+            ..
+        }
     )
 }
 

@@ -307,7 +307,7 @@ impl FakeOpenHandsServer {
             .route("/api/conversations", post(create_conversation))
             .route(
                 "/api/conversations/{conversation_id}",
-                get(get_conversation),
+                get(get_conversation).delete(delete_conversation),
             )
             .route(
                 "/api/conversations/{conversation_id}/events",
@@ -549,6 +549,18 @@ async fn get_conversation(
         .get(&conversation_id)
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(conversation.summary.clone()))
+}
+
+async fn delete_conversation(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    let mut inner = state.inner.lock().await;
+    if inner.conversations.remove(&conversation_id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    inner.conversation_get_not_found.remove(&conversation_id);
+    Ok(Json(json!({ "success": true })))
 }
 
 async fn send_message(
