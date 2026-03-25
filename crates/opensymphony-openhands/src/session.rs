@@ -10,7 +10,9 @@ use opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, NormalizedIssue, RunAttempt,
     RuntimeStreamState, TimestampMs, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord,
 };
-use opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
+use opensymphony_workflow::{
+    Environment, OpenHandsConversationToolConfig, ProcessEnvironment, ResolvedWorkflow,
+};
 use opensymphony_workspace::{
     RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager,
 };
@@ -24,7 +26,7 @@ use uuid::Uuid;
 use crate::{
     AgentConfig, CondenserConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
     EventEnvelope, KnownEvent, LlmConfig, OpenHandsClient, OpenHandsError, RuntimeEventStream,
-    RuntimeStreamConfig, SendMessageRequest, TerminalExecutionStatus, WorkspaceConfig,
+    RuntimeStreamConfig, SendMessageRequest, TerminalExecutionStatus, ToolConfig, WorkspaceConfig,
 };
 
 pub const RUNTIME_CONTRACT_VERSION: &str = "openhands-sdk-agent-server-v1";
@@ -118,6 +120,8 @@ pub struct ConversationLaunchProfile {
     pub llm_base_url_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condenser: Option<ConversationLaunchCondenserProfile>,
+    pub agent_tools: Option<Vec<ToolConfig>>,
+    pub agent_include_default_tools: Option<Vec<String>>,
     pub max_iterations: u32,
     pub stuck_detection: bool,
 }
@@ -169,6 +173,12 @@ impl ConversationLaunchProfile {
                     keep_first: condenser.keep_first,
                 }
             }),
+            agent_tools: conversation
+                .agent
+                .tools
+                .as_ref()
+                .map(|tools| tools.iter().map(tool_config_from_workflow).collect()),
+            agent_include_default_tools: conversation.agent.include_default_tools.clone(),
             max_iterations,
             stuck_detection: conversation.stuck_detection,
         })
@@ -223,6 +233,8 @@ impl ConversationLaunchProfile {
                         condenser.keep_first,
                     )
                 }),
+                tools: self.agent_tools.clone(),
+                include_default_tools: self.agent_include_default_tools.clone(),
             },
         })
     }
@@ -249,6 +261,13 @@ fn normalize_environment_value(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn tool_config_from_workflow(tool: &OpenHandsConversationToolConfig) -> ToolConfig {
+    ToolConfig {
+        name: tool.name.clone(),
+        params: tool.params.clone(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
