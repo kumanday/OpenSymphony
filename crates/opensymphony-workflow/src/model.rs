@@ -28,6 +28,8 @@ pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 pub const DEFAULT_OPENHANDS_LLM_MODEL: &str = "openai/gpt-5.4";
+pub const DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE: u64 = 240;
+pub const DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST: u64 = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowDefinition {
@@ -160,6 +162,7 @@ pub struct OpenHandsConfirmationPolicy {
 pub struct OpenHandsConversationAgentFrontMatter {
     pub kind: Option<String>,
     pub llm: Option<OpenHandsLlmFrontMatter>,
+    pub condenser: Option<OpenHandsConversationCondenserFrontMatter>,
     pub tools: Option<Vec<OpenHandsConversationToolFrontMatter>>,
     pub include_default_tools: Option<Vec<String>>,
     pub log_completions: Option<bool>,
@@ -173,6 +176,14 @@ pub struct OpenHandsConversationToolFrontMatter {
     pub name: String,
     #[serde(default)]
     pub params: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenHandsConversationCondenserFrontMatter {
+    pub enabled: Option<bool>,
+    pub max_size: Option<IntegerLike>,
+    pub keep_first: Option<IntegerLike>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -317,6 +328,7 @@ pub struct OpenHandsConversationConfig {
 pub struct OpenHandsConversationAgentConfig {
     pub kind: String,
     pub llm: Option<OpenHandsLlmConfig>,
+    pub condenser: Option<OpenHandsConversationCondenserConfig>,
     pub tools: Option<Vec<OpenHandsConversationToolConfig>>,
     pub include_default_tools: Option<Vec<String>>,
     pub log_completions: bool,
@@ -327,6 +339,12 @@ pub struct OpenHandsConversationAgentConfig {
 pub struct OpenHandsConversationToolConfig {
     pub name: String,
     pub params: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenHandsConversationCondenserConfig {
+    pub max_size: u64,
+    pub keep_first: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
