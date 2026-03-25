@@ -10,19 +10,20 @@ use crate::{
     model::{
         AgentConfig, AgentFrontMatter, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
         DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS,
-        DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AUTH_MODE, DEFAULT_OPENHANDS_BASE_URL,
-        DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
-        DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_LLM_MODEL,
-        DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
-        DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
-        DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
-        DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
-        DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, Environment,
-        HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
-        OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
-        OpenHandsConversationAgentFrontMatter, OpenHandsConversationCondenserConfig,
-        OpenHandsConversationCondenserFrontMatter, OpenHandsConversationConfig,
-        OpenHandsConversationFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
+        DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AGENT_TOOLS, DEFAULT_OPENHANDS_AUTH_MODE,
+        DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
+        DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
+        DEFAULT_OPENHANDS_LLM_MODEL, DEFAULT_OPENHANDS_MAX_ITERATIONS,
+        DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
+        DEFAULT_OPENHANDS_READINESS_PROBE_PATH, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
+        DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
+        DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS,
+        DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
+        OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
+        OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
+        OpenHandsConversationCondenserConfig, OpenHandsConversationCondenserFrontMatter,
+        OpenHandsConversationConfig, OpenHandsConversationFrontMatter,
+        OpenHandsConversationToolConfig, OpenHandsFrontMatter, OpenHandsLlmConfig,
         OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
         OpenHandsMcpConfig, OpenHandsMcpFrontMatter, OpenHandsTransportConfig,
         OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter,
@@ -552,13 +553,10 @@ fn resolve_openhands_conversation<E: Environment>(
         Some(agent) => resolve_openhands_agent(agent, env)?,
         None => OpenHandsConversationAgentConfig {
             kind: DEFAULT_OPENHANDS_AGENT_KIND.to_owned(),
-            llm: Some(OpenHandsLlmConfig {
-                model: Some(DEFAULT_OPENHANDS_LLM_MODEL.to_owned()),
-                api_key_env: None,
-                base_url_env: None,
-                options: BTreeMap::new(),
-            }),
+            llm: Some(default_openhands_llm_config()),
             condenser: None,
+            tools: Some(default_openhands_agent_tools()),
+            include_default_tools: None,
             log_completions: false,
             options: BTreeMap::new(),
         },
@@ -637,17 +635,81 @@ fn resolve_openhands_agent<E: Environment>(
         kind,
         llm: match agent.llm.as_ref() {
             Some(llm) => Some(resolve_openhands_llm(llm, env)?),
-            None => Some(OpenHandsLlmConfig {
-                model: Some(DEFAULT_OPENHANDS_LLM_MODEL.to_owned()),
-                api_key_env: None,
-                base_url_env: None,
-                options: BTreeMap::new(),
-            }),
+            None => Some(default_openhands_llm_config()),
         },
         condenser: resolve_openhands_condenser(agent.condenser.as_ref())?,
+        tools: match agent.tools.as_ref() {
+            Some(tools) => Some(resolve_openhands_agent_tools(tools, env)?),
+            None => Some(default_openhands_agent_tools()),
+        },
+        include_default_tools: agent
+            .include_default_tools
+            .as_ref()
+            .map(|tools| resolve_openhands_default_tools(tools, env))
+            .transpose()?,
         log_completions: false,
         options: BTreeMap::new(),
     })
+}
+
+fn resolve_openhands_agent_tools<E: Environment>(
+    tools: &[crate::model::OpenHandsConversationToolFrontMatter],
+    env: &E,
+) -> Result<Vec<OpenHandsConversationToolConfig>, WorkflowConfigError> {
+    tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| {
+            let name_field = "openhands.conversation.agent.tools[].name";
+            let name = resolve_string(&tool.name, env, name_field)?;
+            let name = normalize_optional_owned(name).ok_or(WorkflowConfigError::InvalidField {
+                field: name_field,
+                message: format!("entry {index} must not be empty"),
+            })?;
+
+            Ok(OpenHandsConversationToolConfig {
+                name,
+                params: tool.params.clone(),
+            })
+        })
+        .collect()
+}
+
+fn resolve_openhands_default_tools<E: Environment>(
+    tools: &[String],
+    env: &E,
+) -> Result<Vec<String>, WorkflowConfigError> {
+    tools
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| {
+            let field = "openhands.conversation.agent.include_default_tools[]";
+            let resolved = resolve_string(tool, env, field)?;
+            normalize_optional_owned(resolved).ok_or(WorkflowConfigError::InvalidField {
+                field,
+                message: format!("entry {index} must not be empty"),
+            })
+        })
+        .collect()
+}
+
+fn default_openhands_agent_tools() -> Vec<OpenHandsConversationToolConfig> {
+    DEFAULT_OPENHANDS_AGENT_TOOLS
+        .iter()
+        .map(|name| OpenHandsConversationToolConfig {
+            name: (*name).to_owned(),
+            params: BTreeMap::new(),
+        })
+        .collect()
+}
+
+fn default_openhands_llm_config() -> OpenHandsLlmConfig {
+    OpenHandsLlmConfig {
+        model: Some(DEFAULT_OPENHANDS_LLM_MODEL.to_owned()),
+        api_key_env: None,
+        base_url_env: None,
+        options: BTreeMap::new(),
+    }
 }
 
 fn resolve_openhands_condenser(

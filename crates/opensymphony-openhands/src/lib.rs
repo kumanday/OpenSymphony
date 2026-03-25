@@ -19,7 +19,7 @@ pub use models::{
     ConversationCreateRequest, ConversationRunRequest, ConversationStateUpdatePayload,
     DoctorProbeConfig, EventEnvelope, LLM_SUMMARIZING_CONDENSER_KIND, LlmConfig, McpConfig,
     McpStdioServerConfig, SearchConversationEventsResponse, SendMessageRequest, TextContent,
-    WorkspaceConfig,
+    ToolConfig, WorkspaceConfig,
 };
 pub use session::{
     ConversationLaunchProfile, IssueConversationManifest, IssueSessionContext, IssueSessionError,

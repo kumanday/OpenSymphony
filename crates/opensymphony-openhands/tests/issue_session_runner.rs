@@ -191,6 +191,51 @@ Issue: {{{{ issue.identifier }}}}
         .expect("workflow should resolve")
 }
 
+fn workflow_for_with_agent_block(
+    workspace_root: &Path,
+    base_url: &str,
+    agent_block: &str,
+) -> ResolvedWorkflow {
+    let workflow = WorkflowDefinition::parse(&format!(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: {}
+openhands:
+  transport:
+    base_url: {}
+  conversation:
+    persistence_dir_relative: .opensymphony/openhands
+    agent:
+{}
+---
+
+# Assignment
+
+Issue: {{{{ issue.identifier }}}}
+Title: {{{{ issue.title }}}}
+{{% if attempt %}}Attempt: {{{{ attempt }}}}{{% endif %}}
+"#,
+        workspace_root.display(),
+        base_url,
+        agent_block
+    ))
+    .expect("workflow should parse");
+
+    workflow
+        .resolve(
+            workspace_root,
+            &BTreeMap::from([("LINEAR_API_KEY".to_string(), "linear-token".to_string())]),
+        )
+        .expect("workflow should resolve")
+}
+
 fn runner_config(workflow: &ResolvedWorkflow) -> IssueSessionRunnerConfig {
     let mut config = IssueSessionRunnerConfig::from_workflow(workflow);
     config.runtime_stream.readiness_timeout = std::time::Duration::from_secs(2);
@@ -371,6 +416,14 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
     assert_eq!(launch_profile.confirmation_policy_kind, "NeverConfirm");
     assert_eq!(launch_profile.agent_kind, "Agent");
     assert_eq!(launch_profile.llm_model, "openai/gpt-5.4");
+    assert_eq!(
+        launch_profile.agent_tools.as_ref().map(|tools| tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()),
+        Some(vec!["TerminalTool", "FileEditorTool"])
+    );
+    assert_eq!(launch_profile.agent_include_default_tools, None);
     assert!(launch_profile.stuck_detection);
     let first_prompt = manager
         .read_text_artifact(
@@ -391,6 +444,15 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
             .as_str(),
     )
     .expect("conversation ID should parse");
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    assert_eq!(
+        create_request.agent.tools.as_ref().map(|tools| tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>()),
+        Some(vec!["TerminalTool", "FileEditorTool"])
+    );
+    assert_eq!(create_request.agent.include_default_tools, None);
     let first_messages = latest_message_texts(
         client
             .search_all_events(conversation_id)
@@ -502,6 +564,98 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
             .expect("worker outcome should be persisted")
             .outcome,
         WorkerOutcomeKind::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn issue_session_runner_honors_configured_agent_tool_overrides() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for_with_agent_block(
+        &workspace_root,
+        server.base_url(),
+        r#"      tools:
+        - name: ReadFileTool
+        - name: BrowserToolSet
+          params:
+            start_url: https://example.com
+      include_default_tools:
+        - FinishTool
+        - ThinkTool"#,
+    );
+    let issue = sample_issue("COE-293-tools");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client, runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut run_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-tools",
+        None,
+        max_turns,
+    );
+    runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("issue session run should succeed");
+
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    let tools = create_request
+        .agent
+        .tools
+        .expect("configured tool overrides should be serialized");
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0].name, "ReadFileTool");
+    assert!(tools[0].params.is_empty());
+    assert_eq!(tools[1].name, "BrowserToolSet");
+    assert_eq!(
+        tools[1].params.get("start_url"),
+        Some(&serde_json::Value::String(
+            "https://example.com".to_string()
+        ))
+    );
+    assert_eq!(
+        create_request.agent.include_default_tools,
+        Some(vec!["FinishTool".to_string(), "ThinkTool".to_string()])
+    );
+
+    let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+    let launch_profile = manifest
+        .launch_profile
+        .as_ref()
+        .expect("conversation manifest should persist a launch profile");
+    assert_eq!(
+        launch_profile.agent_tools.as_ref().map(|tools| {
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+        }),
+        Some(vec!["ReadFileTool", "BrowserToolSet"])
+    );
+    assert_eq!(
+        launch_profile.agent_include_default_tools,
+        Some(vec!["FinishTool".to_string(), "ThinkTool".to_string()])
     );
 }
 

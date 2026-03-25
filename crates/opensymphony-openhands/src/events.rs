@@ -395,6 +395,8 @@ mod tests {
                     usage_id: None,
                 },
                 condenser: None,
+                tools: None,
+                include_default_tools: None,
             },
         };
         let running = EventEnvelope::new(
