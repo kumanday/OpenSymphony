@@ -22,8 +22,8 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
-    AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest, EventEnvelope,
-    KnownEvent, LlmConfig, OpenHandsClient, OpenHandsError, RuntimeEventStream,
+    AgentConfig, CondenserConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
+    EventEnvelope, KnownEvent, LlmConfig, OpenHandsClient, OpenHandsError, RuntimeEventStream,
     RuntimeStreamConfig, SendMessageRequest, TerminalExecutionStatus, WorkspaceConfig,
 };
 
@@ -116,8 +116,16 @@ pub struct ConversationLaunchProfile {
     pub llm_api_key_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_base_url_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condenser: Option<ConversationLaunchCondenserProfile>,
     pub max_iterations: u32,
     pub stuck_detection: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationLaunchCondenserProfile {
+    pub max_size: u64,
+    pub keep_first: u64,
 }
 
 impl ConversationLaunchProfile {
@@ -155,6 +163,12 @@ impl ConversationLaunchProfile {
                 .llm
                 .as_ref()
                 .and_then(|llm| llm.base_url_env.clone()),
+            condenser: conversation.agent.condenser.as_ref().map(|condenser| {
+                ConversationLaunchCondenserProfile {
+                    max_size: condenser.max_size,
+                    keep_first: condenser.keep_first,
+                }
+            }),
             max_iterations,
             stuck_detection: conversation.stuck_detection,
         })
@@ -180,6 +194,13 @@ impl ConversationLaunchProfile {
         )?
         .or_else(|| normalize_environment_value(env.get("LLM_BASE_URL")));
 
+        let llm = LlmConfig {
+            model: self.llm_model.clone(),
+            api_key,
+            base_url,
+            usage_id: None,
+        };
+
         Ok(ConversationCreateRequest {
             conversation_id: conversation_id.unwrap_or_else(Uuid::new_v4),
             workspace: WorkspaceConfig {
@@ -194,11 +215,14 @@ impl ConversationLaunchProfile {
             },
             agent: AgentConfig {
                 kind: self.agent_kind.clone(),
-                llm: LlmConfig {
-                    model: self.llm_model.clone(),
-                    api_key,
-                    base_url,
-                },
+                llm: llm.clone(),
+                condenser: self.condenser.as_ref().map(|condenser| {
+                    CondenserConfig::llm_summarizing(
+                        llm.clone(),
+                        condenser.max_size,
+                        condenser.keep_first,
+                    )
+                }),
             },
         })
     }

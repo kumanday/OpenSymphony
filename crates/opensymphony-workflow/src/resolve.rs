@@ -11,6 +11,7 @@ use crate::{
         AgentConfig, AgentFrontMatter, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
         DEFAULT_MAX_CONCURRENT_AGENTS, DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS,
         DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AUTH_MODE, DEFAULT_OPENHANDS_BASE_URL,
+        DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
         DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_LLM_MODEL,
         DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
         DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
@@ -19,7 +20,8 @@ use crate::{
         DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, Environment,
         HooksConfig, HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
         OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
-        OpenHandsConversationAgentFrontMatter, OpenHandsConversationConfig,
+        OpenHandsConversationAgentFrontMatter, OpenHandsConversationCondenserConfig,
+        OpenHandsConversationCondenserFrontMatter, OpenHandsConversationConfig,
         OpenHandsConversationFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
         OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
         OpenHandsMcpConfig, OpenHandsMcpFrontMatter, OpenHandsTransportConfig,
@@ -531,6 +533,7 @@ fn resolve_openhands_conversation<E: Environment>(
                 base_url_env: None,
                 options: BTreeMap::new(),
             }),
+            condenser: None,
             log_completions: false,
             options: BTreeMap::new(),
         },
@@ -607,14 +610,44 @@ fn resolve_openhands_agent<E: Environment>(
 
     Ok(OpenHandsConversationAgentConfig {
         kind,
-        llm: agent
-            .llm
-            .as_ref()
-            .map(|llm| resolve_openhands_llm(llm, env))
-            .transpose()?,
+        llm: match agent.llm.as_ref() {
+            Some(llm) => Some(resolve_openhands_llm(llm, env)?),
+            None => Some(OpenHandsLlmConfig {
+                model: Some(DEFAULT_OPENHANDS_LLM_MODEL.to_owned()),
+                api_key_env: None,
+                base_url_env: None,
+                options: BTreeMap::new(),
+            }),
+        },
+        condenser: resolve_openhands_condenser(agent.condenser.as_ref())?,
         log_completions: false,
         options: BTreeMap::new(),
     })
+}
+
+fn resolve_openhands_condenser(
+    condenser: Option<&OpenHandsConversationCondenserFrontMatter>,
+) -> Result<Option<OpenHandsConversationCondenserConfig>, WorkflowConfigError> {
+    let Some(condenser) = condenser else {
+        return Ok(None);
+    };
+
+    if !condenser.enabled.unwrap_or(false) {
+        return Ok(None);
+    }
+
+    Ok(Some(OpenHandsConversationCondenserConfig {
+        max_size: resolve_positive_u64(
+            condenser.max_size.as_ref(),
+            "openhands.conversation.agent.condenser.max_size",
+            DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
+        )?,
+        keep_first: resolve_positive_u64(
+            condenser.keep_first.as_ref(),
+            "openhands.conversation.agent.condenser.keep_first",
+            DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
+        )?,
+    }))
 }
 
 fn resolve_openhands_reuse_policy<E: Environment>(
