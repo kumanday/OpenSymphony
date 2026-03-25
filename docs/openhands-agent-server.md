@@ -102,6 +102,7 @@ Current repository implementation:
 
 - `tools/openhands-server/pyproject.toml` pins the local server environment, `tools/openhands-server/install.sh` performs the locked `uv sync --extra agent-server` bootstrap, and `tools/openhands-server/run-local.sh` starts it via `uv`
 - `opensymphony-openhands` currently implements the typed conversation create, get, send-message, run, paginated event search, readiness probe, and `RuntimeEventStream` attach/reconcile/reconnect surface used by validation and doctor flows
+- workflow resolution now forwards `openhands.conversation.agent.tools` and optional `openhands.conversation.agent.include_default_tools` into the typed OpenHands conversation-create payload; partial agent overrides still inherit the default LLM model unless the workflow explicitly replaces it, and when the tool fields are omitted OpenSymphony adds `TerminalTool` and `FileEditorTool` as the default coding-agent tools while leaving the agent-server default `FinishTool` and `ThinkTool` set under OpenHands control
 - `opensymphony-testkit` emulates the same endpoint subset for deterministic CI coverage and now supports scripted `/events/search` responses plus per-connection WebSocket frame sequences so attach/reconcile race windows, buffered live events, and reconnect drops can be reproduced without bespoke inline servers
 - `opensymphony doctor` now resolves the target repo `WORKFLOW.md` before probing OpenHands, so the live probe uses workflow-derived workspace, transport, conversation, and prompt inputs instead of only static CLI YAML fields
 - `opensymphony doctor` now checks for `cargo`, `curl`, `git`, and `uv` on `PATH`, prints the trusted-machine local-safety warning on every run, and warns when a local deployment points at a non-loopback OpenHands target
@@ -222,6 +223,8 @@ Suggested persisted fields:
 - `confirmation_policy_kind`
 - `agent_kind`
 - `llm_model`
+- `agent_tools`
+- `agent_include_default_tools`
 - `max_iterations`
 - `stuck_detection`
 
@@ -268,7 +271,7 @@ Current implementation detail:
 - the full workflow prompt is selected until a `POST /events` call accepts that first assignment message
 - once seeded, later worker lifetimes send built-in continuation guidance instead of rerendering the workflow template
 - if `GET /api/conversations/{id}` or the initial attach fails for a reused conversation, the runner retries `POST /api/conversations` with the same stable `conversation_id`; when that re-created thread still exposes persisted history, the runner keeps continuation guidance instead of downgrading to a fresh full prompt
-- the runner persists the conversation launch profile on first create and backfills older manifests on reuse so later rehydration and interactive debug sessions can recreate the same thread settings without guessing from mutable runtime state
+- the runner persists the conversation launch profile on first create and backfills older manifests on reuse so later rehydration and interactive debug sessions can recreate the same thread settings, including agent tool selection, without guessing from mutable runtime state
 
 ## 6.4 Interactive debug resumption
 
