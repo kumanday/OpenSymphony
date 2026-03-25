@@ -206,7 +206,7 @@ The repository now exposes three stable foundation contracts that later mileston
   - blocker-aware and hierarchy-aware dispatch eligibility helpers
   - generic scheduler configuration sourced from workflow polling, concurrency, retry, and stall settings
   - explicit `Claimed` / `Running` / `RetryQueued` / `Released` transitions driven only by orchestrator-owned commands and worker reports
-  - fixed continuation retry, exponential failure backoff, bounded global/per-state capacity, running-worker reconciliation, terminal cleanup, and manifest-backed restart recovery for workspace reuse
+  - fixed continuation retry, exponential failure backoff, bounded global/per-state capacity via scheduler-owned cached running counts, running-worker reconciliation, terminal cleanup, and manifest-backed restart recovery for workspace reuse
 
 The other crates are already present at their final ownership boundaries, but for M1 they intentionally expose only thin re-exports or placeholders rather than premature transport logic.
 

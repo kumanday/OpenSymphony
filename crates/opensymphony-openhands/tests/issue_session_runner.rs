@@ -6,8 +6,8 @@ use opensymphony_domain::{
 };
 use opensymphony_openhands::{
     ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
-    IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig, OpenHandsClient,
-    TransportConfig,
+    IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig,
+    LLM_SUMMARIZING_CONDENSER_KIND, OpenHandsClient, TransportConfig,
 };
 use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
@@ -62,6 +62,48 @@ fn workspace_manager(root: &Path, hooks: HookConfig) -> WorkspaceManager {
 
 fn workflow_for(workspace_root: &Path, base_url: &str) -> ResolvedWorkflow {
     workflow_for_with_settings(workspace_root, base_url, ".opensymphony/openhands", None)
+}
+
+fn workflow_for_with_condenser(workspace_root: &Path, base_url: &str) -> ResolvedWorkflow {
+    let workflow = WorkflowDefinition::parse(&format!(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: {}
+openhands:
+  transport:
+    base_url: {}
+  conversation:
+    agent:
+      condenser:
+        enabled: true
+        max_size: 240
+        keep_first: 2
+---
+
+# Assignment
+
+Issue: {{{{ issue.identifier }}}}
+Title: {{{{ issue.title }}}}
+{{% if attempt %}}Attempt: {{{{ attempt }}}}{{% endif %}}
+"#,
+        workspace_root.display(),
+        base_url,
+    ))
+    .expect("workflow should parse");
+
+    workflow
+        .resolve(
+            workspace_root,
+            &BTreeMap::from([("LINEAR_API_KEY".to_string(), "linear-token".to_string())]),
+        )
+        .expect("workflow should resolve")
 }
 
 fn workflow_for_with_persistence_dir(
@@ -1076,6 +1118,69 @@ async fn issue_session_runner_rehydrates_a_missing_conversation_without_downgrad
     );
     assert_eq!(messages.len(), 2);
     assert!(messages[1].contains("The original workflow prompt is already present"));
+}
+
+#[tokio::test]
+async fn issue_session_runner_forwards_configured_condenser_to_create_request() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for_with_condenser(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-288");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client, runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("issue session run should succeed");
+
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    let agent_llm = create_request.agent.llm.clone();
+    let condenser = create_request
+        .agent
+        .condenser
+        .as_ref()
+        .expect("condenser should be forwarded");
+    assert_eq!(condenser.kind, LLM_SUMMARIZING_CONDENSER_KIND);
+    assert_eq!(condenser.max_size, 240);
+    assert_eq!(condenser.keep_first, 2);
+    assert_eq!(&condenser.llm, &agent_llm.with_usage_id("condenser"));
+
+    let persisted_manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+    let persisted_condenser = persisted_manifest
+        .launch_profile
+        .as_ref()
+        .and_then(|profile| profile.condenser.as_ref())
+        .expect("launch profile should persist condenser settings");
+    assert_eq!(persisted_condenser.max_size, 240);
+    assert_eq!(persisted_condenser.keep_first, 2);
 }
 
 #[tokio::test]
