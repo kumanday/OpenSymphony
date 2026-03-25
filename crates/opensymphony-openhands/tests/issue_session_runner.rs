@@ -62,7 +62,7 @@ fn workspace_manager(root: &Path, hooks: HookConfig) -> WorkspaceManager {
 }
 
 fn workflow_for(workspace_root: &Path, base_url: &str) -> ResolvedWorkflow {
-    workflow_for_with_persistence_dir(workspace_root, base_url, ".opensymphony/openhands")
+    workflow_for_with_settings(workspace_root, base_url, ".opensymphony/openhands", None)
 }
 
 fn workflow_for_with_condenser(workspace_root: &Path, base_url: &str) -> ResolvedWorkflow {
@@ -112,6 +112,31 @@ fn workflow_for_with_persistence_dir(
     base_url: &str,
     persistence_dir_relative: &str,
 ) -> ResolvedWorkflow {
+    workflow_for_with_settings(workspace_root, base_url, persistence_dir_relative, None)
+}
+
+fn workflow_for_with_reuse_policy(
+    workspace_root: &Path,
+    base_url: &str,
+    reuse_policy: &str,
+) -> ResolvedWorkflow {
+    workflow_for_with_settings(
+        workspace_root,
+        base_url,
+        ".opensymphony/openhands",
+        Some(reuse_policy),
+    )
+}
+
+fn workflow_for_with_settings(
+    workspace_root: &Path,
+    base_url: &str,
+    persistence_dir_relative: &str,
+    reuse_policy: Option<&str>,
+) -> ResolvedWorkflow {
+    let reuse_policy = reuse_policy
+        .map(|policy| format!("    reuse_policy: {policy}\n"))
+        .unwrap_or_default();
     let workflow = WorkflowDefinition::parse(&format!(
         r#"---
 tracker:
@@ -127,6 +152,7 @@ openhands:
   transport:
     base_url: {}
   conversation:
+{}
     persistence_dir_relative: {}
 ---
 
@@ -138,6 +164,7 @@ Title: {{{{ issue.title }}}}
 "#,
         workspace_root.display(),
         base_url,
+        reuse_policy,
         persistence_dir_relative,
     ))
     .expect("workflow should parse");
@@ -172,6 +199,56 @@ openhands:
           - opensymphony
           - linear-mcp
           - --stdio
+---
+
+# Assignment
+
+Issue: {{{{ issue.identifier }}}}
+"#,
+        workspace_root.display(),
+        base_url,
+    ))
+    .expect("workflow should parse");
+
+    workflow
+        .resolve(
+            workspace_root,
+            &BTreeMap::from([("LINEAR_API_KEY".to_string(), "linear-token".to_string())]),
+        )
+        .expect("workflow should resolve")
+}
+
+fn workflow_with_llm_provider_overrides(
+    workspace_root: &Path,
+    base_url: &str,
+    api_key_env: Option<&str>,
+    base_url_env: Option<&str>,
+) -> ResolvedWorkflow {
+    let api_key_line = api_key_env
+        .map(|name| format!("        api_key_env: {name}\n"))
+        .unwrap_or_default();
+    let base_url_line = base_url_env
+        .map(|name| format!("        base_url_env: {name}\n"))
+        .unwrap_or_default();
+    let workflow = WorkflowDefinition::parse(&format!(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: {}
+openhands:
+  transport:
+    base_url: {}
+  conversation:
+    agent:
+      llm:
+        model: openai/gpt-5.4
+{api_key_line}{base_url_line}
 ---
 
 # Assignment
@@ -403,6 +480,7 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
     );
 
     let first_conversation = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert_eq!(first_conversation.reuse_policy, "per_issue");
     assert!(first_conversation.workflow_prompt_seeded);
     assert_eq!(
         first_conversation.last_prompt_kind,
@@ -548,6 +626,7 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
     assert!(second_messages[1].contains("The original workflow prompt is already present"));
 
     let session_context = read_session_context(&manager, &ensured.handle).await;
+    assert_eq!(session_context.reuse_policy, "per_issue");
     assert_eq!(
         session_context.prompt_kind,
         IssueSessionPromptKind::Continuation
@@ -565,6 +644,331 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
             .outcome,
         WorkerOutcomeKind::Succeeded
     );
+}
+
+#[tokio::test]
+async fn issue_session_runner_fresh_each_run_creates_a_new_full_prompt_conversation_each_worker_lifetime()
+ {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow =
+        workflow_for_with_reuse_policy(&workspace_root, server.base_url(), "fresh_each_run");
+    let issue = sample_issue("COE-282-fresh-each-run");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client.clone(), runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut first_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("first run manifest should prepare");
+    let first_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    let first_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut first_manifest,
+            &issue,
+            &first_run,
+            &workflow,
+        )
+        .await
+        .expect("first issue session run should succeed");
+
+    assert_eq!(first_result.prompt_kind, IssueSessionPromptKind::Full);
+    assert!(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .fresh_conversation
+    );
+
+    let first_conversation = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert_eq!(first_conversation.reuse_policy, "fresh_each_run");
+    assert!(first_conversation.reset_reason.is_none());
+
+    let first_conversation_id = uuid::Uuid::parse_str(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("first conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("conversation ID should parse");
+
+    let mut second_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-2", 2))
+        .await
+        .expect("second run manifest should prepare");
+    let second_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-2",
+        Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
+        max_turns,
+    );
+    let second_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut second_manifest,
+            &issue,
+            &second_run,
+            &workflow,
+        )
+        .await
+        .expect("second issue session run should succeed");
+
+    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Full);
+    assert!(
+        second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .fresh_conversation
+    );
+    assert_ne!(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("first conversation metadata should exist")
+            .conversation_id,
+        second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .conversation_id
+    );
+
+    let second_conversation = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert_eq!(second_conversation.reuse_policy, "fresh_each_run");
+    assert_eq!(
+        second_conversation.last_prompt_kind,
+        Some(IssueSessionPromptKind::Full)
+    );
+    assert!(
+        second_conversation
+            .reset_reason
+            .as_deref()
+            .expect("fresh_each_run should record a reset reason after the first run")
+            .contains("fresh_each_run")
+    );
+
+    let second_conversation_id = uuid::Uuid::parse_str(
+        second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("conversation ID should parse");
+    let first_messages = latest_message_texts(
+        client
+            .search_all_events(first_conversation_id)
+            .await
+            .expect("first conversation events should be searchable")
+            .items(),
+    );
+    let second_messages = latest_message_texts(
+        client
+            .search_all_events(second_conversation_id)
+            .await
+            .expect("second conversation events should be searchable")
+            .items(),
+    );
+    assert_eq!(first_messages.len(), 1);
+    assert_eq!(second_messages.len(), 1);
+    assert!(second_messages[0].contains("Issue: COE-282-fresh-each-run"));
+
+    let session_context = read_session_context(&manager, &ensured.handle).await;
+    assert_eq!(session_context.reuse_policy, "fresh_each_run");
+    assert_eq!(session_context.prompt_kind, IssueSessionPromptKind::Full);
+}
+
+#[tokio::test]
+async fn issue_session_runner_rejects_unknown_reuse_policies_from_the_runtime_boundary() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow =
+        workflow_for_with_reuse_policy(&workspace_root, server.base_url(), "archive_then_retry");
+    let issue = sample_issue("COE-282-unsupported-policy");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client, runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut run_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-unsupported",
+        None,
+        max_turns,
+    );
+    let result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("unsupported reuse policy should surface as a normalized worker failure");
+
+    assert_eq!(result.prompt_kind, IssueSessionPromptKind::Full);
+    assert_eq!(result.run_status, opensymphony_workspace::RunStatus::Failed);
+    assert_eq!(result.worker_outcome.outcome, WorkerOutcomeKind::Failed);
+    assert!(result.conversation.is_none());
+    assert!(
+        result
+            .worker_outcome
+            .error
+            .as_deref()
+            .expect("unsupported policy error should be recorded")
+            .contains("archive_then_retry")
+    );
+    assert!(
+        manager
+            .read_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+            )
+            .await
+            .expect("conversation manifest read should succeed")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn issue_session_runner_resets_when_persisted_reuse_policy_drifts_from_the_current_workflow()
+{
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let initial_workflow =
+        workflow_for_with_reuse_policy(&workspace_root, server.base_url(), "fresh_each_run");
+    let resumed_workflow = workflow_for(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-282-policy-drift");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let max_turns =
+        u32::try_from(initial_workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut first_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("first run manifest should prepare");
+    let first_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    let first_result = IssueSessionRunner::new(client.clone(), runner_config(&initial_workflow))
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut first_manifest,
+            &issue,
+            &first_run,
+            &initial_workflow,
+        )
+        .await
+        .expect("initial issue session run should succeed");
+
+    let first_conversation_id = first_result
+        .conversation
+        .as_ref()
+        .expect("first conversation metadata should exist")
+        .conversation_id
+        .clone();
+    let first_manifest_state = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert_eq!(first_manifest_state.reuse_policy, "fresh_each_run");
+
+    let mut second_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-2", 2))
+        .await
+        .expect("second run manifest should prepare");
+    let second_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-2",
+        Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
+        max_turns,
+    );
+    let second_result = IssueSessionRunner::new(client.clone(), runner_config(&resumed_workflow))
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut second_manifest,
+            &issue,
+            &second_run,
+            &resumed_workflow,
+        )
+        .await
+        .expect(
+            "policy drift should produce a fresh conversation instead of reusing the prior one",
+        );
+
+    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Full);
+    assert_ne!(
+        first_conversation_id,
+        second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .conversation_id
+    );
+
+    let second_manifest_state = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert_eq!(second_manifest_state.reuse_policy, "per_issue");
+    assert!(
+        second_manifest_state
+            .reset_reason
+            .as_deref()
+            .expect("policy drift reset reason should be recorded")
+            .contains("does not match expected `per_issue`")
+    );
+
+    let session_context = read_session_context(&manager, &ensured.handle).await;
+    assert_eq!(session_context.reuse_policy, "per_issue");
+    assert_eq!(session_context.prompt_kind, IssueSessionPromptKind::Full);
 }
 
 #[tokio::test]
@@ -1148,6 +1552,169 @@ async fn issue_session_runner_uses_the_configured_persistence_dir_for_create_and
     assert_eq!(
         second_manifest_state.persistence_dir,
         expected_persistence_dir
+    );
+}
+
+#[tokio::test]
+async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_with_llm_provider_overrides(
+        &workspace_root,
+        server.base_url(),
+        Some("WORKFLOW_OPENHANDS_API_KEY"),
+        Some("WORKFLOW_OPENHANDS_BASE_URL"),
+    );
+    let issue = sample_issue("COE-280-provider");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::with_environment(
+        client,
+        runner_config(&workflow),
+        BTreeMap::from([
+            (
+                "WORKFLOW_OPENHANDS_API_KEY".to_string(),
+                "provider-secret".to_string(),
+            ),
+            (
+                "WORKFLOW_OPENHANDS_BASE_URL".to_string(),
+                "https://provider.example.test/v1".to_string(),
+            ),
+        ]),
+    );
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut run_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("provider-run", 1))
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-provider",
+        None,
+        max_turns,
+    );
+    let result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("provider-backed session run should succeed");
+
+    assert_eq!(
+        result.run_status,
+        opensymphony_workspace::RunStatus::Succeeded
+    );
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    assert_eq!(
+        create_request.agent.llm.api_key.as_deref(),
+        Some("provider-secret")
+    );
+    assert_eq!(
+        create_request.agent.llm.base_url.as_deref(),
+        Some("https://provider.example.test/v1")
+    );
+
+    let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+    let launch_profile = manifest
+        .launch_profile
+        .as_ref()
+        .expect("launch profile should be persisted");
+    assert_eq!(
+        launch_profile.llm_api_key_env.as_deref(),
+        Some("WORKFLOW_OPENHANDS_API_KEY")
+    );
+    assert_eq!(
+        launch_profile.llm_base_url_env.as_deref(),
+        Some("WORKFLOW_OPENHANDS_BASE_URL")
+    );
+}
+
+#[tokio::test]
+async fn issue_session_runner_fails_when_workflow_owned_llm_provider_env_is_missing() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_with_llm_provider_overrides(
+        &workspace_root,
+        server.base_url(),
+        Some("WORKFLOW_MISSING_API_KEY"),
+        None,
+    );
+    let issue = sample_issue("COE-280-missing-provider");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner =
+        IssueSessionRunner::with_environment(client, runner_config(&workflow), BTreeMap::new());
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut run_manifest = manager
+        .start_run(
+            &ensured.handle,
+            &RunDescriptor::new("missing-provider-run", 1),
+        )
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-missing-provider",
+        None,
+        max_turns,
+    );
+    let result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("missing provider env should surface as a failed run");
+
+    assert_eq!(result.run_status, opensymphony_workspace::RunStatus::Failed);
+    assert_eq!(result.worker_outcome.outcome, WorkerOutcomeKind::Failed);
+    assert!(
+        result
+            .worker_outcome
+            .error
+            .as_deref()
+            .expect("provider env error should be persisted")
+            .contains("WORKFLOW_MISSING_API_KEY")
+    );
+    assert!(
+        manager
+            .read_text_artifact(
+                &ensured.handle,
+                &ensured
+                    .handle
+                    .openhands_dir()
+                    .join("create-conversation-request.json"),
+            )
+            .await
+            .expect("request artifact lookup should succeed")
+            .is_none()
     );
 }
 

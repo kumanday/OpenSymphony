@@ -360,15 +360,6 @@ fn reject_unsupported_openhands_local_server_overrides(
         });
     }
 
-    if local_server.command.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.local_server.command",
-            message:
-                "is not supported until the runtime supervisor can honor workflow-owned launcher overrides"
-                    .to_owned(),
-        });
-    }
-
     Ok(())
 }
 
@@ -747,16 +738,17 @@ fn resolve_openhands_reuse_policy<E: Environment>(
         "openhands.conversation.reuse_policy",
         "per_issue",
     )?;
-    if !reuse_policy.eq_ignore_ascii_case("per_issue") {
-        return Err(WorkflowConfigError::InvalidField {
+    let normalized =
+        normalize_optional(&reuse_policy).ok_or_else(|| WorkflowConfigError::InvalidField {
             field: "openhands.conversation.reuse_policy",
-            message:
-                "is not supported until the orchestrator/runtime path can honor non-default conversation reuse policies"
-                    .to_owned(),
-        });
-    }
+            message: "must not be empty".to_owned(),
+        })?;
 
-    Ok("per_issue".to_owned())
+    match normalized.to_ascii_lowercase().as_str() {
+        "per_issue" => Ok("per_issue".to_owned()),
+        "fresh_each_run" => Ok("fresh_each_run".to_owned()),
+        other => Ok(other.to_owned()),
+    }
 }
 
 fn reject_unsupported_openhands_agent_options(
@@ -788,7 +780,6 @@ fn resolve_openhands_llm<E: Environment>(
     llm: &OpenHandsLlmFrontMatter,
     env: &E,
 ) -> Result<OpenHandsLlmConfig, WorkflowConfigError> {
-    reject_unsupported_openhands_llm_provider_overrides(llm)?;
     reject_unsupported_openhands_llm_options(llm)?;
 
     let field = "openhands.conversation.agent.llm.model";
@@ -822,30 +813,6 @@ fn reject_unsupported_openhands_llm_options(
             message: format!(
                 "unsupported options cannot be forwarded to the current OpenHands llm request subset: {unsupported}"
             ),
-        });
-    }
-
-    Ok(())
-}
-
-fn reject_unsupported_openhands_llm_provider_overrides(
-    llm: &OpenHandsLlmFrontMatter,
-) -> Result<(), WorkflowConfigError> {
-    if llm.api_key_env.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.conversation.agent.llm.api_key_env",
-            message:
-                "is not supported until the runtime conversation-create adapter resolves provider credentials"
-                    .to_owned(),
-        });
-    }
-
-    if llm.base_url_env.is_some() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.conversation.agent.llm.base_url_env",
-            message:
-                "is not supported until the runtime conversation-create adapter can forward provider base URLs"
-                    .to_owned(),
         });
     }
 

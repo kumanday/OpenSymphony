@@ -104,7 +104,8 @@ Current implementation:
 - reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
 - leave `openhands.local_server.command` unset when omitted so the runtime-owned local tooling layer resolves the pinned launcher from the OpenSymphony checkout
-- fail when `openhands.local_server.command` is configured until the runtime supervisor can honor workflow-owned launcher overrides
+- resolve `openhands.local_server.command` during workflow loading and honor it only for daemon-managed local supervision
+- fail at runtime when `openhands.local_server.command` is configured for external, authenticated, or `local_server.enabled: false` targets
 - fail when `openhands.local_server.enabled: false` is configured until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - fail when `openhands.local_server.env` is configured until the runtime supervisor creation path forwards workflow-owned launcher environment variables instead of always using runtime-owned defaults
 - fail when `openhands.local_server.readiness_probe_path` is configured until the runtime supervisor launch path consumes workflow-owned probe settings instead of always using `/openapi.json`
@@ -122,14 +123,15 @@ Current implementation:
 - fail when explicit `openhands.websocket.enabled` is configured before the runtime readiness path can honor disabling the socket
 - resolve `openhands.websocket.ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` into the runtime readiness and reconnect budgets
 - resolve `openhands.mcp.stdio_servers` into workflow config and forward the supported stdio subset through `mcp_config`
-- fail when non-default `openhands.conversation.reuse_policy` values are configured before the orchestrator/runtime path can honor alternate conversation reuse behavior
+- resolve `openhands.conversation.reuse_policy` for runtime consumers instead of rejecting non-default values during workflow loading
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
 - fail when `openhands.conversation.confirmation_policy` includes options that cannot be represented in the current OpenHands request subset
 - fail when `openhands.conversation.max_iterations` exceeds the downstream OpenHands `u32` request range
 - fail when `openhands.conversation.agent.log_completions` or extra agent option keys are configured before the runtime conversation-create adapter can forward them
 - fail when `openhands.conversation.agent.llm` is present without a non-empty `model`
 - fail when `openhands.conversation.agent.llm` includes extra option keys before the runtime conversation-create adapter can forward them
-- fail when `openhands.conversation.agent.llm.api_key_env` or `base_url_env` are configured before the runtime conversation-create adapter can forward them
+- resolve `openhands.conversation.agent.llm.api_key_env` and `base_url_env` into the conversation-create payload at runtime
+- fail when configured `openhands.conversation.agent.llm.api_key_env` or `base_url_env` names are missing or blank in the runtime environment
 - fail on malformed `agent.max_concurrent_agents_by_state` entries
 - preserve the Markdown body exactly after the front matter terminator
 - treat whitespace-only prompt bodies as absent so `DEFAULT_PROMPT_TEMPLATE` still applies
@@ -169,7 +171,10 @@ Current implementation:
 - reconnect with backoff
 - out-of-order event insertion
 - terminal state detection
-- conversation reuse
+- conversation reuse for `per_issue`
+- `fresh_each_run` reset/new-conversation behavior
+- runtime rejection of unsupported reuse-policy values
+- persisted policy-drift resets
 - pinned-server auth success and failure paths
 - reuse after an already-active turn or `/run` conflict
 - rehydration of a missing conversation with persisted history
@@ -291,7 +296,7 @@ Expected assertions:
 ### Scenario B: conversation reuse
 
 - run the same issue a second time against the same workspace
-- verify the same `conversation_id` is reused
+- verify the default `per_issue` policy reuses the same `conversation_id`
 - verify continuation guidance is selected instead of a second full prompt
 - verify the second deterministic assistant reply appears only after the reused conversation resumes
 
