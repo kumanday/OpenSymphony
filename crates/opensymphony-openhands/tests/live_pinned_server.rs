@@ -347,6 +347,8 @@ fn long_history_request(workspace_root: &Path, model: &str) -> ConversationCreat
                 LONG_HISTORY_MAX_SIZE,
                 LONG_HISTORY_KEEP_FIRST,
             )),
+            tools: None,
+            include_default_tools: None,
         },
     }
 }
