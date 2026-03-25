@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 use serde_json::{Value, json};
@@ -28,9 +30,20 @@ pub struct LlmConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolConfig {
+    pub name: String,
+    #[serde(default)]
+    pub params: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentConfig {
     pub kind: String,
     pub llm: LlmConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ToolConfig>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_default_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,6 +125,8 @@ impl ConversationCreateRequest {
                     api_key: config.api_key,
                     base_url: config.base_url,
                 },
+                tools: None,
+                include_default_tools: None,
             },
         }
     }
@@ -384,6 +399,8 @@ mod tests {
                     api_key: Some("fake-key".to_string()),
                     base_url: None,
                 },
+                tools: None,
+                include_default_tools: None,
             },
         };
 
@@ -420,6 +437,76 @@ mod tests {
             .expect("request should serialize");
 
         assert_eq!(value, json!({}));
+    }
+
+    #[test]
+    fn conversation_create_request_serializes_agent_tool_config_when_present() {
+        let request = ConversationCreateRequest {
+            conversation_id: Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+                .expect("uuid should parse"),
+            workspace: WorkspaceConfig {
+                working_dir: "/tmp/workspace".to_string(),
+                kind: "LocalWorkspace".to_string(),
+            },
+            persistence_dir: "/tmp/workspace/.opensymphony/openhands".to_string(),
+            max_iterations: 7,
+            stuck_detection: true,
+            confirmation_policy: ConfirmationPolicy {
+                kind: "NeverConfirm".to_string(),
+            },
+            agent: AgentConfig {
+                kind: "Agent".to_string(),
+                llm: LlmConfig {
+                    model: "fake-model".to_string(),
+                    api_key: Some("fake-key".to_string()),
+                    base_url: Some("https://example.com/v1".to_string()),
+                },
+                tools: Some(vec![
+                    ToolConfig {
+                        name: "TerminalTool".to_string(),
+                        params: BTreeMap::new(),
+                    },
+                    ToolConfig {
+                        name: "BrowserToolSet".to_string(),
+                        params: BTreeMap::from([(
+                            "start_url".to_string(),
+                            Value::String("https://example.com".to_string()),
+                        )]),
+                    },
+                ]),
+                include_default_tools: Some(vec![
+                    "FinishTool".to_string(),
+                    "ThinkTool".to_string(),
+                ]),
+            },
+        };
+
+        let value = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(
+            value["agent"],
+            json!({
+                "kind": "Agent",
+                "llm": {
+                    "model": "fake-model",
+                    "api_key": "fake-key",
+                    "base_url": "https://example.com/v1",
+                },
+                "tools": [
+                    {
+                        "name": "TerminalTool",
+                        "params": {},
+                    },
+                    {
+                        "name": "BrowserToolSet",
+                        "params": {
+                            "start_url": "https://example.com",
+                        },
+                    },
+                ],
+                "include_default_tools": ["FinishTool", "ThinkTool"],
+            })
+        );
     }
 
     #[test]
