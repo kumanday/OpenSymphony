@@ -85,7 +85,7 @@ Notes:
 - `.opensymphony.after_create.json` is an internal OpenSymphony bootstrap receipt written at the workspace root immediately after a successful first-time `after_create` hook and before `.opensymphony/` metadata bootstrap.
 - The workspace layer bootstraps `issue.json`, `run.json`, and the supporting metadata directories after a successful first-time `after_create` hook so clone/worktree hooks still see a fresh workspace directory.
 - `conversation.json` now uses workspace-owned path and serialization helpers, but the OpenHands issue-session runner still owns when it is created, reused, or reset.
-- `conversation.json` is the issue-to-session registry: it stores the issue reference, stable `conversation_id`, active reuse policy, timestamps, transport diagnostics, and the launch profile needed to resume or rehydrate the same OpenHands thread later through `opensymphony debug`.
+- `conversation.json` is the issue-to-session registry: it stores the issue reference, stable `conversation_id`, active reuse policy, timestamps, transport diagnostics, the launch profile needed to resume or rehydrate the same OpenHands thread later through `opensymphony debug`, and a hashed LLM config fingerprint so provider drift can be detected without writing secrets to disk.
 - `prompts/` holds the latest prompt of each kind plus JSON metadata that points back to the per-run archive.
 - `runs/attempt-####/` holds immutable per-run prompt captures for auditability without mutating repository-owned policy files.
 - The repository working tree remains otherwise untouched except by normal agent work.
@@ -253,6 +253,7 @@ Suggested fields:
 - `updated_at`
 - `last_attached_at`
 - `launch_profile`
+- `llm_config_fingerprint`
 - `fresh_conversation`
 - `workflow_prompt_seeded`
 - `reset_reason`
@@ -270,6 +271,7 @@ This file is the bridge between Symphony issue ownership and OpenHands conversat
 It also makes conversational debugging deterministic: `opensymphony debug <issue-id>`
 uses the stored issue reference plus `launch_profile` to find the workspace, resume the
 same thread, and preserve context across orchestrator restarts or retry attempts.
+The fingerprint is intentionally hash-only; OpenSymphony never writes raw LLM API keys or base URLs into `conversation.json`.
 
 ## 9. Generated context artifacts
 
@@ -344,6 +346,7 @@ Current implementation detail:
 - the full workflow prompt is rendered from `WORKFLOW.md`
 - continuation guidance is a separate built-in resume prompt, not a rerender of the workflow template
 - `conversation.json` records which prompt shape last ran, which reuse policy produced the current conversation, and whether the workflow prompt has been successfully seeded into the reused conversation
+- if a conversation is recreated because the current LLM config no longer matches the stored fingerprint, the next fresh full prompt also appends Linear workpad recovery context or an explicit absence note before normal execution continues
 
 ## 11. Conversation lifetime policy inside the workspace
 
@@ -364,6 +367,7 @@ Reset handling:
 - archive old metadata if useful
 - write a reset reason
 - reset when the persisted `reuse_policy` no longer matches the current workflow
+- reset when the current workflow-resolved LLM model or provider values drift from the stored conversation fingerprint
 - resend full prompt on the next fresh run
 
 ## 12. Clean exit and continuation

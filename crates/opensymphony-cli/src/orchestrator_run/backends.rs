@@ -2,15 +2,17 @@
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
+use async_trait::async_trait;
 use opensymphony_domain::{
     ConversationMetadata, NormalizedIssue, TimestampMs, WorkerOutcomeKind, WorkerOutcomeRecord,
     WorkspaceKey,
 };
-use opensymphony_linear::{LinearClient, LinearConfig, LinearError};
+use opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use opensymphony_openhands::{
     IssueSessionError, IssueSessionObserver, IssueSessionResult, IssueSessionRunner,
     IssueSessionRunnerConfig, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
     OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
+    WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
 use opensymphony_orchestrator::{
     RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerLaunch,
@@ -84,6 +86,7 @@ pub(super) struct RuntimeWorkerBackend {
     workflow: Arc<ResolvedWorkflow>,
     workspace_manager: Arc<WorkspaceManager>,
     runner_config: IssueSessionRunnerConfig,
+    workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
@@ -99,6 +102,24 @@ struct SchedulerObserver {
     worker_id: String,
     launch_tx: Option<oneshot::Sender<LaunchReport>>,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
+}
+
+struct LinearWorkpadCommentSource {
+    client: LinearClient,
+}
+
+#[async_trait]
+impl WorkpadCommentSource for LinearWorkpadCommentSource {
+    async fn fetch_workpad_comment(
+        &self,
+        issue_id: &str,
+    ) -> Result<Option<SessionWorkpadComment>, String> {
+        self.client
+            .fetch_workpad_comment(issue_id)
+            .await
+            .map(|comment| comment.map(workpad_comment_from_linear))
+            .map_err(|error| error.to_string())
+    }
 }
 
 impl IssueSessionObserver for SchedulerObserver {
@@ -127,16 +148,28 @@ impl IssueSessionObserver for SchedulerObserver {
     }
 }
 
-pub(super) fn build_tracker_backend(
-    workflow: &ResolvedWorkflow,
-) -> Result<RuntimeTrackerBackend, LinearError> {
+fn build_linear_client(workflow: &ResolvedWorkflow) -> Result<LinearClient, LinearError> {
     let tracker = &workflow.config.tracker;
     let mut config = LinearConfig::new(tracker.api_key.clone(), tracker.project_slug.clone());
     config.base_url = tracker.endpoint.clone();
     config.active_states = tracker.active_states.clone();
     config.terminal_states = tracker.terminal_states.clone();
+    LinearClient::new(config)
+}
+
+fn workpad_comment_from_linear(comment: WorkpadComment) -> SessionWorkpadComment {
+    SessionWorkpadComment {
+        id: comment.id,
+        body: comment.body,
+        updated_at: comment.updated_at,
+    }
+}
+
+pub(super) fn build_tracker_backend(
+    workflow: &ResolvedWorkflow,
+) -> Result<RuntimeTrackerBackend, LinearError> {
     Ok(RuntimeTrackerBackend {
-        client: LinearClient::new(config)?,
+        client: build_linear_client(workflow)?,
     })
 }
 
@@ -285,11 +318,25 @@ impl RuntimeWorkerBackend {
         workspace_manager: Arc<WorkspaceManager>,
     ) -> Self {
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
+        let workpad_comment_source = match build_linear_client(&workflow) {
+            Ok(client) => {
+                Some(Arc::new(LinearWorkpadCommentSource { client })
+                    as Arc<dyn WorkpadCommentSource>)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "failed to build the Linear workpad comment source; config-drift rehydrate prompts will fall back to workspace-only recovery"
+                );
+                None
+            }
+        };
         Self {
             client,
             workflow: workflow.clone(),
             workspace_manager,
             runner_config: IssueSessionRunnerConfig::from_workflow(&workflow),
+            workpad_comment_source,
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
@@ -365,7 +412,10 @@ impl WorkerBackend for RuntimeWorkerBackend {
         &mut self,
         request: WorkerStartRequest,
     ) -> Result<WorkerLaunch, Self::Error> {
-        let runner = IssueSessionRunner::new(self.client.clone(), self.runner_config.clone());
+        let mut runner = IssueSessionRunner::new(self.client.clone(), self.runner_config.clone());
+        if let Some(source) = self.workpad_comment_source.clone() {
+            runner = runner.with_workpad_comment_source(source);
+        }
         let workspace_manager = self.workspace_manager.clone();
         let workflow = self.workflow.clone();
         let updates_tx = self.updates_tx.clone();
