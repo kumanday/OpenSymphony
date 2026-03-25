@@ -21,6 +21,7 @@ pub const DEFAULT_OPENHANDS_PERSISTENCE_DIR: &str = ".opensymphony/openhands";
 pub const DEFAULT_OPENHANDS_MAX_ITERATIONS: u64 = 500;
 pub const DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND: &str = "NeverConfirm";
 pub const DEFAULT_OPENHANDS_AGENT_KIND: &str = "Agent";
+pub const DEFAULT_OPENHANDS_AGENT_TOOLS: &[&str] = &["TerminalTool", "FileEditorTool"];
 pub const DEFAULT_OPENHANDS_READY_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS: u64 = 1_000;
 pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
@@ -159,9 +160,19 @@ pub struct OpenHandsConfirmationPolicy {
 pub struct OpenHandsConversationAgentFrontMatter {
     pub kind: Option<String>,
     pub llm: Option<OpenHandsLlmFrontMatter>,
+    pub tools: Option<Vec<OpenHandsConversationToolFrontMatter>>,
+    pub include_default_tools: Option<Vec<String>>,
     pub log_completions: Option<bool>,
     #[serde(flatten)]
     pub options: BTreeMap<String, serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenHandsConversationToolFrontMatter {
+    pub name: String,
+    #[serde(default)]
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -306,8 +317,16 @@ pub struct OpenHandsConversationConfig {
 pub struct OpenHandsConversationAgentConfig {
     pub kind: String,
     pub llm: Option<OpenHandsLlmConfig>,
+    pub tools: Option<Vec<OpenHandsConversationToolConfig>>,
+    pub include_default_tools: Option<Vec<String>>,
     pub log_completions: bool,
     pub options: BTreeMap<String, serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenHandsConversationToolConfig {
+    pub name: String,
+    pub params: BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

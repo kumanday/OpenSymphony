@@ -393,6 +393,8 @@ mod tests {
                     api_key: None,
                     base_url: None,
                 },
+                tools: None,
+                include_default_tools: None,
             },
         };
         let running = EventEnvelope::new(
