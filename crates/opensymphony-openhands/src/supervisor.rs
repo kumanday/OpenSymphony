@@ -53,6 +53,7 @@ impl Default for ProbeConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisedServerConfig {
     pub tooling: LocalServerTooling,
+    pub command: Option<Vec<String>>,
     pub port_override: Option<u16>,
     pub extra_env: BTreeMap<String, String>,
     pub startup_timeout: Duration,
@@ -63,6 +64,7 @@ impl SupervisedServerConfig {
     pub fn new(tooling: LocalServerTooling) -> Self {
         Self {
             tooling,
+            command: None,
             port_override: None,
             extra_env: BTreeMap::new(),
             startup_timeout: Duration::from_secs(10),
@@ -197,9 +199,11 @@ impl LocalServerSupervisor {
                 }
             }
             SupervisorConfig::Supervised(config) => {
-                let launch = config
-                    .tooling
-                    .resolve_launch(config.port_override, &config.extra_env)?;
+                let launch = config.tooling.resolve_launch(
+                    config.port_override,
+                    &config.extra_env,
+                    config.command.as_deref(),
+                )?;
                 if probe_local_ready(&launch.base_url, &config.probe)? {
                     return Err(SupervisorError::ExistingReadyServer {
                         base_url: launch.base_url,

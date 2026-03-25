@@ -104,7 +104,8 @@ Current implementation:
 - reject parent-directory traversal in relative OpenHands persistence paths
 - validate `openhands` extension namespace
 - leave `openhands.local_server.command` unset when omitted so the runtime-owned local tooling layer resolves the pinned launcher from the OpenSymphony checkout
-- fail when `openhands.local_server.command` is configured until the runtime supervisor can honor workflow-owned launcher overrides
+- resolve `openhands.local_server.command` during workflow loading and honor it only for daemon-managed local supervision
+- fail at runtime when `openhands.local_server.command` is configured for external, authenticated, path-prefixed, or `local_server.enabled: false` targets
 - fail when `openhands.local_server.enabled: false` is configured until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - fail when `openhands.local_server.env` is configured until the runtime supervisor creation path forwards workflow-owned launcher environment variables instead of always using runtime-owned defaults
 - fail when `openhands.local_server.readiness_probe_path` is configured until the runtime supervisor launch path consumes workflow-owned probe settings instead of always using `/openapi.json`
@@ -128,7 +129,8 @@ Current implementation:
 - fail when `openhands.conversation.agent.log_completions` or extra agent option keys are configured before the runtime conversation-create adapter can forward them
 - fail when `openhands.conversation.agent.llm` is present without a non-empty `model`
 - fail when `openhands.conversation.agent.llm` includes extra option keys before the runtime conversation-create adapter can forward them
-- fail when `openhands.conversation.agent.llm.api_key_env` or `base_url_env` are configured before the runtime conversation-create adapter can forward them
+- resolve `openhands.conversation.agent.llm.api_key_env` and `base_url_env` into the conversation-create payload at runtime
+- fail when configured `openhands.conversation.agent.llm.api_key_env` or `base_url_env` names are missing or blank in the runtime environment
 - fail on malformed `agent.max_concurrent_agents_by_state` entries
 - preserve the Markdown body exactly after the front matter terminator
 - treat whitespace-only prompt bodies as absent so `DEFAULT_PROMPT_TEMPLATE` still applies

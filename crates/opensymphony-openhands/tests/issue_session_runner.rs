@@ -176,6 +176,56 @@ Title: {{{{ issue.title }}}}
         .expect("workflow should resolve")
 }
 
+fn workflow_with_llm_provider_overrides(
+    workspace_root: &Path,
+    base_url: &str,
+    api_key_env: Option<&str>,
+    base_url_env: Option<&str>,
+) -> ResolvedWorkflow {
+    let api_key_line = api_key_env
+        .map(|name| format!("        api_key_env: {name}\n"))
+        .unwrap_or_default();
+    let base_url_line = base_url_env
+        .map(|name| format!("        base_url_env: {name}\n"))
+        .unwrap_or_default();
+    let workflow = WorkflowDefinition::parse(&format!(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: {}
+openhands:
+  transport:
+    base_url: {}
+  conversation:
+    agent:
+      llm:
+        model: openai/gpt-5.4
+{api_key_line}{base_url_line}
+---
+
+# Assignment
+
+Issue: {{{{ issue.identifier }}}}
+"#,
+        workspace_root.display(),
+        base_url,
+    ))
+    .expect("workflow should parse");
+
+    workflow
+        .resolve(
+            workspace_root,
+            &BTreeMap::from([("LINEAR_API_KEY".to_string(), "linear-token".to_string())]),
+        )
+        .expect("workflow should resolve")
+}
+
 fn workflow_for_with_agent_block(
     workspace_root: &Path,
     base_url: &str,
@@ -1460,6 +1510,169 @@ async fn issue_session_runner_uses_the_configured_persistence_dir_for_create_and
     assert_eq!(
         second_manifest_state.persistence_dir,
         expected_persistence_dir
+    );
+}
+
+#[tokio::test]
+async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_with_llm_provider_overrides(
+        &workspace_root,
+        server.base_url(),
+        Some("WORKFLOW_OPENHANDS_API_KEY"),
+        Some("WORKFLOW_OPENHANDS_BASE_URL"),
+    );
+    let issue = sample_issue("COE-280-provider");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::with_environment(
+        client,
+        runner_config(&workflow),
+        BTreeMap::from([
+            (
+                "WORKFLOW_OPENHANDS_API_KEY".to_string(),
+                "provider-secret".to_string(),
+            ),
+            (
+                "WORKFLOW_OPENHANDS_BASE_URL".to_string(),
+                "https://provider.example.test/v1".to_string(),
+            ),
+        ]),
+    );
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut run_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("provider-run", 1))
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-provider",
+        None,
+        max_turns,
+    );
+    let result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("provider-backed session run should succeed");
+
+    assert_eq!(
+        result.run_status,
+        opensymphony_workspace::RunStatus::Succeeded
+    );
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    assert_eq!(
+        create_request.agent.llm.api_key.as_deref(),
+        Some("provider-secret")
+    );
+    assert_eq!(
+        create_request.agent.llm.base_url.as_deref(),
+        Some("https://provider.example.test/v1")
+    );
+
+    let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+    let launch_profile = manifest
+        .launch_profile
+        .as_ref()
+        .expect("launch profile should be persisted");
+    assert_eq!(
+        launch_profile.llm_api_key_env.as_deref(),
+        Some("WORKFLOW_OPENHANDS_API_KEY")
+    );
+    assert_eq!(
+        launch_profile.llm_base_url_env.as_deref(),
+        Some("WORKFLOW_OPENHANDS_BASE_URL")
+    );
+}
+
+#[tokio::test]
+async fn issue_session_runner_fails_when_workflow_owned_llm_provider_env_is_missing() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_with_llm_provider_overrides(
+        &workspace_root,
+        server.base_url(),
+        Some("WORKFLOW_MISSING_API_KEY"),
+        None,
+    );
+    let issue = sample_issue("COE-280-missing-provider");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner =
+        IssueSessionRunner::with_environment(client, runner_config(&workflow), BTreeMap::new());
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut run_manifest = manager
+        .start_run(
+            &ensured.handle,
+            &RunDescriptor::new("missing-provider-run", 1),
+        )
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-missing-provider",
+        None,
+        max_turns,
+    );
+    let result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("missing provider env should surface as a failed run");
+
+    assert_eq!(result.run_status, opensymphony_workspace::RunStatus::Failed);
+    assert_eq!(result.worker_outcome.outcome, WorkerOutcomeKind::Failed);
+    assert!(
+        result
+            .worker_outcome
+            .error
+            .as_deref()
+            .expect("provider env error should be persisted")
+            .contains("WORKFLOW_MISSING_API_KEY")
+    );
+    assert!(
+        manager
+            .read_text_artifact(
+                &ensured.handle,
+                &ensured
+                    .handle
+                    .openhands_dir()
+                    .join("create-conversation-request.json"),
+            )
+            .await
+            .expect("request artifact lookup should succeed")
+            .is_none()
     );
 }
 

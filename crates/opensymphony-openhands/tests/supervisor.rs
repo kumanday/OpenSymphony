@@ -265,6 +265,53 @@ fn supervised_start_supports_relative_tool_dir_paths() {
     assert_eq!(stopped.state, ServerState::Stopped);
 }
 
+#[test]
+fn supervised_start_honors_workflow_command_overrides() {
+    let fixture = FakeToolingFixture::new("ready");
+    let port = free_port();
+    let custom_launcher = fixture.tool_dir().join("custom-run.sh");
+    let marker_path = fixture.tool_dir().join("custom-launch-marker.txt");
+    fs::write(
+        &custom_launcher,
+        format!(
+            "#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' \"$0 $*\" > \"{}\"\nexec {} \"$(cd -- \"$(dirname -- \"$0\")\" && pwd)/fake_server.py\" \"$OPENHANDS_SERVER_PORT\" ready\n",
+            marker_path.display(),
+            fixture.python,
+        ),
+    )
+    .expect("custom launcher should be written");
+
+    let mut config = SupervisedServerConfig::new(
+        LocalServerTooling::load(fixture.tool_dir()).expect("tooling should load"),
+    );
+    config.command = Some(vec![
+        "bash".to_string(),
+        custom_launcher
+            .file_name()
+            .expect("file name should exist")
+            .to_string_lossy()
+            .into_owned(),
+    ]);
+    config.port_override = Some(port);
+    config.startup_timeout = Duration::from_secs(3);
+
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
+    let started = supervisor.start().expect("workflow override should start");
+
+    assert_eq!(started.state, ServerState::Ready);
+    assert!(
+        started
+            .launcher
+            .as_deref()
+            .is_some_and(|launcher| launcher.contains("workflow override"))
+    );
+    let marker = fs::read_to_string(&marker_path).expect("custom launcher marker should exist");
+    assert!(marker.contains("custom-run.sh"));
+
+    let stopped = supervisor.stop().expect("stop should work");
+    assert_eq!(stopped.state, ServerState::Stopped);
+}
+
 struct FakeToolingFixture {
     temp_dir: TempDir,
     python: String,

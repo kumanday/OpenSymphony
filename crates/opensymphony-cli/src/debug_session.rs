@@ -493,11 +493,14 @@ async fn attach_or_rehydrate_stream(
         Err(error) if should_rehydrate_after_attach_failure(&error) => {
             let launch_profile = resolve_launch_profile(manifest, workflow)
                 .map_err(|detail| DebugCommandError::LaunchProfile { detail })?;
-            let request = launch_profile.to_create_request(
-                workspace.workspace_path(),
-                &manifest.persistence_dir,
-                Some(conversation_id),
-            );
+            let request = launch_profile
+                .to_create_request(
+                    &ProcessEnvironment,
+                    workspace.workspace_path(),
+                    &manifest.persistence_dir,
+                    Some(conversation_id),
+                )
+                .map_err(|detail| DebugCommandError::LaunchProfile { detail })?;
             let conversation = client.create_conversation(&request).await?;
             if conversation.conversation_id != conversation_id {
                 return Err(DebugCommandError::RehydratedConversationMismatch {
