@@ -8,9 +8,10 @@ use opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
     IssueStateCategory, NormalizedIssue, RecoveryRecord, ReleaseReason, RetryReason,
     RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend,
-    TrackerIssue, TrackerIssueStateSnapshot, WorkerAbortReason, WorkerBackend, WorkerId,
-    WorkerLaunch, WorkerOutcomeKind, WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate,
-    WorkspaceBackend, WorkspaceKey, WorkspaceRecord,
+    TrackerIssue, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
+    WorkerAbortReason, WorkerBackend, WorkerId, WorkerLaunch, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey,
+    WorkspaceRecord,
 };
 
 fn ts(value: u64) -> TimestampMs {
@@ -85,6 +86,26 @@ fn normalized_issue(id: &str, identifier: &str, state: &str) -> NormalizedIssue 
         }],
         created_at: Some(ts(0)),
         updated_at: Some(ts(0)),
+    }
+}
+
+fn tracker_state_snapshot(
+    id: &str,
+    identifier: &str,
+    state: &str,
+    tracker_type: &str,
+    updated_at: u64,
+) -> TrackerIssueStateSnapshot {
+    TrackerIssueStateSnapshot {
+        id: id.to_string(),
+        identifier: identifier.to_string(),
+        state: TrackerIssueState {
+            id: state.to_ascii_lowercase().replace(' ', "-"),
+            name: state.to_string(),
+            tracker_type: tracker_type.to_string(),
+            kind: TrackerIssueStateKind::from_tracker_type(tracker_type),
+        },
+        updated_at: dt(updated_at),
     }
 }
 
@@ -402,22 +423,93 @@ async fn failures_schedule_exponential_backoff() {
 }
 
 #[tokio::test]
-async fn terminal_reconciliation_aborts_running_worker_and_cleans_up_workspace() {
-    let issue = tracker_issue("lin-270", "COE-270", "In Progress", 0);
+async fn per_state_capacity_releases_slot_after_worker_finishes() {
     let tracker = FakeTracker {
-        active: vec![issue.clone()],
+        active: vec![
+            tracker_issue("lin-275", "COE-275", "In Progress", 0),
+            tracker_issue("lin-276", "COE-276", "In Progress", 1),
+        ],
         ..Default::default()
     };
     let workspace = FakeWorkspace::default();
     let worker = FakeWorker::default();
-    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+    let mut config = scheduler_config();
+    config
+        .max_concurrent_agents_by_state
+        .insert("In Progress".to_string(), 1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("first tick should dispatch the first issue");
+
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: first_run.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &first_run,
+                WorkerOutcomeKind::Succeeded,
+                ts(200),
+                Some("worker exited cleanly".to_string()),
+                None,
+            ),
+        });
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("finish tick should free the state slot for the next issue");
+
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1].issue.identifier.as_str(),
+        "COE-276"
+    );
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-275").expect("issue id should be valid"))
+            .expect("finished issue should still exist")
+            .status(),
+        SchedulerStatus::RetryQueued
+    );
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-276").expect("issue id should be valid"))
+            .expect("second issue should be running")
+            .status(),
+        SchedulerStatus::Running
+    );
+}
+
+#[tokio::test]
+async fn terminal_reconciliation_aborts_running_worker_and_cleans_up_workspace() {
+    let issue = tracker_issue("lin-270", "COE-270", "In Progress", 0);
+    let tracker = FakeTracker {
+        active: vec![
+            issue.clone(),
+            tracker_issue("lin-270-b", "COE-270-B", "In Progress", 1),
+        ],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config
+        .max_concurrent_agents_by_state
+        .insert("In Progress".to_string(), 1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
 
     scheduler
         .tick(ts(100))
         .await
         .expect("first tick should succeed");
 
-    scheduler.tracker_mut().active.clear();
+    scheduler.tracker_mut().active =
+        vec![tracker_issue("lin-270-b", "COE-270-B", "In Progress", 1)];
     scheduler.tracker_mut().terminal = vec![tracker_issue("lin-270", "COE-270", "Done", 0)];
 
     scheduler
@@ -445,17 +537,36 @@ async fn terminal_reconciliation_aborts_running_worker_and_cleans_up_workspace()
         scheduler.workspace().cleaned,
         vec![("COE-270".to_string(), true)]
     );
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1].issue.identifier.as_str(),
+        "COE-270-B"
+    );
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-270-b").expect("issue id should be valid"))
+            .expect("replacement issue should be running")
+            .status(),
+        SchedulerStatus::Running
+    );
 }
 
 #[tokio::test]
 async fn runtime_events_extend_stall_deadlines_before_retrying_a_stalled_worker() {
     let tracker = FakeTracker {
-        active: vec![tracker_issue("lin-271", "COE-271", "In Progress", 0)],
+        active: vec![
+            tracker_issue("lin-271", "COE-271", "In Progress", 0),
+            tracker_issue("lin-271-b", "COE-271-B", "In Progress", 1),
+        ],
         ..Default::default()
     };
     let workspace = FakeWorkspace::default();
     let worker = FakeWorker::default();
-    let mut scheduler = Scheduler::new(tracker, workspace, worker, scheduler_config());
+    let mut config = scheduler_config();
+    config
+        .max_concurrent_agents_by_state
+        .insert("In Progress".to_string(), 1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
 
     scheduler
         .tick(ts(0))
@@ -508,6 +619,11 @@ async fn runtime_events_extend_stall_deadlines_before_retrying_a_stalled_worker(
         execution.retry().expect("retry should exist").reason,
         RetryReason::Stalled
     );
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1].issue.identifier.as_str(),
+        "COE-271-B"
+    );
 }
 
 #[tokio::test]
@@ -552,6 +668,158 @@ async fn recovery_reuses_manifest_workspace_for_active_issue_dispatch() {
         recovered_workspace.path
     );
     assert!(scheduler.workspace().cleaned.is_empty());
+}
+
+#[tokio::test]
+async fn tracker_inactive_release_frees_the_per_state_slot() {
+    let tracker = FakeTracker {
+        active: vec![
+            tracker_issue("lin-277", "COE-277", "In Progress", 0),
+            tracker_issue("lin-278", "COE-278", "In Progress", 1),
+        ],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config
+        .max_concurrent_agents_by_state
+        .insert("In Progress".to_string(), 1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("first tick should dispatch the first issue");
+
+    scheduler.tracker_mut().active = vec![tracker_issue("lin-278", "COE-278", "In Progress", 1)];
+    scheduler.tracker_mut().states.insert(
+        "lin-277".to_string(),
+        tracker_state_snapshot("lin-277", "COE-277", "Todo", "unstarted", 200),
+    );
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("inactive reconciliation should release and replace the running issue");
+
+    let released = scheduler
+        .execution(&IssueId::new("lin-277").expect("issue id should be valid"))
+        .expect("released issue should still exist");
+    assert_eq!(released.status(), SchedulerStatus::Released);
+    match released.state() {
+        opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
+            assert_eq!(*reason, ReleaseReason::TrackerInactive);
+        }
+        other => panic!("expected released state, got {other:?}"),
+    }
+    assert_eq!(scheduler.worker().aborted.len(), 1);
+    assert_eq!(
+        scheduler.worker().aborted[0].1,
+        WorkerAbortReason::TrackerInactive
+    );
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1].issue.identifier.as_str(),
+        "COE-278"
+    );
+}
+
+#[tokio::test]
+async fn running_count_follows_active_state_reconciliation() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-280", "COE-280", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.max_concurrent_agents = 3;
+    config.stall_timeout_ms = None;
+    config.active_states.push("Code Review".to_string());
+    config
+        .max_concurrent_agents_by_state
+        .insert("In Progress".to_string(), 1);
+    config
+        .max_concurrent_agents_by_state
+        .insert("Code Review".to_string(), 1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("first tick should dispatch the initial issue");
+
+    scheduler.tracker_mut().active = vec![
+        tracker_issue("lin-280", "COE-280", "Code Review", 0),
+        tracker_issue("lin-281", "COE-281", "In Progress", 1),
+        tracker_issue("lin-282", "COE-282", "Code Review", 2),
+    ];
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("active-state reconciliation should update running counts");
+
+    let refreshed = scheduler
+        .execution(&IssueId::new("lin-280").expect("issue id should be valid"))
+        .expect("original issue should still be running");
+    assert_eq!(refreshed.status(), SchedulerStatus::Running);
+    assert_eq!(refreshed.issue().state.name, "Code Review");
+    assert_eq!(scheduler.worker().launches.len(), 2);
+    assert_eq!(
+        scheduler.worker().launches[1].issue.identifier.as_str(),
+        "COE-281"
+    );
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-282").expect("issue id should be valid"))
+            .expect("reconciled active issue should exist")
+            .status(),
+        SchedulerStatus::Unclaimed
+    );
+}
+
+#[tokio::test]
+async fn recovery_does_not_count_released_issues_as_running_capacity() {
+    let recovered_workspace = workspace_record("COE-283-A", "/tmp/recovered/COE-283-A");
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-283-b", "COE-283-B", "In Progress", 1)],
+        states: HashMap::from([(
+            "lin-283-a".to_string(),
+            tracker_state_snapshot("lin-283-a", "COE-283-A", "Todo", "unstarted", 100),
+        )]),
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace {
+        recoveries: vec![RecoveryRecord {
+            issue: normalized_issue("lin-283-a", "COE-283-A", "In Progress"),
+            workspace: recovered_workspace,
+            had_in_flight_run: true,
+        }],
+        ..Default::default()
+    };
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config
+        .max_concurrent_agents_by_state
+        .insert("In Progress".to_string(), 1);
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("recovery tick should not reserve running capacity for released issues");
+
+    let recovered = scheduler
+        .execution(&IssueId::new("lin-283-a").expect("issue id should be valid"))
+        .expect("recovered issue should still exist");
+    assert_eq!(recovered.status(), SchedulerStatus::Released);
+    assert_eq!(scheduler.worker().launches.len(), 1);
+    assert_eq!(
+        scheduler.worker().launches[0].issue.identifier.as_str(),
+        "COE-283-B"
+    );
 }
 
 #[tokio::test]
