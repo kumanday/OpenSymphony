@@ -246,10 +246,13 @@ query/fragment suffixes, and still rejects bracketed IPv6 until the local
 readiness probe grows that support. Non-loopback targets must use `https://`
 and configure `openhands.transport.session_api_key_env`. The runtime attach
 loop now consumes workflow-owned WebSocket readiness and reconnect budgets.
-Until the local supervisor creation path consumes workflow-owned launcher
-overrides, disablement, env, readiness-probe-path, and startup-timeout
-settings, those fields and explicit `websocket.enabled` remain rejected during
-workflow resolution.
+The runtime also now accepts workflow-owned `openhands.local_server.command`
+overrides for managed local supervision and resolves workflow-owned
+`agent.llm.api_key_env` and `agent.llm.base_url_env` names when building the
+conversation-create payload. Explicit `local_server.enabled`, `local_server.env`,
+`local_server.readiness_probe_path`, `local_server.startup_timeout_ms`, and
+`websocket.enabled` remain rejected during workflow resolution until the local
+supervisor and readiness path can honor them end to end.
 
 ## 5. Worker and conversation model
 

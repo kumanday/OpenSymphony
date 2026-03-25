@@ -204,6 +204,7 @@ impl LocalServerTooling {
         &self,
         port_override: Option<u16>,
         extra_env: &BTreeMap<String, String>,
+        command_override: Option<&[String]>,
     ) -> Result<ResolvedLaunch, LocalToolingError> {
         if !self.pin_status.is_ready() {
             return Err(LocalToolingError::UnresolvedPin {
@@ -239,14 +240,36 @@ impl LocalServerTooling {
                 .map(|(key, value)| (key.clone(), value.clone())),
         );
 
+        let (program, args, launcher_summary) = match command_override {
+            Some([]) => {
+                return Err(LocalToolingError::EmptyCommandOverride);
+            }
+            Some([program, args @ ..]) => (
+                program.clone(),
+                args.to_vec(),
+                format!(
+                    "workflow override: {}",
+                    std::iter::once(program.as_str())
+                        .chain(args.iter().map(String::as_str))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            ),
+            None => (
+                "bash".to_string(),
+                vec![self.layout.run_local_script.display().to_string()],
+                self.metadata.launcher.clone(),
+            ),
+        };
+
         Ok(ResolvedLaunch {
-            program: "bash".to_string(),
-            args: vec![self.layout.run_local_script.display().to_string()],
+            program,
+            args,
             env,
             working_dir: self.layout.tool_dir.clone(),
             base_url: self.base_url(port_override),
             version: self.version.clone(),
-            launcher_summary: self.metadata.launcher.clone(),
+            launcher_summary,
         })
     }
 }
@@ -283,6 +306,8 @@ pub enum LocalToolingError {
     NonLoopbackHost { host: String },
     #[error("local OpenHands tooling must force RUNTIME=process, found {runtime}")]
     NonProcessRuntime { runtime: String },
+    #[error("workflow-owned local OpenHands command overrides must not be empty")]
+    EmptyCommandOverride,
     #[error("local OpenHands tooling is not pinned yet: {details}")]
     UnresolvedPin { details: String },
 }
@@ -410,7 +435,7 @@ mod tests {
 
         let tooling = LocalServerTooling::load(temp_dir.path()).expect("load should succeed");
         let error = tooling
-            .resolve_launch(None, &BTreeMap::new())
+            .resolve_launch(None, &BTreeMap::new(), None)
             .expect_err("resolve should fail");
 
         assert!(matches!(error, LocalToolingError::UnresolvedPin { .. }));
@@ -436,6 +461,25 @@ mod tests {
         assert!(tooling.pin_status.blocking_issues().iter().any(|issue| {
             issue.contains("uv.lock OpenHands package versions do not match version.txt")
         }));
+    }
+
+    #[test]
+    fn rejects_empty_workflow_command_overrides() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        write_tooling_fixture(
+            temp_dir.path(),
+            "1.2.3",
+            "openhands-agent-server==1.2.3",
+            resolved_lockfile("1.2.3"),
+            "127.0.0.1",
+        );
+
+        let tooling = LocalServerTooling::load(temp_dir.path()).expect("load should succeed");
+        let error = tooling
+            .resolve_launch(None, &BTreeMap::new(), Some(&[]))
+            .expect_err("empty overrides should fail deterministically");
+
+        assert!(matches!(error, LocalToolingError::EmptyCommandOverride));
     }
 
     fn write_tooling_fixture(
