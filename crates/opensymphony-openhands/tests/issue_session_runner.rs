@@ -7,7 +7,8 @@ use opensymphony_domain::{
 use opensymphony_openhands::{
     ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
     IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig,
-    LLM_SUMMARIZING_CONDENSER_KIND, OpenHandsClient, TransportConfig,
+    LLM_SUMMARIZING_CONDENSER_KIND, McpConfig, McpStdioServerConfig, OpenHandsClient,
+    TransportConfig,
 };
 use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
@@ -165,6 +166,47 @@ Title: {{{{ issue.title }}}}
         base_url,
         reuse_policy,
         persistence_dir_relative,
+    ))
+    .expect("workflow should parse");
+
+    workflow
+        .resolve(
+            workspace_root,
+            &BTreeMap::from([("LINEAR_API_KEY".to_string(), "linear-token".to_string())]),
+        )
+        .expect("workflow should resolve")
+}
+
+fn workflow_for_with_mcp_stdio_server(workspace_root: &Path, base_url: &str) -> ResolvedWorkflow {
+    let workflow = WorkflowDefinition::parse(&format!(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: {}
+openhands:
+  transport:
+    base_url: {}
+  mcp:
+    stdio_servers:
+      - name: linear
+        command:
+          - opensymphony
+          - linear-mcp
+          - --stdio
+---
+
+# Assignment
+
+Issue: {{{{ issue.identifier }}}}
+"#,
+        workspace_root.display(),
+        base_url,
     ))
     .expect("workflow should parse");
 
@@ -1743,5 +1785,60 @@ async fn issue_session_runner_smoke_executes_in_temp_repo_workspace() {
             .await
             .expect("full prompt should be readable")
             .is_some()
+    );
+}
+
+#[tokio::test]
+async fn issue_session_runner_writes_mcp_stdio_servers_into_create_requests() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for_with_mcp_stdio_server(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-281-mcp");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client, runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut run_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("issue session run should succeed");
+
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    assert_eq!(
+        create_request.mcp_config,
+        Some(McpConfig {
+            stdio_servers: vec![McpStdioServerConfig {
+                name: "linear".to_string(),
+                command: "opensymphony".to_string(),
+                args: vec!["linear-mcp".to_string(), "--stdio".to_string()],
+                env: Default::default(),
+            }],
+        })
     );
 }

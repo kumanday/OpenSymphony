@@ -105,7 +105,7 @@ Current implementation:
 - validate `openhands` extension namespace
 - leave `openhands.local_server.command` unset when omitted so the runtime-owned local tooling layer resolves the pinned launcher from the OpenSymphony checkout
 - resolve `openhands.local_server.command` during workflow loading and honor it only for daemon-managed local supervision
-- fail at runtime when `openhands.local_server.command` is configured for external, authenticated, path-prefixed, or `local_server.enabled: false` targets
+- fail at runtime when `openhands.local_server.command` is configured for external, authenticated, or `local_server.enabled: false` targets
 - fail when `openhands.local_server.enabled: false` is configured until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - fail when `openhands.local_server.env` is configured until the runtime supervisor creation path forwards workflow-owned launcher environment variables instead of always using runtime-owned defaults
 - fail when `openhands.local_server.readiness_probe_path` is configured until the runtime supervisor launch path consumes workflow-owned probe settings instead of always using `/openapi.json`
@@ -118,10 +118,11 @@ Current implementation:
 - fail when a non-loopback OpenHands transport base URL uses `http://`
 - fail when a non-loopback OpenHands transport base URL omits `openhands.transport.session_api_key_env`
 - resolve `openhands.transport.session_api_key_env`, `openhands.websocket.auth_mode`, and `openhands.websocket.query_param_name` into the runtime transport config
+- normalize unauthenticated path-prefixed loopback OpenHands transport base URLs back to their origin before managed local supervisor startup while preserving configured prefixes for external or authenticated targets
 - fail when `openhands.websocket.auth_mode` is invalid or requires a missing session API key env
 - fail when explicit `openhands.websocket.enabled` is configured before the runtime readiness path can honor disabling the socket
 - resolve `openhands.websocket.ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` into the runtime readiness and reconnect budgets
-- fail when `openhands.mcp.stdio_servers` is configured before the runtime conversation-create adapter can forward `mcp_config`
+- resolve `openhands.mcp.stdio_servers` into workflow config and forward the supported stdio subset through `mcp_config`
 - resolve `openhands.conversation.reuse_policy` for runtime consumers instead of rejecting non-default values during workflow loading
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
 - fail when `openhands.conversation.confirmation_policy` includes options that cannot be represented in the current OpenHands request subset

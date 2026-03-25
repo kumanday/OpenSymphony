@@ -163,9 +163,9 @@ pub(super) async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
-    let diagnostics = transport.diagnostics()?;
     let local_server = &runtime.workflow.extensions.openhands.local_server;
-    let supervised = diagnostics.managed_local_server_candidate && local_server.enabled;
+    let supervisor_base_url = transport.managed_local_server_base_url()?;
+    let supervised = supervisor_base_url.is_some() && local_server.enabled;
     if local_server.command.is_some() && !supervised {
         return Err(OpenHandsError::InvalidConfiguration {
             detail:
@@ -178,14 +178,17 @@ pub(super) async fn build_runtime_transport(
     if !supervised {
         return Ok((transport, None));
     }
+    let Some(supervisor_base_url) = supervisor_base_url else {
+        return Ok((transport, None));
+    };
 
     let tool_dir = runtime
         .tool_dir
         .clone()
         .ok_or(RunCommandError::MissingToolDir)?;
     let tooling = LocalServerTooling::load(tool_dir)?;
-    let base_url = &runtime.workflow.extensions.openhands.transport.base_url;
-    let url = Url::parse(base_url).expect("validated transport base URL should parse");
+    let url =
+        Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);
     config.command = local_server.command.clone();
     config.extra_env = local_server.env.clone();
@@ -632,7 +635,7 @@ workspace:
   root: ./var/workspaces
 openhands:
   transport:
-    base_url: http://127.0.0.1:8000/runtime
+    base_url: https://127.0.0.1:8000/runtime
   local_server:
     command:
       - bash

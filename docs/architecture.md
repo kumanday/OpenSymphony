@@ -244,12 +244,18 @@ child. Workflow resolution now accepts absolute `http://` and `https://`
 OpenHands origins with optional path prefixes, rejects embedded credentials plus
 query/fragment suffixes, and still rejects bracketed IPv6 until the local
 readiness probe grows that support. Non-loopback targets must use `https://`
-and configure `openhands.transport.session_api_key_env`. The runtime attach
-loop now consumes workflow-owned WebSocket readiness and reconnect budgets.
-The runtime also now accepts workflow-owned `openhands.local_server.command`
-overrides for managed local supervision and resolves workflow-owned
-`agent.llm.api_key_env` and `agent.llm.base_url_env` names when building the
-conversation-create payload. Explicit `local_server.enabled`, `local_server.env`,
+and configure `openhands.transport.session_api_key_env`. For managed local
+loopback targets, the runtime now normalizes any configured path prefix back to
+the origin before starting the repo-owned supervisor and reuses that normalized
+base URL for the local client; authenticated or non-loopback targets keep their
+configured path prefixes end-to-end. The runtime attach loop now consumes
+workflow-owned WebSocket readiness and reconnect budgets. The runtime also now
+accepts workflow-owned `openhands.local_server.command` overrides for managed
+local supervision and resolves workflow-owned `agent.llm.api_key_env` and
+`agent.llm.base_url_env` names when building the conversation-create payload.
+The typed conversation-create request now forwards workflow-owned
+`openhands.mcp.stdio_servers` entries through `mcp_config.stdio_servers`.
+Explicit `local_server.enabled`, `local_server.env`,
 `local_server.readiness_probe_path`, `local_server.startup_timeout_ms`, and
 `websocket.enabled` remain rejected during workflow resolution until the local
 supervisor and readiness path can honor them end to end.

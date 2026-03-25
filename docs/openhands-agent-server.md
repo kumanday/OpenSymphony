@@ -108,11 +108,12 @@ Current repository implementation:
 - `opensymphony doctor` now checks for `cargo`, `curl`, `git`, and `uv` on `PATH`, prints the trusted-machine local-safety warning on every run, and warns when a local deployment points at a non-loopback OpenHands target
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv`, enforces `uv run --directory <tool-dir> --locked --extra agent-server --module openhands.agent_server`, and rejects extra agent-server CLI flags so the pinned project works the same way from the repo root, CI, and the local supervisor
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
-- workflow-owned `openhands.local_server.command` overrides now survive workflow resolution and are honored only when the runtime is using managed local supervision; external, authenticated, path-prefixed, or `local_server.enabled: false` targets fail deterministically at the runtime boundary instead of silently ignoring the override
+- workflow-owned `openhands.local_server.command` overrides now survive workflow resolution and are honored only when the runtime is using managed local supervision; external, authenticated, or `local_server.enabled: false` targets fail deterministically at the runtime boundary instead of silently ignoring the override
 - explicit `openhands.local_server.enabled: false` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - explicit `openhands.local_server.env` overrides are currently rejected during workflow resolution until the runtime supervisor creation path forwards workflow-owned launcher environment variables into `extra_env`
 - explicit `openhands.local_server.startup_timeout_ms` overrides are currently rejected during workflow resolution until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
 - workflow resolution now accepts absolute `http://` and `https://` `openhands.transport.base_url` values with optional path prefixes, rejects embedded credentials plus query/fragment suffixes, still rejects bracketed IPv6 until the local readiness probe supports it, and requires `https://` plus `openhands.transport.session_api_key_env` for non-loopback targets
+- workflow resolution now accepts `openhands.mcp.stdio_servers` entries, validating each `command` vector and preserving the resolved list so the runtime can forward it into `mcp_config.stdio_servers`
 
 ## 4.2 Startup contract
 
@@ -145,8 +146,10 @@ Current implementation detail:
 - the current doctor and live-validation path uses `GET /openapi.json` as the
   conservative readiness probe and will temporarily start a supervised local
   server only when the configured target is an unauthenticated loopback
-  `http://` root origin and the repo-owned pin is valid; authenticated,
-  path-prefixed, or non-loopback targets stay in external mode and are probed in
+  `http://` target and the repo-owned pin is valid; if that loopback target
+  includes a path prefix, the runtime normalizes it back to the origin before
+  launching the managed local server and before rebuilding the local client.
+  Authenticated or non-loopback targets stay in external mode and are probed in
   place
 - live-only doctor overrides such as `probe_model` and `probe_api_key_env` are
   resolved lazily when `--live-openhands` is requested, so shared configs can
@@ -384,7 +387,7 @@ Current workflow defaulting:
 - workflow-owned LLM option keys are rejected during workflow resolution until the current request subset can actually forward them
 - `openhands.conversation.agent.condenser` is the only workflow-owned agent extension currently forwarded by the conversation-create adapter; it defaults to disabled when omitted, and enabled condensers use the agent LLM config plus `max_size: 240` / `keep_first: 2` unless overridden
 - workflow-owned agent options such as `log_completions` and extra agent keys other than `condenser` are rejected during workflow resolution until the current request subset can actually forward them
-- workflow-owned `openhands.mcp.stdio_servers` entries are rejected during workflow resolution until the runtime conversation-create adapter can actually send `mcp_config`
+- workflow resolution now accepts `openhands.mcp.stdio_servers` entries, validating each `command` vector and preserving the resolved list so the runtime can forward it into `mcp_config.stdio_servers`
 
 Implementation rule:
 
@@ -397,13 +400,13 @@ Current repository implementation:
 - the current request model serializes `agent` as `{ kind, llm, condenser? }`; when the workflow enables `agent.condenser`, the runtime forwards `agent.condenser` as `{ kind: LLMSummarizingCondenser, llm, max_size, keep_first }` and reuses the conversation agent LLM settings for the summarizer
 - `llm` still serializes as only `{ model, api_key, base_url? }`, so arbitrary LLM option keys plus agent extras other than `condenser` are rejected before runtime launch
 - the current orchestrator/runtime path consumes workflow-owned `reuse_policy` values: `per_issue` reuses the persisted manifest, `fresh_each_run` always creates a new conversation, and policy drift or unsupported values are surfaced explicitly instead of being silently ignored
-- the current transport layer preserves base-path prefixes across REST endpoints and `/sockets/events/{conversation_id}`, so the same client can target reverse-proxied external servers without code changes outside config
+- the current transport layer preserves base-path prefixes across REST endpoints and `/sockets/events/{conversation_id}` for external or authenticated targets, while managed unauthenticated loopback targets normalize any configured path prefix back to the origin before supervisor startup and client reuse
 - the current session launch profile now persists workflow-owned `agent.llm.api_key_env` and `agent.llm.base_url_env` names so fresh and rehydrated conversation-create requests resolve the same provider env contract
 - the current supervisor readiness probe still owns the local launch path and always uses `/openapi.json`, so explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are still rejected before runtime launch
 - the current supervisor launch path still uses runtime-owned launcher environment variables (`OPENHANDS_SERVER_PORT` and `RUNTIME=process`), so explicit workflow-owned `local_server.env` overrides are rejected before runtime launch
 - the current supervisor launch path now threads workflow-owned `local_server.command` into the actual subprocess launch only for managed local targets; otherwise the runtime rejects that override instead of silently discarding it
 - the current runtime now consumes workflow-owned `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` values, but still always opens the readiness socket so explicit `websocket.enabled` overrides remain rejected before runtime launch
-- the current request model does not yet serialize `mcp_config`, so workflow-owned MCP stdio server declarations are rejected before runtime launch
+- the current request model now serializes the supported `mcp_config.stdio_servers` subset, mapping workflow-owned `command` vectors to OpenHands `command` plus `args` fields and leaving `env` empty for now
 - `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`
 - `AcceptedResponse` tolerates either an explicit JSON success body or an empty successful response for `POST /events` and `POST /run`
 
@@ -487,10 +490,11 @@ For local MVP, the implemented MCP surface is a small Linear tool server launche
   - `linear_link_pr`
   - `linear_list_project_states`
 
-`WORKFLOW.example.md` does not yet declare `mcp.stdio_servers`: workflow-owned
-MCP config remains rejected until the conversation-create adapter can actually
-forward `mcp_config` to OpenHands, so local sessions must provision
-`opensymphony linear-mcp` through the host tool environment for now.
+`WORKFLOW.example.md` does not yet declare `mcp.stdio_servers`, but workflow-
+owned stdio server declarations now flow through the typed
+conversation-create request as `mcp_config.stdio_servers`, so local sessions can
+provision `opensymphony linear-mcp` through workflow config instead of only the
+ambient host tool environment.
 
 ## 12. Hosted-mode implications kept in mind during MVP
 

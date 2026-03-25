@@ -105,8 +105,8 @@ mod tests {
     use serde::Serialize;
 
     use super::{
-        PromptTemplateError, TrackerKind, WorkflowConfigError, WorkflowDefinition,
-        WorkflowLoadError,
+        OpenHandsStdioServerConfig, PromptTemplateError, TrackerKind, WorkflowConfigError,
+        WorkflowDefinition, WorkflowLoadError,
         model::{
             DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
             DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_TOOLS,
@@ -1238,7 +1238,7 @@ openhands:
     }
 
     #[test]
-    fn rejects_unsupported_openhands_mcp_stdio_servers() {
+    fn resolves_openhands_mcp_stdio_servers() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1263,17 +1263,21 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-        let error = workflow
+        let resolved = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("workflow-owned mcp stdio servers should fail during resolution");
+            .expect("workflow-owned mcp stdio servers should resolve");
 
-        assert!(matches!(
-            error,
-            WorkflowConfigError::InvalidField {
-                field: "openhands.mcp.stdio_servers",
-                ..
-            }
-        ));
+        assert_eq!(
+            resolved.extensions.openhands.mcp.stdio_servers,
+            vec![OpenHandsStdioServerConfig {
+                name: "linear".to_string(),
+                command: vec![
+                    "opensymphony".to_string(),
+                    "linear-mcp".to_string(),
+                    "--stdio".to_string(),
+                ],
+            }]
+        );
     }
 
     #[test]
