@@ -18,7 +18,7 @@ OpenSymphony automates software development workflows by:
 - **WebSocket-first runtime**: Real-time agent updates with REST reconciliation
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
 - **Linear MCP integration**: Agent-side Linear writes (comments, state transitions)
-- **Conversation reuse**: Persistent OpenHands conversations across retry attempts
+- **Conversation reuse policies**: Default per-issue reuse with optional fresh-per-run resets
 - **Local-first MVP**: Trusted-machine deployment with optional hosted mode
 
 ## Quick Start

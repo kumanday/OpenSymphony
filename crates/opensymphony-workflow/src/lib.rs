@@ -471,7 +471,7 @@ tracker:
     }
 
     #[test]
-    fn rejects_explicit_openhands_local_server_command() {
+    fn resolves_explicit_openhands_local_server_command() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -495,17 +495,19 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-        let error = workflow
+        let resolved = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("explicit local server commands should fail during resolution");
+            .expect("explicit local server commands should resolve");
 
-        assert!(matches!(
-            error,
-            WorkflowConfigError::InvalidField {
-                field: "openhands.local_server.command",
-                ..
-            }
-        ));
+        assert_eq!(
+            resolved.extensions.openhands.local_server.command,
+            Some(vec![
+                "bash".to_string(),
+                "./scripts/run-openhands.sh".to_string(),
+                "--port".to_string(),
+                "9000".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -1279,7 +1281,7 @@ openhands:
     }
 
     #[test]
-    fn rejects_unsupported_openhands_conversation_reuse_policy_override() {
+    fn resolves_openhands_conversation_reuse_policy_override_for_runtime_consumers() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1299,17 +1301,14 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-        let error = workflow
+        let resolved = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("unsupported reuse policies should fail during resolution");
+            .expect("runtime-owned reuse-policy gating should not fail during workflow resolution");
 
-        assert!(matches!(
-            error,
-            WorkflowConfigError::InvalidField {
-                field: "openhands.conversation.reuse_policy",
-                ..
-            }
-        ));
+        assert_eq!(
+            resolved.extensions.openhands.conversation.reuse_policy,
+            "fresh_each_run"
+        );
     }
 
     #[test]
@@ -1742,7 +1741,7 @@ openhands:
     }
 
     #[test]
-    fn rejects_unsupported_openhands_llm_api_key_env_override() {
+    fn resolves_openhands_llm_api_key_env_override() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1765,17 +1764,21 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token"), ("LLM_MODEL", "gpt-5.4")]);
 
-        let error = workflow
+        let resolved = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("llm api-key env overrides should fail during resolution");
+            .expect("llm api-key env overrides should resolve");
 
-        assert!(matches!(
-            error,
-            WorkflowConfigError::InvalidField {
-                field: "openhands.conversation.agent.llm.api_key_env",
-                ..
-            }
-        ));
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .llm
+                .as_ref()
+                .and_then(|llm| llm.api_key_env.as_deref()),
+            Some("OPENHANDS_API_KEY")
+        );
     }
 
     #[test]
@@ -1835,7 +1838,7 @@ openhands:
     }
 
     #[test]
-    fn rejects_unsupported_openhands_llm_base_url_env_override() {
+    fn resolves_openhands_llm_base_url_env_override() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1858,17 +1861,21 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token"), ("LLM_MODEL", "gpt-5.4")]);
 
-        let error = workflow
+        let resolved = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("llm base-url env overrides should fail during resolution");
+            .expect("llm base-url env overrides should resolve");
 
-        assert!(matches!(
-            error,
-            WorkflowConfigError::InvalidField {
-                field: "openhands.conversation.agent.llm.base_url_env",
-                ..
-            }
-        ));
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .llm
+                .as_ref()
+                .and_then(|llm| llm.base_url_env.as_deref()),
+            Some("OPENHANDS_BASE_URL")
+        );
     }
 
     #[test]

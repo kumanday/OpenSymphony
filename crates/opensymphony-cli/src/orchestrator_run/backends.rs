@@ -10,7 +10,7 @@ use opensymphony_linear::{LinearClient, LinearConfig, LinearError};
 use opensymphony_openhands::{
     IssueSessionError, IssueSessionObserver, IssueSessionResult, IssueSessionRunner,
     IssueSessionRunnerConfig, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
-    SupervisedServerConfig, SupervisorConfig, TransportConfig,
+    OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
 };
 use opensymphony_orchestrator::{
     RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerLaunch,
@@ -163,7 +163,22 @@ pub(super) async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
-    let Some(supervisor_base_url) = transport.managed_local_server_base_url()? else {
+    let local_server = &runtime.workflow.extensions.openhands.local_server;
+    let supervisor_base_url = transport.managed_local_server_base_url()?;
+    let supervised = supervisor_base_url.is_some() && local_server.enabled;
+    if local_server.command.is_some() && !supervised {
+        return Err(OpenHandsError::InvalidConfiguration {
+            detail:
+                "`openhands.local_server.command` requires a managed local OpenHands target with `local_server.enabled: true`"
+                    .to_string(),
+        }
+        .into());
+    }
+
+    if !supervised {
+        return Ok((transport, None));
+    }
+    let Some(supervisor_base_url) = supervisor_base_url else {
         return Ok((transport, None));
     };
 
@@ -175,28 +190,10 @@ pub(super) async fn build_runtime_transport(
     let url =
         Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);
-    config.extra_env = runtime
-        .workflow
-        .extensions
-        .openhands
-        .local_server
-        .env
-        .clone();
-    config.startup_timeout = Duration::from_millis(
-        runtime
-            .workflow
-            .extensions
-            .openhands
-            .local_server
-            .startup_timeout_ms,
-    );
-    config.probe.path = runtime
-        .workflow
-        .extensions
-        .openhands
-        .local_server
-        .readiness_probe_path
-        .clone();
+    config.command = local_server.command.clone();
+    config.extra_env = local_server.env.clone();
+    config.startup_timeout = Duration::from_millis(local_server.startup_timeout_ms);
+    config.probe.path = local_server.readiness_probe_path.clone();
     config.port_override = Some(transport_port_override(&url)?);
 
     let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
@@ -618,6 +615,60 @@ mod tests {
                 .is_empty(),
             "launch failures should be surfaced through start_worker, not queued as runtime updates",
         );
+    }
+
+    #[tokio::test]
+    async fn build_runtime_transport_rejects_launcher_overrides_for_external_targets() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  endpoint: http://127.0.0.1:3001/graphql
+  api_key: test-linear-key
+  project_slug: sample-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+openhands:
+  transport:
+    base_url: https://127.0.0.1:8000/runtime
+  local_server:
+    command:
+      - bash
+      - custom-run.sh
+---
+
+# Test Workflow
+
+Run the scheduler.
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve_with_process_env(tempdir.path())
+        .expect("workflow should resolve");
+        let runtime = RunRuntimeConfig {
+            config_path: None,
+            target_repo: tempdir.path().to_path_buf(),
+            workflow_path: tempdir.path().join("WORKFLOW.md"),
+            workflow,
+            bind: "127.0.0.1:3000".parse().expect("bind should parse"),
+            tool_dir: None,
+        };
+
+        let error = match build_runtime_transport(&runtime).await {
+            Ok(_) => panic!("external targets should reject launcher overrides"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            RunCommandError::Transport(OpenHandsError::InvalidConfiguration { detail })
+                if detail.contains("openhands.local_server.command")
+        ));
     }
 
     #[tokio::test]

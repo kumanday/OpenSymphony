@@ -108,7 +108,7 @@ Current repository implementation:
 - `opensymphony doctor` now checks for `cargo`, `curl`, `git`, and `uv` on `PATH`, prints the trusted-machine local-safety warning on every run, and warns when a local deployment points at a non-loopback OpenHands target
 - `tools/openhands-server/run-local.sh` resolves its own directory before invoking `uv`, enforces `uv run --directory <tool-dir> --locked --extra agent-server --module openhands.agent_server`, and rejects extra agent-server CLI flags so the pinned project works the same way from the repo root, CI, and the local supervisor
 - when `openhands.local_server.command` is omitted, workflow resolution leaves the field unset and the runtime-owned local tooling layer resolves the pinned `tools/openhands-server/run-local.sh` launcher from the OpenSymphony checkout before the supervisor switches `cwd` to the issue workspace, even when the workflow itself lives in a separate target repo
-- explicit `openhands.local_server.command` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned launcher commands instead of always starting the pinned repo-local launcher
+- workflow-owned `openhands.local_server.command` overrides now survive workflow resolution and are honored only when the runtime is using managed local supervision; external, authenticated, or `local_server.enabled: false` targets fail deterministically at the runtime boundary instead of silently ignoring the override
 - explicit `openhands.local_server.enabled: false` overrides are currently rejected during workflow resolution until the runtime supervisor can honor workflow-owned local-server disablement instead of still deciding launch behavior from the localhost base URL plus pinned tooling readiness
 - explicit `openhands.local_server.env` overrides are currently rejected during workflow resolution until the runtime supervisor creation path forwards workflow-owned launcher environment variables into `extra_env`
 - explicit `openhands.local_server.startup_timeout_ms` overrides are currently rejected during workflow resolution until the runtime supervisor creation path consumes workflow-owned startup timeout settings instead of always using the supervisor default
@@ -134,7 +134,8 @@ Readiness probing rule:
 
 Current implementation detail:
 
-- supervised mode launches `bash tools/openhands-server/run-local.sh`
+- supervised mode launches `bash tools/openhands-server/run-local.sh` when `openhands.local_server.command` is omitted
+- when `openhands.local_server.command` is configured for a managed local target, supervised mode executes that command from the configured tooling directory while still injecting the runtime-owned `OPENHANDS_SERVER_PORT` and `RUNTIME=process` environment needed by the pinned local MVP
 - the supervisor sets `OPENHANDS_SERVER_PORT`, while the launcher itself forces `RUNTIME=process`, loopback host `127.0.0.1`, the pinned `agent-server` extra, and `uv` lockfile enforcement
 - before spawning, supervised mode probes the resolved base URL and fails fast if another ready server is already responding there, so the daemon never treats a foreign process as its owned child
 - diagnostics record the launcher summary, resolved base URL, pinned version,
@@ -256,25 +257,36 @@ Current implementation detail:
 
 ## 6.3 Reuse policy
 
-Default policy:
+Supported policies:
 
-- reuse the conversation for the same issue across worker lifetimes
-- when reusing a conversation, send continuation-only guidance instead of replaying the full assignment body
-- if a run fails after attach, preserve the known `conversation_id` in workspace metadata so the next retry can resume the same conversation instead of forcing a fresh thread
-- if persisted conversation metadata is invalid locally, clear it and treat the next dispatch as a fresh reset instead of retrying the corrupt manifest forever
-- reset only when:
-  - conversation metadata is missing or invalid
-  - the server reports the conversation cannot be attached
-  - an incompatible protocol version is detected
-  - an explicit reset policy is configured
+- `per_issue` (default)
+  - reuse the conversation for the same issue across worker lifetimes
+  - send continuation-only guidance instead of replaying the full assignment body once the workflow prompt has already been seeded
+  - preserve the known `conversation_id` in workspace metadata so the next retry can resume the same conversation after a clean worker exit
+- `fresh_each_run`
+  - create a brand-new conversation for every worker lifetime
+  - resend the full workflow prompt on every run
+  - persist the latest fresh conversation in workspace metadata for observability and debug, but never reuse it for the next run
+
+Reset conditions:
+
+- conversation metadata is missing or invalid
+- the server reports the conversation cannot be attached
+- an incompatible protocol version is detected
+- the persisted reuse policy no longer matches the current workflow
+- the configured policy explicitly requires a fresh conversation
 
 Current implementation detail:
 
 - `opensymphony-openhands::IssueSessionRunner` owns `conversation.json`
+- the runner resolves `openhands.conversation.reuse_policy` into runtime behavior instead of treating it as workflow-only metadata
+- unsupported reuse-policy values fail at the runtime boundary with an explicit worker error; they are no longer rejected during workflow resolution
 - fresh conversations start with `workflow_prompt_seeded = false`
 - the full workflow prompt is selected until a `POST /events` call accepts that first assignment message
 - once seeded, later worker lifetimes send built-in continuation guidance instead of rerendering the workflow template
+- `fresh_each_run` bypasses manifest reuse, creates a new `conversation_id` with a full prompt, and records a reset reason in `conversation.json`
 - if `GET /api/conversations/{id}` or the initial attach fails for a reused conversation, the runner retries `POST /api/conversations` with the same stable `conversation_id`; when that re-created thread still exposes persisted history, the runner keeps continuation guidance instead of downgrading to a fresh full prompt
+- the runner persists the active `reuse_policy` alongside the launch profile and treats policy drift as manifest incompatibility so later recovery or interactive debug sessions do not silently reuse a thread created under different semantics
 - the runner persists the conversation launch profile on first create and backfills older manifests on reuse so later rehydration and interactive debug sessions can recreate the same thread settings, including agent tool selection, without guessing from mutable runtime state
 
 ## 6.4 Interactive debug resumption
@@ -361,20 +373,21 @@ Current workflow defaulting:
 - `confirmation_policy.kind` defaults to `NeverConfirm` when omitted
 - unsupported `confirmation_policy` options are rejected during workflow resolution because the current request subset only serializes `{ kind }`
 - `agent.kind` defaults to `Agent` when omitted
-- non-default `openhands.conversation.reuse_policy` values are rejected during workflow resolution until the orchestrator/runtime path can honor alternate conversation reuse behavior
+- `openhands.conversation.reuse_policy` defaults to `per_issue`; the runtime currently supports `per_issue` and `fresh_each_run`, and rejects any other value from the OpenHands boundary with an explicit compatibility error
 - `max_iterations` must fit the downstream OpenHands `u32` request range
 - `openhands.transport.session_api_key_env` is accepted and required for non-loopback remote targets
+- workflow-owned `local_server.command` overrides are accepted during workflow resolution and are only valid for managed local-supervisor targets
 - workflow-owned `local_server.readiness_probe_path` overrides are rejected during workflow resolution until the runtime supervisor launch path consumes them
 - workflow-owned `local_server.startup_timeout_ms` overrides are rejected during workflow resolution until the runtime supervisor creation path consumes them
 - `openhands.websocket.auth_mode` defaults to `auto` and `openhands.websocket.query_param_name` defaults to `session_api_key`
 - workflow-owned `websocket.enabled` overrides are rejected during workflow resolution until the runtime readiness path can honor disabling the socket entirely
 - workflow-owned `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` overrides now resolve into the runtime stream attach and reconnect budgets
 - `agent.llm.model` is required whenever an `llm` block is present
+- workflow-owned `agent.llm.api_key_env` and `agent.llm.base_url_env` overrides are accepted during workflow resolution and resolved lazily at runtime so missing or blank provider envs fail with deterministic runtime-boundary errors
 - workflow-owned LLM option keys are rejected during workflow resolution until the current request subset can actually forward them
 - `openhands.conversation.agent.condenser` is the only workflow-owned agent extension currently forwarded by the conversation-create adapter; it defaults to disabled when omitted, and enabled condensers use the agent LLM config plus `max_size: 240` / `keep_first: 2` unless overridden
 - workflow-owned agent options such as `log_completions` and extra agent keys other than `condenser` are rejected during workflow resolution until the current request subset can actually forward them
-- workflow-owned LLM provider env overrides such as `api_key_env` and `base_url_env` are rejected during workflow resolution until the runtime conversation-create adapter can actually forward them
-- workflow-owned `openhands.mcp.stdio_servers` entries are rejected during workflow resolution until the runtime conversation-create adapter can actually send `mcp_config`
+- workflow resolution now accepts `openhands.mcp.stdio_servers` entries, validating each `command` vector and preserving the resolved list so the runtime can forward it into `mcp_config.stdio_servers`
 
 Implementation rule:
 
@@ -386,10 +399,12 @@ Current repository implementation:
 - `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
 - the current request model serializes `agent` as `{ kind, llm, condenser? }`; when the workflow enables `agent.condenser`, the runtime forwards `agent.condenser` as `{ kind: LLMSummarizingCondenser, llm, max_size, keep_first }` and reuses the conversation agent LLM settings for the summarizer
 - `llm` still serializes as only `{ model, api_key, base_url? }`, so arbitrary LLM option keys plus agent extras other than `condenser` are rejected before runtime launch
-- the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
+- the current orchestrator/runtime path consumes workflow-owned `reuse_policy` values: `per_issue` reuses the persisted manifest, `fresh_each_run` always creates a new conversation, and policy drift or unsupported values are surfaced explicitly instead of being silently ignored
 - the current transport layer preserves base-path prefixes across REST endpoints and `/sockets/events/{conversation_id}` for external or authenticated targets, while managed unauthenticated loopback targets normalize any configured path prefix back to the origin before supervisor startup and client reuse
+- the current session launch profile now persists workflow-owned `agent.llm.api_key_env` and `agent.llm.base_url_env` names so fresh and rehydrated conversation-create requests resolve the same provider env contract
 - the current supervisor readiness probe still owns the local launch path and always uses `/openapi.json`, so explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are still rejected before runtime launch
 - the current supervisor launch path still uses runtime-owned launcher environment variables (`OPENHANDS_SERVER_PORT` and `RUNTIME=process`), so explicit workflow-owned `local_server.env` overrides are rejected before runtime launch
+- the current supervisor launch path now threads workflow-owned `local_server.command` into the actual subprocess launch only for managed local targets; otherwise the runtime rejects that override instead of silently discarding it
 - the current runtime now consumes workflow-owned `websocket.ready_timeout_ms`, `websocket.reconnect_initial_ms`, and `websocket.reconnect_max_ms` values, but still always opens the readiness socket so explicit `websocket.enabled` overrides remain rejected before runtime launch
 - the current request model now serializes the supported `mcp_config.stdio_servers` subset, mapping workflow-owned `command` vectors to OpenHands `command` plus `args` fields and leaving `env` empty for now
 - `ConversationRunRequest` serializes the empty `{}` body used by `POST /api/conversations/{conversation_id}/run`

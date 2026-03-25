@@ -249,21 +249,22 @@ This keeps WebSocket protocol churn isolated inside `opensymphony-openhands` whi
 
 For each turn:
 
-1. Select prompt shape:
-   - full rendered workflow prompt on a fresh conversation
+1. Select or create the conversation for this worker lifetime according to the resolved reuse policy before choosing the prompt shape.
+2. Select prompt shape:
+   - full rendered workflow prompt on a fresh conversation, including every `fresh_each_run` worker lifetime
    - full rendered workflow prompt again if a reused conversation exists locally but has never been seeded with that first assignment message
    - built-in continuation guidance on resumed seeded conversations or later turns
    - persist the selected prompt under `.opensymphony/prompts/last-*-prompt.(md|json)` and archive the per-run capture under `.opensymphony/runs/attempt-####/`
-2. If the reused conversation is already `queued` or `running`, wait for that
+3. If the reused conversation is already `queued` or `running`, wait for that
    turn to reach a terminal state before sending the next prompt.
-3. `POST /api/conversations/{id}/events`
+4. `POST /api/conversations/{id}/events`
    - user role
    - prompt content
    - `run=false`
-4. `POST /api/conversations/{id}/run`
+5. `POST /api/conversations/{id}/run`
    - if the server returns `409 Conflict`, wait for the active turn to finish,
      reconcile the attached backlog, then retry `POST /run` on the same conversation
-5. Observe progress through the WebSocket event stream
+6. Observe progress through the WebSocket event stream
 
 ## 7.2 Waiting for completion
 
