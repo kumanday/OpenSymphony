@@ -628,39 +628,32 @@ impl IssueSessionRunner {
         issue: &NormalizedIssue,
         workflow: &ResolvedWorkflow,
     ) -> Result<Step<ActiveSession>, IssueSessionError> {
-        if let IssueSessionReusePolicy::Unsupported(policy) = &self.config.reuse_policy {
-            return self
-                .persist_failure_without_stream(
-                    workspace_manager,
-                    workspace,
-                    run_manifest,
-                    observed_run,
-                    IssueSessionPromptKind::Full,
-                    None,
-                    failed_outcome(
-                        "workflow configured an unsupported OpenHands conversation reuse policy",
-                        format!(
-                            "unsupported OpenHands conversation reuse policy `{policy}`; supported runtime policies: `{DEFAULT_REUSE_POLICY}`, `{FRESH_EACH_RUN_REUSE_POLICY}`"
-                        ),
-                    ),
-                )
-                .await
-                .map(Box::new)
-                .map(Step::EarlyResult);
-        }
-
-        let loaded = self
-            .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
-            .await?;
-
         match &self.config.reuse_policy {
-            IssueSessionReusePolicy::PerIssue => match loaded.manifest {
-                Some(manifest) => match self
-                    .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
-                    .await?
-                {
-                    ReuseSession::Active(session) => Ok(Step::Continue(*session)),
-                    ReuseSession::Reset(reason) => {
+            IssueSessionReusePolicy::PerIssue => {
+                let loaded = self
+                    .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
+                    .await?;
+
+                match loaded.manifest {
+                    Some(manifest) => match self
+                        .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
+                        .await?
+                    {
+                        ReuseSession::Active(session) => Ok(Step::Continue(*session)),
+                        ReuseSession::Reset(reason) => {
+                            self.create_fresh_session(
+                                workspace_manager,
+                                workspace,
+                                run_manifest,
+                                observed_run,
+                                issue,
+                                workflow,
+                                Some(reason),
+                            )
+                            .await
+                        }
+                    },
+                    None => {
                         self.create_fresh_session(
                             workspace_manager,
                             workspace,
@@ -668,25 +661,16 @@ impl IssueSessionRunner {
                             observed_run,
                             issue,
                             workflow,
-                            Some(reason),
+                            loaded.reset_reason,
                         )
                         .await
                     }
-                },
-                None => {
-                    self.create_fresh_session(
-                        workspace_manager,
-                        workspace,
-                        run_manifest,
-                        observed_run,
-                        issue,
-                        workflow,
-                        loaded.reset_reason,
-                    )
-                    .await
                 }
-            },
+            }
             IssueSessionReusePolicy::FreshEachRun => {
+                let loaded = self
+                    .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
+                    .await?;
                 let reset_reason = loaded.manifest.as_ref().map_or(loaded.reset_reason, |_| {
                     Some(
                         "workflow reuse policy `fresh_each_run` requested a new conversation for this run"
@@ -704,7 +688,24 @@ impl IssueSessionRunner {
                 )
                 .await
             }
-            IssueSessionReusePolicy::Unsupported(_) => unreachable!(),
+            IssueSessionReusePolicy::Unsupported(policy) => self
+                .persist_failure_without_stream(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    observed_run,
+                    IssueSessionPromptKind::Full,
+                    None,
+                    failed_outcome(
+                        "workflow configured an unsupported OpenHands conversation reuse policy",
+                        format!(
+                            "unsupported OpenHands conversation reuse policy `{policy}`; supported runtime policies: `{DEFAULT_REUSE_POLICY}`, `{FRESH_EACH_RUN_REUSE_POLICY}`"
+                        ),
+                    ),
+                )
+                .await
+                .map(Box::new)
+                .map(Step::EarlyResult),
         }
     }
 
