@@ -366,13 +366,13 @@ fn build_debug_client(
     runtime: &DebugRuntimeConfig,
 ) -> Result<(OpenHandsClient, Option<LocalServerSupervisor>, String), DebugCommandError> {
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
-    if !requires_supervisor(&runtime.workflow) {
+    let Some(supervisor_base_url) = transport.managed_local_server_base_url()? else {
         let message = format!(
             "Using configured OpenHands server at {}.",
             transport.base_url()
         );
         return Ok((OpenHandsClient::new(transport), None, message));
-    }
+    };
 
     let tool_dir = runtime
         .tool_dir
@@ -381,8 +381,8 @@ fn build_debug_client(
             repo_root: runtime.repo_root.clone(),
         })?;
     let tooling = LocalServerTooling::load(tool_dir)?;
-    let url = Url::parse(&runtime.workflow.extensions.openhands.transport.base_url)
-        .expect("validated transport URL should parse");
+    let url =
+        Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);
     config.extra_env = runtime
         .workflow
@@ -429,22 +429,6 @@ fn build_debug_client(
         }
         Err(error) => Err(DebugCommandError::Supervisor(error)),
     }
-}
-
-fn requires_supervisor(workflow: &ResolvedWorkflow) -> bool {
-    let transport = &workflow.extensions.openhands.transport;
-    if transport.session_api_key_env.is_some()
-        || !workflow.extensions.openhands.local_server.enabled
-    {
-        return false;
-    }
-
-    let Ok(url) = Url::parse(&transport.base_url) else {
-        return false;
-    };
-    url.scheme() == "http"
-        && url.path().trim_matches('/').is_empty()
-        && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
 }
 
 fn transport_port_override(url: &Url) -> Result<u16, DebugCommandError> {

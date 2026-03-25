@@ -350,6 +350,7 @@ fn long_history_request(workspace_root: &Path, model: &str) -> ConversationCreat
             tools: None,
             include_default_tools: None,
         },
+        mcp_config: None,
     }
 }
 

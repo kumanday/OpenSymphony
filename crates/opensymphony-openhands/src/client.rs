@@ -18,7 +18,7 @@ use tokio_tungstenite::{
     tungstenite::{Message, client::IntoClientRequest},
 };
 use tracing::debug;
-use url::{Host, Url};
+use url::{Host, Position, Url};
 use uuid::Uuid;
 
 use crate::events::{ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus};
@@ -295,12 +295,22 @@ impl TransportConfig {
                 .auth
                 .websocket_query_param_name()
                 .map(ToOwned::to_owned),
-            managed_local_server_candidate: target_kind == TransportTargetKind::Loopback
-                && url.scheme() == "http"
-                && base_url_path_is_root(&url)
-                && self.auth.http_auth_kind() == TransportAuthKind::None
-                && self.auth.websocket_auth_kind() == TransportAuthKind::None,
+            managed_local_server_candidate: self.managed_local_server_base_url()?.is_some(),
         })
+    }
+
+    pub fn managed_local_server_base_url(&self) -> Result<Option<String>, OpenHandsError> {
+        let url = self.parsed_base_url()?;
+        if !is_loopback_host(url.host()) || url.scheme() != "http" {
+            return Ok(None);
+        }
+        if self.auth.http_auth_kind() != TransportAuthKind::None
+            || self.auth.websocket_auth_kind() != TransportAuthKind::None
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(url[..Position::BeforePath].to_string()))
     }
 
     fn endpoint(&self, suffix: &str) -> Result<Url, OpenHandsError> {
@@ -1198,10 +1208,6 @@ fn websocket_auth_mode_label(mode: WorkflowWebSocketAuthMode) -> &'static str {
         WorkflowWebSocketAuthMode::Header => "header",
         WorkflowWebSocketAuthMode::QueryParam => "query_param",
     }
-}
-
-fn base_url_path_is_root(url: &Url) -> bool {
-    url.path().trim_matches('/').is_empty()
 }
 
 fn is_loopback_host(host: Option<Host<&str>>) -> bool {
