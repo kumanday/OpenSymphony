@@ -27,9 +27,37 @@ use crate::{
 };
 
 pub const RUNTIME_CONTRACT_VERSION: &str = "openhands-sdk-agent-server-v1";
+const DEFAULT_REUSE_POLICY: &str = "per_issue";
+const FRESH_EACH_RUN_REUSE_POLICY: &str = "fresh_each_run";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IssueSessionReusePolicy {
+    PerIssue,
+    FreshEachRun,
+    Unsupported(String),
+}
+
+impl IssueSessionReusePolicy {
+    fn parse(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            DEFAULT_REUSE_POLICY => Self::PerIssue,
+            FRESH_EACH_RUN_REUSE_POLICY => Self::FreshEachRun,
+            other => Self::Unsupported(other.to_owned()),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::PerIssue => DEFAULT_REUSE_POLICY,
+            Self::FreshEachRun => FRESH_EACH_RUN_REUSE_POLICY,
+            Self::Unsupported(value) => value.as_str(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IssueSessionRunnerConfig {
+    pub reuse_policy: IssueSessionReusePolicy,
     pub runtime_stream: RuntimeStreamConfig,
     pub terminal_wait_timeout: Duration,
     pub finished_drain_timeout: Duration,
@@ -53,6 +81,7 @@ impl IssueSessionObserver for () {}
 impl Default for IssueSessionRunnerConfig {
     fn default() -> Self {
         Self {
+            reuse_policy: IssueSessionReusePolicy::PerIssue,
             runtime_stream: RuntimeStreamConfig::default(),
             terminal_wait_timeout: Duration::from_secs(300),
             finished_drain_timeout: Duration::from_millis(100),
@@ -64,6 +93,9 @@ impl IssueSessionRunnerConfig {
     pub fn from_workflow(workflow: &ResolvedWorkflow) -> Self {
         let websocket = &workflow.extensions.openhands.websocket;
         Self {
+            reuse_policy: IssueSessionReusePolicy::parse(
+                &workflow.extensions.openhands.conversation.reuse_policy,
+            ),
             runtime_stream: RuntimeStreamConfig {
                 readiness_timeout: Duration::from_millis(websocket.ready_timeout_ms),
                 reconnect_initial_backoff: Duration::from_millis(websocket.reconnect_initial_ms),
@@ -221,6 +253,8 @@ pub struct IssueConversationManifest {
     pub issue_id: IssueId,
     pub identifier: IssueIdentifier,
     pub conversation_id: ConversationId,
+    #[serde(default = "default_reuse_policy")]
+    pub reuse_policy: String,
     pub server_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_target: Option<String>,
@@ -261,10 +295,12 @@ pub struct IssueConversationManifest {
 }
 
 impl IssueConversationManifest {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         issue_id: IssueId,
         identifier: IssueIdentifier,
         conversation_id: ConversationId,
+        reuse_policy: impl Into<String>,
         persistence_dir: PathBuf,
         attached_at: DateTime<Utc>,
         reset_reason: Option<String>,
@@ -274,6 +310,7 @@ impl IssueConversationManifest {
             issue_id,
             identifier,
             conversation_id,
+            reuse_policy: reuse_policy.into(),
             server_base_url: None,
             transport_target: None,
             http_auth_mode: None,
@@ -307,9 +344,15 @@ impl IssueConversationManifest {
         }
     }
 
-    fn is_reusable_for(&self, issue: &NormalizedIssue, expected_persistence_dir: &Path) -> bool {
+    fn is_reusable_for(
+        &self,
+        issue: &NormalizedIssue,
+        expected_persistence_dir: &Path,
+        expected_reuse_policy: &str,
+    ) -> bool {
         self.issue_id == issue.id
             && self.identifier == issue.identifier
+            && self.reuse_policy == expected_reuse_policy
             && self.persistence_dir == expected_persistence_dir
             && self.runtime_contract_version.as_deref() == Some(RUNTIME_CONTRACT_VERSION)
     }
@@ -392,6 +435,8 @@ pub struct IssueSessionContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_path: Option<PathBuf>,
     pub conversation_id: ConversationId,
+    #[serde(default = "default_reuse_policy")]
+    pub reuse_policy: String,
     pub fresh_conversation: bool,
     pub workflow_prompt_seeded: bool,
     pub server_base_url: Option<String>,
@@ -600,30 +645,55 @@ impl IssueSessionRunner {
         issue: &NormalizedIssue,
         workflow: &ResolvedWorkflow,
     ) -> Result<Step<ActiveSession>, IssueSessionError> {
-        let loaded = self
-            .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
-            .await?;
+        match &self.config.reuse_policy {
+            IssueSessionReusePolicy::PerIssue => {
+                let loaded = self
+                    .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
+                    .await?;
 
-        match loaded.manifest {
-            Some(manifest) => match self
-                .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
-                .await?
-            {
-                ReuseSession::Active(session) => Ok(Step::Continue(*session)),
-                ReuseSession::Reset(reason) => {
-                    self.create_fresh_session(
-                        workspace_manager,
-                        workspace,
-                        run_manifest,
-                        observed_run,
-                        issue,
-                        workflow,
-                        Some(reason),
-                    )
-                    .await
+                match loaded.manifest {
+                    Some(manifest) => match self
+                        .try_reuse_session(workspace_manager, workspace, issue, workflow, manifest)
+                        .await?
+                    {
+                        ReuseSession::Active(session) => Ok(Step::Continue(*session)),
+                        ReuseSession::Reset(reason) => {
+                            self.create_fresh_session(
+                                workspace_manager,
+                                workspace,
+                                run_manifest,
+                                observed_run,
+                                issue,
+                                workflow,
+                                Some(reason),
+                            )
+                            .await
+                        }
+                    },
+                    None => {
+                        self.create_fresh_session(
+                            workspace_manager,
+                            workspace,
+                            run_manifest,
+                            observed_run,
+                            issue,
+                            workflow,
+                            loaded.reset_reason,
+                        )
+                        .await
+                    }
                 }
-            },
-            None => {
+            }
+            IssueSessionReusePolicy::FreshEachRun => {
+                let loaded = self
+                    .load_existing_conversation_manifest(workspace_manager, workspace, issue, workflow)
+                    .await?;
+                let reset_reason = loaded.manifest.as_ref().map_or(loaded.reset_reason, |_| {
+                    Some(
+                        "workflow reuse policy `fresh_each_run` requested a new conversation for this run"
+                            .to_string(),
+                    )
+                });
                 self.create_fresh_session(
                     workspace_manager,
                     workspace,
@@ -631,10 +701,28 @@ impl IssueSessionRunner {
                     observed_run,
                     issue,
                     workflow,
-                    loaded.reset_reason,
+                    reset_reason,
                 )
                 .await
             }
+            IssueSessionReusePolicy::Unsupported(policy) => self
+                .persist_failure_without_stream(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    observed_run,
+                    IssueSessionPromptKind::Full,
+                    None,
+                    failed_outcome(
+                        "workflow configured an unsupported OpenHands conversation reuse policy",
+                        format!(
+                            "unsupported OpenHands conversation reuse policy `{policy}`; supported runtime policies: `{DEFAULT_REUSE_POLICY}`, `{FRESH_EACH_RUN_REUSE_POLICY}`"
+                        ),
+                    ),
+                )
+                .await
+                .map(Box::new)
+                .map(Step::EarlyResult),
         }
     }
 
@@ -944,13 +1032,22 @@ impl IssueSessionRunner {
         };
 
         let expected_persistence_dir = configured_persistence_dir(workflow, workspace);
-        if !manifest.is_reusable_for(issue, &expected_persistence_dir) {
-            return Ok(LoadedManifest {
-                manifest: None,
-                reset_reason: Some(format!(
+        let expected_reuse_policy = self.config.reuse_policy.as_str();
+        if !manifest.is_reusable_for(issue, &expected_persistence_dir, expected_reuse_policy) {
+            let reset_reason = if manifest.reuse_policy != expected_reuse_policy {
+                format!(
+                    "conversation manifest reuse policy `{}` does not match expected `{}`",
+                    manifest.reuse_policy, expected_reuse_policy
+                )
+            } else {
+                format!(
                     "conversation manifest is incompatible with issue {} or the current workspace",
                     issue.identifier
-                )),
+                )
+            };
+            return Ok(LoadedManifest {
+                manifest: None,
+                reset_reason: Some(reset_reason),
             });
         }
 
@@ -1002,6 +1099,7 @@ impl IssueSessionRunner {
 
         let attached_at = Utc::now();
         manifest.fresh_conversation = false;
+        manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
         if manifest.launch_profile.is_none() {
             manifest.launch_profile = ConversationLaunchProfile::from_workflow(workflow).ok();
         }
@@ -1148,6 +1246,7 @@ impl IssueSessionRunner {
             issue.identifier.clone(),
             ConversationId::new(conversation.conversation_id.to_string())
                 .expect("UUID-backed conversation ID should not be empty"),
+            self.config.reuse_policy.as_str(),
             configured_persistence_dir(workflow, workspace),
             attached_at,
             reset_reason,
@@ -1260,6 +1359,7 @@ impl IssueSessionRunner {
         manifest.issue_id = issue.id.clone();
         manifest.identifier = issue.identifier.clone();
         manifest.fresh_conversation = false;
+        manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
         manifest.workflow_prompt_seeded = true;
         manifest.server_base_url = Some(self.client.base_url().to_string());
         manifest.persistence_dir = configured_persistence_dir(workflow, workspace);
@@ -1722,6 +1822,7 @@ fn build_session_context(
         prompt_kind,
         prompt_path,
         conversation_id: manifest.conversation_id.clone(),
+        reuse_policy: manifest.reuse_policy.clone(),
         fresh_conversation: manifest.fresh_conversation,
         workflow_prompt_seeded: manifest.workflow_prompt_seeded,
         server_base_url: manifest.server_base_url.clone(),
@@ -1738,6 +1839,10 @@ fn build_session_context(
         worker_outcome,
         updated_at: Utc::now(),
     }
+}
+
+fn default_reuse_policy() -> String {
+    DEFAULT_REUSE_POLICY.to_owned()
 }
 
 fn conversation_snapshot(stream: &RuntimeEventStream) -> Conversation {
@@ -1956,6 +2061,7 @@ mod tests {
         let runner = IssueSessionRunner::new(
             client,
             IssueSessionRunnerConfig {
+                reuse_policy: IssueSessionReusePolicy::PerIssue,
                 runtime_stream: RuntimeStreamConfig {
                     readiness_timeout: Duration::from_secs(2),
                     reconnect_initial_backoff: Duration::from_millis(25),

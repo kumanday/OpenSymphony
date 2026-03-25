@@ -253,25 +253,36 @@ Current implementation detail:
 
 ## 6.3 Reuse policy
 
-Default policy:
+Supported policies:
 
-- reuse the conversation for the same issue across worker lifetimes
-- when reusing a conversation, send continuation-only guidance instead of replaying the full assignment body
-- if a run fails after attach, preserve the known `conversation_id` in workspace metadata so the next retry can resume the same conversation instead of forcing a fresh thread
-- if persisted conversation metadata is invalid locally, clear it and treat the next dispatch as a fresh reset instead of retrying the corrupt manifest forever
-- reset only when:
-  - conversation metadata is missing or invalid
-  - the server reports the conversation cannot be attached
-  - an incompatible protocol version is detected
-  - an explicit reset policy is configured
+- `per_issue` (default)
+  - reuse the conversation for the same issue across worker lifetimes
+  - send continuation-only guidance instead of replaying the full assignment body once the workflow prompt has already been seeded
+  - preserve the known `conversation_id` in workspace metadata so the next retry can resume the same conversation after a clean worker exit
+- `fresh_each_run`
+  - create a brand-new conversation for every worker lifetime
+  - resend the full workflow prompt on every run
+  - persist the latest fresh conversation in workspace metadata for observability and debug, but never reuse it for the next run
+
+Reset conditions:
+
+- conversation metadata is missing or invalid
+- the server reports the conversation cannot be attached
+- an incompatible protocol version is detected
+- the persisted reuse policy no longer matches the current workflow
+- the configured policy explicitly requires a fresh conversation
 
 Current implementation detail:
 
 - `opensymphony-openhands::IssueSessionRunner` owns `conversation.json`
+- the runner resolves `openhands.conversation.reuse_policy` into runtime behavior instead of treating it as workflow-only metadata
+- unsupported reuse-policy values fail at the runtime boundary with an explicit worker error; they are no longer rejected during workflow resolution
 - fresh conversations start with `workflow_prompt_seeded = false`
 - the full workflow prompt is selected until a `POST /events` call accepts that first assignment message
 - once seeded, later worker lifetimes send built-in continuation guidance instead of rerendering the workflow template
+- `fresh_each_run` bypasses manifest reuse, creates a new `conversation_id` with a full prompt, and records a reset reason in `conversation.json`
 - if `GET /api/conversations/{id}` or the initial attach fails for a reused conversation, the runner retries `POST /api/conversations` with the same stable `conversation_id`; when that re-created thread still exposes persisted history, the runner keeps continuation guidance instead of downgrading to a fresh full prompt
+- the runner persists the active `reuse_policy` alongside the launch profile and treats policy drift as manifest incompatibility so later recovery or interactive debug sessions do not silently reuse a thread created under different semantics
 - the runner persists the conversation launch profile on first create and backfills older manifests on reuse so later rehydration and interactive debug sessions can recreate the same thread settings, including agent tool selection, without guessing from mutable runtime state
 
 ## 6.4 Interactive debug resumption
@@ -358,7 +369,7 @@ Current workflow defaulting:
 - `confirmation_policy.kind` defaults to `NeverConfirm` when omitted
 - unsupported `confirmation_policy` options are rejected during workflow resolution because the current request subset only serializes `{ kind }`
 - `agent.kind` defaults to `Agent` when omitted
-- non-default `openhands.conversation.reuse_policy` values are rejected during workflow resolution until the orchestrator/runtime path can honor alternate conversation reuse behavior
+- `openhands.conversation.reuse_policy` defaults to `per_issue`; the runtime currently supports `per_issue` and `fresh_each_run`, and rejects any other value from the OpenHands boundary with an explicit compatibility error
 - `max_iterations` must fit the downstream OpenHands `u32` request range
 - `openhands.transport.session_api_key_env` is accepted and required for non-loopback remote targets
 - workflow-owned `local_server.readiness_probe_path` overrides are rejected during workflow resolution until the runtime supervisor launch path consumes them
@@ -383,7 +394,7 @@ Current repository implementation:
 - `ConversationCreateRequest` carries the minimal create payload subset, including `conversation_id`, `workspace.working_dir`, and `persistence_dir`
 - the current request model serializes `agent` as `{ kind, llm, condenser? }`; when the workflow enables `agent.condenser`, the runtime forwards `agent.condenser` as `{ kind: LLMSummarizingCondenser, llm, max_size, keep_first }` and reuses the conversation agent LLM settings for the summarizer
 - `llm` still serializes as only `{ model, api_key, base_url? }`, so arbitrary LLM option keys plus agent extras other than `condenser` are rejected before runtime launch
-- the current orchestrator/runtime path still uses fixed per-issue conversation reuse, so workflow-owned `reuse_policy` overrides are rejected before runtime launch
+- the current orchestrator/runtime path consumes workflow-owned `reuse_policy` values: `per_issue` reuses the persisted manifest, `fresh_each_run` always creates a new conversation, and policy drift or unsupported values are surfaced explicitly instead of being silently ignored
 - the current transport layer preserves base-path prefixes across REST endpoints and `/sockets/events/{conversation_id}`, so the same client can target reverse-proxied external servers without code changes outside config
 - the current supervisor readiness probe still owns the local launch path and always uses `/openapi.json`, so explicit `local_server.readiness_probe_path` and `local_server.startup_timeout_ms` overrides are still rejected before runtime launch
 - the current supervisor launch path still uses runtime-owned launcher environment variables (`OPENHANDS_SERVER_PORT` and `RUNTIME=process`), so explicit workflow-owned `local_server.env` overrides are rejected before runtime launch
