@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use opensymphony_openhands::{
-    ConversationCreateRequest, EventCache, EventEnvelope, KnownEvent, OpenHandsClient,
-    OpenHandsError, RuntimeStreamConfig, TerminalExecutionStatus, TransportConfig,
+    ConversationCreateRequest, DoctorProbeConfig, EventCache, EventEnvelope, KnownEvent,
+    OpenHandsClient, OpenHandsError, RuntimeStreamConfig, TerminalExecutionStatus, TransportConfig,
 };
 use opensymphony_testkit::{
     FakeEventStreamBuilder, FakeOpenHandsConfig, FakeOpenHandsServer, FakeSearchScript,
@@ -357,6 +357,78 @@ async fn create_conversation_reuses_existing_requested_id_without_losing_history
     assert!(
         events.items().iter().any(|event| event.id == persisted.id),
         "same-ID create should not drop persisted history"
+    );
+}
+
+#[tokio::test]
+async fn delete_conversation_then_recreate_requested_id_resets_history_and_updates_config() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe_with_config(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        DoctorProbeConfig {
+            model: Some("openai/gpt-5.4".to_string()),
+            api_key: Some("old-secret".to_string()),
+            ..DoctorProbeConfig::default()
+        },
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+    server
+        .insert_event(
+            conversation.conversation_id,
+            EventEnvelope::new(
+                "evt-persisted",
+                Utc::now(),
+                "runtime",
+                "ConversationStateUpdateEvent",
+                serde_json::json!({
+                    "execution_status": "running",
+                    "state_delta": {
+                        "execution_status": "running",
+                    },
+                }),
+            ),
+        )
+        .await
+        .expect("persisted history should be stored");
+
+    client
+        .delete_conversation(conversation.conversation_id)
+        .await
+        .expect("conversation delete should succeed");
+
+    let recreated = client
+        .create_conversation(&ConversationCreateRequest {
+            agent: opensymphony_openhands::AgentConfig {
+                llm: opensymphony_openhands::LlmConfig {
+                    api_key: Some("new-secret".to_string()),
+                    ..request.agent.clone().llm
+                },
+                ..request.agent.clone()
+            },
+            ..request.clone()
+        })
+        .await
+        .expect("recreate by requested ID should succeed");
+    let events = client
+        .search_all_events(conversation.conversation_id)
+        .await
+        .expect("history should still be searchable after recreation");
+
+    assert_eq!(recreated.conversation_id, conversation.conversation_id);
+    assert_eq!(recreated.agent.llm.api_key.as_deref(), Some("new-secret"));
+    assert!(
+        events
+            .items()
+            .iter()
+            .all(|event| event.id != "evt-persisted"),
+        "delete + recreate should drop the old persisted history"
     );
 }
 
