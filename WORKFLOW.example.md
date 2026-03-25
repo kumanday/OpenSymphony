@@ -62,9 +62,10 @@ openhands:
     # supervisor creation path forwards workflow-owned environment variables.
 
   conversation:
-    # Defaults to the current runtime-owned per-issue conversation reuse behavior.
-    # Non-default reuse-policy overrides are rejected until the orchestrator/runtime
-    # path can actually honor them end-to-end.
+    # Supported values:
+    # - per_issue: reuse one conversation across worker lifetimes for the issue.
+    # - fresh_each_run: create a new conversation and resend the full workflow prompt each run.
+    reuse_policy: per_issue
     # This path stays relative to the per-issue workspace; parent traversal is rejected.
     persistence_dir_relative: ".opensymphony/openhands"
     max_iterations: 500

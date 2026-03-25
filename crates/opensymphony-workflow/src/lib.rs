@@ -1275,7 +1275,7 @@ openhands:
     }
 
     #[test]
-    fn rejects_unsupported_openhands_conversation_reuse_policy_override() {
+    fn resolves_openhands_conversation_reuse_policy_override_for_runtime_consumers() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1295,17 +1295,14 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-        let error = workflow
+        let resolved = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect_err("unsupported reuse policies should fail during resolution");
+            .expect("runtime-owned reuse-policy gating should not fail during workflow resolution");
 
-        assert!(matches!(
-            error,
-            WorkflowConfigError::InvalidField {
-                field: "openhands.conversation.reuse_policy",
-                ..
-            }
-        ));
+        assert_eq!(
+            resolved.extensions.openhands.conversation.reuse_policy,
+            "fresh_each_run"
+        );
     }
 
     #[test]
