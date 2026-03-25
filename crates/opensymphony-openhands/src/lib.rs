@@ -15,10 +15,11 @@ pub use events::{
     TerminalExecutionStatus, UnknownEvent,
 };
 pub use models::{
-    AcceptedResponse, AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
-    ConversationRunRequest, ConversationStateUpdatePayload, DoctorProbeConfig, EventEnvelope,
-    LlmConfig, McpConfig, McpStdioServerConfig, SearchConversationEventsResponse,
-    SendMessageRequest, TextContent, WorkspaceConfig,
+    AcceptedResponse, AgentConfig, CondenserConfig, ConfirmationPolicy, Conversation,
+    ConversationCreateRequest, ConversationRunRequest, ConversationStateUpdatePayload,
+    DoctorProbeConfig, EventEnvelope, LLM_SUMMARIZING_CONDENSER_KIND, LlmConfig, McpConfig,
+    McpStdioServerConfig, SearchConversationEventsResponse, SendMessageRequest, TextContent,
+    WorkspaceConfig,
 };
 pub use session::{
     ConversationLaunchProfile, IssueConversationManifest, IssueSessionContext, IssueSessionError,

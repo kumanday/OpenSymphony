@@ -9,6 +9,9 @@ fn default_true() -> bool {
     true
 }
 
+pub const LLM_SUMMARIZING_CONDENSER_KIND: &str = "LLMSummarizingCondenser";
+pub const LLM_SUMMARIZING_CONDENSER_USAGE_ID: &str = "condenser";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceConfig {
     pub working_dir: String,
@@ -27,12 +30,43 @@ pub struct LlmConfig {
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_id: Option<String>,
+}
+
+impl LlmConfig {
+    pub fn with_usage_id(&self, usage_id: impl Into<String>) -> Self {
+        let mut cloned = self.clone();
+        cloned.usage_id = Some(usage_id.into());
+        cloned
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CondenserConfig {
+    pub kind: String,
+    pub llm: LlmConfig,
+    pub max_size: u64,
+    pub keep_first: u64,
+}
+
+impl CondenserConfig {
+    pub fn llm_summarizing(llm: LlmConfig, max_size: u64, keep_first: u64) -> Self {
+        Self {
+            kind: LLM_SUMMARIZING_CONDENSER_KIND.to_string(),
+            llm: llm.with_usage_id(LLM_SUMMARIZING_CONDENSER_USAGE_ID),
+            max_size,
+            keep_first,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AgentConfig {
     pub kind: String,
     pub llm: LlmConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condenser: Option<CondenserConfig>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,7 +177,9 @@ impl ConversationCreateRequest {
                     model,
                     api_key: config.api_key,
                     base_url: config.base_url,
+                    usage_id: None,
                 },
+                condenser: None,
             },
             mcp_config: config.mcp_config,
         }
@@ -416,7 +452,9 @@ mod tests {
                     model: "fake-model".to_string(),
                     api_key: Some("fake-key".to_string()),
                     base_url: None,
+                    usage_id: None,
                 },
+                condenser: None,
             },
             mcp_config: None,
         };
@@ -469,7 +507,9 @@ mod tests {
                     model: "fake-model".to_string(),
                     api_key: Some("fake-key".to_string()),
                     base_url: None,
+                    usage_id: None,
                 },
+                condenser: None,
             },
             mcp_config: Some(McpConfig {
                 stdio_servers: vec![McpStdioServerConfig {
@@ -523,6 +563,61 @@ mod tests {
             .expect("request should serialize");
 
         assert_eq!(value, json!({}));
+    }
+
+    #[test]
+    fn conversation_create_request_serializes_optional_condenser() {
+        let request = ConversationCreateRequest {
+            conversation_id: Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+                .expect("uuid should parse"),
+            workspace: WorkspaceConfig {
+                working_dir: "/tmp/workspace".to_string(),
+                kind: "LocalWorkspace".to_string(),
+            },
+            persistence_dir: "/tmp/workspace/.opensymphony/openhands".to_string(),
+            max_iterations: 7,
+            stuck_detection: true,
+            confirmation_policy: ConfirmationPolicy {
+                kind: "NeverConfirm".to_string(),
+            },
+            agent: AgentConfig {
+                kind: "Agent".to_string(),
+                llm: LlmConfig {
+                    model: "fake-model".to_string(),
+                    api_key: Some("fake-key".to_string()),
+                    base_url: Some("https://example.com/v1".to_string()),
+                    usage_id: None,
+                },
+                condenser: Some(CondenserConfig::llm_summarizing(
+                    LlmConfig {
+                        model: "fake-model".to_string(),
+                        api_key: Some("fake-key".to_string()),
+                        base_url: Some("https://example.com/v1".to_string()),
+                        usage_id: None,
+                    },
+                    240,
+                    2,
+                )),
+            },
+            mcp_config: None,
+        };
+
+        let value = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(
+            value["agent"]["condenser"],
+            json!({
+                "kind": "LLMSummarizingCondenser",
+                "llm": {
+                    "model": "fake-model",
+                    "api_key": "fake-key",
+                    "base_url": "https://example.com/v1",
+                    "usage_id": "condenser",
+                },
+                "max_size": 240,
+                "keep_first": 2,
+            })
+        );
     }
 
     #[test]

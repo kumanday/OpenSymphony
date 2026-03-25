@@ -13,7 +13,8 @@ pub use model::{
     AgentConfig, AgentFrontMatter, DEFAULT_PROMPT_TEMPLATE, Environment, HooksConfig,
     HooksFrontMatter, IntegerLike, OpenHandsConfig, OpenHandsConfirmationPolicy,
     OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
-    OpenHandsConversationAgentFrontMatter, OpenHandsConversationConfig,
+    OpenHandsConversationAgentFrontMatter, OpenHandsConversationCondenserConfig,
+    OpenHandsConversationCondenserFrontMatter, OpenHandsConversationConfig,
     OpenHandsConversationFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
     OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
     OpenHandsMcpConfig, OpenHandsMcpFrontMatter, OpenHandsStdioServerConfig,
@@ -108,6 +109,7 @@ mod tests {
         model::{
             DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
             DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_BASE_URL,
+            DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
             DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
             DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
             DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
@@ -415,6 +417,15 @@ tracker:
         assert_eq!(
             resolved.extensions.openhands.conversation.agent.kind,
             "Agent"
+        );
+        assert!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .condenser
+                .is_none()
         );
         assert_eq!(
             resolved.extensions.openhands.websocket.ready_timeout_ms,
@@ -730,6 +741,148 @@ openhands:
         assert_eq!(
             resolved.extensions.openhands.conversation.agent.kind,
             "Agent"
+        );
+        assert!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .condenser
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn resolves_openhands_condenser_configuration() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      condenser:
+        enabled: true
+        max_size: 320
+        keep_first: 4
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+        let condenser = resolved
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .condenser
+            .as_ref()
+            .expect("condenser config should exist");
+
+        assert_eq!(condenser.max_size, 320);
+        assert_eq!(condenser.keep_first, 4);
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .llm
+                .as_ref()
+                .expect("llm config should exist")
+                .model
+                .as_deref(),
+            Some("openai/gpt-5.4")
+        );
+    }
+
+    #[test]
+    fn defaults_openhands_condenser_thresholds_when_enabled_without_overrides() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      condenser:
+        enabled: true
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+        let condenser = resolved
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .condenser
+            .as_ref()
+            .expect("condenser config should exist");
+
+        assert_eq!(condenser.max_size, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE);
+        assert_eq!(condenser.keep_first, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST);
+    }
+
+    #[test]
+    fn disables_openhands_condenser_when_flag_is_false() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      condenser:
+        enabled: false
+        max_size: 320
+        keep_first: 4
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("workflow should resolve");
+
+        assert!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .condenser
+                .is_none()
         );
     }
 
