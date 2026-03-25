@@ -15,7 +15,8 @@ pub use model::{
     OpenHandsConfirmationPolicyFrontMatter, OpenHandsConversationAgentConfig,
     OpenHandsConversationAgentFrontMatter, OpenHandsConversationCondenserConfig,
     OpenHandsConversationCondenserFrontMatter, OpenHandsConversationConfig,
-    OpenHandsConversationFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
+    OpenHandsConversationFrontMatter, OpenHandsConversationToolConfig,
+    OpenHandsConversationToolFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
     OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
     OpenHandsMcpConfig, OpenHandsMcpFrontMatter, OpenHandsStdioServerConfig,
     OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig, OpenHandsTransportFrontMatter,
@@ -108,13 +109,13 @@ mod tests {
         WorkflowDefinition, WorkflowLoadError,
         model::{
             DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
-            DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_BASE_URL,
-            DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
-            DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
-            DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
-            DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
-            DEFAULT_POLL_INTERVAL_MS, DEFAULT_PROMPT_TEMPLATE, DEFAULT_STALL_TIMEOUT_MS,
-            DEFAULT_WORKSPACE_ROOT,
+            DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_TOOLS,
+            DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
+            DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
+            DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
+            DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
+            DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_PROMPT_TEMPLATE,
+            DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT,
         },
     };
 
@@ -417,6 +418,29 @@ tracker:
         assert_eq!(
             resolved.extensions.openhands.conversation.agent.kind,
             "Agent"
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .tools
+                .as_ref()
+                .map(|tools| tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>()),
+            Some(DEFAULT_OPENHANDS_AGENT_TOOLS.to_vec())
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .include_default_tools,
+            None
         );
         assert!(
             resolved
@@ -742,6 +766,29 @@ openhands:
             resolved.extensions.openhands.conversation.agent.kind,
             "Agent"
         );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .tools
+                .as_ref()
+                .map(|tools| tools
+                    .iter()
+                    .map(|tool| tool.name.as_str())
+                    .collect::<Vec<_>>()),
+            Some(DEFAULT_OPENHANDS_AGENT_TOOLS.to_vec())
+        );
+        assert_eq!(
+            resolved
+                .extensions
+                .openhands
+                .conversation
+                .agent
+                .include_default_tools,
+            None
+        );
         assert!(
             resolved
                 .extensions
@@ -884,6 +931,93 @@ openhands:
                 .condenser
                 .is_none()
         );
+    }
+
+    #[test]
+    fn resolves_configured_openhands_agent_tools_and_default_tool_policy() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      tools:
+        - name: ReadFileTool
+        - name: BrowserToolSet
+          params:
+            start_url: https://example.com
+      include_default_tools:
+        - FinishTool
+        - ThinkTool
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("agent tool overrides should resolve");
+
+        let agent = &resolved.extensions.openhands.conversation.agent;
+        let tools = agent.tools.as_ref().expect("tools should be configured");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0].name, "ReadFileTool");
+        assert!(tools[0].params.is_empty());
+        assert_eq!(tools[1].name, "BrowserToolSet");
+        assert_eq!(
+            agent.llm.as_ref().and_then(|llm| llm.model.as_deref()),
+            Some("openai/gpt-5.4")
+        );
+        assert_eq!(
+            tools[1].params.get("start_url"),
+            Some(&serde_json::Value::String(
+                "https://example.com".to_string()
+            ))
+        );
+        assert_eq!(
+            agent.include_default_tools,
+            Some(vec!["FinishTool".to_string(), "ThinkTool".to_string()])
+        );
+    }
+
+    #[test]
+    fn preserves_explicit_empty_openhands_agent_tools_for_opt_out() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      tools: []
+      include_default_tools: []
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("explicit empty tool lists should resolve");
+
+        let agent = &resolved.extensions.openhands.conversation.agent;
+        assert_eq!(agent.tools, Some(Vec::new()));
+        assert_eq!(agent.include_default_tools, Some(Vec::new()));
     }
 
     #[test]

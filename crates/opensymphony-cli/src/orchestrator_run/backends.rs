@@ -299,6 +299,33 @@ impl RuntimeWorkerBackend {
             tasks: HashMap::new(),
         }
     }
+
+    fn abort_tracked_task(&mut self, worker_id: &str) {
+        if let Some(task) = self.tasks.remove(worker_id) {
+            task.handle.abort();
+        }
+    }
+
+    fn abort_all_tracked_tasks(&mut self) {
+        let active_count = self.tasks.len();
+        if active_count == 0 {
+            return;
+        }
+
+        tracing::info!(
+            active_count,
+            "aborting tracked worker tasks during backend shutdown"
+        );
+        for (_, task) in self.tasks.drain() {
+            task.handle.abort();
+        }
+    }
+}
+
+impl Drop for RuntimeWorkerBackend {
+    fn drop(&mut self) {
+        self.abort_all_tracked_tasks();
+    }
 }
 
 fn transport_port_override(url: &Url) -> Result<u16, RunCommandError> {
@@ -446,9 +473,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
                 Err(CliWorkerError::LaunchChannelClosed)
             }
             Err(_) => {
-                if let Some(task) = self.tasks.remove(worker_id.as_str()) {
-                    task.handle.abort();
-                }
+                self.abort_tracked_task(worker_id.as_str());
                 Err(CliWorkerError::LaunchTimeout(self.launch_timeout))
             }
         }
@@ -497,9 +522,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
         worker_id: &opensymphony_domain::WorkerId,
         _reason: WorkerAbortReason,
     ) -> Result<(), Self::Error> {
-        if let Some(task) = self.tasks.remove(worker_id.as_str()) {
-            task.handle.abort();
-        }
+        self.abort_tracked_task(worker_id.as_str());
         Ok(())
     }
 }
@@ -516,7 +539,7 @@ fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{fs, future::pending, path::Path};
 
     use opensymphony_domain::{
         IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt, WorkerId,
@@ -597,6 +620,50 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn runtime_worker_backend_aborts_tracked_tasks_on_drop() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+        );
+
+        let workspace = sample_workspace(&workspace_root);
+        let run = RunAttempt::new(
+            WorkerId::new("worker-drop").expect("worker id should be valid"),
+            IssueId::new("issue-drop").expect("issue id should be valid"),
+            IssueIdentifier::new("COE-286").expect("issue identifier should be valid"),
+            workspace.path.clone(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let (aborted_tx, aborted_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _notifier = AbortNotifier(Some(aborted_tx));
+            pending::<()>().await;
+        });
+        backend
+            .tasks
+            .insert("worker-drop".to_string(), ActiveWorkerTask { handle, run });
+
+        drop(backend);
+
+        match timeout(Duration::from_millis(100), aborted_rx).await {
+            Ok(Ok(())) | Ok(Err(_)) => {}
+            Err(_) => panic!("dropping the backend should abort tracked tasks"),
+        }
+    }
+
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
         let source = format!(
             "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  api_key: test-linear-key\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n",
@@ -639,6 +706,16 @@ mod tests {
             created_at: None,
             updated_at: None,
             last_seen_tracker_refresh_at: None,
+        }
+    }
+
+    struct AbortNotifier(Option<oneshot::Sender<()>>);
+
+    impl Drop for AbortNotifier {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
         }
     }
 }
