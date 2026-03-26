@@ -411,6 +411,8 @@ pub struct IssueConversationManifest {
     pub last_event_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_summary: Option<String>,
+    #[serde(skip)]
+    pub preserved_conversation_summary: Option<String>,
 }
 
 impl IssueConversationManifest {
@@ -453,6 +455,7 @@ impl IssueConversationManifest {
             last_event_kind: None,
             last_event_at: None,
             last_event_summary: None,
+            preserved_conversation_summary: None,
         }
     }
 
@@ -1247,12 +1250,8 @@ impl IssueSessionRunner {
         };
         let current_fingerprint = LlmConfigFingerprint::from_llm_config(&current_request.agent.llm);
 
-        let known_fingerprint = match self.client.get_conversation(conversation_id).await {
-            Ok(conversation) => {
-                Some(manifest.llm_config_fingerprint.clone().unwrap_or_else(|| {
-                    LlmConfigFingerprint::from_llm_config(&conversation.agent.llm)
-                }))
-            }
+        let conversation = match self.client.get_conversation(conversation_id).await {
+            Ok(conversation) => conversation,
             Err(error) if should_rehydrate_after_attach_failure(&error) => {
                 return match self
                     .rehydrate_existing_session(
@@ -1273,48 +1272,95 @@ impl IssueSessionRunner {
                 };
             }
             Err(error) => {
-                debug!(
+                warn!(
                     %error,
                     %conversation_id,
                     issue_id = %issue.id,
-                    "unable to fetch conversation before checking LLM config drift; falling back to the persisted manifest"
-                );
-                manifest.llm_config_fingerprint.clone()
-            }
-        };
-        if let Some(applied_fingerprint) = known_fingerprint.clone() {
-            if applied_fingerprint != current_fingerprint {
-                warn!(
-                    issue_id = %issue.id,
-                    conversation_id = %conversation_id,
-                    stored_model = %applied_fingerprint.model,
-                    current_model = %current_fingerprint.model,
-                    "LLM config drift detected; recreating the conversation with the current provider settings"
+                    "unable to fetch conversation, falling back to rehydrate"
                 );
                 return match self
-                    .rehydrate_session_for_llm_config_change(
+                    .rehydrate_existing_session(
                         workspace_manager,
                         workspace,
                         issue,
                         workflow,
                         manifest,
                         conversation_id,
-                        current_launch_profile,
-                        current_request,
-                        current_fingerprint,
                     )
                     .await?
                 {
                     Some(session) => Ok(ReuseSession::Active(Box::new(session))),
                     None => Ok(ReuseSession::Reset(format!(
-                        "failed to recreate conversation {} after LLM configuration drift was detected",
+                        "failed to rehydrate conversation {}: {error}",
                         manifest_conversation_id
                     ))),
                 };
             }
+        };
 
-            manifest.llm_config_fingerprint = Some(applied_fingerprint);
+        if conversation.agent.llm.api_key.is_none() && current_request.agent.llm.api_key.is_some() {
+            warn!(
+                issue_id = %issue.id,
+                conversation_id = %conversation_id,
+                "persisted conversation LLM config missing api_key; recreating with current provider settings"
+            );
+            return match self
+                .rehydrate_session_for_llm_config_change(
+                    workspace_manager,
+                    workspace,
+                    issue,
+                    workflow,
+                    manifest,
+                    conversation_id,
+                    current_launch_profile,
+                    current_request,
+                    current_fingerprint,
+                )
+                .await?
+            {
+                Some(session) => Ok(ReuseSession::Active(Box::new(session))),
+                None => Ok(ReuseSession::Reset(format!(
+                    "failed to recreate conversation {} after detecting missing api_key in persisted config",
+                    manifest_conversation_id
+                ))),
+            };
         }
+
+        let known_fingerprint = manifest
+            .llm_config_fingerprint
+            .clone()
+            .unwrap_or_else(|| LlmConfigFingerprint::from_llm_config(&conversation.agent.llm));
+        if known_fingerprint != current_fingerprint {
+            warn!(
+                issue_id = %issue.id,
+                conversation_id = %conversation_id,
+                stored_model = %known_fingerprint.model,
+                current_model = %current_fingerprint.model,
+                "LLM config drift detected; recreating the conversation with the current provider settings"
+            );
+            return match self
+                .rehydrate_session_for_llm_config_change(
+                    workspace_manager,
+                    workspace,
+                    issue,
+                    workflow,
+                    manifest,
+                    conversation_id,
+                    current_launch_profile,
+                    current_request,
+                    current_fingerprint,
+                )
+                .await?
+            {
+                Some(session) => Ok(ReuseSession::Active(Box::new(session))),
+                None => Ok(ReuseSession::Reset(format!(
+                    "failed to recreate conversation {} after LLM configuration drift was detected",
+                    manifest_conversation_id
+                ))),
+            };
+        }
+
+        manifest.llm_config_fingerprint = Some(known_fingerprint);
         let stream = match self
             .client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
@@ -1565,6 +1611,48 @@ impl IssueSessionRunner {
         request: ConversationCreateRequest,
         current_fingerprint: LlmConfigFingerprint,
     ) -> Result<Option<ActiveSession>, IssueSessionError> {
+        let preserved_summary = match self.client.search_all_events(conversation_id).await {
+            Ok(cache) => {
+                let messages = extract_message_history(cache.items(), 20);
+                if messages.is_empty() {
+                    debug!(
+                        %conversation_id,
+                        issue_id = %issue.id,
+                        "no message history to summarize before rehydrate"
+                    );
+                    None
+                } else {
+                    let prompt = build_summarization_prompt(&messages, issue);
+                    let http_client = reqwest::Client::new();
+                    match generate_conversation_summary(&http_client, &request.agent.llm, &prompt)
+                        .await
+                    {
+                        Ok(summary) => {
+                            Some(format!("### Previous Conversation Summary\n\n{}", summary))
+                        }
+                        Err(error) => {
+                            warn!(
+                                %error,
+                                %conversation_id,
+                                issue_id = %issue.id,
+                                "failed to generate conversation summary before rehydrate; continuing without"
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                debug!(
+                    %error,
+                    %conversation_id,
+                    issue_id = %issue.id,
+                    "unable to fetch events before rehydrate; continuing without preserved history"
+                );
+                None
+            }
+        };
+
         match self.client.delete_conversation(conversation_id).await {
             Ok(()) => {}
             Err(OpenHandsError::HttpStatus {
@@ -1648,6 +1736,7 @@ impl IssueSessionRunner {
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
         manifest.apply_runtime_snapshot(&stream);
+        manifest.preserved_conversation_summary = preserved_summary;
         workspace_manager
             .write_json_artifact(
                 workspace,
@@ -1861,7 +1950,11 @@ impl IssueSessionRunner {
             ),
         };
 
-        Some(render_rehydration_context(issue, workpad))
+        Some(render_rehydration_context(
+            issue,
+            workpad,
+            manifest.preserved_conversation_summary.as_deref(),
+        ))
     }
 
     async fn wait_for_active_turn_to_finish<O>(
@@ -2253,23 +2346,31 @@ enum RehydrationWorkpadState {
     Unavailable(String),
 }
 
-fn render_rehydration_context(issue: &NormalizedIssue, workpad: RehydrationWorkpadState) -> String {
+fn render_rehydration_context(
+    issue: &NormalizedIssue,
+    workpad: RehydrationWorkpadState,
+    preserved_conversation: Option<&str>,
+) -> String {
     let base = format!(
         "## Runtime Rehydration\nThis fresh OpenHands conversation was recreated for issue {}: {} because the configured LLM provider settings changed.\nThe workspace state is preserved, but the previous OpenHands conversation history was reset.\n",
         issue.identifier, issue.title,
     );
 
+    let conversation_section = preserved_conversation
+        .map(|s| format!("\n{}\n", s))
+        .unwrap_or_default();
+
     match workpad {
         RehydrationWorkpadState::Found(comment) => format!(
-            "{base}\n## Previous Progress (from Linear Codex Workpad)\nLast updated: {}\n\n{}\n\nResume from the preserved workspace state after incorporating this progress.\n",
+            "{base}{conversation_section}\n## Previous Progress (from Linear Codex Workpad)\nLast updated: {}\n\n{}\n\nResume from the preserved workspace state after incorporating this progress.\n",
             comment.updated_at.to_rfc3339(),
             comment.body
         ),
         RehydrationWorkpadState::Missing => format!(
-            "{base}\nNo active `## Codex Workpad` comment was found in Linear. Inspect the preserved workspace state directly and create a fresh workpad update once context has been re-established.\n"
+            "{base}{conversation_section}\nNo active `## Codex Workpad` comment was found in Linear. Inspect the preserved workspace state directly and create a fresh workpad update once context has been re-established.\n"
         ),
         RehydrationWorkpadState::Unavailable(error) => format!(
-            "{base}\nThe Linear Codex workpad could not be loaded for this run ({error}). Inspect the preserved workspace state directly before continuing.\n"
+            "{base}{conversation_section}\nThe Linear Codex workpad could not be loaded for this run ({error}). Inspect the preserved workspace state directly before continuing.\n"
         ),
     }
 }
@@ -2436,6 +2537,114 @@ fn conversation_error_detail(event: &EventEnvelope) -> String {
         });
 
     format!("ConversationErrorEvent {}: {}", event.id, message)
+}
+
+fn extract_message_history(events: &[EventEnvelope], max_messages: usize) -> Vec<(String, String)> {
+    let mut messages: Vec<(String, String)> = events
+        .iter()
+        .filter(|event| event.kind == "MessageEvent")
+        .filter_map(|event| {
+            let content = event.payload.get("content")?.as_array()?;
+            let role = event.payload.get("role")?.as_str()?.to_string();
+            let texts: Vec<String> = content
+                .iter()
+                .filter_map(|entry| entry.get("text")?.as_str().map(ToOwned::to_owned))
+                .collect();
+            if texts.is_empty() {
+                return None;
+            }
+            Some((role, texts.join("\n")))
+        })
+        .collect();
+
+    if messages.len() > max_messages {
+        let skip = messages.len() - max_messages;
+        messages = messages.into_iter().skip(skip).collect();
+    }
+    messages
+}
+
+fn build_summarization_prompt(messages: &[(String, String)], issue: &NormalizedIssue) -> String {
+    let history: String = messages
+        .iter()
+        .map(|(role, text)| format!("{}: {}", role.to_uppercase(), text))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    format!(
+        r#"Summarize the following conversation about Linear issue {}: {}.
+
+Provide a concise summary (2-4 paragraphs) covering:
+1. What was accomplished
+2. What was in progress when the conversation ended
+3. Key decisions or approaches taken
+4. Any blockers or outstanding issues
+
+Conversation history:
+{}
+
+Summary:"#,
+        issue.identifier, issue.title, history
+    )
+}
+
+async fn generate_conversation_summary(
+    client: &reqwest::Client,
+    llm_config: &LlmConfig,
+    prompt: &str,
+) -> Result<String, String> {
+    let api_key = llm_config
+        .api_key
+        .as_ref()
+        .ok_or_else(|| "LLM config missing api_key for summary generation".to_string())?;
+
+    let base_url = llm_config
+        .base_url
+        .as_deref()
+        .unwrap_or("https://api.openai.com/v1");
+
+    let url = format!("{}/chat/completions", base_url);
+
+    let body = serde_json::json!({
+        "model": llm_config.model,
+        "messages": [
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 1000,
+        "temperature": 0.3
+    });
+
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .timeout(Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to call LLM API: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("LLM API returned {}: {}", status, body));
+    }
+
+    let json: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
+
+    let summary = json
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"))
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| "LLM response missing expected content".to_string())?;
+
+    Ok(summary)
 }
 
 fn run_status_for(outcome_kind: WorkerOutcomeKind) -> RunStatus {
