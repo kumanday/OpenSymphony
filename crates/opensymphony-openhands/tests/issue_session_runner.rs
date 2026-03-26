@@ -527,7 +527,7 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()),
-        Some(vec!["TerminalTool", "FileEditorTool"])
+        Some(vec!["terminal", "file_editor"])
     );
     assert_eq!(launch_profile.agent_include_default_tools, None);
     assert!(launch_profile.stuck_detection);
@@ -556,7 +556,7 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>()),
-        Some(vec!["TerminalTool", "FileEditorTool"])
+        Some(vec!["terminal", "file_editor"])
     );
     assert_eq!(create_request.agent.include_default_tools, None);
     let first_messages = latest_message_texts(
