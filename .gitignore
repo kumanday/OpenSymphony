@@ -24,3 +24,13 @@ target
 .venv/
 var/
 tools/openhands-server/workspace/
+
+# Environment variables
+.env
+
+# OpenSymphony runtime files
+.opensymphony/
+.opensymphony.after_create.json
+
+# GitHub workflow artifacts
+.pr-body.md

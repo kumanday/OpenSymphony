@@ -406,7 +406,7 @@ impl TuiState {
         let tracker_style = base_style.merge(&Style::new().dim());
         let title_style = base_style;
 
-        let line = Line::from_spans(vec![
+        Line::from_spans(vec![
             Span::styled(marker, marker_style),
             Span::styled(" ", base_style),
             Span::styled(&issue.identifier, id_style),
@@ -416,8 +416,7 @@ impl TuiState {
             Span::styled(&issue.tracker_state, tracker_style),
             Span::styled("] ", base_style),
             Span::styled(&issue.title, title_style),
-        ]);
-        line
+        ])
     }
 
     fn detail_lines_styled(&self, width: usize, max_rows: usize) -> Vec<Line> {
