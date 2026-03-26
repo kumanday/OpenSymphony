@@ -26,7 +26,6 @@ use tokio::sync::watch;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use url::Url;
 
-const INLINE_UI_HEIGHT: u16 = 42;
 const MIN_TIMELINE_LINES: usize = 4;
 const MAX_TIMELINE_LINES: usize = 6;
 
@@ -198,7 +197,6 @@ impl TuiState {
             return Text::raw("");
         }
 
-        let (body_rows, timeline_rows) = section_layout(height);
         let mut lines = Vec::new();
         let snapshot = self.latest_snapshot.as_ref();
         let issue_count = snapshot
@@ -209,52 +207,118 @@ impl TuiState {
             .map(|value| format_timestamp(value.snapshot.generated_at))
             .unwrap_or_else(|| "--:--:--".to_owned());
 
+        // Header (2 rows)
         lines.push(self.header_line_styled(width, snapshot, sequence, &generated, issue_count));
         lines.push(Line::from(Span::styled(
             "=".repeat(width),
             Style::new().dim(),
         )));
 
-        if width >= 80 {
-            let left_width = max(50, width * 3 / 5);
-            let right_width = width.saturating_sub(left_width + 3);
-            let left = self.issue_lines_styled(left_width, body_rows);
-            let right = self.detail_lines_styled(right_width, body_rows);
+        // Calculate section heights
+        let available_rows = height.saturating_sub(2); // After header
+        let upper_section_rows = (available_rows * 6) / 10; // 60% for upper
+        let bottom_section_rows = available_rows.saturating_sub(upper_section_rows + 1); // 40% for bottom (minus separator)
+
+        // Width configuration for recent events panel
+        // Must accommodate: "HH:MM:SS snapshot_published polled tracker; running=N, retry_queue=N"
+        const RECENT_EVENTS_MIN_WIDTH: usize = 70; // 68 chars + padding
+        const RECENT_EVENTS_MAX_WIDTH: usize = 75; // Cap at reasonable max
+        let upper_right_width = min(
+            RECENT_EVENTS_MAX_WIDTH,
+            max(RECENT_EVENTS_MIN_WIDTH, width / 5),
+        );
+        let upper_left_width = width.saturating_sub(upper_right_width + 3);
+
+        if width >= 100 {
+            // Three-section layout:
+            // Upper: Left (issues remaining) | Right (recent events fixed ~70 chars)
+            // Bottom: Left (metadata 30%) | Right (conversation 70%)
+
+            let bottom_left_width = width * 3 / 10;
+            let bottom_right_width = width.saturating_sub(bottom_left_width + 3);
+
+            // Upper section: Issues | Recent Events
+            let issues_lines = self.issue_lines_styled(upper_left_width, upper_section_rows);
+            let events_lines = self.timeline_lines_styled(upper_right_width, upper_section_rows);
             lines.extend(fit_section_styled(
-                two_column_block_styled(&left, &right, left_width, right_width),
-                body_rows,
+                two_column_block_styled(
+                    &issues_lines,
+                    &events_lines,
+                    upper_left_width,
+                    upper_right_width,
+                ),
+                upper_section_rows,
                 width,
             ));
+
+            // Separator
+            lines.push(Line::from(Span::styled(
+                "-".repeat(width),
+                Style::new().dim(),
+            )));
+
+            // Bottom section: Metadata + Modified Files | Conversation Activity
+            let meta_lines = self.metadata_and_files_lines(bottom_left_width, bottom_section_rows);
+            let activity_lines =
+                self.conversation_activity_lines(bottom_right_width, bottom_section_rows);
+            lines.extend(fit_section_styled(
+                two_column_block_styled(
+                    &meta_lines,
+                    &activity_lines,
+                    bottom_left_width,
+                    bottom_right_width,
+                ),
+                bottom_section_rows,
+                width,
+            ));
+        } else if width >= 80 {
+            // Two-section layout for medium width
+            // Use same fixed-width for recent events
+
+            // Upper: Issues | Recent Events (fixed width)
+            let issues_lines = self.issue_lines_styled(upper_left_width, upper_section_rows);
+            let events_lines = self.timeline_lines_styled(upper_right_width, upper_section_rows);
+            lines.extend(fit_section_styled(
+                two_column_block_styled(
+                    &issues_lines,
+                    &events_lines,
+                    upper_left_width,
+                    upper_right_width,
+                ),
+                upper_section_rows,
+                width,
+            ));
+
+            // Separator
+            lines.push(Line::from(Span::styled(
+                "-".repeat(width),
+                Style::new().dim(),
+            )));
+
+            // Bottom: Selected issue detail (full width)
+            let detail_lines = self.selected_issue_detail_lines(width, bottom_section_rows);
+            lines.extend(fit_section_styled(detail_lines, bottom_section_rows, width));
         } else {
-            let (issue_rows, detail_rows) = stacked_body_layout(body_rows);
+            // Narrow layout: stacked vertically
+            let (upper_rows, bottom_rows) = (upper_section_rows, bottom_section_rows);
+
             lines.extend(fit_section_styled(
-                self.issue_lines_styled(width, issue_rows),
-                issue_rows,
+                self.issue_lines_styled(width, upper_rows),
+                upper_rows,
                 width,
             ));
-            if detail_rows > 0 {
+
+            if bottom_rows > 0 {
                 lines.push(Line::from(Span::styled(
                     "-".repeat(width),
                     Style::new().dim(),
                 )));
                 lines.extend(fit_section_styled(
-                    self.detail_lines_styled(width, detail_rows),
-                    detail_rows,
+                    self.selected_issue_detail_lines(width, bottom_rows),
+                    bottom_rows,
                     width,
                 ));
             }
-        }
-
-        if timeline_rows > 0 {
-            lines.push(Line::from(Span::styled(
-                "=".repeat(width),
-                Style::new().dim(),
-            )));
-            lines.extend(fit_section_styled(
-                self.timeline_lines_styled(width),
-                timeline_rows,
-                width,
-            ));
         }
 
         if lines.len() > height {
@@ -419,6 +483,7 @@ impl TuiState {
         ])
     }
 
+    #[allow(dead_code)]
     fn detail_lines_styled(&self, width: usize, max_rows: usize) -> Vec<Line> {
         let title_style = if self.focus == FocusPane::Detail {
             Style::new().bold()
@@ -508,6 +573,7 @@ impl TuiState {
         lines
     }
 
+    #[allow(dead_code)]
     fn conversation_events_lines_styled(
         &self,
         _width: usize,
@@ -547,6 +613,7 @@ impl TuiState {
         lines
     }
 
+    #[allow(dead_code)]
     fn modified_files_lines_styled(&self, width: usize, issue: &IssueSnapshot) -> Vec<Line> {
         let mut lines = vec![Line::from(Span::styled(
             "[ ] MODIFIED FILES",
@@ -595,7 +662,7 @@ impl TuiState {
         lines
     }
 
-    fn timeline_lines_styled(&self, _width: usize) -> Vec<Line> {
+    fn timeline_lines_styled(&self, _width: usize, max_rows: usize) -> Vec<Line> {
         let title = match self.timeline_mode {
             TimelineMode::Events => "RECENT EVENTS",
             TimelineMode::Metrics => "METRICS",
@@ -610,7 +677,10 @@ impl TuiState {
         match &self.latest_snapshot {
             Some(snapshot) => match self.timeline_mode {
                 TimelineMode::Events => {
-                    for event in &snapshot.snapshot.recent_events {
+                    let show_count = max_rows
+                        .saturating_sub(1)
+                        .min(snapshot.snapshot.recent_events.len());
+                    for event in snapshot.snapshot.recent_events.iter().take(show_count) {
                         let kind_style = match event.kind {
                             opensymphony_domain::ControlPlaneRecentEventKind::WorkerStarted => {
                                 Style::new().fg(GREEN)
@@ -626,15 +696,19 @@ impl TuiState {
                             }
                             _ => Style::new().dim(),
                         };
-                        lines.push(Line::from_spans(vec![
+
+                        // Parse and colorize the summary: colorize running=# (green) and retry_queue=# (orange/yellow)
+                        let summary_spans = parse_summary_with_colors(&event.summary);
+                        let mut line_spans = vec![
                             Span::styled(
                                 format!("{} ", format_timestamp(event.happened_at)),
                                 Style::new().dim(),
                             ),
                             Span::styled(event.kind.as_str(), kind_style),
                             Span::raw(" "),
-                            Span::raw(&event.summary),
-                        ]));
+                        ];
+                        line_spans.extend(summary_spans);
+                        lines.push(Line::from_spans(line_spans));
                     }
                 }
                 TimelineMode::Metrics => {
@@ -643,19 +717,299 @@ impl TuiState {
                         Span::styled("running: ", Style::new().dim()),
                         Span::styled(format!("{}", m.running_issues), Style::new().fg(GREEN)),
                     ]));
-                    lines.push(Line::from_spans(vec![
-                        Span::styled("retry queue: ", Style::new().dim()),
-                        Span::raw(format!("{}", m.retry_queue_depth)),
-                    ]));
-                    lines.push(Line::from_spans(vec![
-                        Span::styled("tokens: ", Style::new().dim()),
-                        Span::raw(format!("{}", m.total_tokens)),
-                    ]));
+                    if lines.len() < max_rows {
+                        lines.push(Line::from_spans(vec![
+                            Span::styled("retry queue: ", Style::new().dim()),
+                            Span::raw(format!("{}", m.retry_queue_depth)),
+                        ]));
+                    }
+                    if lines.len() < max_rows {
+                        lines.push(Line::from_spans(vec![
+                            Span::styled("tokens: ", Style::new().dim()),
+                            Span::raw(format!("{}", m.total_tokens)),
+                        ]));
+                    }
                 }
             },
             None => {
                 lines.push(Line::from(Span::styled(
                     "awaiting first snapshot",
+                    Style::new().dim(),
+                )));
+            }
+        }
+        lines
+    }
+
+    fn metadata_and_files_lines(&self, width: usize, max_rows: usize) -> Vec<Line> {
+        let title_style = Style::new().bold();
+        let mut lines = vec![Line::from(Span::styled(
+            "[ ] ISSUE + WORKSPACE DETAIL",
+            title_style,
+        ))];
+
+        match self.selected_issue() {
+            Some(issue) => {
+                // Issue identifier and title
+                let id_style = Style::new().fg(CYAN).bold();
+                lines.push(Line::from_spans(vec![
+                    Span::styled(&issue.identifier, id_style),
+                    Span::raw(" "),
+                    Span::styled(&issue.title, Style::new().bold()),
+                ]));
+
+                // Tracker / Runtime / Outcome
+                let runtime_style = Style::new().fg(runtime_state_color(&issue.runtime_state));
+                lines.push(Line::from_spans(vec![
+                    Span::styled("tracker: ", Style::new().dim()),
+                    Span::raw(&issue.tracker_state),
+                    Span::raw(" | "),
+                    Span::styled("runtime: ", Style::new().dim()),
+                    Span::styled(issue.runtime_state.as_str(), runtime_style),
+                    Span::raw(" | "),
+                    Span::styled("outcome: ", Style::new().dim()),
+                    Span::raw(issue.last_outcome.as_str()),
+                ]));
+
+                // Workspace and conversation
+                lines.push(Line::from_spans(vec![
+                    Span::styled("workspace: ", Style::new().dim()),
+                    Span::raw(&issue.workspace_path_suffix),
+                    Span::raw(" | "),
+                    Span::styled("conv: ", Style::new().dim()),
+                    Span::raw(&issue.conversation_id_suffix),
+                ]));
+
+                // Last event, retries, blocked
+                let blocked_style = if issue.blocked {
+                    Style::new().fg(YELLOW)
+                } else {
+                    Style::new().fg(GREEN)
+                };
+                lines.push(Line::from_spans(vec![
+                    Span::styled("last event: ", Style::new().dim()),
+                    Span::raw(format_timestamp(issue.last_event_at)),
+                    Span::raw(" | "),
+                    Span::styled("retries: ", Style::new().dim()),
+                    Span::raw(format!("{}", issue.retry_count)),
+                    Span::raw(" | "),
+                    Span::styled("blocked: ", Style::new().dim()),
+                    Span::styled(format!("{}", issue.blocked), blocked_style),
+                ]));
+
+                // Separator
+                if lines.len() < max_rows {
+                    lines.push(Line::from(Span::styled(
+                        "-".repeat(min(width, 40)),
+                        Style::new().dim(),
+                    )));
+                }
+
+                // Modified files (placeholder for now - will integrate git diff later)
+                if lines.len() < max_rows {
+                    lines.push(Line::from(Span::styled(
+                        "[ ] MODIFIED FILES",
+                        Style::new().bold(),
+                    )));
+                    if issue.modified_files.is_empty() {
+                        if lines.len() < max_rows {
+                            lines.push(Line::from(Span::styled(
+                                "no modified files",
+                                Style::new().dim(),
+                            )));
+                        }
+                    } else {
+                        for file in issue
+                            .modified_files
+                            .iter()
+                            .take(max_rows.saturating_sub(lines.len()))
+                        {
+                            let (change_symbol, change_style) = match file.change_kind {
+                                opensymphony_domain::ControlPlaneFileChangeKind::Created => {
+                                    ("+", Style::new().fg(GREEN))
+                                }
+                                opensymphony_domain::ControlPlaneFileChangeKind::Modified => {
+                                    ("~", Style::new().fg(YELLOW))
+                                }
+                                opensymphony_domain::ControlPlaneFileChangeKind::Removed => {
+                                    ("-", Style::new().fg(RED))
+                                }
+                            };
+                            let path = if file.path.len() > width.saturating_sub(12) {
+                                let truncated_len = width.saturating_sub(15);
+                                format!(
+                                    "...{}",
+                                    &file.path[file.path.len().saturating_sub(truncated_len)..]
+                                )
+                            } else {
+                                file.path.clone()
+                            };
+                            lines.push(Line::from_spans(vec![
+                                Span::styled(change_symbol, change_style.bold()),
+                                Span::raw(" "),
+                                Span::raw(path),
+                                Span::raw(" "),
+                                Span::styled(
+                                    format!("(+{}/-{})", file.lines_added, file.lines_removed),
+                                    Style::new().dim(),
+                                ),
+                            ]));
+                        }
+                    }
+                }
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "no selected issue",
+                    Style::new().dim(),
+                )));
+            }
+        }
+        lines
+    }
+
+    fn conversation_activity_lines(&self, width: usize, max_rows: usize) -> Vec<Line> {
+        let mut lines = vec![Line::from(Span::styled(
+            "[ ] CONVERSATION ACTIVITY",
+            Style::new().bold(),
+        ))];
+
+        match self.selected_issue() {
+            Some(issue) => {
+                if issue.recent_events.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "no recent activity",
+                        Style::new().dim(),
+                    )));
+                } else {
+                    let show_count = max_rows.saturating_sub(1).min(issue.recent_events.len());
+                    for event in issue.recent_events.iter().rev().take(show_count) {
+                        let kind_style = event_kind_style(&event.kind);
+                        let summary = if event.summary.len() > width.saturating_sub(30) {
+                            format!("{}...", &event.summary[..width.saturating_sub(33)])
+                        } else {
+                            event.summary.clone()
+                        };
+                        lines.push(Line::from_spans(vec![
+                            Span::styled(
+                                format!("{} ", format_timestamp(event.happened_at)),
+                                Style::new().dim(),
+                            ),
+                            Span::styled(&event.kind, kind_style),
+                            Span::raw(" "),
+                            Span::raw(summary),
+                        ]));
+                    }
+                }
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "no selected issue",
+                    Style::new().dim(),
+                )));
+            }
+        }
+        lines
+    }
+
+    fn selected_issue_detail_lines(&self, width: usize, max_rows: usize) -> Vec<Line> {
+        // For medium-width layout: combine metadata and activity in one column
+        let title_style = if self.focus == FocusPane::Detail {
+            Style::new().bold()
+        } else {
+            Style::new().dim()
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            pane_title("ISSUE + WORKSPACE DETAIL", self.focus == FocusPane::Detail),
+            title_style,
+        ))];
+
+        match self.selected_issue() {
+            Some(issue) => {
+                let id_style = Style::new().fg(CYAN).bold();
+                lines.push(Line::from_spans(vec![
+                    Span::styled(&issue.identifier, id_style),
+                    Span::raw(" "),
+                    Span::styled(&issue.title, Style::new().bold()),
+                ]));
+
+                let runtime_style = Style::new().fg(runtime_state_color(&issue.runtime_state));
+                lines.push(Line::from_spans(vec![
+                    Span::styled("tracker: ", Style::new().dim()),
+                    Span::raw(&issue.tracker_state),
+                    Span::raw(" | "),
+                    Span::styled("runtime: ", Style::new().dim()),
+                    Span::styled(issue.runtime_state.as_str(), runtime_style),
+                    Span::raw(" | "),
+                    Span::styled("outcome: ", Style::new().dim()),
+                    Span::raw(issue.last_outcome.as_str()),
+                ]));
+
+                lines.push(Line::from_spans(vec![
+                    Span::styled("workspace: ", Style::new().dim()),
+                    Span::raw(&issue.workspace_path_suffix),
+                    Span::raw(" | "),
+                    Span::styled("conv: ", Style::new().dim()),
+                    Span::raw(&issue.conversation_id_suffix),
+                ]));
+
+                let blocked_style = if issue.blocked {
+                    Style::new().fg(YELLOW)
+                } else {
+                    Style::new().fg(GREEN)
+                };
+                lines.push(Line::from_spans(vec![
+                    Span::styled("last event: ", Style::new().dim()),
+                    Span::raw(format_timestamp(issue.last_event_at)),
+                    Span::raw(" | "),
+                    Span::styled("retries: ", Style::new().dim()),
+                    Span::raw(format!("{}", issue.retry_count)),
+                    Span::raw(" | "),
+                    Span::styled("blocked: ", Style::new().dim()),
+                    Span::styled(format!("{}", issue.blocked), blocked_style),
+                ]));
+
+                let detail_header_rows = 5;
+                let remaining_rows = max_rows.saturating_sub(detail_header_rows);
+
+                if remaining_rows >= 4 {
+                    lines.push(Line::from(Span::styled(
+                        "-".repeat(min(width, 40)),
+                        Style::new().dim(),
+                    )));
+                    // Show conversation activity
+                    if issue.recent_events.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            "no recent activity",
+                            Style::new().dim(),
+                        )));
+                    } else {
+                        let show_count = remaining_rows
+                            .saturating_sub(1)
+                            .min(issue.recent_events.len());
+                        for event in issue.recent_events.iter().rev().take(show_count) {
+                            let kind_style = event_kind_style(&event.kind);
+                            let summary = if event.summary.len() > 40 {
+                                format!("{}...", &event.summary[..37])
+                            } else {
+                                event.summary.clone()
+                            };
+                            lines.push(Line::from_spans(vec![
+                                Span::styled(
+                                    format!("{} ", format_timestamp(event.happened_at)),
+                                    Style::new().dim(),
+                                ),
+                                Span::styled(&event.kind, kind_style),
+                                Span::raw(" "),
+                                Span::raw(summary),
+                            ]));
+                        }
+                    }
+                }
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "no selected issue",
                     Style::new().dim(),
                 )));
             }
@@ -1044,9 +1398,7 @@ pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), T
     let outcome = Arc::new(Mutex::new(RunOutcome::default()));
     let app = OperatorApp::new(bridge.mailbox(), exit_after, Arc::clone(&outcome));
     let run_result = App::new(app)
-        .screen_mode(ScreenMode::Inline {
-            ui_height: INLINE_UI_HEIGHT,
-        })
+        .screen_mode(ScreenMode::AltScreen)
         .run()
         .map_err(TuiError::Runtime);
     let shutdown_result = bridge.shutdown();
@@ -1641,6 +1993,71 @@ fn runtime_state_color(state: &ControlPlaneIssueRuntimeState) -> PackedRgba {
         ControlPlaneIssueRuntimeState::RetryQueued => BRIGHT_YELLOW,
         ControlPlaneIssueRuntimeState::Releasing => MAGENTA,
     }
+}
+
+/// Parse summary text and colorize metrics: running=# (green), retry_queue=# (yellow)
+fn parse_summary_with_colors(summary: &str) -> Vec<Span<'_>> {
+    let mut spans = Vec::new();
+    let mut remaining = summary;
+
+    // Patterns to match: "running=N" and "retry_queue=N"
+    while let Some(pos) = remaining.find("running=") {
+        // Add text before the match
+        if pos > 0 {
+            spans.push(Span::raw(&remaining[..pos]));
+        }
+
+        // Find the number after "running="
+        let after_marker = &remaining[pos + 8..]; // skip "running="
+        let num_end = after_marker
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(after_marker.len());
+        let num = &after_marker[..num_end];
+
+        // Add "running=" + number in green
+        spans.push(Span::styled(
+            format!("running={}", num),
+            Style::new().fg(GREEN),
+        ));
+
+        remaining = &after_marker[num_end..];
+    }
+
+    // Add any remaining text after last "running=" match
+    if !remaining.is_empty() {
+        // Now look for retry_queue in the remaining text
+        let mut retry_remaining = remaining;
+        while let Some(pos) = retry_remaining.find("retry_queue=") {
+            // Add text before the match
+            if pos > 0 {
+                spans.push(Span::raw(&retry_remaining[..pos]));
+            }
+
+            // Find the number after "retry_queue="
+            let after_marker = &retry_remaining[pos + 12..]; // skip "retry_queue="
+            let num_end = after_marker
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after_marker.len());
+            let num = &after_marker[..num_end];
+
+            // Add "retry_queue=" + number in yellow
+            spans.push(Span::styled(
+                format!("retry_queue={}", num),
+                Style::new().fg(YELLOW),
+            ));
+
+            retry_remaining = &after_marker[num_end..];
+        }
+
+        if !retry_remaining.is_empty() {
+            spans.push(Span::raw(retry_remaining));
+        }
+    } else if spans.is_empty() {
+        // No patterns found, return the whole summary as-is
+        spans.push(Span::raw(summary));
+    }
+
+    spans
 }
 
 fn event_kind_style(kind: &str) -> Style {
