@@ -99,6 +99,18 @@ pub struct ConversationMetadata {
     pub last_event_kind: Option<String>,
     pub last_event_at: Option<TimestampMs>,
     pub last_event_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_activity: Vec<ConversationActivityEvent>,
+}
+
+const MAX_ACTIVITY_EVENTS: usize = 50;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationActivityEvent {
+    pub event_id: String,
+    pub happened_at: TimestampMs,
+    pub kind: String,
+    pub summary: String,
 }
 
 impl ConversationMetadata {
@@ -117,9 +129,21 @@ impl ConversationMetadata {
         }
 
         self.last_event_at = Some(event_at);
-        self.last_event_id = event_id;
-        self.last_event_kind = event_kind;
-        self.last_event_summary = summary;
+        self.last_event_id = event_id.clone();
+        self.last_event_kind = event_kind.clone();
+        self.last_event_summary = summary.clone();
+
+        if let (Some(event_id), Some(event_kind), Some(summary)) = (event_id, event_kind, summary) {
+            self.recent_activity.push(ConversationActivityEvent {
+                event_id,
+                happened_at: event_at,
+                kind: event_kind,
+                summary,
+            });
+            while self.recent_activity.len() > MAX_ACTIVITY_EVENTS {
+                self.recent_activity.remove(0);
+            }
+        }
     }
 }
 

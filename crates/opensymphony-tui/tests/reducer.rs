@@ -64,6 +64,8 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                     http_auth_mode: Some("none".to_owned()),
                     websocket_auth_mode: Some("none".to_owned()),
                     websocket_query_param_name: None,
+                    recent_events: Vec::new(),
+                    modified_files: Vec::new(),
                 })
                 .collect(),
             recent_events: vec![RecentEvent {
@@ -97,6 +99,8 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
             http_auth_mode: Some("none".to_owned()),
             websocket_auth_mode: Some("none".to_owned()),
             websocket_query_param_name: None,
+            recent_events: Vec::new(),
+            modified_files: Vec::new(),
         })
         .collect();
     snapshot
@@ -161,7 +165,16 @@ fn preserves_selected_issue_when_snapshot_reorders() {
 
     let rendered = state.render_text(100, 20);
     assert!(rendered.contains("> COE-256 [running / In Progress]"));
-    assert!(rendered.contains("conversation id: conv-COE-256"));
+    assert!(
+        rendered.contains("workspace:"),
+        "rendered output was: {}",
+        rendered
+    );
+    assert!(
+        rendered.contains("conv:"),
+        "rendered output was: {}",
+        rendered
+    );
 }
 
 #[test]
@@ -199,7 +212,7 @@ fn keeps_selected_detail_visible_in_narrow_layout() {
     let rendered = state.render_text(70, 22);
 
     assert!(rendered.contains("ISSUE + WORKSPACE DETAIL"));
-    assert!(rendered.contains("workspace path: workspace-0"));
+    assert!(rendered.contains("workspace: workspace-0"));
 }
 
 #[test]
@@ -213,7 +226,7 @@ fn keeps_selected_issue_visible_when_issue_list_is_windowed() {
     let rendered = state.render_text(70, 22);
 
     assert!(rendered.contains("> COE-264 [running / In Progress]"));
-    assert!(rendered.contains("workspace path: workspace-9"));
+    assert!(rendered.contains("workspace: workspace-9"));
     assert!(!rendered.contains("> COE-255 [running / In Progress]"));
 }
 
@@ -228,7 +241,7 @@ fn keeps_rendering_latest_snapshot_while_reconnecting() {
 
     assert!(rendered.contains("conn=reconnecting"));
     assert!(rendered.contains("COE-255"));
-    assert!(rendered.contains("workspace path: workspace-0"));
+    assert!(rendered.contains("workspace: workspace-0"));
 }
 
 #[test]
@@ -278,5 +291,5 @@ fn keeps_selected_issue_visible_in_long_issue_lists() {
     let rendered = state.render_text(100, 22);
 
     assert!(rendered.contains("> COE-263 [running / In Progress]"));
-    assert!(rendered.contains("workspace path: workspace-8"));
+    assert!(rendered.contains("workspace: workspace-8"));
 }

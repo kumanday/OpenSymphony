@@ -11,8 +11,9 @@ pub use client::{
     TransportDiagnostics, TransportTargetKind, WebSocketAuth,
 };
 pub use events::{
-    ConversationErrorEvent, ConversationStateMirror, EventCache, KnownEvent, LlmCompletionLogEvent,
-    TerminalExecutionStatus, UnknownEvent,
+    ActionEventPayload, ActivityKind, ActivitySummary, ConversationErrorEvent,
+    ConversationStateMirror, EventCache, KnownEvent, LlmCompletionLogEvent, MessageEventPayload,
+    ObservationEventPayload, TerminalExecutionStatus, UnknownEvent,
 };
 pub use models::{
     AcceptedResponse, AgentConfig, CondenserConfig, ConfirmationPolicy, Conversation,

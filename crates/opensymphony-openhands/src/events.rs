@@ -1,5 +1,6 @@
 use std::{cmp::Ordering, collections::HashSet};
 
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::models::{Conversation, ConversationStateUpdatePayload, EventEnvelope};
@@ -22,11 +23,45 @@ pub struct UnknownEvent {
     pub value: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct TextContent {
+    #[serde(rename = "type")]
+    pub content_type: Option<String>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessageEventPayload {
+    pub role: String,
+    pub content: Vec<TextContent>,
+    pub text_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionEventPayload {
+    pub action_id: String,
+    pub tool_name: Option<String>,
+    pub message: Option<String>,
+    pub arguments: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservationEventPayload {
+    pub observation_id: String,
+    pub tool_name: Option<String>,
+    pub content: Vec<TextContent>,
+    pub text_preview: Option<String>,
+    pub exit_code: Option<i32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum KnownEvent {
     ConversationStateUpdate(ConversationStateUpdatePayload),
     LlmCompletionLog(LlmCompletionLogEvent),
     ConversationError(ConversationErrorEvent),
+    Message(MessageEventPayload),
+    Action(ActionEventPayload),
+    Observation(ObservationEventPayload),
     Unknown(UnknownEvent),
 }
 
@@ -42,9 +77,191 @@ impl KnownEvent {
             "ConversationErrorEvent" => KnownEvent::ConversationError(ConversationErrorEvent {
                 payload: event.payload.clone(),
             }),
+            "MessageEvent" => decode_message_event(event)
+                .map(KnownEvent::Message)
+                .unwrap_or_else(|| KnownEvent::Unknown(unknown_event(event))),
+            "ActionEvent" => decode_action_event(event)
+                .map(KnownEvent::Action)
+                .unwrap_or_else(|| KnownEvent::Unknown(unknown_event(event))),
+            "ObservationEvent" => decode_observation_event(event)
+                .map(KnownEvent::Observation)
+                .unwrap_or_else(|| KnownEvent::Unknown(unknown_event(event))),
             _ => KnownEvent::Unknown(unknown_event(event)),
         }
     }
+
+    pub fn activity_summary(&self) -> Option<ActivitySummary> {
+        match self {
+            KnownEvent::Message(msg) => Some(ActivitySummary {
+                kind: ActivityKind::Message,
+                preview: msg.text_preview.clone().unwrap_or_else(|| {
+                    msg.content
+                        .iter()
+                        .filter_map(|c| c.text.as_deref())
+                        .next()
+                        .unwrap_or("message")
+                        .chars()
+                        .take(60)
+                        .collect()
+                }),
+                tool_name: None,
+            }),
+            KnownEvent::Action(action) => Some(ActivitySummary {
+                kind: ActivityKind::ToolCall,
+                preview: action
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "action".to_string()),
+                tool_name: action.tool_name.clone(),
+            }),
+            KnownEvent::Observation(obs) => Some(ActivitySummary {
+                kind: ActivityKind::ToolResult,
+                preview: obs.text_preview.clone().unwrap_or_else(|| {
+                    obs.content
+                        .iter()
+                        .filter_map(|c| c.text.as_deref())
+                        .next()
+                        .unwrap_or("result")
+                        .chars()
+                        .take(60)
+                        .collect()
+                }),
+                tool_name: obs.tool_name.clone(),
+            }),
+            KnownEvent::ConversationStateUpdate(payload) => {
+                payload
+                    .execution_status
+                    .as_ref()
+                    .map(|status| ActivitySummary {
+                        kind: ActivityKind::StateChange,
+                        preview: format!("status: {}", status),
+                        tool_name: None,
+                    })
+            }
+            KnownEvent::ConversationError(err) => err
+                .payload
+                .get("message")
+                .and_then(Value::as_str)
+                .map(|msg| ActivitySummary {
+                    kind: ActivityKind::Error,
+                    preview: msg.to_string(),
+                    tool_name: None,
+                }),
+            KnownEvent::LlmCompletionLog(_) | KnownEvent::Unknown(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivityKind {
+    StateChange,
+    Message,
+    ToolCall,
+    ToolResult,
+    Error,
+}
+
+impl ActivityKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActivityKind::StateChange => "state",
+            ActivityKind::Message => "message",
+            ActivityKind::ToolCall => "tool",
+            ActivityKind::ToolResult => "result",
+            ActivityKind::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActivitySummary {
+    pub kind: ActivityKind,
+    pub preview: String,
+    pub tool_name: Option<String>,
+}
+
+fn decode_message_event(event: &EventEnvelope) -> Option<MessageEventPayload> {
+    let role = event
+        .payload
+        .get("role")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+
+    let content: Vec<TextContent> = event
+        .payload
+        .get("llm_message")
+        .and_then(|msg| msg.get("content"))
+        .or_else(|| event.payload.get("content"))
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default();
+
+    let text_preview: Option<String> = content
+        .iter()
+        .filter_map(|c| c.text.as_deref())
+        .next()
+        .map(|t: &str| t.chars().take(80).collect());
+
+    Some(MessageEventPayload {
+        role,
+        content,
+        text_preview,
+    })
+}
+
+fn decode_action_event(event: &EventEnvelope) -> Option<ActionEventPayload> {
+    let action = event.payload.get("action")?;
+
+    let action_id = event.id.clone();
+    let tool_name = action
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let message = action
+        .get("message")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let arguments = action.clone();
+
+    Some(ActionEventPayload {
+        action_id,
+        tool_name,
+        message,
+        arguments,
+    })
+}
+
+fn decode_observation_event(event: &EventEnvelope) -> Option<ObservationEventPayload> {
+    let observation = event.payload.get("observation")?;
+
+    let observation_id = event.id.clone();
+    let tool_name = observation
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let exit_code = observation
+        .get("exit_code")
+        .and_then(Value::as_i64)
+        .map(|c| c as i32);
+
+    let content: Vec<TextContent> = observation
+        .get("content")
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default();
+
+    let text_preview: Option<String> = content
+        .iter()
+        .filter_map(|c| c.text.as_deref())
+        .next()
+        .map(|t: &str| t.chars().take(80).collect());
+
+    Some(ObservationEventPayload {
+        observation_id,
+        tool_name,
+        content,
+        text_preview,
+        exit_code,
+    })
 }
 
 fn unknown_event(event: &EventEnvelope) -> UnknownEvent {

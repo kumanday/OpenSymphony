@@ -539,6 +539,7 @@ impl IssueConversationManifest {
             last_event_kind: self.last_event_kind.clone(),
             last_event_at: self.last_event_at.map(timestamp_ms_from_datetime),
             last_event_summary: self.last_event_summary.clone(),
+            recent_activity: Vec::new(),
         }
     }
 }
@@ -2464,6 +2465,7 @@ fn build_summary_metadata(
         last_event_kind: None,
         last_event_at: None,
         last_event_summary: None,
+        recent_activity: Vec::new(),
     }
 }
 
@@ -2499,11 +2501,25 @@ fn failed_outcome(summary: impl Into<String>, error: impl Into<String>) -> Norma
 fn summarize_event(event: &EventEnvelope) -> String {
     match KnownEvent::from_envelope(event) {
         KnownEvent::ConversationStateUpdate(payload) => match payload.execution_status {
-            Some(execution_status) => format!("ConversationStateUpdateEvent `{execution_status}`"),
-            None => "ConversationStateUpdateEvent".to_string(),
+            Some(execution_status) => format!("status: {}", execution_status),
+            None => "state update".to_string(),
         },
-        KnownEvent::ConversationError(_) => format!("ConversationErrorEvent {}", event.id),
-        KnownEvent::LlmCompletionLog(_) => "LLMCompletionLogEvent".to_string(),
+        KnownEvent::ConversationError(_) => format!("error: {}", event.id),
+        KnownEvent::LlmCompletionLog(_) => "llm completion".to_string(),
+        KnownEvent::Message(msg) => {
+            let preview = msg.text_preview.unwrap_or_else(|| "message".to_string());
+            format!("{}: {}", msg.role, preview)
+        }
+        KnownEvent::Action(action) => {
+            let tool = action.tool_name.unwrap_or_else(|| "unknown".to_string());
+            let msg = action.message.unwrap_or_else(|| "action".to_string());
+            format!("tool {}: {}", tool, msg)
+        }
+        KnownEvent::Observation(obs) => {
+            let tool = obs.tool_name.unwrap_or_else(|| "unknown".to_string());
+            let preview = obs.text_preview.unwrap_or_else(|| "result".to_string());
+            format!("result {}: {}", tool, preview)
+        }
         KnownEvent::Unknown(unknown) => unknown.kind,
     }
 }

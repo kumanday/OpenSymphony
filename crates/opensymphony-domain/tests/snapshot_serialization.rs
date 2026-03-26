@@ -52,6 +52,8 @@ fn fixture() -> SnapshotEnvelope {
                 http_auth_mode: Some("header".to_owned()),
                 websocket_auth_mode: Some("query_param".to_owned()),
                 websocket_query_param_name: Some("session_api_key".to_owned()),
+                recent_events: Vec::new(),
+                modified_files: Vec::new(),
             }],
             recent_events: vec![RecentEvent {
                 happened_at: now,

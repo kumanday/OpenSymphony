@@ -23,11 +23,13 @@ use url::Url;
 
 pub use opensymphony_domain::{
     ControlPlaneAgentServerStatus as AgentServerStatus,
+    ControlPlaneConversationEvent as ConversationEvent,
     ControlPlaneDaemonSnapshot as PublicDaemonSnapshot, ControlPlaneDaemonState as DaemonState,
-    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
-    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
-    ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
-    ControlPlaneWorkerOutcome as WorkerOutcome,
+    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneFileChange as FileChange,
+    ControlPlaneFileChangeKind as FileChangeKind,
+    ControlPlaneIssueRuntimeState as IssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
+    ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
+    ControlPlaneRecentEventKind as RecentEventKind, ControlPlaneWorkerOutcome as WorkerOutcome,
 };
 
 pub type DaemonSnapshot = PublicDaemonSnapshot;
@@ -445,6 +447,8 @@ mod tests {
                 http_auth_mode: Some("none".to_owned()),
                 websocket_auth_mode: Some("none".to_owned()),
                 websocket_query_param_name: None,
+                recent_events: Vec::new(),
+                modified_files: Vec::new(),
             }],
             recent_events: vec![RecentEvent {
                 happened_at: now,

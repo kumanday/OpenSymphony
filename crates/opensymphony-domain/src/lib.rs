@@ -10,8 +10,9 @@ mod tracker;
 pub const CRATE_NAME: &str = "opensymphony-domain";
 
 pub use control_plane::{
-    ControlPlaneAgentServerStatus, ControlPlaneDaemonSnapshot, ControlPlaneDaemonState,
-    ControlPlaneDaemonStatus, ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot,
+    ControlPlaneAgentServerStatus, ControlPlaneConversationEvent, ControlPlaneDaemonSnapshot,
+    ControlPlaneDaemonState, ControlPlaneDaemonStatus, ControlPlaneFileChange,
+    ControlPlaneFileChangeKind, ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot,
     ControlPlaneMetricsSnapshot, ControlPlaneRecentEvent, ControlPlaneRecentEventKind,
     ControlPlaneWorkerOutcome, SnapshotEnvelope,
 };
@@ -21,9 +22,9 @@ pub use identifiers::{
 };
 pub use issue::{BlockerRef, IssueRef, IssueState, IssueStateCategory, NormalizedIssue};
 pub use runtime::{
-    ConversationMetadata, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry,
-    RetryPolicy, RetryReason, RunAttempt, RuntimeStreamState, StallMetadata, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceRecord,
+    ConversationActivityEvent, ConversationMetadata, ReleaseReason, RetryAttempt,
+    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeStreamState,
+    StallMetadata, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
 pub use snapshot::{
     ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, IssueSnapshot, OrchestratorSnapshot,
@@ -179,6 +180,7 @@ mod tests {
             last_event_kind: None,
             last_event_at: None,
             last_event_summary: None,
+            recent_activity: Vec::new(),
         }
     }
 

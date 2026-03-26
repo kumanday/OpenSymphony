@@ -7,15 +7,19 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use ftui::{
+    Style,
     core::geometry::Rect,
     prelude::{App, Cmd, Event, Frame, KeyCode, Model, ScreenMode},
+    render::cell::PackedRgba,
     runtime::{Every, Subscription},
+    text::text::{Line, Span, Text},
     widgets::{Widget, paragraph::Paragraph},
 };
 use opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
 use opensymphony_domain::{
-    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
-    ControlPlaneRecentEvent as RecentEvent, SnapshotEnvelope,
+    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
+    ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
+    SnapshotEnvelope,
 };
 use thiserror::Error;
 use tokio::sync::watch;
@@ -25,6 +29,16 @@ use url::Url;
 const INLINE_UI_HEIGHT: u16 = 42;
 const MIN_TIMELINE_LINES: usize = 4;
 const MAX_TIMELINE_LINES: usize = 6;
+
+const RED: PackedRgba = PackedRgba::rgb(205, 0, 0);
+const GREEN: PackedRgba = PackedRgba::rgb(0, 205, 0);
+const YELLOW: PackedRgba = PackedRgba::rgb(205, 205, 0);
+const BLUE: PackedRgba = PackedRgba::rgb(0, 255, 255); // Bright cyan instead of dark blue
+const MAGENTA: PackedRgba = PackedRgba::rgb(205, 0, 205);
+const CYAN: PackedRgba = PackedRgba::rgb(0, 205, 205);
+const BRIGHT_GREEN: PackedRgba = PackedRgba::rgb(0, 255, 0);
+const BRIGHT_YELLOW: PackedRgba = PackedRgba::rgb(255, 255, 0);
+const BRIGHT_BLACK: PackedRgba = PackedRgba::rgb(127, 127, 127);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiState {
@@ -135,10 +149,10 @@ impl TuiState {
         lines.push("=".repeat(width));
 
         if width >= 80 {
-            let left_width = max(26, width * 2 / 5);
+            let left_width = max(50, width * 3 / 5);
             let right_width = width.saturating_sub(left_width + 3);
             let left = self.issue_lines(left_width, body_rows);
-            let right = self.detail_lines(right_width);
+            let right = self.detail_lines(right_width, body_rows);
             lines.extend(fit_section(
                 two_column_block(&left, &right, left_width, right_width),
                 body_rows,
@@ -153,7 +167,11 @@ impl TuiState {
             ));
             if detail_rows > 0 {
                 lines.push("-".repeat(width));
-                lines.extend(fit_section(self.detail_lines(width), detail_rows, width));
+                lines.extend(fit_section(
+                    self.detail_lines(width, detail_rows),
+                    detail_rows,
+                    width,
+                ));
             }
         }
 
@@ -173,6 +191,477 @@ impl TuiState {
             lines.push(" ".repeat(width));
         }
         lines.join("\n")
+    }
+
+    pub fn render_text_styled(&self, width: usize, height: usize) -> Text {
+        if width == 0 || height == 0 {
+            return Text::raw("");
+        }
+
+        let (body_rows, timeline_rows) = section_layout(height);
+        let mut lines = Vec::new();
+        let snapshot = self.latest_snapshot.as_ref();
+        let issue_count = snapshot
+            .map(|value| value.snapshot.issues.len())
+            .unwrap_or_default();
+        let sequence = snapshot.map(|value| value.sequence).unwrap_or_default();
+        let generated = snapshot
+            .map(|value| format_timestamp(value.snapshot.generated_at))
+            .unwrap_or_else(|| "--:--:--".to_owned());
+
+        lines.push(self.header_line_styled(width, snapshot, sequence, &generated, issue_count));
+        lines.push(Line::from(Span::styled(
+            "=".repeat(width),
+            Style::new().dim(),
+        )));
+
+        if width >= 80 {
+            let left_width = max(50, width * 3 / 5);
+            let right_width = width.saturating_sub(left_width + 3);
+            let left = self.issue_lines_styled(left_width, body_rows);
+            let right = self.detail_lines_styled(right_width, body_rows);
+            lines.extend(fit_section_styled(
+                two_column_block_styled(&left, &right, left_width, right_width),
+                body_rows,
+                width,
+            ));
+        } else {
+            let (issue_rows, detail_rows) = stacked_body_layout(body_rows);
+            lines.extend(fit_section_styled(
+                self.issue_lines_styled(width, issue_rows),
+                issue_rows,
+                width,
+            ));
+            if detail_rows > 0 {
+                lines.push(Line::from(Span::styled(
+                    "-".repeat(width),
+                    Style::new().dim(),
+                )));
+                lines.extend(fit_section_styled(
+                    self.detail_lines_styled(width, detail_rows),
+                    detail_rows,
+                    width,
+                ));
+            }
+        }
+
+        if timeline_rows > 0 {
+            lines.push(Line::from(Span::styled(
+                "=".repeat(width),
+                Style::new().dim(),
+            )));
+            lines.extend(fit_section_styled(
+                self.timeline_lines_styled(width),
+                timeline_rows,
+                width,
+            ));
+        }
+
+        if lines.len() > height {
+            lines.truncate(height);
+        }
+        while lines.len() < height {
+            lines.push(Line::from(Span::raw(" ".repeat(width))));
+        }
+        Text::from_lines(lines)
+    }
+
+    fn header_line_styled(
+        &self,
+        width: usize,
+        snapshot: Option<&SnapshotEnvelope>,
+        sequence: u64,
+        generated: &str,
+        issue_count: usize,
+    ) -> Line {
+        let mut spans = vec![
+            Span::styled("OpenSymphony", Style::new().bold()),
+            Span::raw(" | "),
+        ];
+
+        if let Some(snap) = snapshot {
+            let daemon = &snap.snapshot.daemon;
+            let daemon_style = match daemon.state {
+                opensymphony_domain::ControlPlaneDaemonState::Ready => Style::new().fg(GREEN),
+                opensymphony_domain::ControlPlaneDaemonState::Starting => Style::new().fg(YELLOW),
+                opensymphony_domain::ControlPlaneDaemonState::Degraded => Style::new().fg(RED),
+                opensymphony_domain::ControlPlaneDaemonState::Stopped => {
+                    Style::new().fg(BRIGHT_BLACK)
+                }
+            };
+            spans.push(Span::styled(
+                format!("daemon={}", daemon.state.as_str()),
+                daemon_style,
+            ));
+            spans.push(Span::raw(" | "));
+
+            let agent = &snap.snapshot.agent_server;
+            let agent_style = if agent.reachable {
+                Style::new().fg(GREEN)
+            } else {
+                Style::new().fg(RED)
+            };
+            spans.push(Span::styled(
+                format!("agent={}", if agent.reachable { "up" } else { "down" }),
+                agent_style,
+            ));
+            spans.push(Span::raw(" | "));
+        } else {
+            spans.push(Span::styled("daemon=--", Style::new().dim()));
+            spans.push(Span::raw(" | "));
+            spans.push(Span::styled("agent=--", Style::new().dim()));
+            spans.push(Span::raw(" | "));
+        }
+
+        let conn_style = match &self.connection {
+            ConnectionState::Live => Style::new().fg(GREEN).bold(),
+            ConnectionState::Connecting => Style::new().fg(YELLOW),
+            ConnectionState::Reconnecting(_) => Style::new().fg(RED),
+        };
+        spans.push(Span::styled(
+            format!("conn={}", self.connection.label()),
+            conn_style,
+        ));
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(format!("seq={sequence}"), Style::new().dim()));
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            format!("issues={issue_count}"),
+            Style::new().dim(),
+        ));
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            format!("updated={generated}"),
+            Style::new().dim(),
+        ));
+        spans.push(Span::raw(" | "));
+        spans.push(Span::styled(
+            "q quit  tab focus  e toggle",
+            Style::new().fg(BRIGHT_BLACK),
+        ));
+
+        let line = Line::from_spans(spans);
+        Line::from_spans(vec![Span::raw(fit(&line.to_plain_text(), width))])
+    }
+
+    fn issue_lines_styled(&self, width: usize, max_rows: usize) -> Vec<Line> {
+        let title_style = if self.focus == FocusPane::Issues {
+            Style::new().bold()
+        } else {
+            Style::new().dim()
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            pane_title("ISSUES", self.focus == FocusPane::Issues),
+            title_style,
+        ))];
+
+        match &self.latest_snapshot {
+            Some(snapshot) if snapshot.snapshot.issues.is_empty() => {
+                lines.push(Line::from(Span::styled(
+                    "no issues in snapshot",
+                    Style::new().dim(),
+                )));
+            }
+            Some(snapshot) => {
+                let (start, end) = issue_window(
+                    snapshot.snapshot.issues.len(),
+                    self.selected_issue,
+                    visible_issue_count(max_rows),
+                );
+                for (index, issue) in snapshot.snapshot.issues[start..end].iter().enumerate() {
+                    let global_index = start + index;
+                    let is_selected = global_index == self.selected_issue;
+                    lines.push(self.issue_line_styled(issue, is_selected, width));
+                }
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "awaiting first snapshot",
+                    Style::new().dim(),
+                )));
+            }
+        }
+        lines
+    }
+
+    fn issue_line_styled(&self, issue: &IssueSnapshot, is_selected: bool, _width: usize) -> Line {
+        // Use reverse video (swap foreground/background) for selected items
+        // This works on all terminals regardless of color support
+        let base_style = if is_selected {
+            Style::new().reverse().bold()
+        } else {
+            Style::new()
+        };
+
+        let marker = if is_selected { ">" } else { " " };
+        let marker_style = if is_selected {
+            Style::new().reverse().bold()
+        } else {
+            Style::new().fg(BRIGHT_GREEN).bold()
+        };
+
+        let id_style = base_style.merge(&Style::new().fg(CYAN).bold());
+        let state_style =
+            base_style.merge(&Style::new().fg(runtime_state_color(&issue.runtime_state)));
+        let tracker_style = base_style.merge(&Style::new().dim());
+        let title_style = base_style;
+
+        let line = Line::from_spans(vec![
+            Span::styled(marker, marker_style),
+            Span::styled(" ", base_style),
+            Span::styled(&issue.identifier, id_style),
+            Span::styled(" [", base_style),
+            Span::styled(issue.runtime_state.as_str(), state_style),
+            Span::styled(" / ", base_style),
+            Span::styled(&issue.tracker_state, tracker_style),
+            Span::styled("] ", base_style),
+            Span::styled(&issue.title, title_style),
+        ]);
+        line
+    }
+
+    fn detail_lines_styled(&self, width: usize, max_rows: usize) -> Vec<Line> {
+        let title_style = if self.focus == FocusPane::Detail {
+            Style::new().bold()
+        } else {
+            Style::new().dim()
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            pane_title("ISSUE + WORKSPACE DETAIL", self.focus == FocusPane::Detail),
+            title_style,
+        ))];
+
+        match self.selected_issue() {
+            Some(issue) => {
+                let id_style = Style::new().fg(CYAN).bold();
+                lines.push(Line::from_spans(vec![
+                    Span::styled(&issue.identifier, id_style),
+                    Span::raw(" "),
+                    Span::raw(&issue.title),
+                ]));
+
+                let runtime_style = Style::new().fg(runtime_state_color(&issue.runtime_state));
+                lines.push(Line::from_spans(vec![
+                    Span::styled("tracker: ", Style::new().dim()),
+                    Span::raw(&issue.tracker_state),
+                    Span::raw(" | "),
+                    Span::styled("runtime: ", Style::new().dim()),
+                    Span::styled(issue.runtime_state.as_str(), runtime_style),
+                    Span::raw(" | "),
+                    Span::styled("outcome: ", Style::new().dim()),
+                    Span::raw(issue.last_outcome.as_str()),
+                ]));
+
+                lines.push(Line::from_spans(vec![
+                    Span::styled("workspace: ", Style::new().dim()),
+                    Span::raw(&issue.workspace_path_suffix),
+                    Span::raw(" | "),
+                    Span::styled("conv: ", Style::new().dim()),
+                    Span::raw(&issue.conversation_id_suffix),
+                ]));
+
+                let blocked_style = if issue.blocked {
+                    Style::new().fg(YELLOW)
+                } else {
+                    Style::new().fg(GREEN)
+                };
+                lines.push(Line::from_spans(vec![
+                    Span::styled("last event: ", Style::new().dim()),
+                    Span::raw(format_timestamp(issue.last_event_at)),
+                    Span::raw(" | "),
+                    Span::styled("retries: ", Style::new().dim()),
+                    Span::raw(format!("{}", issue.retry_count)),
+                    Span::raw(" | "),
+                    Span::styled("blocked: ", Style::new().dim()),
+                    Span::styled(format!("{}", issue.blocked), blocked_style),
+                ]));
+
+                let detail_header_rows = 5;
+                let remaining_rows = max_rows.saturating_sub(detail_header_rows);
+
+                if remaining_rows >= 4 {
+                    lines.push(Line::from(Span::styled(
+                        "-".repeat(width.min(40)),
+                        Style::new().dim(),
+                    )));
+                    lines.extend(self.conversation_events_lines_styled(
+                        width,
+                        issue,
+                        remaining_rows / 2,
+                    ));
+                }
+
+                if remaining_rows >= 6 {
+                    lines.push(Line::from(Span::styled(
+                        "-".repeat(width.min(40)),
+                        Style::new().dim(),
+                    )));
+                    lines.extend(self.modified_files_lines_styled(width, issue));
+                }
+            }
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "no selected issue",
+                    Style::new().dim(),
+                )));
+            }
+        }
+        lines
+    }
+
+    fn conversation_events_lines_styled(
+        &self,
+        _width: usize,
+        issue: &IssueSnapshot,
+        max_rows: usize,
+    ) -> Vec<Line> {
+        let mut lines = vec![Line::from(Span::styled(
+            "[ ] CONVERSATION ACTIVITY",
+            Style::new().bold(),
+        ))];
+
+        if issue.recent_events.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "no recent activity",
+                Style::new().dim(),
+            )));
+        } else {
+            let show_count = max_rows.saturating_sub(1).min(issue.recent_events.len());
+            for event in issue.recent_events.iter().rev().take(show_count) {
+                let kind_style = event_kind_style(&event.kind);
+                let summary = if event.summary.len() > 40 {
+                    format!("{}...", &event.summary[..37])
+                } else {
+                    event.summary.clone()
+                };
+                lines.push(Line::from_spans(vec![
+                    Span::styled(
+                        format!("{} ", format_timestamp(event.happened_at)),
+                        Style::new().dim(),
+                    ),
+                    Span::styled(&event.kind, kind_style),
+                    Span::raw(" "),
+                    Span::raw(summary),
+                ]));
+            }
+        }
+        lines
+    }
+
+    fn modified_files_lines_styled(&self, width: usize, issue: &IssueSnapshot) -> Vec<Line> {
+        let mut lines = vec![Line::from(Span::styled(
+            "[ ] MODIFIED FILES",
+            Style::new().bold(),
+        ))];
+
+        if issue.modified_files.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "no modified files",
+                Style::new().dim(),
+            )));
+        } else {
+            for file in &issue.modified_files {
+                let (change_symbol, change_style) = match file.change_kind {
+                    opensymphony_domain::ControlPlaneFileChangeKind::Created => {
+                        ("+", Style::new().fg(GREEN))
+                    }
+                    opensymphony_domain::ControlPlaneFileChangeKind::Modified => {
+                        ("~", Style::new().fg(YELLOW))
+                    }
+                    opensymphony_domain::ControlPlaneFileChangeKind::Removed => {
+                        ("-", Style::new().fg(RED))
+                    }
+                };
+                let path = if file.path.len() > width.saturating_sub(12) {
+                    let truncated_len = width.saturating_sub(15);
+                    format!(
+                        "...{}",
+                        &file.path[file.path.len().saturating_sub(truncated_len)..]
+                    )
+                } else {
+                    file.path.clone()
+                };
+                lines.push(Line::from_spans(vec![
+                    Span::styled(change_symbol, change_style.bold()),
+                    Span::raw(" "),
+                    Span::raw(path),
+                    Span::raw(" "),
+                    Span::styled(
+                        format!("(+{}/-{})", file.lines_added, file.lines_removed),
+                        Style::new().dim(),
+                    ),
+                ]));
+            }
+        }
+        lines
+    }
+
+    fn timeline_lines_styled(&self, _width: usize) -> Vec<Line> {
+        let title = match self.timeline_mode {
+            TimelineMode::Events => "RECENT EVENTS",
+            TimelineMode::Metrics => "METRICS",
+        };
+        let title_style = if self.focus == FocusPane::Timeline {
+            Style::new().bold()
+        } else {
+            Style::new().dim()
+        };
+        let mut lines = vec![Line::from(Span::styled(title, title_style))];
+
+        match &self.latest_snapshot {
+            Some(snapshot) => match self.timeline_mode {
+                TimelineMode::Events => {
+                    for event in &snapshot.snapshot.recent_events {
+                        let kind_style = match event.kind {
+                            opensymphony_domain::ControlPlaneRecentEventKind::WorkerStarted => {
+                                Style::new().fg(GREEN)
+                            }
+                            opensymphony_domain::ControlPlaneRecentEventKind::WorkerCompleted => {
+                                Style::new().fg(CYAN)
+                            }
+                            opensymphony_domain::ControlPlaneRecentEventKind::Warning => {
+                                Style::new().fg(RED)
+                            }
+                            opensymphony_domain::ControlPlaneRecentEventKind::SnapshotPublished => {
+                                Style::new().dim()
+                            }
+                            _ => Style::new().dim(),
+                        };
+                        lines.push(Line::from_spans(vec![
+                            Span::styled(
+                                format!("{} ", format_timestamp(event.happened_at)),
+                                Style::new().dim(),
+                            ),
+                            Span::styled(event.kind.as_str(), kind_style),
+                            Span::raw(" "),
+                            Span::raw(&event.summary),
+                        ]));
+                    }
+                }
+                TimelineMode::Metrics => {
+                    let m = &snapshot.snapshot.metrics;
+                    lines.push(Line::from_spans(vec![
+                        Span::styled("running: ", Style::new().dim()),
+                        Span::styled(format!("{}", m.running_issues), Style::new().fg(GREEN)),
+                    ]));
+                    lines.push(Line::from_spans(vec![
+                        Span::styled("retry queue: ", Style::new().dim()),
+                        Span::raw(format!("{}", m.retry_queue_depth)),
+                    ]));
+                    lines.push(Line::from_spans(vec![
+                        Span::styled("tokens: ", Style::new().dim()),
+                        Span::raw(format!("{}", m.total_tokens)),
+                    ]));
+                }
+            },
+            None => {
+                lines.push(Line::from(Span::styled(
+                    "awaiting first snapshot",
+                    Style::new().dim(),
+                )));
+            }
+        }
+        lines
     }
 
     fn issue_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
@@ -214,7 +703,7 @@ impl TuiState {
         lines
     }
 
-    fn detail_lines(&self, width: usize) -> Vec<String> {
+    fn detail_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         let mut lines = vec![fit(
             &pane_title("ISSUE + WORKSPACE DETAIL", self.focus == FocusPane::Detail),
             width,
@@ -222,32 +711,110 @@ impl TuiState {
         match self.selected_issue() {
             Some(issue) => {
                 lines.push(fit(&format!("{} {}", issue.identifier, issue.title), width));
-                lines.push(fit(&format!("tracker: {}", issue.tracker_state), width));
                 lines.push(fit(
-                    &format!("runtime: {}", issue.runtime_state.as_str()),
+                    &format!(
+                        "tracker: {} | runtime: {} | outcome: {}",
+                        issue.tracker_state,
+                        issue.runtime_state.as_str(),
+                        issue.last_outcome.as_str()
+                    ),
                     width,
                 ));
                 lines.push(fit(
-                    &format!("last outcome: {}", issue.last_outcome.as_str()),
+                    &format!(
+                        "workspace: {} | conv: {}",
+                        issue.workspace_path_suffix, issue.conversation_id_suffix
+                    ),
                     width,
                 ));
                 lines.push(fit(
-                    &format!("last event: {}", format_timestamp(issue.last_event_at)),
+                    &format!(
+                        "last event: {} | retries: {} | blocked: {}",
+                        format_timestamp(issue.last_event_at),
+                        issue.retry_count,
+                        issue.blocked
+                    ),
                     width,
                 ));
-                lines.push(fit(
-                    &format!("workspace path: {}", issue.workspace_path_suffix),
-                    width,
-                ));
-                lines.push(fit(
-                    &format!("conversation id: {}", issue.conversation_id_suffix),
-                    width,
-                ));
-                lines.push(fit(&format!("retry count: {}", issue.retry_count), width));
-                lines.push(fit(&format!("blocked: {}", issue.blocked), width));
+
+                let detail_header_rows = 5;
+                let remaining_rows = max_rows.saturating_sub(detail_header_rows);
+
+                if remaining_rows >= 4 {
+                    lines.push("-".repeat(width.min(40)));
+                    lines.extend(self.conversation_events_lines(width, issue, remaining_rows / 2));
+                }
+
+                if remaining_rows >= 6 {
+                    lines.push("-".repeat(width.min(40)));
+                    lines.extend(self.modified_files_lines(width, issue));
+                }
             }
             None => {
                 lines.push(fit("no selected issue", width));
+            }
+        }
+        lines
+    }
+
+    fn conversation_events_lines(
+        &self,
+        width: usize,
+        issue: &IssueSnapshot,
+        max_rows: usize,
+    ) -> Vec<String> {
+        let mut lines = vec![fit("[ ] CONVERSATION ACTIVITY", width)];
+        if issue.recent_events.is_empty() {
+            lines.push(fit("no recent activity", width));
+        } else {
+            let show_count = max_rows.saturating_sub(1).min(issue.recent_events.len());
+            for event in issue.recent_events.iter().rev().take(show_count) {
+                let summary = if event.summary.len() > 40 {
+                    format!("{}...", &event.summary[..37])
+                } else {
+                    event.summary.clone()
+                };
+                lines.push(fit(
+                    &format!(
+                        "{} {} {}",
+                        format_timestamp(event.happened_at),
+                        event.kind,
+                        summary
+                    ),
+                    width,
+                ));
+            }
+        }
+        lines
+    }
+
+    fn modified_files_lines(&self, width: usize, issue: &IssueSnapshot) -> Vec<String> {
+        let mut lines = vec![fit("[ ] MODIFIED FILES", width)];
+        if issue.modified_files.is_empty() {
+            lines.push(fit("no modified files", width));
+        } else {
+            for file in &issue.modified_files {
+                let change_symbol = match file.change_kind {
+                    opensymphony_domain::ControlPlaneFileChangeKind::Created => "+",
+                    opensymphony_domain::ControlPlaneFileChangeKind::Modified => "~",
+                    opensymphony_domain::ControlPlaneFileChangeKind::Removed => "-",
+                };
+                let path = if file.path.len() > width.saturating_sub(12) {
+                    let truncated_len = width.saturating_sub(15);
+                    format!(
+                        "...{}",
+                        &file.path[file.path.len().saturating_sub(truncated_len)..]
+                    )
+                } else {
+                    file.path.clone()
+                };
+                lines.push(fit(
+                    &format!(
+                        "{} {} (+{}/-{})",
+                        change_symbol, path, file.lines_added, file.lines_removed
+                    ),
+                    width,
+                ));
             }
         }
         lines
@@ -714,7 +1281,7 @@ impl Model for OperatorApp {
     fn view(&self, frame: &mut Frame<'_>) {
         let content = self
             .state
-            .render_text(frame.width() as usize, frame.height() as usize);
+            .render_text_styled(frame.width() as usize, frame.height() as usize);
         Paragraph::new(content).render(Rect::new(0, 0, frame.width(), frame.height()), frame);
     }
 
@@ -1066,19 +1633,151 @@ fn pad_to_width(mut value: String, width: usize) -> String {
     value
 }
 
+fn runtime_state_color(state: &ControlPlaneIssueRuntimeState) -> PackedRgba {
+    match state {
+        ControlPlaneIssueRuntimeState::Running => GREEN,
+        ControlPlaneIssueRuntimeState::Failed => RED,
+        ControlPlaneIssueRuntimeState::Idle => YELLOW,
+        ControlPlaneIssueRuntimeState::Completed => CYAN,
+        ControlPlaneIssueRuntimeState::RetryQueued => BRIGHT_YELLOW,
+        ControlPlaneIssueRuntimeState::Releasing => MAGENTA,
+    }
+}
+
+fn event_kind_style(kind: &str) -> Style {
+    match kind {
+        "tool" | "tool_call" | "tool_use" | "ActionEvent" => Style::new().fg(BLUE),
+        "message" | "MessageEvent" => Style::new().fg(CYAN),
+        "error" | "ConversationErrorEvent" => Style::new().fg(RED),
+        "assistant" => Style::new().fg(GREEN),
+        "user" => Style::new().fg(YELLOW),
+        "state" | "ConversationStateUpdateEvent" => Style::new().dim(),
+        _ => Style::new(),
+    }
+}
+
+fn two_column_block_styled(
+    left: &[Line],
+    right: &[Line],
+    left_width: usize,
+    right_width: usize,
+) -> Vec<Line> {
+    let row_count = max(left.len(), right.len());
+    (0..row_count)
+        .map(|index| {
+            let left_line = left.get(index);
+            let right_line = right.get(index);
+
+            // Build combined spans preserving original styling
+            let mut spans: Vec<Span<'_>> = Vec::new();
+
+            // Add left line spans (or empty if none)
+            if let Some(line) = left_line {
+                // Get spans from the line, truncated to width
+                let mut line_width = 0;
+                for span in line.spans() {
+                    let span_text = span.as_str();
+                    let remaining = left_width.saturating_sub(line_width);
+                    if remaining == 0 {
+                        break;
+                    }
+                    let truncated = if span_text.width() > remaining {
+                        &span_text[..span_text
+                            .char_indices()
+                            .take_while(|(i, _)| *i <= remaining)
+                            .last()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0)]
+                    } else {
+                        span_text
+                    };
+                    spans.push(Span::styled(
+                        truncated.to_string(),
+                        span.style.unwrap_or_default(),
+                    ));
+                    line_width += truncated.width();
+                }
+                // Pad if needed
+                if line_width < left_width {
+                    spans.push(Span::raw(" ".repeat(left_width - line_width)));
+                }
+            } else {
+                spans.push(Span::raw(" ".repeat(left_width)));
+            }
+
+            // Add separator
+            spans.push(Span::raw(" | "));
+
+            // Add right line spans (or empty if none)
+            if let Some(line) = right_line {
+                let mut line_width = 0;
+                for span in line.spans() {
+                    let span_text = span.as_str();
+                    let remaining = right_width.saturating_sub(line_width);
+                    if remaining == 0 {
+                        break;
+                    }
+                    let truncated = if span_text.width() > remaining {
+                        &span_text[..span_text
+                            .char_indices()
+                            .take_while(|(i, _)| *i <= remaining)
+                            .last()
+                            .map(|(i, _)| i)
+                            .unwrap_or(0)]
+                    } else {
+                        span_text
+                    };
+                    spans.push(Span::styled(
+                        truncated.to_string(),
+                        span.style.unwrap_or_default(),
+                    ));
+                    line_width += truncated.width();
+                }
+                // Pad if needed
+                if line_width < right_width {
+                    spans.push(Span::raw(" ".repeat(right_width - line_width)));
+                }
+            } else {
+                spans.push(Span::raw(" ".repeat(right_width)));
+            }
+
+            Line::from_spans(spans)
+        })
+        .collect()
+}
+
+fn fit_section_styled(mut lines: Vec<Line>, max_rows: usize, width: usize) -> Vec<Line> {
+    if max_rows == 0 {
+        return Vec::new();
+    }
+
+    if lines.len() > max_rows {
+        lines.truncate(max_rows);
+        if let Some(last) = lines.last_mut() {
+            *last = Line::from(Span::styled("...", Style::new().dim()));
+        }
+    }
+
+    while lines.len() < max_rows {
+        lines.push(Line::from(Span::raw(" ".repeat(width))));
+    }
+
+    lines
+}
+
 trait RuntimeStateLabel {
     fn as_str(&self) -> &'static str;
 }
 
-impl RuntimeStateLabel for opensymphony_domain::ControlPlaneIssueRuntimeState {
+impl RuntimeStateLabel for ControlPlaneIssueRuntimeState {
     fn as_str(&self) -> &'static str {
         match self {
-            opensymphony_domain::ControlPlaneIssueRuntimeState::Idle => "idle",
-            opensymphony_domain::ControlPlaneIssueRuntimeState::Running => "running",
-            opensymphony_domain::ControlPlaneIssueRuntimeState::RetryQueued => "retry_queued",
-            opensymphony_domain::ControlPlaneIssueRuntimeState::Releasing => "releasing",
-            opensymphony_domain::ControlPlaneIssueRuntimeState::Completed => "completed",
-            opensymphony_domain::ControlPlaneIssueRuntimeState::Failed => "failed",
+            ControlPlaneIssueRuntimeState::Idle => "idle",
+            ControlPlaneIssueRuntimeState::Running => "running",
+            ControlPlaneIssueRuntimeState::RetryQueued => "retry_queued",
+            ControlPlaneIssueRuntimeState::Releasing => "releasing",
+            ControlPlaneIssueRuntimeState::Completed => "completed",
+            ControlPlaneIssueRuntimeState::Failed => "failed",
         }
     }
 }
@@ -1125,10 +1824,10 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use ftui::prelude::Model;
     use opensymphony_domain::{
-        ControlPlaneAgentServerStatus as AgentServerStatus,
+        ControlPlaneAgentServerStatus as AgentServerStatus, ControlPlaneConversationEvent,
         ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
-        ControlPlaneDaemonStatus as DaemonStatus,
-        ControlPlaneIssueRuntimeState as IssueRuntimeState,
+        ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneFileChange,
+        ControlPlaneFileChangeKind, ControlPlaneIssueRuntimeState as IssueRuntimeState,
         ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
         ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
         ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
@@ -1220,6 +1919,34 @@ mod tests {
                         http_auth_mode: Some("none".to_owned()),
                         websocket_auth_mode: Some("none".to_owned()),
                         websocket_query_param_name: None,
+                        recent_events: vec![
+                            ControlPlaneConversationEvent {
+                                event_id: format!("evt-{}-1", index),
+                                happened_at: now,
+                                kind: "tool_call".to_owned(),
+                                summary: "editing src/main.rs".to_owned(),
+                            },
+                            ControlPlaneConversationEvent {
+                                event_id: format!("evt-{}-2", index),
+                                happened_at: now,
+                                kind: "message".to_owned(),
+                                summary: "implementing feature".to_owned(),
+                            },
+                        ],
+                        modified_files: vec![
+                            ControlPlaneFileChange {
+                                path: format!("workspace-{}/src/main.rs", index),
+                                change_kind: ControlPlaneFileChangeKind::Modified,
+                                lines_added: 42,
+                                lines_removed: 10,
+                            },
+                            ControlPlaneFileChange {
+                                path: format!("workspace-{}/src/lib.rs", index),
+                                change_kind: ControlPlaneFileChangeKind::Created,
+                                lines_added: 100,
+                                lines_removed: 0,
+                            },
+                        ],
                     })
                     .collect(),
                 recent_events: vec![RecentEvent {
@@ -1372,7 +2099,7 @@ mod tests {
 
         let rendered = state.render_text(72, 22);
         assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
-        assert!(rendered.contains("workspace path: workspace-0"));
+        assert!(rendered.contains("workspace: workspace-0"));
         assert!(rendered.contains("RECENT EVENTS"));
     }
 

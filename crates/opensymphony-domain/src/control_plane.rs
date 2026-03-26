@@ -79,6 +79,34 @@ pub struct ControlPlaneIssueSnapshot {
     pub websocket_auth_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub websocket_query_param_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recent_events: Vec<ControlPlaneConversationEvent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modified_files: Vec<ControlPlaneFileChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneConversationEvent {
+    pub event_id: String,
+    pub happened_at: DateTime<Utc>,
+    pub kind: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneFileChange {
+    pub path: String,
+    pub change_kind: ControlPlaneFileChangeKind,
+    pub lines_added: u32,
+    pub lines_removed: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ControlPlaneFileChangeKind {
+    Created,
+    Modified,
+    Removed,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -123,4 +151,20 @@ pub enum ControlPlaneRecentEventKind {
     ClientAttached,
     ClientDetached,
     Warning,
+}
+
+impl ControlPlaneRecentEventKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ControlPlaneRecentEventKind::WorkerStarted => "worker_started",
+            ControlPlaneRecentEventKind::WorkspacePrepared => "workspace_prepared",
+            ControlPlaneRecentEventKind::StreamAttached => "stream_attached",
+            ControlPlaneRecentEventKind::SnapshotPublished => "snapshot_published",
+            ControlPlaneRecentEventKind::WorkerCompleted => "worker_completed",
+            ControlPlaneRecentEventKind::RetryScheduled => "retry_scheduled",
+            ControlPlaneRecentEventKind::ClientAttached => "client_attached",
+            ControlPlaneRecentEventKind::ClientDetached => "client_detached",
+            ControlPlaneRecentEventKind::Warning => "warning",
+        }
+    }
 }

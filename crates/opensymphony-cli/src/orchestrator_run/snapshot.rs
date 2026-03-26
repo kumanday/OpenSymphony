@@ -7,8 +7,8 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use opensymphony_control::{
-    AgentServerStatus, DaemonSnapshot, DaemonState, DaemonStatus, IssueRuntimeState, IssueSnapshot,
-    MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
+    AgentServerStatus, ConversationEvent, DaemonSnapshot, DaemonState, DaemonStatus,
+    IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
 };
 use opensymphony_domain::{
     HealthStatus, IssueIdentifier, OrchestratorSnapshot, SchedulerStatus, WorkerOutcomeKind,
@@ -151,6 +151,25 @@ fn map_issue(
             .conversation
             .as_ref()
             .and_then(|conversation| conversation.websocket_query_param_name.clone()),
+        recent_events: issue
+            .conversation
+            .as_ref()
+            .map(|conversation| {
+                conversation
+                    .recent_activity
+                    .iter()
+                    .rev()
+                    .take(10)
+                    .map(|activity| ConversationEvent {
+                        event_id: activity.event_id.clone(),
+                        happened_at: timestamp_to_datetime(activity.happened_at),
+                        kind: activity.kind.clone(),
+                        summary: activity.summary.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        modified_files: Vec::new(),
     }
 }
 

@@ -52,6 +52,8 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             http_auth_mode: Some("none".to_owned()),
             websocket_auth_mode: Some("none".to_owned()),
             websocket_query_param_name: None,
+            recent_events: Vec::new(),
+            modified_files: Vec::new(),
         }],
         recent_events: vec![RecentEvent {
             happened_at: now,

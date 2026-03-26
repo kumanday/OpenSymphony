@@ -111,6 +111,7 @@ mod tests {
                 last_event_kind: None,
                 last_event_at: None,
                 last_event_summary: None,
+                recent_activity: Vec::new(),
             }),
         ));
         let execution =
