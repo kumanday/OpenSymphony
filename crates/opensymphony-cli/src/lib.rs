@@ -1335,6 +1335,8 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             http_auth_mode: Some("none".to_owned()),
             websocket_auth_mode: Some("none".to_owned()),
             websocket_query_param_name: None,
+            recent_events: Vec::new(),
+            modified_files: Vec::new(),
         },
         IssueSnapshot {
             identifier: "OSYM-401".to_owned(),
@@ -1352,6 +1354,8 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             http_auth_mode: Some("header".to_owned()),
             websocket_auth_mode: Some("query_param".to_owned()),
             websocket_query_param_name: Some("session_api_key".to_owned()),
+            recent_events: Vec::new(),
+            modified_files: Vec::new(),
         },
         IssueSnapshot {
             identifier: "OSYM-402".to_owned(),
@@ -1377,6 +1381,8 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             http_auth_mode: Some("header".to_owned()),
             websocket_auth_mode: Some("header".to_owned()),
             websocket_query_param_name: None,
+            recent_events: Vec::new(),
+            modified_files: Vec::new(),
         },
     ];
     let running_issues = issues
