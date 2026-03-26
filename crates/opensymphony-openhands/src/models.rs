@@ -665,11 +665,11 @@ mod tests {
                 condenser: None,
                 tools: Some(vec![
                     ToolConfig {
-                        name: "TerminalTool".to_string(),
+                        name: "terminal".to_string(),
                         params: BTreeMap::new(),
                     },
                     ToolConfig {
-                        name: "BrowserToolSet".to_string(),
+                        name: "browser_tool_set".to_string(),
                         params: BTreeMap::from([(
                             "start_url".to_string(),
                             Value::String("https://example.com".to_string()),
@@ -697,11 +697,11 @@ mod tests {
                 },
                 "tools": [
                     {
-                        "name": "TerminalTool",
+                        "name": "terminal",
                         "params": {},
                     },
                     {
-                        "name": "BrowserToolSet",
+                        "name": "browser_tool_set",
                         "params": {
                             "start_url": "https://example.com",
                         },
