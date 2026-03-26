@@ -1271,8 +1271,8 @@ async fn issue_session_runner_waits_for_an_already_running_turn_before_retrying(
 }
 
 #[tokio::test]
-async fn issue_session_runner_rehydrates_a_missing_conversation_without_downgrading_to_full_prompt()
-{
+async fn issue_session_runner_rehydrates_a_missing_conversation_with_fresh_prompt_and_current_config()
+ {
     let server = FakeOpenHandsServer::start()
         .await
         .expect("fake server should start");
@@ -1349,24 +1349,9 @@ async fn issue_session_runner_rehydrates_a_missing_conversation_without_downgrad
         .await
         .expect("rehydrated issue session run should succeed");
 
-    assert_eq!(
-        second_result.prompt_kind,
-        IssueSessionPromptKind::Continuation
-    );
-    assert_eq!(
-        first_result
-            .conversation
-            .as_ref()
-            .expect("first conversation metadata should exist")
-            .conversation_id,
-        second_result
-            .conversation
-            .as_ref()
-            .expect("second conversation metadata should exist")
-            .conversation_id
-    );
+    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Full);
     assert!(
-        !second_result
+        second_result
             .conversation
             .as_ref()
             .expect("second conversation metadata should exist")
@@ -1374,24 +1359,14 @@ async fn issue_session_runner_rehydrates_a_missing_conversation_without_downgrad
     );
 
     let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
-    assert_eq!(create_request.conversation_id, conversation_id);
+    assert!(!create_request.agent.llm.model.is_empty());
 
     let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
     assert!(manifest.workflow_prompt_seeded);
     assert_eq!(
         manifest.last_prompt_kind,
-        Some(IssueSessionPromptKind::Continuation)
+        Some(IssueSessionPromptKind::Full)
     );
-
-    let messages = latest_message_texts(
-        client
-            .search_all_events(conversation_id)
-            .await
-            .expect("events should be searchable after rehydrate")
-            .items(),
-    );
-    assert_eq!(messages.len(), 2);
-    assert!(messages[1].contains("The original workflow prompt is already present"));
 }
 
 #[tokio::test]
