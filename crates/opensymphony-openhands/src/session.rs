@@ -2511,14 +2511,26 @@ fn summarize_event(event: &EventEnvelope) -> String {
             format!("{}: {}", msg.role, preview)
         }
         KnownEvent::Action(action) => {
-            let tool = action.tool_name.unwrap_or_else(|| "unknown".to_string());
-            let msg = action.message.unwrap_or_else(|| "action".to_string());
-            format!("tool {}: {}", tool, msg)
+            let tool = action.tool_name.as_deref().unwrap_or("");
+            let msg = action.message.as_deref().unwrap_or("action");
+            if tool.is_empty() {
+                msg.to_string()
+            } else {
+                format!("{}: {}", tool, msg)
+            }
         }
         KnownEvent::Observation(obs) => {
-            let tool = obs.tool_name.unwrap_or_else(|| "unknown".to_string());
-            let preview = obs.text_preview.unwrap_or_else(|| "result".to_string());
-            format!("result {}: {}", tool, preview)
+            let tool = obs.tool_name.as_deref().unwrap_or("");
+            let preview = obs.text_preview.as_deref().unwrap_or("");
+            if tool.is_empty() {
+                if preview.is_empty() {
+                    "result".to_string()
+                } else {
+                    format!("→ {}", preview)
+                }
+            } else {
+                format!("{}: {}", tool, preview)
+            }
         }
         KnownEvent::Unknown(unknown) => unknown.kind,
     }
