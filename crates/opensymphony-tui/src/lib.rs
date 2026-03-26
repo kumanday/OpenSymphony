@@ -198,13 +198,13 @@ impl TuiState {
                         " "
                     };
                     let line = format!(
-                        "{marker} {} [{} / {}]",
+                        "{marker} {} [{} / {}] {}",
                         issue.identifier,
                         issue.runtime_state.as_str(),
-                        issue.tracker_state
+                        issue.tracker_state,
+                        issue.title
                     );
                     lines.push(fit(&line, width));
-                    lines.push(fit(&format!("  {}", issue.title), width));
                 }
             }
             None => {
@@ -968,7 +968,7 @@ fn fit_section(mut lines: Vec<String>, max_rows: usize, width: usize) -> Vec<Str
 }
 
 fn visible_issue_count(max_rows: usize) -> usize {
-    max(1, max_rows.saturating_sub(1) / 2)
+    max(1, max_rows.saturating_sub(1))
 }
 
 fn issue_window(
@@ -1379,8 +1379,8 @@ mod tests {
     #[test]
     fn visible_issue_count_reserves_header_row() {
         assert_eq!(visible_issue_count(0), 1);
-        assert_eq!(visible_issue_count(4), 1);
-        assert_eq!(visible_issue_count(13), 6);
+        assert_eq!(visible_issue_count(4), 3);
+        assert_eq!(visible_issue_count(13), 12);
     }
 
     #[test]
@@ -1407,6 +1407,20 @@ mod tests {
         assert_eq!(rendered.lines().count(), 22);
         assert!(rendered.contains("first line second line"));
         assert!(!rendered.contains("first line\nsecond line"));
+    }
+
+    #[test]
+    fn compact_issue_rows_show_more_issues_in_default_inline_layout() {
+        let mut state = TuiState::default();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(8, 12))));
+
+        let lines = state.issue_lines(100, 13);
+
+        assert_eq!(lines.len(), 13);
+        assert!(lines[1].contains("COE-255"));
+        assert!(lines[1].contains("Issue 0"));
+        assert!(lines[12].contains("COE-266"));
+        assert!(lines[12].contains("Issue 11"));
     }
 
     #[test]
