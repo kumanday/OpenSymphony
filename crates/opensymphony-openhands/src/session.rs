@@ -1715,6 +1715,22 @@ impl IssueSessionRunner {
             )
             .await?;
 
+        match self.client.delete_conversation(conversation_id).await {
+            Ok(()) => {}
+            Err(OpenHandsError::HttpStatus {
+                status_code: 404, ..
+            }) => {}
+            Err(error) => {
+                warn!(
+                    %error,
+                    %conversation_id,
+                    issue_id = %issue.id,
+                    "failed to delete the existing conversation before recreating it during rehydrate"
+                );
+                return Ok(None);
+            }
+        }
+
         let conversation = match self.client.create_conversation(&request).await {
             Ok(conversation) => conversation,
             Err(error) => {
