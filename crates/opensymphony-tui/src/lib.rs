@@ -22,7 +22,7 @@ use tokio::sync::watch;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use url::Url;
 
-const INLINE_UI_HEIGHT: u16 = 22;
+const INLINE_UI_HEIGHT: u16 = 42;
 const MIN_TIMELINE_LINES: usize = 4;
 const MAX_TIMELINE_LINES: usize = 6;
 
