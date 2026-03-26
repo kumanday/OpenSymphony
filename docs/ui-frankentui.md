@@ -126,6 +126,7 @@ Use pane-based layout so future views can expand without redesign.
 
 The implemented inline layout budgets rows per pane instead of truncating one giant body block.
 That keeps the bottom timeline visible under long issue lists, preserves the selected issue when snapshot ordering changes, and windows the issue pane around the current selection so narrower split terminals still keep the selected row and detail visible.
+Issue rows are rendered as compact single-line summaries so the default inline view can keep more issues visible before scrolling, while the detail pane still carries the full per-issue metadata.
 The always-visible status line now leads with daemon and local agent-server health before the
 connection and focus metadata so degraded runtime state is visible even when the issue list is
 otherwise stable.
