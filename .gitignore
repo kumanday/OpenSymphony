@@ -31,3 +31,6 @@ tools/openhands-server/workspace/
 # OpenSymphony runtime files
 .opensymphony/
 .opensymphony.after_create.json
+
+# GitHub workflow artifacts
+.pr-body.md
