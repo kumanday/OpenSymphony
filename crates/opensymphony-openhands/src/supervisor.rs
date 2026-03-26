@@ -679,6 +679,7 @@ fn is_transient_connection_error(error: &std::io::Error) -> bool {
             | std::io::ErrorKind::ConnectionReset
             | std::io::ErrorKind::AddrNotAvailable
             | std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::WouldBlock
     )
 }
 
