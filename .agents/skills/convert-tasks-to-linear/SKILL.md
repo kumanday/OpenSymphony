@@ -397,6 +397,107 @@ For each sub-issue blocker list:
 
 This means the issue graph in Linear must be queryable through Linear's dependency model, not only readable to humans.
 
+## Linear GraphQL API for Blocker Relationships
+
+Linear's REST API does not expose blocker relationships directly. Use the GraphQL API with `issueRelationCreate` mutation.
+
+### Authentication
+
+Read the Linear API key from:
+- Environment variable: `LINEAR_API_KEY`
+- Or file: `~/.config/opensymphony/secrets/linear-api-key.txt`
+
+```bash
+LINEAR_API_KEY=$(cat ~/.config/opensymphony/secrets/linear-api-key.txt 2>/dev/null || echo "$LINEAR_API_KEY")
+```
+
+### Create blocker relationship
+
+The `issueRelationCreate` mutation creates a "blocks" relationship:
+
+```graphql
+mutation CreateRelation($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) {
+    success
+    issueRelation {
+      id
+      type
+      issue { identifier }
+      relatedIssue { identifier }
+    }
+  }
+}
+```
+
+Variables:
+```json
+{
+  "input": {
+    "issueId": "<blocker-issue-uuid>",
+    "type": "blocks",
+    "relatedIssueId": "<blocked-issue-uuid>"
+  }
+}
+```
+
+### Important: Direction matters
+
+The `blocks` type means: `issueId` **blocks** `relatedIssueId`.
+
+- **Correct**: If BENCH-002 is blocked by BENCH-001, then:
+  - `issueId` = BENCH-001's UUID (the blocker)
+  - `relatedIssueId` = BENCH-002's UUID (the blocked issue)
+  
+- **Wrong**: Setting `issueId` = BENCH-002 would mean BENCH-002 blocks BENCH-001
+
+### curl example
+
+```bash
+curl -s https://api.linear.app/graphql \
+  -H "Authorization: $LINEAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "mutation CreateRelation($input: IssueRelationCreateInput!) { issueRelationCreate(input: $input) { success } }", "variables": {"input": {"issueId": "9dd8e4d2-6c14-4438-9bdb-8f090293d948", "type": "blocks", "relatedIssueId": "af6927c8-3874-4f74-9fe5-55375fd019a3"}}}'
+```
+
+### Query existing blockers
+
+To verify blocker relationships after creation:
+
+```graphql
+query {
+  team(id: "<team-uuid>") {
+    issues(first: 100) {
+      nodes {
+        identifier
+        title
+        relations {
+          nodes {
+            type
+            relatedIssue { identifier }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Filter for `type: "blocks"` to see blocker relationships.
+
+### Batch applying blockers
+
+For efficiency, apply multiple blockers in sequence:
+
+```bash
+# Apply blockers for an issue with multiple dependencies
+for blocker in "uuid-1" "uuid-2" "uuid-3"; do
+  curl -s https://api.linear.app/graphql \
+    -H "Authorization: $LINEAR_API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "{\"query\": \"mutation CreateRelation(\$input: IssueRelationCreateInput!) { issueRelationCreate(input: \$input) { success } }\", \"variables\": {\"input\": {\"issueId\": \"$blocker\", \"type\": \"blocks\", \"relatedIssueId\": \"<blocked-issue-uuid>\"}}}"
+done
+```
+
 ### Step 10: rewrite blocker text in issue bodies
 
 After blocker metadata is set, inspect each issue body and replace any document-only blocker references.
