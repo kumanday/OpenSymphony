@@ -470,7 +470,7 @@ impl TuiState {
         let tracker_style = base_style.merge(&Style::new().dim());
         let title_style = base_style;
 
-        Line::from_spans(vec![
+        let line = Line::from_spans(vec![
             Span::styled(marker, marker_style),
             Span::styled(" ", base_style),
             Span::styled(&issue.identifier, id_style),
@@ -480,7 +480,8 @@ impl TuiState {
             Span::styled(&issue.tracker_state, tracker_style),
             Span::styled("] ", base_style),
             Span::styled(&issue.title, title_style),
-        ])
+        ]);
+        line
     }
 
     #[allow(dead_code)]
