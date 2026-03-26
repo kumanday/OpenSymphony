@@ -76,7 +76,7 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
 "#;
 
 pub(super) const ISSUE_LABELS_QUERY: &str = r#"
-query IssueLabelsPage($issueId: String!, $first: Int!, $after: String) {
+query IssueLabelsPage($issueId: ID!, $first: Int!, $after: String) {
   issue(id: $issueId) {
     id
     labels(first: $first, after: $after) {
@@ -93,7 +93,7 @@ query IssueLabelsPage($issueId: String!, $first: Int!, $after: String) {
 "#;
 
 pub(super) const ISSUE_INVERSE_RELATIONS_QUERY: &str = r#"
-query IssueInverseRelationsPage($issueId: String!, $first: Int!, $after: String) {
+query IssueInverseRelationsPage($issueId: ID!, $first: Int!, $after: String) {
   issue(id: $issueId) {
     id
     inverseRelations(first: $first, after: $after) {
@@ -120,7 +120,7 @@ query IssueInverseRelationsPage($issueId: String!, $first: Int!, $after: String)
 "#;
 
 pub(super) const ISSUE_STATES_BY_IDS_QUERY: &str = r#"
-query IssueStatesByIds($projectSlug: String!, $issueIds: [String!], $first: Int!, $after: String) {
+query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $after: String) {
   issues(
     filter: {
       id: { in: $issueIds }
@@ -149,7 +149,7 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [String!], $first: Int!
 "#;
 
 pub(super) const ISSUE_COMMENTS_QUERY: &str = r#"
-query IssueCommentsPage($issueId: String!, $first: Int!, $after: String) {
+query IssueCommentsPage($issueId: ID!, $first: Int!, $after: String) {
   issue(id: $issueId) {
     id
     comments(first: $first, after: $after) {
