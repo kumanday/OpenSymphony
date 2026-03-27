@@ -1412,14 +1412,22 @@ impl IssueSessionRunner {
             .as_ref()
             .and_then(|p| p.llm_api_key_fingerprint.clone());
 
-        // If fingerprints differ, reset the conversation to use the new key
+        // If fingerprints differ, delete the old conversation and reset to use the new key
         if current_fingerprint != stored_fingerprint {
             tracing::info!(
                 conversation_id = %manifest_conversation_id,
                 stored_fingerprint = ?stored_fingerprint,
                 current_fingerprint = ?current_fingerprint,
-                "API key changed since conversation was created, resetting conversation"
+                "API key changed since conversation was created, deleting old conversation and resetting"
             );
+            // Delete the old conversation to avoid orphaning it
+            if let Err(error) = self.client.delete_conversation(conversation_id).await {
+                tracing::warn!(
+                    conversation_id = %manifest_conversation_id,
+                    %error,
+                    "failed to delete old conversation during API key drift reset"
+                );
+            }
             return Ok(ReuseSession::Reset(
                 "API key changed - conversation needs to be recreated with new credentials"
                     .to_string(),
