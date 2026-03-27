@@ -239,10 +239,7 @@ impl TuiState {
         // Must accommodate: "HH:MM:SS snapshot_published polled tracker; running=N, retry_queue=N"
         const RECENT_EVENTS_MIN_WIDTH: usize = 70; // 68 chars + padding
         const RECENT_EVENTS_MAX_WIDTH: usize = 75; // Cap at reasonable max
-        let upper_right_width = min(
-            RECENT_EVENTS_MAX_WIDTH,
-            max(RECENT_EVENTS_MIN_WIDTH, width / 5),
-        );
+        let upper_right_width = (width / 5).clamp(RECENT_EVENTS_MIN_WIDTH, RECENT_EVENTS_MAX_WIDTH);
         let upper_left_width = width.saturating_sub(upper_right_width + 3);
 
         if width >= 100 {
@@ -516,7 +513,7 @@ impl TuiState {
         let tracker_style = base_style.merge(&Style::new().dim());
         let title_style = base_style;
 
-        let line = Line::from_spans(vec![
+        Line::from_spans(vec![
             Span::styled(marker, marker_style),
             Span::styled(" ", base_style),
             Span::styled(&issue.identifier, id_style),
@@ -526,8 +523,7 @@ impl TuiState {
             Span::styled(&issue.tracker_state, tracker_style),
             Span::styled("] ", base_style),
             Span::styled(&issue.title, title_style),
-        ]);
-        line
+        ])
     }
 
     #[allow(dead_code)]

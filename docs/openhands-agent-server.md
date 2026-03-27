@@ -221,7 +221,7 @@ Suggested persisted fields:
 - `last_event_kind`
 - `last_event_at`
 - `last_event_summary`
-- `llm_config_fingerprint`
+- `llm_config_fingerprint` (simplified: only tracks model name, no longer used for drift detection)
 
 `launch_profile` should capture the OpenHands conversation settings that need to survive restarts and interactive debug reuse, including:
 
@@ -290,10 +290,9 @@ Current implementation detail:
 - `fresh_each_run` bypasses manifest reuse, creates a new `conversation_id` with a full prompt, and records a reset reason in `conversation.json`
 - if `GET /api/conversations/{id}` or the initial attach fails for a reused conversation, the runner retries `POST /api/conversations` with the same stable `conversation_id`; when that re-created thread still exposes persisted history, the runner keeps continuation guidance instead of downgrading to a fresh full prompt
 - the runner persists the active `reuse_policy` alongside the launch profile and treats policy drift as manifest incompatibility so later recovery or interactive debug sessions do not silently reuse a thread created under different semantics
-- the runner persists the conversation launch profile on first create and backfills older manifests on reuse so later rehydration and interactive debug sessions can recreate the same thread settings, including agent tool selection, without guessing from mutable runtime state
-- the runner also persists a hashed LLM configuration fingerprint `{ model, api_key_hash, base_url_hash }` in `conversation.json`; it compares that fingerprint against the current workflow-resolved create request before attach and treats drift as a hard recreation signal
-- hard recreation for LLM config drift uses `DELETE /api/conversations/{id}` followed by `POST /api/conversations` with the same stable `conversation_id`, because same-ID `POST` alone preserves history but does not update the stored provider config
-- because that delete-plus-recreate path loses OpenHands event history, the runner seeds the recreated conversation as a fresh thread and appends Linear workpad recovery context to the first full prompt instead of sending continuation-only guidance
+- the runner persists the conversation launch profile on first create and backfills older manifests on reuse so later recovery and interactive debug sessions can recreate the same thread settings, including agent tool selection, without guessing from mutable runtime state
+- **Simplified conversation resumption**: the runner no longer checks for LLM configuration drift or recreates conversations. Conversations are reused as-is by directly attaching to the existing `conversation_id`. The stored LLM configuration in the conversation's `meta.json` is used without modification. This avoids the complexity and brittleness of the previous delete-and-recreate approach.
+- the runner still tracks `llm_config_fingerprint` in `conversation.json` for observability, but only the model name is recorded (no API key or base URL hashing). This fingerprint is no longer used for drift detection or recreation decisions.
 
 ## 6.4 Interactive debug resumption
 

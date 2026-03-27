@@ -26,7 +26,7 @@ pub use session::{
     ConversationLaunchProfile, IssueConversationManifest, IssueSessionContext, IssueSessionError,
     IssueSessionObserver, IssueSessionPromptKind, IssueSessionResult, IssueSessionReusePolicy,
     IssueSessionRunner, IssueSessionRunnerConfig, LlmConfigFingerprint, RUNTIME_CONTRACT_VERSION,
-    WorkpadComment, WorkpadCommentSource,
+    RehydrationOptions, RehydrationResult, WorkpadComment, WorkpadCommentSource,
 };
 pub use supervisor::{
     ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, ProbeConfig, ServerMode,
