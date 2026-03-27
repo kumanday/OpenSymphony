@@ -883,6 +883,8 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
+        const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 1;
+
         let observed_run = observed_run_for_turn(run);
         let active_session = match self
             .initialize_session(
@@ -899,12 +901,107 @@ impl IssueSessionRunner {
             Step::EarlyResult(result) => return Ok(*result),
         };
 
+        let mut retry_count = 0;
+        let mut current_session = active_session;
+        let (final_session, outcome) = loop {
+            let (mut active_session, outcome) = match self
+                .execute_turn(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    &observed_run,
+                    workflow,
+                    issue,
+                    run,
+                    current_session,
+                    observer,
+                )
+                .await?
+            {
+                Step::Continue(result) => result,
+                Step::EarlyResult(result) => return Ok(*result),
+            };
+
+            if is_context_overflow_outcome(&outcome) && retry_count < MAX_CONTEXT_OVERFLOW_RETRIES {
+                retry_count += 1;
+                tracing::warn!(
+                    conversation_id = %active_session.manifest.conversation_id,
+                    error = ?outcome.error,
+                    retry_count,
+                    max_retries = MAX_CONTEXT_OVERFLOW_RETRIES,
+                    "context overflow detected, attempting auto-recovery via rehydration"
+                );
+
+                let old_manifest = active_session.manifest.clone();
+                let _ = active_session.stream.close().await;
+
+                match self
+                    .recover_from_context_overflow(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        &observed_run,
+                        issue,
+                        workflow,
+                        &old_manifest,
+                    )
+                    .await
+                {
+                    Ok(recovered_session) => {
+                        tracing::info!(
+                            old_conversation_id = %old_manifest.conversation_id,
+                            new_conversation_id = %recovered_session.manifest.conversation_id,
+                            "context overflow recovery: rehydration succeeded, re-running turn"
+                        );
+                        current_session = recovered_session;
+                        continue;
+                    }
+                    Err(rehydration_error) => {
+                        tracing::warn!(
+                            %rehydration_error,
+                            "context overflow recovery: rehydration failed, returning original failure"
+                        );
+                        break (active_session, outcome);
+                    }
+                }
+            } else {
+                break (active_session, outcome);
+            }
+        };
+
+        self.finalize_active_session(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            &observed_run,
+            final_session,
+            outcome,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_turn<O>(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        observed_run: &RunAttempt,
+        workflow: &ResolvedWorkflow,
+        issue: &NormalizedIssue,
+        run: &RunAttempt,
+        active_session: ActiveSession,
+        observer: &mut O,
+    ) -> Result<Step<(ActiveSession, NormalizedOutcome)>, IssueSessionError>
+    where
+        O: IssueSessionObserver,
+    {
         let (mut active_session, mut prepared_turn) = match self
             .prepare_turn(
                 workspace_manager,
                 workspace,
                 run_manifest,
-                &observed_run,
+                observed_run,
                 workflow,
                 issue,
                 run,
@@ -914,7 +1011,7 @@ impl IssueSessionRunner {
             .await?
         {
             Step::Continue(state) => state,
-            Step::EarlyResult(result) => return Ok(*result),
+            Step::EarlyResult(result) => return Ok(Step::EarlyResult(result)),
         };
 
         active_session = match self
@@ -922,7 +1019,7 @@ impl IssueSessionRunner {
                 workspace_manager,
                 workspace,
                 run_manifest,
-                &observed_run,
+                observed_run,
                 active_session,
                 &mut prepared_turn,
                 observer,
@@ -930,7 +1027,7 @@ impl IssueSessionRunner {
             .await?
         {
             Step::Continue(session) => session,
-            Step::EarlyResult(result) => return Ok(*result),
+            Step::EarlyResult(result) => return Ok(Step::EarlyResult(result)),
         };
 
         let outcome = self
@@ -941,113 +1038,38 @@ impl IssueSessionRunner {
             )
             .await;
 
-        if is_context_overflow_outcome(&outcome) {
-            tracing::warn!(
-                conversation_id = %active_session.manifest.conversation_id,
-                error = ?outcome.error,
-                "context overflow detected, attempting auto-recovery via rehydration"
-            );
+        Ok(Step::Continue((active_session, outcome)))
+    }
 
-            let old_manifest = active_session.manifest.clone();
-            let _ = active_session.stream.close().await;
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_from_context_overflow(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        observed_run: &RunAttempt,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
+        old_manifest: &IssueConversationManifest,
+    ) -> Result<ActiveSession, IssueSessionError> {
+        let rehydration_result = self
+            .rehydrate_conversation(
+                workspace_manager,
+                workspace,
+                run_manifest,
+                observed_run,
+                issue,
+                workflow,
+                old_manifest,
+                RehydrationOptions {
+                    reason: "context overflow auto-recovery".to_string(),
+                    summarize: false,
+                    max_summary_events: 0,
+                },
+            )
+            .await?;
 
-            match self
-                .rehydrate_conversation(
-                    workspace_manager,
-                    workspace,
-                    run_manifest,
-                    &observed_run,
-                    issue,
-                    workflow,
-                    &old_manifest,
-                    RehydrationOptions {
-                        reason: "context overflow auto-recovery".to_string(),
-                        summarize: false,
-                        max_summary_events: 0,
-                    },
-                )
-                .await
-            {
-                Ok(rehydration_result) => {
-                    tracing::info!(
-                        old_conversation_id = %rehydration_result.old_conversation_id,
-                        new_conversation_id = %rehydration_result.session.manifest.conversation_id,
-                        "context overflow recovery: rehydration succeeded, re-running turn"
-                    );
-
-                    let recovered_session = rehydration_result.session;
-
-                    let (mut active_session, mut prepared_turn) = match self
-                        .prepare_turn(
-                            workspace_manager,
-                            workspace,
-                            run_manifest,
-                            &observed_run,
-                            workflow,
-                            issue,
-                            run,
-                            recovered_session,
-                            observer,
-                        )
-                        .await?
-                    {
-                        Step::Continue(state) => state,
-                        Step::EarlyResult(result) => return Ok(*result),
-                    };
-
-                    active_session = match self
-                        .start_turn(
-                            workspace_manager,
-                            workspace,
-                            run_manifest,
-                            &observed_run,
-                            active_session,
-                            &mut prepared_turn,
-                            observer,
-                        )
-                        .await?
-                    {
-                        Step::Continue(session) => session,
-                        Step::EarlyResult(result) => return Ok(*result),
-                    };
-
-                    let retry_outcome = self
-                        .await_terminal_outcome(
-                            &mut active_session,
-                            &prepared_turn.baseline_event_ids,
-                            observer,
-                        )
-                        .await;
-
-                    return self
-                        .finalize_active_session(
-                            workspace_manager,
-                            workspace,
-                            run_manifest,
-                            &observed_run,
-                            active_session,
-                            retry_outcome,
-                        )
-                        .await;
-                }
-                Err(rehydration_error) => {
-                    tracing::warn!(
-                        %rehydration_error,
-                        "context overflow recovery: rehydration failed, returning original failure"
-                    );
-                }
-            }
-        }
-
-        self.finalize_active_session(
-            workspace_manager,
-            workspace,
-            run_manifest,
-            &observed_run,
-            active_session,
-            outcome,
-        )
-        .await
+        Ok(rehydration_result.session)
     }
 
     async fn initialize_session(
