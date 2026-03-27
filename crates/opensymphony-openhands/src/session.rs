@@ -964,6 +964,57 @@ impl IssueSessionRunner {
                         break (active_session, outcome);
                     }
                 }
+            } else if is_condenser_corruption_outcome(&outcome)
+                && retry_count < MAX_CONTEXT_OVERFLOW_RETRIES
+            {
+                // Condenser corruption requires a fresh conversation (not rehydration)
+                // because rehydration would carry over the corrupted event history
+                retry_count += 1;
+                tracing::warn!(
+                    conversation_id = %active_session.manifest.conversation_id,
+                    error = ?outcome.error,
+                    retry_count,
+                    max_retries = MAX_CONTEXT_OVERFLOW_RETRIES,
+                    "condenser corruption detected (corrupted event history), resetting to fresh conversation"
+                );
+
+                let _ = active_session.stream.close().await;
+
+                match self
+                    .create_fresh_session(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        &observed_run,
+                        issue,
+                        workflow,
+                        Some("condenser corruption auto-recovery".to_string()),
+                    )
+                    .await
+                {
+                    Ok(Step::Continue(fresh_session)) => {
+                        tracing::info!(
+                            old_conversation_id = %active_session.manifest.conversation_id,
+                            new_conversation_id = %fresh_session.manifest.conversation_id,
+                            "condenser corruption recovery: fresh conversation created, re-running turn"
+                        );
+                        current_session = fresh_session;
+                        continue;
+                    }
+                    Ok(Step::EarlyResult(result)) => {
+                        tracing::warn!(
+                            "condenser corruption recovery: failed to create fresh session, returning original failure"
+                        );
+                        return Ok(*result);
+                    }
+                    Err(fresh_error) => {
+                        tracing::warn!(
+                            %fresh_error,
+                            "condenser corruption recovery: failed to create fresh session, returning original failure"
+                        );
+                        break (active_session, outcome);
+                    }
+                }
             } else {
                 break (active_session, outcome);
             }
@@ -2557,6 +2608,22 @@ fn is_context_overflow_outcome(outcome: &NormalizedOutcome) -> bool {
             .is_some_and(is_context_overflow_error)
 }
 
+fn is_condenser_corruption_error(msg: &str) -> bool {
+    // Detect condenser internal errors that indicate corrupted event history.
+    // The OpenHands condenser's ToolCallMatching crashes with KeyError when
+    // an ObservationBaseEvent doesn't have a corresponding ActionEvent.
+    // The error message is just the key in quotes, e.g., "'chatcmpl-tool-xxx'"
+    msg.starts_with("'") && msg.ends_with("'") && msg.contains("-tool-")
+}
+
+fn is_condenser_corruption_outcome(outcome: &NormalizedOutcome) -> bool {
+    outcome.kind == WorkerOutcomeKind::Failed
+        && outcome
+            .error
+            .as_deref()
+            .is_some_and(is_condenser_corruption_error)
+}
+
 fn extract_error_detail_from_state(state: &ConversationStateMirror) -> Option<String> {
     let raw = state.raw_state();
 
@@ -2938,5 +3005,37 @@ mod tests {
         // Expected: 50 + 75 + 300 = 425 output tokens
         assert_eq!(total_input, 300, "input tokens should be 100 + 200 + 0");
         assert_eq!(total_output, 425, "output tokens should be 50 + 75 + 300");
+    }
+
+    #[test]
+    fn condenser_corruption_detection_identifies_keyerror_patterns() {
+        // Valid condenser corruption error from OpenHands SDK's ToolCallMatching
+        // The pattern is a KeyError string representation: the key in single quotes
+        // containing "-tool-" which indicates a tool call ID
+        assert!(is_condenser_corruption_error(
+            "'chatcmpl-tool-bcea2761df6a8821'"
+        ));
+        assert!(is_condenser_corruption_error("'another-tool-call-id-123'"));
+
+        // Not condenser corruption errors
+        assert!(!is_condenser_corruption_error("prompt is too long: 1000"));
+        assert!(!is_condenser_corruption_error("some other error"));
+        assert!(!is_condenser_corruption_error("tool error without quotes"));
+        assert!(!is_condenser_corruption_error("'not-a-corruption-error'"));
+
+        // Test outcome detection
+        let corruption_outcome = NormalizedOutcome {
+            kind: WorkerOutcomeKind::Failed,
+            summary: "test".to_string(),
+            error: Some("'chatcmpl-tool-xyz'".to_string()),
+        };
+        assert!(is_condenser_corruption_outcome(&corruption_outcome));
+
+        let other_outcome = NormalizedOutcome {
+            kind: WorkerOutcomeKind::Failed,
+            summary: "test".to_string(),
+            error: Some("some other error".to_string()),
+        };
+        assert!(!is_condenser_corruption_outcome(&other_outcome));
     }
 }
