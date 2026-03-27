@@ -1660,8 +1660,7 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
 }
 
 #[tokio::test]
-async fn issue_session_runner_resets_conversation_when_llm_config_changes()
-{
+async fn issue_session_runner_resets_conversation_when_llm_config_changes() {
     // When LLM config (API key) changes, the conversation is reset and recreated
     // with the new config. This ensures the correct API key is used.
     let server = FakeOpenHandsServer::start()

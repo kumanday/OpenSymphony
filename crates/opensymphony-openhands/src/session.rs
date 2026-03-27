@@ -192,19 +192,21 @@ impl ConversationLaunchProfile {
     /// Compute a fingerprint of the current API key from the environment.
     /// This is used to detect when the API key has changed.
     pub fn api_key_fingerprint(&self, env: &dyn Environment) -> Option<String> {
-        let api_key = self.llm_api_key_env.as_deref()
+        let api_key = self
+            .llm_api_key_env
+            .as_deref()
             .and_then(|env_name| env.get(&env_name))
             .or_else(|| env.get("LLM_API_KEY"))?;
-        
+
         // Simple hash - hex-encoded SHA256 of API key
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(api_key.as_bytes());
         let result = hasher.finalize();
         // Return first 16 hex chars of hash
         Some(result[..8].iter().map(|b| format!("{:02x}", b)).collect())
     }
-    
+
     pub fn from_workflow(workflow: &ResolvedWorkflow) -> Result<Self, String> {
         let conversation = &workflow.extensions.openhands.conversation;
         let max_iterations = u32::try_from(conversation.max_iterations).map_err(|_| {
@@ -461,7 +463,7 @@ impl IssueConversationManifest {
     ) -> Self {
         // Compute and store API key fingerprint for drift detection
         launch_profile.llm_api_key_fingerprint = launch_profile.api_key_fingerprint(env);
-        
+
         Self {
             issue_id,
             identifier,
@@ -1083,8 +1085,7 @@ impl IssueSessionRunner {
                 .apply_runtime_snapshot(&active_session.stream);
         }
 
-        let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind)
-        {
+        let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind) {
             Ok(prompt) => prompt,
             Err(detail) => {
                 let summary = format!(
@@ -1396,17 +1397,21 @@ impl IssueSessionRunner {
             Ok(profile) => profile,
             Err(_) => {
                 // If we can't build a launch profile, just try to attach and let it fail naturally
-                return self.try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id).await;
+                return self
+                    .try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id)
+                    .await;
             }
         };
-        
+
         // Compute current API key fingerprint from environment
         let current_fingerprint = launch_profile.api_key_fingerprint(self.environment.as_ref());
-        
+
         // Get stored fingerprint from manifest (if available)
-        let stored_fingerprint = manifest.launch_profile.as_ref()
+        let stored_fingerprint = manifest
+            .launch_profile
+            .as_ref()
             .and_then(|p| p.llm_api_key_fingerprint.clone());
-        
+
         // If fingerprints differ, reset the conversation to use the new key
         if current_fingerprint != stored_fingerprint {
             tracing::info!(
@@ -1416,13 +1421,15 @@ impl IssueSessionRunner {
                 "API key changed since conversation was created, resetting conversation"
             );
             return Ok(ReuseSession::Reset(
-                "API key changed - conversation needs to be recreated with new credentials".to_string()
+                "API key changed - conversation needs to be recreated with new credentials"
+                    .to_string(),
             ));
         }
 
-        self.try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id).await
+        self.try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id)
+            .await
     }
-    
+
     async fn try_attach_and_resume(
         &self,
         workspace_manager: &WorkspaceManager,
@@ -1431,7 +1438,7 @@ impl IssueSessionRunner {
         conversation_id: Uuid,
     ) -> Result<ReuseSession, IssueSessionError> {
         let manifest_conversation_id = manifest.conversation_id.clone();
-        
+
         // Simplified conversation resumption: just try to attach directly
         // without checking for LLM config drift or rehydrating.
         // The conversation's stored LLM config in meta.json is used as-is.
@@ -1666,7 +1673,7 @@ impl IssueSessionRunner {
 
     /// Explicitly rehydrate a conversation by creating a fresh one with the same
     /// configuration, optionally preserving metrics and summarizing history.
-    /// 
+    ///
     /// This is NOT automatically triggered - it must be explicitly called when
     /// rehydration is truly needed (e.g., corruption, export/import, etc.).
     /// For normal operation, conversations are simply reused as-is.
@@ -1683,16 +1690,15 @@ impl IssueSessionRunner {
         options: RehydrationOptions,
     ) -> Result<RehydrationResult, IssueSessionError> {
         let old_conversation_id = old_manifest.conversation_id.clone();
-        
+
         // Try to attach to the old conversation to get its state for summarization
         let old_stream = if options.summarize {
             match parse_uuid(old_conversation_id.as_str()) {
-                Ok(conversation_id) => {
-                    self.client
-                        .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
-                        .await
-                        .ok()
-                }
+                Ok(conversation_id) => self
+                    .client
+                    .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
+                    .await
+                    .ok(),
                 Err(_) => None,
             }
         } else {
@@ -1701,7 +1707,8 @@ impl IssueSessionRunner {
 
         // Build rehydration context if summarization is enabled
         let context = if let Some(stream) = old_stream {
-            self.build_rehydration_context(&stream, options.max_summary_events).await
+            self.build_rehydration_context(&stream, options.max_summary_events)
+                .await
         } else {
             None
         };
@@ -1744,7 +1751,7 @@ impl IssueSessionRunner {
         session.manifest.output_tokens = old_manifest.output_tokens;
         session.manifest.cache_read_tokens = old_manifest.cache_read_tokens;
         session.manifest.last_token_accumulation_at = old_manifest.last_token_accumulation_at;
-        
+
         // Persist the updated manifest with token counts
         workspace_manager
             .write_json_artifact(
@@ -1770,7 +1777,7 @@ impl IssueSessionRunner {
     ) -> Option<String> {
         let conversation = stream.conversation();
         let summary = self.summarize_conversation(stream, max_events).await;
-        
+
         let context = format!(
             "## Previous Conversation Context\n\n\
             This conversation was rehydrated from a previous session.\n\n\
@@ -1786,7 +1793,7 @@ impl IssueSessionRunner {
             conversation.execution_status,
             summary.unwrap_or_else(|| "No summary available.".to_string())
         );
-        
+
         Some(context)
     }
 
@@ -1803,7 +1810,9 @@ impl IssueSessionRunner {
             .filter(|e| {
                 matches!(
                     KnownEvent::from_envelope(e),
-                    KnownEvent::Message(_) | KnownEvent::Observation(_) | KnownEvent::ConversationError(_)
+                    KnownEvent::Message(_)
+                        | KnownEvent::Observation(_)
+                        | KnownEvent::ConversationError(_)
                 )
             })
             .take(max_events)
@@ -1827,7 +1836,9 @@ impl IssueSessionRunner {
                     )
                 }
                 KnownEvent::ConversationError(err) => {
-                    let msg = err.payload.get("message")
+                    let msg = err
+                        .payload
+                        .get("message")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Unknown error");
                     format!("- Error: {}\n", msg)

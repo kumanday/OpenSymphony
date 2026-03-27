@@ -340,7 +340,9 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
                 candidate
             } else {
                 eprintln!("error: no config file found at ./{DEFAULT_DOCTOR_CONFIG_FILE}");
-                eprintln!("hint: create a config.yaml in the current directory, or specify --config <path>");
+                eprintln!(
+                    "hint: create a config.yaml in the current directory, or specify --config <path>"
+                );
                 return ExitCode::from(1);
             }
         }
@@ -451,8 +453,7 @@ pub async fn run_doctor_command(
     // For repo check, try to find the cargo workspace root from the config_root
     // This allows the doctor to work with non-Rust projects (no Cargo.toml at target_repo)
     // while still reporting the cargo workspace location if one exists
-    let repo_root = find_cargo_workspace_root(config_root)
-        .unwrap_or_else(|| target_repo.clone());
+    let repo_root = find_cargo_workspace_root(config_root).unwrap_or_else(|| target_repo.clone());
     checks.push(check_repo_root(&repo_root));
 
     let (runtime, rendered_probe_prompt) = match runtime {
@@ -581,20 +582,48 @@ async fn run_doctor_rehydration(
     max_summary_events: usize,
     no_summary: bool,
 ) -> Result<Vec<RehydrationAttemptResult>, String> {
-    use opensymphony_domain::{IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt, TimestampMs, WorkerId};
+    use opensymphony_domain::{
+        IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt, TimestampMs, WorkerId,
+    };
     use opensymphony_openhands::{
         IssueConversationManifest, IssueSessionRunner, IssueSessionRunnerConfig, RehydrationOptions,
     };
-    use opensymphony_workspace::{RunDescriptor, RunManifest, WorkspaceManager, WorkspaceManagerConfig};
+    use opensymphony_workspace::{
+        RunDescriptor, RunManifest, WorkspaceManager, WorkspaceManagerConfig,
+    };
 
     // Create workspace manager
     let workspace_config = WorkspaceManagerConfig {
         root: runtime.workflow.config.workspace.root.clone(),
         hooks: opensymphony_workspace::HookConfig {
-            after_create: runtime.workflow.config.hooks.after_create.clone().map(|s| opensymphony_workspace::HookDefinition::shell(s)),
-            before_run: runtime.workflow.config.hooks.before_run.clone().map(|s| opensymphony_workspace::HookDefinition::shell(s)),
-            after_run: runtime.workflow.config.hooks.after_run.clone().map(|s| opensymphony_workspace::HookDefinition::shell(s)),
-            before_remove: runtime.workflow.config.hooks.before_remove.clone().map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+            after_create: runtime
+                .workflow
+                .config
+                .hooks
+                .after_create
+                .clone()
+                .map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+            before_run: runtime
+                .workflow
+                .config
+                .hooks
+                .before_run
+                .clone()
+                .map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+            after_run: runtime
+                .workflow
+                .config
+                .hooks
+                .after_run
+                .clone()
+                .map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+            before_remove: runtime
+                .workflow
+                .config
+                .hooks
+                .before_remove
+                .clone()
+                .map(|s| opensymphony_workspace::HookDefinition::shell(s)),
             timeout: Duration::from_millis(runtime.workflow.config.hooks.timeout_ms),
         },
         cleanup: opensymphony_workspace::CleanupConfig {
@@ -615,7 +644,10 @@ async fn run_doctor_rehydration(
         return Ok(vec![]);
     }
 
-    println!("\n🔍 Found {} workspace(s) to check for rehydration", workspaces.len());
+    println!(
+        "\n🔍 Found {} workspace(s) to check for rehydration",
+        workspaces.len()
+    );
 
     // Create OpenHands client
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)
@@ -661,7 +693,8 @@ async fn run_doctor_rehydration(
             }
         };
 
-        let old_manifest: IssueConversationManifest = match serde_json::from_str(&manifest_content) {
+        let old_manifest: IssueConversationManifest = match serde_json::from_str(&manifest_content)
+        {
             Ok(m) => m,
             Err(e) => {
                 println!("  ⚠️  {identifier}: Failed to parse manifest: {e}");
@@ -1009,7 +1042,10 @@ fn check_repo_root(repo_root: &Path) -> CheckResult {
         // Not a failure - doctor works with non-Rust projects too
         CheckResult::pass(
             "repo",
-            format!("no Cargo workspace at {} (non-Rust project)", repo_root.display()),
+            format!(
+                "no Cargo workspace at {} (non-Rust project)",
+                repo_root.display()
+            ),
         )
     }
 }
@@ -1330,7 +1366,10 @@ async fn run_live_openhands_checks(
         Ok(transport) => transport,
         Err(error) => {
             checks.push(CheckResult::fail("openhands-auth", error));
-            return LiveOpenHandsChecks { checks, supervisor: None };
+            return LiveOpenHandsChecks {
+                checks,
+                supervisor: None,
+            };
         }
     };
     let client = OpenHandsClient::new(transport.clone());
@@ -1377,11 +1416,17 @@ async fn run_live_openhands_checks(
             }
             Ok(None) => {
                 checks.push(CheckResult::fail("openhands-http", error.to_string()));
-                return LiveOpenHandsChecks { checks, supervisor: None };
+                return LiveOpenHandsChecks {
+                    checks,
+                    supervisor: None,
+                };
             }
             Err(start_error) => {
                 checks.push(CheckResult::fail("openhands-supervisor-start", start_error));
-                return LiveOpenHandsChecks { checks, supervisor: None };
+                return LiveOpenHandsChecks {
+                    checks,
+                    supervisor: None,
+                };
             }
         }
     }
@@ -1482,7 +1527,10 @@ async fn run_live_openhands_checks(
     }
 
     // Return checks and supervisor (if any) for potential reuse during rehydration
-    LiveOpenHandsChecks { checks, supervisor: managed_supervisor }
+    LiveOpenHandsChecks {
+        checks,
+        supervisor: managed_supervisor,
+    }
 }
 
 fn build_doctor_probe_request(
@@ -1839,9 +1887,8 @@ mod tests {
 
     use super::{
         Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
-        command_check_name, effective_openhands_probe_base_url,
-        executable_suffixes, find_cargo_workspace_root, resolve_doctor_workflow, sample_snapshot,
-        spawn_demo_updates,
+        command_check_name, effective_openhands_probe_base_url, executable_suffixes,
+        find_cargo_workspace_root, resolve_doctor_workflow, sample_snapshot, spawn_demo_updates,
     };
 
     #[test]
@@ -2086,24 +2133,30 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
 
     println!("Rehydrating conversation for issue: {}", args.issue);
     println!("Reason: {}", args.reason);
-    println!("Summary events: {} (summarize: {})", args.max_summary_events, !args.no_summary);
+    println!(
+        "Summary events: {} (summarize: {})",
+        args.max_summary_events, !args.no_summary
+    );
 
     // Load workflow from current directory
-    let current_dir = env::current_dir()
-        .map_err(|e| format!("failed to get current directory: {}", e))?;
+    let current_dir =
+        env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
     let workflow_path = current_dir.join("WORKFLOW.md");
-    
+
     if !workflow_path.exists() {
-        return Err(format!("WORKFLOW.md not found at {}", workflow_path.display()));
+        return Err(format!(
+            "WORKFLOW.md not found at {}",
+            workflow_path.display()
+        ));
     }
 
     let workflow_content = fs::read_to_string(&workflow_path)
         .await
         .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
-    
+
     let workflow_def = WorkflowDefinition::parse(&workflow_content)
         .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
-    
+
     let workflow = workflow_def
         .resolve_with_process_env(&current_dir)
         .map_err(|e| format!("failed to resolve workflow: {}", e))?;
@@ -2112,7 +2165,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let workspace_config = build_rehydrate_workspace_config(&workflow);
     let workspace_manager = WorkspaceManager::new(workspace_config)
         .map_err(|e| format!("failed to create workspace manager: {}", e))?;
-    
+
     // Find workspace by issue reference
     let workspace = workspace_manager
         .find_workspace_by_issue_reference(&args.issue)
@@ -2126,13 +2179,21 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         .read_text_artifact(&workspace, &manifest_path)
         .await
         .map_err(|e| format!("failed to read manifest: {}", e))?
-        .ok_or_else(|| format!("No conversation manifest found at {}", manifest_path.display()))?;
+        .ok_or_else(|| {
+            format!(
+                "No conversation manifest found at {}",
+                manifest_path.display()
+            )
+        })?;
 
-    let old_manifest: opensymphony_openhands::IssueConversationManifest = 
+    let old_manifest: opensymphony_openhands::IssueConversationManifest =
         serde_json::from_str(&manifest_content)
             .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
 
-    println!("Found existing conversation: {}", old_manifest.conversation_id);
+    println!(
+        "Found existing conversation: {}",
+        old_manifest.conversation_id
+    );
     println!("Created at: {:?}", old_manifest.created_at);
     println!("Last attached: {:?}", old_manifest.last_attached_at);
 
@@ -2174,7 +2235,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     };
 
     println!("\nStarting rehydration...");
-    
+
     // Create a minimal NormalizedIssue for the rehydration
     use opensymphony_domain::{IssueState, IssueStateCategory};
     let dummy_issue = opensymphony_domain::NormalizedIssue {
@@ -2215,7 +2276,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     println!("\n✓ Rehydration complete!");
     println!("  Old conversation: {}", result.old_conversation_id);
     println!("  Result: {:?}", result);
-    
+
     if let Some(context) = &result.context {
         println!("\n  Context preserved ({} chars)", context.len());
         if context.len() < 500 {
