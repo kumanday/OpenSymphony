@@ -1908,10 +1908,13 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     println!("Created at: {:?}", old_manifest.created_at);
     println!("Last attached: {:?}", old_manifest.last_attached_at);
 
-    // Create OpenHands client
+    // Create OpenHands client with optional local server startup
     let transport = TransportConfig::from_workflow(&workflow, &ProcessEnvironment)
         .map_err(|e| format!("failed to create transport config: {}", e))?;
-    let client = OpenHandsClient::new(transport);
+
+    let (client, _supervisor, server_message) =
+        build_rehydrate_client(&workflow, &transport, &current_dir)?;
+    println!("{}", server_message);
 
     // Create session runner
     let runner_config = IssueSessionRunnerConfig::default();
@@ -2018,6 +2021,73 @@ fn build_rehydrate_workspace_config(workflow: &ResolvedWorkflow) -> WorkspaceMan
         cleanup: CleanupConfig {
             remove_terminal_workspaces: false,
         },
+    }
+}
+
+fn build_rehydrate_client(
+    workflow: &ResolvedWorkflow,
+    transport: &TransportConfig,
+    repo_root: &Path,
+) -> Result<(OpenHandsClient, Option<LocalServerSupervisor>, String), String> {
+    let supervisor_base_url = transport
+        .managed_local_server_base_url()
+        .map_err(|e| format!("failed to resolve local server base URL: {}", e))?;
+
+    let Some(supervisor_base_url) = supervisor_base_url else {
+        let message = format!(
+            "Using configured OpenHands server at {}.",
+            transport.base_url()
+        );
+        return Ok((OpenHandsClient::new(transport.clone()), None, message));
+    };
+
+    let tool_dir = repo_root.join("tools").join("openhands-server");
+    let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|e| {
+        format!(
+            "failed to load local server tooling from {}: {}",
+            tool_dir.display(),
+            e
+        )
+    })?;
+    let url =
+        Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
+    let mut config = SupervisedServerConfig::new(tooling);
+    config.extra_env = workflow.extensions.openhands.local_server.env.clone();
+    config.startup_timeout = Duration::from_millis(
+        workflow
+            .extensions
+            .openhands
+            .local_server
+            .startup_timeout_ms,
+    );
+    config.probe.path = workflow
+        .extensions
+        .openhands
+        .local_server
+        .readiness_probe_path
+        .clone();
+    config.port_override = url.port_or_known_default();
+
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
+    match supervisor.start() {
+        Ok(status) => {
+            let base_url = status.base_url.clone();
+            let transport = TransportConfig::new(&base_url).with_auth(transport.auth().clone());
+            Ok((
+                OpenHandsClient::new(transport),
+                Some(supervisor),
+                format!("Started local OpenHands server at {base_url} for rehydration."),
+            ))
+        }
+        Err(opensymphony_openhands::SupervisorError::ExistingReadyServer { base_url, .. }) => {
+            let transport = TransportConfig::new(&base_url).with_auth(transport.auth().clone());
+            Ok((
+                OpenHandsClient::new(transport),
+                None,
+                format!("Using existing OpenHands server at {base_url}."),
+            ))
+        }
+        Err(error) => Err(format!("failed to start local server: {}", error)),
     }
 }
 
