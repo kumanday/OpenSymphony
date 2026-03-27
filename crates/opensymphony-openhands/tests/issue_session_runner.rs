@@ -16,8 +16,8 @@ use opensymphony_openhands::{
 use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
 use opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, WorkspaceManager,
-    WorkspaceManagerConfig,
+    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
+    WorkspaceManager, WorkspaceManagerConfig,
 };
 use tempfile::TempDir;
 
@@ -2004,5 +2004,150 @@ async fn issue_session_runner_writes_mcp_stdio_servers_into_create_requests() {
                 env: Default::default(),
             }],
         })
+    );
+}
+
+/// Test that rehydrate_conversation() properly deletes the old conversation,
+/// creates a new one with current API key, and preserves token counts.
+#[tokio::test]
+async fn rehydrate_conversation_deletes_old_and_creates_new_with_token_preservation() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-123");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client.clone(), IssueSessionRunnerConfig::default());
+
+    let run_descriptor = RunDescriptor::new("test", 1);
+    let mut run_manifest = RunManifest::new(&ensured.handle, &run_descriptor);
+
+    let run = run_attempt(&issue, ensured.handle.workspace_path(), "worker-1", None, 8);
+
+    // First, create a conversation by running the session
+    let first_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("first run should succeed");
+
+    let first_conversation_id = first_result
+        .conversation
+        .as_ref()
+        .expect("conversation should exist")
+        .conversation_id
+        .clone();
+
+    // Read the manifest to get the current token counts
+    // (may have some tokens from the initial run)
+    let manifest_before = read_conversation_manifest(&manager, &ensured.handle).await;
+    let initial_input_tokens = manifest_before.input_tokens;
+    let initial_output_tokens = manifest_before.output_tokens;
+    let initial_cache_tokens = manifest_before.cache_read_tokens;
+
+    // Simulate additional token accumulation by manually updating the manifest
+    let mut modified_manifest = manifest_before.clone();
+    modified_manifest.input_tokens = initial_input_tokens + 1500;
+    modified_manifest.output_tokens = initial_output_tokens + 800;
+    modified_manifest.cache_read_tokens = initial_cache_tokens + 200;
+    manager
+        .write_json_artifact(
+            &ensured.handle,
+            &ensured.handle.conversation_manifest_path(),
+            &modified_manifest,
+        )
+        .await
+        .expect("should write modified manifest");
+
+    // Now rehydrate the conversation
+    let rehydrate_run = run_attempt(&issue, ensured.handle.workspace_path(), "worker-2", None, 8);
+
+    let options = opensymphony_openhands::RehydrationOptions {
+        reason: "test rehydration".to_string(),
+        summarize: false,
+        max_summary_events: 10,
+    };
+
+    let rehydrate_result = runner
+        .rehydrate_conversation(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &rehydrate_run,
+            &issue,
+            &workflow,
+            &modified_manifest,
+            options,
+        )
+        .await
+        .expect("rehydration should succeed");
+
+    // Verify the old conversation ID was recorded
+    assert_eq!(
+        rehydrate_result.old_conversation_id,
+        first_conversation_id.as_str(),
+        "old conversation ID should be recorded"
+    );
+
+    // Verify a NEW conversation was created (different ID)
+    let manifest_after = read_conversation_manifest(&manager, &ensured.handle).await;
+    let new_conversation_id = manifest_after.conversation_id.clone();
+    assert_ne!(
+        new_conversation_id, first_conversation_id,
+        "rehydration should create a new conversation with different ID"
+    );
+
+    // Verify token counts were preserved from the old manifest
+    let expected_input_tokens = initial_input_tokens + 1500;
+    let expected_output_tokens = initial_output_tokens + 800;
+    let expected_cache_tokens = initial_cache_tokens + 200;
+    assert_eq!(
+        manifest_after.input_tokens, expected_input_tokens,
+        "input tokens should be preserved from old manifest"
+    );
+    assert_eq!(
+        manifest_after.output_tokens, expected_output_tokens,
+        "output tokens should be preserved from old manifest"
+    );
+    assert_eq!(
+        manifest_after.cache_read_tokens, expected_cache_tokens,
+        "cache read tokens should be preserved from old manifest"
+    );
+
+    // Verify the old conversation was deleted from the server by trying to get it
+    // The fake server returns 404 for deleted conversations
+    let old_conversation_id = first_result
+        .conversation
+        .expect("conversation should exist")
+        .conversation_id;
+    let old_conversation_uuid = uuid::Uuid::parse_str(old_conversation_id.as_str())
+        .expect("conversation_id should be a valid UUID");
+    let old_conversation_result = client.get_conversation(old_conversation_uuid).await;
+    assert!(
+        old_conversation_result.is_err(),
+        "old conversation should be deleted from server (404)"
+    );
+
+    // Verify the new conversation exists on the server
+    let new_conversation_uuid = uuid::Uuid::parse_str(manifest_after.conversation_id.as_str())
+        .expect("conversation_id should be a valid UUID");
+    let new_conversation_result = client.get_conversation(new_conversation_uuid).await;
+    assert!(
+        new_conversation_result.is_ok(),
+        "new conversation should exist on server"
     );
 }

@@ -523,16 +523,13 @@ pub async fn run_doctor_command(
     // Run bulk rehydration if requested
     if rehydrate {
         match run_doctor_rehydration(&runtime, max_summary_events, no_summary).await {
-            Ok(results) => {
-                let success_count = results.iter().filter(|r| r.success).count();
-                let fail_count = results.len() - success_count;
+            Ok((success_count, total_count)) => {
+                let fail_count = total_count - success_count;
                 checks.push(CheckResult::pass(
                     "rehydration",
                     format!(
                         "rehydrated {}/{} conversations ({} failed)",
-                        success_count,
-                        results.len(),
-                        fail_count
+                        success_count, total_count, fail_count
                     ),
                 ));
             }
@@ -567,21 +564,13 @@ pub async fn run_doctor_command(
     }
 }
 
-/// Result of a single workspace rehydration attempt
-#[allow(dead_code)]
-struct RehydrationAttemptResult {
-    workspace_key: String,
-    conversation_id: String,
-    success: bool,
-    error: Option<String>,
-}
-
 /// Bulk rehydration for all workspaces with missing/corrupted LLM API keys
 async fn run_doctor_rehydration(
     runtime: &DoctorRuntimeConfig,
     max_summary_events: usize,
     no_summary: bool,
-) -> Result<Vec<RehydrationAttemptResult>, String> {
+) -> Result<(usize, usize), String> {
+    // Returns (success_count, total_count)
     use opensymphony_domain::{
         IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt, TimestampMs, WorkerId,
     };
@@ -641,7 +630,7 @@ async fn run_doctor_rehydration(
         .map_err(|e| format!("failed to list workspaces: {e}"))?;
 
     if workspaces.is_empty() {
-        return Ok(vec![]);
+        return Ok((0, 0));
     }
 
     println!(
@@ -657,10 +646,10 @@ async fn run_doctor_rehydration(
     let runner_config = IssueSessionRunnerConfig::default();
     let runner = IssueSessionRunner::new(client.clone(), runner_config.clone());
 
-    let mut results = Vec::new();
+    let mut success_count = 0;
+    let total_count = workspaces.len();
 
     for (workspace, _manifest) in workspaces {
-        let workspace_key = workspace.workspace_key().to_string();
         let issue_id = workspace.issue_id().to_string();
         let identifier = workspace.identifier().to_string();
 
@@ -673,22 +662,10 @@ async fn run_doctor_rehydration(
             Ok(Some(content)) => content,
             Ok(None) => {
                 println!("  ⚠️  {identifier}: No conversation manifest found, skipping");
-                results.push(RehydrationAttemptResult {
-                    workspace_key: workspace_key.clone(),
-                    conversation_id: "none".to_string(),
-                    success: false,
-                    error: Some("No conversation manifest".to_string()),
-                });
                 continue;
             }
             Err(e) => {
                 println!("  ⚠️  {identifier}: Failed to read manifest: {e}");
-                results.push(RehydrationAttemptResult {
-                    workspace_key: workspace_key.clone(),
-                    conversation_id: "unknown".to_string(),
-                    success: false,
-                    error: Some(format!("Failed to read manifest: {e}")),
-                });
                 continue;
             }
         };
@@ -698,12 +675,6 @@ async fn run_doctor_rehydration(
             Ok(m) => m,
             Err(e) => {
                 println!("  ⚠️  {identifier}: Failed to parse manifest: {e}");
-                results.push(RehydrationAttemptResult {
-                    workspace_key: workspace_key.clone(),
-                    conversation_id: "unknown".to_string(),
-                    success: false,
-                    error: Some(format!("Failed to parse manifest: {e}")),
-                });
                 continue;
             }
         };
@@ -773,29 +744,18 @@ async fn run_doctor_rehydration(
             )
             .await
         {
-            Ok(result) => {
+            Ok(_result) => {
                 println!("  ✓  {identifier}: Rehydrated successfully");
-                results.push(RehydrationAttemptResult {
-                    workspace_key: workspace_key.clone(),
-                    conversation_id: result.old_conversation_id,
-                    success: true,
-                    error: None,
-                });
+                success_count += 1;
             }
             Err(e) => {
                 println!("  ✗  {identifier}: Rehydration failed: {e}");
-                results.push(RehydrationAttemptResult {
-                    workspace_key: workspace_key.clone(),
-                    conversation_id: conversation_id_str.to_string(),
-                    success: false,
-                    error: Some(e.to_string()),
-                });
             }
         }
     }
 
     println!();
-    Ok(results)
+    Ok((success_count, total_count))
 }
 
 async fn load_config(path: &Path) -> Result<DoctorConfig, String> {
