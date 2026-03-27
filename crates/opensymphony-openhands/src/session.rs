@@ -1585,6 +1585,18 @@ impl IssueSessionRunner {
             ));
         }
 
+        // Defensive check: if previous run ended with error status and had activity,
+        // reset to avoid potential corrupted event history.
+        // This is especially important for condenser tool-matching errors which indicate
+        // corrupted state that would fail again on retry.
+        if manifest.last_execution_status.as_deref() == Some("error")
+            && manifest.last_event_id.is_some()
+        {
+            return Ok(ReuseSession::Reset(
+                "previous run ended with error status, resetting to avoid potential corrupted event history".to_string(),
+            ));
+        }
+
         // Simplified conversation resumption: just try to attach directly.
         // The conversation's stored LLM config in meta.json is used as-is.
         // If the API key has changed, the attach will fail naturally and
@@ -1605,7 +1617,7 @@ impl IssueSessionRunner {
         // Simplified conversation resumption: just try to attach directly
         // without checking for LLM config drift or rehydrating.
         // The conversation's stored LLM config in meta.json is used as-is.
-        let mut stream = match self
+        let stream = match self
             .client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
             .await
@@ -1618,20 +1630,6 @@ impl IssueSessionRunner {
                 )));
             }
         };
-
-        // Defensive check: if the conversation ended with a condenser tool-matching error,
-        // reset instead of trying to reuse. This prevents reusing corrupted event history.
-        if stream.state_mirror().terminal_status() == Some(TerminalExecutionStatus::Error) {
-            if let Some(error_detail) = extract_error_detail_from_state(stream.state_mirror())
-                && is_condenser_tool_matching_error(&error_detail)
-            {
-                let _ = stream.close().await;
-                return Ok(ReuseSession::Reset(format!(
-                    "previous run ended with condenser tool-matching error (corrupted event history): {}",
-                    error_detail
-                )));
-            }
-        }
 
         let attached_at = Utc::now();
         manifest.fresh_conversation = false;
