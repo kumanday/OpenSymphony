@@ -108,6 +108,7 @@ pub struct WorkerLaunch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum WorkerUpdate {
     RuntimeEvent {
         worker_id: WorkerId,

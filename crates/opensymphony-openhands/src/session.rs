@@ -195,7 +195,7 @@ impl ConversationLaunchProfile {
         let api_key = self
             .llm_api_key_env
             .as_deref()
-            .and_then(|env_name| env.get(&env_name))
+            .and_then(|env_name| env.get(env_name))
             .or_else(|| env.get("LLM_API_KEY"))?;
 
         // Simple hash - hex-encoded SHA256 of API key
@@ -697,10 +697,8 @@ impl ActiveSession {
             events_scanned += 1;
 
             // Skip events we've already processed
-            if let Some(cutoff_time) = cutoff {
-                if event.timestamp <= cutoff_time {
-                    continue;
-                }
+            if let Some(cutoff_time) = cutoff && event.timestamp <= cutoff_time {
+                continue;
             }
 
             if let KnownEvent::LlmCompletionLog(llm_event) = KnownEvent::from_envelope(event) {
@@ -1714,14 +1712,14 @@ impl IssueSessionRunner {
         };
 
         // Delete the old conversation
-        if let Ok(conversation_id) = parse_uuid(old_conversation_id.as_str()) {
-            if let Err(error) = self.client.delete_conversation(conversation_id).await {
-                tracing::warn!(
-                    conversation_id = %old_conversation_id,
-                    %error,
-                    "failed to delete old conversation during rehydration"
-                );
-            }
+        if let Ok(conversation_id) = parse_uuid(old_conversation_id.as_str())
+            && let Err(error) = self.client.delete_conversation(conversation_id).await
+        {
+            tracing::warn!(
+                conversation_id = %old_conversation_id,
+                %error,
+                "failed to delete old conversation during rehydration"
+            );
         }
 
         // Create a fresh session with the current configuration
@@ -2770,11 +2768,10 @@ mod tests {
         for event in cache.items() {
             if let crate::events::KnownEvent::LlmCompletionLog(llm_event) =
                 crate::events::KnownEvent::from_envelope(event)
+                && let Some((input, output)) = llm_event.token_usage()
             {
-                if let Some((input, output)) = llm_event.token_usage() {
-                    total_input += input;
-                    total_output += output;
-                }
+                total_input += input;
+                total_output += output;
             }
         }
 
