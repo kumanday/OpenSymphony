@@ -26,8 +26,8 @@ use uuid::Uuid;
 
 use crate::{
     AgentConfig, CondenserConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
-    EventEnvelope, KnownEvent, LlmConfig, McpConfig, McpStdioServerConfig, OpenHandsClient,
-    OpenHandsError, RuntimeEventStream, RuntimeStreamConfig, SendMessageRequest,
+    ConversationStateMirror, EventEnvelope, KnownEvent, LlmConfig, McpConfig, McpStdioServerConfig,
+    OpenHandsClient, OpenHandsError, RuntimeEventStream, RuntimeStreamConfig, SendMessageRequest,
     TerminalExecutionStatus, ToolConfig, WorkspaceConfig,
 };
 
@@ -1505,13 +1505,33 @@ impl IssueSessionRunner {
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
         _issue: &NormalizedIssue,
-        _workflow: &ResolvedWorkflow,
+        workflow: &ResolvedWorkflow,
         manifest: IssueConversationManifest,
     ) -> Result<ReuseSession, IssueSessionError> {
         let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
             Ok(conversation_id) => conversation_id,
             Err(error) => return Ok(ReuseSession::Reset(error)),
         };
+
+        // Check if condenser config has changed and requires reset
+        // Old conversations without condenser should be reset when workflow now has condenser enabled
+        let workflow_condenser = workflow
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .condenser
+            .as_ref();
+        let manifest_condenser = manifest
+            .launch_profile
+            .as_ref()
+            .and_then(|p| p.condenser.as_ref());
+
+        if workflow_condenser.is_some() && manifest_condenser.is_none() {
+            return Ok(ReuseSession::Reset(
+                "workflow now has condenser enabled, but existing conversation was created without condenser - resetting to apply condenser".to_string(),
+            ));
+        }
 
         // Simplified conversation resumption: just try to attach directly.
         // The conversation's stored LLM config in meta.json is used as-is.
@@ -2201,17 +2221,15 @@ impl IssueSessionRunner {
                     None
                 }
             }
-            Some(TerminalExecutionStatus::Error) => Some(NormalizedOutcome {
-                kind: WorkerOutcomeKind::Failed,
-                summary: "OpenHands execution_status `error`".to_string(),
-                error: Some(
-                    stream
-                        .state_mirror()
-                        .execution_status()
-                        .unwrap_or_default()
-                        .to_string(),
-                ),
-            }),
+            Some(TerminalExecutionStatus::Error) => {
+                let error_detail = extract_error_detail_from_state(stream.state_mirror())
+                    .unwrap_or_else(|| "execution_status error".to_string());
+                Some(NormalizedOutcome {
+                    kind: WorkerOutcomeKind::Failed,
+                    summary: "OpenHands execution_status `error`".to_string(),
+                    error: Some(error_detail),
+                })
+            }
             Some(TerminalExecutionStatus::Stuck) => Some(NormalizedOutcome {
                 kind: WorkerOutcomeKind::Stalled,
                 summary: "OpenHands execution_status `stuck`".to_string(),
@@ -2537,6 +2555,31 @@ fn is_context_overflow_outcome(outcome: &NormalizedOutcome) -> bool {
             .error
             .as_deref()
             .is_some_and(is_context_overflow_error)
+}
+
+fn extract_error_detail_from_state(state: &ConversationStateMirror) -> Option<String> {
+    let raw = state.raw_state();
+
+    // Try to get error from state_delta.last_error
+    if let Some(delta) = raw.get("state_delta")
+        && let Some(error) = delta.get("last_error").and_then(|e: &Value| e.as_str())
+    {
+        return Some(error.to_string());
+    }
+
+    // Try to get error from stats.last_error
+    if let Some(stats) = raw.get("stats")
+        && let Some(error) = stats.get("last_error").and_then(|e: &Value| e.as_str())
+    {
+        return Some(error.to_string());
+    }
+
+    // Try to get error from top-level error field
+    if let Some(error) = raw.get("error").and_then(|e: &Value| e.as_str()) {
+        return Some(error.to_string());
+    }
+
+    None
 }
 
 fn summarize_event(event: &EventEnvelope) -> String {
