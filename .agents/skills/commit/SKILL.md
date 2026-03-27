@@ -40,12 +40,10 @@ description:
    - Summary of key changes (what changed).
    - Rationale and trade-offs (why it changed).
    - Tests or validation run (or explicit note if not run).
-9. Append a `Co-authored-by` trailer for Codex using `Codex <codex@openai.com>`
-   unless the user explicitly requests a different identity.
-10. Wrap body lines at 72 characters.
-11. Create the commit message with a here-doc or temp file and use
+9. Wrap body lines at 72 characters.
+10. Create the commit message with a here-doc or temp file and use
     `git commit -F <file>` so newlines are literal (avoid `-m` with `\n`).
-12. Commit only when the message matches the staged changes: if the staged diff
+11. Commit only when the message matches the staged changes: if the staged diff
     includes unrelated files or the message describes work that isn't staged,
     fix the index or revise the message before committing.
 
@@ -70,6 +68,4 @@ Rationale:
 
 Tests:
 - <command or "not run (reason)">
-
-Co-authored-by: Codex <codex@openai.com>
 ```

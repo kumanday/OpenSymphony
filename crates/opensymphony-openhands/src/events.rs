@@ -485,6 +485,10 @@ impl ConversationStateMirror {
     pub fn apply_conversation(&mut self, conversation: &Conversation) {
         self.raw_state = Value::Object(Default::default());
         self.apply_conversation_execution_status(conversation);
+        // Also merge the stats field if present (contains token usage)
+        if let Some(ref stats) = conversation.stats {
+            merge_json(&mut self.raw_state, json!({ "stats": stats.clone() }));
+        }
     }
 
     pub fn apply_conversation_execution_status(&mut self, conversation: &Conversation) {
@@ -759,5 +763,56 @@ mod tests {
             mirror.terminal_status(),
             Some(TerminalExecutionStatus::Finished)
         );
+    }
+
+    #[test]
+    fn state_mirror_includes_stats_from_conversation() {
+        let conversation = Conversation {
+            conversation_id: uuid::Uuid::nil(),
+            workspace: WorkspaceConfig {
+                working_dir: "/tmp/workspace".to_string(),
+                kind: "LocalWorkspace".to_string(),
+            },
+            persistence_dir: "/tmp/workspace/.opensymphony/openhands".to_string(),
+            max_iterations: 4,
+            stuck_detection: true,
+            execution_status: "idle".to_string(),
+            confirmation_policy: ConfirmationPolicy {
+                kind: "NeverConfirm".to_string(),
+            },
+            agent: AgentConfig {
+                kind: "Agent".to_string(),
+                llm: LlmConfig {
+                    model: "openai/gpt-5.4".to_string(),
+                    api_key: None,
+                    base_url: None,
+                    usage_id: None,
+                },
+                condenser: None,
+                tools: None,
+                include_default_tools: None,
+            },
+            stats: Some(json!({
+                "usage_to_metrics": {
+                    "default": {
+                        "accumulated_token_usage": {
+                            "prompt_tokens": 1000,
+                            "completion_tokens": 500,
+                            "cache_read_tokens": 200
+                        }
+                    }
+                }
+            })),
+        };
+
+        let mut mirror = ConversationStateMirror::default();
+        mirror.apply_conversation(&conversation);
+
+        let (input, output, cache_read) = mirror
+            .accumulated_token_usage()
+            .expect("token usage should be extracted from stats");
+        assert_eq!(input, 1000);
+        assert_eq!(output, 500);
+        assert_eq!(cache_read, 200);
     }
 }
