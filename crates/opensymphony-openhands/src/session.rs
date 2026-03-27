@@ -19,10 +19,9 @@ use opensymphony_workspace::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
-use tracing::{debug, warn};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -35,8 +34,6 @@ use crate::{
 pub const RUNTIME_CONTRACT_VERSION: &str = "openhands-sdk-agent-server-v1";
 const DEFAULT_REUSE_POLICY: &str = "per_issue";
 const FRESH_EACH_RUN_REUSE_POLICY: &str = "fresh_each_run";
-const LLM_CONFIG_REHYDRATE_RESET_REASON: &str =
-    "recreated conversation after LLM configuration drift";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueSessionReusePolicy {
@@ -360,9 +357,11 @@ pub struct LlmConfigFingerprint {
 
 impl LlmConfigFingerprint {
     pub fn from_llm_config(llm: &LlmConfig) -> Self {
+        // Simplified: only track model name, not API key or base URL
+        // since we're no longer using this for drift detection
         Self {
-            api_key_hash: hash_llm_config_value(llm.api_key.as_deref()),
-            base_url_hash: hash_llm_config_value(llm.base_url.as_deref()),
+            api_key_hash: None,
+            base_url_hash: None,
             model: llm.model.clone(),
         }
     }
@@ -414,8 +413,6 @@ pub struct IssueConversationManifest {
     pub last_event_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_summary: Option<String>,
-    #[serde(skip)]
-    pub preserved_conversation_summary: Option<String>,
     // Token usage accumulation from LLM completions
     #[serde(default)]
     pub input_tokens: u64,
@@ -468,7 +465,6 @@ impl IssueConversationManifest {
             last_event_kind: None,
             last_event_at: None,
             last_event_summary: None,
-            preserved_conversation_summary: None,
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
@@ -1052,7 +1048,7 @@ impl IssueSessionRunner {
                 .apply_runtime_snapshot(&active_session.stream);
         }
 
-        let mut prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind)
+        let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind)
         {
             Ok(prompt) => prompt,
             Err(detail) => {
@@ -1074,13 +1070,8 @@ impl IssueSessionRunner {
                     .map(Step::EarlyResult);
             }
         };
-        if let Some(rehydration_context) = self
-            .build_rehydration_context(issue, &active_session.manifest, active_session.prompt_kind)
-            .await
-        {
-            prompt.push_str("\n\n");
-            prompt.push_str(&rehydration_context);
-        }
+        // Note: Rehydration context removed - we now reuse conversations as-is
+        // without deleting and recreating them
 
         let prompt_path = active_session.prompt_kind.artifact_path(workspace);
         workspace_manager
@@ -1354,8 +1345,8 @@ impl IssueSessionRunner {
         &self,
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
-        issue: &NormalizedIssue,
-        workflow: &ResolvedWorkflow,
+        _issue: &NormalizedIssue,
+        _workflow: &ResolvedWorkflow,
         mut manifest: IssueConversationManifest,
     ) -> Result<ReuseSession, IssueSessionError> {
         let manifest_conversation_id = manifest.conversation_id.clone();
@@ -1363,173 +1354,28 @@ impl IssueSessionRunner {
             Ok(conversation_id) => conversation_id,
             Err(error) => return Ok(ReuseSession::Reset(error)),
         };
-        let current_launch_profile = match ConversationLaunchProfile::from_workflow(workflow) {
-            Ok(launch_profile) => launch_profile,
-            Err(error) => {
-                return Ok(ReuseSession::Reset(format!(
-                    "failed to build current conversation launch profile while checking LLM config drift: {error}"
-                )));
-            }
-        };
-        let current_request = match current_launch_profile.to_create_request(
-            self.environment.as_ref(),
-            workspace.workspace_path(),
-            &configured_persistence_dir(workflow, workspace),
-            Some(conversation_id),
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                return Ok(ReuseSession::Reset(format!(
-                    "failed to build current OpenHands conversation request while checking LLM config drift: {error}"
-                )));
-            }
-        };
-        let current_fingerprint = LlmConfigFingerprint::from_llm_config(&current_request.agent.llm);
 
-        let conversation = match self.client.get_conversation(conversation_id).await {
-            Ok(conversation) => conversation,
-            Err(error) if should_rehydrate_after_attach_failure(&error) => {
-                return match self
-                    .rehydrate_existing_session(
-                        workspace_manager,
-                        workspace,
-                        issue,
-                        workflow,
-                        manifest,
-                        conversation_id,
-                    )
-                    .await?
-                {
-                    Some(session) => Ok(ReuseSession::Active(Box::new(session))),
-                    None => Ok(ReuseSession::Reset(format!(
-                        "failed to attach existing conversation {}: {error}",
-                        manifest_conversation_id
-                    ))),
-                };
-            }
-            Err(error) => {
-                warn!(
-                    %error,
-                    %conversation_id,
-                    issue_id = %issue.id,
-                    "unable to fetch conversation, falling back to rehydrate"
-                );
-                return match self
-                    .rehydrate_existing_session(
-                        workspace_manager,
-                        workspace,
-                        issue,
-                        workflow,
-                        manifest,
-                        conversation_id,
-                    )
-                    .await?
-                {
-                    Some(session) => Ok(ReuseSession::Active(Box::new(session))),
-                    None => Ok(ReuseSession::Reset(format!(
-                        "failed to rehydrate conversation {}: {error}",
-                        manifest_conversation_id
-                    ))),
-                };
-            }
-        };
-
-        if conversation.agent.llm.api_key.is_none() && current_request.agent.llm.api_key.is_some() {
-            warn!(
-                issue_id = %issue.id,
-                conversation_id = %conversation_id,
-                "persisted conversation LLM config missing api_key; recreating with current provider settings"
-            );
-            return match self
-                .rehydrate_session_for_llm_config_change(
-                    workspace_manager,
-                    workspace,
-                    issue,
-                    workflow,
-                    manifest,
-                    conversation_id,
-                    current_launch_profile,
-                    current_request,
-                    current_fingerprint,
-                )
-                .await?
-            {
-                Some(session) => Ok(ReuseSession::Active(Box::new(session))),
-                None => Ok(ReuseSession::Reset(format!(
-                    "failed to recreate conversation {} after detecting missing api_key in persisted config",
-                    manifest_conversation_id
-                ))),
-            };
-        }
-
-        let known_fingerprint = manifest
-            .llm_config_fingerprint
-            .clone()
-            .unwrap_or_else(|| LlmConfigFingerprint::from_llm_config(&conversation.agent.llm));
-        if known_fingerprint != current_fingerprint {
-            warn!(
-                issue_id = %issue.id,
-                conversation_id = %conversation_id,
-                stored_model = %known_fingerprint.model,
-                current_model = %current_fingerprint.model,
-                "LLM config drift detected; recreating the conversation with the current provider settings"
-            );
-            return match self
-                .rehydrate_session_for_llm_config_change(
-                    workspace_manager,
-                    workspace,
-                    issue,
-                    workflow,
-                    manifest,
-                    conversation_id,
-                    current_launch_profile,
-                    current_request,
-                    current_fingerprint,
-                )
-                .await?
-            {
-                Some(session) => Ok(ReuseSession::Active(Box::new(session))),
-                None => Ok(ReuseSession::Reset(format!(
-                    "failed to recreate conversation {} after LLM configuration drift was detected",
-                    manifest_conversation_id
-                ))),
-            };
-        }
-
-        manifest.llm_config_fingerprint = Some(known_fingerprint);
+        // Simplified conversation resumption: just try to attach directly
+        // without checking for LLM config drift or rehydrating.
+        // The conversation's stored LLM config in meta.json is used as-is.
         let stream = match self
             .client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
             .await
         {
             Ok(stream) => stream,
-            Err(error) => match self
-                .rehydrate_existing_session(
-                    workspace_manager,
-                    workspace,
-                    issue,
-                    workflow,
-                    manifest,
-                    conversation_id,
-                )
-                .await?
-            {
-                Some(session) => return Ok(ReuseSession::Active(Box::new(session))),
-                None => {
-                    return Ok(ReuseSession::Reset(format!(
-                        "failed to attach existing conversation {}: {error}",
-                        manifest_conversation_id
-                    )));
-                }
-            },
+            Err(error) => {
+                return Ok(ReuseSession::Reset(format!(
+                    "failed to attach existing conversation {}: {error}",
+                    manifest_conversation_id
+                )));
+            }
         };
 
         let attached_at = Utc::now();
         manifest.fresh_conversation = false;
         manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
-        if manifest.launch_profile.is_none() {
-            manifest.launch_profile = Some(current_launch_profile);
-        }
+        // Note: We no longer update launch_profile on resume - use what's stored
         manifest.llm_config_fingerprint.get_or_insert_with(|| {
             LlmConfigFingerprint::from_llm_config(&stream.conversation().agent.llm)
         });
@@ -1740,351 +1586,6 @@ impl IssueSessionRunner {
         Ok(Step::Continue(session))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn rehydrate_session_for_llm_config_change(
-        &self,
-        workspace_manager: &WorkspaceManager,
-        workspace: &WorkspaceHandle,
-        issue: &NormalizedIssue,
-        workflow: &ResolvedWorkflow,
-        mut manifest: IssueConversationManifest,
-        conversation_id: Uuid,
-        launch_profile: ConversationLaunchProfile,
-        request: ConversationCreateRequest,
-        current_fingerprint: LlmConfigFingerprint,
-    ) -> Result<Option<ActiveSession>, IssueSessionError> {
-        // CRITICAL: Fetch conversation state BEFORE deleting to preserve token counts
-        let mut preserved_tokens = (0u64, 0u64);
-        if let Ok(conversation) = self.client.get_conversation(conversation_id).await {
-            // Extract token counts from conversation stats before it's deleted
-            if let Some(stats) = conversation.stats {
-                if let Some(usage_metrics) = stats.get("usage_to_metrics") {
-                    if let Some(default_usage) = usage_metrics.get("default") {
-                        if let Some(token_usage) = default_usage.get("accumulated_token_usage") {
-                            let input = token_usage
-                                .get("prompt_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            let output = token_usage
-                                .get("completion_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0);
-                            preserved_tokens = (input, output);
-                            tracing::info!(
-                                conversation_id = %conversation_id,
-                                input_tokens = input,
-                                output_tokens = output,
-                                "preserving token counts before conversation rehydration"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        let preserved_summary = match self.client.search_all_events(conversation_id).await {
-            Ok(cache) => {
-                let messages = extract_message_history(cache.items(), 20);
-                if messages.is_empty() {
-                    debug!(
-                        %conversation_id,
-                        issue_id = %issue.id,
-                        "no message history to summarize before rehydrate"
-                    );
-                    None
-                } else {
-                    let prompt = build_summarization_prompt(&messages, issue);
-                    let http_client = reqwest::Client::new();
-                    match generate_conversation_summary(&http_client, &request.agent.llm, &prompt)
-                        .await
-                    {
-                        Ok(summary) => {
-                            Some(format!("### Previous Conversation Summary\n\n{}", summary))
-                        }
-                        Err(error) => {
-                            warn!(
-                                %error,
-                                %conversation_id,
-                                issue_id = %issue.id,
-                                "failed to generate conversation summary before rehydrate; continuing without"
-                            );
-                            None
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                debug!(
-                    %error,
-                    %conversation_id,
-                    issue_id = %issue.id,
-                    "unable to fetch events before rehydrate; continuing without preserved history"
-                );
-                None
-            }
-        };
-
-        match self.client.delete_conversation(conversation_id).await {
-            Ok(()) => {}
-            Err(OpenHandsError::HttpStatus {
-                status_code: 404, ..
-            }) => {}
-            Err(error) => {
-                warn!(
-                    %error,
-                    %conversation_id,
-                    issue_id = %issue.id,
-                    "failed to delete the existing conversation before recreating it with updated LLM config"
-                );
-                return Ok(None);
-            }
-        }
-
-        workspace_manager
-            .write_json_artifact(
-                workspace,
-                &create_conversation_request_path(workspace),
-                &request,
-            )
-            .await?;
-
-        let conversation = match self.client.create_conversation(&request).await {
-            Ok(conversation) => conversation,
-            Err(error) => {
-                warn!(
-                    %error,
-                    %conversation_id,
-                    issue_id = %issue.id,
-                    "failed to recreate the conversation after deleting it for LLM config drift"
-                );
-                return Ok(None);
-            }
-        };
-        if conversation.conversation_id != conversation_id {
-            warn!(
-                %conversation_id,
-                recreated_conversation_id = %conversation.conversation_id,
-                issue_id = %issue.id,
-                "recreated conversation id changed after LLM config drift reset"
-            );
-            return Ok(None);
-        }
-
-        let stream = match self
-            .client
-            .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                warn!(
-                    %error,
-                    %conversation_id,
-                    issue_id = %issue.id,
-                    "failed to attach the recreated conversation after LLM config drift reset"
-                );
-                return Ok(None);
-            }
-        };
-
-        let attached_at = Utc::now();
-        manifest.issue_id = issue.id.clone();
-        manifest.identifier = issue.identifier.clone();
-        manifest.fresh_conversation = true;
-        manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
-        manifest.workflow_prompt_seeded = false;
-        manifest.persistence_dir = configured_persistence_dir(workflow, workspace);
-        manifest.last_attached_at = attached_at;
-        manifest.updated_at = attached_at;
-        manifest.launch_profile = Some(launch_profile);
-        manifest.llm_config_fingerprint = Some(current_fingerprint);
-        manifest.reset_reason = Some(LLM_CONFIG_REHYDRATE_RESET_REASON.to_string());
-        manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
-        manifest.last_prompt_kind = None;
-        manifest.last_prompt_at = None;
-        manifest.last_prompt_path = None;
-        // Apply preserved tokens from the old conversation before the stream overwrites them
-        manifest.input_tokens = preserved_tokens.0;
-        manifest.output_tokens = preserved_tokens.1;
-        let transport_diagnostics = self.client.transport_diagnostics().ok();
-        manifest
-            .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
-        manifest.apply_runtime_snapshot(&stream);
-        manifest.preserved_conversation_summary = preserved_summary;
-        workspace_manager
-            .write_json_artifact(
-                workspace,
-                &workspace.conversation_manifest_path(),
-                &manifest,
-            )
-            .await?;
-        workspace_manager
-            .write_json_artifact(
-                workspace,
-                &last_conversation_state_path(workspace),
-                &conversation_snapshot(&stream),
-            )
-            .await?;
-
-        let mut session = ActiveSession {
-            prompt_kind: manifest.prompt_kind(),
-            stream,
-            manifest,
-            prompt_path: None,
-        };
-        // Read existing token counts from conversation state on load
-        session.accumulate_tokens();
-        Ok(Some(session))
-    }
-
-    async fn rehydrate_existing_session(
-        &self,
-        workspace_manager: &WorkspaceManager,
-        workspace: &WorkspaceHandle,
-        issue: &NormalizedIssue,
-        workflow: &ResolvedWorkflow,
-        mut manifest: IssueConversationManifest,
-        conversation_id: Uuid,
-    ) -> Result<Option<ActiveSession>, IssueSessionError> {
-        let Some(launch_profile) = manifest
-            .launch_profile
-            .clone()
-            .or_else(|| ConversationLaunchProfile::from_workflow(workflow).ok())
-        else {
-            debug!(
-                %conversation_id,
-                "skipping session rehydrate because no launch profile is available"
-            );
-            return Ok(None);
-        };
-        let request = match launch_profile.to_create_request(
-            self.environment.as_ref(),
-            workspace.workspace_path(),
-            &configured_persistence_dir(workflow, workspace),
-            Some(conversation_id),
-        ) {
-            Ok(request) => request,
-            Err(error) => {
-                debug!(
-                    %error,
-                    %conversation_id,
-                    "skipping session rehydrate because provider configuration is invalid"
-                );
-                return Ok(None);
-            }
-        };
-        workspace_manager
-            .write_json_artifact(
-                workspace,
-                &create_conversation_request_path(workspace),
-                &request,
-            )
-            .await?;
-
-        match self.client.delete_conversation(conversation_id).await {
-            Ok(()) => {}
-            Err(OpenHandsError::HttpStatus {
-                status_code: 404, ..
-            }) => {}
-            Err(error) => {
-                warn!(
-                    %error,
-                    %conversation_id,
-                    issue_id = %issue.id,
-                    "failed to delete the existing conversation before recreating it during rehydrate"
-                );
-                return Ok(None);
-            }
-        }
-
-        let conversation = match self.client.create_conversation(&request).await {
-            Ok(conversation) => conversation,
-            Err(error) => {
-                debug!(
-                    %error,
-                    %conversation_id,
-                    "skipping session rehydrate because conversation recreation failed"
-                );
-                return Ok(None);
-            }
-        };
-        if conversation.conversation_id != conversation_id {
-            debug!(
-                %conversation_id,
-                recreated_conversation_id = %conversation.conversation_id,
-                "skipping session rehydrate because recreated conversation id changed"
-            );
-            return Ok(None);
-        }
-
-        let stream = match self
-            .client
-            .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
-            .await
-        {
-            Ok(stream) => stream,
-            Err(error) => {
-                debug!(
-                    %error,
-                    %conversation_id,
-                    "skipping session rehydrate because runtime stream attach failed"
-                );
-                return Ok(None);
-            }
-        };
-        if !stream_has_persisted_history(&stream) {
-            debug!(
-                %conversation_id,
-                "skipping session rehydrate because recreated conversation has no persisted history"
-            );
-            return Ok(None);
-        }
-
-        let attached_at = Utc::now();
-        manifest.issue_id = issue.id.clone();
-        manifest.identifier = issue.identifier.clone();
-        manifest.fresh_conversation = false;
-        manifest.reuse_policy = self.config.reuse_policy.as_str().to_owned();
-        manifest.workflow_prompt_seeded = true;
-        manifest.persistence_dir = configured_persistence_dir(workflow, workspace);
-        manifest.last_attached_at = attached_at;
-        manifest.updated_at = attached_at;
-        manifest.launch_profile.get_or_insert(launch_profile);
-        manifest
-            .llm_config_fingerprint
-            .get_or_insert_with(|| LlmConfigFingerprint::from_llm_config(&request.agent.llm));
-        manifest.reset_reason = None;
-        manifest.runtime_contract_version = Some(RUNTIME_CONTRACT_VERSION.to_string());
-        let transport_diagnostics = self.client.transport_diagnostics().ok();
-        manifest
-            .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
-        manifest.apply_runtime_snapshot(&stream);
-        workspace_manager
-            .write_json_artifact(
-                workspace,
-                &workspace.conversation_manifest_path(),
-                &manifest,
-            )
-            .await?;
-        workspace_manager
-            .write_json_artifact(
-                workspace,
-                &last_conversation_state_path(workspace),
-                &conversation_snapshot(&stream),
-            )
-            .await?;
-
-        let mut session = ActiveSession {
-            prompt_kind: manifest.prompt_kind(),
-            stream,
-            manifest,
-            prompt_path: None,
-        };
-        // Read existing token counts from conversation state on load
-        session.accumulate_tokens();
-        Ok(Some(session))
-    }
-
     fn render_prompt(
         &self,
         workflow: &ResolvedWorkflow,
@@ -2098,43 +1599,6 @@ impl IssueSessionRunner {
                 .map_err(|error| error.to_string()),
             IssueSessionPromptKind::Continuation => Ok(build_continuation_guidance(issue, run)),
         }
-    }
-
-    async fn build_rehydration_context(
-        &self,
-        issue: &NormalizedIssue,
-        manifest: &IssueConversationManifest,
-        prompt_kind: IssueSessionPromptKind,
-    ) -> Option<String> {
-        if prompt_kind != IssueSessionPromptKind::Full
-            || manifest.reset_reason.as_deref() != Some(LLM_CONFIG_REHYDRATE_RESET_REASON)
-        {
-            return None;
-        }
-
-        let workpad = match &self.workpad_comment_source {
-            Some(source) => match source.fetch_workpad_comment(issue.id.as_str()).await {
-                Ok(Some(comment)) => RehydrationWorkpadState::Found(comment),
-                Ok(None) => RehydrationWorkpadState::Missing,
-                Err(error) => {
-                    warn!(
-                        issue_id = %issue.id,
-                        %error,
-                        "failed to load the active Linear Codex workpad during conversation recreation"
-                    );
-                    RehydrationWorkpadState::Unavailable(error)
-                }
-            },
-            None => RehydrationWorkpadState::Unavailable(
-                "no workpad comment source configured".to_string(),
-            ),
-        };
-
-        Some(render_rehydration_context(
-            issue,
-            workpad,
-            manifest.preserved_conversation_summary.as_deref(),
-        ))
     }
 
     async fn wait_for_active_turn_to_finish<O>(
@@ -2569,47 +2033,6 @@ fn turn_has_stopped(status: &str) -> bool {
     !turn_is_in_progress(status)
 }
 
-fn stream_has_persisted_history(stream: &RuntimeEventStream) -> bool {
-    // Fresh conversations emit only the initial state snapshot, while rehydrated
-    // conversations replay that snapshot plus prior history.
-    stream.event_cache().items().len() > 1
-}
-
-enum RehydrationWorkpadState {
-    Found(WorkpadComment),
-    Missing,
-    Unavailable(String),
-}
-
-fn render_rehydration_context(
-    issue: &NormalizedIssue,
-    workpad: RehydrationWorkpadState,
-    preserved_conversation: Option<&str>,
-) -> String {
-    let base = format!(
-        "## Runtime Rehydration\nThis fresh OpenHands conversation was recreated for issue {}: {} because the configured LLM provider settings changed.\nThe workspace state is preserved, but the previous OpenHands conversation history was reset.\n",
-        issue.identifier, issue.title,
-    );
-
-    let conversation_section = preserved_conversation
-        .map(|s| format!("\n{}\n", s))
-        .unwrap_or_default();
-
-    match workpad {
-        RehydrationWorkpadState::Found(comment) => format!(
-            "{base}{conversation_section}\n## Previous Progress (from Linear Codex Workpad)\nLast updated: {}\n\n{}\n\nResume from the preserved workspace state after incorporating this progress.\n",
-            comment.updated_at.to_rfc3339(),
-            comment.body
-        ),
-        RehydrationWorkpadState::Missing => format!(
-            "{base}{conversation_section}\nNo active `## Codex Workpad` comment was found in Linear. Inspect the preserved workspace state directly and create a fresh workpad update once context has been re-established.\n"
-        ),
-        RehydrationWorkpadState::Unavailable(error) => format!(
-            "{base}{conversation_section}\nThe Linear Codex workpad could not be loaded for this run ({error}). Inspect the preserved workspace state directly before continuing.\n"
-        ),
-    }
-}
-
 fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) -> String {
     let attempt = run
         .attempt
@@ -2806,114 +2229,6 @@ fn conversation_error_detail(event: &EventEnvelope) -> String {
     format!("ConversationErrorEvent {}: {}", event.id, message)
 }
 
-fn extract_message_history(events: &[EventEnvelope], max_messages: usize) -> Vec<(String, String)> {
-    let mut messages: Vec<(String, String)> = events
-        .iter()
-        .filter(|event| event.kind == "MessageEvent")
-        .filter_map(|event| {
-            let content = event.payload.get("content")?.as_array()?;
-            let role = event.payload.get("role")?.as_str()?.to_string();
-            let texts: Vec<String> = content
-                .iter()
-                .filter_map(|entry| entry.get("text")?.as_str().map(ToOwned::to_owned))
-                .collect();
-            if texts.is_empty() {
-                return None;
-            }
-            Some((role, texts.join("\n")))
-        })
-        .collect();
-
-    if messages.len() > max_messages {
-        let skip = messages.len() - max_messages;
-        messages = messages.into_iter().skip(skip).collect();
-    }
-    messages
-}
-
-fn build_summarization_prompt(messages: &[(String, String)], issue: &NormalizedIssue) -> String {
-    let history: String = messages
-        .iter()
-        .map(|(role, text)| format!("{}: {}", role.to_uppercase(), text))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    format!(
-        r#"Summarize the following conversation about Linear issue {}: {}.
-
-Provide a concise summary (2-4 paragraphs) covering:
-1. What was accomplished
-2. What was in progress when the conversation ended
-3. Key decisions or approaches taken
-4. Any blockers or outstanding issues
-
-Conversation history:
-{}
-
-Summary:"#,
-        issue.identifier, issue.title, history
-    )
-}
-
-async fn generate_conversation_summary(
-    client: &reqwest::Client,
-    llm_config: &LlmConfig,
-    prompt: &str,
-) -> Result<String, String> {
-    let api_key = llm_config
-        .api_key
-        .as_ref()
-        .ok_or_else(|| "LLM config missing api_key for summary generation".to_string())?;
-
-    let base_url = llm_config
-        .base_url
-        .as_deref()
-        .unwrap_or("https://api.openai.com/v1");
-
-    let url = format!("{}/chat/completions", base_url);
-
-    let body = serde_json::json!({
-        "model": llm_config.model,
-        "messages": [
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 1000,
-        "temperature": 0.3
-    });
-
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .timeout(Duration::from_secs(60))
-        .send()
-        .await
-        .map_err(|e| format!("Failed to call LLM API: {}", e))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("LLM API returned {}: {}", status, body));
-    }
-
-    let json: Value = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse LLM response: {}", e))?;
-
-    let summary = json
-        .get("choices")
-        .and_then(|c| c.get(0))
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| "LLM response missing expected content".to_string())?;
-
-    Ok(summary)
-}
-
 fn run_status_for(outcome_kind: WorkerOutcomeKind) -> RunStatus {
     match outcome_kind {
         WorkerOutcomeKind::Succeeded => RunStatus::Succeeded,
@@ -2941,14 +2256,6 @@ fn parse_uuid(value: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(|error| format!("invalid UUID `{value}`: {error}"))
 }
 
-fn hash_llm_config_value(value: Option<&str>) -> Option<String> {
-    value.map(|value| {
-        let digest = Sha256::digest(value.as_bytes());
-        let hex = format!("{digest:x}");
-        hex[..16].to_string()
-    })
-}
-
 fn create_conversation_request_path(workspace: &WorkspaceHandle) -> PathBuf {
     workspace
         .openhands_dir()
@@ -2969,16 +2276,6 @@ fn finished_stream_error_is_tolerable(error: &OpenHandsError) -> bool {
     matches!(
         error,
         OpenHandsError::ReconnectExhausted { .. } | OpenHandsError::WebSocketClosed
-    )
-}
-
-fn should_rehydrate_after_attach_failure(error: &OpenHandsError) -> bool {
-    matches!(
-        error,
-        OpenHandsError::HttpStatus {
-            status_code: 404,
-            ..
-        }
     )
 }
 
@@ -3089,7 +2386,6 @@ mod tests {
             last_event_kind: None,
             last_event_at: None,
             last_event_summary: None,
-            preserved_conversation_summary: None,
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,

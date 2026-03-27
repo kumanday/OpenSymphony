@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -1660,8 +1660,10 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
 }
 
 #[tokio::test]
-async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes_and_recovers_workpad_context()
- {
+async fn issue_session_runner_reuses_conversation_despite_llm_config_changes()
+{
+    // Simplified behavior: conversations are reused as-is without rehydration
+    // even when LLM config changes. The stored config in meta.json is used.
     let server = FakeOpenHandsServer::start()
         .await
         .expect("fake server should start");
@@ -1732,6 +1734,7 @@ async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes
         Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
         max_turns,
     );
+    // Even with a different API key, the conversation is reused as-is
     let second_result = IssueSessionRunner::with_environment(
         client.clone(),
         runner_config(&workflow),
@@ -1740,11 +1743,6 @@ async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes
             "new-secret".to_string(),
         )]),
     )
-    .with_workpad_comment_source(Arc::new(StaticWorkpadCommentSource {
-        comment: Some(workpad_comment(
-            "## Codex Workpad\n\n- Investigated provider rotation\n- Workspace state is already prepared",
-        )),
-    }))
     .run(
         &manager,
         &ensured.handle,
@@ -1754,9 +1752,10 @@ async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes
         &workflow,
     )
     .await
-    .expect("config-drift session recreation should succeed");
+    .expect("conversation reuse should succeed");
 
-    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Full);
+    // With simplified behavior, conversation is reused with continuation prompt
+    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Continuation);
     assert_eq!(
         first_result
             .conversation
@@ -1769,55 +1768,41 @@ async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes
             .expect("second conversation metadata should exist")
             .conversation_id
     );
+    // Conversation is NOT marked as fresh - it's being reused
     assert!(
-        second_result
+        !second_result
             .conversation
             .as_ref()
             .expect("second conversation metadata should exist")
             .fresh_conversation
     );
 
-    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
-    assert_eq!(create_request.conversation_id, conversation_id);
-    assert_eq!(
-        create_request.agent.llm.api_key.as_deref(),
-        Some("new-secret")
-    );
-
-    let recreated_conversation = client
+    // The original API key is still used (from the stored conversation config)
+    let reused_conversation = client
         .get_conversation(conversation_id)
         .await
-        .expect("recreated conversation should be fetchable");
+        .expect("reused conversation should be fetchable");
     assert_eq!(
-        recreated_conversation.agent.llm.api_key.as_deref(),
-        Some("new-secret")
+        reused_conversation.agent.llm.api_key.as_deref(),
+        Some("old-secret")
     );
 
     let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
-    assert_eq!(
-        manifest.llm_config_fingerprint,
-        Some(LlmConfigFingerprint::from_llm_config(
-            &create_request.agent.llm
-        ))
-    );
+    // Workflow is already seeded from first run
     assert!(manifest.workflow_prompt_seeded);
     assert_eq!(
         manifest.last_prompt_kind,
-        Some(IssueSessionPromptKind::Full)
+        Some(IssueSessionPromptKind::Continuation)
     );
 
-    let messages = latest_message_texts(
-        client
-            .search_all_events(conversation_id)
-            .await
-            .expect("events should be searchable after config-drift recreation")
-            .items(),
-    );
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("Issue: COE-294-provider-rotation"));
-    assert!(messages[0].contains("## Runtime Rehydration"));
-    assert!(messages[0].contains("## Previous Progress (from Linear Codex Workpad)"));
-    assert!(messages[0].contains("Investigated provider rotation"));
+    // Events from first run are still present (conversation not recreated)
+    let event_cache = client
+        .search_all_events(conversation_id)
+        .await
+        .expect("events should be searchable after conversation reuse");
+    let events = event_cache.items();
+    // Should have events from both runs (continuation + new prompt)
+    assert!(!events.is_empty());
 }
 
 #[tokio::test]

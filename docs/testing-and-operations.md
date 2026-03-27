@@ -82,7 +82,7 @@ Current implementation:
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs` and `crates/opensymphony-openhands/tests/client_resilience.rs` now split the runtime stream coverage intentionally: the shared fake-server contract suite owns the scripted initial snapshot replay, attach-backlog versus buffered-live ordering, reconnect exhaustion, explicit-close shutdown semantics, reconcile, out-of-order delivery, and reconnect recovery cases, while `client_resilience.rs` keeps the narrower auth, forward-compatibility, and mirror-regression cases that still need bespoke server behavior
 - `crates/opensymphony-openhands/tests/live_pinned_server.rs` provides an opt-in live integration check against the pinned `openhands-agent-server==1.14.0` surface for external-mode auth success and failure
-- `crates/opensymphony-openhands/tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, missing-conversation rehydration that stays on continuation guidance, LLM-config-drift recreation with workpad recovery context, hashed provider fingerprint persistence, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
+- `crates/opensymphony-openhands/tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, missing-conversation recreation that stays on continuation guidance, **simplified conversation resumption that reuses conversations as-is without LLM config drift checks**, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
 - `crates/opensymphony-openhands/tests/supervisor.rs` now covers startup rejection when a foreign ready server is already bound to the supervised target port
 
 ## 3. Minimum required test coverage by subsystem
@@ -177,7 +177,8 @@ Current implementation:
 - persisted policy-drift resets
 - pinned-server auth success and failure paths
 - reuse after an already-active turn or `/run` conflict
-- rehydration of a missing conversation with persisted history
+- recreation of a missing conversation with persisted history
+- **simplified conversation resumption without LLM config drift checks**
 - workflow-owned `persistence_dir_relative` mapping
 - supervised-mode rejection of foreign ready servers
 
@@ -587,7 +588,7 @@ Each issue workspace should expose enough local artifacts to debug recovery:
     session-context.json
 ```
 
-These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, `run.json` retains the latest hook/status evidence for the worker lifetime, `conversation.json` records issue ownership, reuse state, prompt-seeding state, the hashed LLM config fingerprint that guards reuse, and the persisted launch profile used by `opensymphony debug`, and the OpenHands plus generated snapshots preserve the exact create request, latest mirrored conversation state, last dispatched prompt artifacts, and latest normalized runner context without reconstructing daemon state.
+These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, `run.json` retains the latest hook/status evidence for the worker lifetime, `conversation.json` records issue ownership, reuse state, prompt-seeding state, the `llm_config_fingerprint` (now simplified to track only model name for observability), and the persisted launch profile used by `opensymphony debug`, and the OpenHands plus generated snapshots preserve the exact create request, latest mirrored conversation state, last dispatched prompt artifacts, and latest normalized runner context without reconstructing daemon state.
 
 ## 10. Version pinning
 
