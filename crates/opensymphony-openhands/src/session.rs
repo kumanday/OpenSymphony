@@ -697,7 +697,9 @@ impl ActiveSession {
             events_scanned += 1;
 
             // Skip events we've already processed
-            if let Some(cutoff_time) = cutoff && event.timestamp <= cutoff_time {
+            if let Some(cutoff_time) = cutoff
+                && event.timestamp <= cutoff_time
+            {
                 continue;
             }
 
