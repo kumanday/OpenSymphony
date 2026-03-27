@@ -1382,58 +1382,18 @@ impl IssueSessionRunner {
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
         _issue: &NormalizedIssue,
-        workflow: &ResolvedWorkflow,
+        _workflow: &ResolvedWorkflow,
         manifest: IssueConversationManifest,
     ) -> Result<ReuseSession, IssueSessionError> {
-        let manifest_conversation_id = manifest.conversation_id.clone();
         let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
             Ok(conversation_id) => conversation_id,
             Err(error) => return Ok(ReuseSession::Reset(error)),
         };
 
-        // Check for API key drift - if the environment's API key differs from
-        // what was used to create the conversation, we need to reset
-        let launch_profile = match ConversationLaunchProfile::from_workflow(workflow) {
-            Ok(profile) => profile,
-            Err(_) => {
-                // If we can't build a launch profile, just try to attach and let it fail naturally
-                return self
-                    .try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id)
-                    .await;
-            }
-        };
-
-        // Compute current API key fingerprint from environment
-        let current_fingerprint = launch_profile.api_key_fingerprint(self.environment.as_ref());
-
-        // Get stored fingerprint from manifest (if available)
-        let stored_fingerprint = manifest
-            .launch_profile
-            .as_ref()
-            .and_then(|p| p.llm_api_key_fingerprint.clone());
-
-        // If fingerprints differ, delete the old conversation and reset to use the new key
-        if current_fingerprint != stored_fingerprint {
-            tracing::info!(
-                conversation_id = %manifest_conversation_id,
-                stored_fingerprint = ?stored_fingerprint,
-                current_fingerprint = ?current_fingerprint,
-                "API key changed since conversation was created, deleting old conversation and resetting"
-            );
-            // Delete the old conversation to avoid orphaning it
-            if let Err(error) = self.client.delete_conversation(conversation_id).await {
-                tracing::warn!(
-                    conversation_id = %manifest_conversation_id,
-                    %error,
-                    "failed to delete old conversation during API key drift reset"
-                );
-            }
-            return Ok(ReuseSession::Reset(
-                "API key changed - conversation needs to be recreated with new credentials"
-                    .to_string(),
-            ));
-        }
-
+        // Simplified conversation resumption: just try to attach directly.
+        // The conversation's stored LLM config in meta.json is used as-is.
+        // If the API key has changed, the attach will fail naturally and
+        // the caller can use explicit rehydration via the CLI.
         self.try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id)
             .await
     }

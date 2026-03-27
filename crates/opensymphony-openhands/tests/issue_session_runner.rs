@@ -1662,9 +1662,11 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
 }
 
 #[tokio::test]
-async fn issue_session_runner_resets_conversation_when_llm_config_changes() {
-    // When LLM config (API key) changes, the conversation is reset and recreated
-    // with the new config. This ensures the correct API key is used.
+async fn issue_session_runner_reuses_conversation_despite_llm_config_changes() {
+    // With simplified conversation resumption, the conversation is reused as-is
+    // even when LLM config (API key) changes. The stored config in meta.json is used.
+    // If the API key is actually invalid, attach will fail naturally and explicit
+    // rehydration via CLI can be used.
     let server = FakeOpenHandsServer::start()
         .await
         .expect("fake server should start");
@@ -1714,15 +1716,12 @@ async fn issue_session_runner_resets_conversation_when_llm_config_changes() {
     )
     .await
     .expect("initial provider-backed session run should succeed");
-    let _conversation_id = uuid::Uuid::parse_str(
-        first_result
-            .conversation
-            .as_ref()
-            .expect("conversation metadata should exist")
-            .conversation_id
-            .as_str(),
-    )
-    .expect("conversation ID should parse");
+    let first_conversation_id = first_result
+        .conversation
+        .as_ref()
+        .expect("conversation metadata should exist")
+        .conversation_id
+        .clone();
 
     let mut second_run_manifest = manager
         .start_run(&ensured.handle, &RunDescriptor::new("provider-run-2", 2))
@@ -1735,7 +1734,7 @@ async fn issue_session_runner_resets_conversation_when_llm_config_changes() {
         Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
         max_turns,
     );
-    // With a different API key, the conversation is reset and recreated
+    // With a different API key in environment, conversation is still reused as-is
     let second_result = IssueSessionRunner::with_environment(
         client.clone(),
         runner_config(&workflow),
@@ -1753,34 +1752,31 @@ async fn issue_session_runner_resets_conversation_when_llm_config_changes() {
         &workflow,
     )
     .await
-    .expect("conversation reset should succeed");
+    .expect("conversation reuse should succeed");
 
-    // When API key changes, conversation is reset with full prompt
-    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Full);
-    // Conversation ID is different (new conversation created)
-    assert_ne!(
-        first_result
-            .conversation
-            .as_ref()
-            .expect("first conversation metadata should exist")
-            .conversation_id,
+    // With simplified resumption, conversation is reused with continuation prompt
+    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Continuation);
+    // Conversation ID is the same (reused, not recreated)
+    assert_eq!(
+        first_conversation_id,
         second_result
             .conversation
             .as_ref()
             .expect("second conversation metadata should exist")
             .conversation_id
     );
-    // Conversation IS marked as fresh - it was recreated
+    // Conversation is NOT marked as fresh - it was reused
     assert!(
-        second_result
+        !second_result
             .conversation
             .as_ref()
             .expect("second conversation metadata should exist")
             .fresh_conversation
     );
 
-    // The new API key is used in the new conversation
-    let new_conversation_id = uuid::Uuid::parse_str(
+    // The conversation still has the OLD API key (stored in meta.json)
+    // With simplified resumption, we don't automatically update the API key
+    let reused_conversation_id = uuid::Uuid::parse_str(
         second_result
             .conversation
             .as_ref()
@@ -1788,22 +1784,23 @@ async fn issue_session_runner_resets_conversation_when_llm_config_changes() {
             .conversation_id
             .as_str(),
     )
-    .expect("new conversation ID should parse");
-    let new_conversation = client
-        .get_conversation(new_conversation_id)
+    .expect("conversation ID should parse");
+    let reused_conversation = client
+        .get_conversation(reused_conversation_id)
         .await
-        .expect("new conversation should be fetchable");
+        .expect("conversation should be fetchable");
+    // API key is still the old one - we don't auto-update on drift
     assert_eq!(
-        new_conversation.agent.llm.api_key.as_deref(),
-        Some("new-secret")
+        reused_conversation.agent.llm.api_key.as_deref(),
+        Some("old-secret")
     );
 
     let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
-    // Workflow is re-seeded after reset
+    // Workflow was seeded in first run and stays seeded (conversation reused)
     assert!(manifest.workflow_prompt_seeded);
     assert_eq!(
         manifest.last_prompt_kind,
-        Some(IssueSessionPromptKind::Full)
+        Some(IssueSessionPromptKind::Continuation)
     );
 }
 
