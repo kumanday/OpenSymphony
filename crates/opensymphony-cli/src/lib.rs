@@ -602,28 +602,28 @@ async fn run_doctor_rehydration(
                 .hooks
                 .after_create
                 .clone()
-                .map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+                .map(opensymphony_workspace::HookDefinition::shell),
             before_run: runtime
                 .workflow
                 .config
                 .hooks
                 .before_run
                 .clone()
-                .map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+                .map(opensymphony_workspace::HookDefinition::shell),
             after_run: runtime
                 .workflow
                 .config
                 .hooks
                 .after_run
                 .clone()
-                .map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+                .map(opensymphony_workspace::HookDefinition::shell),
             before_remove: runtime
                 .workflow
                 .config
                 .hooks
                 .before_remove
                 .clone()
-                .map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+                .map(opensymphony_workspace::HookDefinition::shell),
             timeout: Duration::from_millis(runtime.workflow.config.hooks.timeout_ms),
         },
         cleanup: opensymphony_workspace::CleanupConfig {
@@ -1874,6 +1874,193 @@ enum CommandError {
     Tui(#[from] opensymphony_tui::TuiError),
 }
 
+use opensymphony_workspace::WorkspaceManagerConfig;
+
+async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
+    use opensymphony_openhands::{
+        IssueSessionRunner, IssueSessionRunnerConfig, RehydrationOptions,
+    };
+    use opensymphony_workspace::{RunManifest, WorkspaceManager};
+
+    println!("Rehydrating conversation for issue: {}", args.issue);
+    println!("Reason: {}", args.reason);
+    println!(
+        "Summary events: {} (summarize: {})",
+        args.max_summary_events, !args.no_summary
+    );
+
+    // Load workflow from current directory
+    let current_dir =
+        env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
+    let workflow_path = current_dir.join("WORKFLOW.md");
+
+    if !workflow_path.exists() {
+        return Err(format!(
+            "WORKFLOW.md not found at {}",
+            workflow_path.display()
+        ));
+    }
+
+    let workflow_content = fs::read_to_string(&workflow_path)
+        .await
+        .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
+
+    let workflow_def = WorkflowDefinition::parse(&workflow_content)
+        .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
+
+    let workflow = workflow_def
+        .resolve_with_process_env(&current_dir)
+        .map_err(|e| format!("failed to resolve workflow: {}", e))?;
+
+    // Setup workspace manager
+    let workspace_config = build_rehydrate_workspace_config(&workflow);
+    let workspace_manager = WorkspaceManager::new(workspace_config)
+        .map_err(|e| format!("failed to create workspace manager: {}", e))?;
+
+    // Find workspace by issue reference
+    let workspace = workspace_manager
+        .find_workspace_by_issue_reference(&args.issue)
+        .await
+        .map_err(|e| format!("failed to find workspace: {}", e))?
+        .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?;
+
+    // Load existing conversation manifest
+    let manifest_path = workspace.conversation_manifest_path();
+    let manifest_content = workspace_manager
+        .read_text_artifact(&workspace, &manifest_path)
+        .await
+        .map_err(|e| format!("failed to read manifest: {}", e))?
+        .ok_or_else(|| {
+            format!(
+                "No conversation manifest found at {}",
+                manifest_path.display()
+            )
+        })?;
+
+    let old_manifest: opensymphony_openhands::IssueConversationManifest =
+        serde_json::from_str(&manifest_content)
+            .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
+
+    println!(
+        "Found existing conversation: {}",
+        old_manifest.conversation_id
+    );
+    println!("Created at: {:?}", old_manifest.created_at);
+    println!("Last attached: {:?}", old_manifest.last_attached_at);
+
+    // Create OpenHands client
+    let transport = TransportConfig::from_workflow(&workflow, &ProcessEnvironment)
+        .map_err(|e| format!("failed to create transport config: {}", e))?;
+    let client = OpenHandsClient::new(transport);
+
+    // Create session runner
+    let runner_config = IssueSessionRunnerConfig::default();
+    let runner = IssueSessionRunner::new(client, runner_config);
+
+    // Create a minimal run descriptor for the rehydration
+    use opensymphony_workspace::RunDescriptor;
+    let run_descriptor = RunDescriptor::new("rehydrate", 1);
+    let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
+
+    // Create a minimal RunAttempt for the rehydration
+    use opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("valid system time")
+        .as_millis() as u64;
+    let run_attempt = RunAttempt::new(
+        WorkerId::new("rehydrate-worker").expect("valid worker id"),
+        IssueId::new(workspace.issue_id()).expect("valid issue id"),
+        IssueIdentifier::new(workspace.identifier()).expect("valid identifier"),
+        workspace.workspace_path().to_path_buf(),
+        TimestampMs::new(now),
+        None,
+        8, // max_turns
+    );
+
+    // Perform rehydration
+    let options = RehydrationOptions {
+        reason: args.reason,
+        summarize: !args.no_summary,
+        max_summary_events: args.max_summary_events,
+    };
+
+    println!("\nStarting rehydration...");
+
+    // Create a minimal NormalizedIssue for the rehydration
+    use opensymphony_domain::{IssueState, IssueStateCategory};
+    let dummy_issue = opensymphony_domain::NormalizedIssue {
+        id: IssueId::new(workspace.issue_id()).expect("valid issue id"),
+        identifier: IssueIdentifier::new(workspace.identifier()).expect("valid identifier"),
+        title: "Rehydration".to_string(),
+        description: None,
+        priority: None,
+        state: IssueState {
+            id: None,
+            name: "In Progress".to_string(),
+            category: IssueStateCategory::Active,
+        },
+        branch_name: None,
+        url: None,
+        labels: vec![],
+        parent_id: None,
+        blocked_by: vec![],
+        sub_issues: vec![],
+        created_at: None,
+        updated_at: None,
+    };
+
+    let result = runner
+        .rehydrate_conversation(
+            &workspace_manager,
+            &workspace,
+            &mut run_manifest,
+            &run_attempt,
+            &dummy_issue,
+            &workflow,
+            &old_manifest,
+            options,
+        )
+        .await
+        .map_err(|e| format!("rehydration failed: {}", e))?;
+
+    println!("\n✓ Rehydration complete!");
+    println!("  Old conversation: {}", result.old_conversation_id);
+    println!("  Result: {:?}", result);
+
+    if let Some(context) = &result.context {
+        println!("\n  Context preserved ({} chars)", context.len());
+        if context.len() < 500 {
+            println!("  Preview: {}", context.lines().next().unwrap_or("..."));
+        }
+    } else {
+        println!("\n  No context preserved (summarization skipped or failed)");
+    }
+
+    println!("\nThe conversation has been smartly rehydrated.");
+    println!("The new conversation will be used on the next orchestrator run.");
+
+    Ok(())
+}
+
+fn build_rehydrate_workspace_config(workflow: &ResolvedWorkflow) -> WorkspaceManagerConfig {
+    use opensymphony_workspace::{CleanupConfig, HookConfig, HookDefinition};
+    let hooks = &workflow.config.hooks;
+    WorkspaceManagerConfig {
+        root: workflow.config.workspace.root.clone(),
+        hooks: HookConfig {
+            after_create: hooks.after_create.clone().map(HookDefinition::shell),
+            before_run: hooks.before_run.clone().map(HookDefinition::shell),
+            after_run: hooks.after_run.clone().map(HookDefinition::shell),
+            before_remove: hooks.before_remove.clone().map(HookDefinition::shell),
+            timeout: Duration::from_millis(hooks.timeout_ms),
+        },
+        cleanup: CleanupConfig {
+            remove_terminal_workspaces: false,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf, time::Duration};
@@ -2120,192 +2307,5 @@ openhands:
             probe_api_key_env: None,
             probe_llm_base_url_env: None,
         }
-    }
-}
-
-use opensymphony_workspace::WorkspaceManagerConfig;
-
-async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
-    use opensymphony_openhands::{
-        IssueSessionRunner, IssueSessionRunnerConfig, RehydrationOptions,
-    };
-    use opensymphony_workspace::{RunManifest, WorkspaceManager};
-
-    println!("Rehydrating conversation for issue: {}", args.issue);
-    println!("Reason: {}", args.reason);
-    println!(
-        "Summary events: {} (summarize: {})",
-        args.max_summary_events, !args.no_summary
-    );
-
-    // Load workflow from current directory
-    let current_dir =
-        env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
-    let workflow_path = current_dir.join("WORKFLOW.md");
-
-    if !workflow_path.exists() {
-        return Err(format!(
-            "WORKFLOW.md not found at {}",
-            workflow_path.display()
-        ));
-    }
-
-    let workflow_content = fs::read_to_string(&workflow_path)
-        .await
-        .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
-
-    let workflow_def = WorkflowDefinition::parse(&workflow_content)
-        .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
-
-    let workflow = workflow_def
-        .resolve_with_process_env(&current_dir)
-        .map_err(|e| format!("failed to resolve workflow: {}", e))?;
-
-    // Setup workspace manager
-    let workspace_config = build_rehydrate_workspace_config(&workflow);
-    let workspace_manager = WorkspaceManager::new(workspace_config)
-        .map_err(|e| format!("failed to create workspace manager: {}", e))?;
-
-    // Find workspace by issue reference
-    let workspace = workspace_manager
-        .find_workspace_by_issue_reference(&args.issue)
-        .await
-        .map_err(|e| format!("failed to find workspace: {}", e))?
-        .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?;
-
-    // Load existing conversation manifest
-    let manifest_path = workspace.conversation_manifest_path();
-    let manifest_content = workspace_manager
-        .read_text_artifact(&workspace, &manifest_path)
-        .await
-        .map_err(|e| format!("failed to read manifest: {}", e))?
-        .ok_or_else(|| {
-            format!(
-                "No conversation manifest found at {}",
-                manifest_path.display()
-            )
-        })?;
-
-    let old_manifest: opensymphony_openhands::IssueConversationManifest =
-        serde_json::from_str(&manifest_content)
-            .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
-
-    println!(
-        "Found existing conversation: {}",
-        old_manifest.conversation_id
-    );
-    println!("Created at: {:?}", old_manifest.created_at);
-    println!("Last attached: {:?}", old_manifest.last_attached_at);
-
-    // Create OpenHands client
-    let transport = TransportConfig::from_workflow(&workflow, &ProcessEnvironment)
-        .map_err(|e| format!("failed to create transport config: {}", e))?;
-    let client = OpenHandsClient::new(transport);
-
-    // Create session runner
-    let runner_config = IssueSessionRunnerConfig::default();
-    let runner = IssueSessionRunner::new(client, runner_config);
-
-    // Create a minimal run descriptor for the rehydration
-    use opensymphony_workspace::RunDescriptor;
-    let run_descriptor = RunDescriptor::new("rehydrate", 1);
-    let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
-
-    // Create a minimal RunAttempt for the rehydration
-    use opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("valid system time")
-        .as_millis() as u64;
-    let run_attempt = RunAttempt::new(
-        WorkerId::new("rehydrate-worker").expect("valid worker id"),
-        IssueId::new(workspace.issue_id()).expect("valid issue id"),
-        IssueIdentifier::new(workspace.identifier()).expect("valid identifier"),
-        workspace.workspace_path().to_path_buf(),
-        TimestampMs::new(now),
-        None,
-        8, // max_turns
-    );
-
-    // Perform rehydration
-    let options = RehydrationOptions {
-        reason: args.reason,
-        summarize: !args.no_summary,
-        max_summary_events: args.max_summary_events,
-    };
-
-    println!("\nStarting rehydration...");
-
-    // Create a minimal NormalizedIssue for the rehydration
-    use opensymphony_domain::{IssueState, IssueStateCategory};
-    let dummy_issue = opensymphony_domain::NormalizedIssue {
-        id: IssueId::new(workspace.issue_id()).expect("valid issue id"),
-        identifier: IssueIdentifier::new(workspace.identifier()).expect("valid identifier"),
-        title: "Rehydration".to_string(),
-        description: None,
-        priority: None,
-        state: IssueState {
-            id: None,
-            name: "In Progress".to_string(),
-            category: IssueStateCategory::Active,
-        },
-        branch_name: None,
-        url: None,
-        labels: vec![],
-        parent_id: None,
-        blocked_by: vec![],
-        sub_issues: vec![],
-        created_at: None,
-        updated_at: None,
-    };
-
-    let result = runner
-        .rehydrate_conversation(
-            &workspace_manager,
-            &workspace,
-            &mut run_manifest,
-            &run_attempt,
-            &dummy_issue,
-            &workflow,
-            &old_manifest,
-            options,
-        )
-        .await
-        .map_err(|e| format!("rehydration failed: {}", e))?;
-
-    println!("\n✓ Rehydration complete!");
-    println!("  Old conversation: {}", result.old_conversation_id);
-    println!("  Result: {:?}", result);
-
-    if let Some(context) = &result.context {
-        println!("\n  Context preserved ({} chars)", context.len());
-        if context.len() < 500 {
-            println!("  Preview: {}", context.lines().next().unwrap_or("..."));
-        }
-    } else {
-        println!("\n  No context preserved (summarization skipped or failed)");
-    }
-
-    println!("\nThe conversation has been smartly rehydrated.");
-    println!("The new conversation will be used on the next orchestrator run.");
-
-    Ok(())
-}
-
-fn build_rehydrate_workspace_config(workflow: &ResolvedWorkflow) -> WorkspaceManagerConfig {
-    use opensymphony_workspace::{CleanupConfig, HookConfig, HookDefinition};
-    let hooks = &workflow.config.hooks;
-    WorkspaceManagerConfig {
-        root: workflow.config.workspace.root.clone(),
-        hooks: HookConfig {
-            after_create: hooks.after_create.clone().map(HookDefinition::shell),
-            before_run: hooks.before_run.clone().map(HookDefinition::shell),
-            after_run: hooks.after_run.clone().map(HookDefinition::shell),
-            before_remove: hooks.before_remove.clone().map(HookDefinition::shell),
-            timeout: Duration::from_millis(hooks.timeout_ms),
-        },
-        cleanup: CleanupConfig {
-            remove_terminal_workspaces: false,
-        },
     }
 }

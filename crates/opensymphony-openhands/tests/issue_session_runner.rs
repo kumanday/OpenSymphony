@@ -22,6 +22,7 @@ use opensymphony_workspace::{
 use tempfile::TempDir;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct StaticWorkpadCommentSource {
     comment: Option<SessionWorkpadComment>,
 }
@@ -412,6 +413,7 @@ async fn read_create_conversation_request(
     serde_json::from_str(&raw).expect("create request should decode")
 }
 
+#[allow(dead_code)]
 fn workpad_comment(body: &str) -> SessionWorkpadComment {
     SessionWorkpadComment {
         id: "comment-workpad".to_string(),
@@ -1712,7 +1714,7 @@ async fn issue_session_runner_resets_conversation_when_llm_config_changes() {
     )
     .await
     .expect("initial provider-backed session run should succeed");
-    let conversation_id = uuid::Uuid::parse_str(
+    let _conversation_id = uuid::Uuid::parse_str(
         first_result
             .conversation
             .as_ref()
