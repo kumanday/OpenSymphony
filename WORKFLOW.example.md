@@ -82,11 +82,11 @@ openhands:
         # rejected until the current conversation-create adapter can forward them.
         model: ${LLM_MODEL}
       condenser:
-        # Disabled by default when omitted. When enabled, OpenSymphony forwards
-        # a fixed `LLMSummarizingCondenser` request that reuses the agent LLM
+        # Enabled by default. OpenSymphony forwards a fixed
+        # `LLMSummarizingCondenser` request that reuses the agent LLM
         # configuration and defaults to `max_size: 240` plus `keep_first: 2`
         # if those thresholds are not set explicitly.
-        enabled: true
+        # Set `enabled: false` to disable.
         max_size: 240
         keep_first: 2
       # Workflow-owned agent extras other than `condenser` such as

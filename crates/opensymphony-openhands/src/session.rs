@@ -662,6 +662,8 @@ pub enum IssueSessionError {
     Workspace(#[from] WorkspaceError),
     #[error("unexpected early result: {0}")]
     UnexpectedEarlyResult(String),
+    #[error("rehydration failed: {0}")]
+    RehydrationFailed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -881,6 +883,8 @@ impl IssueSessionRunner {
     where
         O: IssueSessionObserver,
     {
+        const MAX_CONTEXT_OVERFLOW_RETRIES: usize = 1;
+
         let observed_run = observed_run_for_turn(run);
         let active_session = match self
             .initialize_session(
@@ -897,12 +901,107 @@ impl IssueSessionRunner {
             Step::EarlyResult(result) => return Ok(*result),
         };
 
+        let mut retry_count = 0;
+        let mut current_session = active_session;
+        let (final_session, outcome) = loop {
+            let (mut active_session, outcome) = match self
+                .execute_turn(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    &observed_run,
+                    workflow,
+                    issue,
+                    run,
+                    current_session,
+                    observer,
+                )
+                .await?
+            {
+                Step::Continue(result) => result,
+                Step::EarlyResult(result) => return Ok(*result),
+            };
+
+            if is_context_overflow_outcome(&outcome) && retry_count < MAX_CONTEXT_OVERFLOW_RETRIES {
+                retry_count += 1;
+                tracing::warn!(
+                    conversation_id = %active_session.manifest.conversation_id,
+                    error = ?outcome.error,
+                    retry_count,
+                    max_retries = MAX_CONTEXT_OVERFLOW_RETRIES,
+                    "context overflow detected, attempting auto-recovery via rehydration"
+                );
+
+                let old_manifest = active_session.manifest.clone();
+                let _ = active_session.stream.close().await;
+
+                match self
+                    .recover_from_context_overflow(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        &observed_run,
+                        issue,
+                        workflow,
+                        &old_manifest,
+                    )
+                    .await
+                {
+                    Ok(recovered_session) => {
+                        tracing::info!(
+                            old_conversation_id = %old_manifest.conversation_id,
+                            new_conversation_id = %recovered_session.manifest.conversation_id,
+                            "context overflow recovery: rehydration succeeded, re-running turn"
+                        );
+                        current_session = recovered_session;
+                        continue;
+                    }
+                    Err(rehydration_error) => {
+                        tracing::warn!(
+                            %rehydration_error,
+                            "context overflow recovery: rehydration failed, returning original failure"
+                        );
+                        break (active_session, outcome);
+                    }
+                }
+            } else {
+                break (active_session, outcome);
+            }
+        };
+
+        self.finalize_active_session(
+            workspace_manager,
+            workspace,
+            run_manifest,
+            &observed_run,
+            final_session,
+            outcome,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_turn<O>(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        observed_run: &RunAttempt,
+        workflow: &ResolvedWorkflow,
+        issue: &NormalizedIssue,
+        run: &RunAttempt,
+        active_session: ActiveSession,
+        observer: &mut O,
+    ) -> Result<Step<(ActiveSession, NormalizedOutcome)>, IssueSessionError>
+    where
+        O: IssueSessionObserver,
+    {
         let (mut active_session, mut prepared_turn) = match self
             .prepare_turn(
                 workspace_manager,
                 workspace,
                 run_manifest,
-                &observed_run,
+                observed_run,
                 workflow,
                 issue,
                 run,
@@ -912,7 +1011,7 @@ impl IssueSessionRunner {
             .await?
         {
             Step::Continue(state) => state,
-            Step::EarlyResult(result) => return Ok(*result),
+            Step::EarlyResult(result) => return Ok(Step::EarlyResult(result)),
         };
 
         active_session = match self
@@ -920,7 +1019,7 @@ impl IssueSessionRunner {
                 workspace_manager,
                 workspace,
                 run_manifest,
-                &observed_run,
+                observed_run,
                 active_session,
                 &mut prepared_turn,
                 observer,
@@ -928,7 +1027,7 @@ impl IssueSessionRunner {
             .await?
         {
             Step::Continue(session) => session,
-            Step::EarlyResult(result) => return Ok(*result),
+            Step::EarlyResult(result) => return Ok(Step::EarlyResult(result)),
         };
 
         let outcome = self
@@ -938,15 +1037,39 @@ impl IssueSessionRunner {
                 observer,
             )
             .await;
-        self.finalize_active_session(
-            workspace_manager,
-            workspace,
-            run_manifest,
-            &observed_run,
-            active_session,
-            outcome,
-        )
-        .await
+
+        Ok(Step::Continue((active_session, outcome)))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn recover_from_context_overflow(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        observed_run: &RunAttempt,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
+        old_manifest: &IssueConversationManifest,
+    ) -> Result<ActiveSession, IssueSessionError> {
+        let rehydration_result = self
+            .rehydrate_conversation(
+                workspace_manager,
+                workspace,
+                run_manifest,
+                observed_run,
+                issue,
+                workflow,
+                old_manifest,
+                RehydrationOptions {
+                    reason: "context overflow auto-recovery".to_string(),
+                    summarize: false,
+                    max_summary_events: 0,
+                },
+            )
+            .await?;
+
+        Ok(rehydration_result.session)
     }
 
     async fn initialize_session(
@@ -1707,9 +1830,13 @@ impl IssueSessionRunner {
 
         let mut session = match step {
             Step::Continue(session) => session,
-            Step::EarlyResult(_) => {
-                return Err(IssueSessionError::UnexpectedEarlyResult(
-                    "rehydration create_fresh_session returned early result".to_string(),
+            Step::EarlyResult(result) => {
+                return Err(IssueSessionError::RehydrationFailed(
+                    result
+                        .worker_outcome
+                        .error
+                        .or(result.worker_outcome.summary)
+                        .unwrap_or_else(|| "rehydration failed".to_string()),
                 ));
             }
         };
@@ -2391,6 +2518,25 @@ fn failed_outcome(summary: impl Into<String>, error: impl Into<String>) -> Norma
         summary: summary.into(),
         error: Some(error.into()),
     }
+}
+
+fn is_context_overflow_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("prompt is too long")
+        || lower.contains("maximum context length")
+        || lower.contains("context window")
+        || lower.contains("context_length")
+        || lower.contains("token limit")
+        || lower.contains("context length exceeded")
+        || (lower.contains("exceeds") && lower.contains("context"))
+}
+
+fn is_context_overflow_outcome(outcome: &NormalizedOutcome) -> bool {
+    outcome.kind == WorkerOutcomeKind::Failed
+        && outcome
+            .error
+            .as_deref()
+            .is_some_and(is_context_overflow_error)
 }
 
 fn summarize_event(event: &EventEnvelope) -> String {

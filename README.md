@@ -84,19 +84,18 @@ openhands:
         model: ${LLM_MODEL}
 ```
 
-Optional conversation condensation can be enabled per workflow to reduce long-history context pressure before the agent-server hits the model window:
+Optional conversation condensation is enabled by default per workflow to reduce long-history context pressure before the agent-server hits the model window:
 
 ```yaml
 openhands:
   conversation:
     agent:
       condenser:
-        enabled: true
         max_size: 240
         keep_first: 2
 ```
 
-When enabled, OpenSymphony forwards an OpenHands `LLMSummarizingCondenser` that reuses the conversation agent's LLM settings. If `max_size` or `keep_first` are omitted, OpenSymphony defaults them to `240` and `2`.
+OpenSymphony forwards an OpenHands `LLMSummarizingCondenser` that reuses the conversation agent's LLM settings. The condenser is enabled by default with `max_size: 240` and `keep_first: 2`. To disable it, set `enabled: false`.
 
 Add a `config.yaml` file next to your target repository `WORKFLOW.md`. A minimal local-supervised config looks like this:
 
