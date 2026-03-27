@@ -10,6 +10,69 @@ pub struct LlmCompletionLogEvent {
     pub payload: Value,
 }
 
+impl LlmCompletionLogEvent {
+    /// Extract token usage from the completion log payload.
+    /// Returns (input_tokens, output_tokens) if available.
+    pub fn token_usage(&self) -> Option<(u64, u64)> {
+        // OpenHands provides token usage in various formats
+        // Try common field names used by LiteLLM and OpenAI-compatible APIs
+
+        // First, try nested usage object (OpenAI format via LiteLLM)
+        if let Some(usage) = self.payload.get("usage") {
+            let input = usage
+                .get("prompt_tokens")
+                .or_else(|| usage.get("input_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let output = usage
+                .get("completion_tokens")
+                .or_else(|| usage.get("output_tokens"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if input > 0 || output > 0 {
+                return Some((input, output));
+            }
+        }
+
+        // Try flat fields (some older OpenHands versions)
+        let input = self
+            .payload
+            .get("input_tokens")
+            .or_else(|| self.payload.get("prompt_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let output = self
+            .payload
+            .get("output_tokens")
+            .or_else(|| self.payload.get("completion_tokens"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if input > 0 || output > 0 {
+            return Some((input, output));
+        }
+
+        // Try total_tokens field only
+        if let Some(total) = self.payload.get("total_tokens").and_then(Value::as_u64) {
+            return Some((0, total)); // Can't split, report as output
+        }
+
+        // Try simple tokens field (some OpenHands versions use this)
+        if let Some(tokens) = self.payload.get("tokens").and_then(Value::as_u64) {
+            return Some((0, tokens)); // Can't split, report as output
+        }
+
+        None
+    }
+
+    /// Get the model name from the completion log
+    pub fn model(&self) -> Option<String> {
+        self.payload
+            .get("model")
+            .and_then(Value::as_str)
+            .map(String::from)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversationErrorEvent {
     pub payload: Value,
@@ -463,6 +526,37 @@ impl ConversationStateMirror {
             _ => None,
         }
     }
+
+    /// Extract accumulated token usage from the conversation state.
+    /// Returns (input_tokens, output_tokens, cache_read_tokens) from stats.usage_to_metrics.default.accumulated_token_usage
+    pub fn accumulated_token_usage(&self) -> Option<(u64, u64, u64)> {
+        // Navigate the JSON structure: stats.usage_to_metrics.default.accumulated_token_usage
+        let usage = self
+            .raw_state
+            .get("stats")?
+            .get("usage_to_metrics")?
+            .get("default")?
+            .get("accumulated_token_usage")?;
+
+        let input = usage
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let output = usage
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let cache_read = usage
+            .get("cache_read_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+
+        if input > 0 || output > 0 || cache_read > 0 {
+            Some((input, output, cache_read))
+        } else {
+            None
+        }
+    }
 }
 
 fn merge_json(target: &mut Value, delta: Value) {
@@ -615,6 +709,7 @@ mod tests {
                 tools: None,
                 include_default_tools: None,
             },
+            stats: None,
         };
         let running = EventEnvelope::new(
             "evt-running",

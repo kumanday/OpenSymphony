@@ -95,6 +95,9 @@ pub trait IssueSessionObserver {
         _summary: Option<String>,
     ) {
     }
+
+    /// Called when conversation metadata is updated (e.g., after token accumulation)
+    fn on_conversation_update(&mut self, _conversation: &ConversationMetadata) {}
 }
 
 impl IssueSessionObserver for () {}
@@ -413,6 +416,16 @@ pub struct IssueConversationManifest {
     pub last_event_summary: Option<String>,
     #[serde(skip)]
     pub preserved_conversation_summary: Option<String>,
+    // Token usage accumulation from LLM completions
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    // Tracks the last time tokens were accumulated to avoid double-counting
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_token_accumulation_at: Option<DateTime<Utc>>,
 }
 
 impl IssueConversationManifest {
@@ -456,6 +469,10 @@ impl IssueConversationManifest {
             last_event_at: None,
             last_event_summary: None,
             preserved_conversation_summary: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            last_token_accumulation_at: None,
         }
     }
 
@@ -505,6 +522,13 @@ impl IssueConversationManifest {
             self.last_event_summary = Some(summarize_event(event));
         }
 
+        // Update token counts from conversation state (OpenHands tracks tokens in state, not events)
+        if let Some((input, output, cache_read)) = stream.state_mirror().accumulated_token_usage() {
+            self.input_tokens = input;
+            self.output_tokens = output;
+            self.cache_read_tokens = cache_read;
+        }
+
         self.updated_at = Utc::now();
     }
 
@@ -540,6 +564,11 @@ impl IssueConversationManifest {
             last_event_at: self.last_event_at.map(timestamp_ms_from_datetime),
             last_event_summary: self.last_event_summary.clone(),
             recent_activity: Vec::new(),
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            total_tokens: self.input_tokens + self.output_tokens,
+            runtime_seconds: 0, // TODO: track runtime
         }
     }
 }
@@ -614,6 +643,107 @@ struct ActiveSession {
     manifest: IssueConversationManifest,
     prompt_kind: IssueSessionPromptKind,
     prompt_path: Option<PathBuf>,
+}
+
+impl ActiveSession {
+    /// Accumulate tokens from LLM completion events AND conversation state.
+    /// Uses last_token_accumulation_at to avoid double-counting events,
+    /// but also reads accumulated totals from conversation state (OpenHands tracks tokens there).
+    fn accumulate_tokens(&mut self) {
+        use crate::events::KnownEvent;
+        use chrono::DateTime;
+
+        let cutoff = self.manifest.last_token_accumulation_at;
+        let mut max_event_time: Option<DateTime<Utc>> = None;
+        let mut events_scanned = 0;
+        let mut llm_events_found = 0;
+        let mut tokens_added = (0u64, 0u64);
+
+        // Scan for LLM completion events (for backward compatibility, though OpenHands doesn't send these)
+        for event in self.stream.event_cache().items() {
+            events_scanned += 1;
+
+            // Skip events we've already processed
+            if let Some(cutoff_time) = cutoff {
+                if event.timestamp <= cutoff_time {
+                    continue;
+                }
+            }
+
+            if let KnownEvent::LlmCompletionLog(llm_event) = KnownEvent::from_envelope(event) {
+                llm_events_found += 1;
+                if let Some((input, output)) = llm_event.token_usage() {
+                    self.manifest.input_tokens += input;
+                    self.manifest.output_tokens += output;
+                    tokens_added.0 += input;
+                    tokens_added.1 += output;
+                    tracing::debug!(
+                        input_tokens = input,
+                        output_tokens = output,
+                        event_id = %event.id,
+                        "accumulated tokens from LLM completion event"
+                    );
+                } else {
+                    tracing::debug!(
+                        event_id = %event.id,
+                        payload = %llm_event.payload,
+                        "LLMCompletionLogEvent has no token usage data"
+                    );
+                }
+            }
+
+            // Track the latest event timestamp we've seen
+            if max_event_time.is_none() || event.timestamp > max_event_time.unwrap() {
+                max_event_time = Some(event.timestamp);
+            }
+        }
+
+        // Update the cutoff time to the latest event we processed
+        if let Some(latest_time) = max_event_time {
+            self.manifest.last_token_accumulation_at = Some(latest_time);
+        }
+
+        // CRITICAL: Also read accumulated tokens from conversation state
+        // OpenHands tracks tokens in conversation state.stats, not in LLMCompletionLogEvent
+        if let Some((input, output, cache_read)) =
+            self.stream.state_mirror().accumulated_token_usage()
+        {
+            // Use the state's accumulated totals directly (these are already summed by OpenHands)
+            if input > self.manifest.input_tokens {
+                let new_input = input - self.manifest.input_tokens;
+                self.manifest.input_tokens = input;
+                tokens_added.0 += new_input;
+            }
+            if output > self.manifest.output_tokens {
+                let new_output = output - self.manifest.output_tokens;
+                self.manifest.output_tokens = output;
+                tokens_added.1 += new_output;
+            }
+            if cache_read > self.manifest.cache_read_tokens {
+                self.manifest.cache_read_tokens = cache_read;
+            }
+            tracing::debug!(
+                state_input = input,
+                state_output = output,
+                state_cache_read = cache_read,
+                manifest_input = self.manifest.input_tokens,
+                manifest_output = self.manifest.output_tokens,
+                manifest_cache_read = self.manifest.cache_read_tokens,
+                "updated tokens from conversation state"
+            );
+        }
+
+        tracing::debug!(
+            events_scanned,
+            llm_events_found,
+            input_tokens_added = tokens_added.0,
+            output_tokens_added = tokens_added.1,
+            total_input_tokens = self.manifest.input_tokens,
+            total_output_tokens = self.manifest.output_tokens,
+            total_cache_read_tokens = self.manifest.cache_read_tokens,
+            "token accumulation complete"
+        );
+    }
 }
 
 enum Step<T> {
@@ -770,7 +900,7 @@ impl IssueSessionRunner {
 
         let outcome = self
             .await_terminal_outcome(
-                &mut active_session.stream,
+                &mut active_session,
                 &prepared_turn.baseline_event_ids,
                 observer,
             )
@@ -1097,6 +1227,8 @@ impl IssueSessionRunner {
                     active_session
                         .manifest
                         .apply_runtime_snapshot(&active_session.stream);
+                    // Read any existing token counts from conversation state
+                    active_session.accumulate_tokens();
                     prepared_turn.baseline_event_ids.extend(
                         active_session
                             .stream
@@ -1155,6 +1287,9 @@ impl IssueSessionRunner {
                 ),
             )
             .await?;
+
+        // Accumulate tokens from LLM completion events before creating metadata
+        active_session.accumulate_tokens();
 
         observer.on_launch(
             &active_session
@@ -1421,12 +1556,15 @@ impl IssueSessionRunner {
             )
             .await?;
 
-        Ok(ReuseSession::Active(Box::new(ActiveSession {
+        let mut session = ActiveSession {
             prompt_kind: manifest.prompt_kind(),
             stream,
             manifest,
             prompt_path: None,
-        })))
+        };
+        // Read existing token counts from conversation state on load
+        session.accumulate_tokens();
+        Ok(ReuseSession::Active(Box::new(session)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1591,12 +1729,15 @@ impl IssueSessionRunner {
             )
             .await?;
 
-        Ok(Step::Continue(ActiveSession {
+        let mut session = ActiveSession {
             prompt_kind: manifest.prompt_kind(),
             stream,
             manifest,
             prompt_path: None,
-        }))
+        };
+        // Read existing token counts from conversation state on load
+        session.accumulate_tokens();
+        Ok(Step::Continue(session))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1612,6 +1753,35 @@ impl IssueSessionRunner {
         request: ConversationCreateRequest,
         current_fingerprint: LlmConfigFingerprint,
     ) -> Result<Option<ActiveSession>, IssueSessionError> {
+        // CRITICAL: Fetch conversation state BEFORE deleting to preserve token counts
+        let mut preserved_tokens = (0u64, 0u64);
+        if let Ok(conversation) = self.client.get_conversation(conversation_id).await {
+            // Extract token counts from conversation stats before it's deleted
+            if let Some(stats) = conversation.stats {
+                if let Some(usage_metrics) = stats.get("usage_to_metrics") {
+                    if let Some(default_usage) = usage_metrics.get("default") {
+                        if let Some(token_usage) = default_usage.get("accumulated_token_usage") {
+                            let input = token_usage
+                                .get("prompt_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let output = token_usage
+                                .get("completion_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            preserved_tokens = (input, output);
+                            tracing::info!(
+                                conversation_id = %conversation_id,
+                                input_tokens = input,
+                                output_tokens = output,
+                                "preserving token counts before conversation rehydration"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let preserved_summary = match self.client.search_all_events(conversation_id).await {
             Ok(cache) => {
                 let messages = extract_message_history(cache.items(), 20);
@@ -1733,6 +1903,9 @@ impl IssueSessionRunner {
         manifest.last_prompt_kind = None;
         manifest.last_prompt_at = None;
         manifest.last_prompt_path = None;
+        // Apply preserved tokens from the old conversation before the stream overwrites them
+        manifest.input_tokens = preserved_tokens.0;
+        manifest.output_tokens = preserved_tokens.1;
         let transport_diagnostics = self.client.transport_diagnostics().ok();
         manifest
             .apply_transport_diagnostics(transport_diagnostics.as_ref(), self.client.base_url());
@@ -1753,12 +1926,15 @@ impl IssueSessionRunner {
             )
             .await?;
 
-        Ok(Some(ActiveSession {
+        let mut session = ActiveSession {
             prompt_kind: manifest.prompt_kind(),
             stream,
             manifest,
             prompt_path: None,
-        }))
+        };
+        // Read existing token counts from conversation state on load
+        session.accumulate_tokens();
+        Ok(Some(session))
     }
 
     async fn rehydrate_existing_session(
@@ -1898,12 +2074,15 @@ impl IssueSessionRunner {
             )
             .await?;
 
-        Ok(Some(ActiveSession {
+        let mut session = ActiveSession {
             prompt_kind: manifest.prompt_kind(),
             stream,
             manifest,
             prompt_path: None,
-        }))
+        };
+        // Read existing token counts from conversation state on load
+        session.accumulate_tokens();
+        Ok(Some(session))
     }
 
     fn render_prompt(
@@ -2017,7 +2196,7 @@ impl IssueSessionRunner {
 
     async fn await_terminal_outcome<O>(
         &self,
-        stream: &mut RuntimeEventStream,
+        session: &mut ActiveSession,
         baseline_event_ids: &HashSet<String>,
         observer: &mut O,
     ) -> NormalizedOutcome
@@ -2025,54 +2204,100 @@ impl IssueSessionRunner {
         O: IssueSessionObserver,
     {
         let deadline = Instant::now() + self.config.terminal_wait_timeout;
+        let mut next_token_accumulation = Instant::now() + Duration::from_secs(15);
 
         loop {
+            // Accumulate tokens every 15 seconds during streaming
+            if Instant::now() >= next_token_accumulation {
+                session.accumulate_tokens();
+                // Notify observer of updated conversation metadata with new token counts
+                observer.on_conversation_update(
+                    &session
+                        .manifest
+                        .to_domain_metadata(RuntimeStreamState::Ready),
+                );
+                next_token_accumulation = Instant::now() + Duration::from_secs(15);
+            }
+
             if let Some(outcome) = self
-                .terminal_outcome_from_state(stream, baseline_event_ids, observer)
+                .terminal_outcome_from_state(&mut session.stream, baseline_event_ids, observer)
                 .await
             {
+                // Final token accumulation before returning
+                session.accumulate_tokens();
                 return outcome;
             }
 
-            let next_event = timeout_at(deadline, stream.next_event()).await;
+            // Calculate timeout for next_event considering the 15-second accumulation deadline
+            let now = Instant::now();
+            let event_timeout = if next_token_accumulation < deadline {
+                next_token_accumulation - now
+            } else {
+                deadline - now
+            };
+
+            let next_event =
+                tokio::time::timeout_at(now + event_timeout, session.stream.next_event()).await;
+
             match next_event {
                 Err(_) => {
-                    if let Ok(inserted) = stream.reconcile_events().await
-                        && inserted > 0
-                    {
-                        observe_latest_event(observer, stream);
-                        if let Some(outcome) = self
-                            .terminal_outcome_from_state(stream, baseline_event_ids, observer)
-                            .await
-                        {
-                            return outcome;
-                        }
-                        continue;
+                    // Timeout occurred - could be token accumulation time or deadline
+                    if Instant::now() >= next_token_accumulation {
+                        session.accumulate_tokens();
+                        next_token_accumulation = Instant::now() + Duration::from_secs(15);
                     }
-                    return NormalizedOutcome {
-                        kind: WorkerOutcomeKind::Stalled,
-                        summary: "runtime did not reach a terminal state before the stall timeout"
-                            .to_string(),
-                        error: Some(format!(
-                            "no terminal runtime state was observed within {} ms",
-                            self.config.terminal_wait_timeout.as_millis()
-                        )),
-                    };
+
+                    // If we've reached the overall deadline, proceed with stall detection
+                    if Instant::now() >= deadline {
+                        if let Ok(inserted) = session.stream.reconcile_events().await
+                            && inserted > 0
+                        {
+                            observe_latest_event(observer, &session.stream);
+                            if let Some(outcome) = self
+                                .terminal_outcome_from_state(
+                                    &mut session.stream,
+                                    baseline_event_ids,
+                                    observer,
+                                )
+                                .await
+                            {
+                                session.accumulate_tokens();
+                                return outcome;
+                            }
+                        }
+                        return NormalizedOutcome {
+                            kind: WorkerOutcomeKind::Stalled,
+                            summary:
+                                "runtime did not reach a terminal state before the stall timeout"
+                                    .to_string(),
+                            error: Some(format!(
+                                "no terminal runtime state was observed within {} ms",
+                                self.config.terminal_wait_timeout.as_millis()
+                            )),
+                        };
+                    }
+                    // Otherwise continue the loop to accumulate tokens and check again
                 }
                 Ok(Ok(Some(event))) => observe_event(observer, &event),
                 Ok(Ok(None)) => {
-                    if let Ok(inserted) = stream.reconcile_events().await
+                    if let Ok(inserted) = session.stream.reconcile_events().await
                         && inserted > 0
                     {
-                        observe_latest_event(observer, stream);
+                        observe_latest_event(observer, &session.stream);
                         if let Some(outcome) = self
-                            .terminal_outcome_from_state(stream, baseline_event_ids, observer)
+                            .terminal_outcome_from_state(
+                                &mut session.stream,
+                                baseline_event_ids,
+                                observer,
+                            )
                             .await
                         {
+                            session.accumulate_tokens();
                             return outcome;
                         }
                     }
 
+                    session.accumulate_tokens();
                     return NormalizedOutcome {
                         kind: WorkerOutcomeKind::Failed,
                         summary: "runtime event stream ended before terminal status".to_string(),
@@ -2083,13 +2308,22 @@ impl IssueSessionRunner {
                     };
                 }
                 Ok(Err(error)) => {
-                    if let Some(outcome) = self
-                        .terminal_outcome_from_state(stream, baseline_event_ids, observer)
-                        .await
+                    if let Ok(inserted) = session.stream.reconcile_events().await
+                        && inserted > 0
                     {
-                        return outcome;
+                        observe_latest_event(observer, &session.stream);
+                        if let Some(outcome) = self
+                            .terminal_outcome_from_state(
+                                &mut session.stream,
+                                baseline_event_ids,
+                                observer,
+                            )
+                            .await
+                        {
+                            session.accumulate_tokens();
+                            return outcome;
+                        }
                     }
-
                     return NormalizedOutcome {
                         kind: WorkerOutcomeKind::Failed,
                         summary: "runtime event stream failed before terminal status".to_string(),
@@ -2466,6 +2700,11 @@ fn build_summary_metadata(
         last_event_at: None,
         last_event_summary: None,
         recent_activity: Vec::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: 0,
+        runtime_seconds: 0,
     }
 }
 
@@ -2753,6 +2992,13 @@ mod tests {
     use super::*;
     use crate::TransportConfig;
 
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
     #[tokio::test]
     async fn await_terminal_outcome_accepts_reconciled_finished_state_after_stream_close() {
         let server = FakeOpenHandsServer::start()
@@ -2811,14 +3057,131 @@ mod tests {
                 finished_drain_timeout: Duration::from_millis(25),
             },
         );
+
+        // Create a minimal ActiveSession for the test
+        let manifest = IssueConversationManifest {
+            issue_id: must(IssueId::new("lin_test")),
+            identifier: must(IssueIdentifier::new("TEST-123")),
+            conversation_id: must(ConversationId::new(
+                conversation.conversation_id.to_string(),
+            )),
+            reuse_policy: "per_issue".to_string(),
+            server_base_url: None,
+            transport_target: None,
+            http_auth_mode: None,
+            websocket_auth_mode: None,
+            websocket_query_param_name: None,
+            persistence_dir: std::path::PathBuf::from("/tmp/test"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_attached_at: chrono::Utc::now(),
+            launch_profile: None,
+            llm_config_fingerprint: None,
+            fresh_conversation: true,
+            workflow_prompt_seeded: false,
+            reset_reason: None,
+            runtime_contract_version: None,
+            last_prompt_kind: None,
+            last_prompt_at: None,
+            last_prompt_path: None,
+            last_execution_status: None,
+            last_event_id: None,
+            last_event_kind: None,
+            last_event_at: None,
+            last_event_summary: None,
+            preserved_conversation_summary: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            last_token_accumulation_at: None,
+        };
+
+        let mut session = ActiveSession {
+            stream,
+            manifest,
+            prompt_kind: IssueSessionPromptKind::Full,
+            prompt_path: None,
+        };
+
         let outcome = runner
-            .await_terminal_outcome(&mut stream, &baseline_event_ids, &mut ())
+            .await_terminal_outcome(&mut session, &baseline_event_ids, &mut ())
             .await;
 
         assert_eq!(outcome.kind, WorkerOutcomeKind::Succeeded);
         assert_eq!(
-            stream.state_mirror().terminal_status(),
+            session.stream.state_mirror().terminal_status(),
             Some(TerminalExecutionStatus::Finished)
         );
+    }
+
+    #[test]
+    fn token_accumulation_extracts_tokens_from_llm_completion_events() {
+        use chrono::Utc;
+        use serde_json::json;
+
+        // Create events with different token formats
+        let event1 = EventEnvelope::new(
+            "evt-1",
+            Utc::now(),
+            "llm",
+            "LLMCompletionLogEvent",
+            json!({
+                "model": "gpt-4",
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150
+                }
+            }),
+        );
+
+        let event2 = EventEnvelope::new(
+            "evt-2",
+            Utc::now() + chrono::Duration::milliseconds(100),
+            "llm",
+            "LLMCompletionLogEvent",
+            json!({
+                "model": "gpt-4",
+                "input_tokens": 200,
+                "output_tokens": 75
+            }),
+        );
+
+        let event3 = EventEnvelope::new(
+            "evt-3",
+            Utc::now() + chrono::Duration::milliseconds(200),
+            "llm",
+            "LLMCompletionLogEvent",
+            json!({
+                "model": "gpt-4",
+                "tokens": 300
+            }),
+        );
+
+        // Create a simple event cache and add the events
+        let mut cache = crate::events::EventCache::new();
+        cache.insert(event1);
+        cache.insert(event2);
+        cache.insert(event3);
+
+        // Verify tokens are extracted correctly
+        let mut total_input = 0u64;
+        let mut total_output = 0u64;
+
+        for event in cache.items() {
+            if let crate::events::KnownEvent::LlmCompletionLog(llm_event) =
+                crate::events::KnownEvent::from_envelope(event)
+            {
+                if let Some((input, output)) = llm_event.token_usage() {
+                    total_input += input;
+                    total_output += output;
+                }
+            }
+        }
+
+        // Expected: 100 + 200 + 0 = 300 input tokens
+        // Expected: 50 + 75 + 300 = 425 output tokens
+        assert_eq!(total_input, 300, "input tokens should be 100 + 200 + 0");
+        assert_eq!(total_output, 425, "output tokens should be 50 + 75 + 300");
     }
 }

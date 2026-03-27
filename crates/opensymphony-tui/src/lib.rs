@@ -39,6 +39,22 @@ const BRIGHT_GREEN: PackedRgba = PackedRgba::rgb(0, 255, 0);
 const BRIGHT_YELLOW: PackedRgba = PackedRgba::rgb(255, 255, 0);
 const BRIGHT_BLACK: PackedRgba = PackedRgba::rgb(127, 127, 127);
 
+/// Format a number with k/M/B/T suffix for thousands/millions/billions/trillions.
+/// Uses 2 decimal places for values >= 100, 1 decimal place for values >= 10, none for smaller.
+fn format_metric(num: u64) -> String {
+    if num >= 1_000_000_000_000 {
+        format!("{:.2}T", num as f64 / 1_000_000_000_000.0)
+    } else if num >= 1_000_000_000 {
+        format!("{:.2}B", num as f64 / 1_000_000_000.0)
+    } else if num >= 1_000_000 {
+        format!("{:.2}M", num as f64 / 1_000_000.0)
+    } else if num >= 1_000 {
+        format!("{:.1}k", num as f64 / 1_000.0)
+    } else {
+        format!("{}", num)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TuiState {
     pub focus: FocusPane,
@@ -393,6 +409,36 @@ impl TuiState {
             format!("issues={issue_count}"),
             Style::new().dim(),
         ));
+
+        // Add token information (always show, even when 0)
+        if let Some(snap) = snapshot {
+            let metrics = &snap.snapshot.metrics;
+            let cache_suffix = if metrics.cache_read_tokens > 0 {
+                format!(" ({} cache)", format_metric(metrics.cache_read_tokens))
+            } else {
+                String::new()
+            };
+            spans.push(Span::raw(" | "));
+            spans.push(Span::styled(
+                format!(
+                    "{} input{}",
+                    format_metric(metrics.input_tokens),
+                    cache_suffix
+                ),
+                Style::new().fg(GREEN),
+            ));
+            spans.push(Span::raw(", "));
+            spans.push(Span::styled(
+                format!("{} output", format_metric(metrics.output_tokens)),
+                Style::new().fg(CYAN),
+            ));
+            spans.push(Span::raw(", "));
+            spans.push(Span::styled(
+                format!("{} total", format_metric(metrics.total_tokens)),
+                Style::new().fg(CYAN),
+            ));
+        }
+
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(
             format!("updated={generated}"),
@@ -796,6 +842,37 @@ impl TuiState {
                     Span::raw(" | "),
                     Span::styled("blocked: ", Style::new().dim()),
                     Span::styled(format!("{}", issue.blocked), blocked_style),
+                ]));
+
+                // Token usage for this issue (always show, even when 0)
+                let cache_suffix = if issue.cache_read_tokens > 0 {
+                    format!(" ({} cache)", format_metric(issue.cache_read_tokens))
+                } else {
+                    String::new()
+                };
+                lines.push(Line::from_spans(vec![
+                    Span::styled("tokens: ", Style::new().dim()),
+                    Span::styled(
+                        format!(
+                            "{} input{}",
+                            format_metric(issue.input_tokens),
+                            cache_suffix
+                        ),
+                        Style::new().fg(GREEN),
+                    ),
+                    Span::raw(", "),
+                    Span::styled(
+                        format!("{} output", format_metric(issue.output_tokens)),
+                        Style::new().fg(CYAN),
+                    ),
+                    Span::raw(", "),
+                    Span::styled(
+                        format!(
+                            "{} total",
+                            format_metric(issue.input_tokens + issue.output_tokens)
+                        ),
+                        Style::new().dim(),
+                    ),
                 ]));
 
                 // Separator
@@ -2316,6 +2393,9 @@ mod tests {
                 metrics: MetricsSnapshot {
                     running_issues: 1,
                     retry_queue_depth: 0,
+                    input_tokens: 512,
+                    output_tokens: 512,
+                    cache_read_tokens: 256,
                     total_tokens: 1024,
                     total_cost_micros: 50_000,
                 },
@@ -2364,6 +2444,9 @@ mod tests {
                                 lines_removed: 0,
                             },
                         ],
+                        input_tokens: 1024 + (index as u64 * 100),
+                        output_tokens: 512 + (index as u64 * 50),
+                        cache_read_tokens: 256 + (index as u64 * 25),
                     })
                     .collect(),
                 recent_events: vec![RecentEvent {

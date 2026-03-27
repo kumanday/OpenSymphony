@@ -1384,13 +1384,19 @@ async fn read_next_socket_event(stream: &mut RuntimeSocket) -> StreamRead {
     loop {
         match stream.next().await {
             Some(Ok(Message::Text(payload))) => match parse_text_event(&payload) {
-                Ok(event) => return StreamRead::Event(event),
+                Ok(event) => {
+                    debug!(event_kind = %event.kind, event_id = %event.id, source = %event.source, "received websocket event");
+                    return StreamRead::Event(event);
+                }
                 Err(error) => {
                     debug!(error = %error, "ignoring undecodable websocket text frame during streaming");
                 }
             },
             Some(Ok(Message::Binary(payload))) => match parse_binary_event(&payload) {
-                Ok(event) => return StreamRead::Event(event),
+                Ok(event) => {
+                    debug!(event_kind = %event.kind, event_id = %event.id, source = %event.source, "received websocket event");
+                    return StreamRead::Event(event);
+                }
                 Err(error) => {
                     debug!(error = %error, "ignoring undecodable websocket binary frame during streaming");
                 }

@@ -181,6 +181,11 @@ mod tests {
             last_event_at: None,
             last_event_summary: None,
             recent_activity: Vec::new(),
+            input_tokens: 1024,
+            output_tokens: 512,
+            cache_read_tokens: 256,
+            total_tokens: 1536,
+            runtime_seconds: 0,
         }
     }
 

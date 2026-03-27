@@ -53,6 +53,9 @@ pub struct ControlPlaneAgentServerStatus {
 pub struct ControlPlaneMetricsSnapshot {
     pub running_issues: u32,
     pub retry_queue_depth: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
     pub total_tokens: u64,
     pub total_cost_micros: u64,
 }
@@ -83,6 +86,12 @@ pub struct ControlPlaneIssueSnapshot {
     pub recent_events: Vec<ControlPlaneConversationEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modified_files: Vec<ControlPlaneFileChange>,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

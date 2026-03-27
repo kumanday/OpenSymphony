@@ -1337,6 +1337,9 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             websocket_query_param_name: None,
             recent_events: Vec::new(),
             modified_files: Vec::new(),
+            input_tokens: 1024,
+            output_tokens: 512,
+            cache_read_tokens: 0,
         },
         IssueSnapshot {
             identifier: "OSYM-401".to_owned(),
@@ -1356,6 +1359,9 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             websocket_query_param_name: Some("session_api_key".to_owned()),
             recent_events: Vec::new(),
             modified_files: Vec::new(),
+            input_tokens: 2048,
+            output_tokens: 1024,
+            cache_read_tokens: 512,
         },
         IssueSnapshot {
             identifier: "OSYM-402".to_owned(),
@@ -1383,6 +1389,9 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             websocket_query_param_name: None,
             recent_events: Vec::new(),
             modified_files: Vec::new(),
+            input_tokens: 512,
+            output_tokens: 256,
+            cache_read_tokens: 0,
         },
     ];
     let running_issues = issues
@@ -1411,6 +1420,9 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
         metrics: MetricsSnapshot {
             running_issues,
             retry_queue_depth,
+            input_tokens: 2_048 + (step * 60),
+            output_tokens: 4_096 + (step * 100),
+            cache_read_tokens: 512,
             total_tokens: 8_000 + (step * 240),
             total_cost_micros: 340_000 + (step * 9_500),
         },

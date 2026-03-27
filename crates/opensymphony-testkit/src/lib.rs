@@ -84,6 +84,7 @@ impl FakeConversationBuilder {
             execution_status: self.execution_status,
             confirmation_policy: self.confirmation_policy,
             agent: self.agent,
+            stats: None,
         }
     }
 }
