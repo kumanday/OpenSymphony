@@ -930,6 +930,7 @@ async fn readiness_mirror_create_conversation(
         execution_status: "queued".to_string(),
         confirmation_policy: request.confirmation_policy,
         agent: request.agent,
+            stats: None,
     };
     *state.conversation.lock().await = Some(conversation.clone());
     Ok(Json(conversation))
@@ -948,6 +949,7 @@ async fn reused_conversation_readiness_mirror_create_conversation(
         execution_status: "finished".to_string(),
         confirmation_policy: request.confirmation_policy,
         agent: request.agent,
+            stats: None,
     };
     *state.conversation.lock().await = Some(conversation.clone());
     Ok(Json(conversation))
@@ -1215,6 +1217,7 @@ async fn create_conversation(
         execution_status: "idle".to_string(),
         confirmation_policy: request.confirmation_policy,
         agent: request.agent,
+            stats: None,
     };
     *state.conversation.lock().await = Some(conversation.clone());
     Ok(Json(conversation))
@@ -1543,6 +1546,7 @@ async fn probe_create_conversation(
         execution_status: "idle".to_string(),
         confirmation_policy: request.confirmation_policy,
         agent: request.agent,
+            stats: None,
     };
     *state.conversation.lock().await = Some(conversation.clone());
     *state.events.lock().await = vec![EventEnvelope::state_update("evt-ready", "idle")];
@@ -1918,6 +1922,7 @@ async fn readiness_replay_create_conversation(
         execution_status: "idle".to_string(),
         confirmation_policy: request.confirmation_policy,
         agent: request.agent,
+            stats: None,
     };
     *state.conversation.lock().await = Some(conversation.clone());
     Ok(Json(conversation))

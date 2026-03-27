@@ -8,9 +8,9 @@ use opensymphony_domain::{
     ComponentHealthSnapshot, ConversationMetadata, DaemonSnapshot, DurationMs, HealthStatus,
     IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueRef, IssueSnapshot, IssueState,
     IssueStateCategory, NormalizedIssue, OrchestratorSnapshot, ReleaseReason,
-    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, SchedulerStatus,
-    StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueStateSnapshot, TrackerStateId,
-    WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
+    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals,
+    SchedulerStatus, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueStateSnapshot,
+    TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
 use opensymphony_workflow::ResolvedWorkflow;
 use thiserror::Error;
@@ -115,6 +115,10 @@ pub enum WorkerUpdate {
         event_id: Option<String>,
         event_kind: Option<String>,
         summary: Option<String>,
+    },
+    ConversationMetadataUpdate {
+        worker_id: WorkerId,
+        conversation: ConversationMetadata,
     },
     Finished {
         worker_id: WorkerId,
@@ -271,20 +275,46 @@ where
     }
 
     pub fn snapshot(&self, generated_at: TimestampMs) -> OrchestratorSnapshot {
-        let daemon = DaemonSnapshot::new(
-            self.health,
-            self.config.poll_interval_ms,
-            self.config.max_concurrent_agents,
-            self.last_poll_at,
-            ComponentHealthSnapshot::default(),
-            Default::default(),
-        );
         let mut issues = self
             .executions
             .values()
             .map(IssueSnapshot::from)
             .collect::<Vec<_>>();
         issues.sort_by(|left, right| left.issue.identifier.cmp(&right.issue.identifier));
+
+        // Aggregate token usage from all issues
+        let total_input_tokens: u64 = issues
+            .iter()
+            .filter_map(|issue| issue.conversation.as_ref())
+            .map(|conversation| conversation.input_tokens)
+            .sum();
+        let total_output_tokens: u64 = issues
+            .iter()
+            .filter_map(|issue| issue.conversation.as_ref())
+            .map(|conversation| conversation.output_tokens)
+            .sum();
+        let total_cache_read_tokens: u64 = issues
+            .iter()
+            .filter_map(|issue| issue.conversation.as_ref())
+            .map(|conversation| conversation.cache_read_tokens)
+            .sum();
+
+        let daemon = DaemonSnapshot::new(
+            self.health,
+            self.config.poll_interval_ms,
+            self.config.max_concurrent_agents,
+            self.last_poll_at,
+            ComponentHealthSnapshot::default(),
+            RuntimeUsageTotals {
+                input_tokens: total_input_tokens,
+                output_tokens: total_output_tokens,
+                cache_read_tokens: total_cache_read_tokens,
+                total_tokens: total_input_tokens + total_output_tokens,
+                runtime_seconds: 0,
+                estimated_cost_usd_micros: None,
+            },
+        );
+
         OrchestratorSnapshot::new(generated_at, daemon, issues)
     }
 
@@ -696,6 +726,17 @@ where
                     let execution =
                         self.resolve_finished_execution(execution, outcome, finished_at)?;
                     self.insert_execution(issue_id, execution);
+                }
+                WorkerUpdate::ConversationMetadataUpdate {
+                    worker_id,
+                    conversation,
+                } => {
+                    let Some(issue_id) = self.worker_index.get(&worker_id).cloned() else {
+                        continue;
+                    };
+                    if let Some(execution) = self.executions.get_mut(&issue_id) {
+                        execution.update_conversation(conversation);
+                    }
                 }
             }
         }

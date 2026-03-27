@@ -42,6 +42,9 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
             metrics: MetricsSnapshot {
                 running_issues: 1,
                 retry_queue_depth: 0,
+                input_tokens: 512,
+                output_tokens: 512,
+                cache_read_tokens: 256,
                 total_tokens: 1024,
                 total_cost_micros: 50_000,
             },
@@ -66,6 +69,9 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                     websocket_query_param_name: None,
                     recent_events: Vec::new(),
                     modified_files: Vec::new(),
+                    input_tokens: 1024 + (index as u64 * 100),
+                    output_tokens: 512 + (index as u64 * 50),
+                    cache_read_tokens: 256 + (index as u64 * 25),
                 })
                 .collect(),
             recent_events: vec![RecentEvent {
@@ -101,6 +107,9 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
             websocket_query_param_name: None,
             recent_events: Vec::new(),
             modified_files: Vec::new(),
+            input_tokens: 1024 + (index as u64 * 100),
+            output_tokens: 512 + (index as u64 * 50),
+            cache_read_tokens: 256 + (index as u64 * 25),
         })
         .collect();
     snapshot

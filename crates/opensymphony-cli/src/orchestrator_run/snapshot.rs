@@ -50,6 +50,9 @@ pub(super) fn map_snapshot(
         metrics: MetricsSnapshot {
             running_issues: snapshot.daemon.running_issue_count as u32,
             retry_queue_depth: snapshot.daemon.retry_queue_count as u32,
+            input_tokens: snapshot.daemon.usage.input_tokens,
+            output_tokens: snapshot.daemon.usage.output_tokens,
+            cache_read_tokens: snapshot.daemon.usage.cache_read_tokens,
             total_tokens: snapshot.daemon.usage.total_tokens,
             total_cost_micros: snapshot.daemon.usage.estimated_cost_usd_micros.unwrap_or(0),
         },
@@ -170,6 +173,21 @@ fn map_issue(
             })
             .unwrap_or_default(),
         modified_files: Vec::new(),
+        input_tokens: issue
+            .conversation
+            .as_ref()
+            .map(|conversation| conversation.input_tokens)
+            .unwrap_or(0),
+        output_tokens: issue
+            .conversation
+            .as_ref()
+            .map(|conversation| conversation.output_tokens)
+            .unwrap_or(0),
+        cache_read_tokens: issue
+            .conversation
+            .as_ref()
+            .map(|conversation| conversation.cache_read_tokens)
+            .unwrap_or(0),
     }
 }
 

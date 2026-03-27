@@ -33,6 +33,9 @@ fn fixture() -> SnapshotEnvelope {
             metrics: MetricsSnapshot {
                 running_issues: 1,
                 retry_queue_depth: 0,
+                input_tokens: 4096,
+                output_tokens: 4096,
+                cache_read_tokens: 1024,
                 total_tokens: 8_192,
                 total_cost_micros: 250_000,
             },
@@ -54,6 +57,9 @@ fn fixture() -> SnapshotEnvelope {
                 websocket_query_param_name: Some("session_api_key".to_owned()),
                 recent_events: Vec::new(),
                 modified_files: Vec::new(),
+                input_tokens: 2048,
+                output_tokens: 1024,
+                cache_read_tokens: 512,
             }],
             recent_events: vec![RecentEvent {
                 happened_at: now,

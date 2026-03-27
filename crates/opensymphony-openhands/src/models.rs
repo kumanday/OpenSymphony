@@ -210,6 +210,9 @@ pub struct Conversation {
     pub execution_status: String,
     pub confirmation_policy: ConfirmationPolicy,
     pub agent: AgentConfig,
+    /// Conversation statistics including token usage (stats.usage_to_metrics.default.accumulated_token_usage)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -27,6 +27,7 @@ pub struct ComponentHealthSnapshot {
 pub struct RuntimeUsageTotals {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_read_tokens: u64,
     pub total_tokens: u64,
     pub runtime_seconds: u64,
     pub estimated_cost_usd_micros: Option<u64>,

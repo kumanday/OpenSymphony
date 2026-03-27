@@ -221,6 +221,11 @@ impl IssueExecution {
         self.conversation.as_ref()
     }
 
+    /// Update the conversation metadata with new values (e.g., token counts after accumulation)
+    pub fn update_conversation(&mut self, conversation: ConversationMetadata) {
+        self.conversation = Some(conversation);
+    }
+
     pub fn retry(&self) -> Option<&RetryEntry> {
         match &self.state {
             SchedulerState::RetryQueued { retry } => Some(retry),

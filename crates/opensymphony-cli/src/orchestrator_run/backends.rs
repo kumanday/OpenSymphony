@@ -146,6 +146,17 @@ impl IssueSessionObserver for SchedulerObserver {
             summary,
         });
     }
+
+    fn on_conversation_update(&mut self, conversation: &ConversationMetadata) {
+        let worker_id = self.worker_id.clone();
+        let _ = self
+            .updates_tx
+            .send(WorkerUpdate::ConversationMetadataUpdate {
+                worker_id: opensymphony_domain::WorkerId::new(worker_id)
+                    .expect("worker id should remain valid"),
+                conversation: conversation.clone(),
+            });
+    }
 }
 
 fn build_linear_client(workflow: &ResolvedWorkflow) -> Result<LinearClient, LinearError> {

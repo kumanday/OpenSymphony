@@ -37,6 +37,9 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
         metrics: MetricsSnapshot {
             running_issues: 1,
             retry_queue_depth: 0,
+            input_tokens: 2048,
+            output_tokens: 2048,
+            cache_read_tokens: 512,
             total_tokens: 4096 + step,
             total_cost_micros: 120_000,
         },
@@ -58,6 +61,9 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             websocket_query_param_name: None,
             recent_events: Vec::new(),
             modified_files: Vec::new(),
+            input_tokens: 1024,
+            output_tokens: 512,
+            cache_read_tokens: 256,
         }],
         recent_events: vec![RecentEvent {
             happened_at: now,

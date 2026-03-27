@@ -101,6 +101,16 @@ pub struct ConversationMetadata {
     pub last_event_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recent_activity: Vec<ConversationActivityEvent>,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub runtime_seconds: u64,
 }
 
 const MAX_ACTIVITY_EVENTS: usize = 50;
@@ -144,6 +154,16 @@ impl ConversationMetadata {
                 self.recent_activity.remove(0);
             }
         }
+    }
+
+    pub fn add_tokens(&mut self, input: u64, output: u64) {
+        self.input_tokens += input;
+        self.output_tokens += output;
+        self.total_tokens += input + output;
+    }
+
+    pub fn add_runtime_seconds(&mut self, seconds: u64) {
+        self.runtime_seconds += seconds;
     }
 }
 
