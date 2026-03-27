@@ -442,15 +442,16 @@ tracker:
                 .include_default_tools,
             None
         );
-        assert!(
-            resolved
-                .extensions
-                .openhands
-                .conversation
-                .agent
-                .condenser
-                .is_none()
-        );
+        let condenser = resolved
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .condenser
+            .as_ref()
+            .expect("condenser should be enabled by default");
+        assert_eq!(condenser.max_size, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE);
+        assert_eq!(condenser.keep_first, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST);
         assert_eq!(
             resolved.extensions.openhands.websocket.ready_timeout_ms,
             DEFAULT_OPENHANDS_READY_TIMEOUT_MS
@@ -791,15 +792,16 @@ openhands:
                 .include_default_tools,
             None
         );
-        assert!(
-            resolved
-                .extensions
-                .openhands
-                .conversation
-                .agent
-                .condenser
-                .is_none()
-        );
+        let condenser = resolved
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .condenser
+            .as_ref()
+            .expect("condenser should be enabled by default");
+        assert_eq!(condenser.max_size, DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE);
+        assert_eq!(condenser.keep_first, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST);
     }
 
     #[test]

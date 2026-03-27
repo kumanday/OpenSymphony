@@ -545,7 +545,10 @@ fn resolve_openhands_conversation<E: Environment>(
         None => OpenHandsConversationAgentConfig {
             kind: DEFAULT_OPENHANDS_AGENT_KIND.to_owned(),
             llm: Some(default_openhands_llm_config()),
-            condenser: None,
+            condenser: Some(OpenHandsConversationCondenserConfig {
+                max_size: DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
+                keep_first: DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
+            }),
             tools: Some(default_openhands_agent_tools()),
             include_default_tools: None,
             log_completions: false,
@@ -707,10 +710,13 @@ fn resolve_openhands_condenser(
     condenser: Option<&OpenHandsConversationCondenserFrontMatter>,
 ) -> Result<Option<OpenHandsConversationCondenserConfig>, WorkflowConfigError> {
     let Some(condenser) = condenser else {
-        return Ok(None);
+        return Ok(Some(OpenHandsConversationCondenserConfig {
+            max_size: DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE,
+            keep_first: DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
+        }));
     };
 
-    if !condenser.enabled.unwrap_or(false) {
+    if matches!(condenser.enabled, Some(enabled) if !enabled) {
         return Ok(None);
     }
 
