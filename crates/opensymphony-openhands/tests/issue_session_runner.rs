@@ -1755,7 +1755,10 @@ async fn issue_session_runner_reuses_conversation_despite_llm_config_changes() {
     .expect("conversation reuse should succeed");
 
     // With simplified resumption, conversation is reused with continuation prompt
-    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Continuation);
+    assert_eq!(
+        second_result.prompt_kind,
+        IssueSessionPromptKind::Continuation
+    );
     // Conversation ID is the same (reused, not recreated)
     assert_eq!(
         first_conversation_id,
