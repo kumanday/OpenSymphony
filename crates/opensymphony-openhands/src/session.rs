@@ -964,6 +964,58 @@ impl IssueSessionRunner {
                         break (active_session, outcome);
                     }
                 }
+            } else if is_condenser_tool_matching_outcome(&outcome)
+                && retry_count < MAX_CONTEXT_OVERFLOW_RETRIES
+            {
+                // Condenser tool-matching errors indicate corrupted event history.
+                // We need a FRESH conversation (not rehydration) since rehydration
+                // would preserve the corrupted events.
+                retry_count += 1;
+                tracing::warn!(
+                    conversation_id = %active_session.manifest.conversation_id,
+                    error = ?outcome.error,
+                    retry_count,
+                    max_retries = MAX_CONTEXT_OVERFLOW_RETRIES,
+                    "condenser tool-matching error detected (corrupted event history), creating fresh conversation"
+                );
+
+                let _ = active_session.stream.close().await;
+
+                match self
+                    .create_fresh_session(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        &observed_run,
+                        issue,
+                        workflow,
+                        Some("condenser tool-matching error auto-recovery".to_string()),
+                    )
+                    .await
+                {
+                    Ok(Step::Continue(fresh_session)) => {
+                        tracing::info!(
+                            old_conversation_id = %active_session.manifest.conversation_id,
+                            new_conversation_id = %fresh_session.manifest.conversation_id,
+                            "condenser tool-matching recovery: fresh conversation created, re-running turn"
+                        );
+                        current_session = fresh_session;
+                        continue;
+                    }
+                    Ok(Step::EarlyResult(result)) => {
+                        tracing::warn!(
+                            "condenser tool-matching recovery: failed to create fresh session, returning early result"
+                        );
+                        return Ok(*result);
+                    }
+                    Err(fresh_error) => {
+                        tracing::warn!(
+                            %fresh_error,
+                            "condenser tool-matching recovery: failed to create fresh session, returning original failure"
+                        );
+                        break (active_session, outcome);
+                    }
+                }
             } else {
                 break (active_session, outcome);
             }
@@ -1530,6 +1582,18 @@ impl IssueSessionRunner {
         if workflow_condenser.is_some() && manifest_condenser.is_none() {
             return Ok(ReuseSession::Reset(
                 "workflow now has condenser enabled, but existing conversation was created without condenser - resetting to apply condenser".to_string(),
+            ));
+        }
+
+        // Defensive check: if previous run ended with error status and had activity,
+        // reset to avoid potential corrupted event history.
+        // This is especially important for condenser tool-matching errors which indicate
+        // corrupted state that would fail again on retry.
+        if manifest.last_execution_status.as_deref() == Some("error")
+            && manifest.last_event_id.is_some()
+        {
+            return Ok(ReuseSession::Reset(
+                "previous run ended with error status, resetting to avoid potential corrupted event history".to_string(),
             ));
         }
 
@@ -2557,6 +2621,29 @@ fn is_context_overflow_outcome(outcome: &NormalizedOutcome) -> bool {
             .is_some_and(is_context_overflow_error)
 }
 
+/// Detect condenser internal errors from OpenHands SDK's ToolCallMatching.
+/// The error appears as a KeyError string representation: the key in single quotes
+/// containing "-tool-" which indicates a tool call ID.
+/// This happens when event history has an ObservationBaseEvent without a corresponding ActionEvent.
+fn is_condenser_tool_matching_error(msg: &str) -> bool {
+    // Pattern: KeyError for a tool call ID from OpenHands SDK's ToolCallMatching.
+    // The error appears as a KeyError string representation: the key in single quotes.
+    //
+    // Known formats:
+    // - OpenAI: 'chatcmpl-tool-{hex}'
+    //
+    // We match the known OpenAI format. Other LLM provider formats can be added as needed.
+    msg.starts_with("'") && msg.ends_with("'") && msg.contains("chatcmpl-tool-")
+}
+
+fn is_condenser_tool_matching_outcome(outcome: &NormalizedOutcome) -> bool {
+    outcome.kind == WorkerOutcomeKind::Failed
+        && outcome
+            .error
+            .as_deref()
+            .is_some_and(is_condenser_tool_matching_error)
+}
+
 fn extract_error_detail_from_state(state: &ConversationStateMirror) -> Option<String> {
     let raw = state.raw_state();
 
@@ -2938,5 +3025,54 @@ mod tests {
         // Expected: 50 + 75 + 300 = 425 output tokens
         assert_eq!(total_input, 300, "input tokens should be 100 + 200 + 0");
         assert_eq!(total_output, 425, "output tokens should be 50 + 75 + 300");
+    }
+
+    #[test]
+    fn condenser_tool_matching_error_detection() {
+        // Valid condenser tool-matching errors from OpenHands SDK's ToolCallMatching
+        // OpenAI-style tool call IDs: 'chatcmpl-tool-{hex}'
+        assert!(is_condenser_tool_matching_error(
+            "'chatcmpl-tool-bcea2761df6a8821'"
+        ));
+        assert!(is_condenser_tool_matching_error("'chatcmpl-tool-abc123'"));
+
+        // Not tool-matching errors
+        assert!(!is_condenser_tool_matching_error(
+            "prompt is too long: 1000"
+        ));
+        assert!(!is_condenser_tool_matching_error("some other error"));
+        assert!(!is_condenser_tool_matching_error(
+            "tool error without quotes"
+        ));
+        assert!(!is_condenser_tool_matching_error(
+            "'not-a-tool-matching-error'"
+        ));
+        assert!(!is_condenser_tool_matching_error("'no-tool-here'"));
+        assert!(!is_condenser_tool_matching_error("'other-tool-id-123'")); // not chatcmpl format
+
+        // Test outcome detection
+        let tool_matching_outcome = NormalizedOutcome {
+            kind: WorkerOutcomeKind::Failed,
+            summary: "test".to_string(),
+            error: Some("'chatcmpl-tool-xyz'".to_string()),
+        };
+        assert!(is_condenser_tool_matching_outcome(&tool_matching_outcome));
+
+        let other_outcome = NormalizedOutcome {
+            kind: WorkerOutcomeKind::Failed,
+            summary: "test".to_string(),
+            error: Some("some other error".to_string()),
+        };
+        assert!(!is_condenser_tool_matching_outcome(&other_outcome));
+
+        let context_overflow_outcome = NormalizedOutcome {
+            kind: WorkerOutcomeKind::Failed,
+            summary: "test".to_string(),
+            error: Some("prompt is too long: 1000".to_string()),
+        };
+        assert!(!is_condenser_tool_matching_outcome(
+            &context_overflow_outcome
+        ));
+        assert!(is_context_overflow_outcome(&context_overflow_outcome));
     }
 }
