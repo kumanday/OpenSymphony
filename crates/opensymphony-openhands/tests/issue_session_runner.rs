@@ -1660,10 +1660,10 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
 }
 
 #[tokio::test]
-async fn issue_session_runner_reuses_conversation_despite_llm_config_changes()
+async fn issue_session_runner_resets_conversation_when_llm_config_changes()
 {
-    // Simplified behavior: conversations are reused as-is without rehydration
-    // even when LLM config changes. The stored config in meta.json is used.
+    // When LLM config (API key) changes, the conversation is reset and recreated
+    // with the new config. This ensures the correct API key is used.
     let server = FakeOpenHandsServer::start()
         .await
         .expect("fake server should start");
@@ -1734,7 +1734,7 @@ async fn issue_session_runner_reuses_conversation_despite_llm_config_changes()
         Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
         max_turns,
     );
-    // Even with a different API key, the conversation is reused as-is
+    // With a different API key, the conversation is reset and recreated
     let second_result = IssueSessionRunner::with_environment(
         client.clone(),
         runner_config(&workflow),
@@ -1752,11 +1752,12 @@ async fn issue_session_runner_reuses_conversation_despite_llm_config_changes()
         &workflow,
     )
     .await
-    .expect("conversation reuse should succeed");
+    .expect("conversation reset should succeed");
 
-    // With simplified behavior, conversation is reused with continuation prompt
-    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Continuation);
-    assert_eq!(
+    // When API key changes, conversation is reset with full prompt
+    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Full);
+    // Conversation ID is different (new conversation created)
+    assert_ne!(
         first_result
             .conversation
             .as_ref()
@@ -1768,41 +1769,41 @@ async fn issue_session_runner_reuses_conversation_despite_llm_config_changes()
             .expect("second conversation metadata should exist")
             .conversation_id
     );
-    // Conversation is NOT marked as fresh - it's being reused
+    // Conversation IS marked as fresh - it was recreated
     assert!(
-        !second_result
+        second_result
             .conversation
             .as_ref()
             .expect("second conversation metadata should exist")
             .fresh_conversation
     );
 
-    // The original API key is still used (from the stored conversation config)
-    let reused_conversation = client
-        .get_conversation(conversation_id)
+    // The new API key is used in the new conversation
+    let new_conversation_id = uuid::Uuid::parse_str(
+        second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("new conversation ID should parse");
+    let new_conversation = client
+        .get_conversation(new_conversation_id)
         .await
-        .expect("reused conversation should be fetchable");
+        .expect("new conversation should be fetchable");
     assert_eq!(
-        reused_conversation.agent.llm.api_key.as_deref(),
-        Some("old-secret")
+        new_conversation.agent.llm.api_key.as_deref(),
+        Some("new-secret")
     );
 
     let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
-    // Workflow is already seeded from first run
+    // Workflow is re-seeded after reset
     assert!(manifest.workflow_prompt_seeded);
     assert_eq!(
         manifest.last_prompt_kind,
-        Some(IssueSessionPromptKind::Continuation)
+        Some(IssueSessionPromptKind::Full)
     );
-
-    // Events from first run are still present (conversation not recreated)
-    let event_cache = client
-        .search_all_events(conversation_id)
-        .await
-        .expect("events should be searchable after conversation reuse");
-    let events = event_cache.items();
-    // Should have events from both runs (continuation + new prompt)
-    assert!(!events.is_empty());
 }
 
 #[tokio::test]
