@@ -128,6 +128,12 @@ opensymphony run --config ./config.yaml
 # Resume the persisted OpenHands conversation for one issue
 opensymphony debug COE-284
 
+# Rehydrate a conversation (recreate with current API key, preserving history)
+opensymphony rehydrate COE-284 --reason "API key rotation"
+
+# Bulk rehydrate all conversations during doctor check
+opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate
+
 # Optional: Start the TUI for monitoring
 opensymphony tui --url http://127.0.0.1:3000/
 ```

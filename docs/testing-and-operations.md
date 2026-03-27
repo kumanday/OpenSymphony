@@ -537,6 +537,46 @@ Current implementation notes:
 - the current example configs carry machine-local tool/probe settings only; the repo-owned workflow now supplies the workspace root and OpenHands base URL that doctor validates
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials when the workflow omits `tracker.api_key`
 
+## 7.1 Rehydration
+
+Rehydration is the explicit recreation of OpenHands conversations with history preservation. Unlike automatic conversation reset (which was removed), rehydration is an intentional operator action.
+
+### When to use rehydration
+
+- **API key rotation**: When the LLM API key has changed and you need to create new conversations with the new key
+- **Corrupted conversation state**: When a conversation's stored state is damaged
+- **LLM provider switch**: When changing to a different model or provider
+
+### Commands
+
+```bash
+# Rehydrate a single issue
+opensymphony rehydrate COE-123 --reason "API key rotation"
+
+# Rehydrate all conversations during doctor check
+opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate
+
+# Rehydrate with custom summary size (default 50 events)
+opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate --max-summary-events 100
+
+# Rehydrate without preserving conversation history (faster)
+opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate --no-summary
+```
+
+### How rehydration works
+
+1. Reads the existing conversation manifest from `.opensymphony/conversation.json`
+2. Builds a summary of the conversation history (unless `--no-summary` is used)
+3. Deletes the old conversation from the OpenHands server
+4. Creates a new conversation with the current LLM configuration
+5. Seeds the new conversation with the summary as context
+6. Persists the new conversation ID in the manifest
+
+### Simplified conversation resumption vs rehydration
+
+- **Normal resumption**: Conversations are reused as-is without checking for LLM config drift. The stored configuration in the conversation's `meta.json` is used.
+- **Rehydration**: Explicitly deletes and recreates conversations with the current configuration. Use when you need to apply new API keys or switch providers.
+
 ## 8. Logging and diagnostics
 
 Use structured logs everywhere.
