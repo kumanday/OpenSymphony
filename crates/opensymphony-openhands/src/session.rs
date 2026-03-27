@@ -662,6 +662,8 @@ pub enum IssueSessionError {
     Workspace(#[from] WorkspaceError),
     #[error("unexpected early result: {0}")]
     UnexpectedEarlyResult(String),
+    #[error("rehydration failed: {0}")]
+    RehydrationFailed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -938,6 +940,105 @@ impl IssueSessionRunner {
                 observer,
             )
             .await;
+
+        if is_context_overflow_outcome(&outcome) {
+            tracing::warn!(
+                conversation_id = %active_session.manifest.conversation_id,
+                error = ?outcome.error,
+                "context overflow detected, attempting auto-recovery via rehydration"
+            );
+
+            let old_manifest = active_session.manifest.clone();
+            let _ = active_session.stream.close().await;
+
+            match self
+                .rehydrate_conversation(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    &observed_run,
+                    issue,
+                    workflow,
+                    &old_manifest,
+                    RehydrationOptions {
+                        reason: "context overflow auto-recovery".to_string(),
+                        summarize: false,
+                        max_summary_events: 0,
+                    },
+                )
+                .await
+            {
+                Ok(rehydration_result) => {
+                    tracing::info!(
+                        old_conversation_id = %rehydration_result.old_conversation_id,
+                        new_conversation_id = %rehydration_result.session.manifest.conversation_id,
+                        "context overflow recovery: rehydration succeeded, re-running turn"
+                    );
+
+                    let recovered_session = rehydration_result.session;
+
+                    let (mut active_session, mut prepared_turn) = match self
+                        .prepare_turn(
+                            workspace_manager,
+                            workspace,
+                            run_manifest,
+                            &observed_run,
+                            workflow,
+                            issue,
+                            run,
+                            recovered_session,
+                            observer,
+                        )
+                        .await?
+                    {
+                        Step::Continue(state) => state,
+                        Step::EarlyResult(result) => return Ok(*result),
+                    };
+
+                    active_session = match self
+                        .start_turn(
+                            workspace_manager,
+                            workspace,
+                            run_manifest,
+                            &observed_run,
+                            active_session,
+                            &mut prepared_turn,
+                            observer,
+                        )
+                        .await?
+                    {
+                        Step::Continue(session) => session,
+                        Step::EarlyResult(result) => return Ok(*result),
+                    };
+
+                    let retry_outcome = self
+                        .await_terminal_outcome(
+                            &mut active_session,
+                            &prepared_turn.baseline_event_ids,
+                            observer,
+                        )
+                        .await;
+
+                    return self
+                        .finalize_active_session(
+                            workspace_manager,
+                            workspace,
+                            run_manifest,
+                            &observed_run,
+                            active_session,
+                            retry_outcome,
+                        )
+                        .await;
+                }
+                Err(rehydration_error) => {
+                    tracing::warn!(
+                        %rehydration_error,
+                        "context overflow recovery: rehydration failed, returning original failure"
+                    );
+                }
+            }
+        }
+
         self.finalize_active_session(
             workspace_manager,
             workspace,
@@ -1707,9 +1808,13 @@ impl IssueSessionRunner {
 
         let mut session = match step {
             Step::Continue(session) => session,
-            Step::EarlyResult(_) => {
-                return Err(IssueSessionError::UnexpectedEarlyResult(
-                    "rehydration create_fresh_session returned early result".to_string(),
+            Step::EarlyResult(result) => {
+                return Err(IssueSessionError::RehydrationFailed(
+                    result
+                        .worker_outcome
+                        .error
+                        .or(result.worker_outcome.summary)
+                        .unwrap_or_else(|| "rehydration failed".to_string()),
                 ));
             }
         };
@@ -2391,6 +2496,25 @@ fn failed_outcome(summary: impl Into<String>, error: impl Into<String>) -> Norma
         summary: summary.into(),
         error: Some(error.into()),
     }
+}
+
+fn is_context_overflow_error(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("prompt is too long")
+        || lower.contains("maximum context length")
+        || lower.contains("context window")
+        || lower.contains("context_length")
+        || lower.contains("token limit")
+        || lower.contains("context length exceeded")
+        || (lower.contains("exceeds") && lower.contains("context"))
+}
+
+fn is_context_overflow_outcome(outcome: &NormalizedOutcome) -> bool {
+    outcome.kind == WorkerOutcomeKind::Failed
+        && outcome
+            .error
+            .as_deref()
+            .is_some_and(is_context_overflow_error)
 }
 
 fn summarize_event(event: &EventEnvelope) -> String {

@@ -390,7 +390,7 @@ Current workflow defaulting:
 - `agent.llm.model` is required whenever an `llm` block is present
 - workflow-owned `agent.llm.api_key_env` and `agent.llm.base_url_env` overrides are accepted during workflow resolution and resolved lazily at runtime so missing or blank provider envs fail with deterministic runtime-boundary errors
 - workflow-owned LLM option keys are rejected during workflow resolution until the current request subset can actually forward them
-- `openhands.conversation.agent.condenser` is the only workflow-owned agent extension currently forwarded by the conversation-create adapter; it defaults to disabled when omitted, and enabled condensers use the agent LLM config plus `max_size: 240` / `keep_first: 2` unless overridden
+- `openhands.conversation.agent.condenser` is the only workflow-owned agent extension currently forwarded by the conversation-create adapter; it defaults to enabled with `max_size: 240` / `keep_first: 2` when the `condenser` block is omitted, and can be explicitly disabled with `enabled: false`
 - workflow-owned agent options such as `log_completions` and extra agent keys other than `condenser` are rejected during workflow resolution until the current request subset can actually forward them
 - workflow resolution now accepts `openhands.mcp.stdio_servers` entries, validating each `command` vector and preserving the resolved list so the runtime can forward it into `mcp_config.stdio_servers`
 
