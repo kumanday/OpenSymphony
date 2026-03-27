@@ -400,13 +400,13 @@ async fn fetch_workpad_comment_returns_latest_active_workpad_comment() {
                       },
                       {
                         "id": "comment-resolved",
-                        "body": "## Codex Workpad\n\nResolved progress",
+                        "body": "## Agent Harness Workpad\n\nResolved progress",
                         "updatedAt": "2026-03-25T22:01:00.000Z",
                         "resolvedAt": "2026-03-25T22:02:00.000Z"
                       },
                       {
                         "id": "comment-old-workpad",
-                        "body": "## Codex Workpad\n\nOlder progress",
+                        "body": "## Agent Harness Workpad\n\nOlder progress",
                         "updatedAt": "2026-03-25T22:03:00.000Z",
                         "resolvedAt": null
                       }
@@ -429,7 +429,7 @@ async fn fetch_workpad_comment_returns_latest_active_workpad_comment() {
                     "nodes": [
                       {
                         "id": "comment-latest-workpad",
-                        "body": "## Codex Workpad\n\nLatest active progress",
+                        "body": "## Agent Harness Workpad\n\nLatest active progress",
                         "updatedAt": "2026-03-25T22:05:00.000Z",
                         "resolvedAt": null
                       }
@@ -492,7 +492,7 @@ async fn fetch_workpad_comment_returns_none_when_no_active_marker_exists() {
                   },
                   {
                     "id": "comment-resolved",
-                    "body": "## Codex Workpad\n\nResolved progress",
+                    "body": "## Agent Harness Workpad\n\nResolved progress",
                     "updatedAt": "2026-03-25T22:01:00.000Z",
                     "resolvedAt": "2026-03-25T22:02:00.000Z"
                   }
