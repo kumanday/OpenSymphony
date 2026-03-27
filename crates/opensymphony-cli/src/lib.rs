@@ -60,6 +60,8 @@ enum Command {
     LinearMcp(LinearMcpArgs),
     #[command(about = "Run local preflight checks for trusted-machine deployment")]
     Doctor(DoctorArgs),
+    #[command(about = "Smart rehydration: recreate conversations with history preservation")]
+    Rehydrate(RehydrateArgs),
 }
 
 #[derive(Debug, Args)]
@@ -82,18 +84,44 @@ struct TuiArgs {
     exit_after_ms: Option<u64>,
 }
 
+const DEFAULT_DOCTOR_CONFIG_FILE: &str = "config.yaml";
+
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
-    #[arg(help = "Doctor config YAML path")]
-    #[arg(long, default_value = "examples/configs/local-dev.yaml")]
-    config: PathBuf,
+    #[arg(help = "Doctor config YAML path; defaults to ./config.yaml when present")]
+    #[arg(long)]
+    config: Option<PathBuf>,
     #[arg(help = "Run the live OpenHands probe instead of static preflight only")]
     #[arg(long)]
     live_openhands: bool,
+    #[arg(help = "Rehydrate all conversations missing LLM API keys")]
+    #[arg(long)]
+    rehydrate: bool,
+    #[arg(help = "Maximum events to include in summary during rehydration")]
+    #[arg(long, default_value = "50")]
+    max_summary_events: usize,
+    #[arg(help = "Skip summarization during rehydration (faster, but no context preserved)")]
+    #[arg(long)]
+    no_summary: bool,
 }
 
 #[derive(Debug, Args)]
 pub struct LinearMcpArgs {}
+
+#[derive(Debug, Args)]
+pub struct RehydrateArgs {
+    #[arg(help = "Issue identifier to rehydrate (e.g., COE-123)")]
+    issue: String,
+    #[arg(help = "Reason for rehydration")]
+    #[arg(long, default_value = "manual rehydration via CLI")]
+    reason: String,
+    #[arg(help = "Maximum events to include in summary")]
+    #[arg(long, default_value = "50")]
+    max_summary_events: usize,
+    #[arg(help = "Skip summarization (faster, but no context preserved)")]
+    #[arg(long)]
+    no_summary: bool,
+}
 
 #[derive(Debug, Deserialize)]
 struct DoctorConfig {
@@ -153,6 +181,7 @@ struct DoctorProbeIssue<'a> {
     description: Option<&'a str>,
     priority: Option<u8>,
     labels: Vec<&'a str>,
+    url: &'a str,
 }
 
 #[derive(Debug, Error)]
@@ -236,6 +265,7 @@ pub async fn run() -> ExitCode {
         Command::Daemon(args) => run_daemon(args).await,
         Command::Tui(args) => run_tui(args).await,
         Command::LinearMcp(args) => run_linear_mcp(args).await,
+        Command::Rehydrate(args) => run_rehydrate(args).await,
     }
 }
 
@@ -294,7 +324,36 @@ async fn run_tui_command(url: Url, exit_after_ms: Option<u64>) -> Result<(), Com
 }
 
 async fn run_doctor(args: DoctorArgs) -> ExitCode {
-    run_doctor_command(args.config, args.live_openhands).await
+    let cwd = match env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(e) => {
+            eprintln!("failed to determine current directory: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let config_path = match &args.config {
+        Some(path) => path.clone(),
+        None => {
+            let candidate = cwd.join(DEFAULT_DOCTOR_CONFIG_FILE);
+            if candidate.exists() {
+                candidate
+            } else {
+                eprintln!("error: no config file found at ./{DEFAULT_DOCTOR_CONFIG_FILE}");
+                eprintln!("hint: create a config.yaml in the current directory, or specify --config <path>");
+                return ExitCode::from(1);
+            }
+        }
+    };
+
+    run_doctor_command(
+        config_path,
+        args.live_openhands,
+        args.rehydrate,
+        args.max_summary_events,
+        args.no_summary,
+    )
+    .await
 }
 
 async fn run_linear_mcp(args: LinearMcpArgs) -> ExitCode {
@@ -309,7 +368,23 @@ async fn run_linear_mcp(args: LinearMcpArgs) -> ExitCode {
     }
 }
 
-pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> ExitCode {
+async fn run_rehydrate(args: RehydrateArgs) -> ExitCode {
+    match run_rehydrate_command(args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("rehydration failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+pub async fn run_doctor_command(
+    config_path: PathBuf,
+    live_openhands: bool,
+    rehydrate: bool,
+    max_summary_events: usize,
+    no_summary: bool,
+) -> ExitCode {
     let mut checks = Vec::new();
 
     let config = match load_config(&config_path).await {
@@ -328,7 +403,7 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
     };
 
     let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let tool_dir = match resolve_required_path(
+    let _tool_dir = match resolve_required_path(
         config_root,
         "openhands.tool_dir",
         &config.openhands.tool_dir,
@@ -353,16 +428,31 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
             return ExitCode::from(1);
         }
     };
-    let repo_root =
-        discover_checkout_root(config_root, configured_target_repo.as_deref(), &tool_dir)
-            .or_else(|| {
-                env::current_dir()
-                    .ok()
-                    .and_then(|cwd| find_cargo_workspace_root(&cwd).or(Some(cwd)))
-            })
-            .unwrap_or_else(|| PathBuf::from("."));
-    let runtime = resolve_doctor_runtime(&config, config_root, &repo_root);
+    // Use configured target_repo, or auto-detect:
+    // 1. If config_root contains WORKFLOW.md, use config_root (for real projects like StackPerf)
+    // 2. Otherwise, fall back to cargo workspace root + examples/target-repo (for OpenSymphony tests)
+    let target_repo = match configured_target_repo.clone() {
+        Some(target_repo) => target_repo,
+        None => {
+            let workflow_in_config = config_root.join("WORKFLOW.md");
+            if workflow_in_config.exists() {
+                // Real project: config.yaml and WORKFLOW.md are in the same directory
+                config_root.to_path_buf()
+            } else {
+                // OpenSymphony test setup: find cargo workspace and use examples/target-repo
+                let repo_root = find_cargo_workspace_root(config_root)
+                    .unwrap_or_else(|| config_root.to_path_buf());
+                repo_root.join("examples/target-repo")
+            }
+        }
+    };
+    let runtime = resolve_doctor_runtime(&config, config_root, &target_repo);
 
+    // For repo check, try to find the cargo workspace root from the config_root
+    // This allows the doctor to work with non-Rust projects (no Cargo.toml at target_repo)
+    // while still reporting the cargo workspace location if one exists
+    let repo_root = find_cargo_workspace_root(config_root)
+        .unwrap_or_else(|| target_repo.clone());
     checks.push(check_repo_root(&repo_root));
 
     let (runtime, rendered_probe_prompt) = match runtime {
@@ -398,9 +488,9 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
             (runtime, rendered_probe_prompt)
         }
         Err(error) => {
-            let target_repo =
-                configured_target_repo.unwrap_or_else(|| repo_root.join("examples/target-repo"));
-            checks.push(check_target_repo(&target_repo).await);
+            let fallback_target_repo =
+                configured_target_repo.unwrap_or_else(|| config_root.to_path_buf());
+            checks.push(check_target_repo(&fallback_target_repo).await);
             checks.push(CheckResult::fail("workflow", error));
             print_checks(&checks);
             return ExitCode::from(1);
@@ -410,20 +500,59 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
     let tooling_inspection = inspect_local_tooling(&runtime.tool_dir);
     checks.extend(tooling_inspection.checks);
 
+    // Track supervisor for cleanup after rehydration (if both live_openhands and rehydrate)
+    let mut live_checks_supervisor = None;
+
     if live_openhands {
-        checks.extend(
-            run_live_openhands_checks(
-                &runtime,
-                &rendered_probe_prompt,
-                tooling_inspection.tooling.as_ref(),
-            )
-            .await,
-        );
+        let live_checks = run_live_openhands_checks(
+            &runtime,
+            &rendered_probe_prompt,
+            tooling_inspection.tooling.as_ref(),
+        )
+        .await;
+        checks.extend(live_checks.checks);
+        live_checks_supervisor = live_checks.supervisor;
     } else {
         checks.push(CheckResult::skip(
             "openhands-live",
             "live OpenHands checks skipped; rerun with --live-openhands on a prepared machine",
         ));
+    }
+
+    // Run bulk rehydration if requested
+    if rehydrate {
+        match run_doctor_rehydration(&runtime, max_summary_events, no_summary).await {
+            Ok(results) => {
+                let success_count = results.iter().filter(|r| r.success).count();
+                let fail_count = results.len() - success_count;
+                checks.push(CheckResult::pass(
+                    "rehydration",
+                    format!(
+                        "rehydrated {}/{} conversations ({} failed)",
+                        success_count,
+                        results.len(),
+                        fail_count
+                    ),
+                ));
+            }
+            Err(error) => {
+                checks.push(CheckResult::fail("rehydration", error));
+            }
+        }
+    }
+
+    // Stop supervisor if it was started and not already stopped
+    if let Some(mut supervisor) = live_checks_supervisor {
+        match supervisor.stop() {
+            Ok(status) => checks.push(CheckResult::pass(
+                "openhands-supervisor-stop",
+                format!("stopped {}", status.base_url),
+            )),
+            Err(error) => checks.push(CheckResult::fail(
+                "openhands-supervisor-stop",
+                error.to_string(),
+            )),
+        }
     }
 
     print_checks(&checks);
@@ -435,6 +564,205 @@ pub async fn run_doctor_command(config_path: PathBuf, live_openhands: bool) -> E
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Result of a single workspace rehydration attempt
+#[allow(dead_code)]
+struct RehydrationAttemptResult {
+    workspace_key: String,
+    conversation_id: String,
+    success: bool,
+    error: Option<String>,
+}
+
+/// Bulk rehydration for all workspaces with missing/corrupted LLM API keys
+async fn run_doctor_rehydration(
+    runtime: &DoctorRuntimeConfig,
+    max_summary_events: usize,
+    no_summary: bool,
+) -> Result<Vec<RehydrationAttemptResult>, String> {
+    use opensymphony_domain::{IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt, TimestampMs, WorkerId};
+    use opensymphony_openhands::{
+        IssueConversationManifest, IssueSessionRunner, IssueSessionRunnerConfig, RehydrationOptions,
+    };
+    use opensymphony_workspace::{RunDescriptor, RunManifest, WorkspaceManager, WorkspaceManagerConfig};
+
+    // Create workspace manager
+    let workspace_config = WorkspaceManagerConfig {
+        root: runtime.workflow.config.workspace.root.clone(),
+        hooks: opensymphony_workspace::HookConfig {
+            after_create: runtime.workflow.config.hooks.after_create.clone().map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+            before_run: runtime.workflow.config.hooks.before_run.clone().map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+            after_run: runtime.workflow.config.hooks.after_run.clone().map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+            before_remove: runtime.workflow.config.hooks.before_remove.clone().map(|s| opensymphony_workspace::HookDefinition::shell(s)),
+            timeout: Duration::from_millis(runtime.workflow.config.hooks.timeout_ms),
+        },
+        cleanup: opensymphony_workspace::CleanupConfig {
+            remove_terminal_workspaces: false,
+        },
+    };
+
+    let workspace_manager = WorkspaceManager::new(workspace_config)
+        .map_err(|e| format!("failed to create workspace manager: {e}"))?;
+
+    // List all workspaces
+    let workspaces = workspace_manager
+        .list_all_workspaces()
+        .await
+        .map_err(|e| format!("failed to list workspaces: {e}"))?;
+
+    if workspaces.is_empty() {
+        return Ok(vec![]);
+    }
+
+    println!("\n🔍 Found {} workspace(s) to check for rehydration", workspaces.len());
+
+    // Create OpenHands client
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)
+        .map_err(|e| format!("failed to create transport config: {e}"))?;
+    let client = OpenHandsClient::new(transport);
+
+    let runner_config = IssueSessionRunnerConfig::default();
+    let runner = IssueSessionRunner::new(client.clone(), runner_config.clone());
+
+    let mut results = Vec::new();
+
+    for (workspace, _manifest) in workspaces {
+        let workspace_key = workspace.workspace_key().to_string();
+        let issue_id = workspace.issue_id().to_string();
+        let identifier = workspace.identifier().to_string();
+
+        // Load conversation manifest
+        let manifest_path = workspace.conversation_manifest_path();
+        let manifest_content = match workspace_manager
+            .read_text_artifact(&workspace, &manifest_path)
+            .await
+        {
+            Ok(Some(content)) => content,
+            Ok(None) => {
+                println!("  ⚠️  {identifier}: No conversation manifest found, skipping");
+                results.push(RehydrationAttemptResult {
+                    workspace_key: workspace_key.clone(),
+                    conversation_id: "none".to_string(),
+                    success: false,
+                    error: Some("No conversation manifest".to_string()),
+                });
+                continue;
+            }
+            Err(e) => {
+                println!("  ⚠️  {identifier}: Failed to read manifest: {e}");
+                results.push(RehydrationAttemptResult {
+                    workspace_key: workspace_key.clone(),
+                    conversation_id: "unknown".to_string(),
+                    success: false,
+                    error: Some(format!("Failed to read manifest: {e}")),
+                });
+                continue;
+            }
+        };
+
+        let old_manifest: IssueConversationManifest = match serde_json::from_str(&manifest_content) {
+            Ok(m) => m,
+            Err(e) => {
+                println!("  ⚠️  {identifier}: Failed to parse manifest: {e}");
+                results.push(RehydrationAttemptResult {
+                    workspace_key: workspace_key.clone(),
+                    conversation_id: "unknown".to_string(),
+                    success: false,
+                    error: Some(format!("Failed to parse manifest: {e}")),
+                });
+                continue;
+            }
+        };
+
+        let conversation_id = old_manifest.conversation_id.clone();
+        let conversation_id_str = conversation_id.as_str();
+
+        // Always rehydrate when --rehydrate is passed
+        // This ensures all conversations get the current API key from environment
+        println!("  🔄 {identifier}: Rehydrating conversation {conversation_id_str}...");
+
+        let run_descriptor = RunDescriptor::new("doctor-rehydrate", 1);
+        let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("valid system time")
+            .as_millis() as u64;
+
+        let run_attempt = RunAttempt::new(
+            WorkerId::new("doctor-worker").expect("valid worker id"),
+            IssueId::new(&issue_id).expect("valid issue id"),
+            IssueIdentifier::new(&identifier).expect("valid identifier"),
+            workspace.workspace_path().to_path_buf(),
+            TimestampMs::new(now),
+            None,
+            8,
+        );
+
+        let dummy_issue = opensymphony_domain::NormalizedIssue {
+            id: IssueId::new(&issue_id).expect("valid issue id"),
+            identifier: IssueIdentifier::new(&identifier).expect("valid identifier"),
+            title: "Doctor Rehydration".to_string(),
+            description: None,
+            priority: None,
+            state: IssueState {
+                id: None,
+                name: "In Progress".to_string(),
+                category: IssueStateCategory::Active,
+            },
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            parent_id: None,
+            blocked_by: vec![],
+            sub_issues: vec![],
+            created_at: None,
+            updated_at: None,
+        };
+
+        let options = RehydrationOptions {
+            reason: "Doctor: LLM API key missing or conversation corrupted".to_string(),
+            summarize: !no_summary,
+            max_summary_events,
+        };
+
+        match runner
+            .rehydrate_conversation(
+                &workspace_manager,
+                &workspace,
+                &mut run_manifest,
+                &run_attempt,
+                &dummy_issue,
+                &runtime.workflow,
+                &old_manifest,
+                options,
+            )
+            .await
+        {
+            Ok(result) => {
+                println!("  ✓  {identifier}: Rehydrated successfully");
+                results.push(RehydrationAttemptResult {
+                    workspace_key: workspace_key.clone(),
+                    conversation_id: result.old_conversation_id,
+                    success: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                println!("  ✗  {identifier}: Rehydration failed: {e}");
+                results.push(RehydrationAttemptResult {
+                    workspace_key: workspace_key.clone(),
+                    conversation_id: conversation_id_str.to_string(),
+                    success: false,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    println!();
+    Ok(results)
 }
 
 async fn load_config(path: &Path) -> Result<DoctorConfig, String> {
@@ -550,17 +878,6 @@ fn resolve_required_path(
     resolve_required_config_value(field, raw).map(|value| resolve_path(base, &value))
 }
 
-fn discover_checkout_root(
-    config_root: &Path,
-    target_repo: Option<&Path>,
-    tool_dir: &Path,
-) -> Option<PathBuf> {
-    [Some(config_root), target_repo, Some(tool_dir)]
-        .into_iter()
-        .flatten()
-        .find_map(find_cargo_workspace_root)
-}
-
 fn find_cargo_workspace_root(path: &Path) -> Option<PathBuf> {
     let start = if path.is_file() { path.parent()? } else { path };
     start
@@ -601,13 +918,13 @@ fn build_doctor_transport(
 fn resolve_doctor_runtime(
     config: &DoctorConfig,
     config_root: &Path,
-    repo_root: &Path,
+    default_target_repo: &Path,
 ) -> Result<DoctorRuntimeConfig, String> {
     let target_repo = config
         .target_repo
         .as_deref()
         .map(|target_repo| resolve_path(config_root, target_repo))
-        .unwrap_or_else(|| repo_root.join("examples/target-repo"));
+        .unwrap_or_else(|| default_target_repo.to_path_buf());
     let workflow_path = target_repo.join("WORKFLOW.md");
     let workflow = WorkflowDefinition::load_from_path(&workflow_path)
         .map_err(|error| format!("failed to load {}: {error}", workflow_path.display()))?;
@@ -652,6 +969,7 @@ fn render_doctor_probe_prompt(workflow: &ResolvedWorkflow) -> Result<String, Str
         ),
         priority: Some(3),
         labels: vec!["doctor", "probe"],
+        url: "https://github.com/OpenHands/OpenSymphony/issues/DOCTOR-PROBE",
     };
 
     workflow.render_prompt(&issue, None).map_err(|error| {
@@ -688,9 +1006,10 @@ fn check_repo_root(repo_root: &Path) -> CheckResult {
             format!("found Cargo workspace at {}", repo_root.display()),
         )
     } else {
-        CheckResult::fail(
+        // Not a failure - doctor works with non-Rust projects too
+        CheckResult::pass(
             "repo",
-            format!("missing Cargo.toml at {}", repo_root.display()),
+            format!("no Cargo workspace at {} (non-Rust project)", repo_root.display()),
         )
     }
 }
@@ -948,11 +1267,17 @@ fn check_linear(linear: &LinearDoctorConfig, workflow: &ResolvedWorkflow) -> Che
     )
 }
 
+/// Result of live OpenHands checks, including optional supervisor for cleanup
+struct LiveOpenHandsChecks {
+    checks: Vec<CheckResult>,
+    supervisor: Option<LocalServerSupervisor>,
+}
+
 async fn run_live_openhands_checks(
     runtime: &DoctorRuntimeConfig,
     rendered_probe_prompt: &str,
     tooling: Option<&LocalServerTooling>,
-) -> Vec<CheckResult> {
+) -> LiveOpenHandsChecks {
     let mut checks = Vec::new();
     let api_key = runtime
         .probe_api_key_env
@@ -1005,7 +1330,7 @@ async fn run_live_openhands_checks(
         Ok(transport) => transport,
         Err(error) => {
             checks.push(CheckResult::fail("openhands-auth", error));
-            return checks;
+            return LiveOpenHandsChecks { checks, supervisor: None };
         }
     };
     let client = OpenHandsClient::new(transport.clone());
@@ -1019,7 +1344,10 @@ async fn run_live_openhands_checks(
                             "openhands-supervisor-status",
                             status_error.to_string(),
                         ));
-                        return stop_managed_supervisor(checks, Some(supervisor));
+                        return LiveOpenHandsChecks {
+                            checks: stop_managed_supervisor(checks, Some(supervisor)),
+                            supervisor: None,
+                        };
                     }
                 };
                 checks.push(CheckResult::pass(
@@ -1037,7 +1365,10 @@ async fn run_live_openhands_checks(
                     Ok(transport) => transport,
                     Err(error) => {
                         checks.push(CheckResult::fail("openhands-auth", error));
-                        return stop_managed_supervisor(checks, managed_supervisor);
+                        return LiveOpenHandsChecks {
+                            checks: stop_managed_supervisor(checks, managed_supervisor),
+                            supervisor: None,
+                        };
                     }
                 };
                 http_detail = format!(
@@ -1046,11 +1377,11 @@ async fn run_live_openhands_checks(
             }
             Ok(None) => {
                 checks.push(CheckResult::fail("openhands-http", error.to_string()));
-                return checks;
+                return LiveOpenHandsChecks { checks, supervisor: None };
             }
             Err(start_error) => {
                 checks.push(CheckResult::fail("openhands-supervisor-start", start_error));
-                return checks;
+                return LiveOpenHandsChecks { checks, supervisor: None };
             }
         }
     }
@@ -1060,7 +1391,10 @@ async fn run_live_openhands_checks(
         Ok(()) => checks.push(CheckResult::pass("openhands-http", http_detail)),
         Err(error) => {
             checks.push(CheckResult::fail("openhands-http", error.to_string()));
-            return stop_managed_supervisor(checks, managed_supervisor);
+            return LiveOpenHandsChecks {
+                checks: stop_managed_supervisor(checks, managed_supervisor),
+                supervisor: None,
+            };
         }
     }
 
@@ -1071,7 +1405,10 @@ async fn run_live_openhands_checks(
                 "openhands-probe-dir",
                 format!("failed to create probe dir: {error}"),
             ));
-            return stop_managed_supervisor(checks, managed_supervisor);
+            return LiveOpenHandsChecks {
+                checks: stop_managed_supervisor(checks, managed_supervisor),
+                supervisor: None,
+            };
         }
     };
 
@@ -1090,7 +1427,10 @@ async fn run_live_openhands_checks(
             "openhands-probe-dir",
             format!("failed to build probe workspace: {error}"),
         ));
-        return stop_managed_supervisor(checks, managed_supervisor);
+        return LiveOpenHandsChecks {
+            checks: stop_managed_supervisor(checks, managed_supervisor),
+            supervisor: None,
+        };
     }
 
     let request = match build_doctor_probe_request(
@@ -1103,7 +1443,10 @@ async fn run_live_openhands_checks(
         Ok(request) => request,
         Err(error) => {
             checks.push(CheckResult::fail("openhands-probe", error));
-            return stop_managed_supervisor(checks, managed_supervisor);
+            return LiveOpenHandsChecks {
+                checks: stop_managed_supervisor(checks, managed_supervisor),
+                supervisor: None,
+            };
         }
     };
 
@@ -1131,11 +1474,15 @@ async fn run_live_openhands_checks(
         }
         Err(error) => {
             checks.push(CheckResult::fail("openhands-probe", error.to_string()));
-            return stop_managed_supervisor(checks, managed_supervisor);
+            return LiveOpenHandsChecks {
+                checks: stop_managed_supervisor(checks, managed_supervisor),
+                supervisor: None,
+            };
         }
     }
 
-    stop_managed_supervisor(checks, managed_supervisor)
+    // Return checks and supervisor (if any) for potential reuse during rehydration
+    LiveOpenHandsChecks { checks, supervisor: managed_supervisor }
 }
 
 fn build_doctor_probe_request(
@@ -1492,7 +1839,7 @@ mod tests {
 
     use super::{
         Cli, Command, DoctorRuntimeConfig, SnapshotStore, build_doctor_probe_request,
-        command_check_name, discover_checkout_root, effective_openhands_probe_base_url,
+        command_check_name, effective_openhands_probe_base_url,
         executable_suffixes, find_cargo_workspace_root, resolve_doctor_workflow, sample_snapshot,
         spawn_demo_updates,
     };
@@ -1516,7 +1863,8 @@ mod tests {
             | Command::Debug(_)
             | Command::Tui(_)
             | Command::LinearMcp(_)
-            | Command::Doctor(_) => {
+            | Command::Doctor(_)
+            | Command::Rehydrate(_) => {
                 panic!("expected daemon command")
             }
         }
@@ -1657,27 +2005,6 @@ mod tests {
     }
 
     #[test]
-    fn discover_checkout_root_prefers_repo_anchored_inputs() {
-        let temp_dir = TempDir::new().expect("temp dir");
-        let repo_root = temp_dir.path().join("repo");
-        let config_root = repo_root.join("examples/configs");
-        let tool_dir = repo_root.join("tools/openhands-server");
-        let target_repo = repo_root.join("examples/target-repo");
-        fs::create_dir_all(&config_root).expect("config root should exist");
-        fs::create_dir_all(&tool_dir).expect("tool dir should exist");
-        fs::create_dir_all(&target_repo).expect("target repo should exist");
-        fs::write(repo_root.join("Cargo.toml"), "[workspace]\nmembers = []\n")
-            .expect("Cargo.toml should exist");
-        let canonical_repo_root =
-            fs::canonicalize(&repo_root).expect("repo root should canonicalize");
-
-        let discovered = discover_checkout_root(&config_root, Some(&target_repo), &tool_dir)
-            .expect("repo root should be discovered");
-
-        assert_eq!(discovered, canonical_repo_root);
-    }
-
-    #[test]
     fn effective_openhands_probe_base_url_prefers_the_started_supervisor() {
         assert_eq!(
             effective_openhands_probe_base_url(
@@ -1746,5 +2073,178 @@ openhands:
             probe_api_key_env: None,
             probe_llm_base_url_env: None,
         }
+    }
+}
+
+use opensymphony_workspace::WorkspaceManagerConfig;
+
+async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
+    use opensymphony_openhands::{
+        IssueSessionRunner, IssueSessionRunnerConfig, RehydrationOptions,
+    };
+    use opensymphony_workspace::{RunManifest, WorkspaceManager};
+
+    println!("Rehydrating conversation for issue: {}", args.issue);
+    println!("Reason: {}", args.reason);
+    println!("Summary events: {} (summarize: {})", args.max_summary_events, !args.no_summary);
+
+    // Load workflow from current directory
+    let current_dir = env::current_dir()
+        .map_err(|e| format!("failed to get current directory: {}", e))?;
+    let workflow_path = current_dir.join("WORKFLOW.md");
+    
+    if !workflow_path.exists() {
+        return Err(format!("WORKFLOW.md not found at {}", workflow_path.display()));
+    }
+
+    let workflow_content = fs::read_to_string(&workflow_path)
+        .await
+        .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
+    
+    let workflow_def = WorkflowDefinition::parse(&workflow_content)
+        .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
+    
+    let workflow = workflow_def
+        .resolve_with_process_env(&current_dir)
+        .map_err(|e| format!("failed to resolve workflow: {}", e))?;
+
+    // Setup workspace manager
+    let workspace_config = build_rehydrate_workspace_config(&workflow);
+    let workspace_manager = WorkspaceManager::new(workspace_config)
+        .map_err(|e| format!("failed to create workspace manager: {}", e))?;
+    
+    // Find workspace by issue reference
+    let workspace = workspace_manager
+        .find_workspace_by_issue_reference(&args.issue)
+        .await
+        .map_err(|e| format!("failed to find workspace: {}", e))?
+        .ok_or_else(|| format!("No workspace found for issue {}", args.issue))?;
+
+    // Load existing conversation manifest
+    let manifest_path = workspace.conversation_manifest_path();
+    let manifest_content = workspace_manager
+        .read_text_artifact(&workspace, &manifest_path)
+        .await
+        .map_err(|e| format!("failed to read manifest: {}", e))?
+        .ok_or_else(|| format!("No conversation manifest found at {}", manifest_path.display()))?;
+
+    let old_manifest: opensymphony_openhands::IssueConversationManifest = 
+        serde_json::from_str(&manifest_content)
+            .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
+
+    println!("Found existing conversation: {}", old_manifest.conversation_id);
+    println!("Created at: {:?}", old_manifest.created_at);
+    println!("Last attached: {:?}", old_manifest.last_attached_at);
+
+    // Create OpenHands client
+    let transport = TransportConfig::from_workflow(&workflow, &ProcessEnvironment)
+        .map_err(|e| format!("failed to create transport config: {}", e))?;
+    let client = OpenHandsClient::new(transport);
+
+    // Create session runner
+    let runner_config = IssueSessionRunnerConfig::default();
+    let runner = IssueSessionRunner::new(client, runner_config);
+
+    // Create a minimal run descriptor for the rehydration
+    use opensymphony_workspace::RunDescriptor;
+    let run_descriptor = RunDescriptor::new("rehydrate", 1);
+    let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
+
+    // Create a minimal RunAttempt for the rehydration
+    use opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("valid system time")
+        .as_millis() as u64;
+    let run_attempt = RunAttempt::new(
+        WorkerId::new("rehydrate-worker").expect("valid worker id"),
+        IssueId::new(workspace.issue_id()).expect("valid issue id"),
+        IssueIdentifier::new(workspace.identifier()).expect("valid identifier"),
+        workspace.workspace_path().to_path_buf(),
+        TimestampMs::new(now),
+        None,
+        8, // max_turns
+    );
+
+    // Perform rehydration
+    let options = RehydrationOptions {
+        reason: args.reason,
+        summarize: !args.no_summary,
+        max_summary_events: args.max_summary_events,
+    };
+
+    println!("\nStarting rehydration...");
+    
+    // Create a minimal NormalizedIssue for the rehydration
+    use opensymphony_domain::{IssueState, IssueStateCategory};
+    let dummy_issue = opensymphony_domain::NormalizedIssue {
+        id: IssueId::new(workspace.issue_id()).expect("valid issue id"),
+        identifier: IssueIdentifier::new(workspace.identifier()).expect("valid identifier"),
+        title: "Rehydration".to_string(),
+        description: None,
+        priority: None,
+        state: IssueState {
+            id: None,
+            name: "In Progress".to_string(),
+            category: IssueStateCategory::Active,
+        },
+        branch_name: None,
+        url: None,
+        labels: vec![],
+        parent_id: None,
+        blocked_by: vec![],
+        sub_issues: vec![],
+        created_at: None,
+        updated_at: None,
+    };
+
+    let result = runner
+        .rehydrate_conversation(
+            &workspace_manager,
+            &workspace,
+            &mut run_manifest,
+            &run_attempt,
+            &dummy_issue,
+            &workflow,
+            &old_manifest,
+            options,
+        )
+        .await
+        .map_err(|e| format!("rehydration failed: {}", e))?;
+
+    println!("\n✓ Rehydration complete!");
+    println!("  Old conversation: {}", result.old_conversation_id);
+    println!("  Result: {:?}", result);
+    
+    if let Some(context) = &result.context {
+        println!("\n  Context preserved ({} chars)", context.len());
+        if context.len() < 500 {
+            println!("  Preview: {}", context.lines().next().unwrap_or("..."));
+        }
+    } else {
+        println!("\n  No context preserved (summarization skipped or failed)");
+    }
+
+    println!("\nThe conversation has been smartly rehydrated.");
+    println!("The new conversation will be used on the next orchestrator run.");
+
+    Ok(())
+}
+
+fn build_rehydrate_workspace_config(workflow: &ResolvedWorkflow) -> WorkspaceManagerConfig {
+    use opensymphony_workspace::{CleanupConfig, HookConfig, HookDefinition};
+    let hooks = &workflow.config.hooks;
+    WorkspaceManagerConfig {
+        root: workflow.config.workspace.root.clone(),
+        hooks: HookConfig {
+            after_create: hooks.after_create.clone().map(HookDefinition::shell),
+            before_run: hooks.before_run.clone().map(HookDefinition::shell),
+            after_run: hooks.after_run.clone().map(HookDefinition::shell),
+            before_remove: hooks.before_remove.clone().map(HookDefinition::shell),
+            timeout: Duration::from_millis(hooks.timeout_ms),
+        },
+        cleanup: CleanupConfig {
+            remove_terminal_workspaces: false,
+        },
     }
 }

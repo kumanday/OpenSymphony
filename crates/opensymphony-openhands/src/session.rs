@@ -176,6 +176,10 @@ pub struct ConversationLaunchProfile {
     pub stuck_detection: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_stdio_servers: Vec<McpStdioServerConfig>,
+    /// Fingerprint of the API key used when creating this conversation.
+    /// Used to detect when the API key has changed and the conversation needs reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_api_key_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -185,6 +189,22 @@ pub struct ConversationLaunchCondenserProfile {
 }
 
 impl ConversationLaunchProfile {
+    /// Compute a fingerprint of the current API key from the environment.
+    /// This is used to detect when the API key has changed.
+    pub fn api_key_fingerprint(&self, env: &dyn Environment) -> Option<String> {
+        let api_key = self.llm_api_key_env.as_deref()
+            .and_then(|env_name| env.get(&env_name))
+            .or_else(|| env.get("LLM_API_KEY"))?;
+        
+        // Simple hash - hex-encoded SHA256 of API key
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(api_key.as_bytes());
+        let result = hasher.finalize();
+        // Return first 16 hex chars of hash
+        Some(result[..8].iter().map(|b| format!("{:02x}", b)).collect())
+    }
+    
     pub fn from_workflow(workflow: &ResolvedWorkflow) -> Result<Self, String> {
         let conversation = &workflow.extensions.openhands.conversation;
         let max_iterations = u32::try_from(conversation.max_iterations).map_err(|_| {
@@ -241,6 +261,7 @@ impl ConversationLaunchProfile {
                 .iter()
                 .map(launch_profile_stdio_server)
                 .collect(),
+            llm_api_key_fingerprint: None, // Computed when manifest is created
         })
     }
 
@@ -435,8 +456,12 @@ impl IssueConversationManifest {
         persistence_dir: PathBuf,
         attached_at: DateTime<Utc>,
         reset_reason: Option<String>,
-        launch_profile: ConversationLaunchProfile,
+        mut launch_profile: ConversationLaunchProfile,
+        env: &dyn Environment,
     ) -> Self {
+        // Compute and store API key fingerprint for drift detection
+        launch_profile.llm_api_key_fingerprint = launch_profile.api_key_fingerprint(env);
+        
         Self {
             issue_id,
             identifier,
@@ -518,11 +543,19 @@ impl IssueConversationManifest {
             self.last_event_summary = Some(summarize_event(event));
         }
 
-        // Update token counts from conversation state (OpenHands tracks tokens in state, not events)
+        // Update token counts from conversation state, but preserve existing counts if higher
+        // This is important for rehydration where we carry over token counts from old conversations
         if let Some((input, output, cache_read)) = stream.state_mirror().accumulated_token_usage() {
-            self.input_tokens = input;
-            self.output_tokens = output;
-            self.cache_read_tokens = cache_read;
+            // Only update if the stream has higher counts (don't wipe out preserved counts)
+            if input > self.input_tokens {
+                self.input_tokens = input;
+            }
+            if output > self.output_tokens {
+                self.output_tokens = output;
+            }
+            if cache_read > self.cache_read_tokens {
+                self.cache_read_tokens = cache_read;
+            }
         }
 
         self.updated_at = Utc::now();
@@ -636,7 +669,7 @@ struct NormalizedOutcome {
     error: Option<String>,
 }
 
-struct ActiveSession {
+pub struct ActiveSession {
     stream: RuntimeEventStream,
     manifest: IssueConversationManifest,
     prompt_kind: IssueSessionPromptKind,
@@ -1348,8 +1381,8 @@ impl IssueSessionRunner {
         workspace_manager: &WorkspaceManager,
         workspace: &WorkspaceHandle,
         _issue: &NormalizedIssue,
-        _workflow: &ResolvedWorkflow,
-        mut manifest: IssueConversationManifest,
+        workflow: &ResolvedWorkflow,
+        manifest: IssueConversationManifest,
     ) -> Result<ReuseSession, IssueSessionError> {
         let manifest_conversation_id = manifest.conversation_id.clone();
         let conversation_id = match parse_uuid(manifest.conversation_id.as_str()) {
@@ -1357,6 +1390,48 @@ impl IssueSessionRunner {
             Err(error) => return Ok(ReuseSession::Reset(error)),
         };
 
+        // Check for API key drift - if the environment's API key differs from
+        // what was used to create the conversation, we need to reset
+        let launch_profile = match ConversationLaunchProfile::from_workflow(workflow) {
+            Ok(profile) => profile,
+            Err(_) => {
+                // If we can't build a launch profile, just try to attach and let it fail naturally
+                return self.try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id).await;
+            }
+        };
+        
+        // Compute current API key fingerprint from environment
+        let current_fingerprint = launch_profile.api_key_fingerprint(self.environment.as_ref());
+        
+        // Get stored fingerprint from manifest (if available)
+        let stored_fingerprint = manifest.launch_profile.as_ref()
+            .and_then(|p| p.llm_api_key_fingerprint.clone());
+        
+        // If fingerprints differ, reset the conversation to use the new key
+        if current_fingerprint != stored_fingerprint {
+            tracing::info!(
+                conversation_id = %manifest_conversation_id,
+                stored_fingerprint = ?stored_fingerprint,
+                current_fingerprint = ?current_fingerprint,
+                "API key changed since conversation was created, resetting conversation"
+            );
+            return Ok(ReuseSession::Reset(
+                "API key changed - conversation needs to be recreated with new credentials".to_string()
+            ));
+        }
+
+        self.try_attach_and_resume(workspace_manager, workspace, manifest, conversation_id).await
+    }
+    
+    async fn try_attach_and_resume(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        mut manifest: IssueConversationManifest,
+        conversation_id: Uuid,
+    ) -> Result<ReuseSession, IssueSessionError> {
+        let manifest_conversation_id = manifest.conversation_id.clone();
+        
         // Simplified conversation resumption: just try to attach directly
         // without checking for LLM config drift or rehydrating.
         // The conversation's stored LLM config in meta.json is used as-is.
@@ -1555,6 +1630,7 @@ impl IssueSessionRunner {
             attached_at,
             reset_reason,
             launch_profile,
+            self.environment.as_ref(),
         );
         manifest.llm_config_fingerprint =
             Some(LlmConfigFingerprint::from_llm_config(&request.agent.llm));
@@ -1654,7 +1730,7 @@ impl IssueSessionRunner {
             )
             .await?;
 
-        let session = match step {
+        let mut session = match step {
             Step::Continue(session) => session,
             Step::EarlyResult(_) => {
                 return Err(IssueSessionError::UnexpectedEarlyResult(
@@ -1662,6 +1738,21 @@ impl IssueSessionRunner {
                 ));
             }
         };
+
+        // Copy token counts from old manifest to preserve metrics across rehydration
+        session.manifest.input_tokens = old_manifest.input_tokens;
+        session.manifest.output_tokens = old_manifest.output_tokens;
+        session.manifest.cache_read_tokens = old_manifest.cache_read_tokens;
+        session.manifest.last_token_accumulation_at = old_manifest.last_token_accumulation_at;
+        
+        // Persist the updated manifest with token counts
+        workspace_manager
+            .write_json_artifact(
+                workspace,
+                &workspace.conversation_manifest_path(),
+                &session.manifest,
+            )
+            .await?;
 
         Ok(RehydrationResult {
             session,
