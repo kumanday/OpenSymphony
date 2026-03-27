@@ -2151,3 +2151,122 @@ async fn rehydrate_conversation_deletes_old_and_creates_new_with_token_preservat
         "new conversation should exist on server"
     );
 }
+
+/// Test that the session runner creates a fresh conversation when the previous
+/// run ended with error status, preventing reuse of potentially corrupted event history.
+#[tokio::test]
+async fn issue_session_runner_resets_when_previous_run_ended_with_error_status() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-313-error-reset");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    // First, run successfully
+    let mut first_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("first run manifest should prepare");
+    let first_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    let first_result = IssueSessionRunner::new(client.clone(), runner_config(&workflow))
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut first_manifest,
+            &issue,
+            &first_run,
+            &workflow,
+        )
+        .await
+        .expect("first run should succeed");
+
+    let first_conversation_id = first_result
+        .conversation
+        .as_ref()
+        .expect("first conversation should exist")
+        .conversation_id
+        .clone();
+
+    // Simulate a previous run that ended with error by modifying the manifest
+    let mut corrupted_manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+    corrupted_manifest.last_execution_status = Some("error".to_string());
+    corrupted_manifest.last_event_id = Some("evt-error-test".to_string());
+    manager
+        .write_json_artifact(
+            &ensured.handle,
+            &ensured.handle.conversation_manifest_path(),
+            &corrupted_manifest,
+        )
+        .await
+        .expect("should write corrupted manifest");
+
+    // Now run again - should reset due to previous error status
+    let mut second_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-2", 2))
+        .await
+        .expect("second run manifest should prepare");
+    let second_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-2",
+        None,
+        max_turns,
+    );
+    let second_result = IssueSessionRunner::new(client.clone(), runner_config(&workflow))
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut second_manifest,
+            &issue,
+            &second_run,
+            &workflow,
+        )
+        .await
+        .expect("second run should succeed with fresh conversation");
+
+    // Verify it created a fresh conversation (not reused the errored one)
+    let second_conversation_id = second_result
+        .conversation
+        .as_ref()
+        .expect("second conversation should exist")
+        .conversation_id
+        .clone();
+    assert_ne!(
+        first_conversation_id, second_conversation_id,
+        "should create fresh conversation instead of reusing errored one"
+    );
+
+    // Verify full prompt was used (not continuation)
+    assert_eq!(
+        second_result.prompt_kind,
+        IssueSessionPromptKind::Full,
+        "should use full prompt for fresh conversation"
+    );
+
+    // Verify reset reason is recorded
+    let final_manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+    assert!(
+        final_manifest
+            .reset_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("previous run ended with error"),
+        "reset reason should mention previous error status"
+    );
+}
