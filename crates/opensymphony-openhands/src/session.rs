@@ -1605,7 +1605,7 @@ impl IssueSessionRunner {
         // Simplified conversation resumption: just try to attach directly
         // without checking for LLM config drift or rehydrating.
         // The conversation's stored LLM config in meta.json is used as-is.
-        let stream = match self
+        let mut stream = match self
             .client
             .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
             .await
@@ -1618,6 +1618,20 @@ impl IssueSessionRunner {
                 )));
             }
         };
+
+        // Defensive check: if the conversation ended with a condenser tool-matching error,
+        // reset instead of trying to reuse. This prevents reusing corrupted event history.
+        if stream.state_mirror().terminal_status() == Some(TerminalExecutionStatus::Error) {
+            if let Some(error_detail) = extract_error_detail_from_state(stream.state_mirror())
+                && is_condenser_tool_matching_error(&error_detail)
+            {
+                let _ = stream.close().await;
+                return Ok(ReuseSession::Reset(format!(
+                    "previous run ended with condenser tool-matching error (corrupted event history): {}",
+                    error_detail
+                )));
+            }
+        }
 
         let attached_at = Utc::now();
         manifest.fresh_conversation = false;
