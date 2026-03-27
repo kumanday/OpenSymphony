@@ -1,4 +1,4 @@
-mod backends;
+pub(crate) mod backends;
 mod config;
 mod snapshot;
 

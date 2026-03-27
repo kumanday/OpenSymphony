@@ -311,6 +311,51 @@ impl WorkspaceManager {
         Ok(None)
     }
 
+    /// List all valid workspaces in the workspace root.
+    pub async fn list_all_workspaces(
+        &self,
+    ) -> Result<Vec<(WorkspaceHandle, IssueManifest)>, WorkspaceError> {
+        self.create_directory(&self.config.root).await?;
+
+        let mut workspaces = Vec::new();
+        let mut entries = fs::read_dir(&self.config.root).await.map_err(|source| {
+            WorkspaceError::ReadDirectory {
+                path: self.config.root.clone(),
+                source,
+            }
+        })?;
+
+        while let Some(entry) =
+            entries
+                .next_entry()
+                .await
+                .map_err(|source| WorkspaceError::ReadDirectory {
+                    path: self.config.root.clone(),
+                    source,
+                })?
+        {
+            let file_type =
+                entry
+                    .file_type()
+                    .await
+                    .map_err(|source| WorkspaceError::ReadDirectory {
+                        path: entry.path(),
+                        source,
+                    })?;
+            if !file_type.is_dir() {
+                continue;
+            }
+
+            if let Some((handle, manifest)) =
+                self.load_workspace_from_directory(&entry.path()).await?
+            {
+                workspaces.push((handle, manifest));
+            }
+        }
+
+        Ok(workspaces)
+    }
+
     pub async fn write_issue_manifest(
         &self,
         workspace: &WorkspaceHandle,

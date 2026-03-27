@@ -82,7 +82,7 @@ Current implementation:
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
 - `crates/opensymphony-openhands/tests/fake_server_contract.rs` and `crates/opensymphony-openhands/tests/client_resilience.rs` now split the runtime stream coverage intentionally: the shared fake-server contract suite owns the scripted initial snapshot replay, attach-backlog versus buffered-live ordering, reconnect exhaustion, explicit-close shutdown semantics, reconcile, out-of-order delivery, and reconnect recovery cases, while `client_resilience.rs` keeps the narrower auth, forward-compatibility, and mirror-regression cases that still need bespoke server behavior
 - `crates/opensymphony-openhands/tests/live_pinned_server.rs` provides an opt-in live integration check against the pinned `openhands-agent-server==1.14.0` surface for external-mode auth success and failure
-- `crates/opensymphony-openhands/tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, missing-conversation rehydration that stays on continuation guidance, LLM-config-drift recreation with workpad recovery context, hashed provider fingerprint persistence, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
+- `crates/opensymphony-openhands/tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, missing-conversation recreation that stays on continuation guidance, **simplified conversation resumption that reuses conversations as-is without LLM config drift checks**, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
 - `crates/opensymphony-openhands/tests/supervisor.rs` now covers startup rejection when a foreign ready server is already bound to the supervised target port
 
 ## 3. Minimum required test coverage by subsystem
@@ -177,7 +177,8 @@ Current implementation:
 - persisted policy-drift resets
 - pinned-server auth success and failure paths
 - reuse after an already-active turn or `/run` conflict
-- rehydration of a missing conversation with persisted history
+- recreation of a missing conversation with persisted history
+- **simplified conversation resumption without LLM config drift checks**
 - workflow-owned `persistence_dir_relative` mapping
 - supervised-mode rejection of foreign ready servers
 
@@ -536,6 +537,46 @@ Current implementation notes:
 - the current example configs carry machine-local tool/probe settings only; the repo-owned workflow now supplies the workspace root and OpenHands base URL that doctor validates
 - the current example configs disable Linear by default so local runtime validation can succeed without tracker credentials when the workflow omits `tracker.api_key`
 
+## 7.1 Rehydration
+
+Rehydration is the explicit recreation of OpenHands conversations with history preservation. Unlike automatic conversation reset (which was removed), rehydration is an intentional operator action.
+
+### When to use rehydration
+
+- **API key rotation**: When the LLM API key has changed and you need to create new conversations with the new key
+- **Corrupted conversation state**: When a conversation's stored state is damaged
+- **LLM provider switch**: When changing to a different model or provider
+
+### Commands
+
+```bash
+# Rehydrate a single issue
+opensymphony rehydrate COE-123 --reason "API key rotation"
+
+# Rehydrate all conversations during doctor check
+opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate
+
+# Rehydrate with custom summary size (default 50 events)
+opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate --max-summary-events 100
+
+# Rehydrate without preserving conversation history (faster)
+opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate --no-summary
+```
+
+### How rehydration works
+
+1. Reads the existing conversation manifest from `.opensymphony/conversation.json`
+2. Builds a summary of the conversation history (unless `--no-summary` is used)
+3. Deletes the old conversation from the OpenHands server
+4. Creates a new conversation with the current LLM configuration
+5. Seeds the new conversation with the summary as context
+6. Persists the new conversation ID in the manifest
+
+### Simplified conversation resumption vs rehydration
+
+- **Normal resumption**: Conversations are reused as-is without checking for LLM config drift. The stored configuration in the conversation's `meta.json` is used.
+- **Rehydration**: Explicitly deletes and recreates conversations with the current configuration. Use when you need to apply new API keys or switch providers.
+
 ## 8. Logging and diagnostics
 
 Use structured logs everywhere.
@@ -587,7 +628,7 @@ Each issue workspace should expose enough local artifacts to debug recovery:
     session-context.json
 ```
 
-These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, `run.json` retains the latest hook/status evidence for the worker lifetime, `conversation.json` records issue ownership, reuse state, prompt-seeding state, the hashed LLM config fingerprint that guards reuse, and the persisted launch profile used by `opensymphony debug`, and the OpenHands plus generated snapshots preserve the exact create request, latest mirrored conversation state, last dispatched prompt artifacts, and latest normalized runner context without reconstructing daemon state.
+These files should make restart recovery explainable without scraping daemon memory. The root-scoped `after_create` receipt explains why a partially bootstrapped workspace will skip rerunning clone/worktree hooks, `run.json` retains the latest hook/status evidence for the worker lifetime, `conversation.json` records issue ownership, reuse state, prompt-seeding state, the `llm_config_fingerprint` (now simplified to track only model name for observability), and the persisted launch profile used by `opensymphony debug`, and the OpenHands plus generated snapshots preserve the exact create request, latest mirrored conversation state, last dispatched prompt artifacts, and latest normalized runner context without reconstructing daemon state.
 
 ## 10. Version pinning
 

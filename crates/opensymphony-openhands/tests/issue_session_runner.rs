@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -16,12 +16,13 @@ use opensymphony_openhands::{
 use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
 use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
 use opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, WorkspaceManager,
-    WorkspaceManagerConfig,
+    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
+    WorkspaceManager, WorkspaceManagerConfig,
 };
 use tempfile::TempDir;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct StaticWorkpadCommentSource {
     comment: Option<SessionWorkpadComment>,
 }
@@ -412,6 +413,7 @@ async fn read_create_conversation_request(
     serde_json::from_str(&raw).expect("create request should decode")
 }
 
+#[allow(dead_code)]
 fn workpad_comment(body: &str) -> SessionWorkpadComment {
     SessionWorkpadComment {
         id: "comment-workpad".to_string(),
@@ -1660,8 +1662,11 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
 }
 
 #[tokio::test]
-async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes_and_recovers_workpad_context()
- {
+async fn issue_session_runner_reuses_conversation_despite_llm_config_changes() {
+    // With simplified conversation resumption, the conversation is reused as-is
+    // even when LLM config (API key) changes. The stored config in meta.json is used.
+    // If the API key is actually invalid, attach will fail naturally and explicit
+    // rehydration via CLI can be used.
     let server = FakeOpenHandsServer::start()
         .await
         .expect("fake server should start");
@@ -1711,15 +1716,12 @@ async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes
     )
     .await
     .expect("initial provider-backed session run should succeed");
-    let conversation_id = uuid::Uuid::parse_str(
-        first_result
-            .conversation
-            .as_ref()
-            .expect("conversation metadata should exist")
-            .conversation_id
-            .as_str(),
-    )
-    .expect("conversation ID should parse");
+    let first_conversation_id = first_result
+        .conversation
+        .as_ref()
+        .expect("conversation metadata should exist")
+        .conversation_id
+        .clone();
 
     let mut second_run_manifest = manager
         .start_run(&ensured.handle, &RunDescriptor::new("provider-run-2", 2))
@@ -1732,6 +1734,7 @@ async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes
         Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
         max_turns,
     );
+    // With a different API key in environment, conversation is still reused as-is
     let second_result = IssueSessionRunner::with_environment(
         client.clone(),
         runner_config(&workflow),
@@ -1740,11 +1743,6 @@ async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes
             "new-secret".to_string(),
         )]),
     )
-    .with_workpad_comment_source(Arc::new(StaticWorkpadCommentSource {
-        comment: Some(workpad_comment(
-            "## Codex Workpad\n\n- Investigated provider rotation\n- Workspace state is already prepared",
-        )),
-    }))
     .run(
         &manager,
         &ensured.handle,
@@ -1754,70 +1752,59 @@ async fn issue_session_runner_recreates_the_conversation_when_llm_config_changes
         &workflow,
     )
     .await
-    .expect("config-drift session recreation should succeed");
+    .expect("conversation reuse should succeed");
 
-    assert_eq!(second_result.prompt_kind, IssueSessionPromptKind::Full);
+    // With simplified resumption, conversation is reused with continuation prompt
     assert_eq!(
-        first_result
-            .conversation
-            .as_ref()
-            .expect("first conversation metadata should exist")
-            .conversation_id,
+        second_result.prompt_kind,
+        IssueSessionPromptKind::Continuation
+    );
+    // Conversation ID is the same (reused, not recreated)
+    assert_eq!(
+        first_conversation_id,
         second_result
             .conversation
             .as_ref()
             .expect("second conversation metadata should exist")
             .conversation_id
     );
+    // Conversation is NOT marked as fresh - it was reused
     assert!(
-        second_result
+        !second_result
             .conversation
             .as_ref()
             .expect("second conversation metadata should exist")
             .fresh_conversation
     );
 
-    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
-    assert_eq!(create_request.conversation_id, conversation_id);
-    assert_eq!(
-        create_request.agent.llm.api_key.as_deref(),
-        Some("new-secret")
-    );
-
-    let recreated_conversation = client
-        .get_conversation(conversation_id)
+    // The conversation still has the OLD API key (stored in meta.json)
+    // With simplified resumption, we don't automatically update the API key
+    let reused_conversation_id = uuid::Uuid::parse_str(
+        second_result
+            .conversation
+            .as_ref()
+            .expect("second conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("conversation ID should parse");
+    let reused_conversation = client
+        .get_conversation(reused_conversation_id)
         .await
-        .expect("recreated conversation should be fetchable");
+        .expect("conversation should be fetchable");
+    // API key is still the old one - we don't auto-update on drift
     assert_eq!(
-        recreated_conversation.agent.llm.api_key.as_deref(),
-        Some("new-secret")
+        reused_conversation.agent.llm.api_key.as_deref(),
+        Some("old-secret")
     );
 
     let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
-    assert_eq!(
-        manifest.llm_config_fingerprint,
-        Some(LlmConfigFingerprint::from_llm_config(
-            &create_request.agent.llm
-        ))
-    );
+    // Workflow was seeded in first run and stays seeded (conversation reused)
     assert!(manifest.workflow_prompt_seeded);
     assert_eq!(
         manifest.last_prompt_kind,
-        Some(IssueSessionPromptKind::Full)
+        Some(IssueSessionPromptKind::Continuation)
     );
-
-    let messages = latest_message_texts(
-        client
-            .search_all_events(conversation_id)
-            .await
-            .expect("events should be searchable after config-drift recreation")
-            .items(),
-    );
-    assert_eq!(messages.len(), 1);
-    assert!(messages[0].contains("Issue: COE-294-provider-rotation"));
-    assert!(messages[0].contains("## Runtime Rehydration"));
-    assert!(messages[0].contains("## Previous Progress (from Linear Codex Workpad)"));
-    assert!(messages[0].contains("Investigated provider rotation"));
 }
 
 #[tokio::test]
@@ -2017,5 +2004,150 @@ async fn issue_session_runner_writes_mcp_stdio_servers_into_create_requests() {
                 env: Default::default(),
             }],
         })
+    );
+}
+
+/// Test that rehydrate_conversation() properly deletes the old conversation,
+/// creates a new one with current API key, and preserves token counts.
+#[tokio::test]
+async fn rehydrate_conversation_deletes_old_and_creates_new_with_token_preservation() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-123");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client.clone(), IssueSessionRunnerConfig::default());
+
+    let run_descriptor = RunDescriptor::new("test", 1);
+    let mut run_manifest = RunManifest::new(&ensured.handle, &run_descriptor);
+
+    let run = run_attempt(&issue, ensured.handle.workspace_path(), "worker-1", None, 8);
+
+    // First, create a conversation by running the session
+    let first_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("first run should succeed");
+
+    let first_conversation_id = first_result
+        .conversation
+        .as_ref()
+        .expect("conversation should exist")
+        .conversation_id
+        .clone();
+
+    // Read the manifest to get the current token counts
+    // (may have some tokens from the initial run)
+    let manifest_before = read_conversation_manifest(&manager, &ensured.handle).await;
+    let initial_input_tokens = manifest_before.input_tokens;
+    let initial_output_tokens = manifest_before.output_tokens;
+    let initial_cache_tokens = manifest_before.cache_read_tokens;
+
+    // Simulate additional token accumulation by manually updating the manifest
+    let mut modified_manifest = manifest_before.clone();
+    modified_manifest.input_tokens = initial_input_tokens + 1500;
+    modified_manifest.output_tokens = initial_output_tokens + 800;
+    modified_manifest.cache_read_tokens = initial_cache_tokens + 200;
+    manager
+        .write_json_artifact(
+            &ensured.handle,
+            &ensured.handle.conversation_manifest_path(),
+            &modified_manifest,
+        )
+        .await
+        .expect("should write modified manifest");
+
+    // Now rehydrate the conversation
+    let rehydrate_run = run_attempt(&issue, ensured.handle.workspace_path(), "worker-2", None, 8);
+
+    let options = opensymphony_openhands::RehydrationOptions {
+        reason: "test rehydration".to_string(),
+        summarize: false,
+        max_summary_events: 10,
+    };
+
+    let rehydrate_result = runner
+        .rehydrate_conversation(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &rehydrate_run,
+            &issue,
+            &workflow,
+            &modified_manifest,
+            options,
+        )
+        .await
+        .expect("rehydration should succeed");
+
+    // Verify the old conversation ID was recorded
+    assert_eq!(
+        rehydrate_result.old_conversation_id,
+        first_conversation_id.as_str(),
+        "old conversation ID should be recorded"
+    );
+
+    // Verify a NEW conversation was created (different ID)
+    let manifest_after = read_conversation_manifest(&manager, &ensured.handle).await;
+    let new_conversation_id = manifest_after.conversation_id.clone();
+    assert_ne!(
+        new_conversation_id, first_conversation_id,
+        "rehydration should create a new conversation with different ID"
+    );
+
+    // Verify token counts were preserved from the old manifest
+    let expected_input_tokens = initial_input_tokens + 1500;
+    let expected_output_tokens = initial_output_tokens + 800;
+    let expected_cache_tokens = initial_cache_tokens + 200;
+    assert_eq!(
+        manifest_after.input_tokens, expected_input_tokens,
+        "input tokens should be preserved from old manifest"
+    );
+    assert_eq!(
+        manifest_after.output_tokens, expected_output_tokens,
+        "output tokens should be preserved from old manifest"
+    );
+    assert_eq!(
+        manifest_after.cache_read_tokens, expected_cache_tokens,
+        "cache read tokens should be preserved from old manifest"
+    );
+
+    // Verify the old conversation was deleted from the server by trying to get it
+    // The fake server returns 404 for deleted conversations
+    let old_conversation_id = first_result
+        .conversation
+        .expect("conversation should exist")
+        .conversation_id;
+    let old_conversation_uuid = uuid::Uuid::parse_str(old_conversation_id.as_str())
+        .expect("conversation_id should be a valid UUID");
+    let old_conversation_result = client.get_conversation(old_conversation_uuid).await;
+    assert!(
+        old_conversation_result.is_err(),
+        "old conversation should be deleted from server (404)"
+    );
+
+    // Verify the new conversation exists on the server
+    let new_conversation_uuid = uuid::Uuid::parse_str(manifest_after.conversation_id.as_str())
+        .expect("conversation_id should be a valid UUID");
+    let new_conversation_result = client.get_conversation(new_conversation_uuid).await;
+    assert!(
+        new_conversation_result.is_ok(),
+        "new conversation should exist on server"
     );
 }
