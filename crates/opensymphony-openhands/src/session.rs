@@ -625,6 +625,8 @@ pub struct IssueSessionResult {
 pub enum IssueSessionError {
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    #[error("unexpected early result: {0}")]
+    UnexpectedEarlyResult(String),
 }
 
 #[derive(Debug, Clone)]
@@ -1586,6 +1588,167 @@ impl IssueSessionRunner {
         Ok(Step::Continue(session))
     }
 
+    /// Explicitly rehydrate a conversation by creating a fresh one with the same
+    /// configuration, optionally preserving metrics and summarizing history.
+    /// 
+    /// This is NOT automatically triggered - it must be explicitly called when
+    /// rehydration is truly needed (e.g., corruption, export/import, etc.).
+    /// For normal operation, conversations are simply reused as-is.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn rehydrate_conversation(
+        &self,
+        workspace_manager: &WorkspaceManager,
+        workspace: &WorkspaceHandle,
+        run_manifest: &mut RunManifest,
+        observed_run: &RunAttempt,
+        issue: &NormalizedIssue,
+        workflow: &ResolvedWorkflow,
+        old_manifest: &IssueConversationManifest,
+        options: RehydrationOptions,
+    ) -> Result<RehydrationResult, IssueSessionError> {
+        let old_conversation_id = old_manifest.conversation_id.clone();
+        
+        // Try to attach to the old conversation to get its state for summarization
+        let old_stream = if options.summarize {
+            match parse_uuid(old_conversation_id.as_str()) {
+                Ok(conversation_id) => {
+                    self.client
+                        .attach_runtime_stream(conversation_id, self.config.runtime_stream.clone())
+                        .await
+                        .ok()
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+        // Build rehydration context if summarization is enabled
+        let context = if let Some(stream) = old_stream {
+            self.build_rehydration_context(&stream, options.max_summary_events).await
+        } else {
+            None
+        };
+
+        // Delete the old conversation
+        if let Ok(conversation_id) = parse_uuid(old_conversation_id.as_str()) {
+            if let Err(error) = self.client.delete_conversation(conversation_id).await {
+                tracing::warn!(
+                    conversation_id = %old_conversation_id,
+                    %error,
+                    "failed to delete old conversation during rehydration"
+                );
+            }
+        }
+
+        // Create a fresh session with the current configuration
+        let step = self
+            .create_fresh_session(
+                workspace_manager,
+                workspace,
+                run_manifest,
+                observed_run,
+                issue,
+                workflow,
+                Some(format!("rehydration: {}", options.reason)),
+            )
+            .await?;
+
+        let session = match step {
+            Step::Continue(session) => session,
+            Step::EarlyResult(_) => {
+                return Err(IssueSessionError::UnexpectedEarlyResult(
+                    "rehydration create_fresh_session returned early result".to_string(),
+                ));
+            }
+        };
+
+        Ok(RehydrationResult {
+            session,
+            context,
+            old_conversation_id: old_conversation_id.to_string(),
+        })
+    }
+
+    /// Build a rehydration context summarizing the conversation history.
+    /// This is used when explicitly rehydrating to provide context to the new conversation.
+    async fn build_rehydration_context(
+        &self,
+        stream: &RuntimeEventStream,
+        max_events: usize,
+    ) -> Option<String> {
+        let conversation = stream.conversation();
+        let summary = self.summarize_conversation(stream, max_events).await;
+        
+        let context = format!(
+            "## Previous Conversation Context\n\n\
+            This conversation was rehydrated from a previous session.\n\n\
+            - Original conversation ID: {}\n\
+            - Model: {}\n\
+            - Max iterations: {}\n\
+            - Execution status: {}\n\n\
+            ### Summary of Previous Work\n\n\
+            {}",
+            conversation.conversation_id,
+            conversation.agent.llm.model,
+            conversation.max_iterations,
+            conversation.execution_status,
+            summary.unwrap_or_else(|| "No summary available.".to_string())
+        );
+        
+        Some(context)
+    }
+
+    /// Summarize the conversation by extracting key events.
+    async fn summarize_conversation(
+        &self,
+        stream: &RuntimeEventStream,
+        max_events: usize,
+    ) -> Option<String> {
+        let events: Vec<_> = stream
+            .event_cache()
+            .items()
+            .iter()
+            .filter(|e| {
+                matches!(
+                    KnownEvent::from_envelope(e),
+                    KnownEvent::Message(_) | KnownEvent::Observation(_) | KnownEvent::ConversationError(_)
+                )
+            })
+            .take(max_events)
+            .collect();
+
+        if events.is_empty() {
+            return None;
+        }
+
+        let mut summary = String::new();
+        for event in events {
+            let line = match KnownEvent::from_envelope(event) {
+                KnownEvent::Message(msg) => {
+                    format!("- User: {}\n", msg.text_preview.as_deref().unwrap_or("..."))
+                }
+                KnownEvent::Observation(obs) => {
+                    format!(
+                        "- {}: {}\n",
+                        obs.tool_name.as_deref().unwrap_or("Result"),
+                        obs.text_preview.as_deref().unwrap_or("...")
+                    )
+                }
+                KnownEvent::ConversationError(err) => {
+                    let msg = err.payload.get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown error");
+                    format!("- Error: {}\n", msg)
+                }
+                _ => String::new(),
+            };
+            summary.push_str(&line);
+        }
+
+        Some(summary)
+    }
+
     fn render_prompt(
         &self,
         workflow: &ResolvedWorkflow,
@@ -2235,6 +2398,44 @@ fn run_status_for(outcome_kind: WorkerOutcomeKind) -> RunStatus {
         WorkerOutcomeKind::Cancelled => RunStatus::Cancelled,
         WorkerOutcomeKind::Failed | WorkerOutcomeKind::TimedOut | WorkerOutcomeKind::Stalled => {
             RunStatus::Failed
+        }
+    }
+}
+
+/// Rehydration result containing the new session and context for the prompt
+pub struct RehydrationResult {
+    pub session: ActiveSession,
+    pub context: Option<String>,
+    pub old_conversation_id: String,
+}
+
+impl std::fmt::Debug for RehydrationResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RehydrationResult")
+            .field("session", &"<ActiveSession>")
+            .field("context", &self.context)
+            .field("old_conversation_id", &self.old_conversation_id)
+            .finish()
+    }
+}
+
+/// Options for conversation rehydration
+#[derive(Debug, Clone)]
+pub struct RehydrationOptions {
+    /// Reason for rehydration (for logging/metrics)
+    pub reason: String,
+    /// Whether to summarize the old conversation for context
+    pub summarize: bool,
+    /// Maximum events to include in summary
+    pub max_summary_events: usize,
+}
+
+impl Default for RehydrationOptions {
+    fn default() -> Self {
+        Self {
+            reason: "explicit rehydration request".to_string(),
+            summarize: true,
+            max_summary_events: 50,
         }
     }
 }
