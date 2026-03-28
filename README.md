@@ -23,6 +23,19 @@ OpenSymphony automates software development workflows by:
 
 ## Quick Start
 
+### Using the Template for New Projects
+
+For new projects that want to use OpenSymphony, use the template repository:
+
+**[kumanday/OpenSymphony-template](https://github.com/kumanday/OpenSymphony-template)**
+
+Click "Use this template" to create a new repository with:
+- Pre-configured `WORKFLOW.md` with placeholders
+- All required skills (`commit`, `push`, `pull`, `land`, `linear`, `convert-tasks-to-linear`, `create-implementation-plan`)
+- GitHub workflows for AI PR review
+- `AGENTS.md` template for project-specific context
+- Labels: `symphony` and `review-this`
+
 ### Prerequisites
 
 - Rust toolchain (stable)
@@ -46,7 +59,9 @@ opensymphony --help
 
 ### Configuration
 
-Copy `WORKFLOW.example.md` from this repository to your target repository as `WORKFLOW.md` and modify the values:
+For new projects, use the [OpenSymphony-template](https://github.com/kumanday/OpenSymphony-template) repository as a starting point.
+
+For existing projects, copy `WORKFLOW.example.md` to your target repository as `WORKFLOW.md` and modify:
 
 ```bash
 # From your target repository:
