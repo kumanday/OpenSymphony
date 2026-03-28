@@ -175,10 +175,16 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 3. Treat every actionable reviewer comment (human or bot), including inline review comments, as blocking until one of these is true:
    - code/test/docs updated to address it, or
    - explicit, justified pushback reply is posted on that thread.
-4. Update the workpad plan/checklist to include each feedback item and its resolution status.
-5. Re-run validation after feedback-driven changes and push updates.
-6. Repeat this sweep until there are no outstanding actionable comments.
-7. After addressing initial PR review feedback, add the `review-this` label to the PR to re-trigger automated AI PR review.
+4. **Respond to inline review comments IN THE SAME THREAD** (required):
+   - Use `gh api repos/<owner>/<repo>/pulls/<pr>/comments -f body="..." -f in_reply_to=<comment_id>` to reply directly in the thread.
+   - Do NOT post new top-level comments or workpad updates to describe what was changed for a specific review item.
+   - Each inline review thread must have your response directly in that conversation.
+   - After making code changes, reply in the thread: "Fixed in <commit-sha>: <brief description of change>" or "Pushback: <justification for not making the requested change>".
+   - The goal is for the reviewer to see your response in context and easily track resolution status.
+5. Update the workpad plan/checklist to include each feedback item and its resolution status.
+6. Re-run validation after feedback-driven changes and push updates.
+7. Repeat this sweep until there are no outstanding actionable comments.
+8. After addressing initial PR review feedback, add the `review-this` label to the PR to re-trigger automated AI PR review.
 
 ## Blocked-access escape hatch (required behavior)
 
