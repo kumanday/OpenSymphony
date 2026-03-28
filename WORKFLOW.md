@@ -213,7 +213,7 @@ Use this only when completion is blocked by missing required tools or missing au
     - Document these temporary proof steps and outcomes in the workpad `Validation`/`Notes` sections so reviewers can follow the evidence.
 6.  Re-check all acceptance criteria and close any gaps.
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
-8.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
+8.  Attach PR URL to the Linear issue as a link resource using `linear_save_issue(links=[{url, title}])`. This is REQUIRED - do not rely on mentioning the PR URL in comments alone. The PR must appear in the issue's Links/Attachments section.
     - Ensure the GitHub PR has label `symphony` (add it if missing).
     - Add the `review-this` label to trigger automated AI PR review.
 9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
@@ -405,7 +405,14 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 
 ### Notes
 
-- <short progress note with timestamp>
+Timestamped audit log. Add an entry after every milestone (state change, reproduction captured, code change, validation run, PR event, review addressed). Use ISO format: `YYYY-MM-DD HH:MMZ: <action>`.
+
+- YYYY-MM-DD HH:MMZ: State transition: Todo → In Progress, created workpad
+- YYYY-MM-DD HH:MMZ: Pull skill: merged origin/main clean, HEAD now <short-sha>
+- YYYY-MM-DD HH:MMZ: Reproduction captured: <command or behavior observed>
+- YYYY-MM-DD HH:MMZ: Validation passed: <test command and result>
+- YYYY-MM-DD HH:MMZ: Committed <short-sha>: <commit message summary>
+- YYYY-MM-DD HH:MMZ: PR #N opened, awaiting checks
 
 ### Confusions
 
