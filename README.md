@@ -41,7 +41,7 @@ Click "Use this template" to create a new repository with:
 - Rust toolchain (stable)
 - Python 3.12+ with `uv` for OpenHands server
 - Linear API key (for tracker integration)
-- OpenAI API key (for agent runtime)
+- LLM API key (any LiteLLM-compatible provider: OpenAI, Anthropic, Fireworks, etc.)
 
 ### Installation
 
@@ -61,14 +61,39 @@ opensymphony --help
 
 For new projects, use the [OpenSymphony-template](https://github.com/kumanday/OpenSymphony-template) repository as a starting point.
 
-For existing projects, copy `WORKFLOW.example.md` to your target repository as `WORKFLOW.md` and modify:
+For existing projects, copy these files from the template repo:
 
 ```bash
 # From your target repository:
-cp /path/to/OpenSymphony/WORKFLOW.example.md ./WORKFLOW.md
+
+# 1. WORKFLOW.md (orchestration configuration)
+curl -o WORKFLOW.md https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/WORKFLOW.md
+
+# 2. Skills directory (commit, push, pull, land, linear, convert-tasks-to-linear, create-implementation-plan)
+mkdir -p .agents/skills
+for skill in commit land pull push linear convert-tasks-to-linear create-implementation-plan; do
+  mkdir -p ".agents/skills/$skill"
+  curl -o ".agents/skills/$skill/SKILL.md" \
+    "https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/.agents/skills/$skill/SKILL.md"
+done
+
+# 3. GitHub workflows (AI PR review)
+mkdir -p .github/workflows
+curl -o .github/workflows/ai-pr-review.yml \
+  https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/.github/workflows/ai-pr-review.yml
+
+# 4. PR template and CODEOWNERS
+curl -o .github/pull_request_template.md \
+  https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/.github/pull_request_template.md
+curl -o .github/CODEOWNERS \
+  https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/.github/CODEOWNERS
+
+# 5. Create required labels
+gh label create "symphony" --description "PR created by OpenSymphony" --color "1f77b4" || true
+gh label create "review-this" --description "Trigger AI PR review" --color "d73a4a" || true
 ```
 
-Key values to customize:
+Then edit `WORKFLOW.md` to set your project details:
 
 | Field | Description | Env Var | Example |
 |-------|-------------|---------|---------|
