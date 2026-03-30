@@ -174,6 +174,17 @@ pub trait WorkerBackend {
         request: WorkerStartRequest,
     ) -> Result<WorkerLaunch, Self::Error>;
 
+    async fn start_workers(
+        &mut self,
+        requests: Vec<WorkerStartRequest>,
+    ) -> Vec<Result<WorkerLaunch, Self::Error>> {
+        let mut launches = Vec::with_capacity(requests.len());
+        for request in requests {
+            launches.push(self.start_worker(request).await);
+        }
+        launches
+    }
+
     async fn poll_updates(&mut self) -> Result<Vec<WorkerUpdate>, Self::Error>;
 
     async fn abort_worker(
@@ -317,6 +328,29 @@ where
         );
 
         OrchestratorSnapshot::new(generated_at, daemon, issues)
+    }
+
+    pub async fn bootstrap(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<OrchestratorSnapshot, SchedulerError> {
+        if self.pending_recovery.is_none() {
+            self.pending_recovery =
+                Some(self.workspace.recover_workspaces().await.map_err(|error| {
+                    SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    }
+                })?);
+        }
+
+        let tracker_snapshot = self.load_tracker_snapshot().await?;
+        self.bootstrap_recovery(&tracker_snapshot, observed_at)
+            .await?;
+        self.reconcile_tracker_state(&tracker_snapshot, observed_at)
+            .await?;
+
+        self.last_poll_at = Some(observed_at);
+        Ok(self.snapshot(observed_at))
     }
 
     pub async fn tick(
@@ -585,11 +619,18 @@ where
     ) -> Result<(), SchedulerError> {
         let ready =
             filter_issues_for_dispatch(active_issues.to_vec(), &self.config.terminal_state_set());
+        let available_capacity = usize::try_from(self.config.max_concurrent_agents)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(self.worker_index.len());
+        if available_capacity == 0 {
+            return Ok(());
+        }
+
+        let mut pending_launches = Vec::new();
+        let mut planned_running_by_state: HashMap<String, usize> = HashMap::new();
 
         for tracker_issue in ready {
-            if self.worker_index.len()
-                >= usize::try_from(self.config.max_concurrent_agents).unwrap_or(usize::MAX)
-            {
+            if pending_launches.len() >= available_capacity {
                 break;
             }
 
@@ -614,7 +655,12 @@ where
                 &self.config.max_concurrent_agents_by_state,
                 &normalized.state.name,
             ) {
-                let running_in_state = self.running_count_for_state(&normalized.state.name);
+                let state_key = normalized_state_name(&normalized.state.name);
+                let running_in_state = self.running_count_for_state(&normalized.state.name)
+                    + planned_running_by_state
+                        .get(&state_key)
+                        .copied()
+                        .unwrap_or_default();
                 if running_in_state >= usize::try_from(limit).unwrap_or(usize::MAX) {
                     continue;
                 }
@@ -661,7 +707,27 @@ where
                 workspace,
                 run: claimed_run.clone(),
             };
-            match self.worker.start_worker(start_request).await {
+
+            *planned_running_by_state
+                .entry(normalized_state_name(&normalized.state.name))
+                .or_default() += 1;
+            pending_launches.push((issue_id, execution, claimed_run, start_request));
+        }
+
+        let start_results = self
+            .worker
+            .start_workers(
+                pending_launches
+                    .iter()
+                    .map(|(_, _, _, request)| request.clone())
+                    .collect(),
+            )
+            .await;
+
+        for ((issue_id, mut execution, claimed_run, _), result) in
+            pending_launches.into_iter().zip(start_results.into_iter())
+        {
+            match result {
                 Ok(launch) => {
                     execution = execution.start_running(
                         observed_at,
@@ -669,11 +735,13 @@ where
                         Some(launch.conversation),
                     )?;
                     execution.record_turn_started(observed_at)?;
-                    self.worker_index.insert(worker_id, issue_id.clone());
+                    self.worker_index
+                        .insert(claimed_run.worker_id.clone(), issue_id.clone());
                     debug!(issue_id = %issue_id, "dispatched scheduler worker");
                 }
                 Err(error) => {
                     let detail = error.to_string();
+                    warn!(issue_id = %issue_id, error = %detail, "failed to launch scheduler worker");
                     let outcome = WorkerOutcomeRecord::from_run(
                         &claimed_run,
                         WorkerOutcomeKind::Failed,

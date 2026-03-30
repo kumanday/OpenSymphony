@@ -125,7 +125,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let workspace_manager = Arc::new(opensymphony_workspace::WorkspaceManager::new(
         build_workspace_manager_config(&runtime.workflow),
     )?);
-    let workspace = RuntimeWorkspaceBackend::new(workspace_manager.clone());
+    let workspace = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &runtime.workflow);
 
     let (transport, mut supervisor) = build_runtime_transport(&runtime).await?;
     let client = opensymphony_openhands::OpenHandsClient::new(transport);
@@ -152,8 +152,21 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         Utc::now(),
     );
 
+    let bootstrap_snapshot = scheduler.bootstrap(now_timestamp()).await?;
+    push_recent_event(
+        &mut recent_events,
+        RecentEventKind::SnapshotPublished,
+        None,
+        format!(
+            "recovered startup state; running={}, retry_queue={}",
+            bootstrap_snapshot.daemon.running_issue_count,
+            bootstrap_snapshot.daemon.retry_queue_count
+        ),
+        Utc::now(),
+    );
+
     let initial_snapshot = map_snapshot(
-        &scheduler.snapshot(now_timestamp()),
+        &bootstrap_snapshot,
         runtime.workflow.config.workspace.root.as_path(),
         &terminal_state_set(&runtime.workflow),
         current_agent_server_status(&mut supervisor, client.base_url()),

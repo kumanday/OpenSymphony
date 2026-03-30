@@ -729,8 +729,6 @@ impl RuntimeEventStream {
 
     async fn attach(mut self) -> Result<Self, OpenHandsError> {
         self.refresh_conversation().await?;
-        let initial_cache = self.client.search_all_events(self.conversation_id).await?;
-        self.push_new_events(initial_cache.items().iter().cloned(), true);
         self.connect_ready_and_reconcile().await?;
         Ok(self)
     }

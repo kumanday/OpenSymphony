@@ -77,6 +77,7 @@ Current implementation:
 - `cargo test --workspace` exercises the fake-server contract suite in `crates/opensymphony-openhands/tests/fake_server_contract.rs`
 - `cargo test -p opensymphony-linear` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
 - `cargo test -p opensymphony-orchestrator` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, and manifest-backed workspace recovery against fake tracker/workspace/worker backends
+- `cargo test -p opensymphony-cli orchestrator_run::backends::tests` covers runtime workspace-manifest recovery, in-flight run detection from `run.json`, and launch-path failure handling in the concrete CLI backends
 - `crates/opensymphony-cli/tests/doctor.rs` runs the CLI live-probe path against `opensymphony-testkit`
 - `scripts/smoke_local.sh` runs the static doctor pass
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
@@ -198,6 +199,7 @@ Current implementation:
 Current repository implementation:
 
 - `crates/opensymphony-orchestrator/tests/scheduler.rs` covers continuation retry, failure backoff, cached per-state dispatch limits across finish/stall/inactive/terminal/reconciliation transitions, runtime-event-fed stall detection, terminal reconciliation with cleanup, and manifest-backed workspace recovery using fake backends
+- local restart validation should confirm that `opensymphony run` publishes a recovered snapshot before the first post-restart launch wave, so the TUI issue list repopulates even when reused conversations still take time to attach
 - `crates/opensymphony-cli/src/orchestrator_run/backends.rs` covers immediate launch-failure cleanup and abort-on-drop cleanup for tracked runtime worker tasks in the production CLI adapter
 
 ## 3.5 Control plane and TUI

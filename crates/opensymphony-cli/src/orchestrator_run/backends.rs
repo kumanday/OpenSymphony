@@ -4,8 +4,8 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use opensymphony_domain::{
-    ConversationMetadata, NormalizedIssue, TimestampMs, WorkerOutcomeKind, WorkerOutcomeRecord,
-    WorkspaceKey,
+    ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
+    NormalizedIssue, TimestampMs, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
 };
 use opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use opensymphony_openhands::{
@@ -20,14 +20,14 @@ use opensymphony_orchestrator::{
 };
 use opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow};
 use opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, WorkspaceError,
-    WorkspaceManager, WorkspaceManagerConfig,
+    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunStatus,
+    WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
 };
 use thiserror::Error;
 use tokio::{
     fs,
     sync::{mpsc, oneshot},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::timeout,
 };
 use url::Url;
@@ -79,6 +79,8 @@ pub(super) struct RuntimeTrackerBackend {
 
 pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
+    active_states: Vec<String>,
+    terminal_states: Vec<String>,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -96,6 +98,11 @@ pub(super) struct RuntimeWorkerBackend {
 struct ActiveWorkerTask {
     handle: JoinHandle<()>,
     run: opensymphony_domain::RunAttempt,
+}
+
+struct PendingLaunch {
+    worker_id: String,
+    launch_rx: oneshot::Receiver<LaunchReport>,
 }
 
 struct SchedulerObserver {
@@ -270,8 +277,12 @@ impl TrackerBackend for RuntimeTrackerBackend {
 }
 
 impl RuntimeWorkspaceBackend {
-    pub(super) fn new(manager: Arc<WorkspaceManager>) -> Self {
-        Self { manager }
+    pub(super) fn new(manager: Arc<WorkspaceManager>, workflow: &ResolvedWorkflow) -> Self {
+        Self {
+            manager,
+            active_states: workflow.config.tracker.active_states.clone(),
+            terminal_states: workflow.config.tracker.terminal_states.clone(),
+        }
     }
 }
 
@@ -298,7 +309,36 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
     }
 
     async fn recover_workspaces(&mut self) -> Result<Vec<RecoveryRecord>, Self::Error> {
-        Ok(Vec::new())
+        let mut recoveries = Vec::new();
+        for (handle, manifest) in self.manager.list_all_workspaces().await? {
+            let run_manifest = self.manager.load_run_manifest(&handle).await?;
+            let had_in_flight_run = run_manifest.as_ref().is_some_and(|run| {
+                matches!(
+                    run.status,
+                    RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
+                )
+            });
+
+            recoveries.push(RecoveryRecord {
+                issue: normalized_issue_from_manifest(
+                    &manifest,
+                    &self.active_states,
+                    &self.terminal_states,
+                )?,
+                workspace: opensymphony_domain::WorkspaceRecord {
+                    path: handle.workspace_path().to_path_buf(),
+                    workspace_key: WorkspaceKey::new(handle.workspace_key().to_string())?,
+                    created_now: false,
+                    created_at: Some(datetime_to_timestamp_ms(manifest.created_at)),
+                    updated_at: Some(datetime_to_timestamp_ms(manifest.updated_at)),
+                    last_seen_tracker_refresh_at: manifest
+                        .last_seen_tracker_refresh_at
+                        .map(datetime_to_timestamp_ms),
+                },
+                had_in_flight_run,
+            });
+        }
+        Ok(recoveries)
     }
 
     async fn cleanup_workspace(
@@ -375,54 +415,8 @@ impl RuntimeWorkerBackend {
             task.handle.abort();
         }
     }
-}
 
-impl Drop for RuntimeWorkerBackend {
-    fn drop(&mut self) {
-        self.abort_all_tracked_tasks();
-    }
-}
-
-fn transport_port_override(url: &Url) -> Result<u16, RunCommandError> {
-    url.port_or_known_default()
-        .ok_or_else(|| RunCommandError::MissingTransportPort {
-            value: url.as_str().to_string(),
-        })
-}
-
-fn report_launch_failure(
-    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
-    detail: impl Into<String>,
-) {
-    if let Some(sender) = launch_tx.take() {
-        let _ = sender.send(LaunchReport::Failed(detail.into()));
-    }
-}
-
-fn pending_launch_failure_detail(result: &Result<IssueSessionResult, IssueSessionError>) -> String {
-    match result {
-        Ok(result) => {
-            let detail = result
-                .worker_outcome
-                .error
-                .clone()
-                .or_else(|| result.worker_outcome.summary.clone())
-                .unwrap_or_else(|| {
-                    "worker finished before reporting a conversation launch".to_string()
-                });
-            format!("worker finished before reporting a conversation launch: {detail}")
-        }
-        Err(error) => format!("worker failed before reporting a conversation launch: {error}"),
-    }
-}
-
-impl WorkerBackend for RuntimeWorkerBackend {
-    type Error = CliWorkerError;
-
-    async fn start_worker(
-        &mut self,
-        request: WorkerStartRequest,
-    ) -> Result<WorkerLaunch, Self::Error> {
+    fn spawn_worker_task(&mut self, request: WorkerStartRequest) -> PendingLaunch {
         let mut runner = IssueSessionRunner::new(self.client.clone(), self.runner_config.clone());
         if let Some(source) = self.workpad_comment_source.clone() {
             runner = runner.with_workpad_comment_source(source);
@@ -510,31 +504,144 @@ impl WorkerBackend for RuntimeWorkerBackend {
             worker_id.to_string(),
             ActiveWorkerTask {
                 handle,
-                run: request.run.clone(),
+                run: request.run,
             },
         );
 
-        match timeout(self.launch_timeout, launch_rx).await {
+        PendingLaunch {
+            worker_id: worker_id.to_string(),
+            launch_rx,
+        }
+    }
+
+    async fn resolve_launch_result(
+        &mut self,
+        worker_id: &str,
+        result: Result<
+            Result<LaunchReport, oneshot::error::RecvError>,
+            tokio::time::error::Elapsed,
+        >,
+    ) -> Result<WorkerLaunch, CliWorkerError> {
+        match result {
             Ok(Ok(LaunchReport::Conversation(conversation))) => Ok(WorkerLaunch {
                 conversation: *conversation,
             }),
             Ok(Ok(LaunchReport::Failed(detail))) => {
-                if let Some(task) = self.tasks.remove(worker_id.as_str()) {
+                if let Some(task) = self.tasks.remove(worker_id) {
                     task.handle.await?;
                 }
                 Err(CliWorkerError::LaunchFailed(detail))
             }
             Ok(Err(_)) => {
-                if let Some(task) = self.tasks.remove(worker_id.as_str()) {
+                if let Some(task) = self.tasks.remove(worker_id) {
                     task.handle.await?;
                 }
                 Err(CliWorkerError::LaunchChannelClosed)
             }
             Err(_) => {
-                self.abort_tracked_task(worker_id.as_str());
+                self.abort_tracked_task(worker_id);
                 Err(CliWorkerError::LaunchTimeout(self.launch_timeout))
             }
         }
+    }
+}
+
+impl Drop for RuntimeWorkerBackend {
+    fn drop(&mut self) {
+        self.abort_all_tracked_tasks();
+    }
+}
+
+fn transport_port_override(url: &Url) -> Result<u16, RunCommandError> {
+    url.port_or_known_default()
+        .ok_or_else(|| RunCommandError::MissingTransportPort {
+            value: url.as_str().to_string(),
+        })
+}
+
+fn report_launch_failure(
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+    detail: impl Into<String>,
+) {
+    if let Some(sender) = launch_tx.take() {
+        let _ = sender.send(LaunchReport::Failed(detail.into()));
+    }
+}
+
+fn pending_launch_failure_detail(result: &Result<IssueSessionResult, IssueSessionError>) -> String {
+    match result {
+        Ok(result) => {
+            let detail = result
+                .worker_outcome
+                .error
+                .clone()
+                .or_else(|| result.worker_outcome.summary.clone())
+                .unwrap_or_else(|| {
+                    "worker finished before reporting a conversation launch".to_string()
+                });
+            format!("worker finished before reporting a conversation launch: {detail}")
+        }
+        Err(error) => format!("worker failed before reporting a conversation launch: {error}"),
+    }
+}
+
+impl WorkerBackend for RuntimeWorkerBackend {
+    type Error = CliWorkerError;
+
+    async fn start_worker(
+        &mut self,
+        request: WorkerStartRequest,
+    ) -> Result<WorkerLaunch, Self::Error> {
+        let pending = self.spawn_worker_task(request);
+        let worker_id = pending.worker_id.clone();
+        self.resolve_launch_result(
+            &worker_id,
+            timeout(self.launch_timeout, pending.launch_rx).await,
+        )
+        .await
+    }
+
+    async fn start_workers(
+        &mut self,
+        requests: Vec<WorkerStartRequest>,
+    ) -> Vec<Result<WorkerLaunch, Self::Error>> {
+        let pending = requests
+            .into_iter()
+            .map(|request| self.spawn_worker_task(request))
+            .collect::<Vec<_>>();
+        let ordered_worker_ids = pending
+            .iter()
+            .map(|launch| launch.worker_id.clone())
+            .collect::<Vec<_>>();
+
+        let mut join_set = JoinSet::new();
+        for launch in pending {
+            let worker_id = launch.worker_id;
+            let timeout_duration = self.launch_timeout;
+            let rx = launch.launch_rx;
+            join_set.spawn(async move { (worker_id, timeout(timeout_duration, rx).await) });
+        }
+
+        let mut completed = HashMap::new();
+        while let Some(result) = join_set.join_next().await {
+            match result {
+                Ok((worker_id, outcome)) => {
+                    completed.insert(worker_id, outcome);
+                }
+                Err(_) => {}
+            }
+        }
+
+        let mut launches = Vec::with_capacity(ordered_worker_ids.len());
+        for worker_id in ordered_worker_ids {
+            let outcome = completed
+                .remove(&worker_id)
+                .unwrap_or(Ok(Ok(LaunchReport::Failed(
+                    "worker launch waiter finished without a result".to_string(),
+                ))));
+            launches.push(self.resolve_launch_result(&worker_id, outcome).await);
+        }
+        launches
     }
 
     async fn poll_updates(&mut self) -> Result<Vec<WorkerUpdate>, Self::Error> {
@@ -583,6 +690,58 @@ impl WorkerBackend for RuntimeWorkerBackend {
         self.abort_tracked_task(worker_id.as_str());
         Ok(())
     }
+}
+
+fn normalized_state_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+fn issue_state_category(
+    name: &str,
+    active_states: &[String],
+    terminal_states: &[String],
+) -> IssueStateCategory {
+    let normalized = normalized_state_name(name);
+    if terminal_states
+        .iter()
+        .any(|state| normalized_state_name(state) == normalized)
+    {
+        IssueStateCategory::Terminal
+    } else if active_states
+        .iter()
+        .any(|state| normalized_state_name(state) == normalized)
+    {
+        IssueStateCategory::Active
+    } else {
+        IssueStateCategory::NonActive
+    }
+}
+
+fn normalized_issue_from_manifest(
+    manifest: &opensymphony_workspace::IssueManifest,
+    active_states: &[String],
+    terminal_states: &[String],
+) -> Result<NormalizedIssue, CliWorkspaceError> {
+    Ok(NormalizedIssue {
+        id: IssueId::new(manifest.issue_id.clone())?,
+        identifier: IssueIdentifier::new(manifest.identifier.clone())?,
+        title: manifest.title.clone(),
+        description: None,
+        priority: None,
+        state: IssueState {
+            id: None,
+            name: manifest.current_state.clone(),
+            category: issue_state_category(&manifest.current_state, active_states, terminal_states),
+        },
+        branch_name: None,
+        url: None,
+        labels: Vec::new(),
+        parent_id: None,
+        blocked_by: Vec::new(),
+        sub_issues: Vec::new(),
+        created_at: Some(datetime_to_timestamp_ms(manifest.created_at)),
+        updated_at: Some(datetime_to_timestamp_ms(manifest.updated_at)),
+    })
 }
 
 fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
@@ -676,6 +835,44 @@ mod tests {
                 .is_empty(),
             "launch failures should be surfaced through start_worker, not queued as runtime updates",
         );
+    }
+
+    #[tokio::test]
+    async fn recover_workspaces_loads_managed_manifests_and_inflight_runs() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        workspace_manager
+            .start_run(&ensured.handle, &RunDescriptor::new("run-recovery", 2))
+            .await
+            .expect("run manifest should be written");
+
+        let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
+        let recoveries = backend
+            .recover_workspaces()
+            .await
+            .expect("workspace recovery should succeed");
+
+        assert_eq!(recoveries.len(), 1);
+        let recovered = &recoveries[0];
+        assert_eq!(
+            recovered.issue.identifier.to_string(),
+            issue.identifier.to_string()
+        );
+        assert_eq!(recovered.issue.state.category, IssueStateCategory::Active);
+        assert!(recovered.had_in_flight_run);
+        assert_eq!(recovered.workspace.path, ensured.handle.workspace_path());
     }
 
     #[tokio::test]
