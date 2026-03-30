@@ -108,6 +108,13 @@ The persisted OpenHands state directory is derived from the workflow-owned `open
 The workflow-owned `openhands.conversation.reuse_policy` can override that default with `fresh_each_run`, which forces a new conversation and a full prompt on every worker lifetime. Unsupported policy names now fail from the OpenHands runtime boundary instead of being silently dropped during workflow resolution.
 The persisted conversation manifest also records the owning issue reference, active reuse policy, creation and attach timestamps, the launch profile used to create the thread, and an `llm_config_fingerprint` that tracks the model name for observability. This allows `opensymphony debug <issue-id>` to reattach to the same session with matching runtime settings. Persisting the policy keeps recovery deterministic when the workflow later changes from one policy to another.
 
+Daemon restart recovery is now intentionally split into two phases:
+
+- a startup bootstrap pass restores issue/workspace state from managed workspace metadata and publishes that snapshot before new worker launches begin, so the TUI can repopulate quickly after `opensymphony run` restarts
+- later scheduler ticks handle normal dispatch, retry, and terminal reconciliation
+
+When multiple ready issues need launches in the same tick, the runtime backend also starts those launch waits concurrently up to the scheduler's existing capacity limits instead of serializing every conversation attach behind the first one.
+
 **Simplified conversation resumption**: The runner no longer checks for LLM configuration drift or recreates conversations. Conversations are reused as-is by directly attaching to the existing `conversation_id`. The stored LLM configuration in the conversation's `meta.json` is used without modification. This avoids the complexity and brittleness of the previous delete-and-recreate approach, which was causing issues on every orchestrator restart due to false-positive drift detection.
 
 ### 3.6 The UI only sees the control plane

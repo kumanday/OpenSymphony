@@ -63,8 +63,9 @@ impl SchedulerConfig {
                 .max_concurrent_agents_by_state
                 .iter()
                 .map(|(state, limit)| {
+                    let normalized_state = normalized_state_name(state);
                     u32::try_from(*limit)
-                        .map(|limit| (state.clone(), limit))
+                        .map(|limit| (normalized_state, limit))
                         .map_err(|_| SchedulerError::InvalidConfiguration {
                             detail: format!(
                                 "workflow max_concurrent_agents_by_state[{state}] {limit} exceeds u32::MAX ({})",
@@ -173,6 +174,17 @@ pub trait WorkerBackend {
         &mut self,
         request: WorkerStartRequest,
     ) -> Result<WorkerLaunch, Self::Error>;
+
+    async fn start_workers(
+        &mut self,
+        requests: Vec<WorkerStartRequest>,
+    ) -> Vec<Result<WorkerLaunch, Self::Error>> {
+        let mut launches = Vec::with_capacity(requests.len());
+        for request in requests {
+            launches.push(self.start_worker(request).await);
+        }
+        launches
+    }
 
     async fn poll_updates(&mut self) -> Result<Vec<WorkerUpdate>, Self::Error>;
 
@@ -317,6 +329,29 @@ where
         );
 
         OrchestratorSnapshot::new(generated_at, daemon, issues)
+    }
+
+    pub async fn bootstrap(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<OrchestratorSnapshot, SchedulerError> {
+        if self.pending_recovery.is_none() {
+            self.pending_recovery =
+                Some(self.workspace.recover_workspaces().await.map_err(|error| {
+                    SchedulerError::Workspace {
+                        detail: error.to_string(),
+                    }
+                })?);
+        }
+
+        let tracker_snapshot = self.load_tracker_snapshot().await?;
+        self.bootstrap_recovery(&tracker_snapshot, observed_at)
+            .await?;
+        self.reconcile_tracker_state(&tracker_snapshot, observed_at)
+            .await?;
+
+        self.last_poll_at = Some(observed_at);
+        Ok(self.snapshot(observed_at))
     }
 
     pub async fn tick(
@@ -585,11 +620,18 @@ where
     ) -> Result<(), SchedulerError> {
         let ready =
             filter_issues_for_dispatch(active_issues.to_vec(), &self.config.terminal_state_set());
+        let available_capacity = usize::try_from(self.config.max_concurrent_agents)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(self.worker_index.len());
+        if available_capacity == 0 {
+            return Ok(());
+        }
+
+        let mut pending_launches = Vec::new();
+        let mut planned_running_by_state: HashMap<String, usize> = HashMap::new();
 
         for tracker_issue in ready {
-            if self.worker_index.len()
-                >= usize::try_from(self.config.max_concurrent_agents).unwrap_or(usize::MAX)
-            {
+            if pending_launches.len() >= available_capacity {
                 break;
             }
 
@@ -610,11 +652,16 @@ where
                 continue;
             }
 
-            if let Some(limit) = state_limit_for(
-                &self.config.max_concurrent_agents_by_state,
-                &normalized.state.name,
-            ) {
-                let running_in_state = self.running_count_for_state(&normalized.state.name);
+            let state_key = normalized_state_name(&normalized.state.name);
+
+            if let Some(limit) =
+                state_limit_for(&self.config.max_concurrent_agents_by_state, &state_key)
+            {
+                let running_in_state = self.running_count_for_normalized_state(&state_key)
+                    + planned_running_by_state
+                        .get(&state_key)
+                        .copied()
+                        .unwrap_or_default();
                 if running_in_state >= usize::try_from(limit).unwrap_or(usize::MAX) {
                     continue;
                 }
@@ -661,7 +708,25 @@ where
                 workspace,
                 run: claimed_run.clone(),
             };
-            match self.worker.start_worker(start_request).await {
+
+            *planned_running_by_state.entry(state_key).or_default() += 1;
+            pending_launches.push((issue_id, execution, claimed_run, start_request));
+        }
+
+        let start_results = self
+            .worker
+            .start_workers(
+                pending_launches
+                    .iter()
+                    .map(|(_, _, _, request)| request.clone())
+                    .collect(),
+            )
+            .await;
+
+        for ((issue_id, mut execution, claimed_run, _), result) in
+            pending_launches.into_iter().zip(start_results.into_iter())
+        {
+            match result {
                 Ok(launch) => {
                     execution = execution.start_running(
                         observed_at,
@@ -669,11 +734,13 @@ where
                         Some(launch.conversation),
                     )?;
                     execution.record_turn_started(observed_at)?;
-                    self.worker_index.insert(worker_id, issue_id.clone());
+                    self.worker_index
+                        .insert(claimed_run.worker_id.clone(), issue_id.clone());
                     debug!(issue_id = %issue_id, "dispatched scheduler worker");
                 }
                 Err(error) => {
                     let detail = error.to_string();
+                    warn!(issue_id = %issue_id, error = %detail, "failed to launch scheduler worker");
                     let outcome = WorkerOutcomeRecord::from_run(
                         &claimed_run,
                         WorkerOutcomeKind::Failed,
@@ -925,9 +992,9 @@ where
         self.debug_assert_running_counts();
     }
 
-    fn running_count_for_state(&self, state_name: &str) -> usize {
+    fn running_count_for_normalized_state(&self, state_key: &str) -> usize {
         self.running_counts_by_state
-            .get(&normalized_state_name(state_name))
+            .get(state_key)
             .copied()
             .unwrap_or_default()
     }
@@ -1074,11 +1141,12 @@ fn state_category_from_name(name: &str, config: &SchedulerConfig) -> IssueStateC
     }
 }
 
-fn state_limit_for(limits: &BTreeMap<String, u32>, state_name: &str) -> Option<u32> {
-    let normalized = normalized_state_name(state_name);
-    limits
-        .iter()
-        .find_map(|(state, limit)| (normalized_state_name(state) == normalized).then_some(*limit))
+fn state_limit_for(limits: &BTreeMap<String, u32>, state_key: &str) -> Option<u32> {
+    limits.get(state_key).copied().or_else(|| {
+        limits.iter().find_map(|(configured_state, limit)| {
+            (normalized_state_name(configured_state) == state_key).then_some(*limit)
+        })
+    })
 }
 
 fn non_active_release_reason(category: IssueStateCategory) -> Option<ReleaseReason> {

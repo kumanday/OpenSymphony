@@ -197,6 +197,13 @@ Use cases:
 
 - restart recovery
 - operator debugging
+- startup bootstrap before new worker launch
+
+Restart recovery should rely on managed workspace metadata only:
+
+- `issue.json` restores the owning issue reference and last known tracker state
+- `run.json` indicates whether the last known worker lifetime was still in `preparing`, `prepared`, or `running` when the daemon stopped
+- startup bootstrap may republish recovered workspace state immediately, but it must not assume any recovered run is still live until a fresh scheduler tick revalidates tracker state and runtime launch status
 - workspace introspection
 - authoritative ownership check for non-injective sanitized workspace keys
 
