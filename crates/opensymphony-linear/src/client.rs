@@ -603,7 +603,7 @@ fn normalize_required_string(field_name: &str, value: &str) -> Result<String, Li
 
 fn contains_workpad_marker(body: &str) -> bool {
     body.lines()
-        .any(|line| line.trim_start().starts_with("## Codex Workpad"))
+        .any(|line| line.trim_start().starts_with("## Agent Harness Workpad"))
 }
 
 fn ensure_complete_issue_states(

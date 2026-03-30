@@ -17,7 +17,7 @@ description:
 
 ## Inputs
 
-- Codex session history for intent and rationale.
+- Session history for intent and rationale.
 - `git status`, `git diff`, and `git diff --staged` for actual changes.
 - Repo-specific commit conventions if documented.
 

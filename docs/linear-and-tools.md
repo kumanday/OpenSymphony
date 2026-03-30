@@ -18,7 +18,7 @@ Current repository implementation:
 
 - `opensymphony-orchestrator::Scheduler` now drives every tick from three Linear read paths: active candidates, terminal issues, and by-ID state refresh for anything already tracked locally
 - candidate reads decide new dispatches, by-ID refresh releases work that falls out of the configured active states, and terminal reads drive startup cleanup plus terminal reconciliation
-- `opensymphony-linear::LinearClient` also exposes `fetch_workpad_comment(issue_id)` for runtime recovery flows that need the latest active `## Codex Workpad` comment without coupling the OpenHands runtime directly to Linear GraphQL details
+- `opensymphony-linear::LinearClient` also exposes `fetch_workpad_comment(issue_id)` for runtime recovery flows that need the latest active `## Agent Harness Workpad` comment without coupling the OpenHands runtime directly to Linear GraphQL details
 
 ## 2.1 Candidate issue fetch
 
@@ -89,7 +89,7 @@ Current repository implementation:
 
 - `fetch_workpad_comment(issue_id)` pages `issue.comments`
 - it ignores resolved comments
-- it selects the latest updated comment whose body contains the `## Codex Workpad` marker
+- it selects the latest updated comment whose body contains the `## Agent Harness Workpad` marker
 - it returns only `id`, `body`, and `updated_at`, keeping the recovery surface intentionally small
 
 ## 3. Candidate sorting and eligibility
