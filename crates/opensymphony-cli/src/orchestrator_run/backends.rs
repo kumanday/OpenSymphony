@@ -624,8 +624,13 @@ impl WorkerBackend for RuntimeWorkerBackend {
 
         let mut completed = HashMap::new();
         while let Some(result) = join_set.join_next().await {
-            if let Ok((worker_id, outcome)) = result {
-                completed.insert(worker_id, outcome);
+            match result {
+                Ok((worker_id, outcome)) => {
+                    completed.insert(worker_id, outcome);
+                }
+                Err(join_error) => {
+                    tracing::error!(error = %join_error, "worker launch waiter task failed");
+                }
             }
         }
 
