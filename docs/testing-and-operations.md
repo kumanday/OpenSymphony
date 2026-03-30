@@ -362,8 +362,9 @@ Current workspace commands:
 
 - `cd /path/to/target-repo && opensymphony run`
 - `cd /path/to/target-repo && opensymphony run --config ./config.yaml`
+- copy `examples/target-repo/config.yaml` into the target repo root as `config.yaml` before first run; `examples/configs/local-dev.yaml` is only for doctor/preflight against this repo checkout
 - `cd /path/to/target-repo && opensymphony debug COE-284`
-- `opensymphony tui --url http://127.0.0.1:3000/`
+- `opensymphony tui --url http://127.0.0.1:2468/`
 
 Possible helper commands later:
 
@@ -378,9 +379,9 @@ Current validation commands for the implemented orchestrator and observability s
 - `cargo install --path . --locked --root /tmp/opensymphony-install-check`
 - `cd /path/to/target-repo && /tmp/opensymphony-install-check/bin/opensymphony run`
 - `cd /path/to/target-repo && /tmp/opensymphony-install-check/bin/opensymphony debug COE-284`
-- `curl http://127.0.0.1:3000/api/v1/snapshot`
-- `opensymphony tui --url http://127.0.0.1:3000/ --exit-after-ms 1200`
-- `curl http://127.0.0.1:3000/healthz`
+- `curl http://127.0.0.1:2468/api/v1/snapshot`
+- `opensymphony tui --url http://127.0.0.1:2468/ --exit-after-ms 1200`
+- `curl http://127.0.0.1:2468/healthz`
 
 The debug command is intentionally workspace-backed rather than tracker-backed: it
 finds the managed issue workspace, loads `.opensymphony/conversation.json`, and
@@ -422,9 +423,10 @@ Current command set in this repository:
 - `./tools/openhands-server/install.sh`
 - `cargo install --path .`
 - `cd /path/to/target-repo && opensymphony run --config ./config.yaml`
-- `curl http://127.0.0.1:3000/healthz`
-- `curl http://127.0.0.1:3000/api/v1/snapshot`
-- `opensymphony tui --url http://127.0.0.1:3000/ --exit-after-ms 1200`
+- if you are bootstrapping a new target repo, start by copying `examples/target-repo/config.yaml` to `./config.yaml` and then adjust `openhands.tool_dir`, bind port, and any env-backed paths as needed
+- `curl http://127.0.0.1:2468/healthz`
+- `curl http://127.0.0.1:2468/api/v1/snapshot`
+- `opensymphony tui --url http://127.0.0.1:2468/ --exit-after-ms 1200`
 - `opensymphony doctor --config examples/configs/local-dev.yaml`
 - `opensymphony doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_pinned_server -- --nocapture`

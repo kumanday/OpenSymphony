@@ -13,7 +13,7 @@ use tokio::fs;
 use super::{RunArgs, RunCommandError};
 
 const DEFAULT_CONFIG_FILE: &str = "config.yaml";
-const DEFAULT_CONTROL_PLANE_BIND: &str = "127.0.0.1:3000";
+const DEFAULT_CONTROL_PLANE_BIND: &str = "127.0.0.1:2468";
 
 #[derive(Debug, Default, Deserialize)]
 struct RunConfigFile {
