@@ -185,7 +185,7 @@ The legacy `opensymphony daemon` command is still available as a demo control-pl
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     OpenSymphony Daemon                      │
+│                     OpenSymphony Daemon                     │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
 │  │ Orchestrator│  │   Linear    │  │   OpenHands Client  │  │
 │  │  Scheduler  │  │   Adapter   │  │  (REST + WebSocket) │  │
@@ -193,19 +193,19 @@ The legacy `opensymphony daemon` command is still available as a demo control-pl
 │         │                │                    │             │
 │  ┌──────▼────────────────▼────────────────────▼──────────┐  │
 │  │              Workspace Manager                        │  │
-│  │   (per-issue directories, hooks, manifests)         │  │
+│  │   (per-issue directories, hooks, manifests)           │  │
 │  └───────────────────────────────────────────────────────┘  │
 │                           │                                 │
-│  ┌────────────────────────▼────────────────────────────┐  │
-│  │           Control Plane API (read-only)              │  │
-│  │     GET /healthz, /api/v1/snapshot, /api/v1/events  │  │
-│  └────────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────▼──────────────────────────────┐  │
+│  │           Control Plane API (read-only)               │  │
+│  │     GET /healthz, /api/v1/snapshot, /api/v1/events    │  │
+│  └───────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
          │                           │
          ▼                           ▼
 ┌─────────────┐              ┌─────────────────┐
 │   Linear    │              │  OpenHands      │
-│   (Issues)  │              │  Agent-Server    │
+│   (Issues)  │              │  Agent-Server   │
 └─────────────┘              └─────────────────┘
          ▲                           ▲
          │                           │
