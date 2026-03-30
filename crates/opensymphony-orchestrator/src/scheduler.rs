@@ -657,7 +657,7 @@ where
                 &self.config.max_concurrent_agents_by_state,
                 &normalized.state.name,
             ) {
-                let running_in_state = self.running_count_for_state(&normalized.state.name)
+                let running_in_state = self.running_count_for_normalized_state(&state_key)
                     + planned_running_by_state
                         .get(&state_key)
                         .copied()
@@ -992,9 +992,9 @@ where
         self.debug_assert_running_counts();
     }
 
-    fn running_count_for_state(&self, state_name: &str) -> usize {
+    fn running_count_for_normalized_state(&self, state_key: &str) -> usize {
         self.running_counts_by_state
-            .get(&normalized_state_name(state_name))
+            .get(state_key)
             .copied()
             .unwrap_or_default()
     }

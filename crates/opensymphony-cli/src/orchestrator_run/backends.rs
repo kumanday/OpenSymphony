@@ -1,6 +1,11 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use opensymphony_domain::{
@@ -79,8 +84,8 @@ pub(super) struct RuntimeTrackerBackend {
 
 pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
-    active_states: Vec<String>,
-    terminal_states: Vec<String>,
+    active_states: HashSet<String>,
+    terminal_states: HashSet<String>,
 }
 
 pub(super) struct RuntimeWorkerBackend {
@@ -280,8 +285,20 @@ impl RuntimeWorkspaceBackend {
     pub(super) fn new(manager: Arc<WorkspaceManager>, workflow: &ResolvedWorkflow) -> Self {
         Self {
             manager,
-            active_states: workflow.config.tracker.active_states.clone(),
-            terminal_states: workflow.config.tracker.terminal_states.clone(),
+            active_states: workflow
+                .config
+                .tracker
+                .active_states
+                .iter()
+                .map(|state| normalized_state_name(state))
+                .collect(),
+            terminal_states: workflow
+                .config
+                .tracker
+                .terminal_states
+                .iter()
+                .map(|state| normalized_state_name(state))
+                .collect(),
         }
     }
 }
@@ -711,19 +728,13 @@ fn normalized_state_name(name: &str) -> String {
 
 fn issue_state_category(
     name: &str,
-    active_states: &[String],
-    terminal_states: &[String],
+    active_states: &HashSet<String>,
+    terminal_states: &HashSet<String>,
 ) -> IssueStateCategory {
     let normalized = normalized_state_name(name);
-    if terminal_states
-        .iter()
-        .any(|state| normalized_state_name(state) == normalized)
-    {
+    if terminal_states.contains(&normalized) {
         IssueStateCategory::Terminal
-    } else if active_states
-        .iter()
-        .any(|state| normalized_state_name(state) == normalized)
-    {
+    } else if active_states.contains(&normalized) {
         IssueStateCategory::Active
     } else {
         IssueStateCategory::NonActive
@@ -732,8 +743,8 @@ fn issue_state_category(
 
 fn normalized_issue_from_manifest(
     manifest: &opensymphony_workspace::IssueManifest,
-    active_states: &[String],
-    terminal_states: &[String],
+    active_states: &HashSet<String>,
+    terminal_states: &HashSet<String>,
 ) -> Result<NormalizedIssue, CliWorkspaceError> {
     Ok(NormalizedIssue {
         id: IssueId::new(manifest.issue_id.clone())?,
