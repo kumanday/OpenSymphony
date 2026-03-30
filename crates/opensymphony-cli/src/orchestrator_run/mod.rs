@@ -152,21 +152,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         Utc::now(),
     );
 
-    let bootstrap_snapshot = scheduler.bootstrap(now_timestamp()).await?;
-    push_recent_event(
-        &mut recent_events,
-        RecentEventKind::SnapshotPublished,
-        None,
-        format!(
-            "recovered startup state; running={}, retry_queue={}",
-            bootstrap_snapshot.daemon.running_issue_count,
-            bootstrap_snapshot.daemon.retry_queue_count
-        ),
-        Utc::now(),
-    );
-
     let initial_snapshot = map_snapshot(
-        &bootstrap_snapshot,
+        &scheduler.snapshot(now_timestamp()),
         runtime.workflow.config.workspace.root.as_path(),
         &terminal_state_set(&runtime.workflow),
         current_agent_server_status(&mut supervisor, client.base_url()),
@@ -179,6 +166,28 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         .map_err(RunCommandError::BindListener)?;
     let server = ControlPlaneServer::new(store.clone());
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
+
+    let bootstrap_snapshot = scheduler.bootstrap(now_timestamp()).await?;
+    push_recent_event(
+        &mut recent_events,
+        RecentEventKind::SnapshotPublished,
+        None,
+        format!(
+            "recovered startup state; running={}, retry_queue={}",
+            bootstrap_snapshot.daemon.running_issue_count,
+            bootstrap_snapshot.daemon.retry_queue_count
+        ),
+        Utc::now(),
+    );
+    store
+        .publish(map_snapshot(
+            &bootstrap_snapshot,
+            runtime.workflow.config.workspace.root.as_path(),
+            &terminal_state_set(&runtime.workflow),
+            current_agent_server_status(&mut supervisor, client.base_url()),
+            &recent_events,
+        ))
+        .await;
 
     let poll_interval =
         std::time::Duration::from_millis(runtime.workflow.config.polling.interval_ms);
