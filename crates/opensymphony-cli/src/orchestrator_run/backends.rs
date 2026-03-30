@@ -27,7 +27,7 @@ use thiserror::Error;
 use tokio::{
     fs,
     sync::{mpsc, oneshot},
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
     time::timeout,
 };
 use url::Url;
@@ -614,22 +614,33 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .map(|launch| launch.worker_id.clone())
             .collect::<Vec<_>>();
 
-        let mut join_set = JoinSet::new();
+        let mut waiters = Vec::with_capacity(pending.len());
         for launch in pending {
             let worker_id = launch.worker_id;
             let timeout_duration = self.launch_timeout;
             let rx = launch.launch_rx;
-            join_set.spawn(async move { (worker_id, timeout(timeout_duration, rx).await) });
+            let worker_id_for_task = worker_id.clone();
+            let handle =
+                tokio::spawn(
+                    async move { (worker_id_for_task, timeout(timeout_duration, rx).await) },
+                );
+            waiters.push((worker_id, handle));
         }
 
         let mut completed = HashMap::new();
-        while let Some(result) = join_set.join_next().await {
-            match result {
+        for (worker_id, handle) in waiters {
+            match handle.await {
                 Ok((worker_id, outcome)) => {
                     completed.insert(worker_id, outcome);
                 }
                 Err(join_error) => {
                     tracing::error!(error = %join_error, "worker launch waiter task failed");
+                    completed.insert(
+                        worker_id,
+                        Ok(Ok(LaunchReport::Failed(format!(
+                            "worker launch waiter task failed: {join_error}"
+                        )))),
+                    );
                 }
             }
         }

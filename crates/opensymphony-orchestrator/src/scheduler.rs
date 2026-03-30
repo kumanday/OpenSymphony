@@ -651,11 +651,12 @@ where
                 continue;
             }
 
+            let state_key = normalized_state_name(&normalized.state.name);
+
             if let Some(limit) = state_limit_for(
                 &self.config.max_concurrent_agents_by_state,
                 &normalized.state.name,
             ) {
-                let state_key = normalized_state_name(&normalized.state.name);
                 let running_in_state = self.running_count_for_state(&normalized.state.name)
                     + planned_running_by_state
                         .get(&state_key)
@@ -708,9 +709,7 @@ where
                 run: claimed_run.clone(),
             };
 
-            *planned_running_by_state
-                .entry(normalized_state_name(&normalized.state.name))
-                .or_default() += 1;
+            *planned_running_by_state.entry(state_key).or_default() += 1;
             pending_launches.push((issue_id, execution, claimed_run, start_request));
         }
 
