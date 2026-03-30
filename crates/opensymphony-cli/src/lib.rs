@@ -67,7 +67,7 @@ enum Command {
 #[derive(Debug, Args)]
 struct DaemonArgs {
     #[arg(help = "Socket address for the local control-plane HTTP and SSE server")]
-    #[arg(long, default_value = "127.0.0.1:3000")]
+    #[arg(long, default_value = "127.0.0.1:2468")]
     bind: SocketAddr,
     #[arg(help = "Milliseconds between sample snapshot updates")]
     #[arg(long, default_value = "1200")]
@@ -77,7 +77,7 @@ struct DaemonArgs {
 #[derive(Debug, Args)]
 struct TuiArgs {
     #[arg(help = "Control-plane base URL")]
-    #[arg(long, default_value = "http://127.0.0.1:3000/")]
+    #[arg(long, default_value = "http://127.0.0.1:2468/")]
     url: Url,
     #[arg(help = "Exit after the specified number of milliseconds; useful for smoke tests")]
     #[arg(long)]

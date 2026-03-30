@@ -137,11 +137,11 @@ openhands:
 
 OpenSymphony forwards an OpenHands `LLMSummarizingCondenser` that reuses the conversation agent's LLM settings. The condenser is enabled by default with `max_size: 240` and `keep_first: 2`. To disable it, set `enabled: false`.
 
-Add a `config.yaml` file next to your target repository `WORKFLOW.md`. A minimal local-supervised config looks like this:
+Add a root-level `config.yaml` file next to your target repository `WORKFLOW.md`. A minimal local-supervised config looks like this:
 
 ```yaml
 control_plane:
-  bind: 127.0.0.1:3000
+  bind: 127.0.0.1:2468
 
 openhands:
   tool_dir: /absolute/path/to/OpenSymphony/tools/openhands-server
@@ -149,7 +149,9 @@ openhands:
 
 When your workflow points at an external OpenHands agent-server with `openhands.transport.session_api_key_env`, `config.yaml` can omit `openhands.tool_dir`.
 
-See [`examples/target-repo/config.yaml`](examples/target-repo/config.yaml) for a checked-in example.
+Use [`examples/target-repo/config.yaml`](examples/target-repo/config.yaml) as the template for that file: copy it into your target repo root as `config.yaml`, then adjust paths and ports for your machine.
+
+Note: [`examples/configs/local-dev.yaml`](examples/configs/local-dev.yaml) is for `opensymphony doctor` against this OpenSymphony checkout. It is not the runtime config that `opensymphony run` looks for in a target repo.
 
 ### Running the Orchestrator
 
@@ -174,7 +176,7 @@ opensymphony rehydrate COE-284 --reason "API key rotation"
 opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate
 
 # Optional: Start the TUI for monitoring
-opensymphony tui --url http://127.0.0.1:3000/
+opensymphony tui --url http://127.0.0.1:2468/
 ```
 
 The legacy `opensymphony daemon` command is still available as a demo control-plane publisher for smoke tests, but it is not the real orchestrator entrypoint.
