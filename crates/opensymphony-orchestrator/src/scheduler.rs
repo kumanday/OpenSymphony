@@ -63,8 +63,9 @@ impl SchedulerConfig {
                 .max_concurrent_agents_by_state
                 .iter()
                 .map(|(state, limit)| {
+                    let normalized_state = normalized_state_name(state);
                     u32::try_from(*limit)
-                        .map(|limit| (state.clone(), limit))
+                        .map(|limit| (normalized_state, limit))
                         .map_err(|_| SchedulerError::InvalidConfiguration {
                             detail: format!(
                                 "workflow max_concurrent_agents_by_state[{state}] {limit} exceeds u32::MAX ({})",
@@ -653,10 +654,9 @@ where
 
             let state_key = normalized_state_name(&normalized.state.name);
 
-            if let Some(limit) = state_limit_for(
-                &self.config.max_concurrent_agents_by_state,
-                &normalized.state.name,
-            ) {
+            if let Some(limit) =
+                state_limit_for(&self.config.max_concurrent_agents_by_state, &state_key)
+            {
                 let running_in_state = self.running_count_for_normalized_state(&state_key)
                     + planned_running_by_state
                         .get(&state_key)
@@ -1141,11 +1141,12 @@ fn state_category_from_name(name: &str, config: &SchedulerConfig) -> IssueStateC
     }
 }
 
-fn state_limit_for(limits: &BTreeMap<String, u32>, state_name: &str) -> Option<u32> {
-    let normalized = normalized_state_name(state_name);
-    limits
-        .iter()
-        .find_map(|(state, limit)| (normalized_state_name(state) == normalized).then_some(*limit))
+fn state_limit_for(limits: &BTreeMap<String, u32>, state_key: &str) -> Option<u32> {
+    limits.get(state_key).copied().or_else(|| {
+        limits.iter().find_map(|(configured_state, limit)| {
+            (normalized_state_name(configured_state) == state_key).then_some(*limit)
+        })
+    })
 }
 
 fn non_active_release_reason(category: IssueStateCategory) -> Option<ReleaseReason> {
