@@ -131,6 +131,20 @@ struct DoctorConfig {
     linear: LinearDoctorConfig,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RehydrateConfigFile {
+    #[serde(default)]
+    target_repo: Option<String>,
+    #[serde(default)]
+    openhands: RehydrateOpenHandsConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RehydrateOpenHandsConfig {
+    #[serde(default)]
+    tool_dir: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct OpenHandsDoctorConfig {
     tool_dir: String,
@@ -153,6 +167,11 @@ struct DoctorRuntimeConfig {
     probe_model: Option<String>,
     probe_api_key_env: Option<String>,
     probe_llm_base_url_env: Option<String>,
+}
+
+struct RehydrateRuntimeConfig {
+    workflow: ResolvedWorkflow,
+    tool_dir: Option<PathBuf>,
 }
 
 struct DoctorWorkflowEnvironment {
@@ -1849,28 +1868,10 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         args.max_summary_events, !args.no_summary
     );
 
-    // Load workflow from current directory
     let current_dir =
         env::current_dir().map_err(|e| format!("failed to get current directory: {}", e))?;
-    let workflow_path = current_dir.join("WORKFLOW.md");
-
-    if !workflow_path.exists() {
-        return Err(format!(
-            "WORKFLOW.md not found at {}",
-            workflow_path.display()
-        ));
-    }
-
-    let workflow_content = fs::read_to_string(&workflow_path)
-        .await
-        .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
-
-    let workflow_def = WorkflowDefinition::parse(&workflow_content)
-        .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
-
-    let workflow = workflow_def
-        .resolve_with_process_env(&current_dir)
-        .map_err(|e| format!("failed to resolve workflow: {}", e))?;
+    let runtime = resolve_rehydrate_runtime(&current_dir).await?;
+    let workflow = runtime.workflow;
 
     // Setup workspace manager
     let workspace_config = build_rehydrate_workspace_config(&workflow);
@@ -1913,7 +1914,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
         .map_err(|e| format!("failed to create transport config: {}", e))?;
 
     let (client, _supervisor, server_message) =
-        build_rehydrate_client(&workflow, &transport, &current_dir)?;
+        build_rehydrate_client(&workflow, &transport, runtime.tool_dir.as_deref())?;
     println!("{}", server_message);
 
     // Create session runner
@@ -2006,6 +2007,72 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     Ok(())
 }
 
+async fn resolve_rehydrate_runtime(current_dir: &Path) -> Result<RehydrateRuntimeConfig, String> {
+    let config_path = current_dir.join(DEFAULT_DOCTOR_CONFIG_FILE);
+    let (target_repo, tool_dir) = if config_path.is_file() {
+        let raw = fs::read_to_string(&config_path)
+            .await
+            .map_err(|e| format!("failed to read {}: {}", config_path.display(), e))?;
+        let mut config: RehydrateConfigFile = serde_yaml::from_str(&raw)
+            .map_err(|e| format!("failed to parse {}: {}", config_path.display(), e))?;
+        config.target_repo = config
+            .target_repo
+            .take()
+            .map(|value| resolve_rehydrate_value(&config_path, value))
+            .transpose()?;
+        config.openhands.tool_dir = config
+            .openhands
+            .tool_dir
+            .take()
+            .map(|value| resolve_rehydrate_value(&config_path, value))
+            .transpose()?;
+
+        let config_root = config_path.parent().unwrap_or(current_dir);
+        let target_repo = config
+            .target_repo
+            .as_deref()
+            .map(|value| resolve_path(config_root, value))
+            .unwrap_or_else(|| current_dir.to_path_buf());
+        let tool_dir = config
+            .openhands
+            .tool_dir
+            .as_deref()
+            .map(|value| resolve_path(config_root, value));
+        (target_repo, tool_dir)
+    } else {
+        (current_dir.to_path_buf(), None)
+    };
+
+    let workflow_path = target_repo.join("WORKFLOW.md");
+    if !workflow_path.exists() {
+        return Err(format!(
+            "WORKFLOW.md not found at {}",
+            workflow_path.display()
+        ));
+    }
+
+    let workflow_content = fs::read_to_string(&workflow_path)
+        .await
+        .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
+    let workflow_def = WorkflowDefinition::parse(&workflow_content)
+        .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
+    let workflow = workflow_def
+        .resolve_with_process_env(&target_repo)
+        .map_err(|e| format!("failed to resolve workflow: {}", e))?;
+
+    Ok(RehydrateRuntimeConfig { workflow, tool_dir })
+}
+
+fn resolve_rehydrate_value(path: &Path, value: String) -> Result<String, String> {
+    expand_env_tokens(&value).map_err(|error| {
+        format!(
+            "failed to resolve config value in {}: {}",
+            path.display(),
+            error
+        )
+    })
+}
+
 fn build_rehydrate_workspace_config(workflow: &ResolvedWorkflow) -> WorkspaceManagerConfig {
     use opensymphony_workspace::{CleanupConfig, HookConfig, HookDefinition};
     let hooks = &workflow.config.hooks;
@@ -2027,7 +2094,7 @@ fn build_rehydrate_workspace_config(workflow: &ResolvedWorkflow) -> WorkspaceMan
 fn build_rehydrate_client(
     workflow: &ResolvedWorkflow,
     transport: &TransportConfig,
-    repo_root: &Path,
+    configured_tool_dir: Option<&Path>,
 ) -> Result<(OpenHandsClient, Option<LocalServerSupervisor>, String), String> {
     let supervisor_base_url = transport
         .managed_local_server_base_url()
@@ -2041,7 +2108,9 @@ fn build_rehydrate_client(
         return Ok((OpenHandsClient::new(transport.clone()), None, message));
     };
 
-    let tool_dir = repo_root.join("tools").join("openhands-server");
+    let tool_dir = configured_tool_dir.map(Path::to_path_buf).ok_or_else(|| {
+        "managed local-server rehydration requires `openhands.tool_dir` in config.yaml".to_string()
+    })?;
     let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|e| {
         format!(
             "failed to load local server tooling from {}: {}",
@@ -2266,6 +2335,49 @@ mod tests {
             find_cargo_workspace_root(&tool_dir),
             Some(canonical_repo_root)
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_rehydrate_runtime_honors_root_config_tool_dir() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let target_repo = temp_dir.path().join("target");
+        let tool_dir = temp_dir.path().join("shared/openhands-server");
+        fs::create_dir_all(&target_repo).expect("target repo should exist");
+        fs::create_dir_all(&tool_dir).expect("tool dir should exist");
+        fs::write(
+            target_repo.join("WORKFLOW.md"),
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+---
+"#,
+        )
+        .expect("workflow should exist");
+        fs::write(
+            target_repo.join("config.yaml"),
+            format!(
+                "control_plane:\n  bind: 127.0.0.1:2468\n\nopenhands:\n  tool_dir: {}\n",
+                tool_dir.display()
+            ),
+        )
+        .expect("config should exist");
+
+        let runtime = super::resolve_rehydrate_runtime(&target_repo)
+            .await
+            .expect("rehydrate runtime should resolve");
+
+        assert_eq!(runtime.tool_dir, Some(tool_dir));
     }
 
     #[test]
