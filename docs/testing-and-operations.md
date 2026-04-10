@@ -365,7 +365,7 @@ Recommended first-run sequence:
 Current workspace commands:
 
 - `cd /path/to/target-repo && opensymphony init`
-- `opensymphony init` fetches the current bootstrap payload from the template repo's raw GitHub URLs, merges an existing `AGENTS.md`, and prompts before overwriting other repo-owned files
+- `opensymphony init` fetches the current bootstrap payload from the template repo's raw GitHub URLs, merges an existing `AGENTS.md`, prompts before overwriting other repo-owned files, and can optionally scaffold OpenHands AI PR review plus a local setup guide
 - `cd /path/to/target-repo && opensymphony run`
 - `cd /path/to/target-repo && opensymphony run --config ./config.yaml`
 - `cd /path/to/target-repo && opensymphony debug COE-284`
@@ -381,6 +381,7 @@ Current validation commands for the implemented orchestrator and observability s
 
 - `cargo test`
 - `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test -p opensymphony-cli --lib resolve_rehydrate_runtime_honors_root_config_tool_dir -- --nocapture`
 - `cargo test -p opensymphony-cli --test init`
 - `cargo test -p opensymphony-cli --test debug`
 - `cargo install --path . --locked --root /tmp/opensymphony-install-check`

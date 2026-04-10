@@ -68,7 +68,7 @@ cd /path/to/target-repo
 opensymphony init
 ```
 
-`opensymphony init` fetches the current bootstrap files from the template repository's raw GitHub URLs at runtime, copies any missing files, merges an existing `AGENTS.md`, prompts before overwriting other conflicts, detects the repo clone URL from `git remote`, and offers to fill in the Linear project slug/key in `WORKFLOW.md`.
+`opensymphony init` fetches the current bootstrap files from the template repository's raw GitHub URLs at runtime, copies any missing files, merges an existing `AGENTS.md`, prompts before overwriting other conflicts, detects the repo clone URL from `git remote`, offers to fill in the Linear project slug/key in `WORKFLOW.md`, and can optionally scaffold automated OpenHands AI PR review.
 
 The copied bootstrap payload currently includes:
 
@@ -79,8 +79,13 @@ The copied bootstrap payload currently includes:
 - `.agents/skills/`
 - `.github/CODEOWNERS`
 - `.github/pull_request_template.md`
-- `.github/workflows/ai-pr-review.yml`
 - `docs/tasks/README.md`
+
+If you opt into AI PR review during `init`, it also adds:
+
+- `.github/workflows/ai-pr-review.yml`
+- `.agents/skills/custom-codereview-guide.md`
+- `docs/ai-pr-review-human-setup.md`
 
 If you want to inspect the exact upstream source, `init` pulls from the raw template base at [raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main](https://raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main/WORKFLOW.md).
 

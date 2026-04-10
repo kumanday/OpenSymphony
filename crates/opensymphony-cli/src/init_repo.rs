@@ -3,6 +3,7 @@ use std::{
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
     process::ExitCode,
+    time::Duration,
 };
 
 use clap::Args;
@@ -11,8 +12,15 @@ use thiserror::Error;
 
 const DEFAULT_TEMPLATE_BASE_URL: &str =
     "https://raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main/";
+const DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_LLM_MODEL: &str = "openai/accounts/fireworks/models/glm-5p1";
 const DEFAULT_LLM_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
+const DEFAULT_AI_REVIEW_PROVIDER_KIND: &str = "openai-compatible";
+const DEFAULT_AI_REVIEW_MODEL_ID: &str = "accounts/fireworks/models/glm-5p1";
+const DEFAULT_AI_REVIEW_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
+const DEFAULT_AI_REVIEW_STYLE: &str = "standard";
+const DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE: &str = "true";
+const AI_REVIEW_LABEL_NAME: &str = "review-this";
 const PRESERVED_AGENTS_MARKER: &str = "## Preserved Existing AGENTS.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
 const WORKFLOW_GIT_REMOTE_PLACEHOLDER: &str = "https://github.com/YOUR-ORG/YOUR-REPO.git";
@@ -185,7 +193,7 @@ where
     }
 }
 
-const TEMPLATE_ASSETS: &[TemplateAsset] = &[
+const CORE_TEMPLATE_ASSETS: &[TemplateAsset] = &[
     TemplateAsset {
         path: "WORKFLOW.md",
         kind: AssetKind::Workflow,
@@ -239,14 +247,25 @@ const TEMPLATE_ASSETS: &[TemplateAsset] = &[
         kind: AssetKind::Standard,
     },
     TemplateAsset {
-        path: ".github/workflows/ai-pr-review.yml",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
         path: "docs/tasks/README.md",
         kind: AssetKind::Standard,
     },
 ];
+
+const AI_REVIEW_TEMPLATE_ASSETS: &[TemplateAsset] = &[TemplateAsset {
+    path: ".github/workflows/ai-pr-review.yml",
+    kind: AssetKind::Standard,
+}];
+
+const AI_REVIEW_SETUP_DOC_ASSET: TemplateAsset = TemplateAsset {
+    path: "docs/ai-pr-review-human-setup.md",
+    kind: AssetKind::Standard,
+};
+
+const AI_REVIEW_CUSTOM_GUIDE_ASSET: TemplateAsset = TemplateAsset {
+    path: ".agents/skills/custom-codereview-guide.md",
+    kind: AssetKind::Standard,
+};
 
 pub async fn run_command(args: InitArgs) -> ExitCode {
     let stdin = io::stdin();
@@ -276,18 +295,27 @@ where
     let _ = args;
 
     let target_repo = env::current_dir().map_err(InitCommandError::CurrentDir)?;
-    let client = Client::builder()
-        .user_agent(concat!("opensymphony-cli/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(InitCommandError::HttpClient)?;
-
     ui.line(format!(
         "Initializing OpenSymphony files in {}",
         target_repo.display()
     ))?;
+    let enable_ai_pr_review = prompt_yes_no(
+        ui,
+        "Also scaffold automated OpenHands AI PR review? [y/N]: ",
+        false,
+    )?;
+    let client = Client::builder()
+        .user_agent(concat!("opensymphony-cli/", env!("CARGO_PKG_VERSION")))
+        .timeout(template_fetch_timeout())
+        .build()
+        .map_err(InitCommandError::HttpClient)?;
     ui.line("Fetching the current template payload from GitHub...")?;
 
-    let fetched_assets = fetch_template_assets(&client).await?;
+    let mut fetched_assets = fetch_template_assets(&client, CORE_TEMPLATE_ASSETS).await?;
+    if enable_ai_pr_review {
+        fetched_assets.extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS).await?);
+        fetched_assets.extend(generated_ai_review_assets());
+    }
     let mut planned_assets = plan_assets(&target_repo, fetched_assets)?;
     resolve_conflicts(&mut planned_assets, ui)?;
 
@@ -388,6 +416,10 @@ where
         )?;
     }
 
+    if enable_ai_pr_review {
+        print_ai_pr_review_guidance(ui)?;
+    }
+
     prompt_for_missing_llm_env(env_lookup, ui)?;
 
     ui.blank_line()?;
@@ -395,7 +427,10 @@ where
     Ok(())
 }
 
-async fn fetch_template_assets(client: &Client) -> Result<Vec<FetchedAsset>, InitCommandError> {
+async fn fetch_template_assets(
+    client: &Client,
+    assets: &[TemplateAsset],
+) -> Result<Vec<FetchedAsset>, InitCommandError> {
     let base_url = env::var("OPENSYMPHONY_TEMPLATE_BASE_URL")
         .unwrap_or_else(|_| DEFAULT_TEMPLATE_BASE_URL.to_string());
     let base_url =
@@ -404,8 +439,8 @@ async fn fetch_template_assets(client: &Client) -> Result<Vec<FetchedAsset>, Ini
             source,
         })?;
 
-    let mut fetched = Vec::with_capacity(TEMPLATE_ASSETS.len());
-    for definition in TEMPLATE_ASSETS {
+    let mut fetched = Vec::with_capacity(assets.len());
+    for definition in assets {
         let url = base_url.join(definition.path).map_err(|source| {
             InitCommandError::InvalidTemplateBaseUrl {
                 value: format!("{base_url}{}", definition.path),
@@ -446,6 +481,19 @@ async fn fetch_template_assets(client: &Client) -> Result<Vec<FetchedAsset>, Ini
     }
 
     Ok(fetched)
+}
+
+fn generated_ai_review_assets() -> Vec<FetchedAsset> {
+    vec![
+        FetchedAsset {
+            definition: AI_REVIEW_SETUP_DOC_ASSET,
+            contents: ai_pr_review_setup_doc_contents(),
+        },
+        FetchedAsset {
+            definition: AI_REVIEW_CUSTOM_GUIDE_ASSET,
+            contents: custom_codereview_guide_contents(),
+        },
+    ]
 }
 
 fn plan_assets(
@@ -689,6 +737,44 @@ where
     Ok(())
 }
 
+fn prompt_yes_no<R, W>(
+    ui: &mut PromptUi<R, W>,
+    prompt: &str,
+    default: bool,
+) -> Result<bool, InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    loop {
+        let response = ui.prompt(prompt)?;
+        match response.trim().to_ascii_lowercase().as_str() {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => {
+                ui.line("Please answer with `yes` or `no`.")?;
+            }
+        }
+    }
+}
+
+fn template_fetch_timeout() -> Duration {
+    template_fetch_timeout_from_env(
+        env::var("OPENSYMPHONY_TEMPLATE_FETCH_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn template_fetch_timeout_from_env(value: Option<&str>) -> Duration {
+    value
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|timeout_ms| *timeout_ms > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS))
+}
+
 fn detect_git_remote_url(target_repo: &Path) -> GitRemoteDetection {
     let output = std::process::Command::new("git")
         .args(["remote"])
@@ -808,6 +894,168 @@ fn yaml_double_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+fn ai_pr_review_setup_doc_contents() -> String {
+    format!(
+        r#"# OpenHands AI PR Review Setup
+
+This repository was bootstrapped with OpenHands AI PR review support via `opensymphony init`.
+
+## Files Added
+
+- `.github/workflows/ai-pr-review.yml`
+- `.agents/skills/custom-codereview-guide.md`
+
+## GitHub Actions Secret
+
+Add this repository secret under **Settings -> Secrets and variables -> Actions**:
+
+| Name | Value |
+|------|-------|
+| `FIREWORKS_API_KEY` | Your Fireworks API key |
+
+## GitHub Actions Variables
+
+Add these repository variables under **Settings -> Secrets and variables -> Actions -> Variables**:
+
+| Name | Value |
+|------|-------|
+| `AI_REVIEW_PROVIDER_KIND` | `{provider_kind}` |
+| `AI_REVIEW_MODEL_ID` | `{model_id}` |
+| `AI_REVIEW_BASE_URL` | `{base_url}` |
+| `AI_REVIEW_STYLE` | `{style}` |
+| `AI_REVIEW_REQUIRE_EVIDENCE` | `{require_evidence}` |
+
+## Label
+
+Create the `{label}` label so maintainers can retrigger review on demand.
+
+```bash
+gh label create {quoted_label} --description 'Trigger AI PR review' --color 'd73a4a' || true
+```
+
+## Optional GitHub CLI Commands
+
+```bash
+gh variable set AI_REVIEW_PROVIDER_KIND --body {quoted_provider_kind}
+gh variable set AI_REVIEW_MODEL_ID --body {quoted_model_id}
+gh variable set AI_REVIEW_BASE_URL --body {quoted_base_url}
+gh variable set AI_REVIEW_STYLE --body {quoted_style}
+gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {quoted_require_evidence}
+gh secret set FIREWORKS_API_KEY
+```
+
+## Notes
+
+- If your organization restricts Actions, allow `OpenHands/extensions`.
+- Do not make the AI review workflow a required status check.
+- Keep the workflow on GitHub-hosted runners unless you have separately reviewed the risk model for untrusted PR content.
+"#,
+        provider_kind = DEFAULT_AI_REVIEW_PROVIDER_KIND,
+        model_id = DEFAULT_AI_REVIEW_MODEL_ID,
+        base_url = DEFAULT_AI_REVIEW_BASE_URL,
+        style = DEFAULT_AI_REVIEW_STYLE,
+        require_evidence = DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE,
+        label = AI_REVIEW_LABEL_NAME,
+        quoted_label = shell_single_quote(AI_REVIEW_LABEL_NAME),
+        quoted_provider_kind = shell_single_quote(DEFAULT_AI_REVIEW_PROVIDER_KIND),
+        quoted_model_id = shell_single_quote(DEFAULT_AI_REVIEW_MODEL_ID),
+        quoted_base_url = shell_single_quote(DEFAULT_AI_REVIEW_BASE_URL),
+        quoted_style = shell_single_quote(DEFAULT_AI_REVIEW_STYLE),
+        quoted_require_evidence = shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE),
+    )
+}
+
+fn custom_codereview_guide_contents() -> String {
+    r#"---
+name: custom-codereview-guide
+description: |
+  Repository-specific code review guidance for this project.
+  Update this file so OpenHands PR review focuses on the right risks.
+---
+
+# Custom Code Review Guide
+
+OpenHands PR review will load this file when it is present. Replace this starter content with repository-specific expectations.
+
+## Default Priorities
+
+- Prioritize correctness, regressions, security risks, and missing tests ahead of style-only feedback.
+- Treat behavior changes as incomplete unless the PR includes concrete verification or evidence.
+- Call out risky data migrations, auth changes, concurrency hazards, and production operability regressions explicitly.
+
+## Customize For This Repository
+
+- List the most security-sensitive paths or subsystems.
+- List required validation commands reviewers should expect to see.
+- Describe any architecture invariants that must not be broken.
+- Add framework- or language-specific review heuristics that matter here.
+
+## Evidence Expectations
+
+- Behavior changes should include test or reproduction output.
+- UI changes should include screenshots or recordings.
+- Performance-sensitive changes should include benchmark data or timing notes.
+"#
+    .to_string()
+}
+
+fn print_ai_pr_review_guidance<R, W>(ui: &mut PromptUi<R, W>) -> Result<(), InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    ui.blank_line()?;
+    ui.line("OpenHands AI PR review scaffolding was added.")?;
+    ui.line("Next steps for GitHub Actions setup:")?;
+    ui.line("- secret: FIREWORKS_API_KEY=<your-fireworks-api-key>")?;
+    ui.line(format!(
+        "- variable: AI_REVIEW_PROVIDER_KIND={DEFAULT_AI_REVIEW_PROVIDER_KIND}"
+    ))?;
+    ui.line(format!(
+        "- variable: AI_REVIEW_MODEL_ID={DEFAULT_AI_REVIEW_MODEL_ID}"
+    ))?;
+    ui.line(format!(
+        "- variable: AI_REVIEW_BASE_URL={DEFAULT_AI_REVIEW_BASE_URL}"
+    ))?;
+    ui.line(format!(
+        "- variable: AI_REVIEW_STYLE={DEFAULT_AI_REVIEW_STYLE}"
+    ))?;
+    ui.line(format!(
+        "- variable: AI_REVIEW_REQUIRE_EVIDENCE={DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE}"
+    ))?;
+    ui.line(format!(
+        "- label: `{AI_REVIEW_LABEL_NAME}` for manual reruns"
+    ))?;
+    ui.line("GitHub CLI examples:")?;
+    ui.line(format!(
+        "gh variable set AI_REVIEW_PROVIDER_KIND --body {}",
+        shell_single_quote(DEFAULT_AI_REVIEW_PROVIDER_KIND)
+    ))?;
+    ui.line(format!(
+        "gh variable set AI_REVIEW_MODEL_ID --body {}",
+        shell_single_quote(DEFAULT_AI_REVIEW_MODEL_ID)
+    ))?;
+    ui.line(format!(
+        "gh variable set AI_REVIEW_BASE_URL --body {}",
+        shell_single_quote(DEFAULT_AI_REVIEW_BASE_URL)
+    ))?;
+    ui.line(format!(
+        "gh variable set AI_REVIEW_STYLE --body {}",
+        shell_single_quote(DEFAULT_AI_REVIEW_STYLE)
+    ))?;
+    ui.line(format!(
+        "gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {}",
+        shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE)
+    ))?;
+    ui.line("gh secret set FIREWORKS_API_KEY")?;
+    ui.line(format!(
+        "gh label create {} --description 'Trigger AI PR review' --color 'd73a4a' || true",
+        shell_single_quote(AI_REVIEW_LABEL_NAME)
+    ))?;
+    ui.line("See `docs/ai-pr-review-human-setup.md` for the full setup checklist.")?;
+    Ok(())
+}
+
 fn print_group<R, W>(
     ui: &mut PromptUi<R, W>,
     label: &str,
@@ -831,11 +1079,16 @@ where
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::time::Duration;
 
     use super::{
-        DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, GitRemoteDetection, PRESERVED_AGENTS_MARKER,
-        PromptUi, agents_already_initialized, comparable_text, customize_workflow, git_remote_url,
-        merge_agents, prompt_for_missing_llm_env, select_remote_name, shell_single_quote,
+        AI_REVIEW_LABEL_NAME, DEFAULT_AI_REVIEW_BASE_URL, DEFAULT_AI_REVIEW_MODEL_ID,
+        DEFAULT_AI_REVIEW_PROVIDER_KIND, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
+        DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS, GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi,
+        agents_already_initialized, ai_pr_review_setup_doc_contents, comparable_text,
+        custom_codereview_guide_contents, customize_workflow, git_remote_url, merge_agents,
+        prompt_for_missing_llm_env, prompt_yes_no, select_remote_name, shell_single_quote,
+        template_fetch_timeout_from_env,
     };
 
     struct StubEnvironment {
@@ -979,5 +1232,51 @@ hooks:
         assert!(rendered.contains("openai/accounts/fireworks/models/glm-5p1"));
         assert!(rendered.contains("https://api.fireworks.ai/inference/v1"));
         assert!(rendered.contains("export LLM_API_KEY='<your-llm-api-key>'"));
+    }
+
+    #[test]
+    fn prompt_yes_no_accepts_blank_as_default() {
+        let mut output = Vec::new();
+        let mut ui = PromptUi::new(&b"\n"[..], &mut output);
+
+        let accepted =
+            prompt_yes_no(&mut ui, "Enable? [y/N]: ", false).expect("prompt should succeed");
+
+        assert!(!accepted);
+    }
+
+    #[test]
+    fn template_fetch_timeout_uses_default_and_override() {
+        assert_eq!(
+            template_fetch_timeout_from_env(None),
+            Duration::from_millis(DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS)
+        );
+        assert_eq!(
+            template_fetch_timeout_from_env(Some("250")),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            template_fetch_timeout_from_env(Some("not-a-number")),
+            Duration::from_millis(DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS)
+        );
+    }
+
+    #[test]
+    fn ai_pr_review_setup_doc_uses_fireworks_p1_defaults() {
+        let doc = ai_pr_review_setup_doc_contents();
+
+        assert!(doc.contains(DEFAULT_AI_REVIEW_PROVIDER_KIND));
+        assert!(doc.contains(DEFAULT_AI_REVIEW_MODEL_ID));
+        assert!(doc.contains(DEFAULT_AI_REVIEW_BASE_URL));
+        assert!(doc.contains(AI_REVIEW_LABEL_NAME));
+    }
+
+    #[test]
+    fn custom_codereview_guide_contains_starter_skill_metadata() {
+        let guide = custom_codereview_guide_contents();
+
+        assert!(guide.contains("name: custom-codereview-guide"));
+        assert!(guide.contains("Default Priorities"));
+        assert!(guide.contains("Evidence Expectations"));
     }
 }

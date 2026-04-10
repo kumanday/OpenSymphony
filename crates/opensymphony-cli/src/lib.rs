@@ -2060,9 +2060,17 @@ async fn resolve_rehydrate_runtime(current_dir: &Path) -> Result<RehydrateRuntim
         .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
     let workflow_def = WorkflowDefinition::parse(&workflow_content)
         .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
-    let workflow = workflow_def
-        .resolve_with_process_env(&target_repo)
-        .map_err(|e| format!("failed to resolve workflow: {}", e))?;
+    let workflow = if workflow_def.front_matter.tracker.api_key.is_some() {
+        workflow_def.resolve_with_process_env(&target_repo)
+    } else {
+        workflow_def.resolve(
+            &target_repo,
+            &DoctorWorkflowEnvironment {
+                fallback_linear_api_key: true,
+            },
+        )
+    }
+    .map_err(|e| format!("failed to resolve workflow: {}", e))?;
 
     Ok(RehydrateRuntimeConfig { workflow, tool_dir })
 }

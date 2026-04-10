@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, process::Stdio, sync::Arc};
+use std::{collections::BTreeMap, process::Stdio, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -17,7 +17,7 @@ async fn init_copies_template_files_and_customizes_workflow() {
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
 
     let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
-    write_stdin(&mut child, "demo-project\n").await;
+    write_stdin(&mut child, "\ndemo-project\n").await;
 
     let output = child
         .wait_with_output()
@@ -49,8 +49,65 @@ async fn init_copies_template_files_and_customizes_workflow() {
         "config.yaml should be created"
     );
     assert!(
+        !repo
+            .path()
+            .join(".github/workflows/ai-pr-review.yml")
+            .exists(),
+        "AI PR review workflow should not be added unless requested"
+    );
+    assert!(
         stdout.contains("Initialization summary"),
         "stdout should contain a summary: {stdout}",
+    );
+}
+
+#[tokio::test]
+async fn init_can_scaffold_ai_pr_review_and_print_setup_guidance() {
+    let server = TemplateServer::start().await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
+    write_stdin(&mut child, "yes\ndemo-project\n").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "init should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        repo.path()
+            .join(".github/workflows/ai-pr-review.yml")
+            .is_file(),
+        "AI PR review workflow should be created"
+    );
+    assert!(
+        repo.path()
+            .join(".agents/skills/custom-codereview-guide.md")
+            .is_file(),
+        "starter review guide should be created"
+    );
+    assert!(
+        repo.path()
+            .join("docs/ai-pr-review-human-setup.md")
+            .is_file(),
+        "setup guide should be created"
+    );
+    assert!(
+        stdout.contains("OpenHands AI PR review scaffolding was added."),
+        "stdout should contain AI review guidance: {stdout}",
+    );
+    assert!(
+        stdout.contains(
+            "gh variable set AI_REVIEW_MODEL_ID --body 'accounts/fireworks/models/glm-5p1'"
+        ),
+        "stdout should contain GitHub variable commands: {stdout}",
     );
 }
 
@@ -73,7 +130,7 @@ async fn init_merges_agents_and_skips_conflicting_file_when_requested() {
     .expect("existing PR template should write");
 
     let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
-    write_stdin(&mut child, "skip\ndemo-project\n").await;
+    write_stdin(&mut child, "\nskip\ndemo-project\n").await;
 
     let output = child
         .wait_with_output()
@@ -117,7 +174,7 @@ async fn init_aborts_before_writing_when_user_requests_abort() {
         .expect("existing workflow should write");
 
     let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
-    write_stdin(&mut child, "abort\n").await;
+    write_stdin(&mut child, "\nabort\n").await;
 
     let output = child
         .wait_with_output()
@@ -141,10 +198,54 @@ async fn init_aborts_before_writing_when_user_requests_abort() {
     );
 }
 
+#[tokio::test]
+async fn init_fails_when_template_fetch_times_out() {
+    let server = TemplateServer::start_with_delay(Duration::from_millis(250)).await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child_with_env(
+        repo.path(),
+        server.base_url(),
+        &[],
+        &[("OPENSYMPHONY_TEMPLATE_FETCH_TIMEOUT_MS", "50")],
+    );
+    write_stdin(&mut child, "\n").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "init should fail on template fetch timeout: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("opensymphony init failed: failed to fetch template asset"),
+        "stdout should report the fetch failure: {stdout}",
+    );
+    assert!(
+        !repo.path().join("WORKFLOW.md").exists(),
+        "no files should be written when the template fetch times out",
+    );
+}
+
 fn spawn_init_child(
     repo_root: &std::path::Path,
     template_base_url: &str,
     extra_args: &[&str],
+) -> tokio::process::Child {
+    spawn_init_child_with_env(repo_root, template_base_url, extra_args, &[])
+}
+
+fn spawn_init_child_with_env(
+    repo_root: &std::path::Path,
+    template_base_url: &str,
+    extra_args: &[&str],
+    extra_env: &[(&str, &str)],
 ) -> tokio::process::Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
     command
@@ -159,6 +260,9 @@ fn spawn_init_child(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    for (name, value) in extra_env {
+        command.env(name, value);
+    }
     command.spawn().expect("init command should spawn")
 }
 
@@ -192,10 +296,14 @@ struct TemplateServer {
 
 impl TemplateServer {
     async fn start() -> Self {
+        Self::start_with_delay(Duration::ZERO).await
+    }
+
+    async fn start_with_delay(delay: Duration) -> Self {
         let assets = Arc::new(template_assets());
         let app = Router::new()
             .fallback(get(template_handler))
-            .with_state(assets);
+            .with_state((assets, delay));
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("template server should bind");
@@ -226,10 +334,13 @@ impl Drop for TemplateServer {
 }
 
 async fn template_handler(
-    State(assets): State<Arc<BTreeMap<String, String>>>,
+    State((assets, delay)): State<(Arc<BTreeMap<String, String>>, Duration)>,
     uri: Uri,
     _request: Request,
 ) -> Response {
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
     let path = uri.path().trim_start_matches('/');
     match assets.get(path) {
         Some(content) => (StatusCode::OK, content.clone()).into_response(),
