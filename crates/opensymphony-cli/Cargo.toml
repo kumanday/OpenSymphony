@@ -28,6 +28,7 @@ opensymphony-orchestrator = { path = "../opensymphony-orchestrator" }
 opensymphony-workflow = { path = "../opensymphony-workflow" }
 opensymphony-tui = { path = "../opensymphony-tui" }
 opensymphony-workspace = { path = "../opensymphony-workspace" }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

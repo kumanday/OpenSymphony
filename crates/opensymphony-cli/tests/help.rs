@@ -16,6 +16,7 @@ fn top_level_help_describes_commands_and_safety_posture() {
     for snippet in [
         "Operate the OpenSymphony local MVP on a trusted machine",
         "process-level isolation only",
+        "Initialize the current target repository with OpenSymphony files",
         "Run the real orchestrator against the current project workflow",
         "Resume an issue conversation for interactive debugging",
         "Serve the local control-plane demo stream",
