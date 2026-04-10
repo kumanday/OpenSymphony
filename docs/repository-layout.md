@@ -122,10 +122,14 @@ Purpose:
 
 Purpose:
 
+- `init`
+- `run`
+- `debug`
 - `daemon`
 - `tui`
 - `doctor`
 - `linear-mcp`
+- `rehydrate`
 - config and path resolution entrypoints
 
 ## 2.10 `opensymphony-tui`

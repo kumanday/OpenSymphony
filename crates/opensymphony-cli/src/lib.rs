@@ -1,4 +1,5 @@
 mod debug_session;
+mod init_repo;
 mod orchestrator_run;
 
 use std::{
@@ -48,6 +49,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Initialize the current target repository with OpenSymphony files")]
+    Init(init_repo::InitArgs),
     #[command(about = "Run the real orchestrator against the current project workflow")]
     Run(orchestrator_run::RunArgs),
     #[command(about = "Resume an issue conversation for interactive debugging")]
@@ -278,6 +281,7 @@ pub async fn run() -> ExitCode {
     init_tracing();
     let cli = Cli::parse();
     match cli.command {
+        Command::Init(args) => init_repo::run_command(args).await,
         Command::Run(args) => orchestrator_run::run_command(args).await,
         Command::Debug(args) => debug_session::run_command(args).await,
         Command::Doctor(args) => run_doctor(args).await,
@@ -2056,9 +2060,17 @@ async fn resolve_rehydrate_runtime(current_dir: &Path) -> Result<RehydrateRuntim
         .map_err(|e| format!("failed to read WORKFLOW.md: {}", e))?;
     let workflow_def = WorkflowDefinition::parse(&workflow_content)
         .map_err(|e| format!("failed to parse WORKFLOW.md: {}", e))?;
-    let workflow = workflow_def
-        .resolve_with_process_env(&target_repo)
-        .map_err(|e| format!("failed to resolve workflow: {}", e))?;
+    let workflow = if workflow_def.front_matter.tracker.api_key.is_some() {
+        workflow_def.resolve_with_process_env(&target_repo)
+    } else {
+        workflow_def.resolve(
+            &target_repo,
+            &DoctorWorkflowEnvironment {
+                fallback_linear_api_key: true,
+            },
+        )
+    }
+    .map_err(|e| format!("failed to resolve workflow: {}", e))?;
 
     Ok(RehydrateRuntimeConfig { workflow, tool_dir })
 }
@@ -2191,6 +2203,7 @@ mod tests {
             .expect("CLI fixture should parse");
 
         match cli.command {
+            Command::Init(_) => panic!("expected daemon command"),
             Command::Daemon(args) => assert_eq!(args.sample_interval_ms.get(), 250),
             Command::Run(_)
             | Command::Debug(_)

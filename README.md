@@ -61,56 +61,57 @@ opensymphony --help
 
 For new projects, use the [OpenSymphony-template](https://github.com/kumanday/OpenSymphony-template) repository as a starting point.
 
-For existing projects, copy these files from the template repo:
+For an existing repository, bootstrap it in place:
 
 ```bash
-# From your target repository:
+cd /path/to/target-repo
+opensymphony init
+```
 
-# 1. WORKFLOW.md (orchestration configuration)
-curl -o WORKFLOW.md https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/WORKFLOW.md
+`opensymphony init` fetches the current bootstrap files from the template repository's raw GitHub URLs at runtime, copies any missing files, merges an existing `AGENTS.md`, prompts before overwriting other conflicts, detects the repo clone URL from `git remote`, offers to fill in the Linear project slug/key in `WORKFLOW.md`, and can optionally scaffold automated OpenHands AI PR review.
 
-# 2. Skills directory (commit, push, pull, land, linear, convert-tasks-to-linear, create-implementation-plan)
-mkdir -p .agents/skills
-for skill in commit land pull push linear convert-tasks-to-linear create-implementation-plan; do
-  mkdir -p ".agents/skills/$skill"
-  curl -o ".agents/skills/$skill/SKILL.md" \
-    "https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/.agents/skills/$skill/SKILL.md"
-done
+The copied bootstrap payload currently includes:
 
-# 3. GitHub workflows (AI PR review)
-mkdir -p .github/workflows
-curl -o .github/workflows/ai-pr-review.yml \
-  https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/.github/workflows/ai-pr-review.yml
+- `WORKFLOW.md`
+- `AGENTS.md`
+- `config.yaml`
+- `.gitignore`
+- `.agents/skills/`
+- `.github/CODEOWNERS`
+- `.github/pull_request_template.md`
+- `docs/tasks/README.md`
 
-# 4. PR template and CODEOWNERS
-curl -o .github/pull_request_template.md \
-  https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/.github/pull_request_template.md
-curl -o .github/CODEOWNERS \
-  https://raw.githubusercontent.com/kumanday/OpenSymphony-template/main/.github/CODEOWNERS
+If you opt into AI PR review during `init`, it also adds:
 
-# 5. Create required labels
+- `.github/workflows/ai-pr-review.yml`
+- `.agents/skills/custom-codereview-guide.md`
+- `docs/ai-pr-review-human-setup.md`
+
+If you want to inspect the exact upstream source, `init` pulls from the raw template base at [raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main](https://raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main/WORKFLOW.md).
+
+If you want the template's GitHub label conventions, create them once per repository:
+
+```bash
 gh label create "symphony" --description "PR created by OpenSymphony" --color "1f77b4" || true
 gh label create "review-this" --description "Trigger AI PR review" --color "d73a4a" || true
 ```
 
-Then edit `WORKFLOW.md` to set your project details:
+Then review the copied `WORKFLOW.md` and `config.yaml`:
 
 | Field | Description | Env Var | Example |
 |-------|-------------|---------|---------|
 | `tracker.project_slug` | Your Linear project identifier | - | `my-team/my-project` |
 | `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
-| `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/gpt-5.4` |
+| `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/accounts/fireworks/models/glm-5p1` |
 
 **Environment Variables**
 
 OpenSymphony uses standard OpenHands environment variable names:
 
 ```bash
-# Required: LLM configuration
-export LLM_MODEL="openai/gpt-5.4"
-export LLM_API_KEY="sk-..."
-
-# Optional: Custom base URL for non-OpenAI providers (e.g., Fireworks)
+# Fireworks example via the OpenAI-compatible provider adapter
+export LLM_MODEL="openai/accounts/fireworks/models/glm-5p1"
+export LLM_API_KEY="fw-..."
 export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
 ```
 
@@ -137,7 +138,7 @@ openhands:
 
 OpenSymphony forwards an OpenHands `LLMSummarizingCondenser` that reuses the conversation agent's LLM settings. The condenser is enabled by default with `max_size: 240` and `keep_first: 2`. To disable it, set `enabled: false`.
 
-Add a root-level `config.yaml` file next to your target repository `WORKFLOW.md`. A minimal local-supervised config looks like this:
+`opensymphony init` also copies a starter `config.yaml` next to the target repository `WORKFLOW.md`. A minimal local-supervised config looks like this:
 
 ```yaml
 control_plane:
@@ -159,8 +160,11 @@ Note: [`examples/configs/local-dev.yaml`](examples/configs/local-dev.yaml) is fo
 # Run preflight checks from the OpenSymphony checkout
 opensymphony doctor --config examples/configs/local-dev.yaml
 
-# Start the orchestrator from the target repository
+# Bootstrap an existing target repository once
 cd /path/to/target-repo
+opensymphony init
+
+# Start the orchestrator from the target repository
 opensymphony run
 
 # Or point at an explicit runtime config file
@@ -226,7 +230,7 @@ The legacy `opensymphony daemon` command is still available as a demo control-pl
 | `opensymphony-workspace` | Workspace lifecycle, hooks, containment |
 | `opensymphony-control` | Control plane API and snapshot derivation |
 | `opensymphony-tui` | FrankenTUI operator client |
-| `opensymphony-cli` | CLI entrypoints: run, daemon (demo), tui, doctor, linear-mcp |
+| `opensymphony-cli` | CLI entrypoints: init, run, debug, daemon (demo), tui, doctor, linear-mcp, rehydrate |
 
 ## Deployment Modes
 

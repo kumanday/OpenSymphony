@@ -182,10 +182,13 @@ Current crate boundaries:
   - snapshot store
   - local HTTP and WebSocket control-plane API
 - `opensymphony-cli`
+  - `init` target-repo bootstrap from template-hosted raw assets
   - `run` orchestrator startup
+  - `debug` conversation resume
   - `daemon` demo control-plane startup
   - doctor command
   - target-repo `WORKFLOW.md` resolution and prompt preflight for doctor
+  - rehydrate command
   - repo-root OpenHands preflight checks
   - linear-mcp command
   - config entrypoints

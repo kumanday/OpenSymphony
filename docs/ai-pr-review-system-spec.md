@@ -391,7 +391,7 @@ Settings → Secrets and variables → Actions → Variables
 Create these repository variables:
 
 - `AI_REVIEW_PROVIDER_KIND` = `openai-compatible`
-- `AI_REVIEW_MODEL_ID` = `accounts/fireworks/models/glm-5`
+- `AI_REVIEW_MODEL_ID` = `accounts/fireworks/models/glm-5p1`
 - `AI_REVIEW_BASE_URL` = `https://api.fireworks.ai/inference/v1`
 - `AI_REVIEW_STYLE` = `standard`
 - `AI_REVIEW_REQUIRE_EVIDENCE` = `true`
@@ -503,7 +503,7 @@ If you want to use a native LiteLLM provider route instead of the generic OpenAI
 Example for native Fireworks through LiteLLM:
 
 - `AI_REVIEW_PROVIDER_KIND` = `litellm-native`
-- `AI_REVIEW_MODEL_ID` = `fireworks_ai/accounts/fireworks/models/glm-5`
+- `AI_REVIEW_MODEL_ID` = `fireworks_ai/accounts/fireworks/models/glm-5p1`
 - `AI_REVIEW_BASE_URL` = empty
 
 ## Local developer note
@@ -513,7 +513,7 @@ If you want to test the provider configuration locally with OpenHands tooling, t
 ```bash
 export FIREWORKS_API_KEY="<your-fireworks-key>"
 export LLM_API_KEY="$FIREWORKS_API_KEY"
-export LLM_MODEL="openai/accounts/fireworks/models/glm-5"
+export LLM_MODEL="openai/accounts/fireworks/models/glm-5p1"
 export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
 ```
 ```
@@ -608,7 +608,6 @@ Before finishing, verify all of the following:
 - [ ] no `pull_request_target` workflow was added by default
 - [ ] no auto-approval logic was added
 - [ ] the Fireworks configuration is documented exactly with:
-  - model id `accounts/fireworks/models/glm-5`
+  - model id `accounts/fireworks/models/glm-5p1`
   - base URL `https://api.fireworks.ai/inference/v1`
   - secret name `FIREWORKS_API_KEY`
-

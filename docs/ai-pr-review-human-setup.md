@@ -29,7 +29,7 @@ Add the following **Variables**:
 | Name | Value | Description |
 |------|-------|-------------|
 | `AI_REVIEW_PROVIDER_KIND` | `openai-compatible` | Provider type |
-| `AI_REVIEW_MODEL_ID` | `accounts/fireworks/models/glm-5` | Model identifier |
+| `AI_REVIEW_MODEL_ID` | `accounts/fireworks/models/glm-5p1` | Model identifier |
 | `AI_REVIEW_BASE_URL` | `https://api.fireworks.ai/inference/v1` | API base URL |
 | `AI_REVIEW_STYLE` | `standard` | Review style (standard, strict, lenient) |
 | `AI_REVIEW_REQUIRE_EVIDENCE` | `true` | Require Evidence section in PRs |
@@ -199,7 +199,7 @@ To use a native LiteLLM provider route instead of OpenAI-compatible:
 
 Example for native Fireworks:
 - `AI_REVIEW_PROVIDER_KIND` = `litellm-native`
-- `AI_REVIEW_MODEL_ID` = `fireworks_ai/accounts/fireworks/models/glm-5`
+- `AI_REVIEW_MODEL_ID` = `fireworks_ai/accounts/fireworks/models/glm-5p1`
 - `AI_REVIEW_BASE_URL` = (empty)
 
 ## Future Enhancements (Not Implemented)

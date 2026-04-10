@@ -345,25 +345,31 @@ Expected assertions:
 
 Recommended CLI commands for the repo:
 
+- `opensymphony init`
 - `opensymphony run`
 - `opensymphony debug <issue-id>`
 - `opensymphony tui`
 - `opensymphony doctor`
 - `opensymphony linear-mcp`
+- `opensymphony rehydrate <issue-id> --reason "..."`
 
 Recommended first-run sequence:
 
 - `cargo install --path .`
 - `./tools/openhands-server/install.sh`
 - `opensymphony --help`
+- `cd /path/to/target-repo && opensymphony init`
+- review the copied `config.yaml` and update `openhands.tool_dir` if the template path does not match your machine
 - `opensymphony doctor --config examples/configs/local-dev.yaml`
 
 Current workspace commands:
 
+- `cd /path/to/target-repo && opensymphony init`
+- `opensymphony init` fetches the current bootstrap payload from the template repo's raw GitHub URLs, merges an existing `AGENTS.md`, prompts before overwriting other repo-owned files, and can optionally scaffold OpenHands AI PR review plus a local setup guide
 - `cd /path/to/target-repo && opensymphony run`
 - `cd /path/to/target-repo && opensymphony run --config ./config.yaml`
-- copy `examples/target-repo/config.yaml` into the target repo root as `config.yaml` before first run; `examples/configs/local-dev.yaml` is only for doctor/preflight against this repo checkout
 - `cd /path/to/target-repo && opensymphony debug COE-284`
+- `cd /path/to/target-repo && opensymphony rehydrate COE-284 --reason "API key rotation"`
 - `opensymphony tui --url http://127.0.0.1:2468/`
 
 Possible helper commands later:
@@ -375,8 +381,11 @@ Current validation commands for the implemented orchestrator and observability s
 
 - `cargo test`
 - `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo test -p opensymphony-cli --lib resolve_rehydrate_runtime_honors_root_config_tool_dir -- --nocapture`
+- `cargo test -p opensymphony-cli --test init`
 - `cargo test -p opensymphony-cli --test debug`
 - `cargo install --path . --locked --root /tmp/opensymphony-install-check`
+- `cd /path/to/target-repo && /tmp/opensymphony-install-check/bin/opensymphony init`
 - `cd /path/to/target-repo && /tmp/opensymphony-install-check/bin/opensymphony run`
 - `cd /path/to/target-repo && /tmp/opensymphony-install-check/bin/opensymphony debug COE-284`
 - `curl http://127.0.0.1:2468/api/v1/snapshot`
