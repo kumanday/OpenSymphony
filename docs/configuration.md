@@ -137,7 +137,7 @@ the starting template if you want to inspect the checked-in example.
 `opensymphony doctor` against the OpenSymphony checkout. It is not the runtime
 config that `opensymphony run` looks for in a target repo.
 
-## AI PR Review
+## OpenHands PR Review
 
-If you opt into OpenHands AI PR review during `init`, finish the GitHub Actions
+If you opt into OpenHands PR review during `init`, finish the GitHub Actions
 setup described in [ai-pr-review-human-setup.md](ai-pr-review-human-setup.md).

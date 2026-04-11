@@ -51,7 +51,7 @@ opensymphony init
 ```
 
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
-can optionally scaffold automated OpenHands AI PR review.
+can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review).
 
 ### Running the Orchestrator
 

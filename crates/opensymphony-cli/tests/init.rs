@@ -100,7 +100,7 @@ async fn init_can_scaffold_ai_pr_review_and_print_setup_guidance() {
         "setup guide should be created"
     );
     assert!(
-        stdout.contains("OpenHands AI PR review scaffolding was added."),
+        stdout.contains("OpenHands PR review scaffolding was added."),
         "stdout should contain AI review guidance: {stdout}",
     );
     assert!(

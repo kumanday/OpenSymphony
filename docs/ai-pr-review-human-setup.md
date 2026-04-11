@@ -1,6 +1,11 @@
-# AI PR Review System - Human Setup Guide
+# OpenHands PR Review - Human Setup Guide
 
-This document describes the manual setup steps required to activate the AI PR review system.
+This document describes the manual setup steps required to activate the OpenHands PR review workflow.
+
+Useful references:
+
+- Plugin page with installation details: https://github.com/OpenHands/extensions/tree/main/plugins/pr-review
+- Official OpenHands guide: https://docs.openhands.dev/sdk/guides/github-workflows/pr-review
 
 ## Prerequisites
 
@@ -57,23 +62,22 @@ Under "Actions permissions":
 - Add `OpenHands/extensions` to the allowlist
 - Or use your organization's standard third-party action review process
 
-### 5. Pin the OpenHands Extensions SHA
+### 5. Verify the pinned OpenHands Extensions SHA
 
-**TODO:** Before activating, pin the action to a specific commit SHA:
+The scaffolded workflow should already pin the plugin to this commit from `OpenHands/extensions`:
 
-1. Go to https://github.com/OpenHands/extensions/commits/main
-2. Find a recent stable commit
-3. Copy the full SHA (40 characters)
-4. Update `.github/workflows/ai-pr-review.yml`:
-   - Replace `__PINNED_OPENHANDS_EXTENSIONS_SHA__` with the actual SHA in **both** places:
-     - The `uses:` line
-     - The `extensions-version:` input
+- `9e5bb49dbe61bdb364c89c10c7307c38139e9532`
+
+Verify that `.github/workflows/ai-pr-review.yml` uses the same SHA in **both** places:
+
+- the `uses:` line
+- the `extensions-version:` input
 
 Example:
 ```yaml
-uses: OpenHands/extensions/plugins/pr-review@abc123def456...
+uses: OpenHands/extensions/plugins/pr-review@9e5bb49dbe61bdb364c89c10c7307c38139e9532
 with:
-  extensions-version: abc123def456...
+  extensions-version: 9e5bb49dbe61bdb364c89c10c7307c38139e9532
 ```
 
 ### 6. Branch Protection Settings (Recommended)

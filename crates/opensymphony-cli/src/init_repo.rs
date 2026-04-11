@@ -20,6 +20,12 @@ const DEFAULT_AI_REVIEW_MODEL_ID: &str = "accounts/fireworks/models/glm-5p1";
 const DEFAULT_AI_REVIEW_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 const DEFAULT_AI_REVIEW_STYLE: &str = "standard";
 const DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE: &str = "true";
+const OPENHANDS_PR_REVIEW_PLUGIN_URL: &str =
+    "https://github.com/OpenHands/extensions/tree/main/plugins/pr-review";
+const OPENHANDS_PR_REVIEW_DOCS_URL: &str =
+    "https://docs.openhands.dev/sdk/guides/github-workflows/pr-review";
+const OPENHANDS_EXTENSIONS_PINNED_SHA: &str =
+    "9e5bb49dbe61bdb364c89c10c7307c38139e9532";
 const AI_REVIEW_LABEL_NAME: &str = "review-this";
 const PRESERVED_AGENTS_MARKER: &str = "## Preserved Existing AGENTS.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
@@ -896,9 +902,14 @@ fn yaml_double_quote(value: &str) -> String {
 
 fn ai_pr_review_setup_doc_contents() -> String {
     format!(
-        r#"# OpenHands AI PR Review Setup
+        r#"# OpenHands PR Review Setup
 
-This repository was bootstrapped with OpenHands AI PR review support via `opensymphony init`.
+This repository was bootstrapped with OpenHands PR review support via `opensymphony init`.
+
+Useful references:
+
+- Plugin page: {plugin_url}
+- Official docs: {docs_url}
 
 ## Files Added
 
@@ -947,6 +958,7 @@ gh secret set FIREWORKS_API_KEY
 ## Notes
 
 - If your organization restricts Actions, allow `OpenHands/extensions`.
+- The generated workflow should already pin the plugin to `{pinned_sha}` in both the `uses:` line and the `extensions-version:` input.
 - Do not make the AI review workflow a required status check.
 - Keep the workflow on GitHub-hosted runners unless you have separately reviewed the risk model for untrusted PR content.
 "#,
@@ -962,6 +974,9 @@ gh secret set FIREWORKS_API_KEY
         quoted_base_url = shell_single_quote(DEFAULT_AI_REVIEW_BASE_URL),
         quoted_style = shell_single_quote(DEFAULT_AI_REVIEW_STYLE),
         quoted_require_evidence = shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE),
+        plugin_url = OPENHANDS_PR_REVIEW_PLUGIN_URL,
+        docs_url = OPENHANDS_PR_REVIEW_DOCS_URL,
+        pinned_sha = OPENHANDS_EXTENSIONS_PINNED_SHA,
     )
 }
 
@@ -1005,7 +1020,7 @@ where
     W: Write,
 {
     ui.blank_line()?;
-    ui.line("OpenHands AI PR review scaffolding was added.")?;
+    ui.line("OpenHands PR review scaffolding was added.")?;
     ui.line("Next steps for GitHub Actions setup:")?;
     ui.line("- secret: FIREWORKS_API_KEY=<your-fireworks-api-key>")?;
     ui.line(format!(
@@ -1051,6 +1066,12 @@ where
     ui.line(format!(
         "gh label create {} --description 'Trigger AI PR review' --color 'd73a4a' || true",
         shell_single_quote(AI_REVIEW_LABEL_NAME)
+    ))?;
+    ui.line(format!(
+        "Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"
+    ))?;
+    ui.line(format!(
+        "Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"
     ))?;
     ui.line("See `docs/ai-pr-review-human-setup.md` for the full setup checklist.")?;
     Ok(())
