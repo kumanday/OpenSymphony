@@ -121,6 +121,10 @@ async fn init_can_scaffold_ai_pr_review_and_print_setup_guidance() {
         ),
         "stdout should contain GitHub variable commands: {stdout}",
     );
+    assert!(
+        stdout.contains("gh secret set AI_REVIEW_API_KEY"),
+        "stdout should contain the generic AI review secret guidance: {stdout}",
+    );
 }
 
 #[tokio::test]

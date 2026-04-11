@@ -23,6 +23,8 @@ const DEFAULT_AI_REVIEW_MODEL_ID: &str = "accounts/fireworks/models/glm-5p1";
 const DEFAULT_AI_REVIEW_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 const DEFAULT_AI_REVIEW_STYLE: &str = "standard";
 const DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE: &str = "true";
+const DEFAULT_AI_REVIEW_SECRET_NAME: &str = "AI_REVIEW_API_KEY";
+const LEGACY_AI_REVIEW_SECRET_NAME: &str = "FIREWORKS_API_KEY";
 const OPENHANDS_PR_REVIEW_PLUGIN_URL: &str =
     "https://github.com/OpenHands/extensions/tree/main/plugins/pr-review";
 const OPENHANDS_PR_REVIEW_DOCS_URL: &str =
@@ -1035,7 +1037,11 @@ Add this repository secret under **Settings -> Secrets and variables -> Actions*
 
 | Name | Value |
 |------|-------|
-| `FIREWORKS_API_KEY` | Your Fireworks API key |
+| `{secret_name}` | Your AI review provider API key |
+
+Fireworks remains the default example provider, but the secret name is
+provider-agnostic. The workflow also accepts `{legacy_secret_name}` as a
+legacy fallback for older repositories.
 
 ## GitHub Actions Variables
 
@@ -1065,7 +1071,7 @@ gh variable set AI_REVIEW_MODEL_ID --body {quoted_model_id}
 gh variable set AI_REVIEW_BASE_URL --body {quoted_base_url}
 gh variable set AI_REVIEW_STYLE --body {quoted_style}
 gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {quoted_require_evidence}
-gh secret set FIREWORKS_API_KEY
+gh secret set {secret_name}
 ```
 
 ## Notes
@@ -1087,6 +1093,8 @@ gh secret set FIREWORKS_API_KEY
         quoted_base_url = shell_single_quote(DEFAULT_AI_REVIEW_BASE_URL),
         quoted_style = shell_single_quote(DEFAULT_AI_REVIEW_STYLE),
         quoted_require_evidence = shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE),
+        secret_name = DEFAULT_AI_REVIEW_SECRET_NAME,
+        legacy_secret_name = LEGACY_AI_REVIEW_SECRET_NAME,
         plugin_url = OPENHANDS_PR_REVIEW_PLUGIN_URL,
         docs_url = OPENHANDS_PR_REVIEW_DOCS_URL,
         pinned_sha = OPENHANDS_EXTENSIONS_PINNED_SHA,
@@ -1135,7 +1143,8 @@ where
     ui.blank_line()?;
     ui.line("OpenHands PR review scaffolding was added.")?;
     ui.line("Next steps for GitHub Actions setup:")?;
-    ui.line("- secret: FIREWORKS_API_KEY=<your-fireworks-api-key>")?;
+    ui.line("- secret: AI_REVIEW_API_KEY=<your-ai-review-provider-key>")?;
+    ui.line("- optional legacy fallback: FIREWORKS_API_KEY=<your-fireworks-api-key>")?;
     ui.line(format!(
         "- variable: AI_REVIEW_PROVIDER_KIND={DEFAULT_AI_REVIEW_PROVIDER_KIND}"
     ))?;
@@ -1175,7 +1184,7 @@ where
         "gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {}",
         shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE)
     ))?;
-    ui.line("gh secret set FIREWORKS_API_KEY")?;
+    ui.line("gh secret set AI_REVIEW_API_KEY")?;
     ui.line(format!(
         "gh label create {} --description 'Trigger AI PR review' --color 'd73a4a' || true",
         shell_single_quote(AI_REVIEW_LABEL_NAME)
@@ -1392,9 +1401,10 @@ hooks:
     }
 
     #[test]
-    fn ai_pr_review_setup_doc_uses_fireworks_p1_defaults() {
+    fn ai_pr_review_setup_doc_uses_generic_secret_and_fireworks_defaults() {
         let doc = ai_pr_review_setup_doc_contents();
 
+        assert!(doc.contains(DEFAULT_AI_REVIEW_SECRET_NAME));
         assert!(doc.contains(DEFAULT_AI_REVIEW_PROVIDER_KIND));
         assert!(doc.contains(DEFAULT_AI_REVIEW_MODEL_ID));
         assert!(doc.contains(DEFAULT_AI_REVIEW_BASE_URL));
