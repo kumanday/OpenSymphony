@@ -37,7 +37,8 @@ Core bootstrap payload:
 - `AGENTS.md`
 - `config.yaml`
 - `.gitignore`
-- `.agents/skills/`
+- `.agents/skills/` copied recursively, including skill-local `references/`, `scripts/`, and similar helper files
+- `.agents/skills/linear/references/`
 - `.github/CODEOWNERS`
 - `.github/pull_request_template.md`
 - `docs/tasks/README.md`
@@ -66,9 +67,12 @@ Important fields:
 
 | Field | Description | Env Var | Example |
 |-------|-------------|---------|---------|
-| `tracker.project_slug` | Your Linear project identifier | - | `my-team/my-project` |
+| `tracker.project_slug` | Linear `Project.slugId` from the project URL | - | `my-project-5250e49b61f4` |
 | `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
 | `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/accounts/fireworks/models/glm-5p1` |
+
+For Linear trackers, `tracker.project_slug` should store the project's
+`slugId`, not a `team/project` path.
 
 ## Environment Variables
 

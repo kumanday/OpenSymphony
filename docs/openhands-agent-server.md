@@ -502,6 +502,15 @@ conversation-create request as `mcp_config.stdio_servers`, so local sessions can
 provision `opensymphony linear-mcp` through workflow config instead of only the
 ambient host tool environment.
 
+OpenSymphony does not currently inject Symphony-style `dynamicTools` such as
+`linear_graphql` into OpenHands conversations. Repo-local Linear skills should
+therefore assume:
+
+- MCP is the primary in-session path
+- any injected `linear_graphql` tool is optional and runtime-dependent
+- `LINEAR_API_KEY` raw GraphQL remains the fallback for operations beyond the
+  current MCP surface
+
 ## 12. Hosted-mode implications kept in mind during MVP
 
 The local MVP chooses a single local server process, but the OpenHands integration boundary must also support future remote deployment.

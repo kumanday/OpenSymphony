@@ -8,10 +8,13 @@ use std::{
 
 use clap::Args;
 use reqwest::{Client, StatusCode, Url};
+use serde::Deserialize;
 use thiserror::Error;
 
 const DEFAULT_TEMPLATE_BASE_URL: &str =
     "https://raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main/";
+const DEFAULT_TEMPLATE_TREE_URL: &str =
+    "https://api.github.com/repos/kumanday/OpenSymphony-template/git/trees/main?recursive=1";
 const DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_LLM_MODEL: &str = "openai/accounts/fireworks/models/glm-5p1";
 const DEFAULT_LLM_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
@@ -24,8 +27,7 @@ const OPENHANDS_PR_REVIEW_PLUGIN_URL: &str =
     "https://github.com/OpenHands/extensions/tree/main/plugins/pr-review";
 const OPENHANDS_PR_REVIEW_DOCS_URL: &str =
     "https://docs.openhands.dev/sdk/guides/github-workflows/pr-review";
-const OPENHANDS_EXTENSIONS_PINNED_SHA: &str =
-    "9e5bb49dbe61bdb364c89c10c7307c38139e9532";
+const OPENHANDS_EXTENSIONS_PINNED_SHA: &str = "9e5bb49dbe61bdb364c89c10c7307c38139e9532";
 const AI_REVIEW_LABEL_NAME: &str = "review-this";
 const PRESERVED_AGENTS_MARKER: &str = "## Preserved Existing AGENTS.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
@@ -48,24 +50,40 @@ enum InitCommandError {
     },
     #[error("failed to fetch template asset {path} from {url}: {source}")]
     FetchTemplate {
-        path: &'static str,
+        path: String,
         url: String,
         #[source]
         source: reqwest::Error,
     },
     #[error("failed to fetch template asset {path} from {url}: HTTP {status}")]
     FetchTemplateStatus {
-        path: &'static str,
+        path: String,
         url: String,
         status: StatusCode,
     },
     #[error("template asset {path} from {url} was not valid UTF-8: {source}")]
     DecodeTemplate {
-        path: &'static str,
+        path: String,
         url: String,
         #[source]
         source: reqwest::Error,
     },
+    #[error("failed to fetch template tree from {url}: {source}")]
+    FetchTemplateTree {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("failed to fetch template tree from {url}: HTTP {status}")]
+    FetchTemplateTreeStatus { url: String, status: StatusCode },
+    #[error("template tree from {url} was not valid JSON: {source}")]
+    DecodeTemplateTree {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("template directory {path} had no files in tree {url}")]
+    MissingTemplateDirectory { path: &'static str, url: String },
     #[error("failed to read {path}: {source}")]
     ReadFile {
         path: PathBuf,
@@ -98,6 +116,12 @@ struct TemplateAsset {
     kind: AssetKind,
 }
 
+#[derive(Clone, Copy)]
+struct TemplateDirectory {
+    path: &'static str,
+    kind: AssetKind,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AssetKind {
     Standard,
@@ -107,8 +131,21 @@ enum AssetKind {
 
 #[derive(Clone)]
 struct FetchedAsset {
-    definition: TemplateAsset,
+    path: String,
+    kind: AssetKind,
     contents: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateTreeResponse {
+    tree: Vec<TemplateTreeEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateTreeEntry {
+    path: String,
+    #[serde(rename = "type")]
+    entry_type: String,
 }
 
 enum PlannedAction {
@@ -217,34 +254,6 @@ const CORE_TEMPLATE_ASSETS: &[TemplateAsset] = &[
         kind: AssetKind::Standard,
     },
     TemplateAsset {
-        path: ".agents/skills/commit/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/convert-tasks-to-linear/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/create-implementation-plan/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/land/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/linear/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/pull/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/push/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
         path: ".github/CODEOWNERS",
         kind: AssetKind::Standard,
     },
@@ -257,6 +266,11 @@ const CORE_TEMPLATE_ASSETS: &[TemplateAsset] = &[
         kind: AssetKind::Standard,
     },
 ];
+
+const CORE_TEMPLATE_DIRECTORIES: &[TemplateDirectory] = &[TemplateDirectory {
+    path: ".agents/skills",
+    kind: AssetKind::Standard,
+}];
 
 const AI_REVIEW_TEMPLATE_ASSETS: &[TemplateAsset] = &[TemplateAsset {
     path: ".github/workflows/ai-pr-review.yml",
@@ -317,16 +331,18 @@ where
         .map_err(InitCommandError::HttpClient)?;
     ui.line("Fetching the current template payload from GitHub...")?;
 
-    let mut fetched_assets = fetch_template_assets(&client, CORE_TEMPLATE_ASSETS).await?;
+    let mut fetched_assets =
+        fetch_template_assets(&client, CORE_TEMPLATE_ASSETS, CORE_TEMPLATE_DIRECTORIES).await?;
     if enable_ai_pr_review {
-        fetched_assets.extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS).await?);
+        fetched_assets
+            .extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS, &[]).await?);
         fetched_assets.extend(generated_ai_review_assets());
     }
     let mut planned_assets = plan_assets(&target_repo, fetched_assets)?;
     resolve_conflicts(&mut planned_assets, ui)?;
 
     let workflow_will_change = planned_assets.iter().any(|planned| {
-        planned.asset.definition.kind == AssetKind::Workflow
+        planned.asset.kind == AssetKind::Workflow
             && matches!(
                 planned.action,
                 PlannedAction::Create | PlannedAction::Overwrite | PlannedAction::CustomizeWorkflow
@@ -371,8 +387,8 @@ where
     let mut wrote_config = false;
 
     for planned in planned_assets {
-        let destination = target_repo.join(planned.asset.definition.path);
-        let relative_path = planned.asset.definition.path.to_owned();
+        let destination = target_repo.join(&planned.asset.path);
+        let relative_path = planned.asset.path.clone();
 
         let final_result = apply_asset(
             &destination,
@@ -436,6 +452,7 @@ where
 async fn fetch_template_assets(
     client: &Client,
     assets: &[TemplateAsset],
+    directories: &[TemplateDirectory],
 ) -> Result<Vec<FetchedAsset>, InitCommandError> {
     let base_url = env::var("OPENSYMPHONY_TEMPLATE_BASE_URL")
         .unwrap_or_else(|_| DEFAULT_TEMPLATE_BASE_URL.to_string());
@@ -444,59 +461,155 @@ async fn fetch_template_assets(
             value: base_url.clone(),
             source,
         })?;
+    let tree_url = match env::var("OPENSYMPHONY_TEMPLATE_TREE_URL") {
+        Ok(tree_url) => {
+            Url::parse(&tree_url).map_err(|source| InitCommandError::InvalidTemplateBaseUrl {
+                value: tree_url,
+                source,
+            })?
+        }
+        Err(_) if env::var_os("OPENSYMPHONY_TEMPLATE_BASE_URL").is_some() => base_url
+            .join("__tree.json")
+            .map_err(|source| InitCommandError::InvalidTemplateBaseUrl {
+                value: format!("{base_url}__tree.json"),
+                source,
+            })?,
+        Err(_) => {
+            Url::parse(DEFAULT_TEMPLATE_TREE_URL).expect("default template tree URL is valid")
+        }
+    };
 
-    let mut fetched = Vec::with_capacity(assets.len());
+    let tree_paths = if directories.is_empty() {
+        Vec::new()
+    } else {
+        fetch_template_tree(client, &tree_url).await?
+    };
+
+    let mut fetched = Vec::new();
     for definition in assets {
-        let url = base_url.join(definition.path).map_err(|source| {
-            InitCommandError::InvalidTemplateBaseUrl {
-                value: format!("{base_url}{}", definition.path),
-                source,
-            }
-        })?;
-        let response = client.get(url.clone()).send().await.map_err(|source| {
-            InitCommandError::FetchTemplate {
-                path: definition.path,
-                url: url.to_string(),
-                source,
-            }
-        })?;
+        fetched
+            .push(fetch_template_file(client, &base_url, definition.path, definition.kind).await?);
+    }
 
-        let status = response.status();
-        if !status.is_success() {
-            return Err(InitCommandError::FetchTemplateStatus {
-                path: definition.path,
-                url: url.to_string(),
-                status,
+    for directory in directories {
+        let prefix = format!("{}/", directory.path.trim_end_matches('/'));
+        let mut matched_paths = tree_paths
+            .iter()
+            .filter(|path| path.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        matched_paths.sort();
+
+        if matched_paths.is_empty() {
+            return Err(InitCommandError::MissingTemplateDirectory {
+                path: directory.path,
+                url: tree_url.to_string(),
             });
         }
 
-        let contents =
-            response
-                .text()
-                .await
-                .map_err(|source| InitCommandError::DecodeTemplate {
-                    path: definition.path,
-                    url: url.to_string(),
-                    source,
-                })?;
-
-        fetched.push(FetchedAsset {
-            definition: *definition,
-            contents,
-        });
+        for path in matched_paths {
+            fetched.push(fetch_template_file(client, &base_url, &path, directory.kind).await?);
+        }
     }
 
     Ok(fetched)
 }
 
+async fn fetch_template_tree(
+    client: &Client,
+    tree_url: &Url,
+) -> Result<Vec<String>, InitCommandError> {
+    let response = client
+        .get(tree_url.clone())
+        .send()
+        .await
+        .map_err(|source| InitCommandError::FetchTemplateTree {
+            url: tree_url.to_string(),
+            source,
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(InitCommandError::FetchTemplateTreeStatus {
+            url: tree_url.to_string(),
+            status,
+        });
+    }
+
+    let tree = response
+        .json::<TemplateTreeResponse>()
+        .await
+        .map_err(|source| InitCommandError::DecodeTemplateTree {
+            url: tree_url.to_string(),
+            source,
+        })?;
+
+    Ok(tree
+        .tree
+        .into_iter()
+        .filter(|entry| entry.entry_type == "blob")
+        .map(|entry| entry.path)
+        .collect())
+}
+
+async fn fetch_template_file(
+    client: &Client,
+    base_url: &Url,
+    path: &str,
+    kind: AssetKind,
+) -> Result<FetchedAsset, InitCommandError> {
+    let url = base_url
+        .join(path)
+        .map_err(|source| InitCommandError::InvalidTemplateBaseUrl {
+            value: format!("{base_url}{path}"),
+            source,
+        })?;
+    let response =
+        client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|source| InitCommandError::FetchTemplate {
+                path: path.to_string(),
+                url: url.to_string(),
+                source,
+            })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(InitCommandError::FetchTemplateStatus {
+            path: path.to_string(),
+            url: url.to_string(),
+            status,
+        });
+    }
+
+    let contents = response
+        .text()
+        .await
+        .map_err(|source| InitCommandError::DecodeTemplate {
+            path: path.to_string(),
+            url: url.to_string(),
+            source,
+        })?;
+
+    Ok(FetchedAsset {
+        path: path.to_string(),
+        kind,
+        contents,
+    })
+}
+
 fn generated_ai_review_assets() -> Vec<FetchedAsset> {
     vec![
         FetchedAsset {
-            definition: AI_REVIEW_SETUP_DOC_ASSET,
+            path: AI_REVIEW_SETUP_DOC_ASSET.path.to_string(),
+            kind: AI_REVIEW_SETUP_DOC_ASSET.kind,
             contents: ai_pr_review_setup_doc_contents(),
         },
         FetchedAsset {
-            definition: AI_REVIEW_CUSTOM_GUIDE_ASSET,
+            path: AI_REVIEW_CUSTOM_GUIDE_ASSET.path.to_string(),
+            kind: AI_REVIEW_CUSTOM_GUIDE_ASSET.kind,
             contents: custom_codereview_guide_contents(),
         },
     ]
@@ -509,10 +622,10 @@ fn plan_assets(
     let mut planned = Vec::with_capacity(assets.len());
 
     for asset in assets {
-        let destination = target_repo.join(asset.definition.path);
+        let destination = target_repo.join(&asset.path);
         match fs::read_to_string(&destination) {
             Ok(existing) => {
-                let action = match asset.definition.kind {
+                let action = match asset.kind {
                     AssetKind::Agents => {
                         if comparable_text(&existing) == comparable_text(&asset.contents)
                             || agents_already_initialized(&existing, &asset.contents)
@@ -576,7 +689,7 @@ where
             continue;
         }
 
-        let relative_path = Path::new(planned.asset.definition.path);
+        let relative_path = Path::new(&planned.asset.path);
         let display_path = relative_path.display();
 
         loop {
@@ -665,7 +778,7 @@ fn build_final_contents(
     linear_project_slug: Option<&str>,
 ) -> Option<String> {
     match action {
-        PlannedAction::Create | PlannedAction::Overwrite => Some(match asset.definition.kind {
+        PlannedAction::Create | PlannedAction::Overwrite => Some(match asset.kind {
             AssetKind::Workflow => {
                 customize_workflow(&asset.contents, git_remote_url, linear_project_slug)
             }
@@ -1067,12 +1180,8 @@ where
         "gh label create {} --description 'Trigger AI PR review' --color 'd73a4a' || true",
         shell_single_quote(AI_REVIEW_LABEL_NAME)
     ))?;
-    ui.line(format!(
-        "Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"
-    ))?;
-    ui.line(format!(
-        "Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"
-    ))?;
+    ui.line(format!("Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"))?;
+    ui.line(format!("Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"))?;
     ui.line("See `docs/ai-pr-review-human-setup.md` for the full setup checklist.")?;
     Ok(())
 }

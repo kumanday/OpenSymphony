@@ -67,9 +67,15 @@ Instructions:
 
 Work only in the provided repository copy. Do not touch any other path.
 
-## Prerequisite: Linear MCP or `linear_graphql` tool is available
+## Prerequisite: at least one Linear path is available
 
-The agent should be able to talk to Linear, either via a configured Linear MCP server or injected `linear_graphql` tool. If none are present, stop and ask the user to configure Linear.
+The agent should be able to talk to Linear through one of these paths:
+
+1. configured OpenSymphony Linear MCP tools
+2. an injected `linear_graphql` tool, if the runtime provides one
+3. raw GraphQL through `LINEAR_API_KEY` for operations not covered by MCP
+
+Prefer MCP for routine issue operations, use `linear_graphql` when a session exposes it for raw GraphQL work, and fall back to direct GraphQL with `LINEAR_API_KEY` when needed. If none of these paths is available, treat Linear access as a real blocker, record it in the workpad, and follow the blocked path in this workflow.
 
 ## Default posture
 
@@ -93,7 +99,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## Related skills
 
-- `linear`: interact with Linear.
+- `linear`: interact with Linear using MCP first, then injected `linear_graphql`, then raw GraphQL fallback when needed.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
@@ -315,7 +321,7 @@ For major rework:
 - If issue state is `Backlog`, do not modify it; wait for human to move it to `Todo`.
 - Do not edit the issue body/description for planning or progress tracking.
 - Use exactly one persistent workpad comment (`## Agent Harness Workpad`) per issue.
-- If comment editing is unavailable in-session, use the update script. Only report blocked if both MCP editing and script-based editing are unavailable.
+- If the usual Linear tool path is unavailable in-session, use the `linear` skill's fallback order. Only report blocked if MCP, injected `linear_graphql`, and raw GraphQL via `LINEAR_API_KEY` are all unavailable.
 - Temporary proof edits are allowed only for local verification and must be reverted before commit.
 - If out-of-scope improvements are found, create a separate Backlog issue rather
   than expanding current scope, and include a clear

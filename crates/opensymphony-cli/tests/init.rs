@@ -45,6 +45,18 @@ async fn init_copies_template_files_and_customizes_workflow() {
         "skill file should be created"
     );
     assert!(
+        repo.path()
+            .join(".agents/skills/commit/scripts/helper.sh")
+            .is_file(),
+        "skill helper files should be copied recursively"
+    );
+    assert!(
+        repo.path()
+            .join(".agents/skills/linear/references/raw-graphql.md")
+            .is_file(),
+        "linear reference file should be created"
+    );
+    assert!(
         repo.path().join("config.yaml").is_file(),
         "config.yaml should be created"
     );
@@ -224,7 +236,7 @@ async fn init_fails_when_template_fetch_times_out() {
         "init should fail on template fetch timeout: stdout={stdout}, stderr={stderr}",
     );
     assert!(
-        stdout.contains("opensymphony init failed: failed to fetch template asset"),
+        stdout.contains("opensymphony init failed: failed to fetch template tree"),
         "stdout should report the fetch failure: {stdout}",
     );
     assert!(
@@ -342,6 +354,17 @@ async fn template_handler(
         tokio::time::sleep(delay).await;
     }
     let path = uri.path().trim_start_matches('/');
+    if path == "__tree.json" {
+        let tree = assets
+            .keys()
+            .map(|path| serde_json::json!({ "path": path, "type": "blob" }))
+            .collect::<Vec<_>>();
+        return (
+            StatusCode::OK,
+            serde_json::json!({ "tree": tree }).to_string(),
+        )
+            .into_response();
+    }
     match assets.get(path) {
         Some(content) => (StatusCode::OK, content.clone()).into_response(),
         None => (StatusCode::NOT_FOUND, format!("missing asset {path}")).into_response(),
@@ -382,6 +405,10 @@ openhands:
             "# commit\n".to_string(),
         ),
         (
+            ".agents/skills/commit/scripts/helper.sh".to_string(),
+            "#!/usr/bin/env bash\necho helper\n".to_string(),
+        ),
+        (
             ".agents/skills/convert-tasks-to-linear/SKILL.md".to_string(),
             "# convert\n".to_string(),
         ),
@@ -396,6 +423,22 @@ openhands:
         (
             ".agents/skills/linear/SKILL.md".to_string(),
             "# linear\n".to_string(),
+        ),
+        (
+            ".agents/skills/linear/references/mcp-capabilities.md".to_string(),
+            "# mcp\n".to_string(),
+        ),
+        (
+            ".agents/skills/linear/references/raw-graphql.md".to_string(),
+            "# raw graphql\n".to_string(),
+        ),
+        (
+            ".agents/skills/linear/references/issue-and-comment-operations.md".to_string(),
+            "# issue ops\n".to_string(),
+        ),
+        (
+            ".agents/skills/linear/references/project-and-advanced-operations.md".to_string(),
+            "# project ops\n".to_string(),
         ),
         (
             ".agents/skills/pull/SKILL.md".to_string(),

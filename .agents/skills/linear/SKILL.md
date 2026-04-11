@@ -1,388 +1,70 @@
 ---
 name: linear
 description: |
-  Use Symphony's `linear_graphql` client tool for raw Linear GraphQL
-  operations such as comment editing and upload flows.
+  Interact with Linear through the best available transport for the current
+  session: OpenSymphony Linear MCP tools first, optional injected
+  `linear_graphql` when available, and raw GraphQL via `LINEAR_API_KEY` for
+  GraphQL-only gaps.
 ---
 
-# Linear GraphQL
+# Linear
 
-Use this skill for raw Linear GraphQL work during Symphony app-server sessions.
+Use this skill whenever the agent needs to read or write Linear state from an
+OpenSymphony-managed repository.
 
-## Primary tool
+## Goal
 
-Use the `linear_graphql` client tool exposed by Symphony's app-server session.
-It reuses Symphony's configured Linear auth for the session.
+Choose the narrowest transport that can complete the task while keeping the
+workflow reproducible across OpenSymphony sessions, Codex desktop sessions, and
+future injected-tool runtimes.
 
-Tool input:
+## Transport order
 
-```json
-{
-  "query": "query or mutation document",
-  "variables": {
-    "optional": "graphql variables object"
-  }
-}
-```
+OpenSymphony currently supports three Linear access paths:
 
-Tool behavior:
+1. Linear MCP tools
+   - Primary OpenSymphony path for routine issue operations.
+   - The current MCP surface is intentionally narrow: issue fetch, comment
+     create, state transition, URL/PR link attachment, and workflow-state
+     lookup.
+   - Prefer this when the operation is covered by the MCP surface.
+2. Optional `linear_graphql` dynamic tool
+   - Present in Symphony/Codex app-server sessions and any future runtime that
+     injects the same tool.
+   - Prefer this over raw shell GraphQL when you need schema-level GraphQL
+     access and the tool is available in-session.
+3. Raw GraphQL via `LINEAR_API_KEY`
+   - Fallback when the required operation is not covered by MCP or no injected
+     Linear tool is available.
+   - Use the reference files below instead of improvising large GraphQL
+     documents from scratch.
 
-- Send one GraphQL operation per tool call.
-- Treat a top-level `errors` array as a failed GraphQL operation even if the
-  tool call itself completed.
-- Keep queries/mutations narrowly scoped; ask only for the fields you need.
+If none of the three paths is available, report a real Linear blocker.
 
-## Discovering unfamiliar operations
+## How to choose quickly
 
-When you need an unfamiliar mutation, input type, or object field, use targeted
-introspection through `linear_graphql`.
+- For routine issue fetch, comment creation, transitions, PR links, and state
+  lookup, start with [references/mcp-capabilities.md](references/mcp-capabilities.md).
+- For raw GraphQL transport and auth fallback, open
+  [references/raw-graphql.md](references/raw-graphql.md).
+- For issue, comment, attachment, and dependency mutations, open
+  [references/issue-and-comment-operations.md](references/issue-and-comment-operations.md).
+- For project overview/content updates, uploads, and schema discovery, open
+  [references/project-and-advanced-operations.md](references/project-and-advanced-operations.md).
 
-List mutation names:
+## Rules
 
-```graphql
-query ListMutations {
-  __type(name: "Mutation") {
-    fields {
-      name
-    }
-  }
-}
-```
-
-Inspect a specific input object:
-
-```graphql
-query CommentCreateInputShape {
-  __type(name: "CommentCreateInput") {
-    inputFields {
-      name
-      type {
-        kind
-        name
-        ofType {
-          kind
-          name
-        }
-      }
-    }
-  }
-}
-```
-
-## Common workflows
-
-### Query an issue by key, identifier, or id
-
-Use these progressively:
-
-- Start with `issue(id: $key)` when you have a ticket key such as `MT-686`.
-- Fall back to `issues(filter: ...)` when you need identifier search semantics.
-- Once you have the internal issue id, prefer `issue(id: $id)` for narrower reads.
-
-Lookup by issue key:
-
-```graphql
-query IssueByKey($key: String!) {
-  issue(id: $key) {
-    id
-    identifier
-    title
-    state {
-      id
-      name
-      type
-    }
-    project {
-      id
-      name
-    }
-    branchName
-    url
-    description
-    updatedAt
-    links {
-      nodes {
-        id
-        url
-        title
-      }
-    }
-  }
-}
-```
-
-Lookup by identifier filter:
-
-```graphql
-query IssueByIdentifier($identifier: String!) {
-  issues(filter: { identifier: { eq: $identifier } }, first: 1) {
-    nodes {
-      id
-      identifier
-      title
-      state {
-        id
-        name
-        type
-      }
-      project {
-        id
-        name
-      }
-      branchName
-      url
-      description
-      updatedAt
-    }
-  }
-}
-```
-
-Resolve a key to an internal id:
-
-```graphql
-query IssueByIdOrKey($id: String!) {
-  issue(id: $id) {
-    id
-    identifier
-    title
-  }
-}
-```
-
-Read the issue once the internal id is known:
-
-```graphql
-query IssueDetails($id: String!) {
-  issue(id: $id) {
-    id
-    identifier
-    title
-    url
-    description
-    state {
-      id
-      name
-      type
-    }
-    project {
-      id
-      name
-    }
-    attachments {
-      nodes {
-        id
-        title
-        url
-        sourceType
-      }
-    }
-  }
-}
-```
-
-### Query team workflow states for an issue
-
-Use this before changing issue state when you need the exact `stateId`:
-
-```graphql
-query IssueTeamStates($id: String!) {
-  issue(id: $id) {
-    id
-    team {
-      id
-      key
-      name
-      states {
-        nodes {
-          id
-          name
-          type
-        }
-      }
-    }
-  }
-}
-```
-
-### Edit an existing comment
-
-Use `commentUpdate` through `linear_graphql`:
-
-```graphql
-mutation UpdateComment($id: String!, $body: String!) {
-  commentUpdate(id: $id, input: { body: $body }) {
-    success
-    comment {
-      id
-      body
-    }
-  }
-}
-```
-
-### Create a comment
-
-Use `commentCreate` through `linear_graphql`:
-
-```graphql
-mutation CreateComment($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-    comment {
-      id
-      url
-    }
-  }
-}
-```
-
-### Move an issue to a different state
-
-Use `issueUpdate` with the destination `stateId`:
-
-```graphql
-mutation MoveIssueToState($id: String!, $stateId: String!) {
-  issueUpdate(id: $id, input: { stateId: $stateId }) {
-    success
-    issue {
-      id
-      identifier
-      state {
-        id
-        name
-      }
-    }
-  }
-}
-```
-
-### Attach a GitHub PR to an issue
-
-Use the GitHub-specific attachment mutation when linking a PR:
-
-```graphql
-mutation AttachGitHubPR($issueId: String!, $url: String!, $title: String) {
-  attachmentLinkGitHubPR(
-    issueId: $issueId
-    url: $url
-    title: $title
-    linkKind: links
-  ) {
-    success
-    attachment {
-      id
-      title
-      url
-    }
-  }
-}
-```
-
-If you only need a plain URL attachment and do not care about GitHub-specific
-link metadata, use:
-
-```graphql
-mutation AttachURL($issueId: String!, $url: String!, $title: String) {
-  attachmentLinkURL(issueId: $issueId, url: $url, title: $title) {
-    success
-    attachment {
-      id
-      title
-      url
-    }
-  }
-}
-```
-
-### Introspection patterns used during schema discovery
-
-Use these when the exact field or mutation shape is unclear:
-
-```graphql
-query QueryFields {
-  __type(name: "Query") {
-    fields {
-      name
-    }
-  }
-}
-```
-
-```graphql
-query IssueFieldArgs {
-  __type(name: "Query") {
-    fields {
-      name
-      args {
-        name
-        type {
-          kind
-          name
-          ofType {
-            kind
-            name
-            ofType {
-              kind
-              name
-            }
-          }
-        }
-      }
-    }
-  }
-}
-```
-
-### Upload a video to a comment
-
-Do this in three steps:
-
-1. Call `linear_graphql` with `fileUpload` to get `uploadUrl`, `assetUrl`, and
-   any required upload headers.
-2. Upload the local file bytes to `uploadUrl` with `curl -X PUT` and the exact
-   headers returned by `fileUpload`.
-3. Call `linear_graphql` again with `commentCreate` (or `commentUpdate`) and
-   include the resulting `assetUrl` in the comment body.
-
-Useful mutations:
-
-```graphql
-mutation FileUpload(
-  $filename: String!
-  $contentType: String!
-  $size: Int!
-  $makePublic: Boolean
-) {
-  fileUpload(
-    filename: $filename
-    contentType: $contentType
-    size: $size
-    makePublic: $makePublic
-  ) {
-    success
-    uploadFile {
-      uploadUrl
-      assetUrl
-      headers {
-        key
-        value
-      }
-    }
-  }
-}
-```
-
-## Usage rules
-
-- Use `linear_graphql` for comment edits, uploads, and ad-hoc Linear API
-  queries.
-- Prefer the narrowest issue lookup that matches what you already know:
-  key -> identifier search -> internal id.
-- For state transitions, fetch team states first and use the exact `stateId`
-  instead of hardcoding names inside mutations.
-- Prefer `attachmentLinkGitHubPR` over a generic URL attachment when linking a
-  GitHub PR to a Linear issue.
-- Do not introduce new raw-token shell helpers for GraphQL access.
-- If you need shell work for uploads, only use it for signed upload URLs
-  returned by `fileUpload`; those URLs already carry the needed authorization.
+- Prefer MCP for routine issue operations that it already abstracts cleanly.
+- Prefer `linear_graphql` over raw shell GraphQL when the session already
+  exposes it and you need a GraphQL-only operation.
+- Use raw GraphQL via `LINEAR_API_KEY` for gaps such as project overview
+  updates, comment edits, uploads, schema introspection, or issue-relation
+  mutations when those are not available through MCP.
+- Keep GraphQL operations narrow: one operation per request, minimal fields, and
+  variables instead of string interpolation.
+- Reuse the repository's existing project slug semantics:
+  `tracker.project_slug` stores Linear `Project.slugId`.
+- Do not invent new ad hoc GraphQL shapes if a reference file already covers the
+  operation.
+- If the needed mutation shape is unfamiliar, use the introspection patterns in
+  the advanced reference file before guessing.

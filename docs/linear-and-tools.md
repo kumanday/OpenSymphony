@@ -181,10 +181,40 @@ Implemented MVP tools:
   - move an issue to a named workflow state for that issue's team
 - `linear_link_pr`
   - add a PR URL or related link to the issue via a URL attachment
+  - currently backed by `attachmentLinkURL`, not the GitHub-specific `attachmentLinkGitHubPR` mutation
 - `linear_list_project_states`
-  - fetch valid team workflow states for safer transitions using either an issue reference or a team key/UUID
+  - despite the legacy name, fetch valid team workflow states for safer transitions using either an issue reference or a team key/UUID
 
 Do not start with a giant tool surface.
+
+## 5.1.1 GraphQL-only gaps and fallback order
+
+The current MCP surface is intentionally narrow, so some Linear operations still
+need raw GraphQL. Verified gaps relative to the live Linear schema include:
+
+- editing an existing comment via `commentUpdate`
+- file uploads for comment assets via `fileUpload`
+- issue relation mutations such as `issueRelationCreate`
+- GitHub-native PR attachments via `attachmentLinkGitHubPR`
+- project overview/content reads and updates through `Project.content` and `projectUpdate`
+- project status mutations such as `projectStatusCreate` and `projectStatusUpdate`
+- schema introspection for unfamiliar Linear objects or mutations
+
+The repo-scaffolded `linear` skill should guide agents through this order:
+
+1. use MCP when the operation is covered by the stable tool surface
+2. use an injected `linear_graphql` tool when the runtime exposes it and the
+   task needs raw GraphQL
+3. fall back to direct GraphQL over `LINEAR_API_KEY` when the operation is not
+   covered by MCP or no injected tool is available
+
+The skill should keep the main `SKILL.md` concise and move GraphQL examples into
+progressively disclosed reference files under `.agents/skills/linear/`.
+
+In practice:
+
+- use MCP for issue reads, new comments, workflow transitions, lightweight PR/URL links, and workflow-state lookup
+- switch to GraphQL when you need comment edits, uploads, issue relations, project overview updates, project status mutations, or schema discovery
 
 ## 5.2 Why MCP instead of direct orchestrator writes
 
@@ -213,6 +243,19 @@ Current transport notes:
 - the stdio transport uses one JSON-RPC message per line
 - the server negotiates MCP protocol versions from `2024-11-05` through `2025-11-25`
 - the server advertises only the tool capability and keeps the write surface intentionally narrow
+
+## 5.4 Optional injected GraphQL tools
+
+Symphony's Codex app-server integration can inject a `linear_graphql` dynamic
+tool into a session, but OpenSymphony's OpenHands runtime does not currently
+depend on or provide that mechanism.
+
+OpenSymphony should therefore:
+
+- treat MCP as the primary in-session Linear surface
+- treat injected `linear_graphql` as an optional enhancement, not a guarantee
+- preserve a documented `LINEAR_API_KEY` raw GraphQL fallback for operations
+  outside the current MCP surface
 
 ## 6. Tool design guidelines
 
