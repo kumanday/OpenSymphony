@@ -28,7 +28,6 @@ project_context:
 repo_paths:
   - crates/opensymphony-workspace/
   - crates/opensymphony-linear/
-  - crates/opensymphony-linear-mcp/
   - crates/opensymphony-orchestrator/
 definition_of_ready:
   - M1 and M2 are merged
@@ -39,12 +38,12 @@ definition_of_ready:
 # OSYM-300: Tracker, Workspaces, and Orchestration
 
 ## Summary
-Implement the Symphony-specific heart of the system: issue polling, workspace lifecycle, retry scheduling, and the agent-facing Linear tool path.
+Implement the Symphony-specific heart of the system: issue polling, workspace lifecycle, retry scheduling, and the GraphQL-backed Linear repo harness.
 
 ## Scope
 - Workspace create, reuse, hook execution, and cleanup
 - Linear read adapter for orchestration
-- Linear MCP server for agent-side writes
+- Repo-local GraphQL helper assets for agent-side Linear operations
 - Scheduler loop, retries, stall detection, and reconciliation
 - Repository harness files and generated context artifacts
 
@@ -62,7 +61,7 @@ Implement the Symphony-specific heart of the system: issue polling, workspace li
 ## Deliverables
 - Workspace manager
 - Linear read adapter
-- Linear MCP server
+- GraphQL-backed target-repo Linear skill assets
 - Orchestrator scheduler
 - Repo harness artifact generation rules
 

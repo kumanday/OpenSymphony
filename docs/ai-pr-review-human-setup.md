@@ -25,8 +25,8 @@ Add the following **Secret**:
 |------|-------|
 | `AI_REVIEW_API_KEY` | Your AI review provider API key |
 
-The scaffolded workflow prefers `AI_REVIEW_API_KEY` and still accepts
-`FIREWORKS_API_KEY` as a legacy fallback for older repos.
+The scaffolded workflow uses `AI_REVIEW_API_KEY` as the only review secret
+name.
 
 ### 2. Configure Repository Variables
 
@@ -153,8 +153,6 @@ After setup, verify the system works:
 ### "Missing secret" errors
 
 - Verify `AI_REVIEW_API_KEY` is set
-- Or verify legacy `FIREWORKS_API_KEY` is set if you are relying on the
-  compatibility fallback
 - Check the secret is available to Actions (not environment-scoped only)
 
 ### No review comments posted
@@ -177,7 +175,7 @@ The default implementation does **not** expose the LLM secret to fork PR workflo
 ### Secret minimization
 
 The workflow only receives:
-- `AI_REVIEW_API_KEY` (or legacy `FIREWORKS_API_KEY`) for the review LLM
+- `AI_REVIEW_API_KEY` for the review LLM
 - `GITHUB_TOKEN` (to post comments)
 
 No deployment credentials, cloud keys, package publishing tokens, or database secrets are exposed.

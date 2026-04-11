@@ -52,7 +52,7 @@ async fn init_copies_template_files_and_customizes_workflow() {
     );
     assert!(
         repo.path()
-            .join(".agents/skills/linear/references/raw-graphql.md")
+            .join(".agents/skills/linear/references/using-the-helper.md")
             .is_file(),
         "linear reference file should be created"
     );
@@ -80,7 +80,7 @@ async fn init_can_scaffold_ai_pr_review_and_print_setup_guidance() {
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
 
     let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
-    write_stdin(&mut child, "yes\ndemo-project\n").await;
+    write_stdin(&mut child, "yes\n\n\n\n\n\ndemo-project\n").await;
 
     let output = child
         .wait_with_output()
@@ -429,12 +429,12 @@ openhands:
             "# linear\n".to_string(),
         ),
         (
-            ".agents/skills/linear/references/mcp-capabilities.md".to_string(),
-            "# mcp\n".to_string(),
+            ".agents/skills/linear/scripts/linear_graphql.py".to_string(),
+            "#!/usr/bin/env python3\n".to_string(),
         ),
         (
-            ".agents/skills/linear/references/raw-graphql.md".to_string(),
-            "# raw graphql\n".to_string(),
+            ".agents/skills/linear/references/using-the-helper.md".to_string(),
+            "# helper\n".to_string(),
         ),
         (
             ".agents/skills/linear/references/issue-and-comment-operations.md".to_string(),
@@ -443,6 +443,10 @@ openhands:
         (
             ".agents/skills/linear/references/project-and-advanced-operations.md".to_string(),
             "# project ops\n".to_string(),
+        ),
+        (
+            ".agents/skills/linear/queries/viewer.graphql".to_string(),
+            "query Viewer { viewer { id } }\n".to_string(),
         ),
         (
             ".agents/skills/pull/SKILL.md".to_string(),

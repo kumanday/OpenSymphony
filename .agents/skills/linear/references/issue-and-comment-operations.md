@@ -1,171 +1,21 @@
 # Issue And Comment Operations
 
-Use these GraphQL operations when MCP is unavailable or when the required
-mutation is not covered by MCP.
+Use these checked-in query files for common issue-side work:
 
-## Query an issue by key
+- Read an issue by key: `queries/issue_by_key.graphql`
+- Read a full issue snapshot by id: `queries/issue_details.graphql`
+- Resolve valid workflow states for an issue: `queries/issue_team_states.graphql`
+- Create a comment: `queries/comment_create.graphql`
+- Update a comment: `queries/comment_update.graphql`
+- Move an issue to another state: `queries/issue_move_to_state.graphql`
+- Create a blocker/related relation: `queries/issue_relation_create.graphql`
+- Attach a GitHub PR with native semantics: `queries/attachment_link_github_pr.graphql`
+- Attach a generic URL: `queries/attachment_link_url.graphql`
 
-```graphql
-query IssueByKey($key: String!) {
-  issue(id: $key) {
-    id
-    identifier
-    title
-    state {
-      id
-      name
-      type
-    }
-    project {
-      id
-      name
-      slugId
-    }
-    branchName
-    url
-    description
-    updatedAt
-  }
-}
-```
+## Notes
 
-## Query team workflow states for an issue
-
-Use this before `issueUpdate` when you need the exact destination `stateId`.
-
-```graphql
-query IssueTeamStates($id: String!) {
-  issue(id: $id) {
-    id
-    team {
-      id
-      key
-      name
-      states {
-        nodes {
-          id
-          name
-          type
-        }
-      }
-    }
-  }
-}
-```
-
-## Create a comment
-
-```graphql
-mutation CreateComment($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-    comment {
-      id
-      url
-    }
-  }
-}
-```
-
-## Update an existing comment
-
-```graphql
-mutation UpdateComment($id: String!, $body: String!) {
-  commentUpdate(id: $id, input: { body: $body }) {
-    success
-    comment {
-      id
-      body
-    }
-  }
-}
-```
-
-## Move an issue to another state
-
-```graphql
-mutation MoveIssueToState($id: String!, $stateId: String!) {
-  issueUpdate(id: $id, input: { stateId: $stateId }) {
-    success
-    issue {
-      id
-      identifier
-      state {
-        id
-        name
-      }
-    }
-  }
-}
-```
-
-## Attach a GitHub PR
-
-Prefer this over a generic URL attachment when linking a PR.
-
-Use this when you need GitHub-specific attachment semantics. OpenSymphony's
-current MCP `linear_link_pr` tool uses `attachmentLinkURL` instead.
-
-```graphql
-mutation AttachGitHubPR($issueId: String!, $url: String!, $title: String) {
-  attachmentLinkGitHubPR(
-    issueId: $issueId
-    url: $url
-    title: $title
-    linkKind: links
-  ) {
-    success
-    attachment {
-      id
-      title
-      url
-    }
-  }
-}
-```
-
-## Attach a generic URL
-
-This is the mutation currently used behind OpenSymphony's MCP `linear_link_pr`
-tool.
-
-```graphql
-mutation AttachURL($issueId: String!, $url: String!, $title: String) {
-  attachmentLinkURL(issueId: $issueId, url: $url, title: $title) {
-    success
-    attachment {
-      id
-      title
-      url
-    }
-  }
-}
-```
-
-## Create an issue relation
-
-Use this for blocker/dependency metadata when plain MCP tools are insufficient.
-
-```graphql
-mutation CreateIssueRelation($input: IssueRelationCreateInput!) {
-  issueRelationCreate(input: $input) {
-    success
-    issueRelation {
-      id
-      type
-    }
-  }
-}
-```
-
-Example variables:
-
-```json
-{
-  "input": {
-    "issueId": "blocked-issue-uuid",
-    "relatedIssueId": "blocking-issue-uuid",
-    "type": "blocks"
-  }
-}
-```
+- Prefer `attachmentLinkGitHubPR` for real PR links.
+- Use `attachmentLinkURL` only when the target is not a GitHub PR or the
+  generic URL behavior is explicitly desired.
+- `issue_move_to_state.graphql` expects a `stateId`; resolve it first with
+  `issue_team_states.graphql`.

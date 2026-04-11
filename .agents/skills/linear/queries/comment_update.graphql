@@ -1,0 +1,10 @@
+mutation UpdateComment($id: String!, $body: String!) {
+  commentUpdate(id: $id, input: { body: $body }) {
+    success
+    comment {
+      id
+      body
+      updatedAt
+    }
+  }
+}

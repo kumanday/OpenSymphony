@@ -1,10 +1,8 @@
 ---
 name: linear
 description: |
-  Interact with Linear through the best available transport for the current
-  session: OpenSymphony Linear MCP tools first, optional injected
-  `linear_graphql` when available, and raw GraphQL via `LINEAR_API_KEY` for
-  GraphQL-only gaps.
+  Use repo-local GraphQL helpers to read and write Linear through
+  `LINEAR_API_KEY`.
 ---
 
 # Linear
@@ -12,59 +10,78 @@ description: |
 Use this skill whenever the agent needs to read or write Linear state from an
 OpenSymphony-managed repository.
 
-## Goal
+## Required auth
 
-Choose the narrowest transport that can complete the task while keeping the
-workflow reproducible across OpenSymphony sessions, Codex desktop sessions, and
-future injected-tool runtimes.
+- `LINEAR_API_KEY` must be present in the environment.
+- If it is missing, treat Linear access as a real blocker.
+- `tracker.project_slug` stores Linear `Project.slugId`, not a display name.
 
-## Transport order
+## Primary path
 
-OpenSymphony currently supports three Linear access paths:
+Run the repo-local helper:
 
-1. Linear MCP tools
-   - Primary OpenSymphony path for routine issue operations.
-   - The current MCP surface is intentionally narrow: issue fetch, comment
-     create, state transition, URL/PR link attachment, and workflow-state
-     lookup.
-   - Prefer this when the operation is covered by the MCP surface.
-2. Optional `linear_graphql` dynamic tool
-   - Present in Symphony/Codex app-server sessions and any future runtime that
-     injects the same tool.
-   - Prefer this over raw shell GraphQL when you need schema-level GraphQL
-     access and the tool is available in-session.
-3. Raw GraphQL via `LINEAR_API_KEY`
-   - Fallback when the required operation is not covered by MCP or no injected
-     Linear tool is available.
-   - Use the reference files below instead of improvising large GraphQL
-     documents from scratch.
+```bash
+python3 .agents/skills/linear/scripts/linear_graphql.py \
+  --query-file .agents/skills/linear/queries/viewer.graphql
+```
 
-If none of the three paths is available, report a real Linear blocker.
+Pass variables as inline JSON or a JSON file:
 
-## How to choose quickly
+```bash
+python3 .agents/skills/linear/scripts/linear_graphql.py \
+  --query-file .agents/skills/linear/queries/issue_by_key.graphql \
+  --variables '{"key":"COE-123"}'
+```
 
-- For routine issue fetch, comment creation, transitions, PR links, and state
-  lookup, start with [references/mcp-capabilities.md](references/mcp-capabilities.md).
-- For raw GraphQL transport and auth fallback, open
-  [references/raw-graphql.md](references/raw-graphql.md).
-- For issue, comment, attachment, and dependency mutations, open
+## References
+
+- Start with [references/using-the-helper.md](references/using-the-helper.md).
+- For issue, comment, relation, and PR-link work, open
   [references/issue-and-comment-operations.md](references/issue-and-comment-operations.md).
-- For project overview/content updates, uploads, and schema discovery, open
+- For project overview/status updates, uploads, and introspection, open
   [references/project-and-advanced-operations.md](references/project-and-advanced-operations.md).
 
 ## Rules
 
-- Prefer MCP for routine issue operations that it already abstracts cleanly.
-- Prefer `linear_graphql` over raw shell GraphQL when the session already
-  exposes it and you need a GraphQL-only operation.
-- Use raw GraphQL via `LINEAR_API_KEY` for gaps such as project overview
-  updates, comment edits, uploads, schema introspection, or issue-relation
-  mutations when those are not available through MCP.
-- Keep GraphQL operations narrow: one operation per request, minimal fields, and
-  variables instead of string interpolation.
-- Reuse the repository's existing project slug semantics:
-  `tracker.project_slug` stores Linear `Project.slugId`.
-- Do not invent new ad hoc GraphQL shapes if a reference file already covers the
-  operation.
-- If the needed mutation shape is unfamiliar, use the introspection patterns in
-  the advanced reference file before guessing.
+- This repo uses GraphQL-only Linear access through the checked-in helper.
+- Prefer query files under `.agents/skills/linear/queries/` over ad hoc inline
+  GraphQL strings.
+- Keep exactly one GraphQL operation per request.
+- Use variables instead of string interpolation.
+- Treat a top-level `errors` array as a failed Linear operation even if the
+  HTTP request succeeds.
+- Keep requested fields narrow and task-specific.
+- When an unfamiliar mutation or input shape is needed, start with the
+  introspection query files before guessing.
+- Use the reference docs for exact variable shapes and example commands instead
+  of copying large GraphQL documents inline.
+
+## Common workflows
+
+- Create a comment:
+  - `.agents/skills/linear/queries/comment_create.graphql`
+- Edit a comment:
+  - `.agents/skills/linear/queries/comment_update.graphql`
+- Move an issue to a new state:
+  - `.agents/skills/linear/queries/issue_team_states.graphql`
+  - `.agents/skills/linear/queries/issue_move_to_state.graphql`
+- Attach a GitHub PR:
+  - `.agents/skills/linear/queries/attachment_link_github_pr.graphql`
+- Attach a plain URL:
+  - `.agents/skills/linear/queries/attachment_link_url.graphql`
+- Create an issue relation:
+  - `.agents/skills/linear/queries/issue_relation_create.graphql`
+- Update project overview/content:
+  - `.agents/skills/linear/queries/project_by_slug.graphql`
+  - `.agents/skills/linear/queries/project_update_content.graphql`
+- Create or update project status:
+  - `.agents/skills/linear/queries/project_status_create.graphql`
+  - `.agents/skills/linear/queries/project_status_update.graphql`
+  - `.agents/skills/linear/queries/project_set_status.graphql`
+- Upload a file for a comment:
+  - `.agents/skills/linear/queries/file_upload.graphql`
+  - upload the bytes to the returned `uploadUrl`
+  - then create or update the comment with the returned `assetUrl`
+- Inspect the schema:
+  - `.agents/skills/linear/queries/introspect_mutations.graphql`
+  - `.agents/skills/linear/queries/introspect_input_shape.graphql`

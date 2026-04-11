@@ -17,7 +17,7 @@ This document is the planning index for OpenSymphony. It is designed to be direc
 |---|---|---|
 | M1 Foundation and contracts | repo bootstrap, workflow/config, domain model | stable repo skeleton and core invariants |
 | M2 OpenHands runtime adapter | local supervisor, REST client, WebSocket runtime, session runner | working agent runtime path |
-| M3 Symphony orchestration core | workspace lifecycle, Linear adapter, scheduler, MCP writes | issue-driven autonomous execution with a generic scheduler core over tracker, workspace, and worker backends |
+| M3 Symphony orchestration core | workspace lifecycle, Linear adapter, scheduler, GraphQL-backed repo harness | issue-driven autonomous execution with a generic scheduler core over tracker, workspace, and worker backends |
 | M4 Operator UX and repo harness | control plane, FrankenTUI, generated context artifacts | usable local operator experience |
 | M5 Validation and local packaging | fake server, live tests, doctor, packaging | reliable local MVP |
 
@@ -38,7 +38,7 @@ OSYM-200 OpenHands Runtime Adapter
 OSYM-300 Tracker, Workspaces, and Orchestration
   ├─ OSYM-301 Workspace manager and lifecycle hooks
   ├─ OSYM-302 Linear read adapter
-  ├─ OSYM-303 Linear MCP write surface
+  ├─ OSYM-303 Linear GraphQL agent write path
   ├─ OSYM-304 Orchestrator scheduler, retries, and reconciliation
   └─ OSYM-305 Repository harness and generated context artifacts
 

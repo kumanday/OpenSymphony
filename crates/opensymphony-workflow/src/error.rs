@@ -52,6 +52,12 @@ pub enum WorkflowConfigError {
         field: &'static str,
         message: String,
     },
+
+    #[error("removed config field `{field}`: {message}")]
+    RemovedField {
+        field: &'static str,
+        message: String,
+    },
 }
 
 #[derive(Debug, Error)]

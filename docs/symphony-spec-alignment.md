@@ -191,7 +191,7 @@ The workflow schema adds an `openhands` namespace for:
 - local server launch configuration
 - conversation persistence settings
 - WebSocket settings
-- MCP server definitions
+- repo-local GraphQL helper assets for agent-side Linear operations
 - minimal agent payload settings
 - extension settings resolved separately from the core workflow config so non-runtime code can stay OpenHands-agnostic
 - the repo-local `codex` namespace can coexist as non-runtime metadata, while other unknown top-level namespaces still fail deterministically

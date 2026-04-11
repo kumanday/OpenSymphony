@@ -1,0 +1,13 @@
+mutation SetProjectStatus($id: String!, $statusId: String!) {
+  projectUpdate(id: $id, input: { statusId: $statusId }) {
+    success
+    project {
+      id
+      name
+      status {
+        id
+        name
+      }
+    }
+  }
+}

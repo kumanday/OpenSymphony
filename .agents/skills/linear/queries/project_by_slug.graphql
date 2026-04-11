@@ -1,0 +1,16 @@
+query ProjectBySlug($slug: String!) {
+  projects(filter: { slugId: { eq: $slug } }, first: 1) {
+    nodes {
+      id
+      name
+      slugId
+      url
+      description
+      content
+      status {
+        id
+        name
+      }
+    }
+  }
+}

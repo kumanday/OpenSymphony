@@ -1,0 +1,23 @@
+mutation FileUpload(
+  $filename: String!
+  $contentType: String!
+  $size: Int!
+  $makePublic: Boolean
+) {
+  fileUpload(
+    filename: $filename
+    contentType: $contentType
+    size: $size
+    makePublic: $makePublic
+  ) {
+    success
+    uploadFile {
+      uploadUrl
+      assetUrl
+      headers {
+        key
+        value
+      }
+    }
+  }
+}

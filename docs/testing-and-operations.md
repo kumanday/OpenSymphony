@@ -125,7 +125,7 @@ Current implementation:
 - fail when `openhands.websocket.auth_mode` is invalid or requires a missing session API key env
 - fail when explicit `openhands.websocket.enabled` is configured before the runtime readiness path can honor disabling the socket
 - resolve `openhands.websocket.ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` into the runtime readiness and reconnect budgets
-- resolve `openhands.mcp.stdio_servers` into workflow config and forward the supported stdio subset through `mcp_config`
+- reject removed `openhands.mcp` config with a migration error that points users to `LINEAR_API_KEY` and the repo-local GraphQL helper assets
 - resolve `openhands.conversation.reuse_policy` for runtime consumers instead of rejecting non-default values during workflow loading
 - default required OpenHands conversation request fields such as `confirmation_policy` and `agent`, including `confirmation_policy.kind` when the block is present without an explicit kind
 - fail when `openhands.conversation.confirmation_policy` includes options that cannot be represented in the current OpenHands request subset

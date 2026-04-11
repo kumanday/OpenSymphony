@@ -1,0 +1,23 @@
+query IntrospectInputShape($name: String!) {
+  __type(name: $name) {
+    inputFields {
+      name
+      type {
+        kind
+        name
+        ofType {
+          kind
+          name
+          ofType {
+            kind
+            name
+            ofType {
+              kind
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}

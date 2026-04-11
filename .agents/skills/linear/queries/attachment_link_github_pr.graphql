@@ -1,0 +1,20 @@
+mutation AttachGitHubPR(
+  $issueId: String!
+  $url: String!
+  $title: String
+  $linkKind: GitLinkKind
+) {
+  attachmentLinkGitHubPR(
+    issueId: $issueId
+    url: $url
+    title: $title
+    linkKind: $linkKind
+  ) {
+    success
+    attachment {
+      id
+      title
+      url
+    }
+  }
+}

@@ -1,0 +1,9 @@
+mutation CreateIssueRelation($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) {
+    success
+    issueRelation {
+      id
+      type
+    }
+  }
+}

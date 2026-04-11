@@ -1,0 +1,20 @@
+query IssueByKey($key: String!) {
+  issue(id: $key) {
+    id
+    identifier
+    title
+    url
+    description
+    branchName
+    state {
+      id
+      name
+      type
+    }
+    project {
+      id
+      name
+      slugId
+    }
+  }
+}

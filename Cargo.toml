@@ -12,7 +12,6 @@ members = [
     "crates/opensymphony-workflow",
     "crates/opensymphony-workspace",
     "crates/opensymphony-linear",
-    "crates/opensymphony-linear-mcp",
     "crates/opensymphony-openhands",
     "crates/opensymphony-orchestrator",
     "crates/opensymphony-control",
@@ -34,7 +33,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/kumanday/OpenSymphony"
 rust-version = "1.93"
-version = "0.1.1"
+version = "1.0.0"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

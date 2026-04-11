@@ -24,7 +24,6 @@ const DEFAULT_AI_REVIEW_BASE_URL: &str = "https://api.fireworks.ai/inference/v1"
 const DEFAULT_AI_REVIEW_STYLE: &str = "standard";
 const DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE: &str = "true";
 const DEFAULT_AI_REVIEW_SECRET_NAME: &str = "AI_REVIEW_API_KEY";
-const LEGACY_AI_REVIEW_SECRET_NAME: &str = "FIREWORKS_API_KEY";
 const OPENHANDS_PR_REVIEW_PLUGIN_URL: &str =
     "https://github.com/OpenHands/extensions/tree/main/plugins/pr-review";
 const OPENHANDS_PR_REVIEW_DOCS_URL: &str =
@@ -148,6 +147,37 @@ struct TemplateTreeEntry {
     path: String,
     #[serde(rename = "type")]
     entry_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AiReviewConfig {
+    provider_kind: String,
+    model_id: String,
+    base_url: Option<String>,
+    style: String,
+    require_evidence: bool,
+}
+
+impl Default for AiReviewConfig {
+    fn default() -> Self {
+        Self {
+            provider_kind: DEFAULT_AI_REVIEW_PROVIDER_KIND.to_string(),
+            model_id: DEFAULT_AI_REVIEW_MODEL_ID.to_string(),
+            base_url: Some(DEFAULT_AI_REVIEW_BASE_URL.to_string()),
+            style: DEFAULT_AI_REVIEW_STYLE.to_string(),
+            require_evidence: DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE == "true",
+        }
+    }
+}
+
+impl AiReviewConfig {
+    fn require_evidence_value(&self) -> &'static str {
+        if self.require_evidence {
+            "true"
+        } else {
+            "false"
+        }
+    }
 }
 
 enum PlannedAction {
@@ -326,6 +356,11 @@ where
         "Also scaffold automated OpenHands AI PR review? [y/N]: ",
         false,
     )?;
+    let ai_review_config = if enable_ai_pr_review {
+        Some(prompt_ai_review_config(ui)?)
+    } else {
+        None
+    };
     let client = Client::builder()
         .user_agent(concat!("opensymphony-cli/", env!("CARGO_PKG_VERSION")))
         .timeout(template_fetch_timeout())
@@ -335,10 +370,10 @@ where
 
     let mut fetched_assets =
         fetch_template_assets(&client, CORE_TEMPLATE_ASSETS, CORE_TEMPLATE_DIRECTORIES).await?;
-    if enable_ai_pr_review {
+    if let Some(config) = ai_review_config.as_ref() {
         fetched_assets
             .extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS, &[]).await?);
-        fetched_assets.extend(generated_ai_review_assets());
+        fetched_assets.extend(generated_ai_review_assets(config));
     }
     let mut planned_assets = plan_assets(&target_repo, fetched_assets)?;
     resolve_conflicts(&mut planned_assets, ui)?;
@@ -440,8 +475,8 @@ where
         )?;
     }
 
-    if enable_ai_pr_review {
-        print_ai_pr_review_guidance(ui)?;
+    if let Some(config) = ai_review_config.as_ref() {
+        print_ai_pr_review_guidance(ui, config)?;
     }
 
     prompt_for_missing_llm_env(env_lookup, ui)?;
@@ -602,12 +637,12 @@ async fn fetch_template_file(
     })
 }
 
-fn generated_ai_review_assets() -> Vec<FetchedAsset> {
+fn generated_ai_review_assets(config: &AiReviewConfig) -> Vec<FetchedAsset> {
     vec![
         FetchedAsset {
             path: AI_REVIEW_SETUP_DOC_ASSET.path.to_string(),
             kind: AI_REVIEW_SETUP_DOC_ASSET.kind,
-            contents: ai_pr_review_setup_doc_contents(),
+            contents: ai_pr_review_setup_doc_contents(config),
         },
         FetchedAsset {
             path: AI_REVIEW_CUSTOM_GUIDE_ASSET.path.to_string(),
@@ -880,6 +915,85 @@ where
     }
 }
 
+fn prompt_with_default<R, W>(
+    ui: &mut PromptUi<R, W>,
+    prompt: &str,
+    default: &str,
+) -> Result<String, InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let response = ui.prompt(prompt)?;
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn prompt_ai_review_config<R, W>(
+    ui: &mut PromptUi<R, W>,
+) -> Result<AiReviewConfig, InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    ui.blank_line()?;
+    ui.line("Configure the default AI PR review provider for this repository.")?;
+    ui.line(
+        "Fireworks is the starter example, but these values can target any supported provider.",
+    )?;
+
+    let provider_kind = loop {
+        let response = prompt_with_default(
+            ui,
+            "AI review provider kind [openai-compatible/litellm-native] (default openai-compatible): ",
+            DEFAULT_AI_REVIEW_PROVIDER_KIND,
+        )?;
+        match response.as_str() {
+            "openai-compatible" | "litellm-native" => break response,
+            _ => ui.line("Please enter `openai-compatible` or `litellm-native`.")?,
+        }
+    };
+
+    let model_id = prompt_with_default(
+        ui,
+        &format!("AI review model id (default {DEFAULT_AI_REVIEW_MODEL_ID}): "),
+        DEFAULT_AI_REVIEW_MODEL_ID,
+    )?;
+
+    let base_url = if provider_kind == "openai-compatible" {
+        Some(prompt_with_default(
+            ui,
+            &format!("AI review base URL (default {DEFAULT_AI_REVIEW_BASE_URL}): "),
+            DEFAULT_AI_REVIEW_BASE_URL,
+        )?)
+    } else {
+        None
+    };
+
+    let style = prompt_with_default(
+        ui,
+        &format!("AI review style (default {DEFAULT_AI_REVIEW_STYLE}): "),
+        DEFAULT_AI_REVIEW_STYLE,
+    )?;
+    let require_evidence = prompt_yes_no(
+        ui,
+        "Require evidence in AI PR review findings? [Y/n]: ",
+        true,
+    )?;
+
+    Ok(AiReviewConfig {
+        provider_kind,
+        model_id,
+        base_url,
+        style,
+        require_evidence,
+    })
+}
+
 fn template_fetch_timeout() -> Duration {
     template_fetch_timeout_from_env(
         env::var("OPENSYMPHONY_TEMPLATE_FETCH_TIMEOUT_MS")
@@ -1015,7 +1129,23 @@ fn yaml_double_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn ai_pr_review_setup_doc_contents() -> String {
+fn ai_pr_review_setup_doc_contents(config: &AiReviewConfig) -> String {
+    let base_url_row = config.base_url.as_ref().map_or(String::new(), |base_url| {
+        format!("| `AI_REVIEW_BASE_URL` | `{base_url}` |\n")
+    });
+    let base_url_command = config.base_url.as_ref().map_or(String::new(), |base_url| {
+        format!(
+            "gh variable set AI_REVIEW_BASE_URL --body {}\n",
+            shell_single_quote(base_url)
+        )
+    });
+    let base_url_note = if config.base_url.is_some() {
+        String::new()
+    } else {
+        "- `AI_REVIEW_BASE_URL` is optional for the selected provider and may be left unset.\n"
+            .to_string()
+    };
+
     format!(
         r#"# OpenHands PR Review Setup
 
@@ -1039,9 +1169,8 @@ Add this repository secret under **Settings -> Secrets and variables -> Actions*
 |------|-------|
 | `{secret_name}` | Your AI review provider API key |
 
-Fireworks remains the default example provider, but the secret name is
-provider-agnostic. The workflow also accepts `{legacy_secret_name}` as a
-legacy fallback for older repositories.
+The secret name is provider-agnostic. Fireworks is only the default example
+configuration for new repos; any compatible provider/model is fine.
 
 ## GitHub Actions Variables
 
@@ -1051,8 +1180,7 @@ Add these repository variables under **Settings -> Secrets and variables -> Acti
 |------|-------|
 | `AI_REVIEW_PROVIDER_KIND` | `{provider_kind}` |
 | `AI_REVIEW_MODEL_ID` | `{model_id}` |
-| `AI_REVIEW_BASE_URL` | `{base_url}` |
-| `AI_REVIEW_STYLE` | `{style}` |
+{base_url_row}| `AI_REVIEW_STYLE` | `{style}` |
 | `AI_REVIEW_REQUIRE_EVIDENCE` | `{require_evidence}` |
 
 ## Label
@@ -1068,33 +1196,34 @@ gh label create {quoted_label} --description 'Trigger AI PR review' --color 'd73
 ```bash
 gh variable set AI_REVIEW_PROVIDER_KIND --body {quoted_provider_kind}
 gh variable set AI_REVIEW_MODEL_ID --body {quoted_model_id}
-gh variable set AI_REVIEW_BASE_URL --body {quoted_base_url}
-gh variable set AI_REVIEW_STYLE --body {quoted_style}
+{base_url_command}gh variable set AI_REVIEW_STYLE --body {quoted_style}
 gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {quoted_require_evidence}
 gh secret set {secret_name}
 ```
 
 ## Notes
 
+- Fireworks is the default example only; swap in your preferred provider/model if needed.
+{base_url_note}- If your provider uses an OpenAI-compatible endpoint, `AI_REVIEW_BASE_URL` must be set.
 - If your organization restricts Actions, allow `OpenHands/extensions`.
 - The generated workflow should already pin the plugin to `{pinned_sha}` in both the `uses:` line and the `extensions-version:` input.
 - Do not make the AI review workflow a required status check.
 - Keep the workflow on GitHub-hosted runners unless you have separately reviewed the risk model for untrusted PR content.
 "#,
-        provider_kind = DEFAULT_AI_REVIEW_PROVIDER_KIND,
-        model_id = DEFAULT_AI_REVIEW_MODEL_ID,
-        base_url = DEFAULT_AI_REVIEW_BASE_URL,
-        style = DEFAULT_AI_REVIEW_STYLE,
-        require_evidence = DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE,
+        provider_kind = config.provider_kind,
+        model_id = config.model_id,
+        style = config.style,
+        require_evidence = config.require_evidence_value(),
         label = AI_REVIEW_LABEL_NAME,
+        base_url_row = base_url_row,
+        base_url_command = base_url_command,
+        base_url_note = base_url_note,
         quoted_label = shell_single_quote(AI_REVIEW_LABEL_NAME),
-        quoted_provider_kind = shell_single_quote(DEFAULT_AI_REVIEW_PROVIDER_KIND),
-        quoted_model_id = shell_single_quote(DEFAULT_AI_REVIEW_MODEL_ID),
-        quoted_base_url = shell_single_quote(DEFAULT_AI_REVIEW_BASE_URL),
-        quoted_style = shell_single_quote(DEFAULT_AI_REVIEW_STYLE),
-        quoted_require_evidence = shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE),
+        quoted_provider_kind = shell_single_quote(&config.provider_kind),
+        quoted_model_id = shell_single_quote(&config.model_id),
+        quoted_style = shell_single_quote(&config.style),
+        quoted_require_evidence = shell_single_quote(config.require_evidence_value()),
         secret_name = DEFAULT_AI_REVIEW_SECRET_NAME,
-        legacy_secret_name = LEGACY_AI_REVIEW_SECRET_NAME,
         plugin_url = OPENHANDS_PR_REVIEW_PLUGIN_URL,
         docs_url = OPENHANDS_PR_REVIEW_DOCS_URL,
         pinned_sha = OPENHANDS_EXTENSIONS_PINNED_SHA,
@@ -1135,7 +1264,10 @@ OpenHands PR review will load this file when it is present. Replace this starter
     .to_string()
 }
 
-fn print_ai_pr_review_guidance<R, W>(ui: &mut PromptUi<R, W>) -> Result<(), InitCommandError>
+fn print_ai_pr_review_guidance<R, W>(
+    ui: &mut PromptUi<R, W>,
+    config: &AiReviewConfig,
+) -> Result<(), InitCommandError>
 where
     R: BufRead,
     W: Write,
@@ -1144,21 +1276,21 @@ where
     ui.line("OpenHands PR review scaffolding was added.")?;
     ui.line("Next steps for GitHub Actions setup:")?;
     ui.line("- secret: AI_REVIEW_API_KEY=<your-ai-review-provider-key>")?;
-    ui.line("- optional legacy fallback: FIREWORKS_API_KEY=<your-fireworks-api-key>")?;
     ui.line(format!(
-        "- variable: AI_REVIEW_PROVIDER_KIND={DEFAULT_AI_REVIEW_PROVIDER_KIND}"
+        "- variable: AI_REVIEW_PROVIDER_KIND={}",
+        config.provider_kind
     ))?;
     ui.line(format!(
-        "- variable: AI_REVIEW_MODEL_ID={DEFAULT_AI_REVIEW_MODEL_ID}"
+        "- variable: AI_REVIEW_MODEL_ID={}",
+        config.model_id
     ))?;
+    if let Some(base_url) = config.base_url.as_ref() {
+        ui.line(format!("- variable: AI_REVIEW_BASE_URL={base_url}"))?;
+    }
+    ui.line(format!("- variable: AI_REVIEW_STYLE={}", config.style))?;
     ui.line(format!(
-        "- variable: AI_REVIEW_BASE_URL={DEFAULT_AI_REVIEW_BASE_URL}"
-    ))?;
-    ui.line(format!(
-        "- variable: AI_REVIEW_STYLE={DEFAULT_AI_REVIEW_STYLE}"
-    ))?;
-    ui.line(format!(
-        "- variable: AI_REVIEW_REQUIRE_EVIDENCE={DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE}"
+        "- variable: AI_REVIEW_REQUIRE_EVIDENCE={}",
+        config.require_evidence_value()
     ))?;
     ui.line(format!(
         "- label: `{AI_REVIEW_LABEL_NAME}` for manual reruns"
@@ -1166,23 +1298,25 @@ where
     ui.line("GitHub CLI examples:")?;
     ui.line(format!(
         "gh variable set AI_REVIEW_PROVIDER_KIND --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_PROVIDER_KIND)
+        shell_single_quote(&config.provider_kind)
     ))?;
     ui.line(format!(
         "gh variable set AI_REVIEW_MODEL_ID --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_MODEL_ID)
+        shell_single_quote(&config.model_id)
     ))?;
-    ui.line(format!(
-        "gh variable set AI_REVIEW_BASE_URL --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_BASE_URL)
-    ))?;
+    if let Some(base_url) = config.base_url.as_ref() {
+        ui.line(format!(
+            "gh variable set AI_REVIEW_BASE_URL --body {}",
+            shell_single_quote(base_url)
+        ))?;
+    }
     ui.line(format!(
         "gh variable set AI_REVIEW_STYLE --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_STYLE)
+        shell_single_quote(&config.style)
     ))?;
     ui.line(format!(
         "gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE)
+        shell_single_quote(config.require_evidence_value())
     ))?;
     ui.line("gh secret set AI_REVIEW_API_KEY")?;
     ui.line(format!(
@@ -1221,11 +1355,12 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        AI_REVIEW_LABEL_NAME, DEFAULT_AI_REVIEW_BASE_URL, DEFAULT_AI_REVIEW_MODEL_ID,
-        DEFAULT_AI_REVIEW_PROVIDER_KIND, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
-        DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS, GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi,
-        agents_already_initialized, ai_pr_review_setup_doc_contents, comparable_text,
-        custom_codereview_guide_contents, customize_workflow, git_remote_url, merge_agents,
+        AI_REVIEW_LABEL_NAME, AiReviewConfig, DEFAULT_AI_REVIEW_BASE_URL,
+        DEFAULT_AI_REVIEW_MODEL_ID, DEFAULT_AI_REVIEW_PROVIDER_KIND, DEFAULT_AI_REVIEW_SECRET_NAME,
+        DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS,
+        GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi, agents_already_initialized,
+        ai_pr_review_setup_doc_contents, comparable_text, custom_codereview_guide_contents,
+        customize_workflow, git_remote_url, merge_agents, prompt_ai_review_config,
         prompt_for_missing_llm_env, prompt_yes_no, select_remote_name, shell_single_quote,
         template_fetch_timeout_from_env,
     };
@@ -1402,13 +1537,28 @@ hooks:
 
     #[test]
     fn ai_pr_review_setup_doc_uses_generic_secret_and_fireworks_defaults() {
-        let doc = ai_pr_review_setup_doc_contents();
+        let doc = ai_pr_review_setup_doc_contents(&AiReviewConfig::default());
 
         assert!(doc.contains(DEFAULT_AI_REVIEW_SECRET_NAME));
         assert!(doc.contains(DEFAULT_AI_REVIEW_PROVIDER_KIND));
         assert!(doc.contains(DEFAULT_AI_REVIEW_MODEL_ID));
         assert!(doc.contains(DEFAULT_AI_REVIEW_BASE_URL));
         assert!(doc.contains(AI_REVIEW_LABEL_NAME));
+    }
+
+    #[test]
+    fn prompt_ai_review_config_supports_non_fireworks_provider_defaults() {
+        let input = b"litellm-native\nopenai/gpt-5.4\ncustom\nn\n";
+        let mut output = Vec::new();
+        let mut ui = PromptUi::new(&input[..], &mut output);
+
+        let config = prompt_ai_review_config(&mut ui).expect("prompt should succeed");
+
+        assert_eq!(config.provider_kind, "litellm-native");
+        assert_eq!(config.model_id, "openai/gpt-5.4");
+        assert_eq!(config.base_url, None);
+        assert_eq!(config.style, "custom");
+        assert!(!config.require_evidence);
     }
 
     #[test]

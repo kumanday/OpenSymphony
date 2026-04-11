@@ -35,7 +35,7 @@ definition_of_ready:
 Package the local MVP into a usable CLI with a meaningful doctor command and final operations documentation for trusted-machine deployment.
 
 ## Scope
-- Implement `daemon`, `tui`, `doctor`, and `linear-mcp` entrypoints cleanly
+- Implement `daemon`, `tui`, `doctor`, and `rehydrate` entrypoints cleanly
 - Wire the doctor command to real preflight checks
 - Document setup, troubleshooting, and local safety posture
 - Package pinned local server setup under `tools/openhands-server/`

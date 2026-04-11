@@ -67,15 +67,12 @@ Instructions:
 
 Work only in the provided repository copy. Do not touch any other path.
 
-## Prerequisite: at least one Linear path is available
+## Prerequisite: `LINEAR_API_KEY` is available
 
-The agent should be able to talk to Linear through one of these paths:
-
-1. configured OpenSymphony Linear MCP tools
-2. an injected `linear_graphql` tool, if the runtime provides one
-3. raw GraphQL through `LINEAR_API_KEY` for operations not covered by MCP
-
-Prefer MCP for routine issue operations, use `linear_graphql` when a session exposes it for raw GraphQL work, and fall back to direct GraphQL with `LINEAR_API_KEY` when needed. If none of these paths is available, treat Linear access as a real blocker, record it in the workpad, and follow the blocked path in this workflow.
+The agent must be able to talk to Linear through direct GraphQL using
+`LINEAR_API_KEY` plus the repo-local `linear` skill assets. If the key is not
+present, treat that as a real blocker, record it in the workpad, and follow
+the blocked path in this workflow.
 
 ## Default posture
 
@@ -99,7 +96,7 @@ Prefer MCP for routine issue operations, use `linear_graphql` when a session exp
 
 ## Related skills
 
-- `linear`: interact with Linear using MCP first, then injected `linear_graphql`, then raw GraphQL fallback when needed.
+- `linear`: interact with Linear through the repo-local GraphQL helper, query files, and references.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
@@ -321,7 +318,7 @@ For major rework:
 - If issue state is `Backlog`, do not modify it; wait for human to move it to `Todo`.
 - Do not edit the issue body/description for planning or progress tracking.
 - Use exactly one persistent workpad comment (`## Agent Harness Workpad`) per issue.
-- If the usual Linear tool path is unavailable in-session, use the `linear` skill's fallback order. Only report blocked if MCP, injected `linear_graphql`, and raw GraphQL via `LINEAR_API_KEY` are all unavailable.
+- If a Linear action fails, retry it with the repo-local `linear` helper and the checked-in query files before reporting a blocker.
 - Temporary proof edits are allowed only for local verification and must be reverted before commit.
 - If out-of-scope improvements are found, create a separate Backlog issue rather
   than expanding current scope, and include a clear
@@ -348,7 +345,8 @@ Update the priority table in the Linear project overview whenever:
 
 ### How to update the dashboard
 
-1. Use the `linear_get_project` tool to fetch the current project description
+1. Use the repo-local Linear helper with `queries/project_by_slug.graphql` to
+   fetch the current project description
 2. Locate the `## Dependency Blockers & PR Review Priority` section
 3. Regenerate the table with current data:
    - Query all issues in `Human Review`, `Merging`, `Rework`, `In Progress`, and `Todo` states
@@ -359,7 +357,9 @@ Update the priority table in the Linear project overview whenever:
    - **P1 (🟡 Epic):** Parent issues of active milestones that need review
    - **P2 (🟢 Ready):** Issues unblocked but with lower downstream impact
    - **P3 (⚪ Waiting):** Issues currently blocked by dependencies
-5. Use `linear_save_project` to update the description with the new table
+5. Use the repo-local Linear helper with
+   `queries/project_update_content.graphql` to update the description with the
+   new table
 
 ### Priority calculation guidelines
 

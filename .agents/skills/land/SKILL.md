@@ -37,19 +37,19 @@ description:
 9. When all checks are green and review feedback is addressed, set the Linear
    issue to "Human Review" state. **DO NOT MERGE YOURSELF.**
 10. **Context guard:** Before implementing review feedback, confirm it does not
-   conflict with the user's stated intent or task context. If it conflicts,
-   respond inline with a justification and ask the user before changing code.
+    conflict with the user's stated intent or task context. If it conflicts,
+    respond inline with a justification and ask the user before changing code.
 11. **Pushback template:** When disagreeing, reply inline with: acknowledge +
-   rationale + offer alternative.
+    rationale + offer alternative.
 12. **Ambiguity gate:** When ambiguity blocks progress, use the clarification
-   flow (assign PR to current GH user, mention them, wait for response). Do not
-   implement until ambiguity is resolved.
+    flow (assign PR to current GH user, mention them, wait for response). Do not
+    implement until ambiguity is resolved.
     - If you are confident you know better than the reviewer, you may proceed
       without asking the user, but reply inline with your rationale.
 13. **Per-comment mode:** For each review comment, choose one of: accept,
-   clarify, or push back. Reply inline stating the mode before changing code.
+    clarify, or push back. Reply inline stating the mode before changing code.
 14. **Reply before change:** Always respond with intended action before pushing
-   code changes.
+    code changes.
 
 ## Commands
 
@@ -86,10 +86,10 @@ fi
 # PR is ready - move Linear issue to Human Review
 echo "PR #$pr_number is ready:"
 echo "  - CI: green"
-echo "  - Conflicts: resolved"  
+echo "  - Conflicts: resolved"
 echo "  - Review: addressed"
 echo ""
-echo "Move the Linear issue to 'Human Review' state via Linear MCP tools."
+echo "Move the Linear issue to 'Human Review' state via the repo-local Linear GraphQL helper."
 echo "**DO NOT MERGE** - the user reviews and merges."
 ```
 

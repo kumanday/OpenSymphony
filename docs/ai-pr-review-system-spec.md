@@ -81,8 +81,8 @@ Important:
 - Replace `__PINNED_OPENHANDS_EXTENSIONS_SHA__` with the same full commit SHA from the canonical `OpenHands/extensions` repository in **both** places before finalizing.
 - Keep this workflow on **GitHub-hosted runners**.
 - Keep this as a **same-repo** workflow only.
-- Fireworks remains the default example provider, but the preferred repo secret
-  name is provider-agnostic: `AI_REVIEW_API_KEY`.
+- Fireworks remains the default example provider, but the repo secret name is
+  provider-agnostic: `AI_REVIEW_API_KEY`.
 
 ```yaml
 name: ai-pr-review
@@ -611,4 +611,4 @@ Before finishing, verify all of the following:
 - [ ] the Fireworks configuration is documented exactly with:
   - model id `accounts/fireworks/models/glm-5p1`
   - base URL `https://api.fireworks.ai/inference/v1`
-  - preferred secret name `AI_REVIEW_API_KEY`
+  - review secret name `AI_REVIEW_API_KEY`

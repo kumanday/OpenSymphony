@@ -1,6 +1,6 @@
 ---
 id: OSYM-303
-title: Implement Linear MCP write surface
+title: Implement Linear GraphQL agent write path
 type: feature
 area: tracker-tools
 priority: P1
@@ -19,39 +19,39 @@ project_context:
   - docs/linear-and-tools.md
   - docs/architecture.md
 repo_paths:
-  - crates/opensymphony-linear-mcp/
   - crates/opensymphony-cli/
+  - .agents/skills/linear/
 definition_of_ready:
   - OSYM-101 and OSYM-302 are merged
   - The initial write operations are selected
 ---
 
-# OSYM-303: Implement Linear MCP write surface
+# OSYM-303: Implement Linear GraphQL agent write path
 
 ## Summary
-Implement a small stdio MCP server that lets the coding agent write back to Linear without giving the orchestrator direct responsibility for those writes.
+Implement the checked-in GraphQL helper, query assets, and documentation that let the coding agent write back to Linear without giving the orchestrator direct responsibility for those writes.
 
 ## Scope
-- Expose a minimal set of Linear write tools through MCP
-- Keep the tool contracts narrow and auditable
-- Document how the tool is attached to OpenHands conversations
-- Package the MCP server behind a CLI subcommand
+- Provide a small checked-in helper for authenticated GraphQL execution
+- Check in audited query files for the supported write flows
+- Document how target repos should use the helper and query assets
+- Keep the orchestrator independent of agent-side write failures
 
 ## Out of scope
-- A full Linear SDK
-- Scheduler logic that depends on MCP writes succeeding
+- A generated full Linear SDK
+- Scheduler logic that depends on agent-side writes succeeding
 
 ## Deliverables
-- Runnable MCP server
-- Tool schemas and docs
-- CLI entrypoint such as `opensymphony linear-mcp`
+- Repo-local helper script
+- Query assets and reference docs
+- `opensymphony init` propagation of the full skill tree
 
 ## Acceptance criteria
-- The MCP server starts locally and advertises the documented tools
-- Agent-side writes can be performed through the MCP layer
-- Failure of MCP writes does not break scheduler correctness
+- Target repos can run the helper with `LINEAR_API_KEY`
+- Agent-side writes can be performed through the checked-in GraphQL assets
+- Failure of agent-side writes does not break scheduler correctness
 
 ## Test plan
-- Tool schema tests
-- Local stdio integration tests
+- CLI init propagation tests
+- Helper smoke tests with checked-in query files
 - Optional live Linear write tests on a safe sandbox project
