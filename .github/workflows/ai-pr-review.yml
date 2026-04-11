@@ -37,6 +37,7 @@ jobs:
           AI_REVIEW_BASE_URL: ${{ vars.AI_REVIEW_BASE_URL }}
           AI_REVIEW_STYLE: ${{ vars.AI_REVIEW_STYLE }}
           AI_REVIEW_REQUIRE_EVIDENCE: ${{ vars.AI_REVIEW_REQUIRE_EVIDENCE }}
+          FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
         run: |
           set -euo pipefail
 
@@ -45,28 +46,34 @@ jobs:
           base_url="${AI_REVIEW_BASE_URL:-}"
           review_style="${AI_REVIEW_STYLE:-standard}"
           require_evidence="${AI_REVIEW_REQUIRE_EVIDENCE:-true}"
+          llm_api_key="${FIREWORKS_API_KEY:-}"
 
           # Trim whitespace from variables
           provider_kind=$(echo "$provider_kind" | xargs)
           model_id=$(echo "$model_id" | xargs)
           base_url=$(echo "$base_url" | xargs)
+          llm_api_key=$(echo "$llm_api_key" | xargs)
 
-          if [[ -z "$provider_kind" ]]; then
-            echo "::error::Missing repository variable AI_REVIEW_PROVIDER_KIND"
-            exit 1
+          if [[ -z "$provider_kind" || -z "$model_id" ]]; then
+            echo "::notice::Skipping AI PR review because AI_REVIEW_PROVIDER_KIND and/or AI_REVIEW_MODEL_ID is not configured for this repository."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          if [[ -z "$model_id" ]]; then
-            echo "::error::Missing repository variable AI_REVIEW_MODEL_ID"
-            exit 1
+          if [[ "$provider_kind" == "openai-compatible" && -z "$base_url" ]]; then
+            echo "::notice::Skipping AI PR review because AI_REVIEW_BASE_URL is required when AI_REVIEW_PROVIDER_KIND=openai-compatible."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ -z "$llm_api_key" ]]; then
+            echo "::notice::Skipping AI PR review because FIREWORKS_API_KEY is not configured for this repository."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           case "$provider_kind" in
             openai-compatible)
-              if [[ -z "$base_url" ]]; then
-                echo "::error::AI_REVIEW_BASE_URL is required when AI_REVIEW_PROVIDER_KIND=openai-compatible"
-                exit 1
-              fi
               resolved_model="openai/${model_id}"
               resolved_base_url="$base_url"
               ;;
@@ -81,12 +88,14 @@ jobs:
               ;;
           esac
 
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
           echo "model=$resolved_model" >> "$GITHUB_OUTPUT"
           echo "base_url=$resolved_base_url" >> "$GITHUB_OUTPUT"
           echo "style=$review_style" >> "$GITHUB_OUTPUT"
           echo "require_evidence=$require_evidence" >> "$GITHUB_OUTPUT"
 
       - name: Run OpenHands PR Review
+        if: steps.llm.outputs.enabled == 'true'
         uses: OpenHands/extensions/plugins/pr-review@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
