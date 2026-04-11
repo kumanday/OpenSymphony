@@ -210,6 +210,7 @@ implementation repo.
 ```text
 docs/
   architecture.md
+  configuration.md
   symphony-spec-alignment.md
   openhands-agent-server.md
   websocket-runtime.md
@@ -218,6 +219,7 @@ docs/
   ui-frankentui.md
   repository-layout.md
   deployment-modes.md
+  operations.md
   testing-and-operations.md
   implementation-plan.md
   sources.md

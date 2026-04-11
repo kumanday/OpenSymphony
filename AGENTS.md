@@ -136,7 +136,7 @@ The local MVP is a trusted-environment mode.
 - Expect host process execution.
 - Do not overstate isolation.
 - Harden later for hosted mode with remote or container-backed workspaces.
-- Document risky defaults clearly in `README.md` and `docs/testing-and-operations.md`.
+- Document risky defaults clearly in `README.md` and `docs/operations.md`.
 
 ## Coding standards
 
@@ -202,10 +202,12 @@ The local MVP is a trusted-environment mode.
 When changing behavior in any of these files, update the corresponding docs in the same change:
 
 - `docs/architecture.md`
+- `docs/configuration.md`
 - `docs/openhands-agent-server.md`
 - `docs/websocket-runtime.md`
 - `docs/workspace-and-lifecycle.md`
 - `docs/linear-and-tools.md`
+- `docs/operations.md`
 - `docs/testing-and-operations.md`
 
 When changing milestones or task sequencing, update `docs/implementation-plan.md`.
@@ -224,7 +226,9 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/ui-frankentui.md`: operator UI design
 - `docs/repository-layout.md`: crate ownership
 - `docs/deployment-modes.md`: local MVP and hosted follow-on
-- `docs/testing-and-operations.md`: tests, doctor, packaging, local ops
+- `docs/configuration.md`: target repo bootstrap and runtime config
+- `docs/operations.md`: doctor, rehydration, diagnostics, packaging, and local ops
+- `docs/testing-and-operations.md`: test strategy and validation layers
 - `docs/tasks/`: issue-ready implementation work items
 
 ---

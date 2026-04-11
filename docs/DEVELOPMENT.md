@@ -162,7 +162,8 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 
 ### Testing Strategy
 
-See [testing-and-operations.md](testing-and-operations.md) for the full test strategy.
+See [testing-and-operations.md](testing-and-operations.md) for the full test
+strategy and [operations.md](operations.md) for local operator workflows.
 
 Key test layers:
 
@@ -213,7 +214,9 @@ Do not rely on a random globally installed `openhands` binary.
 - `docs/ui-frankentui.md`: Operator UI design
 - `docs/repository-layout.md`: Crate ownership and repository boundaries
 - `docs/deployment-modes.md`: Local MVP mode and hosted follow-on mode
-- `docs/testing-and-operations.md`: Testing matrix, local ops, doctor checks
+- `docs/configuration.md`: Target repo bootstrap and runtime config
+- `docs/operations.md`: Doctor, rehydration, diagnostics, packaging, and local ops
+- `docs/testing-and-operations.md`: Testing matrix and validation layers
 - `docs/sources.md`: Primary references and trust notes
 - `docs/implementation-plan.md`: Milestone and dependency view
 - `docs/tasks/`: Issue-ready work items with Linear-friendly metadata

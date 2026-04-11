@@ -23,19 +23,6 @@ OpenSymphony automates software development workflows by:
 
 ## Quick Start
 
-### Using the Template for New Projects
-
-For new projects that want to use OpenSymphony, use the template repository:
-
-**[kumanday/OpenSymphony-template](https://github.com/kumanday/OpenSymphony-template)**
-
-Click "Use this template" to create a new repository with:
-- Pre-configured `WORKFLOW.md` with placeholders
-- All required skills (`commit`, `push`, `pull`, `land`, `linear`, `convert-tasks-to-linear`, `create-implementation-plan`)
-- GitHub workflows for AI PR review
-- `AGENTS.md` template for project-specific context
-- Labels: `symphony` and `review-this`
-
 ### Prerequisites
 
 - Rust toolchain (stable)
@@ -57,133 +44,40 @@ cargo install --path .
 opensymphony --help
 ```
 
-### Configuration
+### Bootstrap A Target Repo
 
-For new projects, use the [OpenSymphony-template](https://github.com/kumanday/OpenSymphony-template) repository as a starting point.
-
-For an existing repository, bootstrap it in place:
+Bootstrap the target repository in place:
 
 ```bash
 cd /path/to/target-repo
 opensymphony init
 ```
 
-`opensymphony init` fetches the current bootstrap files from the template repository's raw GitHub URLs at runtime, copies any missing files, merges an existing `AGENTS.md`, prompts before overwriting other conflicts, detects the repo clone URL from `git remote`, offers to fill in the Linear project slug/key in `WORKFLOW.md`, and can optionally scaffold automated OpenHands AI PR review.
+`opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
+can optionally scaffold automated OpenHands AI PR review.
 
-The copied bootstrap payload currently includes:
-
-- `WORKFLOW.md`
-- `AGENTS.md`
-- `config.yaml`
-- `.gitignore`
-- `.agents/skills/`
-- `.github/CODEOWNERS`
-- `.github/pull_request_template.md`
-- `docs/tasks/README.md`
-
-If you opt into AI PR review during `init`, it also adds:
-
-- `.github/workflows/ai-pr-review.yml`
-- `.agents/skills/custom-codereview-guide.md`
-- `docs/ai-pr-review-human-setup.md`
-
-If you want to inspect the exact upstream source, `init` pulls from the raw template base at [raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main](https://raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main/WORKFLOW.md).
-
-If you want the template's GitHub label conventions, create them once per repository:
-
-```bash
-gh label create "symphony" --description "PR created by OpenSymphony" --color "1f77b4" || true
-gh label create "review-this" --description "Trigger AI PR review" --color "d73a4a" || true
-```
-
-Then review the copied `WORKFLOW.md` and `config.yaml`:
-
-| Field | Description | Env Var | Example |
-|-------|-------------|---------|---------|
-| `tracker.project_slug` | Your Linear project identifier | - | `my-team/my-project` |
-| `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
-| `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/accounts/fireworks/models/glm-5p1` |
-
-**Environment Variables**
-
-OpenSymphony uses standard OpenHands environment variable names:
-
-```bash
-# Fireworks example via the OpenAI-compatible provider adapter
-export LLM_MODEL="openai/accounts/fireworks/models/glm-5p1"
-export LLM_API_KEY="fw-..."
-export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
-```
-
-The workflow supports `${VAR}` syntax for environment variable substitution in the front matter:
-
-```yaml
-openhands:
-  conversation:
-    agent:
-      llm:
-        model: ${LLM_MODEL}
-```
-
-Optional conversation condensation is enabled by default per workflow to reduce long-history context pressure before the agent-server hits the model window:
-
-```yaml
-openhands:
-  conversation:
-    agent:
-      condenser:
-        max_size: 240
-        keep_first: 2
-```
-
-OpenSymphony forwards an OpenHands `LLMSummarizingCondenser` that reuses the conversation agent's LLM settings. The condenser is enabled by default with `max_size: 240` and `keep_first: 2`. To disable it, set `enabled: false`.
-
-`opensymphony init` also copies a starter `config.yaml` next to the target repository `WORKFLOW.md`. A minimal local-supervised config looks like this:
-
-```yaml
-control_plane:
-  bind: 127.0.0.1:2468
-
-openhands:
-  tool_dir: /absolute/path/to/OpenSymphony/tools/openhands-server
-```
-
-When your workflow points at an external OpenHands agent-server with `openhands.transport.session_api_key_env`, `config.yaml` can omit `openhands.tool_dir`.
-
-Use [`examples/target-repo/config.yaml`](examples/target-repo/config.yaml) as the template for that file: copy it into your target repo root as `config.yaml`, then adjust paths and ports for your machine.
-
-Note: [`examples/configs/local-dev.yaml`](examples/configs/local-dev.yaml) is for `opensymphony doctor` against this OpenSymphony checkout. It is not the runtime config that `opensymphony run` looks for in a target repo.
+For generated files, environment variables, `config.yaml`, and the template
+repo details behind `init`, see [Configuration](docs/configuration.md).
 
 ### Running the Orchestrator
 
+Run the preflight check from the OpenSymphony checkout:
+
 ```bash
-# Run preflight checks from the OpenSymphony checkout
 opensymphony doctor --config examples/configs/local-dev.yaml
+```
 
-# Bootstrap an existing target repository once
+Then start from the target repository:
+
+```bash
 cd /path/to/target-repo
-opensymphony init
-
-# Start the orchestrator from the target repository
 opensymphony run
-
-# Or point at an explicit runtime config file
-opensymphony run --config ./config.yaml
-
-# Resume the persisted OpenHands conversation for one issue
-opensymphony debug COE-284
-
-# Rehydrate a conversation (recreate with current API key, preserving history)
-opensymphony rehydrate COE-284 --reason "API key rotation"
-
-# Bulk rehydrate all conversations during doctor check
-opensymphony doctor --config examples/configs/local-dev.yaml --rehydrate
-
-# Optional: Start the TUI for monitoring
-opensymphony tui --url http://127.0.0.1:2468/
 ```
 
 The legacy `opensymphony daemon` command is still available as a demo control-plane publisher for smoke tests, but it is not the real orchestrator entrypoint.
+
+For alternate config paths, `debug`, `rehydrate`, packaging, and local operator
+workflows, see [Operations](docs/operations.md).
 
 ## Architecture
 
@@ -343,8 +237,10 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 ## Documentation
 
 - [Architecture](docs/architecture.md) - High-level design and component interactions
+- [Configuration](docs/configuration.md) - Target repo bootstrap and runtime config
 - [Deployment Modes](docs/deployment-modes.md) - Local vs hosted deployment
-- [Testing and Operations](docs/testing-and-operations.md) - Test strategy and local ops
+- [Operations](docs/operations.md) - Doctor, rehydration, diagnostics, and local ops
+- [Testing](docs/testing-and-operations.md) - Test strategy and validation layers
 - [AGENTS.md](AGENTS.md) - Repository guidelines for coding agents
 - [Development Guide](docs/DEVELOPMENT.md) - Contributing and development details
 
