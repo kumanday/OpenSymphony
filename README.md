@@ -33,15 +33,10 @@ OpenSymphony automates software development workflows by:
 ### Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/kumanday/OpenSymphony.git
-cd OpenSymphony
+git clone https://github.com/kumanday/OpenSymphony.git && cd OpenSymphony
 
-# Install the CLI as `opensymphony`
 cargo install --path .
 
-# Inspect the command surface
-opensymphony --help
 ```
 
 ### Bootstrap A Target Repo
@@ -56,15 +51,12 @@ opensymphony init
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
 can optionally scaffold automated OpenHands AI PR review.
 
-For generated files, environment variables, `config.yaml`, and the template
-repo details behind `init`, see [Configuration](docs/configuration.md).
-
 ### Running the Orchestrator
 
 Run the preflight check from the OpenSymphony checkout:
 
 ```bash
-opensymphony doctor --config examples/configs/local-dev.yaml
+opensymphony doctor
 ```
 
 Then start from the target repository:
@@ -74,10 +66,23 @@ cd /path/to/target-repo
 opensymphony run
 ```
 
-The legacy `opensymphony daemon` command is still available as a demo control-plane publisher for smoke tests, but it is not the real orchestrator entrypoint.
+Ror real-time monitoring while the orchestrator is running, run the TUI in a separate terminal window:
+```bash
+opensymphony tui
+```
+
+### Further Details
+
+For generated files, environment variables, `config.yaml`, and the template
+repo details behind `init`, see [Configuration](docs/configuration.md).
 
 For alternate config paths, `debug`, `rehydrate`, packaging, and local operator
 workflows, see [Operations](docs/operations.md).
+
+To innspect the command surface, run:
+```
+opensymphony --help
+```
 
 ## Architecture
 
