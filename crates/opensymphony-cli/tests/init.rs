@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, process::Stdio, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, fs, process::Stdio, sync::Arc, time::Duration};
 
 use axum::{
     Router,
@@ -32,7 +32,7 @@ async fn init_copies_template_files_and_customizes_workflow() {
     );
 
     let workflow =
-        std::fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
     assert!(workflow.contains("project_slug: \"demo-project\""));
     assert!(workflow.contains("git clone --depth 1 'https://github.com/example/demo.git' ."));
 
@@ -61,6 +61,10 @@ async fn init_copies_template_files_and_customizes_workflow() {
         "config.yaml should be created"
     );
     assert!(
+        !repo.path().join(".gitignore").exists(),
+        "target repos should not receive the template .gitignore"
+    );
+    assert!(
         !repo
             .path()
             .join(".github/workflows/ai-pr-review.yml")
@@ -74,7 +78,7 @@ async fn init_copies_template_files_and_customizes_workflow() {
 }
 
 #[tokio::test]
-async fn init_can_scaffold_ai_pr_review_and_print_setup_guidance() {
+async fn init_can_scaffold_ai_pr_review_and_print_fallback_commands_when_gh_cannot_access_repo() {
     let server = TemplateServer::start().await;
     let repo = TempDir::new().expect("temp repo should exist");
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
@@ -117,13 +121,79 @@ async fn init_can_scaffold_ai_pr_review_and_print_setup_guidance() {
     );
     assert!(
         stdout.contains(
-            "gh variable set AI_REVIEW_MODEL_ID --body 'accounts/fireworks/models/glm-5p1'"
+            "gh variable set AI_REVIEW_MODEL_ID --repo example/demo --body 'accounts/fireworks/models/glm-5p1'"
         ),
         "stdout should contain GitHub variable commands: {stdout}",
     );
     assert!(
-        stdout.contains("gh secret set AI_REVIEW_API_KEY"),
-        "stdout should contain the generic AI review secret guidance: {stdout}",
+        stdout.contains("`gh` could not access `example/demo`"),
+        "stdout should explain why automation fell back to manual commands: {stdout}",
+    );
+}
+
+#[tokio::test]
+async fn init_can_scaffold_ai_pr_review_and_configure_github_with_gh() {
+    let server = TemplateServer::start().await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    let gh_log = repo.path().join("gh.log");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child_with_env(
+        repo.path(),
+        server.base_url(),
+        &[],
+        &[
+            ("OPENSYMPHONY_TEST_GH_MODE", "success"),
+            (
+                "OPENSYMPHONY_TEST_GH_LOG",
+                gh_log.to_str().expect("gh log path should be valid"),
+            ),
+        ],
+    );
+    write_stdin(&mut child, "yes\n\n\n\n\n\ndemo-project\nyes\nyes\n").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "init should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("GitHub Actions settings for `example/demo` were configured with `gh`."),
+        "stdout should confirm GitHub automation: {stdout}",
+    );
+    assert!(
+        !stdout.contains("gh variable set AI_REVIEW_MODEL_ID"),
+        "successful automation should not dump fallback gh commands: {stdout}",
+    );
+
+    let gh_log = fs::read_to_string(&gh_log).expect("gh log should exist");
+    assert!(
+        gh_log.contains("gh --version"),
+        "preflight should verify gh exists: {gh_log}",
+    );
+    assert!(
+        gh_log.contains("gh repo view --repo example/demo --json nameWithOwner"),
+        "preflight should verify repo access: {gh_log}",
+    );
+    assert!(
+        gh_log.contains(
+            "gh variable set AI_REVIEW_PROVIDER_KIND --repo example/demo --body openai-compatible"
+        ),
+        "provider variable should be configured: {gh_log}",
+    );
+    assert!(
+        gh_log.contains("gh label create review-this --repo example/demo --description Trigger AI PR review --color d73a4a --force"),
+        "label should be ensured: {gh_log}",
+    );
+    assert!(
+        gh_log.contains("gh secret set AI_REVIEW_API_KEY --repo example/demo"),
+        "secret should be configured when the user reuses LLM_API_KEY: {gh_log}",
     );
 }
 
@@ -133,13 +203,13 @@ async fn init_merges_agents_and_skips_conflicting_file_when_requested() {
     let repo = TempDir::new().expect("temp repo should exist");
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
 
-    std::fs::write(
+    fs::write(
         repo.path().join("AGENTS.md"),
         "# Existing Agents\n\nKeep me.\n",
     )
     .expect("existing AGENTS should write");
-    std::fs::create_dir_all(repo.path().join(".github")).expect(".github should exist");
-    std::fs::write(
+    fs::create_dir_all(repo.path().join(".github")).expect(".github should exist");
+    fs::write(
         repo.path().join(".github/pull_request_template.md"),
         "keep this template\n",
     )
@@ -160,8 +230,7 @@ async fn init_merges_agents_and_skips_conflicting_file_when_requested() {
         "init should succeed: stdout={stdout}, stderr={stderr}",
     );
 
-    let agents =
-        std::fs::read_to_string(repo.path().join("AGENTS.md")).expect("AGENTS.md should exist");
+    let agents = fs::read_to_string(repo.path().join("AGENTS.md")).expect("AGENTS.md should exist");
     assert!(
         agents.contains("## Preserved Existing AGENTS.md"),
         "existing AGENTS content should be preserved: {agents}",
@@ -171,7 +240,7 @@ async fn init_merges_agents_and_skips_conflicting_file_when_requested() {
         "existing AGENTS text should be appended: {agents}",
     );
 
-    let pr_template = std::fs::read_to_string(repo.path().join(".github/pull_request_template.md"))
+    let pr_template = fs::read_to_string(repo.path().join(".github/pull_request_template.md"))
         .expect("PR template should exist");
     assert_eq!(pr_template, "keep this template\n");
     assert!(
@@ -186,7 +255,7 @@ async fn init_aborts_before_writing_when_user_requests_abort() {
     let repo = TempDir::new().expect("temp repo should exist");
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
 
-    std::fs::write(repo.path().join("WORKFLOW.md"), "user workflow\n")
+    fs::write(repo.path().join("WORKFLOW.md"), "user workflow\n")
         .expect("existing workflow should write");
 
     let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
@@ -204,8 +273,7 @@ async fn init_aborts_before_writing_when_user_requests_abort() {
         "init should fail when aborted: stdout={stdout}, stderr={stderr}",
     );
     assert_eq!(
-        std::fs::read_to_string(repo.path().join("WORKFLOW.md"))
-            .expect("workflow should still exist"),
+        fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should still exist"),
         "user workflow\n"
     );
     assert!(
@@ -263,12 +331,34 @@ fn spawn_init_child_with_env(
     extra_args: &[&str],
     extra_env: &[(&str, &str)],
 ) -> tokio::process::Child {
+    let gh_bin_dir = repo_root.join(".test-bin");
+    fs::create_dir_all(&gh_bin_dir).expect("fake gh bin dir should exist");
+    let gh_bin = gh_bin_dir.join("gh");
+    fs::write(&gh_bin, fake_gh_script()).expect("fake gh should be written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&gh_bin)
+            .expect("fake gh metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&gh_bin, permissions).expect("fake gh should be executable");
+    }
+    let path = format!(
+        "{}:{}",
+        gh_bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
     let mut command = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
     command
         .arg("init")
         .args(extra_args)
         .current_dir(repo_root)
+        .env("PATH", path)
         .env("OPENSYMPHONY_TEMPLATE_BASE_URL", template_base_url)
+        .env("OPENSYMPHONY_TEST_GH_MODE", "deny-repo")
         .env("LLM_MODEL", "already-set-model")
         .env("LLM_API_KEY", "already-set-key")
         .env("LLM_BASE_URL", "https://example.com/llm")
@@ -403,7 +493,6 @@ openhands:
             "config.yaml".to_string(),
             "control_plane:\n  bind: 127.0.0.1:2468\n".to_string(),
         ),
-        (".gitignore".to_string(), ".opensymphony/\n".to_string()),
         (
             ".agents/skills/commit/SKILL.md".to_string(),
             "# commit\n".to_string(),
@@ -467,4 +556,66 @@ openhands:
         ),
         ("docs/tasks/README.md".to_string(), "# Tasks\n".to_string()),
     ])
+}
+
+fn fake_gh_script() -> &'static str {
+    r#"#!/bin/sh
+set -eu
+
+mode="${OPENSYMPHONY_TEST_GH_MODE:-deny-repo}"
+log_path="${OPENSYMPHONY_TEST_GH_LOG:-}"
+
+log_command() {
+  if [ -n "$log_path" ]; then
+    printf 'gh %s\n' "$*" >> "$log_path"
+  fi
+}
+
+case "${1-}" in
+  --version)
+    log_command "$*"
+    printf 'gh version test\n'
+    exit 0
+    ;;
+  repo)
+    log_command "$*"
+    if [ "$mode" = "success" ]; then
+      printf '{"nameWithOwner":"example/demo"}\n'
+      exit 0
+    fi
+    printf 'authentication required or repository access denied\n' >&2
+    exit 1
+    ;;
+  variable)
+    log_command "$*"
+    if [ "$mode" = "success" ]; then
+      exit 0
+    fi
+    printf 'repository settings access denied\n' >&2
+    exit 1
+    ;;
+  label)
+    log_command "$*"
+    if [ "$mode" = "success" ]; then
+      exit 0
+    fi
+    printf 'label write access denied\n' >&2
+    exit 1
+    ;;
+  secret)
+    log_command "$*"
+    cat >/dev/null
+    if [ "$mode" = "success" ]; then
+      exit 0
+    fi
+    printf 'secret write access denied\n' >&2
+    exit 1
+    ;;
+  *)
+    log_command "$*"
+    printf 'unexpected gh invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+"#
 }

@@ -57,7 +57,9 @@ Do **not** create a fork-secret workflow by default.
 
 Do **not** enable `pull_request_target` by default.
 
-Do **not** create or modify branch protection or labels through code. Put those steps in the human setup document.
+Do **not** create or modify branch protection through code. Labels may be
+bootstrapped by repository setup tooling when `gh` is available, but the human
+setup document must still cover the manual fallback path.
 
 Do **not** invent `CODEOWNERS` entries if real owners are not obvious from the repository. Put a TODO and an example in the human setup document instead.
 

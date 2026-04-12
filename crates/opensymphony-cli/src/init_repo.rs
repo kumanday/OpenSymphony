@@ -2,7 +2,7 @@ use std::{
     env, fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{ExitCode, Output},
     time::Duration,
 };
 
@@ -24,6 +24,7 @@ const DEFAULT_AI_REVIEW_BASE_URL: &str = "https://api.fireworks.ai/inference/v1"
 const DEFAULT_AI_REVIEW_STYLE: &str = "standard";
 const DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE: &str = "true";
 const DEFAULT_AI_REVIEW_SECRET_NAME: &str = "AI_REVIEW_API_KEY";
+const AI_REVIEW_LABEL_DESCRIPTION: &str = "Trigger AI PR review";
 const OPENHANDS_PR_REVIEW_PLUGIN_URL: &str =
     "https://github.com/OpenHands/extensions/tree/main/plugins/pr-review";
 const OPENHANDS_PR_REVIEW_DOCS_URL: &str =
@@ -205,6 +206,16 @@ enum AppliedChange {
     Unchanged,
 }
 
+enum GhRepoAutomationStatus {
+    Ready,
+    MissingCli,
+    RepoAccessUnavailable { details: String },
+}
+
+struct AiReviewGhAutomationResult {
+    secret_updated: bool,
+}
+
 enum GitRemoteDetection {
     Selected { remote_name: String, url: String },
     None,
@@ -279,10 +290,6 @@ const CORE_TEMPLATE_ASSETS: &[TemplateAsset] = &[
     },
     TemplateAsset {
         path: "config.yaml",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".gitignore",
         kind: AssetKind::Standard,
     },
     TemplateAsset {
@@ -476,7 +483,7 @@ where
     }
 
     if let Some(config) = ai_review_config.as_ref() {
-        print_ai_pr_review_guidance(ui, config)?;
+        handle_ai_pr_review_setup(ui, env_lookup, &target_repo, &git_remote, config)?;
     }
 
     prompt_for_missing_llm_env(env_lookup, ui)?;
@@ -1151,6 +1158,10 @@ fn ai_pr_review_setup_doc_contents(config: &AiReviewConfig) -> String {
 
 This repository was bootstrapped with OpenHands PR review support via `opensymphony init`.
 
+If `opensymphony init` was able to use `gh`, it may already have configured the
+repository variables, label, and optional secret. Use this document to verify
+that setup, fill in anything you skipped, or finish the manual fallback path.
+
 Useful references:
 
 - Plugin page: {plugin_url}
@@ -1163,7 +1174,7 @@ Useful references:
 
 ## GitHub Actions Secret
 
-Add this repository secret under **Settings -> Secrets and variables -> Actions**:
+Verify or add this repository secret under **Settings -> Secrets and variables -> Actions**:
 
 | Name | Value |
 |------|-------|
@@ -1174,7 +1185,7 @@ configuration for new repos; any compatible provider/model is fine.
 
 ## GitHub Actions Variables
 
-Add these repository variables under **Settings -> Secrets and variables -> Actions -> Variables**:
+Verify or add these repository variables under **Settings -> Secrets and variables -> Actions -> Variables**:
 
 | Name | Value |
 |------|-------|
@@ -1185,13 +1196,16 @@ Add these repository variables under **Settings -> Secrets and variables -> Acti
 
 ## Label
 
-Create the `{label}` label so maintainers can retrigger review on demand.
+Make sure the `{label}` label exists so maintainers can retrigger review on demand.
 
 ```bash
-gh label create {quoted_label} --description 'Trigger AI PR review' --color 'd73a4a' || true
+gh label create {quoted_label} --description 'Trigger AI PR review' --color 'd73a4a' --force
 ```
 
 ## Optional GitHub CLI Commands
+
+Run these from the target repo root if you want to configure or verify the
+repository with `gh` manually:
 
 ```bash
 gh variable set AI_REVIEW_PROVIDER_KIND --body {quoted_provider_kind}
@@ -1199,6 +1213,7 @@ gh variable set AI_REVIEW_MODEL_ID --body {quoted_model_id}
 {base_url_command}gh variable set AI_REVIEW_STYLE --body {quoted_style}
 gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {quoted_require_evidence}
 gh secret set {secret_name}
+gh label create {quoted_label} --description 'Trigger AI PR review' --color 'd73a4a' --force
 ```
 
 ## Notes
@@ -1264,69 +1279,416 @@ OpenHands PR review will load this file when it is present. Replace this starter
     .to_string()
 }
 
-fn print_ai_pr_review_guidance<R, W>(
+fn handle_ai_pr_review_setup<R, W, E>(
     ui: &mut PromptUi<R, W>,
+    env_lookup: &E,
+    target_repo: &Path,
+    git_remote: &GitRemoteDetection,
+    config: &AiReviewConfig,
+) -> Result<(), InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+    E: EnvLookup,
+{
+    ui.blank_line()?;
+    ui.line("OpenHands PR review scaffolding was added.")?;
+    let Some(repo_slug) = git_remote_url(git_remote).and_then(github_repo_slug_from_remote) else {
+        ui.line(
+            "GitHub automation was skipped because the detected git remote is missing or is not a GitHub repository URL.",
+        )?;
+        ui.line("See `docs/ai-pr-review-human-setup.md` for the remaining setup checklist.")?;
+        return Ok(());
+    };
+
+    match check_gh_repo_automation(target_repo, &repo_slug) {
+        GhRepoAutomationStatus::Ready => {}
+        GhRepoAutomationStatus::MissingCli => {
+            ui.line(
+                "GitHub automation was skipped because `gh` is not installed or is not available on `PATH`.",
+            )?;
+            ui.line(
+                "Install GitHub CLI, run `gh auth login`, and then run these commands when you're ready:",
+            )?;
+            print_ai_review_cli_fallback(ui, &repo_slug, config)?;
+            return Ok(());
+        }
+        GhRepoAutomationStatus::RepoAccessUnavailable { details } => {
+            ui.line(format!(
+                "GitHub automation was skipped because `gh` could not access `{repo_slug}`."
+            ))?;
+            if !details.is_empty() {
+                ui.line(format!("`gh` reported: {details}"))?;
+            }
+            ui.line(
+                "Run `gh auth login` with an account that can manage this repository, then run these commands when you're ready:",
+            )?;
+            print_ai_review_cli_fallback(ui, &repo_slug, config)?;
+            return Ok(());
+        }
+    }
+
+    if !prompt_yes_no(
+        ui,
+        &format!(
+            "Configure GitHub Actions variables, the optional secret, and the `{AI_REVIEW_LABEL_NAME}` label for `{repo_slug}` now with `gh`? [Y/n]: "
+        ),
+        true,
+    )? {
+        ui.line("Skipped GitHub automation for now.")?;
+        ui.line("See `docs/ai-pr-review-human-setup.md` for the checklist and validation steps.")?;
+        return Ok(());
+    }
+
+    let secret_value = prompt_ai_review_secret(ui, env_lookup)?;
+    match configure_ai_review_with_gh(target_repo, &repo_slug, config, secret_value.as_deref()) {
+        Ok(result) => {
+            ui.line(format!(
+                "GitHub Actions settings for `{repo_slug}` were configured with `gh`."
+            ))?;
+            ui.line("- variables: AI_REVIEW_PROVIDER_KIND, AI_REVIEW_MODEL_ID, AI_REVIEW_BASE_URL, AI_REVIEW_STYLE, AI_REVIEW_REQUIRE_EVIDENCE")?;
+            ui.line(format!("- label: `{AI_REVIEW_LABEL_NAME}` ensured"))?;
+            if result.secret_updated {
+                ui.line(format!(
+                    "- secret: `{DEFAULT_AI_REVIEW_SECRET_NAME}` updated"
+                ))?;
+            } else {
+                ui.line(format!(
+                    "- secret: `{DEFAULT_AI_REVIEW_SECRET_NAME}` was left unchanged; set it later if needed"
+                ))?;
+            }
+        }
+        Err(error) => {
+            ui.line(format!(
+                "GitHub automation could not finish automatically: {error}"
+            ))?;
+            ui.line(
+                "Make sure your account can manage repository variables, secrets, and labels, then finish the checklist in `docs/ai-pr-review-human-setup.md`.",
+            )?;
+        }
+    }
+
+    ui.line(format!("Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"))?;
+    ui.line(format!("Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"))?;
+    Ok(())
+}
+
+fn prompt_ai_review_secret<R, W, E>(
+    ui: &mut PromptUi<R, W>,
+    env_lookup: &E,
+) -> Result<Option<String>, InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+    E: EnvLookup,
+{
+    if let Some(llm_api_key) = env_lookup.get("LLM_API_KEY")
+        && prompt_yes_no(
+            ui,
+            &format!(
+                "Reuse the current `LLM_API_KEY` value for GitHub secret `{DEFAULT_AI_REVIEW_SECRET_NAME}`? [Y/n]: "
+            ),
+            true,
+        )?
+    {
+        return Ok(Some(llm_api_key));
+    }
+
+    ui.line(format!(
+        "`{DEFAULT_AI_REVIEW_SECRET_NAME}` is the provider key the GitHub Actions review workflow will use."
+    ))?;
+    let response = ui.prompt(&format!(
+        "Enter a value for `{DEFAULT_AI_REVIEW_SECRET_NAME}` now (input is visible; leave blank to skip this step for now): "
+    ))?;
+    let response = response.trim();
+    if response.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(response.to_string()))
+    }
+}
+
+fn github_repo_slug_from_remote(remote_url: &str) -> Option<String> {
+    if let Ok(url) = Url::parse(remote_url)
+        && matches!(url.host_str(), Some("github.com" | "www.github.com"))
+    {
+        return normalize_github_repo_slug(url.path());
+    }
+
+    remote_url
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote_url.strip_prefix("ssh://git@github.com/"))
+        .and_then(normalize_github_repo_slug)
+}
+
+fn normalize_github_repo_slug(path: &str) -> Option<String> {
+    let trimmed = path.trim_matches('/');
+    let trimmed = trimmed.strip_suffix(".git").unwrap_or(trimmed);
+    let mut parts = trimmed.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+fn check_gh_repo_automation(target_repo: &Path, repo_slug: &str) -> GhRepoAutomationStatus {
+    match run_gh_command(target_repo, &["--version"]) {
+        Ok(output) if output.status.success() => {}
+        Ok(_) => return GhRepoAutomationStatus::MissingCli,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => {
+            return GhRepoAutomationStatus::MissingCli;
+        }
+        Err(source) => {
+            return GhRepoAutomationStatus::RepoAccessUnavailable {
+                details: source.to_string(),
+            };
+        }
+    }
+
+    match run_gh_command(
+        target_repo,
+        &[
+            "repo",
+            "view",
+            "--repo",
+            repo_slug,
+            "--json",
+            "nameWithOwner",
+        ],
+    ) {
+        Ok(output) if output.status.success() => GhRepoAutomationStatus::Ready,
+        Ok(output) => GhRepoAutomationStatus::RepoAccessUnavailable {
+            details: summarize_command_output(&output),
+        },
+        Err(source) => GhRepoAutomationStatus::RepoAccessUnavailable {
+            details: source.to_string(),
+        },
+    }
+}
+
+fn configure_ai_review_with_gh(
+    target_repo: &Path,
+    repo_slug: &str,
+    config: &AiReviewConfig,
+    secret_value: Option<&str>,
+) -> Result<AiReviewGhAutomationResult, String> {
+    run_gh_command_checked(
+        target_repo,
+        &[
+            "variable",
+            "set",
+            "AI_REVIEW_PROVIDER_KIND",
+            "--repo",
+            repo_slug,
+            "--body",
+            &config.provider_kind,
+        ],
+    )?;
+    run_gh_command_checked(
+        target_repo,
+        &[
+            "variable",
+            "set",
+            "AI_REVIEW_MODEL_ID",
+            "--repo",
+            repo_slug,
+            "--body",
+            &config.model_id,
+        ],
+    )?;
+    run_gh_command_checked(
+        target_repo,
+        &[
+            "variable",
+            "set",
+            "AI_REVIEW_BASE_URL",
+            "--repo",
+            repo_slug,
+            "--body",
+            config.base_url.as_deref().unwrap_or(""),
+        ],
+    )?;
+    run_gh_command_checked(
+        target_repo,
+        &[
+            "variable",
+            "set",
+            "AI_REVIEW_STYLE",
+            "--repo",
+            repo_slug,
+            "--body",
+            &config.style,
+        ],
+    )?;
+    run_gh_command_checked(
+        target_repo,
+        &[
+            "variable",
+            "set",
+            "AI_REVIEW_REQUIRE_EVIDENCE",
+            "--repo",
+            repo_slug,
+            "--body",
+            config.require_evidence_value(),
+        ],
+    )?;
+    run_gh_command_checked(
+        target_repo,
+        &[
+            "label",
+            "create",
+            AI_REVIEW_LABEL_NAME,
+            "--repo",
+            repo_slug,
+            "--description",
+            AI_REVIEW_LABEL_DESCRIPTION,
+            "--color",
+            "d73a4a",
+            "--force",
+        ],
+    )?;
+
+    let secret_updated = if let Some(secret_value) = secret_value {
+        run_gh_secret_set(
+            target_repo,
+            repo_slug,
+            DEFAULT_AI_REVIEW_SECRET_NAME,
+            secret_value,
+        )?;
+        true
+    } else {
+        false
+    };
+
+    Ok(AiReviewGhAutomationResult { secret_updated })
+}
+
+fn print_ai_review_cli_fallback<R, W>(
+    ui: &mut PromptUi<R, W>,
+    repo_slug: &str,
     config: &AiReviewConfig,
 ) -> Result<(), InitCommandError>
 where
     R: BufRead,
     W: Write,
 {
-    ui.blank_line()?;
-    ui.line("OpenHands PR review scaffolding was added.")?;
-    ui.line("Next steps for GitHub Actions setup:")?;
-    ui.line("- secret: AI_REVIEW_API_KEY=<your-ai-review-provider-key>")?;
     ui.line(format!(
-        "- variable: AI_REVIEW_PROVIDER_KIND={}",
-        config.provider_kind
-    ))?;
-    ui.line(format!(
-        "- variable: AI_REVIEW_MODEL_ID={}",
-        config.model_id
-    ))?;
-    if let Some(base_url) = config.base_url.as_ref() {
-        ui.line(format!("- variable: AI_REVIEW_BASE_URL={base_url}"))?;
-    }
-    ui.line(format!("- variable: AI_REVIEW_STYLE={}", config.style))?;
-    ui.line(format!(
-        "- variable: AI_REVIEW_REQUIRE_EVIDENCE={}",
-        config.require_evidence_value()
-    ))?;
-    ui.line(format!(
-        "- label: `{AI_REVIEW_LABEL_NAME}` for manual reruns"
-    ))?;
-    ui.line("GitHub CLI examples:")?;
-    ui.line(format!(
-        "gh variable set AI_REVIEW_PROVIDER_KIND --body {}",
+        "gh variable set AI_REVIEW_PROVIDER_KIND --repo {repo_slug} --body {}",
         shell_single_quote(&config.provider_kind)
     ))?;
     ui.line(format!(
-        "gh variable set AI_REVIEW_MODEL_ID --body {}",
+        "gh variable set AI_REVIEW_MODEL_ID --repo {repo_slug} --body {}",
         shell_single_quote(&config.model_id)
     ))?;
-    if let Some(base_url) = config.base_url.as_ref() {
-        ui.line(format!(
-            "gh variable set AI_REVIEW_BASE_URL --body {}",
-            shell_single_quote(base_url)
-        ))?;
-    }
     ui.line(format!(
-        "gh variable set AI_REVIEW_STYLE --body {}",
+        "gh variable set AI_REVIEW_BASE_URL --repo {repo_slug} --body {}",
+        shell_single_quote(config.base_url.as_deref().unwrap_or(""))
+    ))?;
+    ui.line(format!(
+        "gh variable set AI_REVIEW_STYLE --repo {repo_slug} --body {}",
         shell_single_quote(&config.style)
     ))?;
     ui.line(format!(
-        "gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {}",
+        "gh variable set AI_REVIEW_REQUIRE_EVIDENCE --repo {repo_slug} --body {}",
         shell_single_quote(config.require_evidence_value())
     ))?;
-    ui.line("gh secret set AI_REVIEW_API_KEY")?;
     ui.line(format!(
-        "gh label create {} --description 'Trigger AI PR review' --color 'd73a4a' || true",
-        shell_single_quote(AI_REVIEW_LABEL_NAME)
+        "gh secret set {DEFAULT_AI_REVIEW_SECRET_NAME} --repo {repo_slug}"
     ))?;
-    ui.line(format!("Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"))?;
-    ui.line(format!("Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"))?;
-    ui.line("See `docs/ai-pr-review-human-setup.md` for the full setup checklist.")?;
+    ui.line(format!(
+        "gh label create {AI_REVIEW_LABEL_NAME} --repo {repo_slug} --description {} --color d73a4a --force",
+        shell_single_quote(AI_REVIEW_LABEL_DESCRIPTION)
+    ))?;
+    ui.line(
+        "You can reuse the same value as `LLM_API_KEY` for `AI_REVIEW_API_KEY` if that is the provider key you want the review workflow to use.",
+    )?;
+    ui.line("See `docs/ai-pr-review-human-setup.md` for the full checklist.")?;
     Ok(())
+}
+
+fn run_gh_command(target_repo: &Path, args: &[&str]) -> io::Result<Output> {
+    std::process::Command::new("gh")
+        .args(args)
+        .current_dir(target_repo)
+        .output()
+}
+
+fn run_gh_command_checked(target_repo: &Path, args: &[&str]) -> Result<(), String> {
+    let output = run_gh_command(target_repo, args)
+        .map_err(|source| format!("failed to run `gh {}`: {source}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`gh {}` failed: {}",
+            args.join(" "),
+            summarize_command_output(&output)
+        ))
+    }
+}
+
+fn run_gh_secret_set(
+    target_repo: &Path,
+    repo_slug: &str,
+    secret_name: &str,
+    secret_value: &str,
+) -> Result<(), String> {
+    let mut child = std::process::Command::new("gh")
+        .args(["secret", "set", secret_name, "--repo", repo_slug])
+        .current_dir(target_repo)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|source| format!("failed to run `gh secret set {secret_name}`: {source}"))?;
+
+    let Some(mut stdin) = child.stdin.take() else {
+        return Err(format!(
+            "failed to provide a value for `gh secret set {secret_name}`"
+        ));
+    };
+    stdin
+        .write_all(secret_value.as_bytes())
+        .map_err(|source| format!("failed to write `{secret_name}` to `gh`: {source}"))?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|source| format!("failed to wait for `gh secret set {secret_name}`: {source}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`gh secret set {secret_name}` failed: {}",
+            summarize_command_output(&output)
+        ))
+    }
+}
+
+fn summarize_command_output(output: &Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return summarize_line(&stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !stdout.is_empty() {
+        return summarize_line(&stdout);
+    }
+
+    "command returned no output".to_string()
+}
+
+fn summarize_line(value: &str) -> String {
+    const MAX_LEN: usize = 200;
+    let first_line = value.lines().next().unwrap_or(value).trim();
+    if first_line.len() > MAX_LEN {
+        format!("{}...", &first_line[..MAX_LEN])
+    } else {
+        first_line.to_string()
+    }
 }
 
 fn print_group<R, W>(
@@ -1360,9 +1722,9 @@ mod tests {
         DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS,
         GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi, agents_already_initialized,
         ai_pr_review_setup_doc_contents, comparable_text, custom_codereview_guide_contents,
-        customize_workflow, git_remote_url, merge_agents, prompt_ai_review_config,
-        prompt_for_missing_llm_env, prompt_yes_no, select_remote_name, shell_single_quote,
-        template_fetch_timeout_from_env,
+        customize_workflow, git_remote_url, github_repo_slug_from_remote, merge_agents,
+        normalize_github_repo_slug, prompt_ai_review_config, prompt_for_missing_llm_env,
+        prompt_yes_no, select_remote_name, shell_single_quote, template_fetch_timeout_from_env,
     };
 
     struct StubEnvironment {
@@ -1470,6 +1832,35 @@ hooks:
         assert_eq!(git_remote_url(&GitRemoteDetection::None), None);
         assert_eq!(
             git_remote_url(&GitRemoteDetection::Ambiguous(vec!["fork".to_string()])),
+            None
+        );
+    }
+
+    #[test]
+    fn github_repo_slug_parser_supports_https_and_ssh_remotes() {
+        assert_eq!(
+            github_repo_slug_from_remote("https://github.com/kumanday/OpenSymphony.git"),
+            Some("kumanday/OpenSymphony".to_string())
+        );
+        assert_eq!(
+            github_repo_slug_from_remote("git@github.com:kumanday/OpenSymphony.git"),
+            Some("kumanday/OpenSymphony".to_string())
+        );
+        assert_eq!(
+            github_repo_slug_from_remote("https://gitlab.com/kumanday/OpenSymphony.git"),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_github_repo_slug_rejects_invalid_paths() {
+        assert_eq!(
+            normalize_github_repo_slug("/kumanday/OpenSymphony.git"),
+            Some("kumanday/OpenSymphony".to_string())
+        );
+        assert_eq!(normalize_github_repo_slug("/kumanday"), None);
+        assert_eq!(
+            normalize_github_repo_slug("/kumanday/OpenSymphony/extra"),
             None
         );
     }

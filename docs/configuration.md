@@ -21,6 +21,8 @@ opensymphony init
 - fills the `WORKFLOW.md` clone hook from `git remote` when possible
 - offers to fill the Linear project slug/key in `WORKFLOW.md`
 - can optionally scaffold OpenHands AI PR review
+- can configure the GitHub Actions variables, label, and optional review secret
+  automatically when `gh` is installed and can access the repository
 
 The template repository is still the upstream source of those starter assets,
 but it is an implementation detail of `opensymphony init`, not a required
@@ -36,7 +38,6 @@ Core bootstrap payload:
 - `WORKFLOW.md`
 - `AGENTS.md`
 - `config.yaml`
-- `.gitignore`
 - `.agents/skills/` copied recursively, including skill-local `references/`, `scripts/`, and similar helper files
 - `.agents/skills/linear/references/`
 - `.github/CODEOWNERS`
@@ -51,12 +52,12 @@ Optional AI PR review scaffolding:
 
 ## Labels
 
-If you want the template's GitHub label conventions, create them once per
-repository:
+If you enable AI PR review and `gh` is available with repository access,
+`opensymphony init` can create the `review-this` label for you. If automation is
+skipped, create it once per repository:
 
 ```bash
-gh label create "symphony" --description "PR created by OpenSymphony" --color "1f77b4" || true
-gh label create "review-this" --description "Trigger AI PR review" --color "d73a4a" || true
+gh label create "review-this" --description "Trigger AI PR review" --color "d73a4a" --force
 ```
 
 ## Review The Generated Workflow
@@ -143,5 +144,14 @@ config that `opensymphony run` looks for in a target repo.
 
 ## OpenHands PR Review
 
-If you opt into OpenHands PR review during `init`, finish the GitHub Actions
-setup described in [ai-pr-review-human-setup.md](ai-pr-review-human-setup.md).
+If you opt into OpenHands PR review during `init`, the CLI will try to
+configure the GitHub Actions variables, label, and optional review secret for
+you when:
+
+- `gh` is installed
+- `gh` can access the target repository
+- you approve the automation prompt
+
+If any of those are missing, `init` falls back to a short checklist plus the
+manual `gh` commands. The full verification and branch-protection guidance
+lives in [ai-pr-review-human-setup.md](ai-pr-review-human-setup.md).
