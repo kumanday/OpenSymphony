@@ -26,9 +26,9 @@ use uuid::Uuid;
 
 use crate::{
     AgentConfig, CondenserConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
-    ConversationStateMirror, EventEnvelope, KnownEvent, LlmConfig, McpConfig, McpStdioServerConfig,
-    OpenHandsClient, OpenHandsError, RuntimeEventStream, RuntimeStreamConfig, SendMessageRequest,
-    TerminalExecutionStatus, ToolConfig, WorkspaceConfig,
+    ConversationStateMirror, EventEnvelope, KnownEvent, LlmConfig, OpenHandsClient, OpenHandsError,
+    RuntimeEventStream, RuntimeStreamConfig, SendMessageRequest, TerminalExecutionStatus,
+    ToolConfig, WorkspaceConfig,
 };
 
 pub const RUNTIME_CONTRACT_VERSION: &str = "openhands-sdk-agent-server-v1";
@@ -174,8 +174,6 @@ pub struct ConversationLaunchProfile {
     pub agent_include_default_tools: Option<Vec<String>>,
     pub max_iterations: u32,
     pub stuck_detection: bool,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mcp_stdio_servers: Vec<McpStdioServerConfig>,
     /// Fingerprint of the API key used when creating this conversation.
     /// Used to detect when the API key has changed and the conversation needs reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -255,14 +253,6 @@ impl ConversationLaunchProfile {
             agent_include_default_tools: conversation.agent.include_default_tools.clone(),
             max_iterations,
             stuck_detection: conversation.stuck_detection,
-            mcp_stdio_servers: workflow
-                .extensions
-                .openhands
-                .mcp
-                .stdio_servers
-                .iter()
-                .map(launch_profile_stdio_server)
-                .collect(),
             llm_api_key_fingerprint: None, // Computed when manifest is created
         })
     }
@@ -319,23 +309,7 @@ impl ConversationLaunchProfile {
                 tools: self.agent_tools.clone(),
                 include_default_tools: self.agent_include_default_tools.clone(),
             },
-            mcp_config: McpConfig::from_stdio_servers(self.mcp_stdio_servers.clone()),
         })
-    }
-}
-
-fn launch_profile_stdio_server(
-    server: &opensymphony_workflow::OpenHandsStdioServerConfig,
-) -> McpStdioServerConfig {
-    let (command, args) = server
-        .command
-        .split_first()
-        .expect("workflow stdio server commands should be validated during resolution");
-    McpStdioServerConfig {
-        name: server.name.clone(),
-        command: command.clone(),
-        args: args.to_vec(),
-        env: Default::default(),
     }
 }
 

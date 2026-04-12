@@ -8,10 +8,13 @@ use std::{
 
 use clap::Args;
 use reqwest::{Client, StatusCode, Url};
+use serde::Deserialize;
 use thiserror::Error;
 
 const DEFAULT_TEMPLATE_BASE_URL: &str =
     "https://raw.githubusercontent.com/kumanday/OpenSymphony-template/refs/heads/main/";
+const DEFAULT_TEMPLATE_TREE_URL: &str =
+    "https://api.github.com/repos/kumanday/OpenSymphony-template/git/trees/main?recursive=1";
 const DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_LLM_MODEL: &str = "openai/accounts/fireworks/models/glm-5p1";
 const DEFAULT_LLM_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
@@ -20,12 +23,12 @@ const DEFAULT_AI_REVIEW_MODEL_ID: &str = "accounts/fireworks/models/glm-5p1";
 const DEFAULT_AI_REVIEW_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 const DEFAULT_AI_REVIEW_STYLE: &str = "standard";
 const DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE: &str = "true";
+const DEFAULT_AI_REVIEW_SECRET_NAME: &str = "AI_REVIEW_API_KEY";
 const OPENHANDS_PR_REVIEW_PLUGIN_URL: &str =
     "https://github.com/OpenHands/extensions/tree/main/plugins/pr-review";
 const OPENHANDS_PR_REVIEW_DOCS_URL: &str =
     "https://docs.openhands.dev/sdk/guides/github-workflows/pr-review";
-const OPENHANDS_EXTENSIONS_PINNED_SHA: &str =
-    "9e5bb49dbe61bdb364c89c10c7307c38139e9532";
+const OPENHANDS_EXTENSIONS_PINNED_SHA: &str = "9e5bb49dbe61bdb364c89c10c7307c38139e9532";
 const AI_REVIEW_LABEL_NAME: &str = "review-this";
 const PRESERVED_AGENTS_MARKER: &str = "## Preserved Existing AGENTS.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
@@ -48,24 +51,40 @@ enum InitCommandError {
     },
     #[error("failed to fetch template asset {path} from {url}: {source}")]
     FetchTemplate {
-        path: &'static str,
+        path: String,
         url: String,
         #[source]
         source: reqwest::Error,
     },
     #[error("failed to fetch template asset {path} from {url}: HTTP {status}")]
     FetchTemplateStatus {
-        path: &'static str,
+        path: String,
         url: String,
         status: StatusCode,
     },
     #[error("template asset {path} from {url} was not valid UTF-8: {source}")]
     DecodeTemplate {
-        path: &'static str,
+        path: String,
         url: String,
         #[source]
         source: reqwest::Error,
     },
+    #[error("failed to fetch template tree from {url}: {source}")]
+    FetchTemplateTree {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("failed to fetch template tree from {url}: HTTP {status}")]
+    FetchTemplateTreeStatus { url: String, status: StatusCode },
+    #[error("template tree from {url} was not valid JSON: {source}")]
+    DecodeTemplateTree {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("template directory {path} had no files in tree {url}")]
+    MissingTemplateDirectory { path: &'static str, url: String },
     #[error("failed to read {path}: {source}")]
     ReadFile {
         path: PathBuf,
@@ -98,6 +117,12 @@ struct TemplateAsset {
     kind: AssetKind,
 }
 
+#[derive(Clone, Copy)]
+struct TemplateDirectory {
+    path: &'static str,
+    kind: AssetKind,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AssetKind {
     Standard,
@@ -107,8 +132,52 @@ enum AssetKind {
 
 #[derive(Clone)]
 struct FetchedAsset {
-    definition: TemplateAsset,
+    path: String,
+    kind: AssetKind,
     contents: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateTreeResponse {
+    tree: Vec<TemplateTreeEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TemplateTreeEntry {
+    path: String,
+    #[serde(rename = "type")]
+    entry_type: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AiReviewConfig {
+    provider_kind: String,
+    model_id: String,
+    base_url: Option<String>,
+    style: String,
+    require_evidence: bool,
+}
+
+impl Default for AiReviewConfig {
+    fn default() -> Self {
+        Self {
+            provider_kind: DEFAULT_AI_REVIEW_PROVIDER_KIND.to_string(),
+            model_id: DEFAULT_AI_REVIEW_MODEL_ID.to_string(),
+            base_url: Some(DEFAULT_AI_REVIEW_BASE_URL.to_string()),
+            style: DEFAULT_AI_REVIEW_STYLE.to_string(),
+            require_evidence: DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE == "true",
+        }
+    }
+}
+
+impl AiReviewConfig {
+    fn require_evidence_value(&self) -> &'static str {
+        if self.require_evidence {
+            "true"
+        } else {
+            "false"
+        }
+    }
 }
 
 enum PlannedAction {
@@ -217,34 +286,6 @@ const CORE_TEMPLATE_ASSETS: &[TemplateAsset] = &[
         kind: AssetKind::Standard,
     },
     TemplateAsset {
-        path: ".agents/skills/commit/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/convert-tasks-to-linear/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/create-implementation-plan/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/land/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/linear/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/pull/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
-        path: ".agents/skills/push/SKILL.md",
-        kind: AssetKind::Standard,
-    },
-    TemplateAsset {
         path: ".github/CODEOWNERS",
         kind: AssetKind::Standard,
     },
@@ -257,6 +298,11 @@ const CORE_TEMPLATE_ASSETS: &[TemplateAsset] = &[
         kind: AssetKind::Standard,
     },
 ];
+
+const CORE_TEMPLATE_DIRECTORIES: &[TemplateDirectory] = &[TemplateDirectory {
+    path: ".agents/skills",
+    kind: AssetKind::Standard,
+}];
 
 const AI_REVIEW_TEMPLATE_ASSETS: &[TemplateAsset] = &[TemplateAsset {
     path: ".github/workflows/ai-pr-review.yml",
@@ -310,6 +356,11 @@ where
         "Also scaffold automated OpenHands AI PR review? [y/N]: ",
         false,
     )?;
+    let ai_review_config = if enable_ai_pr_review {
+        Some(prompt_ai_review_config(ui)?)
+    } else {
+        None
+    };
     let client = Client::builder()
         .user_agent(concat!("opensymphony-cli/", env!("CARGO_PKG_VERSION")))
         .timeout(template_fetch_timeout())
@@ -317,16 +368,18 @@ where
         .map_err(InitCommandError::HttpClient)?;
     ui.line("Fetching the current template payload from GitHub...")?;
 
-    let mut fetched_assets = fetch_template_assets(&client, CORE_TEMPLATE_ASSETS).await?;
-    if enable_ai_pr_review {
-        fetched_assets.extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS).await?);
-        fetched_assets.extend(generated_ai_review_assets());
+    let mut fetched_assets =
+        fetch_template_assets(&client, CORE_TEMPLATE_ASSETS, CORE_TEMPLATE_DIRECTORIES).await?;
+    if let Some(config) = ai_review_config.as_ref() {
+        fetched_assets
+            .extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS, &[]).await?);
+        fetched_assets.extend(generated_ai_review_assets(config));
     }
     let mut planned_assets = plan_assets(&target_repo, fetched_assets)?;
     resolve_conflicts(&mut planned_assets, ui)?;
 
     let workflow_will_change = planned_assets.iter().any(|planned| {
-        planned.asset.definition.kind == AssetKind::Workflow
+        planned.asset.kind == AssetKind::Workflow
             && matches!(
                 planned.action,
                 PlannedAction::Create | PlannedAction::Overwrite | PlannedAction::CustomizeWorkflow
@@ -371,8 +424,8 @@ where
     let mut wrote_config = false;
 
     for planned in planned_assets {
-        let destination = target_repo.join(planned.asset.definition.path);
-        let relative_path = planned.asset.definition.path.to_owned();
+        let destination = target_repo.join(&planned.asset.path);
+        let relative_path = planned.asset.path.clone();
 
         let final_result = apply_asset(
             &destination,
@@ -422,8 +475,8 @@ where
         )?;
     }
 
-    if enable_ai_pr_review {
-        print_ai_pr_review_guidance(ui)?;
+    if let Some(config) = ai_review_config.as_ref() {
+        print_ai_pr_review_guidance(ui, config)?;
     }
 
     prompt_for_missing_llm_env(env_lookup, ui)?;
@@ -436,6 +489,7 @@ where
 async fn fetch_template_assets(
     client: &Client,
     assets: &[TemplateAsset],
+    directories: &[TemplateDirectory],
 ) -> Result<Vec<FetchedAsset>, InitCommandError> {
     let base_url = env::var("OPENSYMPHONY_TEMPLATE_BASE_URL")
         .unwrap_or_else(|_| DEFAULT_TEMPLATE_BASE_URL.to_string());
@@ -444,59 +498,155 @@ async fn fetch_template_assets(
             value: base_url.clone(),
             source,
         })?;
+    let tree_url = match env::var("OPENSYMPHONY_TEMPLATE_TREE_URL") {
+        Ok(tree_url) => {
+            Url::parse(&tree_url).map_err(|source| InitCommandError::InvalidTemplateBaseUrl {
+                value: tree_url,
+                source,
+            })?
+        }
+        Err(_) if env::var_os("OPENSYMPHONY_TEMPLATE_BASE_URL").is_some() => base_url
+            .join("__tree.json")
+            .map_err(|source| InitCommandError::InvalidTemplateBaseUrl {
+                value: format!("{base_url}__tree.json"),
+                source,
+            })?,
+        Err(_) => {
+            Url::parse(DEFAULT_TEMPLATE_TREE_URL).expect("default template tree URL is valid")
+        }
+    };
 
-    let mut fetched = Vec::with_capacity(assets.len());
+    let tree_paths = if directories.is_empty() {
+        Vec::new()
+    } else {
+        fetch_template_tree(client, &tree_url).await?
+    };
+
+    let mut fetched = Vec::new();
     for definition in assets {
-        let url = base_url.join(definition.path).map_err(|source| {
-            InitCommandError::InvalidTemplateBaseUrl {
-                value: format!("{base_url}{}", definition.path),
-                source,
-            }
-        })?;
-        let response = client.get(url.clone()).send().await.map_err(|source| {
-            InitCommandError::FetchTemplate {
-                path: definition.path,
-                url: url.to_string(),
-                source,
-            }
-        })?;
+        fetched
+            .push(fetch_template_file(client, &base_url, definition.path, definition.kind).await?);
+    }
 
-        let status = response.status();
-        if !status.is_success() {
-            return Err(InitCommandError::FetchTemplateStatus {
-                path: definition.path,
-                url: url.to_string(),
-                status,
+    for directory in directories {
+        let prefix = format!("{}/", directory.path.trim_end_matches('/'));
+        let mut matched_paths = tree_paths
+            .iter()
+            .filter(|path| path.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        matched_paths.sort();
+
+        if matched_paths.is_empty() {
+            return Err(InitCommandError::MissingTemplateDirectory {
+                path: directory.path,
+                url: tree_url.to_string(),
             });
         }
 
-        let contents =
-            response
-                .text()
-                .await
-                .map_err(|source| InitCommandError::DecodeTemplate {
-                    path: definition.path,
-                    url: url.to_string(),
-                    source,
-                })?;
-
-        fetched.push(FetchedAsset {
-            definition: *definition,
-            contents,
-        });
+        for path in matched_paths {
+            fetched.push(fetch_template_file(client, &base_url, &path, directory.kind).await?);
+        }
     }
 
     Ok(fetched)
 }
 
-fn generated_ai_review_assets() -> Vec<FetchedAsset> {
+async fn fetch_template_tree(
+    client: &Client,
+    tree_url: &Url,
+) -> Result<Vec<String>, InitCommandError> {
+    let response = client
+        .get(tree_url.clone())
+        .send()
+        .await
+        .map_err(|source| InitCommandError::FetchTemplateTree {
+            url: tree_url.to_string(),
+            source,
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(InitCommandError::FetchTemplateTreeStatus {
+            url: tree_url.to_string(),
+            status,
+        });
+    }
+
+    let tree = response
+        .json::<TemplateTreeResponse>()
+        .await
+        .map_err(|source| InitCommandError::DecodeTemplateTree {
+            url: tree_url.to_string(),
+            source,
+        })?;
+
+    Ok(tree
+        .tree
+        .into_iter()
+        .filter(|entry| entry.entry_type == "blob")
+        .map(|entry| entry.path)
+        .collect())
+}
+
+async fn fetch_template_file(
+    client: &Client,
+    base_url: &Url,
+    path: &str,
+    kind: AssetKind,
+) -> Result<FetchedAsset, InitCommandError> {
+    let url = base_url
+        .join(path)
+        .map_err(|source| InitCommandError::InvalidTemplateBaseUrl {
+            value: format!("{base_url}{path}"),
+            source,
+        })?;
+    let response =
+        client
+            .get(url.clone())
+            .send()
+            .await
+            .map_err(|source| InitCommandError::FetchTemplate {
+                path: path.to_string(),
+                url: url.to_string(),
+                source,
+            })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(InitCommandError::FetchTemplateStatus {
+            path: path.to_string(),
+            url: url.to_string(),
+            status,
+        });
+    }
+
+    let contents = response
+        .text()
+        .await
+        .map_err(|source| InitCommandError::DecodeTemplate {
+            path: path.to_string(),
+            url: url.to_string(),
+            source,
+        })?;
+
+    Ok(FetchedAsset {
+        path: path.to_string(),
+        kind,
+        contents,
+    })
+}
+
+fn generated_ai_review_assets(config: &AiReviewConfig) -> Vec<FetchedAsset> {
     vec![
         FetchedAsset {
-            definition: AI_REVIEW_SETUP_DOC_ASSET,
-            contents: ai_pr_review_setup_doc_contents(),
+            path: AI_REVIEW_SETUP_DOC_ASSET.path.to_string(),
+            kind: AI_REVIEW_SETUP_DOC_ASSET.kind,
+            contents: ai_pr_review_setup_doc_contents(config),
         },
         FetchedAsset {
-            definition: AI_REVIEW_CUSTOM_GUIDE_ASSET,
+            path: AI_REVIEW_CUSTOM_GUIDE_ASSET.path.to_string(),
+            kind: AI_REVIEW_CUSTOM_GUIDE_ASSET.kind,
             contents: custom_codereview_guide_contents(),
         },
     ]
@@ -509,10 +659,10 @@ fn plan_assets(
     let mut planned = Vec::with_capacity(assets.len());
 
     for asset in assets {
-        let destination = target_repo.join(asset.definition.path);
+        let destination = target_repo.join(&asset.path);
         match fs::read_to_string(&destination) {
             Ok(existing) => {
-                let action = match asset.definition.kind {
+                let action = match asset.kind {
                     AssetKind::Agents => {
                         if comparable_text(&existing) == comparable_text(&asset.contents)
                             || agents_already_initialized(&existing, &asset.contents)
@@ -576,7 +726,7 @@ where
             continue;
         }
 
-        let relative_path = Path::new(planned.asset.definition.path);
+        let relative_path = Path::new(&planned.asset.path);
         let display_path = relative_path.display();
 
         loop {
@@ -665,7 +815,7 @@ fn build_final_contents(
     linear_project_slug: Option<&str>,
 ) -> Option<String> {
     match action {
-        PlannedAction::Create | PlannedAction::Overwrite => Some(match asset.definition.kind {
+        PlannedAction::Create | PlannedAction::Overwrite => Some(match asset.kind {
             AssetKind::Workflow => {
                 customize_workflow(&asset.contents, git_remote_url, linear_project_slug)
             }
@@ -763,6 +913,85 @@ where
             }
         }
     }
+}
+
+fn prompt_with_default<R, W>(
+    ui: &mut PromptUi<R, W>,
+    prompt: &str,
+    default: &str,
+) -> Result<String, InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    let response = ui.prompt(prompt)?;
+    let trimmed = response.trim();
+    if trimmed.is_empty() {
+        Ok(default.to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn prompt_ai_review_config<R, W>(
+    ui: &mut PromptUi<R, W>,
+) -> Result<AiReviewConfig, InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    ui.blank_line()?;
+    ui.line("Configure the default AI PR review provider for this repository.")?;
+    ui.line(
+        "Fireworks is the starter example, but these values can target any supported provider.",
+    )?;
+
+    let provider_kind = loop {
+        let response = prompt_with_default(
+            ui,
+            "AI review provider kind [openai-compatible/litellm-native] (default openai-compatible): ",
+            DEFAULT_AI_REVIEW_PROVIDER_KIND,
+        )?;
+        match response.as_str() {
+            "openai-compatible" | "litellm-native" => break response,
+            _ => ui.line("Please enter `openai-compatible` or `litellm-native`.")?,
+        }
+    };
+
+    let model_id = prompt_with_default(
+        ui,
+        &format!("AI review model id (default {DEFAULT_AI_REVIEW_MODEL_ID}): "),
+        DEFAULT_AI_REVIEW_MODEL_ID,
+    )?;
+
+    let base_url = if provider_kind == "openai-compatible" {
+        Some(prompt_with_default(
+            ui,
+            &format!("AI review base URL (default {DEFAULT_AI_REVIEW_BASE_URL}): "),
+            DEFAULT_AI_REVIEW_BASE_URL,
+        )?)
+    } else {
+        None
+    };
+
+    let style = prompt_with_default(
+        ui,
+        &format!("AI review style (default {DEFAULT_AI_REVIEW_STYLE}): "),
+        DEFAULT_AI_REVIEW_STYLE,
+    )?;
+    let require_evidence = prompt_yes_no(
+        ui,
+        "Require evidence in AI PR review findings? [Y/n]: ",
+        true,
+    )?;
+
+    Ok(AiReviewConfig {
+        provider_kind,
+        model_id,
+        base_url,
+        style,
+        require_evidence,
+    })
 }
 
 fn template_fetch_timeout() -> Duration {
@@ -900,7 +1129,23 @@ fn yaml_double_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn ai_pr_review_setup_doc_contents() -> String {
+fn ai_pr_review_setup_doc_contents(config: &AiReviewConfig) -> String {
+    let base_url_row = config.base_url.as_ref().map_or(String::new(), |base_url| {
+        format!("| `AI_REVIEW_BASE_URL` | `{base_url}` |\n")
+    });
+    let base_url_command = config.base_url.as_ref().map_or(String::new(), |base_url| {
+        format!(
+            "gh variable set AI_REVIEW_BASE_URL --body {}\n",
+            shell_single_quote(base_url)
+        )
+    });
+    let base_url_note = if config.base_url.is_some() {
+        String::new()
+    } else {
+        "- `AI_REVIEW_BASE_URL` is optional for the selected provider and may be left unset.\n"
+            .to_string()
+    };
+
     format!(
         r#"# OpenHands PR Review Setup
 
@@ -922,7 +1167,10 @@ Add this repository secret under **Settings -> Secrets and variables -> Actions*
 
 | Name | Value |
 |------|-------|
-| `FIREWORKS_API_KEY` | Your Fireworks API key |
+| `{secret_name}` | Your AI review provider API key |
+
+The secret name is provider-agnostic. Fireworks is only the default example
+configuration for new repos; any compatible provider/model is fine.
 
 ## GitHub Actions Variables
 
@@ -932,8 +1180,7 @@ Add these repository variables under **Settings -> Secrets and variables -> Acti
 |------|-------|
 | `AI_REVIEW_PROVIDER_KIND` | `{provider_kind}` |
 | `AI_REVIEW_MODEL_ID` | `{model_id}` |
-| `AI_REVIEW_BASE_URL` | `{base_url}` |
-| `AI_REVIEW_STYLE` | `{style}` |
+{base_url_row}| `AI_REVIEW_STYLE` | `{style}` |
 | `AI_REVIEW_REQUIRE_EVIDENCE` | `{require_evidence}` |
 
 ## Label
@@ -949,31 +1196,34 @@ gh label create {quoted_label} --description 'Trigger AI PR review' --color 'd73
 ```bash
 gh variable set AI_REVIEW_PROVIDER_KIND --body {quoted_provider_kind}
 gh variable set AI_REVIEW_MODEL_ID --body {quoted_model_id}
-gh variable set AI_REVIEW_BASE_URL --body {quoted_base_url}
-gh variable set AI_REVIEW_STYLE --body {quoted_style}
+{base_url_command}gh variable set AI_REVIEW_STYLE --body {quoted_style}
 gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {quoted_require_evidence}
-gh secret set FIREWORKS_API_KEY
+gh secret set {secret_name}
 ```
 
 ## Notes
 
+- Fireworks is the default example only; swap in your preferred provider/model if needed.
+{base_url_note}- If your provider uses an OpenAI-compatible endpoint, `AI_REVIEW_BASE_URL` must be set.
 - If your organization restricts Actions, allow `OpenHands/extensions`.
 - The generated workflow should already pin the plugin to `{pinned_sha}` in both the `uses:` line and the `extensions-version:` input.
 - Do not make the AI review workflow a required status check.
 - Keep the workflow on GitHub-hosted runners unless you have separately reviewed the risk model for untrusted PR content.
 "#,
-        provider_kind = DEFAULT_AI_REVIEW_PROVIDER_KIND,
-        model_id = DEFAULT_AI_REVIEW_MODEL_ID,
-        base_url = DEFAULT_AI_REVIEW_BASE_URL,
-        style = DEFAULT_AI_REVIEW_STYLE,
-        require_evidence = DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE,
+        provider_kind = config.provider_kind,
+        model_id = config.model_id,
+        style = config.style,
+        require_evidence = config.require_evidence_value(),
         label = AI_REVIEW_LABEL_NAME,
+        base_url_row = base_url_row,
+        base_url_command = base_url_command,
+        base_url_note = base_url_note,
         quoted_label = shell_single_quote(AI_REVIEW_LABEL_NAME),
-        quoted_provider_kind = shell_single_quote(DEFAULT_AI_REVIEW_PROVIDER_KIND),
-        quoted_model_id = shell_single_quote(DEFAULT_AI_REVIEW_MODEL_ID),
-        quoted_base_url = shell_single_quote(DEFAULT_AI_REVIEW_BASE_URL),
-        quoted_style = shell_single_quote(DEFAULT_AI_REVIEW_STYLE),
-        quoted_require_evidence = shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE),
+        quoted_provider_kind = shell_single_quote(&config.provider_kind),
+        quoted_model_id = shell_single_quote(&config.model_id),
+        quoted_style = shell_single_quote(&config.style),
+        quoted_require_evidence = shell_single_quote(config.require_evidence_value()),
+        secret_name = DEFAULT_AI_REVIEW_SECRET_NAME,
         plugin_url = OPENHANDS_PR_REVIEW_PLUGIN_URL,
         docs_url = OPENHANDS_PR_REVIEW_DOCS_URL,
         pinned_sha = OPENHANDS_EXTENSIONS_PINNED_SHA,
@@ -1014,7 +1264,10 @@ OpenHands PR review will load this file when it is present. Replace this starter
     .to_string()
 }
 
-fn print_ai_pr_review_guidance<R, W>(ui: &mut PromptUi<R, W>) -> Result<(), InitCommandError>
+fn print_ai_pr_review_guidance<R, W>(
+    ui: &mut PromptUi<R, W>,
+    config: &AiReviewConfig,
+) -> Result<(), InitCommandError>
 where
     R: BufRead,
     W: Write,
@@ -1022,21 +1275,22 @@ where
     ui.blank_line()?;
     ui.line("OpenHands PR review scaffolding was added.")?;
     ui.line("Next steps for GitHub Actions setup:")?;
-    ui.line("- secret: FIREWORKS_API_KEY=<your-fireworks-api-key>")?;
+    ui.line("- secret: AI_REVIEW_API_KEY=<your-ai-review-provider-key>")?;
     ui.line(format!(
-        "- variable: AI_REVIEW_PROVIDER_KIND={DEFAULT_AI_REVIEW_PROVIDER_KIND}"
+        "- variable: AI_REVIEW_PROVIDER_KIND={}",
+        config.provider_kind
     ))?;
     ui.line(format!(
-        "- variable: AI_REVIEW_MODEL_ID={DEFAULT_AI_REVIEW_MODEL_ID}"
+        "- variable: AI_REVIEW_MODEL_ID={}",
+        config.model_id
     ))?;
+    if let Some(base_url) = config.base_url.as_ref() {
+        ui.line(format!("- variable: AI_REVIEW_BASE_URL={base_url}"))?;
+    }
+    ui.line(format!("- variable: AI_REVIEW_STYLE={}", config.style))?;
     ui.line(format!(
-        "- variable: AI_REVIEW_BASE_URL={DEFAULT_AI_REVIEW_BASE_URL}"
-    ))?;
-    ui.line(format!(
-        "- variable: AI_REVIEW_STYLE={DEFAULT_AI_REVIEW_STYLE}"
-    ))?;
-    ui.line(format!(
-        "- variable: AI_REVIEW_REQUIRE_EVIDENCE={DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE}"
+        "- variable: AI_REVIEW_REQUIRE_EVIDENCE={}",
+        config.require_evidence_value()
     ))?;
     ui.line(format!(
         "- label: `{AI_REVIEW_LABEL_NAME}` for manual reruns"
@@ -1044,35 +1298,33 @@ where
     ui.line("GitHub CLI examples:")?;
     ui.line(format!(
         "gh variable set AI_REVIEW_PROVIDER_KIND --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_PROVIDER_KIND)
+        shell_single_quote(&config.provider_kind)
     ))?;
     ui.line(format!(
         "gh variable set AI_REVIEW_MODEL_ID --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_MODEL_ID)
+        shell_single_quote(&config.model_id)
     ))?;
-    ui.line(format!(
-        "gh variable set AI_REVIEW_BASE_URL --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_BASE_URL)
-    ))?;
+    if let Some(base_url) = config.base_url.as_ref() {
+        ui.line(format!(
+            "gh variable set AI_REVIEW_BASE_URL --body {}",
+            shell_single_quote(base_url)
+        ))?;
+    }
     ui.line(format!(
         "gh variable set AI_REVIEW_STYLE --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_STYLE)
+        shell_single_quote(&config.style)
     ))?;
     ui.line(format!(
         "gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {}",
-        shell_single_quote(DEFAULT_AI_REVIEW_REQUIRE_EVIDENCE)
+        shell_single_quote(config.require_evidence_value())
     ))?;
-    ui.line("gh secret set FIREWORKS_API_KEY")?;
+    ui.line("gh secret set AI_REVIEW_API_KEY")?;
     ui.line(format!(
         "gh label create {} --description 'Trigger AI PR review' --color 'd73a4a' || true",
         shell_single_quote(AI_REVIEW_LABEL_NAME)
     ))?;
-    ui.line(format!(
-        "Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"
-    ))?;
-    ui.line(format!(
-        "Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"
-    ))?;
+    ui.line(format!("Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"))?;
+    ui.line(format!("Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"))?;
     ui.line("See `docs/ai-pr-review-human-setup.md` for the full setup checklist.")?;
     Ok(())
 }
@@ -1103,11 +1355,12 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        AI_REVIEW_LABEL_NAME, DEFAULT_AI_REVIEW_BASE_URL, DEFAULT_AI_REVIEW_MODEL_ID,
-        DEFAULT_AI_REVIEW_PROVIDER_KIND, DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL,
-        DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS, GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi,
-        agents_already_initialized, ai_pr_review_setup_doc_contents, comparable_text,
-        custom_codereview_guide_contents, customize_workflow, git_remote_url, merge_agents,
+        AI_REVIEW_LABEL_NAME, AiReviewConfig, DEFAULT_AI_REVIEW_BASE_URL,
+        DEFAULT_AI_REVIEW_MODEL_ID, DEFAULT_AI_REVIEW_PROVIDER_KIND, DEFAULT_AI_REVIEW_SECRET_NAME,
+        DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS,
+        GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi, agents_already_initialized,
+        ai_pr_review_setup_doc_contents, comparable_text, custom_codereview_guide_contents,
+        customize_workflow, git_remote_url, merge_agents, prompt_ai_review_config,
         prompt_for_missing_llm_env, prompt_yes_no, select_remote_name, shell_single_quote,
         template_fetch_timeout_from_env,
     };
@@ -1283,13 +1536,29 @@ hooks:
     }
 
     #[test]
-    fn ai_pr_review_setup_doc_uses_fireworks_p1_defaults() {
-        let doc = ai_pr_review_setup_doc_contents();
+    fn ai_pr_review_setup_doc_uses_generic_secret_and_fireworks_defaults() {
+        let doc = ai_pr_review_setup_doc_contents(&AiReviewConfig::default());
 
+        assert!(doc.contains(DEFAULT_AI_REVIEW_SECRET_NAME));
         assert!(doc.contains(DEFAULT_AI_REVIEW_PROVIDER_KIND));
         assert!(doc.contains(DEFAULT_AI_REVIEW_MODEL_ID));
         assert!(doc.contains(DEFAULT_AI_REVIEW_BASE_URL));
         assert!(doc.contains(AI_REVIEW_LABEL_NAME));
+    }
+
+    #[test]
+    fn prompt_ai_review_config_supports_non_fireworks_provider_defaults() {
+        let input = b"litellm-native\nopenai/gpt-5.4\ncustom\nn\n";
+        let mut output = Vec::new();
+        let mut ui = PromptUi::new(&input[..], &mut output);
+
+        let config = prompt_ai_review_config(&mut ui).expect("prompt should succeed");
+
+        assert_eq!(config.provider_kind, "litellm-native");
+        assert_eq!(config.model_id, "openai/gpt-5.4");
+        assert_eq!(config.base_url, None);
+        assert_eq!(config.style, "custom");
+        assert!(!config.require_evidence);
     }
 
     #[test]

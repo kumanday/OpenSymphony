@@ -19,11 +19,9 @@ use opensymphony_control::{
     IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
     WorkerOutcome,
 };
-use opensymphony_linear_mcp::run_stdio_server as run_linear_mcp_stdio_server;
 use opensymphony_openhands::{
-    ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, McpConfig,
-    McpStdioServerConfig, OpenHandsClient, SupervisedServerConfig, SupervisorConfig,
-    TransportConfig,
+    ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
+    SupervisedServerConfig, SupervisorConfig, TransportConfig,
 };
 use opensymphony_workflow::{
     Environment, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
@@ -40,7 +38,7 @@ use url::Url;
 #[command(name = "opensymphony")]
 #[command(about = "Operate the OpenSymphony local MVP on a trusted machine")]
 #[command(
-    long_about = "Operate the OpenSymphony local MVP on a trusted machine.\n\nUse this CLI to run the orchestrator, local control-plane demos, preflight checks, and the Linear MCP bridge.\n\nSafety: local OpenSymphony runs agent activity on the host with process-level isolation only. It is not sandboxed."
+    long_about = "Operate the OpenSymphony local MVP on a trusted machine.\n\nUse this CLI to run the orchestrator, local control-plane demos, preflight checks, and GraphQL-backed Linear workflows.\n\nSafety: local OpenSymphony runs agent activity on the host with process-level isolation only. It is not sandboxed."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -59,8 +57,6 @@ enum Command {
     Daemon(DaemonArgs),
     #[command(about = "Attach the FrankenTUI operator client to a control plane")]
     Tui(TuiArgs),
-    #[command(about = "Start the stdio Linear MCP server for agent-side writes")]
-    LinearMcp(LinearMcpArgs),
     #[command(about = "Run local preflight checks for trusted-machine deployment")]
     Doctor(DoctorArgs),
     #[command(about = "Smart rehydration: recreate conversations with history preservation")]
@@ -107,9 +103,6 @@ pub struct DoctorArgs {
     #[arg(long)]
     no_summary: bool,
 }
-
-#[derive(Debug, Args)]
-pub struct LinearMcpArgs {}
 
 #[derive(Debug, Args)]
 pub struct RehydrateArgs {
@@ -287,7 +280,6 @@ pub async fn run() -> ExitCode {
         Command::Doctor(args) => run_doctor(args).await,
         Command::Daemon(args) => run_daemon(args).await,
         Command::Tui(args) => run_tui(args).await,
-        Command::LinearMcp(args) => run_linear_mcp(args).await,
         Command::Rehydrate(args) => run_rehydrate(args).await,
     }
 }
@@ -379,18 +371,6 @@ async fn run_doctor(args: DoctorArgs) -> ExitCode {
         args.no_summary,
     )
     .await
-}
-
-async fn run_linear_mcp(args: LinearMcpArgs) -> ExitCode {
-    let _ = args;
-
-    match run_linear_mcp_stdio_server().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("failed to start Linear MCP server: {error}");
-            ExitCode::from(1)
-        }
-    }
 }
 
 async fn run_rehydrate(args: RehydrateArgs) -> ExitCode {
@@ -1538,28 +1518,6 @@ fn build_doctor_probe_request(
             u32::MAX
         )
     })?;
-    let mcp_config = McpConfig::from_stdio_servers(
-        runtime
-            .workflow
-            .extensions
-            .openhands
-            .mcp
-            .stdio_servers
-            .iter()
-            .map(|server| {
-                let (command, args) = server
-                    .command
-                    .split_first()
-                    .expect("workflow stdio server commands should be validated during resolution");
-                McpStdioServerConfig {
-                    name: server.name.clone(),
-                    command: command.clone(),
-                    args: args.to_vec(),
-                    env: Default::default(),
-                }
-            })
-            .collect(),
-    );
     Ok(ConversationCreateRequest::doctor_probe_with_config(
         probe_workspace.display().to_string(),
         persistence_dir.display().to_string(),
@@ -1571,7 +1529,6 @@ fn build_doctor_probe_request(
             model,
             api_key,
             base_url: llm_base_url,
-            mcp_config,
         },
     ))
 }
@@ -2208,7 +2165,6 @@ mod tests {
             Command::Run(_)
             | Command::Debug(_)
             | Command::Tui(_)
-            | Command::LinearMcp(_)
             | Command::Doctor(_)
             | Command::Rehydrate(_) => {
                 panic!("expected daemon command")
@@ -2290,38 +2246,6 @@ mod tests {
                 u64::from(u32::MAX) + 1,
                 u32::MAX
             )
-        );
-    }
-
-    #[test]
-    fn build_doctor_probe_request_forwards_mcp_stdio_servers() {
-        let mut runtime = sample_doctor_runtime();
-        runtime.workflow.extensions.openhands.mcp.stdio_servers =
-            vec![opensymphony_workflow::OpenHandsStdioServerConfig {
-                name: "linear".to_string(),
-                command: vec![
-                    "opensymphony".to_string(),
-                    "linear-mcp".to_string(),
-                    "--stdio".to_string(),
-                ],
-            }];
-
-        let probe_workspace = PathBuf::from("/tmp/doctor-probe-workspace");
-        let persistence_dir = probe_workspace.join("sessions");
-        let request =
-            build_doctor_probe_request(&runtime, &probe_workspace, &persistence_dir, None, None)
-                .expect("doctor probe request should build");
-
-        assert_eq!(
-            request.mcp_config,
-            Some(opensymphony_openhands::McpConfig {
-                stdio_servers: vec![opensymphony_openhands::McpStdioServerConfig {
-                    name: "linear".to_string(),
-                    command: "opensymphony".to_string(),
-                    args: vec!["linear-mcp".to_string(), "--stdio".to_string()],
-                    env: Default::default(),
-                }],
-            })
         );
     }
 

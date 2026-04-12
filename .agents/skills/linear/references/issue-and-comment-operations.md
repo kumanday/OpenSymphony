@@ -1,0 +1,21 @@
+# Issue And Comment Operations
+
+Use these checked-in query files for common issue-side work:
+
+- Read an issue by key: `queries/issue_by_key.graphql`
+- Read a full issue snapshot by id: `queries/issue_details.graphql`
+- Resolve valid workflow states for an issue: `queries/issue_team_states.graphql`
+- Create a comment: `queries/comment_create.graphql`
+- Update a comment: `queries/comment_update.graphql`
+- Move an issue to another state: `queries/issue_move_to_state.graphql`
+- Create a blocker/related relation: `queries/issue_relation_create.graphql`
+- Attach a GitHub PR with native semantics: `queries/attachment_link_github_pr.graphql`
+- Attach a generic URL: `queries/attachment_link_url.graphql`
+
+## Notes
+
+- Prefer `attachmentLinkGitHubPR` for real PR links.
+- Use `attachmentLinkURL` only when the target is not a GitHub PR or the
+  generic URL behavior is explicitly desired.
+- `issue_move_to_state.graphql` expects a `stateId`; resolve it first with
+  `issue_team_states.graphql`.

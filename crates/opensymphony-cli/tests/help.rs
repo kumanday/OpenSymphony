@@ -22,7 +22,7 @@ fn top_level_help_describes_commands_and_safety_posture() {
         "Serve the local control-plane demo stream",
         "Attach the FrankenTUI operator client to a control plane",
         "Run local preflight checks for trusted-machine deployment",
-        "Start the stdio Linear MCP server for agent-side writes",
+        "GraphQL-backed Linear workflows",
     ] {
         assert!(
             stdout.contains(snippet),

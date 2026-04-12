@@ -19,9 +19,13 @@ OpenSymphony automates software development workflows by:
 - **Hierarchy-aware scheduling**: Parent issues wait for sub-issues to complete
 - **WebSocket-first runtime**: Real-time agent updates with REST reconciliation
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
-- **Linear MCP integration**: Agent-side Linear writes (comments, state transitions)
+- **GraphQL-only Linear integration**: Agent-side Linear reads and writes through checked-in helper/query assets
 - **Conversation reuse policies**: Default per-issue reuse with optional fresh-per-run resets
 - **Local-first MVP**: Trusted-machine deployment with optional hosted mode
+
+OpenSymphony `1.0.0` is the compatibility boundary for the GraphQL-only Linear
+rewrite. See [Migration Guide](docs/migration-1.0.0.md) if you are upgrading an
+older setup.
 
 ## Quick Start
 
@@ -114,10 +118,10 @@ opensymphony --help
 └─────────────┘              └─────────────────┘
          ▲                           ▲
          │                           │
-    ┌────┴────┐                 ┌────┴────┐
-    │   MCP   │                 │  Agent  │
-    │  Tools  │                 │ Runtime │
-    └─────────┘                 └─────────┘
+    ┌────┴────────────┐        ┌────┴────┐
+    │ GraphQL Helper  │        │  Agent  │
+    │ + Query Assets  │        │ Runtime │
+    └─────────────────┘        └─────────┘
 ```
 
 ### Component Overview
@@ -125,13 +129,12 @@ opensymphony --help
 | Component | Responsibility |
 |-----------|----------------|
 | `opensymphony-orchestrator` | Poll loop, scheduling, retries, state machine |
-| `opensymphony-linear` | GraphQL client for Linear read operations |
-| `opensymphony-linear-mcp` | MCP server for agent-side Linear writes |
+| `opensymphony-linear` | GraphQL client for orchestrator-side Linear reads |
 | `opensymphony-openhands` | REST/WebSocket client for agent runtime |
 | `opensymphony-workspace` | Workspace lifecycle, hooks, containment |
 | `opensymphony-control` | Control plane API and snapshot derivation |
 | `opensymphony-tui` | FrankenTUI operator client |
-| `opensymphony-cli` | CLI entrypoints: init, run, debug, daemon (demo), tui, doctor, linear-mcp, rehydrate |
+| `opensymphony-cli` | CLI entrypoints: init, run, debug, daemon (demo), tui, doctor, rehydrate |
 
 ## Deployment Modes
 
@@ -248,6 +251,7 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 - [Deployment Modes](docs/deployment-modes.md) - Local vs hosted deployment
 - [Operations](docs/operations.md) - Doctor, rehydration, diagnostics, and local ops
 - [Testing](docs/testing-and-operations.md) - Test strategy and validation layers
+- [Migration Guide](docs/migration-1.0.0.md) - Breaking changes and upgrade steps for 1.0.0
 - [AGENTS.md](AGENTS.md) - Repository guidelines for coding agents
 - [Development Guide](docs/DEVELOPMENT.md) - Contributing and development details
 

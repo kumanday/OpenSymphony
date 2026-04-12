@@ -1,0 +1,13 @@
+mutation MoveIssueToState($id: String!, $stateId: String!) {
+  issueUpdate(id: $id, input: { stateId: $stateId }) {
+    success
+    issue {
+      id
+      identifier
+      state {
+        id
+        name
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+query IssueTeamStates($id: String!) {
+  issue(id: $id) {
+    id
+    team {
+      id
+      key
+      name
+      states {
+        nodes {
+          id
+          name
+          type
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+mutation CreateProjectStatus($input: ProjectStatusCreateInput!) {
+  projectStatusCreate(input: $input) {
+    success
+    status {
+      id
+      name
+      color
+      description
+      position
+      type
+      indefinite
+    }
+  }
+}

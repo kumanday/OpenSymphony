@@ -81,7 +81,8 @@ Important:
 - Replace `__PINNED_OPENHANDS_EXTENSIONS_SHA__` with the same full commit SHA from the canonical `OpenHands/extensions` repository in **both** places before finalizing.
 - Keep this workflow on **GitHub-hosted runners**.
 - Keep this as a **same-repo** workflow only.
-- The Fireworks example uses the repo secret `FIREWORKS_API_KEY` exactly as requested.
+- Fireworks remains the default example provider, but the repo secret name is
+  provider-agnostic: `AI_REVIEW_API_KEY`.
 
 ```yaml
 name: ai-pr-review
@@ -175,7 +176,7 @@ jobs:
           review-style: ${{ steps.llm.outputs.review_style }}
           require-evidence: ${{ steps.llm.outputs.require_evidence }}
           extensions-version: __PINNED_OPENHANDS_EXTENSIONS_SHA__
-          llm-api-key: ${{ secrets.FIREWORKS_API_KEY }}
+          llm-api-key: ${{ secrets.AI_REVIEW_API_KEY }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # lmnr-api-key: ${{ secrets.LMNR_PROJECT_API_KEY }}
 ```
@@ -378,7 +379,7 @@ Settings → Secrets and variables → Actions
 
 Create this repository secret:
 
-- `FIREWORKS_API_KEY` = your Fireworks API key
+- `AI_REVIEW_API_KEY` = your AI review provider API key
 
 This is the exact Fireworks key used by the PR review workflow.
 
@@ -484,7 +485,7 @@ To switch providers later:
 1. Change these repo variables:
    - `AI_REVIEW_MODEL_ID`
    - `AI_REVIEW_BASE_URL`
-2. Update the workflow secret reference from `FIREWORKS_API_KEY` to the new provider’s secret name
+2. Keep using the same `AI_REVIEW_API_KEY` secret name
 3. Leave `AI_REVIEW_PROVIDER_KIND=openai-compatible`
 
 Example pattern for other providers:
@@ -511,8 +512,8 @@ Example for native Fireworks through LiteLLM:
 If you want to test the provider configuration locally with OpenHands tooling, these environment variables are the useful defaults:
 
 ```bash
-export FIREWORKS_API_KEY="<your-fireworks-key>"
-export LLM_API_KEY="$FIREWORKS_API_KEY"
+export AI_REVIEW_API_KEY="<your-review-provider-key>"
+export LLM_API_KEY="$AI_REVIEW_API_KEY"
 export LLM_MODEL="openai/accounts/fireworks/models/glm-5p1"
 export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
 ```
@@ -610,4 +611,4 @@ Before finishing, verify all of the following:
 - [ ] the Fireworks configuration is documented exactly with:
   - model id `accounts/fireworks/models/glm-5p1`
   - base URL `https://api.fireworks.ai/inference/v1`
-  - secret name `FIREWORKS_API_KEY`
+  - review secret name `AI_REVIEW_API_KEY`

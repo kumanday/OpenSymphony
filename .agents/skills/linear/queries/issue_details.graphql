@@ -1,0 +1,34 @@
+query IssueDetails($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    title
+    url
+    description
+    branchName
+    state {
+      id
+      name
+      type
+    }
+    team {
+      id
+      key
+      name
+    }
+    project {
+      id
+      name
+      slugId
+      url
+    }
+    attachments {
+      nodes {
+        id
+        title
+        url
+        sourceType
+      }
+    }
+  }
+}

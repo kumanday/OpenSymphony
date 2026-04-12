@@ -10,7 +10,7 @@ Useful references:
 ## Prerequisites
 
 - Repository admin access to configure GitHub settings
-- A Fireworks AI account (or another OpenAI-compatible LLM provider)
+- An LLM provider account for the review model you want to use
 - GitHub Actions enabled for the repository
 
 ## Setup Steps
@@ -23,7 +23,10 @@ Add the following **Secret**:
 
 | Name | Value |
 |------|-------|
-| `FIREWORKS_API_KEY` | Your Fireworks AI API key |
+| `AI_REVIEW_API_KEY` | Your AI review provider API key |
+
+The scaffolded workflow uses `AI_REVIEW_API_KEY` as the only review secret
+name.
 
 ### 2. Configure Repository Variables
 
@@ -149,7 +152,7 @@ After setup, verify the system works:
 
 ### "Missing secret" errors
 
-- Verify `FIREWORKS_API_KEY` secret is set
+- Verify `AI_REVIEW_API_KEY` is set
 - Check the secret is available to Actions (not environment-scoped only)
 
 ### No review comments posted
@@ -172,7 +175,7 @@ The default implementation does **not** expose the LLM secret to fork PR workflo
 ### Secret minimization
 
 The workflow only receives:
-- `FIREWORKS_API_KEY` (LLM provider key)
+- `AI_REVIEW_API_KEY` for the review LLM
 - `GITHUB_TOKEN` (to post comments)
 
 No deployment credentials, cloud keys, package publishing tokens, or database secrets are exposed.
@@ -189,7 +192,7 @@ To switch to another OpenAI-compatible provider:
    - `AI_REVIEW_MODEL_ID` = the provider's model ID
    - `AI_REVIEW_BASE_URL` = the provider's OpenAI-compatible base URL
 
-2. Update the workflow secret reference from `FIREWORKS_API_KEY` to the new provider's secret name
+2. Keep using the same `AI_REVIEW_API_KEY` secret name
 
 3. Leave `AI_REVIEW_PROVIDER_KIND=openai-compatible`
 

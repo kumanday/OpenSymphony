@@ -18,12 +18,11 @@ pub use model::{
     OpenHandsConversationFrontMatter, OpenHandsConversationToolConfig,
     OpenHandsConversationToolFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
     OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
-    OpenHandsMcpConfig, OpenHandsMcpFrontMatter, OpenHandsStdioServerConfig,
-    OpenHandsStdioServerFrontMatter, OpenHandsTransportConfig, OpenHandsTransportFrontMatter,
-    OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter,
-    ProcessEnvironment, PromptContext, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter,
-    TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkflowFrontMatter,
-    WorkspaceConfig, WorkspaceFrontMatter,
+    OpenHandsTransportConfig, OpenHandsTransportFrontMatter, OpenHandsWebSocketConfig,
+    OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter, ProcessEnvironment,
+    PromptContext, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind,
+    WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkflowFrontMatter, WorkspaceConfig,
+    WorkspaceFrontMatter,
 };
 
 pub const CRATE_NAME: &str = "opensymphony-workflow";
@@ -105,8 +104,8 @@ mod tests {
     use serde::Serialize;
 
     use super::{
-        OpenHandsStdioServerConfig, PromptTemplateError, TrackerKind, WorkflowConfigError,
-        WorkflowDefinition, WorkflowLoadError,
+        PromptTemplateError, TrackerKind, WorkflowConfigError, WorkflowDefinition,
+        WorkflowLoadError,
         model::{
             DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT, DEFAULT_MAX_CONCURRENT_AGENTS,
             DEFAULT_MAX_RETRY_BACKOFF_MS, DEFAULT_MAX_TURNS, DEFAULT_OPENHANDS_AGENT_TOOLS,
@@ -468,7 +467,6 @@ tracker:
             resolved.extensions.openhands.websocket.query_param_name,
             DEFAULT_OPENHANDS_QUERY_PARAM_NAME
         );
-        assert!(resolved.extensions.openhands.mcp.stdio_servers.is_empty());
     }
 
     #[test]
@@ -1240,7 +1238,7 @@ openhands:
     }
 
     #[test]
-    fn resolves_openhands_mcp_stdio_servers() {
+    fn rejects_removed_legacy_linear_bridge_config() {
         let workflow = WorkflowDefinition::parse(
             r#"---
 tracker:
@@ -1255,9 +1253,8 @@ openhands:
     stdio_servers:
       - name: linear
         command:
-          - opensymphony
-          - linear-mcp
-          - --stdio
+          - deprecated
+          - removed-linear-bridge
 ---
 {{ issue.identifier }}
 "#,
@@ -1265,21 +1262,17 @@ openhands:
         .expect("workflow should parse");
         let env = env([("LINEAR_API_KEY", "linear-token")]);
 
-        let resolved = workflow
+        let error = workflow
             .resolve(Path::new("/repo"), &env)
-            .expect("workflow-owned mcp stdio servers should resolve");
+            .expect_err("removed legacy Linear bridge config should fail with a migration error");
 
-        assert_eq!(
-            resolved.extensions.openhands.mcp.stdio_servers,
-            vec![OpenHandsStdioServerConfig {
-                name: "linear".to_string(),
-                command: vec![
-                    "opensymphony".to_string(),
-                    "linear-mcp".to_string(),
-                    "--stdio".to_string(),
-                ],
-            }]
-        );
+        assert!(matches!(
+            error,
+            WorkflowConfigError::RemovedField {
+                field: "openhands.mcp",
+                ..
+            }
+        ));
     }
 
     #[test]

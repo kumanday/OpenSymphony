@@ -1,0 +1,7 @@
+query IntrospectMutations {
+  __type(name: "Mutation") {
+    fields {
+      name
+    }
+  }
+}

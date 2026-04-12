@@ -25,10 +25,10 @@ use crate::{
         OpenHandsConversationConfig, OpenHandsConversationFrontMatter,
         OpenHandsConversationToolConfig, OpenHandsFrontMatter, OpenHandsLlmConfig,
         OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
-        OpenHandsMcpConfig, OpenHandsMcpFrontMatter, OpenHandsTransportConfig,
-        OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter,
-        ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig,
-        WorkflowDefinition, WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter,
+        OpenHandsTransportConfig, OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter,
+        PollingConfig, PollingFrontMatter, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter,
+        TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkspaceConfig,
+        WorkspaceFrontMatter,
     },
 };
 
@@ -234,6 +234,7 @@ fn resolve_openhands<E: Environment>(
     _base_dir: &Path,
     env: &E,
 ) -> Result<OpenHandsConfig, WorkflowConfigError> {
+    reject_removed_legacy_linear_bridge_config(openhands.legacy_linear_bridge.as_ref())?;
     reject_unsupported_openhands_local_server_overrides(&openhands.local_server)?;
     reject_unsupported_openhands_websocket_overrides(&openhands.websocket)?;
 
@@ -317,8 +318,22 @@ fn resolve_openhands<E: Environment>(
         },
         conversation: resolve_openhands_conversation(&openhands.conversation, env)?,
         websocket,
-        mcp: resolve_openhands_mcp(&openhands.mcp)?,
     })
+}
+
+fn reject_removed_legacy_linear_bridge_config(
+    legacy_linear_bridge: Option<&serde_yaml::Value>,
+) -> Result<(), WorkflowConfigError> {
+    if legacy_linear_bridge.is_some() {
+        return Err(WorkflowConfigError::RemovedField {
+            field: "openhands.mcp",
+            message:
+                "Legacy Linear bridge configuration at `openhands.mcp` was removed in OpenSymphony 1.0.0. Use GraphQL-only Linear access through `LINEAR_API_KEY` and the repo-local `linear` skill assets instead."
+                    .to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn reject_unsupported_openhands_local_server_overrides(
@@ -376,40 +391,6 @@ fn reject_unsupported_openhands_websocket_overrides(
     }
 
     Ok(())
-}
-
-fn resolve_openhands_mcp(
-    mcp: &OpenHandsMcpFrontMatter,
-) -> Result<OpenHandsMcpConfig, WorkflowConfigError> {
-    let stdio_servers = mcp
-        .stdio_servers
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .map(resolve_openhands_stdio_server)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(OpenHandsMcpConfig { stdio_servers })
-}
-
-fn resolve_openhands_stdio_server(
-    server: &crate::OpenHandsStdioServerFrontMatter,
-) -> Result<crate::OpenHandsStdioServerConfig, WorkflowConfigError> {
-    let name = server.name.trim();
-    if name.is_empty() {
-        return Err(WorkflowConfigError::InvalidField {
-            field: "openhands.mcp.stdio_servers[].name",
-            message: "must not be empty".to_owned(),
-        });
-    }
-
-    Ok(crate::OpenHandsStdioServerConfig {
-        name: name.to_owned(),
-        command: resolve_command(
-            Some(server.command.as_slice()),
-            "openhands.mcp.stdio_servers[].command",
-            Vec::new(),
-        )?,
-    })
 }
 
 fn resolve_openhands_base_url<E: Environment>(

@@ -162,11 +162,11 @@ COE-268 (Parent)          COE-277 (Child)
 
 ### Example: Correct parent/sub-issue split
 
-**Parent Issue (COE-254): Linear MCP tools for issue and project management**
+**Parent Issue (COE-254): Linear GraphQL issue and project operations**
 
 ```markdown
 ## Summary
-Implement Linear MCP tools for issue and project management operations.
+Implement the checked-in Linear GraphQL workflow for issue and project operations.
 
 ## Acceptance Criteria
 - [ ] All sub-issues are completed and merged:
@@ -189,11 +189,11 @@ Implement Linear MCP tools for issue and project management operations.
 - Unit tests for specific tools (in sub-issues)
 ```
 
-**Sub-Issue (COE-268): Implement linear_save_project tool**
+**Sub-Issue (COE-268): Implement project overview update workflow**
 
 ```markdown
 ## Summary
-Implement the `linear_save_project` MCP tool for updating Linear project descriptions.
+Implement the `project_update_content.graphql` workflow for updating Linear project descriptions.
 
 ## Acceptance Criteria
 - [ ] Tool accepts project ID and new description
@@ -204,7 +204,7 @@ Implement the `linear_save_project` MCP tool for updating Linear project descrip
 
 ## Scope
 ### In scope
-- Tool implementation in opensymphony-linear-mcp crate
+- Query assets and helper usage in `.agents/skills/linear/`
 - Input validation
 - Error handling
 - Unit tests

@@ -67,9 +67,12 @@ Instructions:
 
 Work only in the provided repository copy. Do not touch any other path.
 
-## Prerequisite: Linear MCP or `linear_graphql` tool is available
+## Prerequisite: `LINEAR_API_KEY` is available
 
-The agent should be able to talk to Linear, either via a configured Linear MCP server or injected `linear_graphql` tool. If none are present, stop and ask the user to configure Linear.
+The agent must be able to talk to Linear through direct GraphQL using
+`LINEAR_API_KEY` plus the repo-local `linear` skill assets. If the key is not
+present, treat that as a real blocker, record it in the workpad, and follow
+the blocked path in this workflow.
 
 ## Default posture
 
@@ -93,7 +96,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## Related skills
 
-- `linear`: interact with Linear.
+- `linear`: interact with Linear through the repo-local GraphQL helper, query files, and references.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
@@ -315,7 +318,7 @@ For major rework:
 - If issue state is `Backlog`, do not modify it; wait for human to move it to `Todo`.
 - Do not edit the issue body/description for planning or progress tracking.
 - Use exactly one persistent workpad comment (`## Agent Harness Workpad`) per issue.
-- If comment editing is unavailable in-session, use the update script. Only report blocked if both MCP editing and script-based editing are unavailable.
+- If a Linear action fails, retry it with the repo-local `linear` helper and the checked-in query files before reporting a blocker.
 - Temporary proof edits are allowed only for local verification and must be reverted before commit.
 - If out-of-scope improvements are found, create a separate Backlog issue rather
   than expanding current scope, and include a clear
@@ -342,7 +345,8 @@ Update the priority table in the Linear project overview whenever:
 
 ### How to update the dashboard
 
-1. Use the `linear_get_project` tool to fetch the current project description
+1. Use the repo-local Linear helper with `queries/project_by_slug.graphql` to
+   fetch the current project description
 2. Locate the `## Dependency Blockers & PR Review Priority` section
 3. Regenerate the table with current data:
    - Query all issues in `Human Review`, `Merging`, `Rework`, `In Progress`, and `Todo` states
@@ -353,7 +357,9 @@ Update the priority table in the Linear project overview whenever:
    - **P1 (🟡 Epic):** Parent issues of active milestones that need review
    - **P2 (🟢 Ready):** Issues unblocked but with lower downstream impact
    - **P3 (⚪ Waiting):** Issues currently blocked by dependencies
-5. Use `linear_save_project` to update the description with the new table
+5. Use the repo-local Linear helper with
+   `queries/project_update_content.graphql` to update the description with the
+   new table
 
 ### Priority calculation guidelines
 

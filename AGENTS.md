@@ -50,7 +50,7 @@ Do not silently invent behavior when the upstream spec or chosen integration con
 ### Tracker contract
 
 - The orchestrator reads Linear directly.
-- Tracker writes are done by agent-side tools through MCP unless a future operator API explicitly documents otherwise.
+- Tracker writes are done by agent-side GraphQL helpers and checked-in query assets unless a future operator API explicitly documents otherwise.
 - Scheduler correctness must not depend on agent-side tracker writes succeeding.
 
 ### UI separation
@@ -76,7 +76,6 @@ Preferred crate and trait boundaries:
 - `opensymphony-workflow`
 - `opensymphony-workspace`
 - `opensymphony-linear`
-- `opensymphony-linear-mcp`
 - `opensymphony-openhands`
 - `opensymphony-orchestrator`
 - `opensymphony-control`
@@ -222,7 +221,7 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/openhands-agent-server.md`: agent-server integration choices
 - `docs/websocket-runtime.md`: wire contract and recovery behavior
 - `docs/workspace-and-lifecycle.md`: workspace ownership and hooks
-- `docs/linear-and-tools.md`: Linear integration and MCP tools
+- `docs/linear-and-tools.md`: Linear integration and GraphQL helper assets
 - `docs/ui-frankentui.md`: operator UI design
 - `docs/repository-layout.md`: crate ownership
 - `docs/deployment-modes.md`: local MVP and hosted follow-on

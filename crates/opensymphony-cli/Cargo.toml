@@ -20,7 +20,6 @@ async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
 opensymphony-linear = { path = "../opensymphony-linear" }
-opensymphony-linear-mcp = { path = "../opensymphony-linear-mcp" }
 opensymphony-control = { path = "../opensymphony-control" }
 opensymphony-domain = { path = "../opensymphony-domain" }
 opensymphony-openhands = { path = "../opensymphony-openhands" }

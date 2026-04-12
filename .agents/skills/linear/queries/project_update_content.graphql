@@ -1,0 +1,12 @@
+mutation UpdateProjectContent($id: String!, $content: String!) {
+  projectUpdate(id: $id, input: { content: $content }) {
+    success
+    project {
+      id
+      name
+      slugId
+      content
+      updatedAt
+    }
+  }
+}

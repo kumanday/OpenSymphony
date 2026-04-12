@@ -226,7 +226,7 @@ impl LocalServerTooling {
             "LLM_MODEL",
             "LLM_BASE_URL",
             "LLM_API_KEY",
-            "FIREWORKS_API_KEY",
+            "AI_REVIEW_API_KEY",
         ] {
             if let Ok(value) = std::env::var(key)
                 && !value.is_empty()

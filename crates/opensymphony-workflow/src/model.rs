@@ -113,8 +113,8 @@ pub struct OpenHandsFrontMatter {
     pub conversation: OpenHandsConversationFrontMatter,
     #[serde(default)]
     pub websocket: OpenHandsWebSocketFrontMatter,
-    #[serde(default)]
-    pub mcp: OpenHandsMcpFrontMatter,
+    #[serde(default, rename = "mcp")]
+    pub legacy_linear_bridge: Option<serde_yaml::Value>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -206,19 +206,6 @@ pub struct OpenHandsWebSocketFrontMatter {
     pub query_param_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct OpenHandsMcpFrontMatter {
-    pub stdio_servers: Option<Vec<OpenHandsStdioServerFrontMatter>>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct OpenHandsStdioServerFrontMatter {
-    pub name: String,
-    pub command: Vec<String>,
-}
-
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum IntegerLike {
@@ -296,7 +283,6 @@ pub struct OpenHandsConfig {
     pub local_server: OpenHandsLocalServerConfig,
     pub conversation: OpenHandsConversationConfig,
     pub websocket: OpenHandsWebSocketConfig,
-    pub mcp: OpenHandsMcpConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,17 +349,6 @@ pub struct OpenHandsWebSocketConfig {
     pub reconnect_max_ms: u64,
     pub auth_mode: String,
     pub query_param_name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenHandsMcpConfig {
-    pub stdio_servers: Vec<OpenHandsStdioServerConfig>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenHandsStdioServerConfig {
-    pub name: String,
-    pub command: Vec<String>,
 }
 
 pub trait Environment {

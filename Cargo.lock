@@ -1370,7 +1370,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "opensymphony"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "opensymphony-cli",
  "tokio",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-cli"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1387,7 +1387,6 @@ dependencies = [
  "opensymphony-control",
  "opensymphony-domain",
  "opensymphony-linear",
- "opensymphony-linear-mcp",
  "opensymphony-openhands",
  "opensymphony-orchestrator",
  "opensymphony-testkit",
@@ -1409,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-control"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -1428,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-domain"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1438,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-linear"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1452,23 +1451,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "opensymphony-linear-mcp"
-version = "0.1.1"
-dependencies = [
- "axum",
- "opensymphony-domain",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "opensymphony-openhands"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1494,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-orchestrator"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1509,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-testkit"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1524,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-tui"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "ftui",
@@ -1539,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-workflow"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "liquid",
  "serde",
@@ -1552,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-workspace"
-version = "0.1.1"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "libc",
