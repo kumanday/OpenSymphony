@@ -16,8 +16,12 @@ Use these query files for project-side or advanced operations:
 ## Notes
 
 - `projectUpdate` accepts both `content` and `statusId`.
-- `fileUpload` only returns the signed upload target and required headers. The
-  actual `PUT` happens separately against `uploadUrl`.
+- `projectStatusCreate` requires `name`, `color`, `position`, and `type`.
+- Project status names must be 25 characters or fewer.
+- `fileUpload` only returns the signed upload target and partial header set.
+  The actual `PUT` happens separately against `uploadUrl`, and the request must
+  include `Content-Type` matching the `contentType` you requested in addition
+  to the headers returned by Linear.
 - For input-shape discovery, pass variables such as:
 
 ```json

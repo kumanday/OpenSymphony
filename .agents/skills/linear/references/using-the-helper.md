@@ -32,5 +32,7 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 - Prefer the checked-in query files over improvising large inline documents.
 - Treat top-level `errors` as failure.
 - Keep requested fields narrow.
+- For `fileUpload`, send the follow-up `PUT` with `Content-Type` equal to the
+  `contentType` you requested, plus every header returned by Linear.
 - Use `queries/introspect_mutations.graphql` and
   `queries/introspect_input_shape.graphql` before guessing unfamiliar shapes.

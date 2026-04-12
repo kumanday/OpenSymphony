@@ -1,7 +1,7 @@
 mutation UpdateProjectStatus($id: String!, $input: ProjectStatusUpdateInput!) {
   projectStatusUpdate(id: $id, input: $input) {
     success
-    projectStatus {
+    status {
       id
       name
       color

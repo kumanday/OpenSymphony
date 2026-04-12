@@ -80,7 +80,8 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
   - `.agents/skills/linear/queries/project_set_status.graphql`
 - Upload a file for a comment:
   - `.agents/skills/linear/queries/file_upload.graphql`
-  - upload the bytes to the returned `uploadUrl`
+  - upload the bytes to the returned `uploadUrl` with `Content-Type` matching
+    the requested `contentType` plus every header returned by Linear
   - then create or update the comment with the returned `assetUrl`
 - Inspect the schema:
   - `.agents/skills/linear/queries/introspect_mutations.graphql`

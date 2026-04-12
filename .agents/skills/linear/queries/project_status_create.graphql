@@ -1,7 +1,7 @@
 mutation CreateProjectStatus($input: ProjectStatusCreateInput!) {
   projectStatusCreate(input: $input) {
     success
-    projectStatus {
+    status {
       id
       name
       color
