@@ -32,6 +32,9 @@ Important `init` behavior:
 - merges an existing `AGENTS.md`
 - prompts before overwriting repo-owned files
 - optionally scaffolds AI PR review assets
+- can configure GitHub Actions variables, the `review-this` label, and the
+  optional AI review secret automatically when `gh` is installed and can access
+  the target repository
 - copies `.agents/skills/` recursively so helper scripts, query files, and
   reference docs all arrive together
 

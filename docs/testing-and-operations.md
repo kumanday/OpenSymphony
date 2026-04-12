@@ -280,7 +280,7 @@ The repository-owned script performs the full live flow:
 
 ### Scenario A: checklist-driven issue lifecycle
 
-- generate a temp target repo with repo-owned `WORKFLOW.md`, `AGENTS.md`, `.gitignore`, and a two-step checklist
+- generate a temp target repo with repo-owned `WORKFLOW.md`, `AGENTS.md`, and a two-step checklist
 - populate the issue workspace through the documented `after_create` clone hook
 - run one issue through the real `WorkspaceManager` plus `IssueSessionRunner` path
 - verify workspace creation, prompt capture, conversation creation, and a deterministic first-run assistant reply

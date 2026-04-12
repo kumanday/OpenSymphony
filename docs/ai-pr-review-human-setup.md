@@ -1,6 +1,12 @@
 # OpenHands PR Review - Human Setup Guide
 
-This document describes the manual setup steps required to activate the OpenHands PR review workflow.
+This document covers the remaining human checks for the OpenHands PR review
+workflow.
+
+`opensymphony init` now tries to configure the GitHub Actions variables, label,
+and optional review secret automatically when `gh` is installed and can access
+the target repository. Use this guide to verify that setup, finish anything you
+skipped, or complete the fallback path when GitHub automation was unavailable.
 
 Useful references:
 
@@ -19,7 +25,7 @@ Useful references:
 
 Go to: **Settings → Secrets and variables → Actions**
 
-Add the following **Secret**:
+Verify or add the following **Secret**:
 
 | Name | Value |
 |------|-------|
@@ -32,7 +38,7 @@ name.
 
 Go to: **Settings → Secrets and variables → Actions → Variables tab**
 
-Add the following **Variables**:
+Verify or add the following **Variables**:
 
 | Name | Value | Description |
 |------|-------|-------------|
@@ -52,7 +58,9 @@ Create:
 - **Description:** `Trigger AI PR review`
 - **Color:** Any (suggested: `#0052CC` blue)
 
-Adding this label to a same-repo PR will retrigger the review workflow.
+Adding this label to a same-repo PR will retrigger the review workflow. If
+`opensymphony init` had working `gh` access, it may already have created or
+updated this label for you.
 
 ### 4. Allow the OpenHands Action (if restricted)
 
@@ -144,6 +152,15 @@ After setup, verify the system works:
 - Check that the PR is from the same repository (not a fork)
 - Check that the author is not Dependabot
 - Check that Actions are enabled in repository settings
+
+### `opensymphony init` could not automate GitHub setup
+
+- Install GitHub CLI if `gh` is missing: https://cli.github.com/
+- Sign in with `gh auth login`
+- Make sure the signed-in account can manage repository Actions settings and
+  labels
+- Re-run `opensymphony init` or use the printed fallback `gh` commands from the
+  target repo root
 
 ### "Missing repository variable" errors
 
