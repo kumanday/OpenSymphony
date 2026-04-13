@@ -1220,9 +1220,7 @@ async fn proxy_websocket(socket: WebSocket, state: ProxyState, conversation_id: 
     } {
         match result {
             EitherMessage::Client(Ok(message)) => {
-                let Some(message) = axum_to_tungstenite(message) else {
-                    continue;
-                };
+                let message = axum_to_tungstenite(message);
                 if upstream_sender.send(message).await.is_err() {
                     break;
                 }
@@ -1283,18 +1281,18 @@ fn should_drop_after_ready(message: &TungsteniteMessage) -> bool {
     }
 }
 
-fn axum_to_tungstenite(message: AxumMessage) -> Option<TungsteniteMessage> {
+fn axum_to_tungstenite(message: AxumMessage) -> TungsteniteMessage {
     match message {
-        AxumMessage::Text(text) => Some(TungsteniteMessage::Text(text.to_string())),
-        AxumMessage::Binary(data) => Some(TungsteniteMessage::Binary(data.to_vec())),
-        AxumMessage::Ping(data) => Some(TungsteniteMessage::Ping(data.to_vec())),
-        AxumMessage::Pong(data) => Some(TungsteniteMessage::Pong(data.to_vec())),
-        AxumMessage::Close(frame) => Some(TungsteniteMessage::Close(frame.map(|frame| {
+        AxumMessage::Text(text) => TungsteniteMessage::Text(text.to_string()),
+        AxumMessage::Binary(data) => TungsteniteMessage::Binary(data.to_vec()),
+        AxumMessage::Ping(data) => TungsteniteMessage::Ping(data.to_vec()),
+        AxumMessage::Pong(data) => TungsteniteMessage::Pong(data.to_vec()),
+        AxumMessage::Close(frame) => TungsteniteMessage::Close(frame.map(|frame| {
             tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: frame.code.into(),
                 reason: frame.reason.to_string().into(),
             }
-        }))),
+        })),
     }
 }
 

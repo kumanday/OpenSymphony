@@ -436,7 +436,7 @@ async fn runtime_stream_does_not_replay_reconnect_readiness_barriers_without_new
     let mut stream = client
         .attach_runtime_stream(
             conversation.conversation_id,
-            crate::opensymphony_openhands::RuntimeStreamConfig {
+            RuntimeStreamConfig {
                 readiness_timeout: Duration::from_secs(2),
                 reconnect_initial_backoff: Duration::from_millis(25),
                 reconnect_max_backoff: Duration::from_millis(100),

@@ -12,6 +12,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [workspace]
 members = ["."]
 resolver = "2"
@@ -24,7 +27,6 @@ chrono.workspace = true
 clap.workspace = true
 ftui.workspace = true
 futures-util.workspace = true
-libc.workspace = true
 liquid.workspace = true
 reqwest.workspace = true
 reqwest-eventsource.workspace = true
@@ -43,6 +45,9 @@ tracing-subscriber.workspace = true
 unicode-width.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [workspace.package]
 edition = "2024"
@@ -77,6 +82,7 @@ libc = "0.2"
 liquid = "0.26"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 reqwest-eventsource = "0.6"
+rustix = { version = "1", features = ["process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

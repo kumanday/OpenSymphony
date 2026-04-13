@@ -292,9 +292,9 @@ Title: {{{{ issue.title }}}}
 
 fn runner_config(workflow: &ResolvedWorkflow) -> IssueSessionRunnerConfig {
     let mut config = IssueSessionRunnerConfig::from_workflow(workflow);
-    config.runtime_stream.readiness_timeout = std::time::Duration::from_secs(2);
-    config.terminal_wait_timeout = std::time::Duration::from_secs(2);
-    config.finished_drain_timeout = std::time::Duration::from_millis(200);
+    config.runtime_stream.readiness_timeout = Duration::from_secs(2);
+    config.terminal_wait_timeout = Duration::from_secs(2);
+    config.finished_drain_timeout = Duration::from_millis(200);
     config
 }
 

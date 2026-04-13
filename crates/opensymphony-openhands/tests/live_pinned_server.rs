@@ -308,7 +308,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn doctor_probe_request(workspace_root: &std::path::Path) -> ConversationCreateRequest {
+fn doctor_probe_request(workspace_root: &Path) -> ConversationCreateRequest {
     let working_dir = workspace_root.join("repo");
     let persistence_dir = working_dir.join(".opensymphony/openhands");
     std::fs::create_dir_all(&persistence_dir).expect("probe directories should be created");

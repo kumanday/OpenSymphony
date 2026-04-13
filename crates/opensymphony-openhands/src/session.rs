@@ -702,7 +702,7 @@ impl ActiveSession {
             }
 
             // Track the latest event timestamp we've seen
-            if max_event_time.is_none() || event.timestamp > max_event_time.unwrap() {
+            if max_event_time.is_none_or(|current| event.timestamp > current) {
                 max_event_time = Some(event.timestamp);
             }
         }
@@ -2118,8 +2118,7 @@ impl IssueSessionRunner {
                 deadline - now
             };
 
-            let next_event =
-                tokio::time::timeout_at(now + event_timeout, session.stream.next_event()).await;
+            let next_event = timeout_at(now + event_timeout, session.stream.next_event()).await;
 
             match next_event {
                 Err(_) => {
@@ -2889,10 +2888,10 @@ mod tests {
             http_auth_mode: None,
             websocket_auth_mode: None,
             websocket_query_param_name: None,
-            persistence_dir: std::path::PathBuf::from("/tmp/test"),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            last_attached_at: chrono::Utc::now(),
+            persistence_dir: PathBuf::from("/tmp/test"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_attached_at: Utc::now(),
             launch_profile: None,
             llm_config_fingerprint: None,
             fresh_conversation: true,
@@ -2986,8 +2985,7 @@ mod tests {
         let mut total_output = 0u64;
 
         for event in cache.items() {
-            if let super::super::events::KnownEvent::LlmCompletionLog(llm_event) =
-                super::super::events::KnownEvent::from_envelope(event)
+            if let KnownEvent::LlmCompletionLog(llm_event) = KnownEvent::from_envelope(event)
                 && let Some((input, output)) = llm_event.token_usage()
             {
                 total_input += input;

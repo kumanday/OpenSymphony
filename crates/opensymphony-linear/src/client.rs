@@ -425,7 +425,7 @@ impl LinearClient {
                         return Err(error);
                     }
 
-                    if let Some(error) = decode_graphql_error_response(&payload, retry_after)? {
+                    if let Some(error) = decode_graphql_error_response(&payload, retry_after) {
                         if self.should_retry(&error, attempt) {
                             self.sleep_before_retry(&error, attempt).await;
                             attempt += 1;
@@ -542,18 +542,18 @@ fn convert_graphql_errors(errors: Vec<GraphqlErrorPayload>) -> Vec<GraphqlError>
 fn decode_graphql_error_response(
     payload: &str,
     retry_after: Option<Duration>,
-) -> Result<Option<LinearError>, LinearError> {
+) -> Option<LinearError> {
     let envelope: GraphqlEnvelope<Value> = match serde_json::from_str(payload) {
         Ok(envelope) => envelope,
-        Err(_) => return Ok(None),
+        Err(_) => return None,
     };
 
-    Ok(envelope.errors.map(|errors| {
+    envelope.errors.map(|errors| {
         LinearError::from_graphql_errors_with_retry_after(
             convert_graphql_errors(errors),
             retry_after,
         )
-    }))
+    })
 }
 
 fn normalize_strings<S>(values: &[S]) -> Vec<String>
