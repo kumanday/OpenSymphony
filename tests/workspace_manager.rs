@@ -1,3 +1,4 @@
+#[path = "support/mod.rs"]
 mod compat;
 pub use compat::*;
 
