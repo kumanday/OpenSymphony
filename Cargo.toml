@@ -1,14 +1,18 @@
 [package]
 name = "opensymphony"
-description = "Rust implementation of the OpenAI Symphony orchestrator"
+description = "A Rust implementation of the OpenAI Symphony orchestration design"
+license = "MIT"
+homepage = "https://opensymphony.dev"
+repository = "https://github.com/kumanday/OpenSymphony"
+authors = ["Leonardo Gonzalez <leonardo.gonzalez@trilogy.com>"]
+readme = "README.md"
+keywords = ["ai", "agents", "orchestration", "linear", "openhands", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-readme = "README.md"
-keywords = ["ai", "agents", "orchestration", "linear", "openhands"]
-categories = ["command-line-utilities", "development-tools"]
 
 [workspace]
 members = [
