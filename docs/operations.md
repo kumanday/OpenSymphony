@@ -22,7 +22,7 @@ opensymphony --help
 
 cd /path/to/target-repo
 opensymphony init
-opensymphony run --config ./config.yaml
+opensymphony run
 ```
 
 If you already run an external OpenHands agent-server, you can skip

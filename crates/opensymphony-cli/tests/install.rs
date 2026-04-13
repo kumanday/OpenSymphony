@@ -7,6 +7,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use opensymphony_openhands::LocalServerTooling;
 use tempfile::TempDir;
 
 #[test]
@@ -152,6 +153,55 @@ fn install_openhands_repairs_missing_files_in_the_managed_tool_dir() {
 }
 
 #[test]
+fn install_openhands_updates_a_stale_but_self_consistent_pin() {
+    let home_dir = TempDir::new().expect("home dir should be created");
+    let fake_bin_dir = TempDir::new().expect("fake bin dir should be created");
+    let uv_log = fake_bin_dir.path().join("uv.log");
+    let tool_dir = home_dir.path().join(".opensymphony/openhands-server");
+
+    write_fake_uv(fake_bin_dir.path().join("uv"), &uv_log);
+    write_bash_wrapper(fake_bin_dir.path().join("bash"));
+
+    let first = run_install(&home_dir, fake_bin_dir.path());
+    assert!(
+        first.status.success(),
+        "first install should succeed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+
+    rewrite_openhands_pin(&tool_dir, "1.14.0", "1.13.0");
+    let stale_tooling =
+        LocalServerTooling::load(&tool_dir).expect("stale tooling should still parse");
+    assert_eq!(stale_tooling.version, "1.13.0");
+    assert!(
+        stale_tooling.pin_status.is_ready(),
+        "stale tooling fixture should remain internally self-consistent",
+    );
+
+    let updated = run_install(&home_dir, fake_bin_dir.path());
+    let stdout = String::from_utf8_lossy(&updated.stdout);
+    let stderr = String::from_utf8_lossy(&updated.stderr);
+
+    assert!(
+        updated.status.success(),
+        "stale install should update cleanly: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("updated pinned OpenHands tooling 1.14.0"),
+        "stale install should report an update, not a ready no-op: stdout={stdout}",
+    );
+    assert_eq!(
+        uv_invocation_count(&uv_log),
+        2,
+        "updating a stale embedded pin should rerun uv",
+    );
+    let refreshed = LocalServerTooling::load(&tool_dir).expect("updated tooling should parse");
+    assert_eq!(refreshed.version, "1.14.0");
+    assert!(refreshed.pin_status.is_ready());
+}
+
+#[test]
 fn install_openhands_surfaces_a_missing_uv_requirement() {
     let home_dir = TempDir::new().expect("home dir should be created");
     let fake_bin_dir = TempDir::new().expect("fake bin dir should be created");
@@ -211,6 +261,21 @@ fn uv_invocation_count(log_path: &Path) -> usize {
         .lines()
         .filter(|line| line.starts_with("ARGS="))
         .count()
+}
+
+fn rewrite_openhands_pin(tool_dir: &Path, from: &str, to: &str) {
+    for relative in ["version.txt", "pyproject.toml", "uv.lock"] {
+        let path = tool_dir.join(relative);
+        let contents = std::fs::read_to_string(&path).expect("tooling file should exist");
+        let updated = contents.replace(from, to);
+        assert_ne!(
+            contents,
+            updated,
+            "stale pin fixture should rewrite at least one occurrence in {}",
+            path.display(),
+        );
+        std::fs::write(&path, updated).expect("tooling file should rewrite");
+    }
 }
 
 fn path_only(path: &Path) -> OsString {

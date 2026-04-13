@@ -60,6 +60,7 @@ const EMBEDDED_OPENHANDS_FILES: &[EmbeddedToolingFile] = &[
 pub(crate) enum ToolingInstallAction {
     Ready,
     Installed,
+    Updated,
     Repaired,
 }
 
@@ -80,6 +81,11 @@ impl ToolingInstallReport {
             ),
             ToolingInstallAction::Installed => format!(
                 "installed pinned OpenHands tooling {} at {}",
+                self.version,
+                self.tool_dir.display()
+            ),
+            ToolingInstallAction::Updated => format!(
+                "updated pinned OpenHands tooling {} at {}",
                 self.version,
                 self.tool_dir.display()
             ),
@@ -177,7 +183,15 @@ pub(crate) fn embedded_openhands_version() -> &'static str {
 
 fn current_install_action(tool_dir: &Path) -> ToolingInstallAction {
     match LocalServerTooling::load(tool_dir) {
-        Ok(tooling) if tooling.pin_status.is_ready() => ToolingInstallAction::Ready,
+        Ok(tooling)
+            if tooling.pin_status.is_ready() && tooling.version == embedded_openhands_version() =>
+        {
+            ToolingInstallAction::Ready
+        }
+        Ok(tooling) if tooling.pin_status.is_ready() => {
+            debug_assert_ne!(tooling.version, embedded_openhands_version());
+            ToolingInstallAction::Updated
+        }
         _ if tool_dir.exists() => ToolingInstallAction::Repaired,
         _ => ToolingInstallAction::Installed,
     }
