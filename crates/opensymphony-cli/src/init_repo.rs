@@ -29,7 +29,8 @@ const OPENHANDS_PR_REVIEW_PLUGIN_URL: &str =
     "https://github.com/OpenHands/extensions/tree/main/plugins/pr-review";
 const OPENHANDS_PR_REVIEW_DOCS_URL: &str =
     "https://docs.openhands.dev/sdk/guides/github-workflows/pr-review";
-const OPENHANDS_EXTENSIONS_PINNED_SHA: &str = "9e5bb49dbe61bdb364c89c10c7307c38139e9532";
+const OPENHANDS_PR_REVIEW_SETUP_GUIDE_URL: &str =
+    "https://github.com/kumanday/OpenSymphony/blob/main/docs/ai-pr-review-human-setup.md";
 const AI_REVIEW_LABEL_NAME: &str = "review-this";
 const PRESERVED_AGENTS_MARKER: &str = "## Preserved Existing AGENTS.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
@@ -300,10 +301,6 @@ const CORE_TEMPLATE_ASSETS: &[TemplateAsset] = &[
         path: ".github/pull_request_template.md",
         kind: AssetKind::Standard,
     },
-    TemplateAsset {
-        path: "docs/tasks/README.md",
-        kind: AssetKind::Standard,
-    },
 ];
 
 const CORE_TEMPLATE_DIRECTORIES: &[TemplateDirectory] = &[TemplateDirectory {
@@ -315,11 +312,6 @@ const AI_REVIEW_TEMPLATE_ASSETS: &[TemplateAsset] = &[TemplateAsset {
     path: ".github/workflows/ai-pr-review.yml",
     kind: AssetKind::Standard,
 }];
-
-const AI_REVIEW_SETUP_DOC_ASSET: TemplateAsset = TemplateAsset {
-    path: "docs/ai-pr-review-human-setup.md",
-    kind: AssetKind::Standard,
-};
 
 const AI_REVIEW_CUSTOM_GUIDE_ASSET: TemplateAsset = TemplateAsset {
     path: ".agents/skills/custom-codereview-guide.md",
@@ -377,10 +369,10 @@ where
 
     let mut fetched_assets =
         fetch_template_assets(&client, CORE_TEMPLATE_ASSETS, CORE_TEMPLATE_DIRECTORIES).await?;
-    if let Some(config) = ai_review_config.as_ref() {
+    if ai_review_config.is_some() {
         fetched_assets
             .extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS, &[]).await?);
-        fetched_assets.extend(generated_ai_review_assets(config));
+        fetched_assets.extend(generated_ai_review_assets());
     }
     let mut planned_assets = plan_assets(&target_repo, fetched_assets)?;
     resolve_conflicts(&mut planned_assets, ui)?;
@@ -478,7 +470,7 @@ where
     if wrote_config {
         ui.blank_line()?;
         ui.line(
-            "If you use the managed local OpenHands runtime, run `opensymphony install openhands` to provision the pinned tooling into the configured `openhands.tool_dir`.",
+            "For the managed local OpenHands server, run `opensymphony install openhands` to provision the pinned tooling into the configured `openhands.tool_dir`.",
         )?;
     }
 
@@ -644,19 +636,12 @@ async fn fetch_template_file(
     })
 }
 
-fn generated_ai_review_assets(config: &AiReviewConfig) -> Vec<FetchedAsset> {
-    vec![
-        FetchedAsset {
-            path: AI_REVIEW_SETUP_DOC_ASSET.path.to_string(),
-            kind: AI_REVIEW_SETUP_DOC_ASSET.kind,
-            contents: ai_pr_review_setup_doc_contents(config),
-        },
-        FetchedAsset {
-            path: AI_REVIEW_CUSTOM_GUIDE_ASSET.path.to_string(),
-            kind: AI_REVIEW_CUSTOM_GUIDE_ASSET.kind,
-            contents: custom_codereview_guide_contents(),
-        },
-    ]
+fn generated_ai_review_assets() -> Vec<FetchedAsset> {
+    vec![FetchedAsset {
+        path: AI_REVIEW_CUSTOM_GUIDE_ASSET.path.to_string(),
+        kind: AI_REVIEW_CUSTOM_GUIDE_ASSET.kind,
+        contents: custom_codereview_guide_contents(),
+    }]
 }
 
 fn plan_assets(
@@ -1136,115 +1121,6 @@ fn yaml_double_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-fn ai_pr_review_setup_doc_contents(config: &AiReviewConfig) -> String {
-    let base_url_row = config.base_url.as_ref().map_or(String::new(), |base_url| {
-        format!("| `AI_REVIEW_BASE_URL` | `{base_url}` |\n")
-    });
-    let base_url_command = config.base_url.as_ref().map_or(String::new(), |base_url| {
-        format!(
-            "gh variable set AI_REVIEW_BASE_URL --body {}\n",
-            shell_single_quote(base_url)
-        )
-    });
-    let base_url_note = if config.base_url.is_some() {
-        String::new()
-    } else {
-        "- `AI_REVIEW_BASE_URL` is optional for the selected provider and may be left unset.\n"
-            .to_string()
-    };
-
-    format!(
-        r#"# OpenHands PR Review Setup
-
-This repository was bootstrapped with OpenHands PR review support via `opensymphony init`.
-
-If `opensymphony init` was able to use `gh`, it may already have configured the
-repository variables, label, and optional secret. Use this document to verify
-that setup, fill in anything you skipped, or finish the manual fallback path.
-
-Useful references:
-
-- Plugin page: {plugin_url}
-- Official docs: {docs_url}
-
-## Files Added
-
-- `.github/workflows/ai-pr-review.yml`
-- `.agents/skills/custom-codereview-guide.md`
-
-## GitHub Actions Secret
-
-Verify or add this repository secret under **Settings -> Secrets and variables -> Actions**:
-
-| Name | Value |
-|------|-------|
-| `{secret_name}` | Your AI review provider API key |
-
-The secret name is provider-agnostic. Fireworks is only the default example
-configuration for new repos; any compatible provider/model is fine.
-
-## GitHub Actions Variables
-
-Verify or add these repository variables under **Settings -> Secrets and variables -> Actions -> Variables**:
-
-| Name | Value |
-|------|-------|
-| `AI_REVIEW_PROVIDER_KIND` | `{provider_kind}` |
-| `AI_REVIEW_MODEL_ID` | `{model_id}` |
-{base_url_row}| `AI_REVIEW_STYLE` | `{style}` |
-| `AI_REVIEW_REQUIRE_EVIDENCE` | `{require_evidence}` |
-
-## Label
-
-Make sure the `{label}` label exists so maintainers can retrigger review on demand.
-
-```bash
-gh label create {quoted_label} --description 'Trigger AI PR review' --color 'd73a4a' --force
-```
-
-## Optional GitHub CLI Commands
-
-Run these from the target repo root if you want to configure or verify the
-repository with `gh` manually:
-
-```bash
-gh variable set AI_REVIEW_PROVIDER_KIND --body {quoted_provider_kind}
-gh variable set AI_REVIEW_MODEL_ID --body {quoted_model_id}
-{base_url_command}gh variable set AI_REVIEW_STYLE --body {quoted_style}
-gh variable set AI_REVIEW_REQUIRE_EVIDENCE --body {quoted_require_evidence}
-gh secret set {secret_name}
-gh label create {quoted_label} --description 'Trigger AI PR review' --color 'd73a4a' --force
-```
-
-## Notes
-
-- Fireworks is the default example only; swap in your preferred provider/model if needed.
-{base_url_note}- If your provider uses an OpenAI-compatible endpoint, `AI_REVIEW_BASE_URL` must be set.
-- If your organization restricts Actions, allow `OpenHands/extensions`.
-- The generated workflow should already pin the plugin to `{pinned_sha}` in both the `uses:` line and the `extensions-version:` input.
-- Do not make the AI review workflow a required status check.
-- Keep the workflow on GitHub-hosted runners unless you have separately reviewed the risk model for untrusted PR content.
-"#,
-        provider_kind = config.provider_kind,
-        model_id = config.model_id,
-        style = config.style,
-        require_evidence = config.require_evidence_value(),
-        label = AI_REVIEW_LABEL_NAME,
-        base_url_row = base_url_row,
-        base_url_command = base_url_command,
-        base_url_note = base_url_note,
-        quoted_label = shell_single_quote(AI_REVIEW_LABEL_NAME),
-        quoted_provider_kind = shell_single_quote(&config.provider_kind),
-        quoted_model_id = shell_single_quote(&config.model_id),
-        quoted_style = shell_single_quote(&config.style),
-        quoted_require_evidence = shell_single_quote(config.require_evidence_value()),
-        secret_name = DEFAULT_AI_REVIEW_SECRET_NAME,
-        plugin_url = OPENHANDS_PR_REVIEW_PLUGIN_URL,
-        docs_url = OPENHANDS_PR_REVIEW_DOCS_URL,
-        pinned_sha = OPENHANDS_EXTENSIONS_PINNED_SHA,
-    )
-}
-
 fn custom_codereview_guide_contents() -> String {
     r#"---
 name: custom-codereview-guide
@@ -1297,7 +1173,7 @@ where
         ui.line(
             "GitHub automation was skipped because the detected git remote is missing or is not a GitHub repository URL.",
         )?;
-        ui.line("See `docs/ai-pr-review-human-setup.md` for the remaining setup checklist.")?;
+        print_ai_review_setup_links(ui)?;
         return Ok(());
     };
 
@@ -1336,7 +1212,7 @@ where
         true,
     )? {
         ui.line("Skipped GitHub automation for now.")?;
-        ui.line("See `docs/ai-pr-review-human-setup.md` for the checklist and validation steps.")?;
+        print_ai_review_setup_links(ui)?;
         return Ok(());
     }
 
@@ -1363,13 +1239,13 @@ where
                 "GitHub automation could not finish automatically: {error}"
             ))?;
             ui.line(
-                "Make sure your account can manage repository variables, secrets, and labels, then finish the checklist in `docs/ai-pr-review-human-setup.md`.",
+                "Make sure your account can manage repository variables, secrets, and labels, then finish the setup with the printed commands or the upstream guide.",
             )?;
+            print_ai_review_setup_links(ui)?;
         }
     }
 
-    ui.line(format!("Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"))?;
-    ui.line(format!("Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"))?;
+    print_ai_review_setup_links(ui)?;
     Ok(())
 }
 
@@ -1449,14 +1325,7 @@ fn check_gh_repo_automation(target_repo: &Path, repo_slug: &str) -> GhRepoAutoma
 
     match run_gh_command(
         target_repo,
-        &[
-            "repo",
-            "view",
-            "--repo",
-            repo_slug,
-            "--json",
-            "nameWithOwner",
-        ],
+        &["repo", "view", repo_slug, "--json", "nameWithOwner"],
     ) {
         Ok(output) if output.status.success() => GhRepoAutomationStatus::Ready,
         Ok(output) => GhRepoAutomationStatus::RepoAccessUnavailable {
@@ -1480,7 +1349,7 @@ fn configure_ai_review_with_gh(
             "variable",
             "set",
             "AI_REVIEW_PROVIDER_KIND",
-            "--repo",
+            "-R",
             repo_slug,
             "--body",
             &config.provider_kind,
@@ -1492,7 +1361,7 @@ fn configure_ai_review_with_gh(
             "variable",
             "set",
             "AI_REVIEW_MODEL_ID",
-            "--repo",
+            "-R",
             repo_slug,
             "--body",
             &config.model_id,
@@ -1504,7 +1373,7 @@ fn configure_ai_review_with_gh(
             "variable",
             "set",
             "AI_REVIEW_BASE_URL",
-            "--repo",
+            "-R",
             repo_slug,
             "--body",
             config.base_url.as_deref().unwrap_or(""),
@@ -1516,7 +1385,7 @@ fn configure_ai_review_with_gh(
             "variable",
             "set",
             "AI_REVIEW_STYLE",
-            "--repo",
+            "-R",
             repo_slug,
             "--body",
             &config.style,
@@ -1528,7 +1397,7 @@ fn configure_ai_review_with_gh(
             "variable",
             "set",
             "AI_REVIEW_REQUIRE_EVIDENCE",
-            "--repo",
+            "-R",
             repo_slug,
             "--body",
             config.require_evidence_value(),
@@ -1540,7 +1409,7 @@ fn configure_ai_review_with_gh(
             "label",
             "create",
             AI_REVIEW_LABEL_NAME,
-            "--repo",
+            "-R",
             repo_slug,
             "--description",
             AI_REVIEW_LABEL_DESCRIPTION,
@@ -1575,36 +1444,49 @@ where
     W: Write,
 {
     ui.line(format!(
-        "gh variable set AI_REVIEW_PROVIDER_KIND --repo {repo_slug} --body {}",
+        "gh variable set AI_REVIEW_PROVIDER_KIND -R {repo_slug} --body {}",
         shell_single_quote(&config.provider_kind)
     ))?;
     ui.line(format!(
-        "gh variable set AI_REVIEW_MODEL_ID --repo {repo_slug} --body {}",
+        "gh variable set AI_REVIEW_MODEL_ID -R {repo_slug} --body {}",
         shell_single_quote(&config.model_id)
     ))?;
     ui.line(format!(
-        "gh variable set AI_REVIEW_BASE_URL --repo {repo_slug} --body {}",
+        "gh variable set AI_REVIEW_BASE_URL -R {repo_slug} --body {}",
         shell_single_quote(config.base_url.as_deref().unwrap_or(""))
     ))?;
     ui.line(format!(
-        "gh variable set AI_REVIEW_STYLE --repo {repo_slug} --body {}",
+        "gh variable set AI_REVIEW_STYLE -R {repo_slug} --body {}",
         shell_single_quote(&config.style)
     ))?;
     ui.line(format!(
-        "gh variable set AI_REVIEW_REQUIRE_EVIDENCE --repo {repo_slug} --body {}",
+        "gh variable set AI_REVIEW_REQUIRE_EVIDENCE -R {repo_slug} --body {}",
         shell_single_quote(config.require_evidence_value())
     ))?;
     ui.line(format!(
-        "gh secret set {DEFAULT_AI_REVIEW_SECRET_NAME} --repo {repo_slug}"
+        "gh secret set {DEFAULT_AI_REVIEW_SECRET_NAME} -R {repo_slug}"
     ))?;
     ui.line(format!(
-        "gh label create {AI_REVIEW_LABEL_NAME} --repo {repo_slug} --description {} --color d73a4a --force",
+        "gh label create {AI_REVIEW_LABEL_NAME} -R {repo_slug} --description {} --color d73a4a --force",
         shell_single_quote(AI_REVIEW_LABEL_DESCRIPTION)
     ))?;
     ui.line(
         "You can reuse the same value as `LLM_API_KEY` for `AI_REVIEW_API_KEY` if that is the provider key you want the review workflow to use.",
     )?;
-    ui.line("See `docs/ai-pr-review-human-setup.md` for the full checklist.")?;
+    print_ai_review_setup_links(ui)?;
+    Ok(())
+}
+
+fn print_ai_review_setup_links<R, W>(ui: &mut PromptUi<R, W>) -> Result<(), InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    ui.line(format!(
+        "Manual setup guide: {OPENHANDS_PR_REVIEW_SETUP_GUIDE_URL}"
+    ))?;
+    ui.line(format!("Plugin: {OPENHANDS_PR_REVIEW_PLUGIN_URL}"))?;
+    ui.line(format!("Docs: {OPENHANDS_PR_REVIEW_DOCS_URL}"))?;
     Ok(())
 }
 
@@ -1636,7 +1518,7 @@ fn run_gh_secret_set(
     secret_value: &str,
 ) -> Result<(), String> {
     let mut child = std::process::Command::new("gh")
-        .args(["secret", "set", secret_name, "--repo", repo_slug])
+        .args(["secret", "set", secret_name, "-R", repo_slug])
         .current_dir(target_repo)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1717,14 +1599,12 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        AI_REVIEW_LABEL_NAME, AiReviewConfig, DEFAULT_AI_REVIEW_BASE_URL,
-        DEFAULT_AI_REVIEW_MODEL_ID, DEFAULT_AI_REVIEW_PROVIDER_KIND, DEFAULT_AI_REVIEW_SECRET_NAME,
         DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS,
         GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi, agents_already_initialized,
-        ai_pr_review_setup_doc_contents, comparable_text, custom_codereview_guide_contents,
-        customize_workflow, git_remote_url, github_repo_slug_from_remote, merge_agents,
-        normalize_github_repo_slug, prompt_ai_review_config, prompt_for_missing_llm_env,
-        prompt_yes_no, select_remote_name, shell_single_quote, template_fetch_timeout_from_env,
+        comparable_text, custom_codereview_guide_contents, customize_workflow, git_remote_url,
+        github_repo_slug_from_remote, merge_agents, normalize_github_repo_slug,
+        prompt_ai_review_config, prompt_for_missing_llm_env, prompt_yes_no, select_remote_name,
+        shell_single_quote, template_fetch_timeout_from_env,
     };
 
     struct StubEnvironment {
@@ -1924,17 +1804,6 @@ hooks:
             template_fetch_timeout_from_env(Some("not-a-number")),
             Duration::from_millis(DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS)
         );
-    }
-
-    #[test]
-    fn ai_pr_review_setup_doc_uses_generic_secret_and_fireworks_defaults() {
-        let doc = ai_pr_review_setup_doc_contents(&AiReviewConfig::default());
-
-        assert!(doc.contains(DEFAULT_AI_REVIEW_SECRET_NAME));
-        assert!(doc.contains(DEFAULT_AI_REVIEW_PROVIDER_KIND));
-        assert!(doc.contains(DEFAULT_AI_REVIEW_MODEL_ID));
-        assert!(doc.contains(DEFAULT_AI_REVIEW_BASE_URL));
-        assert!(doc.contains(AI_REVIEW_LABEL_NAME));
     }
 
     #[test]

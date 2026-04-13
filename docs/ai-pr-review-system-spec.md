@@ -51,7 +51,7 @@ Create or update the following:
 2. `.agents/skills/custom-codereview-guide.md`
 3. `AGENTS.md` (append an additive AI-review section, or create one if it does not exist)
 4. `.github/pull_request_template.md` or the repository’s existing PR template(s)
-5. `docs/ai-pr-review-human-setup.md`
+5. the central setup guide at `docs/ai-pr-review-human-setup.md` in OpenSymphony itself
 
 Do **not** create a fork-secret workflow by default.
 
@@ -61,19 +61,19 @@ Do **not** create or modify branch protection through code. Labels may be
 bootstrapped by repository setup tooling when `gh` is available, but the human
 setup document must still cover the manual fallback path.
 
-Do **not** invent `CODEOWNERS` entries if real owners are not obvious from the repository. Put a TODO and an example in the human setup document instead.
+Do **not** invent `CODEOWNERS` entries if real owners are not obvious from the repository. Put a TODO and an example in the central human setup guide instead.
 
 ## Coding-agent implementation rules
 
 1. Preserve existing files and merge changes additively.
 2. If `AGENTS.md` already exists, append a clearly labeled section instead of overwriting it.
 3. If `.github/pull_request_template.md` already exists, merge the `Evidence` section into the existing template instead of replacing the whole file.
-4. If the repo uses `.github/PULL_REQUEST_TEMPLATE/` multiple templates, update the default or the most relevant template and document the rest in the human setup file.
+4. If the repo uses `.github/PULL_REQUEST_TEMPLATE/` multiple templates, update the default or the most relevant template and document the rest in the central human setup guide.
 5. If the repo already has `.agents/skills/` or `.openhands/skills/`, use `.agents/skills/` and avoid conflicting duplicate skill names.
 6. Use a **unique** skill name like `custom-codereview-guide`, not `code-review`, so the repo skill **supplements** the default OpenHands review skill instead of overriding it.
 7. Pin the OpenHands action to a **full commit SHA** before finalizing the implementation.
 8. Use the **same SHA** for the action ref and for the `extensions-version` input.
-9. Do not ask humans for follow-up information during implementation. Infer what is safe to infer from the repository. Put everything else into `docs/ai-pr-review-human-setup.md`.
+9. Do not ask humans for follow-up information during implementation. Infer what is safe to infer from the repository. Put everything else into the central `docs/ai-pr-review-human-setup.md` guide.
 
 ## File 1: `.github/workflows/ai-pr-review.yml`
 
@@ -351,9 +351,9 @@ Call out any specific files, invariants, migrations, compatibility concerns, or 
 - [ ] Evidence section is complete
 ```
 
-## File 5: `docs/ai-pr-review-human-setup.md`
+## File 5: central `docs/ai-pr-review-human-setup.md`
 
-Create this documentation file for humans.
+Create or update this documentation file for humans in OpenSymphony itself. `opensymphony init` should link to it rather than copying it into target repositories.
 
 Use the following content, updating any repo-specific references or notes you discover during implementation.
 
@@ -594,7 +594,7 @@ The coding agent should inspect the repository and enrich the following where sa
 - generated or vendored paths
 - sensitive areas like auth, payments, migrations, queues, background jobs, schema, API contracts, rollout flags
 
-If a fact is not safely inferable, put it in `docs/ai-pr-review-human-setup.md` as a TODO.
+If a fact is not safely inferable, put it in the central `docs/ai-pr-review-human-setup.md` guide as a TODO.
 
 ## Final checklist for the coding agent
 
@@ -606,7 +606,7 @@ Before finishing, verify all of the following:
 - [ ] `.agents/skills/custom-codereview-guide.md` exists with a **unique** skill name
 - [ ] `AGENTS.md` exists and includes the AI review overlay
 - [ ] the PR template contains an `Evidence` section
-- [ ] `docs/ai-pr-review-human-setup.md` exists
+- [ ] the central `docs/ai-pr-review-human-setup.md` guide exists
 - [ ] no fork-secret workflow was added by default
 - [ ] no `pull_request_target` workflow was added by default
 - [ ] no auto-approval logic was added

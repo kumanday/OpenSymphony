@@ -42,13 +42,11 @@ Core bootstrap payload:
 - `.agents/skills/linear/references/`
 - `.github/CODEOWNERS`
 - `.github/pull_request_template.md`
-- `docs/tasks/README.md`
 
 Optional AI PR review scaffolding:
 
 - `.github/workflows/ai-pr-review.yml`
 - `.agents/skills/custom-codereview-guide.md`
-- `docs/ai-pr-review-human-setup.md`
 
 ## Labels
 
@@ -160,4 +158,6 @@ you when:
 
 If any of those are missing, `init` falls back to a short checklist plus the
 manual `gh` commands. The full verification and branch-protection guidance
-lives in [ai-pr-review-human-setup.md](ai-pr-review-human-setup.md).
+lives in the OpenSymphony docs at
+[ai-pr-review-human-setup.md](ai-pr-review-human-setup.md); `init` does not
+copy that guide into the target repository.
