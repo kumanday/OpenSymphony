@@ -43,6 +43,8 @@ Important `init` behavior:
   the target repository
 - copies `.agents/skills/` recursively so helper scripts, query files, and
   reference docs all arrive together
+- keeps bootstrap guidance in CLI output and the central OpenSymphony docs
+  instead of copying `docs/` files into the target repository
 
 ## 3. Recommended validation commands
 

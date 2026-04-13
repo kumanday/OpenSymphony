@@ -63,6 +63,10 @@ async fn init_copies_template_files_and_customizes_workflow() {
         "config.yaml should be created"
     );
     assert!(
+        !repo.path().join("docs/tasks/README.md").exists(),
+        "target repos should not receive docs/tasks bootstrap files"
+    );
+    assert!(
         !repo.path().join(".gitignore").exists(),
         "target repos should not receive the template .gitignore"
     );
@@ -112,10 +116,17 @@ async fn init_can_scaffold_ai_pr_review_and_print_fallback_commands_when_gh_cann
         "starter review guide should be created"
     );
     assert!(
-        repo.path()
+        !repo
+            .path()
             .join("docs/ai-pr-review-human-setup.md")
-            .is_file(),
-        "setup guide should be created"
+            .exists(),
+        "AI PR review should not create repo-local docs setup files"
+    );
+    assert!(
+        stdout.contains(
+            "For the managed local OpenHands server, run `opensymphony install openhands`"
+        ),
+        "stdout should present managed local OpenHands as the normal path: {stdout}",
     );
     assert!(
         stdout.contains("OpenHands PR review scaffolding was added."),
@@ -123,9 +134,15 @@ async fn init_can_scaffold_ai_pr_review_and_print_fallback_commands_when_gh_cann
     );
     assert!(
         stdout.contains(
-            "gh variable set AI_REVIEW_MODEL_ID --repo example/demo --body 'accounts/fireworks/models/glm-5p1'"
+            "gh variable set AI_REVIEW_MODEL_ID -R example/demo --body 'accounts/fireworks/models/glm-5p1'"
         ),
         "stdout should contain GitHub variable commands: {stdout}",
+    );
+    assert!(
+        stdout.contains(
+            "Manual setup guide: https://github.com/kumanday/OpenSymphony/blob/main/docs/ai-pr-review-human-setup.md"
+        ),
+        "stdout should point to the upstream setup guide: {stdout}",
     );
     assert!(
         stdout.contains("`gh` could not access `example/demo`"),
@@ -180,21 +197,21 @@ async fn init_can_scaffold_ai_pr_review_and_configure_github_with_gh() {
         "preflight should verify gh exists: {gh_log}",
     );
     assert!(
-        gh_log.contains("gh repo view --repo example/demo --json nameWithOwner"),
+        gh_log.contains("gh repo view example/demo --json nameWithOwner"),
         "preflight should verify repo access: {gh_log}",
     );
     assert!(
         gh_log.contains(
-            "gh variable set AI_REVIEW_PROVIDER_KIND --repo example/demo --body openai-compatible"
+            "gh variable set AI_REVIEW_PROVIDER_KIND -R example/demo --body openai-compatible"
         ),
         "provider variable should be configured: {gh_log}",
     );
     assert!(
-        gh_log.contains("gh label create review-this --repo example/demo --description Trigger AI PR review --color d73a4a --force"),
+        gh_log.contains("gh label create review-this -R example/demo --description Trigger AI PR review --color d73a4a --force"),
         "label should be ensured: {gh_log}",
     );
     assert!(
-        gh_log.contains("gh secret set AI_REVIEW_API_KEY --repo example/demo"),
+        gh_log.contains("gh secret set AI_REVIEW_API_KEY -R example/demo"),
         "secret should be configured when the user reuses LLM_API_KEY: {gh_log}",
     );
 }
@@ -556,7 +573,6 @@ openhands:
             ".github/workflows/ai-pr-review.yml".to_string(),
             "name: ai-pr-review\n".to_string(),
         ),
-        ("docs/tasks/README.md".to_string(), "# Tasks\n".to_string()),
     ])
 }
 
