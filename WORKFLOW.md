@@ -2,6 +2,7 @@
 tracker:
   kind: linear
   project_slug: "opensymphony-bootstrap-e7b957855cb7"
+  # tracker.api_key is optional here; the loader falls back to LINEAR_API_KEY.
   active_states:
     - Todo
     - In Progress
@@ -9,29 +10,67 @@ tracker:
     - Merging
     - Rework
   terminal_states:
+    - Done
     - Closed
     - Cancelled
     - Canceled
     - Duplicate
-    - Done
+
 polling:
   interval_ms: 5000
+
 workspace:
-  root: ~/code/symphony-workspaces
-logging:
-  level: debug
-agent:
-  max_concurrent_agents: 16
-  max_turns: 50
+  # `~` and exact $VAR/${VAR} tokens are expanded during config resolution.
+  # Any non-absolute path here is resolved relative to the repository's WORKFLOW.md.
+  root: ~/.opensymphony/workspaces
+
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/kumanday/OpenSymphony .
-codex:
-  command: codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh --model gpt-5.4 app-server
-  approval_policy: never
-  thread_sandbox: danger-full-access
-  turn_sandbox_policy:
-    type: dangerFullAccess
+    git clone --depth 1 'git@github.com:kumanday/OpenSymphony.git' .
+  before_run: |
+    git status --short
+  after_run: |
+    git status --short
+  before_remove: |
+    git status --short
+  timeout_ms: 60000
+
+agent:
+  max_concurrent_agents: 4
+  max_turns: 20
+  max_retry_backoff_ms: 300000
+  stall_timeout_ms: 300000
+
+openhands:
+  transport:
+    # The current readiness probe path only supports bare `http://host:port`
+    # origins. `https://`, path-prefixed, query-bearing, and fragment-bearing
+    # origins are rejected for now.
+    base_url: "http://127.0.0.1:8000"
+
+  local_server:
+    # Defaults to `true` when omitted. Explicit `false` is rejected until the
+    # runtime can honor workflow-owned local-server disablement instead of still
+    # deciding launch behavior from the localhost base URL plus pinned tooling.
+    enabled: true
+
+  conversation:
+    # Defaults to the current runtime-owned per-issue conversation reuse behavior.
+    # This path stays relative to the per-issue workspace; parent traversal is rejected.
+    persistence_dir_relative: ".opensymphony/openhands"
+    max_iterations: 500
+    stuck_detection: true
+    # Defaults to `NeverConfirm` when omitted.
+    confirmation_policy:
+      kind: NeverConfirm
+    agent:
+      # Defaults to `Agent` when omitted.
+      kind: Agent
+      llm:
+        # Exact $VAR/${VAR} tokens are resolved before runtime launch.
+        # Provider-specific auth/base-url overrides and extra LLM option keys are
+        # rejected until the current conversation-create adapter can forward them.
+        model: ${LLM_MODEL}
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
@@ -71,8 +110,8 @@ Work only in the provided repository copy. Do not touch any other path.
 
 The agent must be able to talk to Linear through direct GraphQL using
 `LINEAR_API_KEY` plus the repo-local `linear` skill assets. If the key is not
-present, treat that as a real blocker, record it in the workpad, and follow
-the blocked path in this workflow.
+present, treat that as a real blocker and follow the blocked path in this
+workflow.
 
 ## Default posture
 
@@ -96,11 +135,11 @@ the blocked path in this workflow.
 
 ## Related skills
 
-- `linear`: interact with Linear through the repo-local GraphQL helper, query files, and references.
+- `linear`: interact with Linear.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
-- `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
+- `land`: when ticket reaches `Merging`, explicitly open and follow `.agents/skills/land/SKILL.md`, which includes the `land` loop.
 
 ## Status map
 
@@ -123,12 +162,13 @@ the blocked path in this workflow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
    - `Human Review` -> wait and poll for decision/review updates.
-   - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
+   - `Merging` -> on entry, open and follow `.agents/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
 4. Check whether a PR already exists for the current branch and whether it is closed.
-   - If a branch PR exists and is `CLOSED` or `MERGED`, treat prior branch work as non-reusable for this run.
-   - Create a fresh branch from `origin/main` and restart execution flow as a new attempt.
+   - For `Todo`, `In Progress`, or `Rework`: if a branch PR exists and is `CLOSED` or `MERGED`, treat prior branch work as non-reusable for this run.
+   - For `Todo`, `In Progress`, or `Rework`: create a fresh branch from `origin/main` and restart execution flow as a new attempt.
+   - For `Human Review` or `Merging`: if the attached PR is already `MERGED`, do **not** reset the branch; update the workpad/dashboard as needed and move the issue to `Done`.
 5. For `Todo` tickets, do startup sequencing in this exact order:
    - `update_issue(..., state: "In Progress")`
    - find/create `## Agent Harness Workpad` bootstrap comment
@@ -222,7 +262,7 @@ Use this only when completion is blocked by missing required tools or missing au
     - Document these temporary proof steps and outcomes in the workpad `Validation`/`Notes` sections so reviewers can follow the evidence.
 6.  Re-check all acceptance criteria and close any gaps.
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
-8.  Attach PR URL to the Linear issue as a link resource using `linear_save_issue(links=[{url, title}])`. This is REQUIRED - do not rely on mentioning the PR URL in comments alone. The PR must appear in the issue's Links/Attachments section.
+8.  Attach the PR URL to the Linear issue through the repo-local `linear` skill using `attachmentLinkGitHubPR` (preferred) or `attachmentLinkURL` when the target is not a GitHub PR. This is REQUIRED - do not rely on mentioning the PR URL in comments alone. The PR must appear in the issue's Links/Attachments section.
     - Ensure the GitHub PR has label `symphony` (add it if missing).
     - Add the `review-this` label to trigger automated AI PR review.
 9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
@@ -249,11 +289,32 @@ Use this only when completion is blocked by missing required tools or missing au
 ## Step 3: Human Review and merge handling
 
 1. When the issue is in `Human Review`, do not code or change ticket content.
-2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
-3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
-4. If approved, human moves the issue to `Merging`.
-5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
-6. After merge is complete, move the issue to `Done`.
+2. On every `Human Review` poll cycle, fetch feedback in this order before doing anything else:
+   - latest Linear issue comments
+   - top-level PR comments (`gh pr view --comments`)
+   - inline PR review comments (`gh api repos/<owner>/<repo>/pulls/<pr>/comments`)
+   - PR review summaries/states (`gh pr view --json reviews,reviewDecision`)
+   - PR check state (`gh pr view --json statusCheckRollup`)
+3. Poll silently by default while the issue remains in `Human Review`.
+   - Do not add a new Linear comment.
+   - Do not rewrite the workpad comment just because a poll happened, the retry counter increased, or the PR is still waiting on the same human decision.
+   - Only update the single workpad comment when something materially changes: new actionable feedback arrives, approval/review/check/mergeability state changes, the ticket leaves `Human Review`, or you need a one-time escalation after an unusually long stall.
+4. Treat all human feedback channels as authoritative, not just inline review comments:
+   - a new Linear issue comment from the operator is actionable feedback
+   - a new top-level PR comment is actionable feedback
+   - a failing required PR check is actionable feedback even if no human comment was left
+5. If any actionable feedback or failing required check is present, move the issue to `Rework` and follow the rework flow.
+   - Do not wait for an inline review comment when a Linear comment, top-level PR comment, or failing check already requires action.
+6. If approved, human moves the issue to `Merging`.
+7. When the issue is in `Merging`, first inspect the attached PR state.
+   - If the PR is already `MERGED`, update the workpad/dashboard and move the issue directly to `Done`.
+   - If the PR is still open, re-run the PR feedback sweep protocol one final time. Do not proceed if:
+   - Any critical/major feedback remains unaddressed (no code change or pushback reply)
+   - Required checks are failing
+   - Required validation items from the ticket are incomplete
+   Wait for the human to move the issue to `Merging` only when genuinely ready.
+8. If the PR is still open, open and follow `.agents/skills/land/SKILL.md` to perform the repo-specific final merge-readiness checks and handoff. Do not call `gh pr merge` directly.
+9. Continue polling while the issue remains in `Merging`. As soon as the attached PR is observed in `MERGED` state, move the issue to `Done`.
 
 ## Step 4: Rework handling
 
@@ -266,14 +327,18 @@ For most code review feedback (addressing comments, small fixes, requested tweak
 1. **Keep the existing PR and branch open** - do not close them.
 2. Continue using the existing `## Agent Harness Workpad` comment - do not remove it.
 3. Address each piece of feedback directly in the current branch:
-   - Make the requested code changes
-   - Respond to inline comments (resolve or reply with justification)
-   - Push new commits to the same branch
+    - Make the requested code changes
+    - Read and address the latest Linear issue comments before GitHub review threads so operator guidance is not missed
+    - Read and address top-level PR comments in addition to inline review comments
+    - Respond to inline comments (resolve or reply with justification)
+    - Push new commits to the same branch
 4. Update the workpad with:
    - List of feedback items addressed
    - Any items pushed back with justification
    - Validation steps re-run
 5. Re-run validation/tests to ensure changes are correct.
+   - Always inspect current PR checks (`gh pr view --json statusCheckRollup`) before declaring feedback addressed.
+   - If any required check is failing, treat that as unfinished rework even if the latest review text is positive.
 6. Add the `review-this` label to the PR to re-trigger automated AI PR review.
 7. Move the issue back to `Human Review` once all feedback is addressed.
 
@@ -318,7 +383,7 @@ For major rework:
 - If issue state is `Backlog`, do not modify it; wait for human to move it to `Todo`.
 - Do not edit the issue body/description for planning or progress tracking.
 - Use exactly one persistent workpad comment (`## Agent Harness Workpad`) per issue.
-- If a Linear action fails, retry it with the repo-local `linear` helper and the checked-in query files before reporting a blocker.
+- If comment editing fails, use the repo-local `linear` helper with `queries/comment_update.graphql` before reporting a blocker.
 - Temporary proof edits are allowed only for local verification and must be reverted before commit.
 - If out-of-scope improvements are found, create a separate Backlog issue rather
   than expanding current scope, and include a clear
@@ -326,6 +391,7 @@ For major rework:
   link to the current issue, and `blockedBy` when the follow-up depends on
   the current issue.
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
+- **Never merge or allow merge of a PR with outstanding critical feedback or failing checks.** This includes not moving to `Merging` if feedback sweep shows unresolved comments.
 - In `Human Review`, do not make changes; wait and poll.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
@@ -334,6 +400,8 @@ For major rework:
 ## Dependency Blocker Dashboard Maintenance
 
 This workflow manages multiple concurrent issues with complex dependencies. To help human reviewers prioritize which PRs to review first, agents must maintain a **Dependency Blockers & PR Review Priority** table in the Linear project description.
+
+The Linear project overview is a live dashboard, not a one-off narrative summary. The project description must always begin with the `## Dependency Blockers & PR Review Priority` section, and that section must be regenerated in place whenever the underlying review queue changes.
 
 ### When to update the dashboard
 
@@ -348,6 +416,8 @@ Update the priority table in the Linear project overview whenever:
 1. Use the repo-local Linear helper with `queries/project_by_slug.graphql` to
    fetch the current project description
 2. Locate the `## Dependency Blockers & PR Review Priority` section
+   - If it does not exist, create it at the very top of the project description.
+   - If the top of the description contains a stale narrative overview or milestone dump, replace that top section with the live dashboard and keep any still-useful static planning notes below it.
 3. Regenerate the table with current data:
    - Query all issues in `Human Review`, `Merging`, `Rework`, `In Progress`, and `Todo` states
    - Include `includeRelations: true` to get blockedBy/blocks data
@@ -360,6 +430,7 @@ Update the priority table in the Linear project overview whenever:
 5. Use the repo-local Linear helper with
    `queries/project_update_content.graphql` to update the description with the
    new table
+6. Do not append ad hoc prose summaries above the dashboard. Keep the dashboard concise, current, and reviewer-focused.
 
 ### Priority calculation guidelines
 
@@ -367,7 +438,7 @@ For each issue with a pending PR, score it by:
 1. **Is it unblocked?** (no open blockers in non-terminal states) → Higher priority
 2. **How many issues does it block?** (count blocks relationships) → More = higher priority
 3. **Is it a parent issue?** (has child issues grouped under it) → These should generally be P1 minimum
-4. **Is it in the critical path?** (e.g., COE-266 → COE-268 → COE-269 chain) → P0
+4. **Is it in the critical path?** (e.g., issue chain A → B → C) → P0
 
 ### Table format
 
@@ -378,7 +449,7 @@ Use this exact markdown structure (no Status column - Linear issue refs automati
 
 | Priority | Issue | PR | Blocked By | Blocks | Impact |
 |:--------:|:------|:--:|:-----------|:-------|:-------|
-| 🔴 **P0** | [COE-XXX](<https://linear.app/trilogy-ai-coe/issue/COE-XXX>) | [#N](<https://github.com/kumanday/OpenSymphony/pull/N>) | Blockers | Count | Brief description |
+| 🔴 **P0** | [XXX](<https://linear.app/your-team/issue/XXX>) | [#N](<https://github.com/your-org/your-repo/pull/N>) | Blockers | Count | Brief description |
 | 🟡 **P1** | ... | ... | ... | ... | ... |
 | 🟢 **P2** | ... | ... | ... | ... | ... |
 | ⚪ **P3** | ... | ... | ... | ... | ... |
@@ -392,7 +463,7 @@ Use this exact markdown structure (no Status column - Linear issue refs automati
 
 Use this exact structure for the persistent workpad comment and keep it updated in place throughout execution:
 
-````md
+```md
 ## Agent Harness Workpad
 
 ```text
@@ -401,10 +472,10 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 
 ### Plan
 
-- [ ] 1\. Parent task
+- [ ] 1. Parent task
   - [ ] 1.1 Child task
   - [ ] 1.2 Child task
-- [ ] 2\. Parent task
+- [ ] 2. Parent task
 
 ### Acceptance Criteria
 
@@ -429,4 +500,4 @@ Timestamped audit log. Add an entry after every milestone (state change, reprodu
 ### Confusions
 
 - <only include when something was confusing during execution>
-````
+```
