@@ -37,7 +37,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/kumanday/OpenSymphony"
 rust-version = "1.93"
-version = "1.0.1"
+version = "1.0.2"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
@@ -62,16 +62,16 @@ clap = { version = "4.5", features = ["derive", "env"] }
 ftui = { version = "0.2.1", features = ["crossterm"] }
 futures-util = "0.3"
 libc = "0.2"
-opensymphony-cli = { version = "=1.0.1", path = "crates/opensymphony-cli" }
-opensymphony-control = { version = "=1.0.1", path = "crates/opensymphony-control" }
-opensymphony-domain = { version = "=1.0.1", path = "crates/opensymphony-domain" }
-opensymphony-linear = { version = "=1.0.1", path = "crates/opensymphony-linear" }
-opensymphony-openhands = { version = "=1.0.1", path = "crates/opensymphony-openhands" }
-opensymphony-orchestrator = { version = "=1.0.1", path = "crates/opensymphony-orchestrator" }
-opensymphony-testkit = { version = "=1.0.1", path = "crates/opensymphony-testkit" }
-opensymphony-tui = { version = "=1.0.1", path = "crates/opensymphony-tui" }
-opensymphony-workflow = { version = "=1.0.1", path = "crates/opensymphony-workflow" }
-opensymphony-workspace = { version = "=1.0.1", path = "crates/opensymphony-workspace" }
+opensymphony-cli = { version = "=1.0.2", path = "crates/opensymphony-cli" }
+opensymphony-control = { version = "=1.0.2", path = "crates/opensymphony-control" }
+opensymphony-domain = { version = "=1.0.2", path = "crates/opensymphony-domain" }
+opensymphony-linear = { version = "=1.0.2", path = "crates/opensymphony-linear" }
+opensymphony-openhands = { version = "=1.0.2", path = "crates/opensymphony-openhands" }
+opensymphony-orchestrator = { version = "=1.0.2", path = "crates/opensymphony-orchestrator" }
+opensymphony-testkit = { version = "=1.0.2", path = "crates/opensymphony-testkit" }
+opensymphony-tui = { version = "=1.0.2", path = "crates/opensymphony-tui" }
+opensymphony-workflow = { version = "=1.0.2", path = "crates/opensymphony-workflow" }
+opensymphony-workspace = { version = "=1.0.2", path = "crates/opensymphony-workspace" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 reqwest-eventsource = "0.6"
 serde = { version = "1", features = ["derive"] }

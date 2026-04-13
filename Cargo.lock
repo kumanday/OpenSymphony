@@ -1370,7 +1370,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "opensymphony"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "opensymphony-cli",
  "tokio",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-cli"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-control"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-stream",
  "axum",
@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-domain"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "serde",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-linear"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "axum",
  "chrono",
@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-openhands"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-orchestrator"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "axum",
  "chrono",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-testkit"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "axum",
  "chrono",
@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-tui"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "ftui",
@@ -1523,7 +1523,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-workflow"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "liquid",
  "serde",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "opensymphony-workspace"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "chrono",
  "libc",

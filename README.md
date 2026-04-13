@@ -36,30 +36,19 @@ older setup.
 - Linear API key (for tracker integration)
 - LLM API key (any LiteLLM-compatible provider: OpenAI, Anthropic, Fireworks, etc.)
 
+For platform-specific Rust and Python/`uv` setup steps, see [Prerequisites](docs/prerequisites.md).
+
 ### Installation
 
 ```bash
 cargo install opensymphony
 ```
 
-If you want OpenSymphony to manage a local OpenHands agent-server for you,
-install the pinned runtime once:
+OpenSymphony manages a local OpenHands agent-server; install the pinned runtime like this:
 
 ```bash
 opensymphony install openhands
 ```
-
-If you already run an external OpenHands agent-server, `cargo install opensymphony`
-is enough for the CLI.
-
-If you are developing OpenSymphony itself, clone the repository and install from
-the checkout instead:
-
-```bash
-git clone https://github.com/kumanday/OpenSymphony.git && cd OpenSymphony
-cargo install --path .
-```
-
 ### Bootstrap A Target Repo
 
 Bootstrap the target repository in place:

@@ -4,6 +4,13 @@ This document is for contributors working on OpenSymphony itself. For user
 setup and operator flows, start with the [README](../README.md) and the docs
 linked there.
 
+If you are developing OpenSymphony itself, clone the repository and install from the checkout instead:
+
+```bash
+git clone https://github.com/kumanday/OpenSymphony.git && cd OpenSymphony
+cargo install --path .
+```
+
 ## Repository structure
 
 ```text
