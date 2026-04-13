@@ -77,8 +77,10 @@ enum RunCommandError {
     WorkspaceManager(#[from] WorkspaceError),
     #[error("failed to prepare OpenHands transport: {0}")]
     Transport(#[from] OpenHandsError),
-    #[error("failed to load local OpenHands tooling: {0}")]
-    Tooling(#[from] opensymphony_openhands::LocalToolingError),
+    #[error(
+        "managed local OpenHands tooling at {tool_dir} is missing or invalid: {detail}. Run `opensymphony install openhands` or `opensymphony doctor --config <path>`."
+    )]
+    ToolingSetupRequired { tool_dir: PathBuf, detail: String },
     #[error("failed to start local OpenHands supervisor: {0}")]
     Supervisor(#[from] opensymphony_openhands::SupervisorError),
     #[error("failed to build scheduler configuration: {0}")]
@@ -88,7 +90,7 @@ enum RunCommandError {
     #[error("control-plane server exited unexpectedly: {0}")]
     Serve(#[source] std::io::Error),
     #[error(
-        "workflow config requires a local OpenHands server, but no `openhands.tool_dir` was provided via config"
+        "workflow config requires a managed local OpenHands server, but `openhands.tool_dir` is missing from config.yaml (recommended: ~/.opensymphony/openhands-server)"
     )]
     MissingToolDir,
     #[error(

@@ -1,6 +1,6 @@
 target_repo: ../target-repo
 openhands:
-  tool_dir: ../../tools/openhands-server
+  tool_dir: ~/.opensymphony/openhands-server
   probe_model: ${LLM_MODEL}
   probe_api_key_env: LLM_API_KEY
   probe_llm_base_url_env: LLM_BASE_URL

@@ -361,16 +361,19 @@ fn doctor_fails_when_required_prerequisite_is_missing() {
 fn doctor_accepts_present_prerequisites_from_path() {
     let repo_root = repo_root();
     let fake_bin_dir = TempDir::new().expect("fake bin dir should be created");
+    let home_dir = TempDir::new().expect("fake home dir should be created");
 
     for command in ["cargo", "curl", "git", "uv"] {
         write_fake_executable(fake_bin_dir.path().join(command));
     }
+    write_bash_wrapper(fake_bin_dir.path().join("bash"));
 
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .arg("doctor")
         .arg("--config")
         .arg("examples/configs/local-dev.yaml")
         .current_dir(&repo_root)
+        .env("HOME", home_dir.path())
         .env("PATH", path_only(fake_bin_dir.path()))
         .output()
         .expect("doctor command should run");
@@ -387,6 +390,101 @@ fn doctor_accepts_present_prerequisites_from_path() {
             "doctor should report a passing prerequisite check for {check}: stdout={stdout}",
         );
     }
+    assert!(
+        stdout.contains("[PASS] openhands-install:"),
+        "doctor should report the managed-local tooling bootstrap: stdout={stdout}",
+    );
+    assert!(
+        home_dir
+            .path()
+            .join(".opensymphony/openhands-server/install.sh")
+            .is_file(),
+        "doctor should bootstrap the managed-local tooling into the HOME-based tool dir",
+    );
+}
+
+#[test]
+fn doctor_bootstraps_missing_managed_local_tooling_into_explicit_configured_dir() {
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let target_repo = temp_dir.path().join("target-repo");
+    let workspace_root = temp_dir.path().join("var/workspaces");
+    let tool_dir = temp_dir.path().join("managed/openhands-server");
+    let config_path = temp_dir.path().join("doctor.yaml");
+    let fake_bin_dir = TempDir::new().expect("fake bin dir should be created");
+
+    std::fs::create_dir_all(&target_repo).expect("target repo should be created");
+    std::fs::write(
+        target_repo.join("WORKFLOW.md"),
+        doctor_workflow_source(&workspace_root, "http://127.0.0.1:8000"),
+    )
+    .expect("workflow should be written");
+    let config = serde_yaml::to_string(&Value::Mapping(
+        [
+            (
+                Value::String("target_repo".to_string()),
+                Value::String(target_repo.display().to_string()),
+            ),
+            (
+                Value::String("openhands".to_string()),
+                Value::Mapping(
+                    [
+                        (
+                            Value::String("tool_dir".to_string()),
+                            Value::String(tool_dir.display().to_string()),
+                        ),
+                        (Value::String("probe_model".to_string()), Value::Null),
+                        (Value::String("probe_api_key_env".to_string()), Value::Null),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ),
+            (
+                Value::String("linear".to_string()),
+                Value::Mapping(
+                    [(Value::String("enabled".to_string()), Value::Bool(false))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    ))
+    .expect("config should serialize");
+    std::fs::write(&config_path, config).expect("config should be written");
+
+    for command in ["cargo", "curl", "git", "uv"] {
+        write_fake_executable(fake_bin_dir.path().join(command));
+    }
+    write_bash_wrapper(fake_bin_dir.path().join("bash"));
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .arg("doctor")
+        .arg("--config")
+        .arg(&config_path)
+        .env("PATH", path_only(fake_bin_dir.path()))
+        .output()
+        .expect("doctor command should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "doctor should bootstrap missing managed-local tooling: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("[PASS] openhands-install: installed pinned OpenHands tooling 1.14.0"),
+        "doctor should report the bootstrap install explicitly: stdout={stdout}",
+    );
+    assert!(
+        tool_dir.join("install.sh").is_file()
+            && tool_dir.join("run-local.sh").is_file()
+            && tool_dir.join("pyproject.toml").is_file()
+            && tool_dir.join("uv.lock").is_file()
+            && tool_dir.join("version.txt").is_file(),
+        "doctor should materialize the managed-local tooling bundle into the configured tool dir",
+    );
 }
 
 #[test]
@@ -542,6 +640,42 @@ fn write_fake_executable(path: PathBuf) {
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).expect("fake executable should be executable");
     }
+}
+
+fn write_bash_wrapper(path: PathBuf) {
+    let bash = real_bash_path();
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", bash.display()),
+    )
+    .expect("bash wrapper should be written");
+    #[cfg(unix)]
+    {
+        let mut perms = std::fs::metadata(&path)
+            .expect("bash wrapper metadata should exist")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("bash wrapper should be executable");
+    }
+}
+
+fn real_bash_path() -> PathBuf {
+    let output = Command::new("bash")
+        .args(["-lc", "command -v bash"])
+        .output()
+        .expect("bash lookup should run");
+    assert!(
+        output.status.success(),
+        "bash lookup should succeed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    PathBuf::from(
+        String::from_utf8(output.stdout)
+            .expect("bash lookup output should be UTF-8")
+            .trim(),
+    )
 }
 
 fn doctor_workflow_source(workspace_root: &std::path::Path, base_url: &str) -> String {

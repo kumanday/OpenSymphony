@@ -47,6 +47,8 @@ Use for:
 Repository ownership:
 
 - `tools/openhands-server/` owns the local package pin
+- published `opensymphony` bundles those pinned files and materializes them into
+  `~/.opensymphony/openhands-server` via `opensymphony install openhands`
 - `run-local.sh` launches the pinned server
 - the supervisor probes readiness before treating the server as usable
 

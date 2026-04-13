@@ -1,9 +1,12 @@
 [package]
 name = "opensymphony-workflow"
+description = "Workflow manifest parsing and template rendering for OpenSymphony"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+categories = ["development-tools"]
 
 [lib]
 path = "src/lib.rs"

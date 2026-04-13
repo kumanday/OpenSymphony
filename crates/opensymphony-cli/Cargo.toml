@@ -1,9 +1,13 @@
 [package]
 name = "opensymphony-cli"
+description = "CLI entrypoints for the OpenSymphony orchestrator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+keywords = ["ai", "agents", "orchestration", "linear", "openhands"]
+categories = ["command-line-utilities", "development-tools"]
 
 [lib]
 path = "src/lib.rs"
@@ -19,14 +23,14 @@ workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 clap.workspace = true
-opensymphony-linear = { path = "../opensymphony-linear" }
-opensymphony-control = { path = "../opensymphony-control" }
-opensymphony-domain = { path = "../opensymphony-domain" }
-opensymphony-openhands = { path = "../opensymphony-openhands" }
-opensymphony-orchestrator = { path = "../opensymphony-orchestrator" }
-opensymphony-workflow = { path = "../opensymphony-workflow" }
-opensymphony-tui = { path = "../opensymphony-tui" }
-opensymphony-workspace = { path = "../opensymphony-workspace" }
+opensymphony-control.workspace = true
+opensymphony-domain.workspace = true
+opensymphony-linear.workspace = true
+opensymphony-openhands.workspace = true
+opensymphony-orchestrator.workspace = true
+opensymphony-tui.workspace = true
+opensymphony-workflow.workspace = true
+opensymphony-workspace.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -41,7 +45,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
-opensymphony-testkit = { path = "../opensymphony-testkit" }
+opensymphony-testkit.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

@@ -98,6 +98,62 @@ async fn run_accepts_existing_repo_config_shape_with_extra_doctor_fields() {
     terminate_child(&mut child).await;
 }
 
+#[test]
+fn run_fails_with_install_guidance_when_managed_local_tooling_is_missing() {
+    let project = TempDir::new().expect("temp project should exist");
+    let bind_addr = reserve_socket_addr();
+    std::fs::write(
+        project.path().join("WORKFLOW.md"),
+        r#"---
+tracker:
+  kind: linear
+  endpoint: http://127.0.0.1:9/graphql
+  project_slug: test-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+---
+
+# Test Workflow
+
+Run the scheduler.
+"#,
+    )
+    .expect("workflow should be written");
+    std::fs::write(
+        project.path().join("config.yaml"),
+        format!(
+            "control_plane:\n  bind: {bind_addr}\nopenhands:\n  tool_dir: ./managed/openhands-server\nlinear:\n  enabled: false\n"
+        ),
+    )
+    .expect("config should be written");
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .arg("run")
+        .current_dir(project.path())
+        .env("LINEAR_API_KEY", "test-linear-key")
+        .output()
+        .expect("run command should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        !output.status.success(),
+        "run should fail when managed-local tooling is missing: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stderr.contains("opensymphony install openhands")
+            && stderr.contains("opensymphony doctor --config <path>"),
+        "run should explain how to provision the managed-local tooling: stderr={stderr}",
+    );
+}
+
 fn spawn_run_child(project_root: &std::path::Path, extra_args: &[&str]) -> Child {
     let mut command = Command::new(env!("CARGO_BIN_EXE_opensymphony"));
     command

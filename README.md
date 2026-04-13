@@ -39,10 +39,25 @@ older setup.
 ### Installation
 
 ```bash
+cargo install opensymphony
+```
+
+If you want OpenSymphony to manage a local OpenHands agent-server for you,
+install the pinned runtime once:
+
+```bash
+opensymphony install openhands
+```
+
+If you already run an external OpenHands agent-server, `cargo install opensymphony`
+is enough for the CLI.
+
+If you are developing OpenSymphony itself, clone the repository and install from
+the checkout instead:
+
+```bash
 git clone https://github.com/kumanday/OpenSymphony.git && cd OpenSymphony
-
 cargo install --path .
-
 ```
 
 ### Bootstrap A Target Repo
@@ -59,12 +74,6 @@ can optionally scaffold automated code review via the [OpenHands PR Review Plugi
 
 ### Running the Orchestrator
 
-Run the preflight check from the OpenSymphony checkout:
-
-```bash
-opensymphony doctor
-```
-
 Then start from the target repository:
 
 ```bash
@@ -72,7 +81,7 @@ cd /path/to/target-repo
 opensymphony run
 ```
 
-Ror real-time monitoring while the orchestrator is running, run the TUI in a separate terminal window:
+For real-time monitoring while the orchestrator is running, run the TUI in a separate terminal window:
 ```bash
 opensymphony tui
 ```
@@ -85,7 +94,14 @@ repo details behind `init`, see [Configuration](docs/configuration.md).
 For alternate config paths, `debug`, `rehydrate`, packaging, and local operator
 workflows, see [Operations](docs/operations.md).
 
-To innspect the command surface, run:
+Optional troubleshooting and validation:
+
+```bash
+cd /path/to/target-repo
+opensymphony doctor
+```
+
+To inspect the command surface, run:
 ```
 opensymphony --help
 ```
@@ -272,7 +288,8 @@ OpenSymphony pins exact versions for reproducibility:
 - `openhands-sdk==1.14.0`
 - Rust stable toolchain
 
-See `tools/openhands-server/` for the pinned environment.
+The managed local OpenHands bundle is sourced from `tools/openhands-server/`
+and provisioned with `opensymphony install openhands`.
 
 ## License
 

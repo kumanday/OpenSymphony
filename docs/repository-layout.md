@@ -91,7 +91,8 @@ OpenSymphony/
 
 ### `tools/openhands-server/`
 
-Owns the pinned local OpenHands package and launch scripts.
+Owns the pinned local OpenHands package and launch scripts that the published
+CLI embeds for `opensymphony install openhands`.
 
 ### `examples/`
 

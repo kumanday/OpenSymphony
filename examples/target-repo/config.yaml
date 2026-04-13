@@ -2,4 +2,4 @@ control_plane:
   bind: 127.0.0.1:2468
 
 openhands:
-  tool_dir: ../../tools/openhands-server
+  tool_dir: ~/.opensymphony/openhands-server

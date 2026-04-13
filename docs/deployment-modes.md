@@ -44,8 +44,10 @@ developer machine
 - no Docker container per workspace
 - host filesystem and host process access are expected
 - loopback-only bind is required by default
-- launch metadata comes from the repo-local `tools/openhands-server/` wrapper
-  and pin files, not a globally installed `openhands` binary
+- launch metadata comes from the pinned `tools/openhands-server/` source bundle,
+  which `opensymphony install openhands` materializes into
+  `~/.opensymphony/openhands-server`; the runtime does not rely on a globally
+  installed `openhands` binary
 
 ### Best use case
 

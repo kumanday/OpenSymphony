@@ -16,15 +16,17 @@ Recommended CLI commands:
 ## 2. First-run flow
 
 ```bash
-cargo install --path . --locked
-./tools/openhands-server/install.sh
+cargo install opensymphony
+opensymphony install openhands
 opensymphony --help
 
 cd /path/to/target-repo
 opensymphony init
-opensymphony doctor --config ./config.yaml
 opensymphony run --config ./config.yaml
 ```
+
+If you already run an external OpenHands agent-server, you can skip
+`opensymphony install openhands`.
 
 Important `init` behavior:
 
@@ -61,6 +63,10 @@ opensymphony tui --url http://127.0.0.1:2468/ --exit-after-ms 1200
 
 `opensymphony doctor` is a real preflight tool.
 
+It is optional troubleshooting/preflight help, not the primary install path for
+managed local OpenHands. The normal setup flow is `cargo install opensymphony`
+followed by `opensymphony install openhands`.
+
 Current scope:
 
 - loads and resolves the target repo `WORKFLOW.md`
@@ -79,6 +85,10 @@ Expected checks include:
 - `cargo`, `curl`, `git`, and `uv` are on `PATH`
 - the pinned OpenHands toolchain is present
 - loopback/local safety warnings are surfaced
+
+When the configured transport uses managed local OpenHands, `doctor` can
+bootstrap the pinned tooling into the configured `openhands.tool_dir` before
+continuing the rest of its checks.
 
 ## 5. Linear operational model
 

@@ -1,17 +1,20 @@
 [package]
 name = "opensymphony-orchestrator"
+description = "Scheduler and orchestration core for OpenSymphony"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+categories = ["development-tools"]
 
 [lib]
 path = "src/lib.rs"
 
 [dependencies]
 chrono = { workspace = true }
-opensymphony-domain = { path = "../opensymphony-domain" }
-opensymphony-workflow = { path = "../opensymphony-workflow" }
+opensymphony-domain.workspace = true
+opensymphony-workflow.workspace = true
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -19,6 +22,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 axum = { workspace = true }
 chrono = { workspace = true }
-opensymphony-linear = { path = "../opensymphony-linear" }
+opensymphony-linear.workspace = true
 serde_json = { workspace = true }
 tokio = { workspace = true }
