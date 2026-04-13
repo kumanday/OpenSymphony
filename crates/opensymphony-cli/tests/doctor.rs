@@ -3,7 +3,7 @@ use std::{ffi::OsString, path::PathBuf, process::Command};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use opensymphony_testkit::FakeOpenHandsServer;
+use crate::opensymphony_testkit::FakeOpenHandsServer;
 use serde_yaml::Value;
 use tempfile::TempDir;
 
@@ -12,12 +12,7 @@ async fn doctor_live_probe_succeeds_against_fake_server() {
     let server = FakeOpenHandsServer::start()
         .await
         .expect("fake server should start");
-    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir should have workspace parent")
-        .parent()
-        .expect("workspace root should exist")
-        .to_path_buf();
+    let repo_root = repo_root();
     let temp_dir = TempDir::new().expect("temp dir should be created");
     let workspace_root = temp_dir.path().join("var/workspaces");
     let target_repo = temp_dir.path().join("target-repo");
@@ -599,12 +594,17 @@ fn run_local_launcher_rejects_extra_agent_server_flags() {
 }
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir should have workspace parent")
-        .parent()
-        .expect("workspace root should exist")
-        .to_path_buf()
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if manifest_dir.join("Cargo.toml").is_file() && manifest_dir.join("README.md").is_file() {
+        manifest_dir
+    } else {
+        manifest_dir
+            .parent()
+            .expect("crate dir should have workspace parent")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
 }
 
 fn path_only(path: &std::path::Path) -> OsString {

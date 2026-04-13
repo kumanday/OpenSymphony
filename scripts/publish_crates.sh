@@ -5,24 +5,23 @@ cd "$(dirname "$0")/.."
 
 usage() {
   cat <<'EOF'
-Usage: ./scripts/publish_crates.sh [--execute] [--dry-run] [--allow-dirty] [--from <crate>] [--skip-wait]
+Usage: ./scripts/publish_crates.sh [--execute] [--dry-run] [--allow-dirty] [--skip-wait]
 
-Publishes the OpenSymphony workspace crates to crates.io in dependency order.
+Publishes the public OpenSymphony package to crates.io.
 
 Modes:
-  --dry-run       Run `cargo publish --dry-run` for each crate.
-  --execute       Perform the real publish sequence.
+  --dry-run       Run `cargo publish --dry-run -p opensymphony`.
+  --execute       Perform the real publish for `opensymphony`.
 
 Options:
   --allow-dirty   Pass `--allow-dirty` through to cargo publish.
-  --from <crate>  Resume from the named crate in the publish order.
-  --skip-wait     Do not wait for each uploaded crate to appear on crates.io.
+  --skip-wait     Do not wait for the uploaded package to appear on crates.io.
 
 Notes:
   - Choose exactly one of `--dry-run` or `--execute`.
-  - A full workspace dry run cannot verify dependent crates until their
-    internal dependencies already exist on crates.io. For a first release,
-    dry-run the leaf crates, then use `--execute` for the staged upload.
+  - OpenSymphony now publishes a single crates.io package: `opensymphony`.
+  - Internal subsystem boundaries remain in-repo source trees under `crates/`,
+    but they are not published as standalone crates.
 EOF
 }
 
@@ -52,7 +51,6 @@ wait_for_crate() {
 
 mode=""
 allow_dirty=false
-from_crate=""
 skip_wait=false
 
 while (($# > 0)); do
@@ -68,15 +66,6 @@ while (($# > 0)); do
     --allow-dirty)
       allow_dirty=true
       shift
-      ;;
-    --from)
-      if (($# < 2)); then
-        echo "--from requires a crate name" >&2
-        usage
-        exit 1
-      fi
-      from_crate="$2"
-      shift 2
       ;;
     --skip-wait)
       skip_wait=true
@@ -100,59 +89,27 @@ if [[ -z "$mode" ]]; then
   exit 1
 fi
 
-packages=(
-  opensymphony-domain
-  opensymphony-workflow
-  opensymphony-workspace
-  opensymphony-linear
-  opensymphony-orchestrator
-  opensymphony-control
-  opensymphony-openhands
-  opensymphony-tui
-  opensymphony-testkit
-  opensymphony-cli
-  opensymphony
-)
-
-start_index=0
-if [[ -n "$from_crate" ]]; then
-  found=false
-  for i in "${!packages[@]}"; do
-    if [[ "${packages[$i]}" == "$from_crate" ]]; then
-      start_index="$i"
-      found=true
-      break
-    fi
-  done
-  if [[ "$found" != true ]]; then
-    echo "crate not found in publish order: $from_crate" >&2
-    exit 1
-  fi
-fi
-
 version="$(workspace_version)"
 if [[ -z "$version" ]]; then
   echo "failed to determine workspace version from Cargo.toml" >&2
   exit 1
 fi
 
-for ((i = start_index; i < ${#packages[@]}; i++)); do
-  pkg="${packages[$i]}"
-  cmd=(cargo publish -p "$pkg")
+pkg="opensymphony"
+cmd=(cargo publish -p "$pkg")
 
-  if [[ "$mode" == "dry-run" ]]; then
-    cmd+=(--dry-run)
-  fi
+if [[ "$mode" == "dry-run" ]]; then
+  cmd+=(--dry-run)
+fi
 
-  if [[ "$allow_dirty" == true ]]; then
-    cmd+=(--allow-dirty)
-  fi
+if [[ "$allow_dirty" == true ]]; then
+  cmd+=(--allow-dirty)
+fi
 
-  echo "==> ${cmd[*]}"
-  "${cmd[@]}"
+echo "==> ${cmd[*]}"
+"${cmd[@]}"
 
-  if [[ "$mode" == "execute" && "$skip_wait" != true ]]; then
-    echo "==> waiting for ${pkg} ${version} to appear on crates.io"
-    wait_for_crate "$pkg" "$version"
-  fi
-done
+if [[ "$mode" == "execute" && "$skip_wait" != true ]]; then
+  echo "==> waiting for ${pkg} ${version} to appear on crates.io"
+  wait_for_crate "$pkg" "$version"
+fi

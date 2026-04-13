@@ -8,6 +8,21 @@ use std::{
     time::Duration,
 };
 
+use crate::opensymphony_domain::{
+    IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RetryAttempt,
+    RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
+};
+use crate::opensymphony_openhands::{
+    ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
+    IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig, LocalServerSupervisor,
+    LocalServerTooling, OpenHandsClient, RuntimeStreamConfig, SendMessageRequest,
+    SupervisedServerConfig, SupervisorConfig, TransportConfig,
+};
+use crate::opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
+use crate::opensymphony_workspace::{
+    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, WorkspaceManager,
+    WorkspaceManagerConfig,
+};
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -21,21 +36,6 @@ use axum::{
 };
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use opensymphony_domain::{
-    IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RetryAttempt,
-    RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
-};
-use opensymphony_openhands::{
-    ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
-    IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig, LocalServerSupervisor,
-    LocalServerTooling, OpenHandsClient, RuntimeStreamConfig, SendMessageRequest,
-    SupervisedServerConfig, SupervisorConfig, TransportConfig,
-};
-use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
-use opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, WorkspaceManager,
-    WorkspaceManagerConfig,
-};
 use serde_json::{Value, json};
 use tokio::{
     net::TcpListener as TokioTcpListener,
@@ -801,7 +801,7 @@ fn run_attempt(
 
 async fn read_conversation_manifest(
     manager: &WorkspaceManager,
-    handle: &opensymphony_workspace::WorkspaceHandle,
+    handle: &crate::opensymphony_workspace::WorkspaceHandle,
 ) -> Result<IssueConversationManifest, String> {
     let raw = manager
         .read_text_artifact(handle, &handle.conversation_manifest_path())
@@ -814,7 +814,7 @@ async fn read_conversation_manifest(
 
 async fn read_session_context(
     manager: &WorkspaceManager,
-    handle: &opensymphony_workspace::WorkspaceHandle,
+    handle: &crate::opensymphony_workspace::WorkspaceHandle,
 ) -> Result<IssueSessionContext, String> {
     let raw = manager
         .read_text_artifact(handle, &handle.generated_dir().join("session-context.json"))
@@ -893,12 +893,17 @@ fn write_json(path: &Path, value: &Value) {
 }
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir should have workspace parent")
-        .parent()
-        .expect("workspace root should exist")
-        .to_path_buf()
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if manifest_dir.join("Cargo.toml").is_file() && manifest_dir.join("README.md").is_file() {
+        manifest_dir
+    } else {
+        manifest_dir
+            .parent()
+            .expect("crate dir should have workspace parent")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
 }
 
 fn free_port() -> u16 {

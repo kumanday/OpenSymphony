@@ -1,0 +1,5 @@
+mod compat;
+pub use compat::*;
+
+#[path = "../crates/opensymphony-cli/tests/run.rs"]
+mod run;

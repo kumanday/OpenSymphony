@@ -27,6 +27,11 @@ OpenSymphony `1.0.0` is the compatibility boundary for the GraphQL-only Linear
 rewrite. See [Migration Guide](docs/migration-1.0.0.md) if you are upgrading an
 older setup.
 
+Packaging note: crates.io exposes a single public package, `opensymphony`.
+Internally, the repo still keeps clear subsystem boundaries under
+`crates/opensymphony-*`, but those directories are now internal module trees,
+not separately published crates.
+
 ## Quick Start
 
 ### Prerequisites
@@ -129,17 +134,20 @@ opensymphony --help
     └─────────────────┘        └─────────┘
 ```
 
-### Component Overview
+### Internal Boundaries
 
-| Component | Responsibility |
+OpenSymphony keeps explicit internal subsystem boundaries while shipping as one
+installable crates.io package:
+
+| Internal module tree | Responsibility |
 |-----------|----------------|
-| `opensymphony-orchestrator` | Poll loop, scheduling, retries, state machine |
-| `opensymphony-linear` | GraphQL client for orchestrator-side Linear reads |
-| `opensymphony-openhands` | REST/WebSocket client for agent runtime |
-| `opensymphony-workspace` | Workspace lifecycle, hooks, containment |
-| `opensymphony-control` | Control plane API and snapshot derivation |
-| `opensymphony-tui` | FrankenTUI operator client |
-| `opensymphony-cli` | CLI entrypoints: init, run, debug, daemon (demo), tui, doctor, rehydrate |
+| `opensymphony_orchestrator` | Poll loop, scheduling, retries, state machine |
+| `opensymphony_linear` | GraphQL client for orchestrator-side Linear reads |
+| `opensymphony_openhands` | REST/WebSocket client for agent runtime |
+| `opensymphony_workspace` | Workspace lifecycle, hooks, containment |
+| `opensymphony_control` | Control plane API and snapshot derivation |
+| `opensymphony_tui` | FrankenTUI operator client |
+| `opensymphony_cli` | CLI entrypoints: init, run, debug, daemon (demo), tui, doctor, rehydrate |
 
 ## Deployment Modes
 
@@ -234,13 +242,13 @@ CLI sessions bound to the same port.
 
 ```bash
 # Unit tests
-cargo test --workspace
+cargo test
 
 # Static validation
-cargo run -p opensymphony-cli -- doctor
+opensymphony doctor
 
 # Live tests (requires OpenHands server)
-OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands
+OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test --test live_local_suite -- --ignored --nocapture --test-threads=1
 
 # Smoke test
 ./scripts/smoke_local.sh

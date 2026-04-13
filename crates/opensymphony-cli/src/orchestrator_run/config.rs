@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
+use crate::opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
 use serde::Deserialize;
 use tokio::fs;
 

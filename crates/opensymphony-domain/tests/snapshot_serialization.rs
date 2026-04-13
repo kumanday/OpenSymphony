@@ -1,5 +1,4 @@
-use chrono::{TimeZone, Utc};
-use opensymphony_domain::{
+use crate::opensymphony_domain::{
     ControlPlaneAgentServerStatus as AgentServerStatus,
     ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
     ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
@@ -7,6 +6,7 @@ use opensymphony_domain::{
     ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
     ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
 };
+use chrono::{TimeZone, Utc};
 
 fn fixture() -> SnapshotEnvelope {
     let now = Utc

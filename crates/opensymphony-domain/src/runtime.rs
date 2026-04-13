@@ -3,7 +3,7 @@ use std::{fmt, num::NonZeroU32, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
+use super::{
     ConversationId, DurationMs, IssueId, IssueIdentifier, TimestampMs, WorkerId, WorkspaceKey,
 };
 
@@ -221,7 +221,7 @@ pub struct RetryEntry {
 
 impl RetryEntry {
     pub fn continuation(
-        issue: &crate::NormalizedIssue,
+        issue: &super::NormalizedIssue,
         previous_attempt: Option<RetryAttempt>,
         normal_retry_count: u32,
         scheduled_at: TimestampMs,
@@ -242,7 +242,7 @@ impl RetryEntry {
     }
 
     pub fn failure(
-        issue: &crate::NormalizedIssue,
+        issue: &super::NormalizedIssue,
         previous_attempt: Option<RetryAttempt>,
         normal_retry_count: u32,
         scheduled_at: TimestampMs,

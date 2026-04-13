@@ -2362,11 +2362,16 @@ Ticket: {{ issue.identifier }}
     }
 
     fn repo_root() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crate dir should have workspace parent")
-            .parent()
-            .expect("workspace root should exist")
-            .to_path_buf()
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if manifest_dir.join("WORKFLOW.md").is_file() {
+            manifest_dir
+        } else {
+            manifest_dir
+                .parent()
+                .expect("crate dir should have workspace parent")
+                .parent()
+                .expect("workspace root should exist")
+                .to_path_buf()
+        }
     }
 }

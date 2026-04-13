@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use opensymphony_openhands::{
+use crate::opensymphony_openhands::{
     AgentConfig, ApiKeyAuth, AuthConfig, CondenserConfig, ConfirmationPolicy, Conversation,
     ConversationCreateRequest, HttpAuth, LlmConfig, OpenHandsClient, OpenHandsError,
     RuntimeStreamConfig, SendMessageRequest, TransportConfig, WebSocketAuth, WorkspaceConfig,
@@ -287,12 +287,17 @@ impl Drop for PinnedServer {
 }
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir should have workspace parent")
-        .parent()
-        .expect("workspace root should exist")
-        .to_path_buf()
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if manifest_dir.join("Cargo.toml").is_file() && manifest_dir.join("README.md").is_file() {
+        manifest_dir
+    } else {
+        manifest_dir
+            .parent()
+            .expect("crate dir should have workspace parent")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
 }
 
 fn free_port() -> u16 {

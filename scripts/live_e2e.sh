@@ -56,7 +56,7 @@ run_doctor_preflight() {
   local log_file="${LOG_DIR}/doctor.log"
   : > "${log_file}"
 
-  cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands \
+  cargo run -- doctor --config examples/configs/local-dev.with-live-openhands.yaml --live-openhands \
     2>&1 | tee "${log_file}" &
   DOCTOR_PID=$!
 
@@ -130,7 +130,7 @@ echo "${SERVER_PID}" > "${RUN_DIR}/agent-server.pid"
 
 wait_for_server_ready
 
-cargo test -p opensymphony-openhands --test live_local_suite -- --ignored --nocapture --test-threads=1 \
+cargo test --test live_local_suite -- --ignored --nocapture --test-threads=1 \
   2>&1 | tee "${LOG_DIR}/live-suite.log"
 
 cat > "${RUN_DIR}/README.txt" <<EOF

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use opensymphony_domain::TrackerIssue;
+use crate::opensymphony_domain::TrackerIssue;
 
 pub fn issue_blocked_by_non_terminal_blockers(issue: &TrackerIssue) -> bool {
     issue
@@ -58,11 +58,11 @@ fn priority_rank(issue: &TrackerIssue) -> u8 {
 mod tests {
     use std::collections::HashSet;
 
-    use chrono::{DateTime, Utc};
-    use opensymphony_domain::{
+    use crate::opensymphony_domain::{
         TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
         TrackerIssueStateKind,
     };
+    use chrono::{DateTime, Utc};
 
     use super::{
         filter_issues_for_dispatch, issue_blocked_by_non_terminal_blockers,

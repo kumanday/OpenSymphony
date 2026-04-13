@@ -7,27 +7,27 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
-use opensymphony_domain::{
+use crate::opensymphony_domain::{
     ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
     NormalizedIssue, TimestampMs, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
 };
-use opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
-use opensymphony_openhands::{
+use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
+use crate::opensymphony_openhands::{
     IssueSessionError, IssueSessionObserver, IssueSessionResult, IssueSessionRunner,
     IssueSessionRunnerConfig, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
     OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
-use opensymphony_orchestrator::{
+use crate::opensymphony_orchestrator::{
     RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerLaunch,
     WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
 };
-use opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow};
-use opensymphony_workspace::{
+use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow};
+use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunStatus,
     WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
 };
+use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
     fs,
@@ -49,7 +49,7 @@ pub(super) enum CliWorkspaceError {
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
-    Identifier(#[from] opensymphony_domain::IdentifierError),
+    Identifier(#[from] crate::opensymphony_domain::IdentifierError),
     #[error("failed to remove workspace {path}: {source}")]
     RemoveWorkspace {
         path: PathBuf,
@@ -102,7 +102,7 @@ pub(super) struct RuntimeWorkerBackend {
 
 struct ActiveWorkerTask {
     handle: JoinHandle<()>,
-    run: opensymphony_domain::RunAttempt,
+    run: crate::opensymphony_domain::RunAttempt,
 }
 
 struct PendingLaunch {
@@ -150,7 +150,7 @@ impl IssueSessionObserver for SchedulerObserver {
     ) {
         let worker_id = self.worker_id.clone();
         let _ = self.updates_tx.send(WorkerUpdate::RuntimeEvent {
-            worker_id: opensymphony_domain::WorkerId::new(worker_id)
+            worker_id: crate::opensymphony_domain::WorkerId::new(worker_id)
                 .expect("worker id should remain valid"),
             observed_at,
             event_id,
@@ -164,7 +164,7 @@ impl IssueSessionObserver for SchedulerObserver {
         let _ = self
             .updates_tx
             .send(WorkerUpdate::ConversationMetadataUpdate {
-                worker_id: opensymphony_domain::WorkerId::new(worker_id)
+                worker_id: crate::opensymphony_domain::WorkerId::new(worker_id)
                     .expect("worker id should remain valid"),
                 conversation: conversation.clone(),
             });
@@ -268,20 +268,20 @@ impl TrackerBackend for RuntimeTrackerBackend {
 
     async fn candidate_issues(
         &mut self,
-    ) -> Result<Vec<opensymphony_domain::TrackerIssue>, Self::Error> {
+    ) -> Result<Vec<crate::opensymphony_domain::TrackerIssue>, Self::Error> {
         self.client.candidate_issues().await
     }
 
     async fn terminal_issues(
         &mut self,
-    ) -> Result<Vec<opensymphony_domain::TrackerIssue>, Self::Error> {
+    ) -> Result<Vec<crate::opensymphony_domain::TrackerIssue>, Self::Error> {
         self.client.terminal_issues().await
     }
 
     async fn issue_states_by_ids(
         &mut self,
         issue_ids: &[String],
-    ) -> Result<Vec<opensymphony_domain::TrackerIssueStateSnapshot>, Self::Error> {
+    ) -> Result<Vec<crate::opensymphony_domain::TrackerIssueStateSnapshot>, Self::Error> {
         self.client.issue_states_by_ids(issue_ids).await
     }
 }
@@ -315,9 +315,9 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
         &mut self,
         issue: &NormalizedIssue,
         _observed_at: TimestampMs,
-    ) -> Result<opensymphony_domain::WorkspaceRecord, Self::Error> {
+    ) -> Result<crate::opensymphony_domain::WorkspaceRecord, Self::Error> {
         let ensured = self.manager.ensure(&issue_descriptor(issue)).await?;
-        Ok(opensymphony_domain::WorkspaceRecord {
+        Ok(crate::opensymphony_domain::WorkspaceRecord {
             path: ensured.handle.workspace_path().to_path_buf(),
             workspace_key: WorkspaceKey::new(ensured.handle.workspace_key().to_string())?,
             created_now: ensured.created,
@@ -347,7 +347,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     &self.active_states,
                     &self.terminal_states,
                 )?,
-                workspace: opensymphony_domain::WorkspaceRecord {
+                workspace: crate::opensymphony_domain::WorkspaceRecord {
                     path: handle.workspace_path().to_path_buf(),
                     workspace_key: WorkspaceKey::new(handle.workspace_key().to_string())?,
                     created_now: false,
@@ -365,7 +365,7 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
 
     async fn cleanup_workspace(
         &mut self,
-        workspace: &opensymphony_domain::WorkspaceRecord,
+        workspace: &crate::opensymphony_domain::WorkspaceRecord,
         terminal: bool,
     ) -> Result<(), Self::Error> {
         if terminal {
@@ -701,7 +701,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
             };
             if let Err(error) = task.handle.await {
                 updates.push(WorkerUpdate::Finished {
-                    worker_id: opensymphony_domain::WorkerId::new(worker_id)
+                    worker_id: crate::opensymphony_domain::WorkerId::new(worker_id)
                         .expect("worker id should remain valid"),
                     outcome: WorkerOutcomeRecord::from_run(
                         &task.run,
@@ -719,7 +719,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
 
     async fn abort_worker(
         &mut self,
-        worker_id: &opensymphony_domain::WorkerId,
+        worker_id: &crate::opensymphony_domain::WorkerId,
         _reason: WorkerAbortReason,
     ) -> Result<(), Self::Error> {
         self.abort_tracked_task(worker_id.as_str());
@@ -747,7 +747,7 @@ fn issue_state_category(
 }
 
 fn normalized_issue_from_manifest(
-    manifest: &opensymphony_workspace::IssueManifest,
+    manifest: &crate::opensymphony_workspace::IssueManifest,
     active_states: &HashSet<String>,
     terminal_states: &HashSet<String>,
 ) -> Result<NormalizedIssue, CliWorkspaceError> {
@@ -787,11 +787,11 @@ fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
 mod tests {
     use std::{fs, future::pending, path::Path};
 
-    use opensymphony_domain::{
+    use crate::opensymphony_domain::{
         IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt, WorkerId,
         WorkspaceKey,
     };
-    use opensymphony_workflow::WorkflowDefinition;
+    use crate::opensymphony_workflow::WorkflowDefinition;
     use tempfile::TempDir;
 
     use super::*;
@@ -1036,8 +1036,8 @@ Run the scheduler.
         }
     }
 
-    fn sample_workspace(workspace_root: &Path) -> opensymphony_domain::WorkspaceRecord {
-        opensymphony_domain::WorkspaceRecord {
+    fn sample_workspace(workspace_root: &Path) -> crate::opensymphony_domain::WorkspaceRecord {
+        crate::opensymphony_domain::WorkspaceRecord {
             path: workspace_root.join("COE-284"),
             workspace_key: WorkspaceKey::new("COE-284").expect("workspace key should be valid"),
             created_now: false,

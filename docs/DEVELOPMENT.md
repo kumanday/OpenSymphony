@@ -15,6 +15,7 @@ cargo install --path .
 
 ```text
 OpenSymphony/
+├── Cargo.toml
 ├── crates/
 │   ├── opensymphony-cli/
 │   ├── opensymphony-control/
@@ -35,6 +36,10 @@ OpenSymphony/
 └── README.md
 ```
 
+Only the repository-root `Cargo.toml` is a package manifest. The
+`crates/opensymphony-*` directories are internal subsystem module trees that
+compile into the one public `opensymphony` package.
+
 ## Design summary
 
 OpenSymphony is the Rust implementation of the Symphony orchestration model.
@@ -44,7 +49,7 @@ Key choices:
 - Rust owns orchestration, retries, workspace lifecycle, and tracker
   reconciliation
 - OpenHands is the execution substrate
-- Linear reads happen through `opensymphony-linear`
+- Linear reads happen through the internal `opensymphony_linear` module
 - agent-side Linear writes use the repo-local GraphQL helper assets copied by
   `opensymphony init`
 - FrankenTUI is optional and must not affect correctness
@@ -75,8 +80,8 @@ Fake server, live tests, doctor command, packaging.
 
 ```bash
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
 ## Useful commands
@@ -84,17 +89,17 @@ cargo test --workspace
 ```bash
 # Format and lint
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --all-targets -- -D warnings
 
 # Full tests
-cargo test --workspace
+cargo test
 
 # CLI-focused checks
-cargo test -p opensymphony-cli --test init
-cargo test -p opensymphony-cli --test help
+cargo test --test init
+cargo test --test help
 
 # Doctor
-cargo run -p opensymphony-cli -- doctor --config examples/configs/local-dev.yaml
+cargo run -- doctor --config examples/configs/local-dev.yaml
 
 # Install and smoke-test
 cargo install --path . --locked
@@ -116,7 +121,7 @@ make sure the init flow still copies the full tree.
 
 ## Linear development rules
 
-- keep orchestrator-side Linear logic inside `opensymphony-linear`
+- keep orchestrator-side Linear logic inside the `opensymphony_linear` module tree
 - keep agent-side Linear usage in the template-owned `.agents/skills/linear/`
   tree
 - prefer checked-in GraphQL query files over inline ad hoc mutations

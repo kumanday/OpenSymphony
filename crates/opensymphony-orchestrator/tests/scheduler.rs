@@ -3,8 +3,7 @@ use std::{
     path::PathBuf,
 };
 
-use chrono::{TimeZone, Utc};
-use opensymphony_orchestrator::{
+use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
     IssueStateCategory, NormalizedIssue, RecoveryRecord, ReleaseReason, RetryReason,
     RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend,
@@ -13,6 +12,7 @@ use opensymphony_orchestrator::{
     WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey,
     WorkspaceRecord,
 };
+use chrono::{TimeZone, Utc};
 
 fn ts(value: u64) -> TimestampMs {
     TimestampMs::new(value)
@@ -529,7 +529,7 @@ async fn terminal_reconciliation_aborts_running_worker_and_cleans_up_workspace()
         .expect("released execution should still exist");
     assert_eq!(execution.status(), SchedulerStatus::Released);
     match execution.state() {
-        opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
+        crate::opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
             assert_eq!(*reason, ReleaseReason::TrackerTerminal);
         }
         other => panic!("expected released state, got {other:?}"),
@@ -714,7 +714,7 @@ async fn tracker_inactive_release_frees_the_per_state_slot() {
         .expect("released issue should still exist");
     assert_eq!(released.status(), SchedulerStatus::Released);
     match released.state() {
-        opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
+        crate::opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
             assert_eq!(*reason, ReleaseReason::TrackerInactive);
         }
         other => panic!("expected released state, got {other:?}"),

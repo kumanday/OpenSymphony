@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use crate::WorkspaceError;
+use super::WorkspaceError;
 
 pub fn sanitize_workspace_key(identifier: &str) -> Result<String, WorkspaceError> {
     if identifier.trim().is_empty() {
@@ -91,8 +91,8 @@ pub(crate) fn normalize_absolute_path(path: &Path) -> Result<PathBuf, WorkspaceE
 mod tests {
     use std::path::PathBuf;
 
+    use super::WorkspaceError;
     use super::{resolve_path_within_root, sanitize_workspace_key};
-    use crate::WorkspaceError;
 
     #[test]
     fn sanitizes_documented_examples() {

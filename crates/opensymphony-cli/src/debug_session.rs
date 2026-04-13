@@ -7,18 +7,18 @@ use std::{
     time::Duration,
 };
 
-use clap::Args;
-use opensymphony_openhands::{
+use crate::opensymphony_openhands::{
     ConversationLaunchProfile, EventEnvelope, IssueConversationManifest, IssueSessionRunnerConfig,
     KnownEvent, LocalServerSupervisor, LocalServerTooling, OpenHandsClient, OpenHandsError,
     RuntimeEventStream, SendMessageRequest, SupervisedServerConfig, SupervisorConfig,
     SupervisorError, TerminalExecutionStatus, TransportConfig,
 };
-use opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition};
-use opensymphony_workspace::{
+use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition};
+use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, WorkspaceError, WorkspaceHandle, WorkspaceManager,
     WorkspaceManagerConfig,
 };
+use clap::Args;
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{fs, time::timeout_at};
@@ -78,13 +78,13 @@ enum DebugCommandError {
     LoadWorkflow {
         path: PathBuf,
         #[source]
-        source: opensymphony_workflow::WorkflowLoadError,
+        source: crate::opensymphony_workflow::WorkflowLoadError,
     },
     #[error("failed to resolve workflow {path}: {source}")]
     ResolveWorkflow {
         path: PathBuf,
         #[source]
-        source: opensymphony_workflow::WorkflowConfigError,
+        source: crate::opensymphony_workflow::WorkflowConfigError,
     },
     #[error("failed to create workspace manager: {0}")]
     WorkspaceManager(#[from] WorkspaceError),
@@ -114,7 +114,7 @@ enum DebugCommandError {
     #[error(transparent)]
     Transport(#[from] OpenHandsError),
     #[error(transparent)]
-    Tooling(#[from] opensymphony_openhands::LocalToolingError),
+    Tooling(#[from] crate::opensymphony_openhands::LocalToolingError),
     #[error(transparent)]
     Supervisor(#[from] SupervisorError),
     #[error(
@@ -878,8 +878,8 @@ fn turn_has_stopped(status: &str) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use opensymphony_openhands::OpenHandsError;
-    use opensymphony_workflow::WorkflowDefinition;
+    use crate::opensymphony_openhands::OpenHandsError;
+    use crate::opensymphony_workflow::WorkflowDefinition;
     use tempfile::TempDir;
 
     use super::{

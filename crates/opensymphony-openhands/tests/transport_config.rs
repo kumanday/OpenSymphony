@@ -1,9 +1,9 @@
 use std::{collections::BTreeMap, path::Path};
 
-use opensymphony_openhands::{
+use crate::opensymphony_openhands::{
     HttpAuth, TransportAuthKind, TransportConfig, TransportTargetKind, WebSocketAuth,
 };
-use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
+use crate::opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
 
 fn resolve_workflow(source: &str, env: BTreeMap<String, String>) -> ResolvedWorkflow {
     let workflow = WorkflowDefinition::parse(source).expect("workflow should parse");

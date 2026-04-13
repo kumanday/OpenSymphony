@@ -19,7 +19,7 @@ The project needs more than unit tests. It needs layered validation with determi
 
 ## 2.1 Unit tests
 
-Every crate should have focused unit tests for pure logic.
+Every internal subsystem module should have focused unit tests for pure logic.
 
 Examples:
 
@@ -33,7 +33,8 @@ Examples:
 
 ## 2.2 Contract tests
 
-Use `opensymphony-testkit` for protocol-level checks against stable fixtures.
+Use the internal `opensymphony_testkit` module for protocol-level checks
+against stable fixtures.
 
 Required contract suites:
 
@@ -76,17 +77,17 @@ Suggested gates:
 
 Current implementation:
 
-- `cargo test --workspace` exercises the fake-server contract suite in `crates/opensymphony-openhands/tests/fake_server_contract.rs`
-- `cargo test -p opensymphony-linear` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
-- `cargo test -p opensymphony-orchestrator` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, and manifest-backed workspace recovery against fake tracker/workspace/worker backends
-- `cargo test -p opensymphony-cli orchestrator_run::backends::tests` covers runtime workspace-manifest recovery, in-flight run detection from `run.json`, and launch-path failure handling in the concrete CLI backends
-- `crates/opensymphony-cli/tests/doctor.rs` runs the CLI live-probe path against `opensymphony-testkit`
+- `cargo test` exercises the full root package, including the fake-server contract suite from `tests/fake_server_contract.rs`
+- `cargo test --test linear_client` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
+- `cargo test --test hierarchy_selection --test scheduler` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, and manifest-backed workspace recovery against fake tracker/workspace/worker backends
+- `cargo test --lib orchestrator_run::backends::tests` covers runtime workspace-manifest recovery, in-flight run detection from `run.json`, and launch-path failure handling in the concrete CLI adapter
+- `tests/doctor.rs` runs the CLI live-probe path against the internal `opensymphony_testkit` module
 - `scripts/smoke_local.sh` runs the static doctor pass
 - `scripts/live_e2e.sh` gates the live doctor run behind `OPENSYMPHONY_LIVE_OPENHANDS=1`
-- `crates/opensymphony-openhands/tests/fake_server_contract.rs` and `crates/opensymphony-openhands/tests/client_resilience.rs` now split the runtime stream coverage intentionally: the shared fake-server contract suite owns the scripted initial snapshot replay, attach-backlog versus buffered-live ordering, reconnect exhaustion, explicit-close shutdown semantics, reconcile, out-of-order delivery, and reconnect recovery cases, while `client_resilience.rs` keeps the narrower auth, forward-compatibility, and mirror-regression cases that still need bespoke server behavior
-- `crates/opensymphony-openhands/tests/live_pinned_server.rs` provides an opt-in live integration check against the pinned `openhands-agent-server==1.14.0` surface for external-mode auth success and failure
-- `crates/opensymphony-openhands/tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, missing-conversation recreation that stays on continuation guidance, **simplified conversation resumption that reuses conversations as-is without LLM config drift checks**, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
-- `crates/opensymphony-openhands/tests/supervisor.rs` now covers startup rejection when a foreign ready server is already bound to the supervised target port
+- `tests/fake_server_contract.rs` and `tests/client_resilience.rs` now split the runtime stream coverage intentionally: the shared fake-server contract suite owns the scripted initial snapshot replay, attach-backlog versus buffered-live ordering, reconnect exhaustion, explicit-close shutdown semantics, reconcile, out-of-order delivery, and reconnect recovery cases, while `client_resilience.rs` keeps the narrower auth, forward-compatibility, and mirror-regression cases that still need bespoke server behavior
+- `tests/live_pinned_server.rs` provides an opt-in live integration check against the pinned `openhands-agent-server==1.14.0` surface for external-mode auth success and failure
+- `tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, missing-conversation recreation that stays on continuation guidance, **simplified conversation resumption that reuses conversations as-is without LLM config drift checks**, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
+- `tests/supervisor.rs` now covers startup rejection when a foreign ready server is already bound to the supervised target port
 
 ## 3. Minimum required test coverage by subsystem
 
@@ -200,7 +201,7 @@ Current implementation:
 
 Current repository implementation:
 
-- `crates/opensymphony-orchestrator/tests/scheduler.rs` covers continuation retry, failure backoff, cached per-state dispatch limits across finish/stall/inactive/terminal/reconciliation transitions, runtime-event-fed stall detection, terminal reconciliation with cleanup, and manifest-backed workspace recovery using fake backends
+- `tests/scheduler.rs` covers continuation retry, failure backoff, cached per-state dispatch limits across finish/stall/inactive/terminal/reconciliation transitions, runtime-event-fed stall detection, terminal reconciliation with cleanup, and manifest-backed workspace recovery using fake backends
 - local restart validation should confirm that `opensymphony run` publishes a recovered snapshot before the first post-restart launch wave, so the TUI issue list repopulates even when reused conversations still take time to attach
 - `crates/opensymphony-cli/src/orchestrator_run/backends.rs` covers immediate launch-failure cleanup and abort-on-drop cleanup for tracked runtime worker tasks in the production CLI adapter
 
@@ -258,7 +259,7 @@ developer machine against the pinned local OpenHands server.
 
 Implemented entrypoints:
 
-- `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test -p opensymphony-openhands --test live_local_suite -- --ignored --nocapture --test-threads=1`
+- `OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test --test live_local_suite -- --ignored --nocapture --test-threads=1`
 - `OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh`
 
 Required machine inputs:

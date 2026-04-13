@@ -40,6 +40,13 @@ OpenSymphony is split into five layers:
    - control-plane API
    - FrankenTUI
 
+Packaging distinction:
+
+- modularity is preserved through explicit internal subsystem boundaries
+- packaging is intentionally flat: crates.io publishes only `opensymphony`
+- the `crates/opensymphony-*` directories are internal module trees compiled
+  into that one package
+
 ## 3. Main decisions
 
 ### 3.1 Rust owns orchestration
@@ -98,7 +105,7 @@ OpenSymphony 1.0.0 removed the old bridge layer for agent-side Linear writes.
 
 The supported model is now:
 
-- orchestrator reads Linear through `opensymphony-linear`
+- orchestrator reads Linear through the internal `opensymphony_linear` module
 - initialized target repos read and write Linear through the checked-in
   GraphQL helper assets under `.agents/skills/linear/`
 
@@ -106,27 +113,27 @@ This keeps one canonical Linear API surface for the agent path.
 
 ## 4. Component model
 
-### Core crates
+### Internal subsystem modules
 
-- `opensymphony-domain`
+- `opensymphony_domain`
   - domain models and scheduler transitions
-- `opensymphony-workflow`
+- `opensymphony_workflow`
   - workflow loading, config resolution, prompt rendering
-- `opensymphony-workspace`
+- `opensymphony_workspace`
   - workspace management and manifests
-- `opensymphony-linear`
+- `opensymphony_linear`
   - Linear GraphQL read adapter
-- `opensymphony-openhands`
+- `opensymphony_openhands`
   - OpenHands transport and session runner
-- `opensymphony-orchestrator`
+- `opensymphony_orchestrator`
   - scheduler loop and reconciliation
-- `opensymphony-control`
+- `opensymphony_control`
   - control-plane API
-- `opensymphony-cli`
+- `opensymphony_cli`
   - user-facing entrypoints
-- `opensymphony-tui`
+- `opensymphony_tui`
   - terminal operator UI
-- `opensymphony-testkit`
+- `opensymphony_testkit`
   - fakes and contract fixtures
 
 ### Target-repo Linear assets

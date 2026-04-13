@@ -2,6 +2,10 @@
 
 This document covers the current local operator workflow for OpenSymphony.
 
+Packaging note: crates.io publishes one package, `opensymphony`. The internal
+`crates/opensymphony-*` directories are module trees inside that package, not
+separately published dependencies.
+
 ## 1. Core commands
 
 Recommended CLI commands:
@@ -44,10 +48,10 @@ Important `init` behavior:
 
 ```bash
 cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo test -p opensymphony-cli --test init
-cargo test -p opensymphony-cli --test help
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo test --test init
+cargo test --test help
 ./scripts/smoke_local.sh
 ```
 

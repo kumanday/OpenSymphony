@@ -1,14 +1,14 @@
 use std::time::Duration;
 
-use chrono::{Duration as ChronoDuration, Utc};
-use opensymphony_openhands::{
+use crate::opensymphony_openhands::{
     ConversationCreateRequest, DoctorProbeConfig, EventCache, EventEnvelope, KnownEvent,
     OpenHandsClient, OpenHandsError, RuntimeStreamConfig, TerminalExecutionStatus, TransportConfig,
 };
-use opensymphony_testkit::{
+use crate::opensymphony_testkit::{
     FakeEventStreamBuilder, FakeOpenHandsConfig, FakeOpenHandsServer, FakeSearchScript,
     FakeSocketScript,
 };
+use chrono::{Duration as ChronoDuration, Utc};
 
 #[tokio::test]
 async fn fake_server_runtime_stream_attaches_reconciles_and_detects_terminal_state() {
@@ -33,7 +33,7 @@ async fn fake_server_runtime_stream_attaches_reconciles_and_detects_terminal_sta
     client
         .send_message(
             conversation.conversation_id,
-            &opensymphony_openhands::SendMessageRequest::user_text("hello"),
+            &crate::opensymphony_openhands::SendMessageRequest::user_text("hello"),
         )
         .await
         .expect("message send should succeed");
@@ -405,8 +405,8 @@ async fn delete_conversation_then_recreate_requested_id_resets_history_and_updat
 
     let recreated = client
         .create_conversation(&ConversationCreateRequest {
-            agent: opensymphony_openhands::AgentConfig {
-                llm: opensymphony_openhands::LlmConfig {
+            agent: crate::opensymphony_openhands::AgentConfig {
+                llm: crate::opensymphony_openhands::LlmConfig {
                     api_key: Some("new-secret".to_string()),
                     ..request.agent.clone().llm
                 },

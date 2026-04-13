@@ -3,7 +3,7 @@ use std::{cmp::Ordering, collections::HashSet};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::models::{Conversation, ConversationStateUpdatePayload, EventEnvelope};
+use super::models::{Conversation, ConversationStateUpdatePayload, EventEnvelope};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmCompletionLogEvent {
@@ -581,12 +581,12 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use serde_json::json;
 
-    use super::{
-        ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus, UnknownEvent,
-    };
-    use crate::models::{
+    use super::super::models::{
         AgentConfig, ConfirmationPolicy, Conversation, ConversationStateUpdatePayload,
         EventEnvelope, LlmConfig, WorkspaceConfig,
+    };
+    use super::{
+        ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus, UnknownEvent,
     };
 
     #[test]

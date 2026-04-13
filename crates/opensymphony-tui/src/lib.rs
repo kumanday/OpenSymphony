@@ -5,6 +5,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
+use crate::opensymphony_domain::{
+    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
+    ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
+    SnapshotEnvelope,
+};
 use chrono::{DateTime, Utc};
 use ftui::{
     Style,
@@ -14,12 +20,6 @@ use ftui::{
     runtime::{Every, Subscription},
     text::text::{Line, Span, Text},
     widgets::{Widget, paragraph::Paragraph},
-};
-use opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
-use opensymphony_domain::{
-    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
-    ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
-    SnapshotEnvelope,
 };
 use thiserror::Error;
 use tokio::sync::watch;
@@ -359,10 +359,16 @@ impl TuiState {
         if let Some(snap) = snapshot {
             let daemon = &snap.snapshot.daemon;
             let daemon_style = match daemon.state {
-                opensymphony_domain::ControlPlaneDaemonState::Ready => Style::new().fg(GREEN),
-                opensymphony_domain::ControlPlaneDaemonState::Starting => Style::new().fg(YELLOW),
-                opensymphony_domain::ControlPlaneDaemonState::Degraded => Style::new().fg(RED),
-                opensymphony_domain::ControlPlaneDaemonState::Stopped => {
+                crate::opensymphony_domain::ControlPlaneDaemonState::Ready => {
+                    Style::new().fg(GREEN)
+                }
+                crate::opensymphony_domain::ControlPlaneDaemonState::Starting => {
+                    Style::new().fg(YELLOW)
+                }
+                crate::opensymphony_domain::ControlPlaneDaemonState::Degraded => {
+                    Style::new().fg(RED)
+                }
+                crate::opensymphony_domain::ControlPlaneDaemonState::Stopped => {
                     Style::new().fg(BRIGHT_BLACK)
                 }
             };
@@ -671,13 +677,13 @@ impl TuiState {
         } else {
             for file in &issue.modified_files {
                 let (change_symbol, change_style) = match file.change_kind {
-                    opensymphony_domain::ControlPlaneFileChangeKind::Created => {
+                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Created => {
                         ("+", Style::new().fg(GREEN))
                     }
-                    opensymphony_domain::ControlPlaneFileChangeKind::Modified => {
+                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Modified => {
                         ("~", Style::new().fg(YELLOW))
                     }
-                    opensymphony_domain::ControlPlaneFileChangeKind::Removed => {
+                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Removed => {
                         ("-", Style::new().fg(RED))
                     }
                 };
@@ -725,16 +731,16 @@ impl TuiState {
                         .min(snapshot.snapshot.recent_events.len());
                     for event in snapshot.snapshot.recent_events.iter().take(show_count) {
                         let kind_style = match event.kind {
-                            opensymphony_domain::ControlPlaneRecentEventKind::WorkerStarted => {
+                            crate::opensymphony_domain::ControlPlaneRecentEventKind::WorkerStarted => {
                                 Style::new().fg(GREEN)
                             }
-                            opensymphony_domain::ControlPlaneRecentEventKind::WorkerCompleted => {
+                            crate::opensymphony_domain::ControlPlaneRecentEventKind::WorkerCompleted => {
                                 Style::new().fg(CYAN)
                             }
-                            opensymphony_domain::ControlPlaneRecentEventKind::Warning => {
+                            crate::opensymphony_domain::ControlPlaneRecentEventKind::Warning => {
                                 Style::new().fg(RED)
                             }
-                            opensymphony_domain::ControlPlaneRecentEventKind::SnapshotPublished => {
+                            crate::opensymphony_domain::ControlPlaneRecentEventKind::SnapshotPublished => {
                                 Style::new().dim()
                             }
                             _ => Style::new().dim(),
@@ -899,13 +905,13 @@ impl TuiState {
                             .take(max_rows.saturating_sub(lines.len()))
                         {
                             let (change_symbol, change_style) = match file.change_kind {
-                                opensymphony_domain::ControlPlaneFileChangeKind::Created => {
+                                crate::opensymphony_domain::ControlPlaneFileChangeKind::Created => {
                                     ("+", Style::new().fg(GREEN))
                                 }
-                                opensymphony_domain::ControlPlaneFileChangeKind::Modified => {
+                                crate::opensymphony_domain::ControlPlaneFileChangeKind::Modified => {
                                     ("~", Style::new().fg(YELLOW))
                                 }
-                                opensymphony_domain::ControlPlaneFileChangeKind::Removed => {
+                                crate::opensymphony_domain::ControlPlaneFileChangeKind::Removed => {
                                     ("-", Style::new().fg(RED))
                                 }
                             };
@@ -1222,9 +1228,9 @@ impl TuiState {
         } else {
             for file in &issue.modified_files {
                 let change_symbol = match file.change_kind {
-                    opensymphony_domain::ControlPlaneFileChangeKind::Created => "+",
-                    opensymphony_domain::ControlPlaneFileChangeKind::Modified => "~",
-                    opensymphony_domain::ControlPlaneFileChangeKind::Removed => "-",
+                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Created => "+",
+                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Modified => "~",
+                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Removed => "-",
                 };
                 let path = if file.path.len() > width.saturating_sub(12) {
                     let truncated_len = width.saturating_sub(15);
@@ -1643,7 +1649,7 @@ async fn fetch_snapshot_or_shutdown(
 }
 
 async fn next_update_or_shutdown(
-    stream: &mut opensymphony_control::ControlPlaneEventStream,
+    stream: &mut crate::opensymphony_control::ControlPlaneEventStream,
     shutdown: &mut watch::Receiver<bool>,
 ) -> Option<Option<Result<SnapshotEnvelope, ControlPlaneClientError>>> {
     if shutdown_requested(shutdown) {
@@ -2276,15 +2282,15 @@ trait WorkerOutcomeLabel {
     fn as_str(&self) -> &'static str;
 }
 
-impl WorkerOutcomeLabel for opensymphony_domain::ControlPlaneWorkerOutcome {
+impl WorkerOutcomeLabel for crate::opensymphony_domain::ControlPlaneWorkerOutcome {
     fn as_str(&self) -> &'static str {
         match self {
-            opensymphony_domain::ControlPlaneWorkerOutcome::Unknown => "unknown",
-            opensymphony_domain::ControlPlaneWorkerOutcome::Running => "running",
-            opensymphony_domain::ControlPlaneWorkerOutcome::Continued => "continued",
-            opensymphony_domain::ControlPlaneWorkerOutcome::Completed => "completed",
-            opensymphony_domain::ControlPlaneWorkerOutcome::Failed => "failed",
-            opensymphony_domain::ControlPlaneWorkerOutcome::Canceled => "canceled",
+            crate::opensymphony_domain::ControlPlaneWorkerOutcome::Unknown => "unknown",
+            crate::opensymphony_domain::ControlPlaneWorkerOutcome::Running => "running",
+            crate::opensymphony_domain::ControlPlaneWorkerOutcome::Continued => "continued",
+            crate::opensymphony_domain::ControlPlaneWorkerOutcome::Completed => "completed",
+            crate::opensymphony_domain::ControlPlaneWorkerOutcome::Failed => "failed",
+            crate::opensymphony_domain::ControlPlaneWorkerOutcome::Canceled => "canceled",
         }
     }
 }
@@ -2293,13 +2299,13 @@ trait DaemonStateLabel {
     fn as_str(&self) -> &'static str;
 }
 
-impl DaemonStateLabel for opensymphony_domain::ControlPlaneDaemonState {
+impl DaemonStateLabel for crate::opensymphony_domain::ControlPlaneDaemonState {
     fn as_str(&self) -> &'static str {
         match self {
-            opensymphony_domain::ControlPlaneDaemonState::Starting => "starting",
-            opensymphony_domain::ControlPlaneDaemonState::Ready => "ready",
-            opensymphony_domain::ControlPlaneDaemonState::Degraded => "degraded",
-            opensymphony_domain::ControlPlaneDaemonState::Stopped => "stopped",
+            crate::opensymphony_domain::ControlPlaneDaemonState::Starting => "starting",
+            crate::opensymphony_domain::ControlPlaneDaemonState::Ready => "ready",
+            crate::opensymphony_domain::ControlPlaneDaemonState::Degraded => "degraded",
+            crate::opensymphony_domain::ControlPlaneDaemonState::Stopped => "stopped",
         }
     }
 }
@@ -2311,9 +2317,7 @@ mod tests {
         OperatorApp, RunOutcome, TuiAction, TuiState, display_width, fit, handle_bridge_error,
         issue_window, section_layout, stacked_body_layout, visible_issue_count,
     };
-    use chrono::{TimeZone, Utc};
-    use ftui::prelude::Model;
-    use opensymphony_domain::{
+    use crate::opensymphony_domain::{
         ControlPlaneAgentServerStatus as AgentServerStatus, ControlPlaneConversationEvent,
         ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
         ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneFileChange,
@@ -2322,6 +2326,8 @@ mod tests {
         ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
         ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
     };
+    use chrono::{TimeZone, Utc};
+    use ftui::prelude::Model;
     use std::{
         sync::{
             Arc, Mutex,

@@ -107,7 +107,7 @@ conversation persistence settings inside the issue workspace.
 
 ## 7. Runtime contract
 
-`opensymphony-openhands` owns:
+The internal `opensymphony_openhands` module owns:
 
 - typed request/response models
 - authenticated REST requests when needed
@@ -129,9 +129,9 @@ GraphQL helper assets and use `LINEAR_API_KEY` directly.
 
 Important checks:
 
-- `cargo test -p opensymphony-openhands --test live_pinned_server`
-- `cargo test -p opensymphony-openhands --test issue_session_runner`
-- `cargo test -p opensymphony-cli --test doctor`
+- `cargo test --test live_pinned_server`
+- `cargo test --test issue_session_runner`
+- `cargo test --test doctor`
 
 When validating a local setup, confirm that:
 

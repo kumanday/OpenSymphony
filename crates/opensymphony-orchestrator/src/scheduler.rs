@@ -3,8 +3,7 @@ use std::{
     future::Future,
 };
 
-use chrono::{DateTime, Utc};
-use opensymphony_domain::{
+use crate::opensymphony_domain::{
     ComponentHealthSnapshot, ConversationMetadata, DaemonSnapshot, DurationMs, HealthStatus,
     IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueRef, IssueSnapshot, IssueState,
     IssueStateCategory, NormalizedIssue, OrchestratorSnapshot, ReleaseReason,
@@ -12,7 +11,8 @@ use opensymphony_domain::{
     SchedulerStatus, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueStateSnapshot,
     TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
-use opensymphony_workflow::ResolvedWorkflow;
+use crate::opensymphony_workflow::ResolvedWorkflow;
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::{
     select,
@@ -20,7 +20,7 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
-use crate::filter_issues_for_dispatch;
+use super::filter_issues_for_dispatch;
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
 
@@ -821,7 +821,7 @@ where
             .executions
             .iter()
             .filter_map(|(issue_id, execution)| match execution.state() {
-                opensymphony_domain::SchedulerState::Running { stall, .. }
+                crate::opensymphony_domain::SchedulerState::Running { stall, .. }
                     if stall.stalled_at <= observed_at =>
                 {
                     Some(issue_id.clone())
@@ -1076,7 +1076,7 @@ fn normalize_tracker_issue(
             .blocked_by
             .iter()
             .map(|blocker| {
-                Ok(opensymphony_domain::BlockerRef {
+                Ok(crate::opensymphony_domain::BlockerRef {
                     id: Some(IssueId::new(blocker.id.clone())?),
                     identifier: Some(IssueIdentifier::new(blocker.identifier.clone())?),
                     state: Some(blocker.state.name.clone()),

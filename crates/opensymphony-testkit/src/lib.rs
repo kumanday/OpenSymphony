@@ -3,6 +3,11 @@ use std::{
     sync::Arc,
 };
 
+use crate::opensymphony_openhands::{
+    AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
+    ConversationStateUpdatePayload, EventEnvelope, KnownEvent, SearchConversationEventsResponse,
+    SendMessageRequest, WorkspaceConfig,
+};
 use axum::{
     Json, Router,
     extract::{
@@ -14,11 +19,6 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use opensymphony_openhands::{
-    AgentConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
-    ConversationStateUpdatePayload, EventEnvelope, KnownEvent, SearchConversationEventsResponse,
-    SendMessageRequest, WorkspaceConfig,
-};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
@@ -844,7 +844,7 @@ mod tests {
     use chrono::TimeZone;
 
     use super::{FakeConversationBuilder, FakeEventStreamBuilder};
-    use opensymphony_openhands::{ConversationCreateRequest, KnownEvent};
+    use crate::opensymphony_openhands::{ConversationCreateRequest, KnownEvent};
 
     #[test]
     fn conversation_builder_preserves_request_fields_and_overrides_status() {

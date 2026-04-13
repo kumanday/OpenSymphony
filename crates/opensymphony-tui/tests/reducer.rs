@@ -1,5 +1,4 @@
-use chrono::{TimeZone, Utc};
-use opensymphony_domain::{
+use crate::opensymphony_domain::{
     ControlPlaneAgentServerStatus as AgentServerStatus,
     ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
     ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
@@ -7,7 +6,8 @@ use opensymphony_domain::{
     ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
     ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
 };
-use opensymphony_tui::{ConnectionState, FocusPane, TimelineMode, TuiAction, TuiState};
+use crate::opensymphony_tui::{ConnectionState, FocusPane, TimelineMode, TuiAction, TuiState};
+use chrono::{TimeZone, Utc};
 
 fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
     let identifiers = (0..issue_count)

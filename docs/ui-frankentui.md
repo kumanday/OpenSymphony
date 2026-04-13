@@ -236,7 +236,7 @@ The implemented bridge between the SSE client and the FTUI reducer coalesces bur
 
 The current implementation uses the published `ftui` facade from crates.io with the `crossterm` feature enabled.
 
-This keeps the OpenSymphony workspace self-contained while preserving the option to move to a path dependency later if a future FrankenTUI feature requires unpublished workspace crates.
+This keeps the OpenSymphony workspace self-contained while preserving the option to reorganize the internal module tree later if a future FrankenTUI feature needs a different repository boundary.
 
 ## 12. Testing approach
 

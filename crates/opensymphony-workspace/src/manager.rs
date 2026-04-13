@@ -9,7 +9,7 @@ use tokio::{
     time::{Instant, timeout},
 };
 
-use crate::{
+use super::{
     CleanupDecision, CleanupOutcome, ConversationManifest, EnsureWorkspaceResult, HookDefinition,
     HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
     IssueLifecycleState, IssueManifest, PromptCaptureDescriptor, PromptCaptureManifest,
@@ -74,7 +74,7 @@ impl WorkspaceManager {
         &self,
         issue_identifier: &str,
     ) -> Result<std::path::PathBuf, WorkspaceError> {
-        crate::workspace_path_for_root(&self.config.root, issue_identifier)
+        super::workspace_path_for_root(&self.config.root, issue_identifier)
     }
 
     pub async fn ensure(
@@ -84,7 +84,7 @@ impl WorkspaceManager {
         self.create_directory(&self.config.root).await?;
         let canonical_root = self.canonicalize_path(&self.config.root).await?;
         let workspace_key = sanitize_workspace_key(&issue.identifier)?;
-        let workspace_path = crate::workspace_path_for_root(&canonical_root, &issue.identifier)?;
+        let workspace_path = super::workspace_path_for_root(&canonical_root, &issue.identifier)?;
 
         self.reject_symlinked_workspace_root(&workspace_path)
             .await?;
@@ -260,7 +260,7 @@ impl WorkspaceManager {
     ) -> Result<Option<WorkspaceHandle>, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
 
-        match crate::workspace_path_for_root(&self.config.root, issue_reference) {
+        match super::workspace_path_for_root(&self.config.root, issue_reference) {
             Ok(candidate) => {
                 if let Some((handle, manifest)) =
                     self.load_workspace_from_directory(&candidate).await?
@@ -1162,6 +1162,7 @@ async fn join_child_pipe(
 }
 
 #[cfg(unix)]
+#[allow(unsafe_code)]
 fn configure_hook_command(command: &mut Command) {
     unsafe {
         command.pre_exec(|| {
@@ -1178,6 +1179,7 @@ fn configure_hook_command(command: &mut Command) {
 fn configure_hook_command(_command: &mut Command) {}
 
 #[cfg(unix)]
+#[allow(unsafe_code)]
 async fn terminate_hook_process_tree(
     _child: &mut tokio::process::Child,
     process_id: Option<u32>,

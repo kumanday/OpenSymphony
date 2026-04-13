@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
+use super::{
     ConversationMetadata, DurationMs, IssueId, NormalizedIssue, ReleaseReason, RetryAttempt,
     RetryEntry, RunAttempt, StallMetadata, TimestampMs, WorkerId, WorkerOutcomeRecord,
     WorkspaceKey, WorkspaceRecord,
@@ -443,8 +443,8 @@ impl IssueExecution {
         }
     }
 
-    pub fn snapshot(&self) -> crate::IssueSnapshot {
-        crate::IssueSnapshot::from(self)
+    pub fn snapshot(&self) -> super::IssueSnapshot {
+        super::IssueSnapshot::from(self)
     }
 
     fn record_outcome(&mut self, outcome: WorkerOutcomeRecord) {

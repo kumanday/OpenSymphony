@@ -4,14 +4,14 @@ mod snapshot;
 
 use std::{collections::VecDeque, path::PathBuf, process::ExitCode, sync::Arc};
 
+use crate::opensymphony_control::{ControlPlaneServer, RecentEventKind, SnapshotStore};
+use crate::opensymphony_domain::TimestampMs;
+use crate::opensymphony_linear::LinearError;
+use crate::opensymphony_openhands::OpenHandsError;
+use crate::opensymphony_orchestrator::{Scheduler, SchedulerConfig, SchedulerError};
+use crate::opensymphony_workspace::WorkspaceError;
 use chrono::{DateTime, Utc};
 use clap::Args;
-use opensymphony_control::{ControlPlaneServer, RecentEventKind, SnapshotStore};
-use opensymphony_domain::TimestampMs;
-use opensymphony_linear::LinearError;
-use opensymphony_openhands::OpenHandsError;
-use opensymphony_orchestrator::{Scheduler, SchedulerConfig, SchedulerError};
-use opensymphony_workspace::WorkspaceError;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
@@ -63,13 +63,13 @@ enum RunCommandError {
     LoadWorkflow {
         path: PathBuf,
         #[source]
-        source: opensymphony_workflow::WorkflowLoadError,
+        source: crate::opensymphony_workflow::WorkflowLoadError,
     },
     #[error("failed to resolve workflow {path}: {source}")]
     ResolveWorkflow {
         path: PathBuf,
         #[source]
-        source: opensymphony_workflow::WorkflowConfigError,
+        source: crate::opensymphony_workflow::WorkflowConfigError,
     },
     #[error("failed to build tracker client: {0}")]
     Tracker(#[from] LinearError),
@@ -82,7 +82,7 @@ enum RunCommandError {
     )]
     ToolingSetupRequired { tool_dir: PathBuf, detail: String },
     #[error("failed to start local OpenHands supervisor: {0}")]
-    Supervisor(#[from] opensymphony_openhands::SupervisorError),
+    Supervisor(#[from] crate::opensymphony_openhands::SupervisorError),
     #[error("failed to build scheduler configuration: {0}")]
     SchedulerConfig(#[from] SchedulerError),
     #[error("failed to bind control-plane listener: {0}")]
@@ -124,13 +124,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     );
 
     let tracker = build_tracker_backend(&runtime.workflow)?;
-    let workspace_manager = Arc::new(opensymphony_workspace::WorkspaceManager::new(
+    let workspace_manager = Arc::new(crate::opensymphony_workspace::WorkspaceManager::new(
         build_workspace_manager_config(&runtime.workflow),
     )?);
     let workspace = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &runtime.workflow);
 
     let (transport, mut supervisor) = build_runtime_transport(&runtime).await?;
-    let client = opensymphony_openhands::OpenHandsClient::new(transport);
+    let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
     client.openapi_probe().await?;
 
     let worker = RuntimeWorkerBackend::new(

@@ -2,12 +2,12 @@
 
 use std::{path::PathBuf, process::Command};
 
-use chrono::{TimeZone, Utc};
-use opensymphony_control::{
+use crate::opensymphony_control::{
     AgentServerStatus, ControlPlaneServer, DaemonSnapshot, DaemonState, DaemonStatus,
     IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
     WorkerOutcome,
 };
+use chrono::{TimeZone, Utc};
 use tokio::net::TcpListener;
 
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {

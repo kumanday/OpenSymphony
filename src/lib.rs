@@ -1,0 +1,22 @@
+#[path = "../crates/opensymphony-cli/src/lib.rs"]
+pub mod opensymphony_cli;
+#[path = "../crates/opensymphony-control/src/lib.rs"]
+pub mod opensymphony_control;
+#[path = "../crates/opensymphony-domain/src/lib.rs"]
+pub mod opensymphony_domain;
+#[path = "../crates/opensymphony-linear/src/lib.rs"]
+pub mod opensymphony_linear;
+#[path = "../crates/opensymphony-openhands/src/lib.rs"]
+pub mod opensymphony_openhands;
+#[path = "../crates/opensymphony-orchestrator/src/lib.rs"]
+pub mod opensymphony_orchestrator;
+#[path = "../crates/opensymphony-testkit/src/lib.rs"]
+pub mod opensymphony_testkit;
+#[path = "../crates/opensymphony-tui/src/lib.rs"]
+pub mod opensymphony_tui;
+#[path = "../crates/opensymphony-workflow/src/lib.rs"]
+pub mod opensymphony_workflow;
+#[path = "../crates/opensymphony-workspace/src/lib.rs"]
+pub mod opensymphony_workspace;
+
+pub use crate::opensymphony_cli::run;
