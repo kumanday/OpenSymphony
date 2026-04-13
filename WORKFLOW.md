@@ -227,7 +227,8 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 5. Update the workpad plan/checklist to include each feedback item and its resolution status.
 6. Re-run validation after feedback-driven changes and push updates.
 7. Repeat this sweep until there are no outstanding actionable comments.
-8. After addressing initial PR review feedback, add the `review-this` label to the PR to re-trigger automated AI PR review.
+8. If you pushed follow-up commits to an existing PR, add the `review-this` label after the push to re-trigger automated AI PR review.
+   - Do **not** add `review-this` when the PR is first created; the `pull_request.opened` event already triggers the initial AI review pass.
 
 ## Blocked-access escape hatch (required behavior)
 
@@ -264,7 +265,8 @@ Use this only when completion is blocked by missing required tools or missing au
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
 8.  Attach the PR URL to the Linear issue through the repo-local `linear` skill using `attachmentLinkGitHubPR` (preferred) or `attachmentLinkURL` when the target is not a GitHub PR. This is REQUIRED - do not rely on mentioning the PR URL in comments alone. The PR must appear in the issue's Links/Attachments section.
     - Ensure the GitHub PR has label `symphony` (add it if missing).
-    - Add the `review-this` label to trigger automated AI PR review.
+    - Do **not** add `review-this` when this push created the PR; the initial PR open already triggered AI review.
+    - If this push updated an existing PR with new commits, add `review-this` after the push to request a fresh AI review pass.
 9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
@@ -304,6 +306,7 @@ Use this only when completion is blocked by missing required tools or missing au
    - a new top-level PR comment is actionable feedback
    - a failing required PR check is actionable feedback even if no human comment was left
 5. If any actionable feedback or failing required check is present, move the issue to `Rework` and follow the rework flow.
+   - Before leaving `Human Review` to address new feedback, remove any pre-existing `review-this` label from the PR so the next rerun request is an explicit new edge.
    - Do not wait for an inline review comment when a Linear comment, top-level PR comment, or failing check already requires action.
 6. If approved, human moves the issue to `Merging`.
 7. When the issue is in `Merging`, first inspect the attached PR state.
@@ -330,7 +333,7 @@ For most code review feedback (addressing comments, small fixes, requested tweak
     - Make the requested code changes
     - Read and address the latest Linear issue comments before GitHub review threads so operator guidance is not missed
     - Read and address top-level PR comments in addition to inline review comments
-    - Respond to inline comments (resolve or reply with justification)
+    - Reply directly in every inline review thread with the resolution (`Fixed in <commit-sha>: ...`) or explicit pushback justification
     - Push new commits to the same branch
 4. Update the workpad with:
    - List of feedback items addressed
@@ -339,7 +342,7 @@ For most code review feedback (addressing comments, small fixes, requested tweak
 5. Re-run validation/tests to ensure changes are correct.
    - Always inspect current PR checks (`gh pr view --json statusCheckRollup`) before declaring feedback addressed.
    - If any required check is failing, treat that as unfinished rework even if the latest review text is positive.
-6. Add the `review-this` label to the PR to re-trigger automated AI PR review.
+6. After pushing follow-up commits to the existing PR, add the `review-this` label to re-trigger automated AI PR review.
 7. Move the issue back to `Human Review` once all feedback is addressed.
 
 **Preserve review history**: Keeping the same PR preserves all discussion context, review threads, and decision history. Reviewers can see incremental changes rather than starting from scratch.
@@ -361,7 +364,7 @@ For major rework:
    - If current issue state is `Todo`, move it to `In Progress`; otherwise keep the current state.
    - Create a new bootstrap `## Agent Harness Workpad` comment.
    - Build a fresh plan/checklist and execute end-to-end.
-6. After creating the new PR, add the `review-this` label to trigger automated AI PR review.
+6. Do **not** add `review-this` immediately after creating the new PR; the initial PR open already triggered automated AI review.
 
 **Default assumption**: Treat `Rework` as minor feedback unless there is clear evidence that the approach is fundamentally broken. Preserve PR history and discussion context as the default behavior.
 

@@ -8,7 +8,7 @@ permissions: {}
 
 concurrency:
   group: ai-pr-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event.action != 'labeled' || github.event.label.name == 'review-this' }}
 
 jobs:
   review:
