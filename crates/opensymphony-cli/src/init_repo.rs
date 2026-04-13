@@ -478,7 +478,7 @@ where
     if wrote_config {
         ui.blank_line()?;
         ui.line(
-            "Review `config.yaml` and update `openhands.tool_dir` if the copied template path does not match your machine.",
+            "If you use the managed local OpenHands runtime, run `opensymphony install openhands` to provision the pinned tooling into the configured `openhands.tool_dir`.",
         )?;
     }
 

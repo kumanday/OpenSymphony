@@ -1,5 +1,6 @@
 mod debug_session;
 mod init_repo;
+mod install_tooling;
 mod orchestrator_run;
 
 use std::{
@@ -14,6 +15,10 @@ use std::{
 
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::{Args, Parser, Subcommand};
+use install_tooling::{
+    DEFAULT_MANAGED_OPENHANDS_TOOL_DIR, default_managed_openhands_tool_dir,
+    ensure_openhands_tooling,
+};
 use opensymphony_control::{
     AgentServerStatus, ControlPlaneServer, DaemonSnapshot, DaemonState, DaemonStatus,
     IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
@@ -49,6 +54,8 @@ pub struct Cli {
 enum Command {
     #[command(about = "Initialize the current target repository with OpenSymphony files")]
     Init(init_repo::InitArgs),
+    #[command(about = "Install app-managed runtimes and integrations")]
+    Install(InstallArgs),
     #[command(about = "Run the real orchestrator against the current project workflow")]
     Run(orchestrator_run::RunArgs),
     #[command(about = "Resume an issue conversation for interactive debugging")]
@@ -62,6 +69,24 @@ enum Command {
     #[command(about = "Smart rehydration: recreate conversations with history preservation")]
     Rehydrate(RehydrateArgs),
 }
+
+#[derive(Debug, Args)]
+struct InstallArgs {
+    #[command(subcommand)]
+    target: InstallTarget,
+}
+
+#[derive(Debug, Subcommand)]
+enum InstallTarget {
+    #[command(
+        name = "openhands",
+        about = "Install the pinned app-managed OpenHands agent-server runtime"
+    )]
+    OpenHands(InstallOpenHandsArgs),
+}
+
+#[derive(Debug, Args)]
+struct InstallOpenHandsArgs {}
 
 #[derive(Debug, Args)]
 struct DaemonArgs {
@@ -143,7 +168,8 @@ struct RehydrateOpenHandsConfig {
 
 #[derive(Debug, Deserialize)]
 struct OpenHandsDoctorConfig {
-    tool_dir: String,
+    #[serde(default)]
+    tool_dir: Option<String>,
     probe_model: Option<String>,
     probe_api_key_env: Option<String>,
     probe_llm_base_url_env: Option<String>,
@@ -159,7 +185,7 @@ struct DoctorRuntimeConfig {
     target_repo: PathBuf,
     workflow_path: PathBuf,
     workflow: ResolvedWorkflow,
-    tool_dir: PathBuf,
+    tool_dir: Option<PathBuf>,
     probe_model: Option<String>,
     probe_api_key_env: Option<String>,
     probe_llm_base_url_env: Option<String>,
@@ -275,12 +301,49 @@ pub async fn run() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Init(args) => init_repo::run_command(args).await,
+        Command::Install(args) => run_install(args).await,
         Command::Run(args) => orchestrator_run::run_command(args).await,
         Command::Debug(args) => debug_session::run_command(args).await,
         Command::Doctor(args) => run_doctor(args).await,
         Command::Daemon(args) => run_daemon(args).await,
         Command::Tui(args) => run_tui(args).await,
         Command::Rehydrate(args) => run_rehydrate(args).await,
+    }
+}
+
+async fn run_install(args: InstallArgs) -> ExitCode {
+    match args.target {
+        InstallTarget::OpenHands(args) => run_install_openhands(args).await,
+    }
+}
+
+async fn run_install_openhands(_args: InstallOpenHandsArgs) -> ExitCode {
+    let tool_dir = match default_managed_openhands_tool_dir() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
+    };
+
+    println!(
+        "Installing pinned OpenHands tooling into {}",
+        tool_dir.display()
+    );
+
+    match ensure_openhands_tooling(&tool_dir).await {
+        Ok(report) => {
+            println!("{}", report.summary());
+            println!(
+                "Managed local OpenHands is ready. Point `openhands.tool_dir` at {}.",
+                tool_dir.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -408,18 +471,6 @@ pub async fn run_doctor_command(
     };
 
     let config_root = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let _tool_dir = match resolve_required_path(
-        config_root,
-        "openhands.tool_dir",
-        &config.openhands.tool_dir,
-    ) {
-        Ok(tool_dir) => tool_dir,
-        Err(error) => {
-            checks.push(CheckResult::fail("config", error.to_string()));
-            print_checks(&checks);
-            return ExitCode::from(1);
-        }
-    };
     let configured_target_repo = match config
         .target_repo
         .as_deref()
@@ -484,8 +535,6 @@ pub async fn run_doctor_command(
             };
 
             checks.push(check_workspace_root(&runtime.workflow.config.workspace.root).await);
-            checks.push(check_tool_dir(&runtime.tool_dir).await);
-            checks.extend(check_required_commands());
             checks.push(check_local_safety());
             checks.push(check_openhands_transport(&runtime.workflow));
             checks.push(check_linear(&config.linear, &runtime.workflow));
@@ -501,19 +550,73 @@ pub async fn run_doctor_command(
         }
     };
 
-    let tooling_inspection = inspect_local_tooling(&runtime.tool_dir);
-    checks.extend(tooling_inspection.checks);
+    let managed_local = match managed_local_openhands_enabled(&runtime.workflow) {
+        Ok(enabled) => enabled,
+        Err(error) => {
+            checks.push(CheckResult::fail("openhands-auth", error));
+            print_checks(&checks);
+            return ExitCode::from(1);
+        }
+    };
+
+    let prerequisite_checks = check_required_commands(managed_local);
+    let prerequisite_failures = prerequisite_checks
+        .iter()
+        .any(|check| matches!(check.status, CheckStatus::Fail));
+    checks.extend(prerequisite_checks);
+
+    let mut tooling = None;
+    if managed_local {
+        let Some(tool_dir) = runtime.tool_dir.as_ref() else {
+            checks.push(CheckResult::fail(
+                "openhands-tooling",
+                managed_local_tool_dir_required_message(),
+            ));
+            print_checks(&checks);
+            return ExitCode::from(1);
+        };
+
+        if prerequisite_failures {
+            checks.push(CheckResult::skip(
+                "openhands-install",
+                format!(
+                    "skipped automatic bootstrap for {} because prerequisite checks failed",
+                    tool_dir.display()
+                ),
+            ));
+        } else {
+            match ensure_openhands_tooling(tool_dir).await {
+                Ok(report) => checks.push(CheckResult::pass("openhands-install", report.summary())),
+                Err(error) => {
+                    checks.push(CheckResult::fail("openhands-install", error.to_string()))
+                }
+            }
+        }
+
+        checks.push(check_tool_dir(tool_dir).await);
+        let ToolingInspection {
+            tooling: inspected_tooling,
+            checks: tooling_checks,
+        } = inspect_local_tooling(tool_dir);
+        checks.extend(tooling_checks);
+        tooling = inspected_tooling;
+    } else {
+        checks.push(CheckResult::skip(
+            "openhands-install",
+            "configured OpenHands transport does not require managed local tooling",
+        ));
+        checks.push(CheckResult::skip(
+            "openhands-tooling",
+            "managed local OpenHands tooling not required for configured transport",
+        ));
+    }
 
     // Track supervisor for cleanup after rehydration (if both live_openhands and rehydrate)
     let mut live_checks_supervisor = None;
 
     if live_openhands {
-        let live_checks = run_live_openhands_checks(
-            &runtime,
-            &rendered_probe_prompt,
-            tooling_inspection.tooling.as_ref(),
-        )
-        .await;
+        let live_checks =
+            run_live_openhands_checks(&runtime, &rendered_probe_prompt, tooling.as_ref()).await;
         checks.extend(live_checks.checks);
         live_checks_supervisor = live_checks.supervisor;
     } else {
@@ -778,8 +881,9 @@ fn resolve_doctor_config(
         config.target_repo = Some(resolve_required_config_value("target_repo", &target_repo)?);
     }
 
+    let tool_dir = config.openhands.tool_dir.take();
     config.openhands.tool_dir =
-        resolve_required_config_value("openhands.tool_dir", &config.openhands.tool_dir)?;
+        resolve_present_optional_config_value("openhands.tool_dir", tool_dir.as_deref())?;
 
     let probe_model = config.openhands.probe_model.take();
     config.openhands.probe_model =
@@ -857,13 +961,58 @@ fn resolve_optional_config_value(
     }
 }
 
+fn resolve_present_optional_config_value(
+    field: &'static str,
+    raw: Option<&str>,
+) -> Result<Option<String>, ResolveDoctorConfigError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+
+    resolve_required_config_value(field, raw).map(|value| match value.trim() {
+        "" => None,
+        normalized => Some(normalized.to_owned()),
+    })
+}
+
 fn resolve_path(base: &Path, raw: &str) -> PathBuf {
-    let path = PathBuf::from(raw);
+    let path = expand_home_path(raw);
     if path.is_absolute() {
         path
     } else {
         base.join(path)
     }
+}
+
+fn expand_home_path(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return open_user_home_dir().unwrap_or_else(|| PathBuf::from(raw));
+    }
+
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return open_user_home_dir()
+            .map(|home| home.join(rest))
+            .unwrap_or_else(|| PathBuf::from(raw));
+    }
+
+    PathBuf::from(raw)
+}
+
+fn open_user_home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
+fn recommended_openhands_tool_dir() -> &'static str {
+    DEFAULT_MANAGED_OPENHANDS_TOOL_DIR
+}
+
+fn managed_local_tool_dir_required_message() -> String {
+    format!(
+        "managed local OpenHands requires `openhands.tool_dir` in config.yaml (recommended: {})",
+        recommended_openhands_tool_dir()
+    )
 }
 
 fn resolve_required_path(
@@ -931,7 +1080,11 @@ fn resolve_doctor_runtime(
         target_repo,
         workflow_path,
         workflow,
-        tool_dir: resolve_path(config_root, &config.openhands.tool_dir),
+        tool_dir: config
+            .openhands
+            .tool_dir
+            .as_deref()
+            .map(|value| resolve_path(config_root, value)),
         probe_model: config.openhands.probe_model.clone(),
         probe_api_key_env: config.openhands.probe_api_key_env.clone(),
         probe_llm_base_url_env: config.openhands.probe_llm_base_url_env.clone(),
@@ -1087,21 +1240,42 @@ async fn check_tool_dir(tool_dir: &Path) -> CheckResult {
     }
 }
 
-fn check_required_commands() -> Vec<CheckResult> {
-    [
-        (
+fn managed_local_openhands_enabled(workflow: &ResolvedWorkflow) -> Result<bool, String> {
+    let transport = TransportConfig::from_workflow(workflow, &ProcessEnvironment)
+        .map_err(|error| error.to_string())?;
+    transport
+        .managed_local_server_base_url()
+        .map(|candidate| candidate.is_some() && workflow.extensions.openhands.local_server.enabled)
+        .map_err(|error| error.to_string())
+}
+
+fn check_required_commands(require_uv: bool) -> Vec<CheckResult> {
+    let mut checks = vec![
+        check_required_command(
             "cargo",
             "Rust workspace builds, tests, and CLI smoke checks",
         ),
-        ("curl", "local control-plane and agent-server smoke probes"),
-        ("git", "workspace hooks and local repository operations"),
-        (
+        check_required_command("curl", "local control-plane and agent-server smoke probes"),
+        check_required_command("git", "workspace hooks and local repository operations"),
+    ];
+
+    if require_uv {
+        checks.push(check_required_command(
             "uv",
-            "the pinned OpenHands environment under tools/openhands-server",
-        ),
-    ]
-    .into_iter()
-    .map(|(name, purpose)| match find_executable(name) {
+            "the pinned OpenHands environment used for managed local mode",
+        ));
+    } else {
+        checks.push(CheckResult::skip(
+            "prereq-uv",
+            "uv is only required for managed local OpenHands tooling",
+        ));
+    }
+
+    checks
+}
+
+fn check_required_command(name: &'static str, purpose: &'static str) -> CheckResult {
+    match find_executable(name) {
         Some(path) => CheckResult::pass(
             command_check_name(name),
             format!("found {} at {} ({purpose})", name, path.display()),
@@ -1110,8 +1284,7 @@ fn check_required_commands() -> Vec<CheckResult> {
             command_check_name(name),
             format!("{} is not on PATH ({purpose})", name),
         ),
-    })
-    .collect()
+    }
 }
 
 fn command_check_name(name: &'static str) -> &'static str {
@@ -2078,13 +2251,16 @@ fn build_rehydrate_client(
     };
 
     let tool_dir = configured_tool_dir.map(Path::to_path_buf).ok_or_else(|| {
-        "managed local-server rehydration requires `openhands.tool_dir` in config.yaml".to_string()
-    })?;
-    let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|e| {
         format!(
-            "failed to load local server tooling from {}: {}",
+            "managed local-server rehydration requires `openhands.tool_dir` in config.yaml (recommended: {})",
+            recommended_openhands_tool_dir()
+        )
+    })?;
+    let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
+        format!(
+            "managed local OpenHands tooling at {} is missing or invalid: {}. Run `opensymphony install openhands` or `opensymphony doctor --config <path>`.",
             tool_dir.display(),
-            e
+            error
         )
     })?;
     let url =
@@ -2166,6 +2342,7 @@ mod tests {
             | Command::Debug(_)
             | Command::Tui(_)
             | Command::Doctor(_)
+            | Command::Install(_)
             | Command::Rehydrate(_) => {
                 panic!("expected daemon command")
             }
@@ -2318,6 +2495,56 @@ openhands:
     }
 
     #[test]
+    fn build_rehydrate_client_requires_tool_dir_for_managed_local_transport() {
+        let runtime = sample_doctor_runtime();
+        let transport = opensymphony_openhands::TransportConfig::from_workflow(
+            &runtime.workflow,
+            &opensymphony_workflow::ProcessEnvironment,
+        )
+        .expect("transport should resolve");
+
+        let error = match super::build_rehydrate_client(&runtime.workflow, &transport, None) {
+            Err(error) => error,
+            Ok(_) => panic!("managed-local rehydration should require tool_dir"),
+        };
+
+        assert!(
+            error.contains(
+                "managed local-server rehydration requires `openhands.tool_dir` in config.yaml"
+            ),
+            "rehydrate guidance should mention the missing managed-local tool_dir: {error}",
+        );
+    }
+
+    #[test]
+    fn build_rehydrate_client_reports_install_guidance_for_invalid_tooling() {
+        let runtime = sample_doctor_runtime();
+        let transport = opensymphony_openhands::TransportConfig::from_workflow(
+            &runtime.workflow,
+            &opensymphony_workflow::ProcessEnvironment,
+        )
+        .expect("transport should resolve");
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tool_dir = temp_dir.path().join("missing/openhands-server");
+
+        let error =
+            match super::build_rehydrate_client(&runtime.workflow, &transport, Some(&tool_dir)) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid managed-local tooling should be reported"),
+            };
+
+        assert!(
+            error.contains("opensymphony install openhands")
+                && error.contains("opensymphony doctor --config <path>"),
+            "rehydrate guidance should explain how to provision tooling: {error}",
+        );
+        assert!(
+            error.contains(&tool_dir.display().to_string()),
+            "rehydrate guidance should mention the configured tool dir: {error}",
+        );
+    }
+
+    #[test]
     fn effective_openhands_probe_base_url_prefers_the_started_supervisor() {
         assert_eq!(
             effective_openhands_probe_base_url(
@@ -2381,7 +2608,7 @@ openhands:
             target_repo,
             workflow_path: temp_dir.path().join("target-repo/WORKFLOW.md"),
             workflow,
-            tool_dir: temp_dir.path().join("tools/openhands-server"),
+            tool_dir: Some(temp_dir.path().join("tools/openhands-server")),
             probe_model: None,
             probe_api_key_env: None,
             probe_llm_base_url_env: None,

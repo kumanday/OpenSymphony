@@ -52,7 +52,6 @@ struct DebugOpenHandsConfigFile {
 }
 
 struct DebugRuntimeConfig {
-    repo_root: PathBuf,
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
 }
@@ -119,9 +118,13 @@ enum DebugCommandError {
     #[error(transparent)]
     Supervisor(#[from] SupervisorError),
     #[error(
-        "workflow config requires a local OpenHands server, but no tooling directory was configured and {repo_root}/tools/openhands-server was not found"
+        "workflow config requires a managed local OpenHands server, but `openhands.tool_dir` is missing from config.yaml (recommended: ~/.opensymphony/openhands-server)"
     )]
-    MissingToolDir { repo_root: PathBuf },
+    MissingToolDir,
+    #[error(
+        "managed local OpenHands tooling at {tool_dir} is missing or invalid: {detail}. Run `opensymphony install openhands` or `opensymphony doctor --config <path>`."
+    )]
+    ToolingSetupRequired { tool_dir: PathBuf, detail: String },
     #[error(
         "OpenHands transport URL `{value}` does not include an explicit port and has no default port"
     )]
@@ -285,11 +288,6 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         (default_target_repo, None)
     };
 
-    let repo_root = super::find_cargo_workspace_root(&target_repo)
-        .unwrap_or_else(|| super::normalize_workspace_root(&target_repo));
-    let inferred_tool_dir = repo_root.join("tools").join("openhands-server");
-    let tool_dir =
-        configured_tool_dir.or_else(|| inferred_tool_dir.is_dir().then_some(inferred_tool_dir));
     let workflow_path = target_repo.join("WORKFLOW.md");
     let workflow = WorkflowDefinition::load_from_path(&workflow_path).map_err(|source| {
         DebugCommandError::LoadWorkflow {
@@ -305,9 +303,8 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
         })?;
 
     Ok(DebugRuntimeConfig {
-        repo_root,
         workflow,
-        tool_dir,
+        tool_dir: configured_tool_dir,
     })
 }
 
@@ -377,10 +374,13 @@ fn build_debug_client(
     let tool_dir = runtime
         .tool_dir
         .clone()
-        .ok_or_else(|| DebugCommandError::MissingToolDir {
-            repo_root: runtime.repo_root.clone(),
-        })?;
-    let tooling = LocalServerTooling::load(tool_dir)?;
+        .ok_or(DebugCommandError::MissingToolDir)?;
+    let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
+        DebugCommandError::ToolingSetupRequired {
+            tool_dir,
+            detail: error.to_string(),
+        }
+    })?;
     let url =
         Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);
@@ -876,8 +876,16 @@ fn turn_has_stopped(status: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::should_rehydrate_after_attach_failure;
+    use std::path::PathBuf;
+
     use opensymphony_openhands::OpenHandsError;
+    use opensymphony_workflow::WorkflowDefinition;
+    use tempfile::TempDir;
+
+    use super::{
+        DebugCommandError, DebugRuntimeConfig, build_debug_client,
+        should_rehydrate_after_attach_failure,
+    };
 
     #[test]
     fn rehydrate_only_when_conversation_is_missing() {
@@ -901,5 +909,79 @@ mod tests {
                 detail: "connection refused".to_string(),
             }
         ));
+    }
+
+    #[test]
+    fn build_debug_client_requires_tool_dir_for_managed_local_transport() {
+        let runtime = sample_debug_runtime(None);
+
+        let error = match build_debug_client(&runtime) {
+            Err(error) => error,
+            Ok(_) => panic!("managed-local debug should require tool_dir"),
+        };
+
+        assert!(matches!(error, DebugCommandError::MissingToolDir));
+    }
+
+    #[test]
+    fn build_debug_client_reports_install_guidance_for_invalid_tooling() {
+        let temp_dir = TempDir::new().expect("temp dir should exist");
+        let tool_dir = temp_dir.path().join("missing/openhands-server");
+        let runtime = sample_debug_runtime(Some(tool_dir.clone()));
+
+        let error = match build_debug_client(&runtime) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid tooling should be reported"),
+        };
+
+        match error {
+            DebugCommandError::ToolingSetupRequired {
+                tool_dir: reported,
+                detail,
+            } => {
+                assert_eq!(reported, tool_dir);
+                assert!(
+                    detail.contains("required local OpenHands tooling file is missing"),
+                    "tooling detail should explain the missing managed-local file: {detail}",
+                );
+            }
+            other => panic!("expected tooling setup guidance, got {other}"),
+        }
+    }
+
+    fn sample_debug_runtime(tool_dir: Option<PathBuf>) -> DebugRuntimeConfig {
+        let temp_dir = TempDir::new().expect("temp dir should exist");
+        let target_repo = temp_dir.path().join("target-repo");
+        std::fs::create_dir_all(&target_repo).expect("target repo should exist");
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: ./var/workspaces
+openhands:
+  transport:
+    base_url: http://127.0.0.1:8000
+---
+
+# Debug Session
+"#,
+        )
+        .expect("workflow should parse")
+        .resolve(
+            &target_repo,
+            &super::super::DoctorWorkflowEnvironment {
+                fallback_linear_api_key: true,
+            },
+        )
+        .expect("workflow should resolve");
+
+        DebugRuntimeConfig { workflow, tool_dir }
     }
 }

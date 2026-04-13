@@ -128,7 +128,13 @@ control_plane:
   bind: 127.0.0.1:2468
 
 openhands:
-  tool_dir: /absolute/path/to/OpenSymphony/tools/openhands-server
+  tool_dir: ~/.opensymphony/openhands-server
+```
+
+Provision that app-managed directory with:
+
+```bash
+opensymphony install openhands
 ```
 
 When your workflow points at an external OpenHands agent-server with
@@ -138,8 +144,8 @@ When your workflow points at an external OpenHands agent-server with
 Use [examples/target-repo/config.yaml](../examples/target-repo/config.yaml) as
 the starting template if you want to inspect the checked-in example.
 
-[examples/configs/local-dev.yaml](../examples/configs/local-dev.yaml) is for
-`opensymphony doctor` against the OpenSymphony checkout. It is not the runtime
+[examples/configs/local-dev.yaml](../examples/configs/local-dev.yaml) is a
+developer-facing doctor fixture for this repository. It is not the runtime
 config that `opensymphony run` looks for in a target repo.
 
 ## OpenHands PR Review

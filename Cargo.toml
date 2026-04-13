@@ -1,10 +1,14 @@
 [package]
 name = "opensymphony"
+description = "Rust implementation of the OpenAI Symphony orchestrator"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+readme = "README.md"
+keywords = ["ai", "agents", "orchestration", "linear", "openhands"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace]
 members = [
@@ -25,7 +29,7 @@ resolver = "2"
 workspace = true
 
 [dependencies]
-opensymphony-cli = { path = "crates/opensymphony-cli" }
+opensymphony-cli.workspace = true
 tokio.workspace = true
 
 [workspace.package]
@@ -58,6 +62,16 @@ clap = { version = "4.5", features = ["derive", "env"] }
 ftui = { version = "0.2.1", features = ["crossterm"] }
 futures-util = "0.3"
 libc = "0.2"
+opensymphony-cli = { version = "=1.0.1", path = "crates/opensymphony-cli" }
+opensymphony-control = { version = "=1.0.1", path = "crates/opensymphony-control" }
+opensymphony-domain = { version = "=1.0.1", path = "crates/opensymphony-domain" }
+opensymphony-linear = { version = "=1.0.1", path = "crates/opensymphony-linear" }
+opensymphony-openhands = { version = "=1.0.1", path = "crates/opensymphony-openhands" }
+opensymphony-orchestrator = { version = "=1.0.1", path = "crates/opensymphony-orchestrator" }
+opensymphony-testkit = { version = "=1.0.1", path = "crates/opensymphony-testkit" }
+opensymphony-tui = { version = "=1.0.1", path = "crates/opensymphony-tui" }
+opensymphony-workflow = { version = "=1.0.1", path = "crates/opensymphony-workflow" }
+opensymphony-workspace = { version = "=1.0.1", path = "crates/opensymphony-workspace" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 reqwest-eventsource = "0.6"
 serde = { version = "1", features = ["derive"] }

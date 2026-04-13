@@ -33,8 +33,10 @@ async fn init_copies_template_files_and_customizes_workflow() {
 
     let workflow =
         fs::read_to_string(repo.path().join("WORKFLOW.md")).expect("workflow should exist");
+    let config = fs::read_to_string(repo.path().join("config.yaml")).expect("config should exist");
     assert!(workflow.contains("project_slug: \"demo-project\""));
     assert!(workflow.contains("git clone --depth 1 'https://github.com/example/demo.git' ."));
+    assert!(config.contains("tool_dir: ~/.opensymphony/openhands-server"));
 
     assert!(
         repo.path().join("AGENTS.md").is_file(),
@@ -491,7 +493,7 @@ openhands:
         ),
         (
             "config.yaml".to_string(),
-            "control_plane:\n  bind: 127.0.0.1:2468\n".to_string(),
+            "control_plane:\n  bind: 127.0.0.1:2468\n\nopenhands:\n  tool_dir: ~/.opensymphony/openhands-server\n".to_string(),
         ),
         (
             ".agents/skills/commit/SKILL.md".to_string(),

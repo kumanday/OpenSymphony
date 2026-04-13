@@ -242,7 +242,12 @@ pub(super) async fn build_runtime_transport(
         .tool_dir
         .clone()
         .ok_or(RunCommandError::MissingToolDir)?;
-    let tooling = LocalServerTooling::load(tool_dir)?;
+    let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
+        RunCommandError::ToolingSetupRequired {
+            tool_dir,
+            detail: error.to_string(),
+        }
+    })?;
     let url =
         Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);

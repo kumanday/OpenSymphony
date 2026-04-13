@@ -1,9 +1,12 @@
 [package]
 name = "opensymphony-workspace"
+description = "Workspace lifecycle and safety management for OpenSymphony"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+rust-version.workspace = true
+categories = ["development-tools"]
 
 [lib]
 path = "src/lib.rs"

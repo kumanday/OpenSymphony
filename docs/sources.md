@@ -36,6 +36,8 @@ Pinned for the current local-MVP implementation branch:
   `https://github.com/OpenHands/software-agent-sdk/releases/tag/v1.14.0`
 - Local tooling pin location:
   `tools/openhands-server/`
+  Published `opensymphony` embeds this bundle for
+  `opensymphony install openhands`.
 
 - Local server guide:
   `https://docs.openhands.dev/sdk/guides/agent-server/local-server`
