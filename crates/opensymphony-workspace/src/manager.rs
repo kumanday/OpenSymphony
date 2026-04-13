@@ -1,6 +1,11 @@
 use std::{io, path::Path, process::Stdio};
 
 use chrono::Utc;
+#[cfg(unix)]
+use rustix::{
+    io::Errno,
+    process::{Pid, Signal, kill_process_group},
+};
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
     fs,
@@ -9,7 +14,7 @@ use tokio::{
     time::{Instant, timeout},
 };
 
-use crate::{
+use super::{
     CleanupDecision, CleanupOutcome, ConversationManifest, EnsureWorkspaceResult, HookDefinition,
     HookExecutionRecord, HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor,
     IssueLifecycleState, IssueManifest, PromptCaptureDescriptor, PromptCaptureManifest,
@@ -74,7 +79,7 @@ impl WorkspaceManager {
         &self,
         issue_identifier: &str,
     ) -> Result<std::path::PathBuf, WorkspaceError> {
-        crate::workspace_path_for_root(&self.config.root, issue_identifier)
+        super::workspace_path_for_root(&self.config.root, issue_identifier)
     }
 
     pub async fn ensure(
@@ -84,7 +89,7 @@ impl WorkspaceManager {
         self.create_directory(&self.config.root).await?;
         let canonical_root = self.canonicalize_path(&self.config.root).await?;
         let workspace_key = sanitize_workspace_key(&issue.identifier)?;
-        let workspace_path = crate::workspace_path_for_root(&canonical_root, &issue.identifier)?;
+        let workspace_path = super::workspace_path_for_root(&canonical_root, &issue.identifier)?;
 
         self.reject_symlinked_workspace_root(&workspace_path)
             .await?;
@@ -229,7 +234,7 @@ impl WorkspaceManager {
         if decision == CleanupDecision::Remove {
             match fs::remove_dir_all(workspace.workspace_path()).await {
                 Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(WorkspaceError::RemoveWorkspace {
                         path: workspace.workspace_path().to_path_buf(),
@@ -260,7 +265,7 @@ impl WorkspaceManager {
     ) -> Result<Option<WorkspaceHandle>, WorkspaceError> {
         self.create_directory(&self.config.root).await?;
 
-        match crate::workspace_path_for_root(&self.config.root, issue_reference) {
+        match super::workspace_path_for_root(&self.config.root, issue_reference) {
             Ok(candidate) => {
                 if let Some((handle, manifest)) =
                     self.load_workspace_from_directory(&candidate).await?
@@ -394,7 +399,7 @@ impl WorkspaceManager {
         let path = self.validate_workspace_owned_path(workspace, path).await?;
         match fs::read_to_string(&path).await {
             Ok(raw) => Ok(Some(raw)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(WorkspaceError::ReadManagedFile {
                 path,
                 source: error,
@@ -592,7 +597,7 @@ impl WorkspaceManager {
         let path = self.validate_workspace_owned_path(workspace, &path).await?;
         let raw = match fs::read_to_string(&path).await {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(ExistingIssueManifestState::Missing);
             }
             Err(error) => {
@@ -620,7 +625,7 @@ impl WorkspaceManager {
         let path = self.validate_workspace_owned_path(workspace, &path).await?;
         let raw = match fs::read_to_string(&path).await {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(ExistingReceiptState::Missing);
             }
             Err(error) => {
@@ -694,7 +699,7 @@ impl WorkspaceManager {
         let issue_manifest_path = canonical_workspace.join(".opensymphony").join("issue.json");
         let raw = match fs::read_to_string(&issue_manifest_path).await {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(source) => {
                 return Err(WorkspaceError::ReadManifest {
                     path: issue_manifest_path,
@@ -984,7 +989,7 @@ impl WorkspaceManager {
                 })
             }
             Ok(_) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(WorkspaceError::Canonicalize {
                 path: path.to_path_buf(),
                 source: error,
@@ -1003,7 +1008,7 @@ impl WorkspaceManager {
         let path = self.validate_workspace_owned_path(workspace, path).await?;
         let raw = match fs::read_to_string(&path).await {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => {
                 return Err(WorkspaceError::ReadManifest {
                     path: path.to_path_buf(),
@@ -1091,7 +1096,7 @@ impl WorkspaceManager {
                     });
                 }
                 Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
                 Err(error) => {
                     return Err(WorkspaceError::Canonicalize {
                         path: current.clone(),
@@ -1163,15 +1168,7 @@ async fn join_child_pipe(
 
 #[cfg(unix)]
 fn configure_hook_command(command: &mut Command) {
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setpgid(0, 0) == 0 {
-                Ok(())
-            } else {
-                Err(io::Error::last_os_error())
-            }
-        });
-    }
+    command.process_group(0);
 }
 
 #[cfg(not(unix))]
@@ -1182,17 +1179,27 @@ async fn terminate_hook_process_tree(
     _child: &mut tokio::process::Child,
     process_id: Option<u32>,
 ) -> io::Result<()> {
-    if let Some(process_id) = process_id {
-        let result = unsafe { libc::kill(-(process_id as i32), libc::SIGKILL) };
-        if result != 0 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(error);
-            }
-        }
-    }
+    let Some(process_id) = process_id else {
+        return Ok(());
+    };
 
-    Ok(())
+    let process_id = i32::try_from(process_id).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("hook process id {process_id} does not fit in i32"),
+        )
+    })?;
+    let process_group = Pid::from_raw(process_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("hook process id {process_id} is not a valid Unix pid"),
+        )
+    })?;
+
+    match kill_process_group(process_group, Signal::KILL) {
+        Ok(()) | Err(Errno::SRCH) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(windows)]
@@ -1329,7 +1336,7 @@ fn ensure_descendant(root: &Path, candidate: &Path) -> Result<(), WorkspaceError
 async fn path_exists(path: &Path) -> Result<bool, WorkspaceError> {
     match fs::metadata(path).await {
         Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(WorkspaceError::Canonicalize {
             path: path.to_path_buf(),
             source: error,

@@ -4,7 +4,8 @@
 
 OpenSymphony uses Linear in two different ways:
 
-- the Rust orchestrator reads Linear through `opensymphony-linear`
+- the Rust orchestrator reads Linear through the internal `opensymphony_linear`
+  module
 - the coding agent reads and writes Linear through the repo-local GraphQL skill
   assets copied into the target repository
 
@@ -12,7 +13,8 @@ Scheduler correctness must never depend on agent-side ticket writes succeeding.
 
 ## 2. Orchestrator read adapter
 
-`opensymphony-linear` is the only tracker adapter used by the daemon.
+The internal `opensymphony_linear` module is the only tracker adapter used by
+the daemon.
 
 It is responsible for:
 
@@ -111,9 +113,9 @@ The expected behavior is:
 The relevant ownership boundaries are:
 
 - `crates/opensymphony-linear/`
-  - orchestrator-side GraphQL adapter
+  - orchestrator-side GraphQL adapter module tree
 - `crates/opensymphony-workflow/`
-  - workflow validation for Linear-related config
+  - workflow validation module tree for Linear-related config
 - `.agents/skills/linear/` in the template repo
   - agent-side GraphQL helper, query files, and references
 
@@ -123,8 +125,8 @@ OpenSymphony intentionally does not ship a second agent-side Linear server.
 
 Before merging Linear-related changes:
 
-- run `cargo test --workspace`
-- run `cargo test -p opensymphony-cli --test init`
+- run `cargo test`
+- run `cargo test --test init`
 - initialize a sample repo with `opensymphony init`
 - confirm the copied `.agents/skills/linear/` tree includes scripts, queries,
   and references

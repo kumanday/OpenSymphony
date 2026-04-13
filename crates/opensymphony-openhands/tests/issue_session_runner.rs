@@ -1,23 +1,23 @@
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use opensymphony_domain::{
+use crate::opensymphony_domain::{
     IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RetryAttempt,
     RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
 };
-use opensymphony_openhands::{
+use crate::opensymphony_openhands::{
     ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
     IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig,
     LLM_SUMMARIZING_CONDENSER_KIND, LlmConfigFingerprint, OpenHandsClient, TransportConfig,
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
-use opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
-use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
-use opensymphony_workspace::{
+use crate::opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
+use crate::opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
+use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
     WorkspaceManager, WorkspaceManagerConfig,
 };
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use tempfile::TempDir;
 
 #[derive(Clone)]
@@ -292,9 +292,9 @@ Title: {{{{ issue.title }}}}
 
 fn runner_config(workflow: &ResolvedWorkflow) -> IssueSessionRunnerConfig {
     let mut config = IssueSessionRunnerConfig::from_workflow(workflow);
-    config.runtime_stream.readiness_timeout = std::time::Duration::from_secs(2);
-    config.terminal_wait_timeout = std::time::Duration::from_secs(2);
-    config.finished_drain_timeout = std::time::Duration::from_millis(200);
+    config.runtime_stream.readiness_timeout = Duration::from_secs(2);
+    config.terminal_wait_timeout = Duration::from_secs(2);
+    config.finished_drain_timeout = Duration::from_millis(200);
     config
 }
 
@@ -332,7 +332,7 @@ fn extract_message_text(event: &EventEnvelope) -> Option<String> {
 
 async fn read_conversation_manifest(
     manager: &WorkspaceManager,
-    handle: &opensymphony_workspace::WorkspaceHandle,
+    handle: &crate::opensymphony_workspace::WorkspaceHandle,
 ) -> IssueConversationManifest {
     let raw = manager
         .read_text_artifact(handle, &handle.conversation_manifest_path())
@@ -344,7 +344,7 @@ async fn read_conversation_manifest(
 
 async fn read_session_context(
     manager: &WorkspaceManager,
-    handle: &opensymphony_workspace::WorkspaceHandle,
+    handle: &crate::opensymphony_workspace::WorkspaceHandle,
 ) -> IssueSessionContext {
     let raw = manager
         .read_text_artifact(handle, &handle.generated_dir().join("session-context.json"))
@@ -356,7 +356,7 @@ async fn read_session_context(
 
 async fn read_create_conversation_request(
     manager: &WorkspaceManager,
-    handle: &opensymphony_workspace::WorkspaceHandle,
+    handle: &crate::opensymphony_workspace::WorkspaceHandle,
 ) -> ConversationCreateRequest {
     let raw = manager
         .read_text_artifact(
@@ -426,7 +426,7 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
     assert_eq!(first_result.prompt_kind, IssueSessionPromptKind::Full);
     assert_eq!(
         first_result.run_status,
-        opensymphony_workspace::RunStatus::Succeeded
+        crate::opensymphony_workspace::RunStatus::Succeeded
     );
     assert_eq!(
         first_result.worker_outcome.outcome,
@@ -558,7 +558,7 @@ async fn issue_session_runner_reuses_conversation_and_switches_to_continuation_p
     );
     assert_eq!(
         second_result.run_status,
-        opensymphony_workspace::RunStatus::Succeeded
+        crate::opensymphony_workspace::RunStatus::Succeeded
     );
     assert_eq!(
         second_result.worker_outcome.outcome,
@@ -833,7 +833,10 @@ async fn issue_session_runner_rejects_unknown_reuse_policies_from_the_runtime_bo
         .expect("unsupported reuse policy should surface as a normalized worker failure");
 
     assert_eq!(result.prompt_kind, IssueSessionPromptKind::Full);
-    assert_eq!(result.run_status, opensymphony_workspace::RunStatus::Failed);
+    assert_eq!(
+        result.run_status,
+        crate::opensymphony_workspace::RunStatus::Failed
+    );
     assert_eq!(result.worker_outcome.outcome, WorkerOutcomeKind::Failed);
     assert!(result.conversation.is_none());
     assert!(
@@ -1096,7 +1099,10 @@ async fn issue_session_runner_reports_failure_when_current_turn_terminal_error_i
         .expect("failing session run should return a normalized result");
 
     assert_eq!(result.prompt_kind, IssueSessionPromptKind::Full);
-    assert_eq!(result.run_status, opensymphony_workspace::RunStatus::Failed);
+    assert_eq!(
+        result.run_status,
+        crate::opensymphony_workspace::RunStatus::Failed
+    );
     assert_eq!(result.worker_outcome.outcome, WorkerOutcomeKind::Failed);
     assert!(
         result
@@ -1212,7 +1218,7 @@ async fn issue_session_runner_waits_for_an_already_running_turn_before_retrying(
     );
     assert_eq!(
         second_result.run_status,
-        opensymphony_workspace::RunStatus::Succeeded
+        crate::opensymphony_workspace::RunStatus::Succeeded
     );
     assert_eq!(
         second_result.worker_outcome.outcome,
@@ -1579,7 +1585,7 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
 
     assert_eq!(
         result.run_status,
-        opensymphony_workspace::RunStatus::Succeeded
+        crate::opensymphony_workspace::RunStatus::Succeeded
     );
     let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
     assert_eq!(
@@ -1815,7 +1821,10 @@ async fn issue_session_runner_fails_when_workflow_owned_llm_provider_env_is_miss
         .await
         .expect("missing provider env should surface as a failed run");
 
-    assert_eq!(result.run_status, opensymphony_workspace::RunStatus::Failed);
+    assert_eq!(
+        result.run_status,
+        crate::opensymphony_workspace::RunStatus::Failed
+    );
     assert_eq!(result.worker_outcome.outcome, WorkerOutcomeKind::Failed);
     assert!(
         result
@@ -1895,7 +1904,7 @@ async fn issue_session_runner_smoke_executes_in_temp_repo_workspace() {
 
     assert_eq!(
         result.run_status,
-        opensymphony_workspace::RunStatus::Succeeded
+        crate::opensymphony_workspace::RunStatus::Succeeded
     );
     assert_eq!(result.worker_outcome.outcome, WorkerOutcomeKind::Succeeded);
     assert!(
@@ -1979,7 +1988,7 @@ async fn rehydrate_conversation_deletes_old_and_creates_new_with_token_preservat
     // Now rehydrate the conversation
     let rehydrate_run = run_attempt(&issue, ensured.handle.workspace_path(), "worker-2", None, 8);
 
-    let options = opensymphony_openhands::RehydrationOptions {
+    let options = crate::opensymphony_openhands::RehydrationOptions {
         reason: "test rehydration".to_string(),
         summarize: false,
         max_summary_events: 10,

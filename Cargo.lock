@@ -1370,181 +1370,34 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "opensymphony"
-version = "1.0.2"
+version = "1.1.0"
 dependencies = [
- "opensymphony-cli",
- "tokio",
-]
-
-[[package]]
-name = "opensymphony-cli"
-version = "1.0.2"
-dependencies = [
+ "async-stream",
  "async-trait",
  "axum",
  "chrono",
  "clap",
- "opensymphony-control",
- "opensymphony-domain",
- "opensymphony-linear",
- "opensymphony-openhands",
- "opensymphony-orchestrator",
- "opensymphony-testkit",
- "opensymphony-tui",
- "opensymphony-workflow",
- "opensymphony-workspace",
+ "ftui",
+ "futures-util",
+ "liquid",
  "reqwest",
+ "reqwest-eventsource",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "opensymphony-control"
-version = "1.0.2"
-dependencies = [
- "async-stream",
- "axum",
- "chrono",
- "futures-util",
- "opensymphony-domain",
- "reqwest",
- "reqwest-eventsource",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "opensymphony-domain"
-version = "1.0.2"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "opensymphony-linear"
-version = "1.0.2"
-dependencies = [
- "axum",
- "chrono",
- "opensymphony-domain",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "opensymphony-openhands"
-version = "1.0.2"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "futures-util",
- "opensymphony-domain",
- "opensymphony-testkit",
- "opensymphony-workflow",
- "opensymphony-workspace",
- "reqwest",
- "serde",
- "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "time",
  "tokio",
  "tokio-tungstenite 0.24.0",
  "toml",
  "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "opensymphony-orchestrator"
-version = "1.0.2"
-dependencies = [
- "axum",
- "chrono",
- "opensymphony-domain",
- "opensymphony-linear",
- "opensymphony-workflow",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "opensymphony-testkit"
-version = "1.0.2"
-dependencies = [
- "axum",
- "chrono",
- "opensymphony-openhands",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "opensymphony-tui"
-version = "1.0.2"
-dependencies = [
- "chrono",
- "ftui",
- "opensymphony-control",
- "opensymphony-domain",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
+ "tracing-subscriber",
  "unicode-width",
  "url",
-]
-
-[[package]]
-name = "opensymphony-workflow"
-version = "1.0.2"
-dependencies = [
- "liquid",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.18",
- "time",
- "url",
-]
-
-[[package]]
-name = "opensymphony-workspace"
-version = "1.0.2"
-dependencies = [
- "chrono",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
+ "uuid",
 ]
 
 [[package]]

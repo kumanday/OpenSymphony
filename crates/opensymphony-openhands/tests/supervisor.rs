@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use opensymphony_openhands::{
+use crate::opensymphony_openhands::{
     ExternalServerConfig, LaunchOwnership, LocalServerSupervisor, LocalServerTooling, ServerState,
     SupervisedServerConfig, SupervisorConfig, SupervisorError,
 };

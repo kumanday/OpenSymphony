@@ -1,6 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 
-use crate::WorkspaceError;
+use super::WorkspaceError;
 
 pub fn sanitize_workspace_key(identifier: &str) -> Result<String, WorkspaceError> {
     if identifier.trim().is_empty() {
@@ -91,15 +91,22 @@ pub(crate) fn normalize_absolute_path(path: &Path) -> Result<PathBuf, WorkspaceE
 mod tests {
     use std::path::PathBuf;
 
+    use super::WorkspaceError;
     use super::{resolve_path_within_root, sanitize_workspace_key};
-    use crate::WorkspaceError;
 
     #[test]
     fn sanitizes_documented_examples() {
-        assert_eq!(sanitize_workspace_key("ABC-123").unwrap(), "ABC-123");
-        assert_eq!(sanitize_workspace_key("feature/42").unwrap(), "feature_42");
         assert_eq!(
-            sanitize_workspace_key("Bug: weird path").unwrap(),
+            sanitize_workspace_key("ABC-123").expect("documented ticket key should be valid"),
+            "ABC-123"
+        );
+        assert_eq!(
+            sanitize_workspace_key("feature/42").expect("slashes should be normalized"),
+            "feature_42"
+        );
+        assert_eq!(
+            sanitize_workspace_key("Bug: weird path")
+                .expect("spaces and punctuation should be normalized"),
             "Bug__weird_path"
         );
     }
@@ -123,7 +130,8 @@ mod tests {
     #[test]
     fn containment_helper_rejects_parent_escape() {
         let root = std::env::temp_dir().join("opensymphony-workspace-root");
-        let error = resolve_path_within_root(&root, PathBuf::from("../escape")).unwrap_err();
+        let error = resolve_path_within_root(&root, PathBuf::from("../escape"))
+            .expect_err("parent-relative candidate should be rejected");
 
         assert!(matches!(error, WorkspaceError::PathEscape { .. }));
     }

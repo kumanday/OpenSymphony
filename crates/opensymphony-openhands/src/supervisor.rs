@@ -11,7 +11,7 @@ use reqwest::{blocking::Client, redirect::Policy};
 use thiserror::Error;
 use url::Url;
 
-use crate::tooling::{LocalServerTooling, LocalToolingError, ResolvedLaunch};
+use super::tooling::{LocalServerTooling, LocalToolingError, ResolvedLaunch};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerMode {

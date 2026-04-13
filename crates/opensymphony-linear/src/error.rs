@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use opensymphony_domain::TrackerErrorCategory;
+use crate::opensymphony_domain::TrackerErrorCategory;
 use reqwest::StatusCode;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -140,10 +140,10 @@ fn graphql_category(errors: &[GraphqlError]) -> TrackerErrorCategory {
 mod tests {
     use std::time::Duration;
 
-    use opensymphony_domain::TrackerErrorCategory;
+    use crate::opensymphony_domain::TrackerErrorCategory;
     use reqwest::StatusCode;
 
-    use crate::error::{GraphqlError, LinearError};
+    use super::{GraphqlError, LinearError};
 
     #[test]
     fn http_statuses_map_to_tracker_categories() {

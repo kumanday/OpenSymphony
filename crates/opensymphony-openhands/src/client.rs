@@ -1,7 +1,7 @@
 use std::{cmp::Ordering, collections::VecDeque, time::Duration};
 
+use crate::opensymphony_workflow::{Environment, ResolvedWorkflow};
 use futures_util::StreamExt;
-use opensymphony_workflow::{Environment, ResolvedWorkflow};
 use reqwest::{
     RequestBuilder,
     header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue},
@@ -21,8 +21,8 @@ use tracing::debug;
 use url::{Host, Position, Url};
 use uuid::Uuid;
 
-use crate::events::{ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus};
-use crate::models::{
+use super::events::{ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus};
+use super::models::{
     AcceptedResponse, Conversation, ConversationCreateRequest, ConversationRunRequest,
     EventEnvelope, SearchConversationEventsResponse, SendMessageRequest,
 };

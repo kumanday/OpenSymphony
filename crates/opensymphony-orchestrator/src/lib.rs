@@ -3,7 +3,7 @@ mod selection;
 
 pub const CRATE_NAME: &str = "opensymphony-orchestrator";
 
-pub use opensymphony_domain::{
+pub use crate::opensymphony_domain::{
     ComponentHealthSnapshot, ConversationId, ConversationMetadata, DaemonSnapshot, DurationMs,
     HealthStatus, IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueRef,
     IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,

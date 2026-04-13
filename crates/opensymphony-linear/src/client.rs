@@ -1,6 +1,6 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot};
+use crate::opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot};
 use reqwest::{
     Client, StatusCode,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::debug;
 
-use crate::error::{GraphqlError, LinearError};
-use crate::graphql::{
+use super::error::{GraphqlError, LinearError};
+use super::graphql::{
     GraphqlEnvelope, GraphqlErrorPayload, ISSUE_COMMENTS_QUERY, ISSUE_INVERSE_RELATIONS_QUERY,
     ISSUE_LABELS_QUERY, ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueCommentsData,
     IssueCommentsVariables, IssueInverseRelationsData, IssueInverseRelationsVariables,
@@ -19,7 +19,7 @@ use crate::graphql::{
     IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
     LinearRelationConnection,
 };
-use crate::normalize::{normalize_issue, normalize_issue_state};
+use super::normalize::{normalize_issue, normalize_issue_state};
 
 const DEFAULT_BASE_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -425,7 +425,7 @@ impl LinearClient {
                         return Err(error);
                     }
 
-                    if let Some(error) = decode_graphql_error_response(&payload, retry_after)? {
+                    if let Some(error) = decode_graphql_error_response(&payload, retry_after) {
                         if self.should_retry(&error, attempt) {
                             self.sleep_before_retry(&error, attempt).await;
                             attempt += 1;
@@ -542,18 +542,18 @@ fn convert_graphql_errors(errors: Vec<GraphqlErrorPayload>) -> Vec<GraphqlError>
 fn decode_graphql_error_response(
     payload: &str,
     retry_after: Option<Duration>,
-) -> Result<Option<LinearError>, LinearError> {
+) -> Option<LinearError> {
     let envelope: GraphqlEnvelope<Value> = match serde_json::from_str(payload) {
         Ok(envelope) => envelope,
-        Err(_) => return Ok(None),
+        Err(_) => return None,
     };
 
-    Ok(envelope.errors.map(|errors| {
+    envelope.errors.map(|errors| {
         LinearError::from_graphql_errors_with_retry_after(
             convert_graphql_errors(errors),
             retry_after,
         )
-    }))
+    })
 }
 
 fn normalize_strings<S>(values: &[S]) -> Vec<String>

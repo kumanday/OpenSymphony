@@ -2,7 +2,7 @@ use std::{io, path::PathBuf, time::Duration};
 
 use serde_json::Error as JsonError;
 
-use crate::HookKind;
+use super::HookKind;
 
 #[derive(Debug)]
 pub struct WorkspaceOwnershipConflictDetails {

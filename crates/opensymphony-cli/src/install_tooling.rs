@@ -8,7 +8,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use opensymphony_openhands::LocalServerTooling;
+use crate::opensymphony_openhands::LocalServerTooling;
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::process::Command;
@@ -353,8 +353,12 @@ mod tests {
         materialize_embedded_tooling(temp_dir.path(), super::ToolingInstallAction::Installed)
             .expect("tooling should materialize");
 
-        let repo_tooling_root =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/openhands-server");
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_tooling_root = if manifest_dir.join("tools/openhands-server").is_dir() {
+            manifest_dir.join("tools/openhands-server")
+        } else {
+            manifest_dir.join("../../tools/openhands-server")
+        };
         if !repo_tooling_root.is_dir() {
             return;
         }

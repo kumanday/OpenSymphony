@@ -161,14 +161,14 @@ wait on kernel TCP timeouts.
 
 Current repository implementation:
 
-- `opensymphony-openhands::OpenHandsClient::wait_for_readiness` loops until an event envelope with kind `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable frames before readiness
-- `opensymphony-openhands::OpenHandsClient::attach_runtime_stream` performs the full attach sequence: initial REST sync, WebSocket connect, readiness barrier, and post-ready reconcile before returning a live `RuntimeEventStream`
+- `opensymphony::opensymphony_openhands::OpenHandsClient::wait_for_readiness` loops until an event envelope with kind `ConversationStateUpdateEvent` arrives from `/sockets/events/{conversation_id}`, while tolerating control frames and unrelated or undecodable frames before readiness
+- `opensymphony::opensymphony_openhands::OpenHandsClient::attach_runtime_stream` performs the full attach sequence: initial REST sync, WebSocket connect, readiness barrier, and post-ready reconcile before returning a live `RuntimeEventStream`
 - `TransportConfig` preserves base-path prefixes and applies REST versus WebSocket auth independently, so reverse-proxied external or authenticated targets keep their `/runtime/...` style prefixes while still matching the pinned auth contract; managed unauthenticated loopback targets normalize those prefixes back to the direct origin before local supervisor startup and client reuse
 - the readiness frame is retained on `RuntimeEventStream::ready_event` as an attach barrier and diagnostic snapshot, refreshes the in-memory state mirror only when it is newer than the reconciled state, stays authoritative across later mirror rebuilds until reconcile or REST refresh surfaces an equal or newer decodable state update, can salvage a forward-compatible `state_delta` even when the full payload shape no longer deserializes cleanly, can clear stale terminal REST fallback when a reused conversation has already restarted into an active `queued` or `running` state, and is not replayed through `next_event()` unless `/events/search` independently contains the same event ID
 - `RuntimeEventStream::next_event` now drains any immediately available live socket frames into the same ordered pending queue before yielding a later attach-backlog item, so direct consumers still observe timestamp order while replaying persisted history without relying on a fixed read-ahead delay
 - workflow-owned `openhands.websocket.ready_timeout_ms`, `reconnect_initial_ms`, and `reconnect_max_ms` overrides are now consumed by the runtime attach/reconnect path; explicit `openhands.websocket.enabled` still remains rejected because the live runtime always opens the readiness socket
-- `opensymphony-testkit` sends a state-update event immediately on default WebSocket attach and can now override individual `/events/search` calls plus per-connection WebSocket frame sequences, so attach/reconcile race windows stay deterministic in CI without standing up ad hoc inline servers for each scenario
-- `crates/opensymphony-openhands/tests/fake_server_contract.rs`, `crates/opensymphony-openhands/tests/client_resilience.rs`, `crates/opensymphony-openhands/tests/live_pinned_server.rs`, and `crates/opensymphony-cli/tests/doctor.rs` cover the readiness, attach, auth, and reconcile path, with the shared fake-server contract suite now absorbing the scripted initial-replay, buffered-live ordering, reconnect-exhaustion, and explicit-close cases
+- the internal `opensymphony_testkit` module sends a state-update event immediately on default WebSocket attach and can now override individual `/events/search` calls plus per-connection WebSocket frame sequences, so attach/reconcile race windows stay deterministic in CI without standing up ad hoc inline servers for each scenario
+- `tests/fake_server_contract.rs`, `tests/client_resilience.rs`, `tests/live_pinned_server.rs`, and `tests/doctor.rs` cover the readiness, attach, auth, and reconcile path, with the shared fake-server contract suite now absorbing the scripted initial-replay, buffered-live ordering, reconnect-exhaustion, and explicit-close cases
 
 ## 6. Event cache and reconciliation
 
@@ -241,7 +241,7 @@ The worker backend that bridges `RuntimeEventStream` into the scheduler should s
 - ordered runtime-event updates carrying `event_id`, `event_kind`, `summary`, and `observed_at`
 - a terminal worker outcome once the stream resolves to `finished`, `error`, `stuck`, or another final condition
 
-This keeps WebSocket protocol churn isolated inside `opensymphony-openhands` while still giving the orchestrator enough information for stall detection, reconciliation, and snapshot derivation.
+This keeps WebSocket protocol churn isolated inside the internal `opensymphony_openhands` module while still giving the orchestrator enough information for stall detection, reconciliation, and snapshot derivation.
 
 ## 7. Run lifecycle over REST plus WebSocket
 
@@ -342,7 +342,7 @@ Current repository implementation:
 - `wait_for_probe_terminal_state` also gives the stream one extra scheduler-turn buffered drain before accepting `finished`, so a just-arrived `ConversationErrorEvent` still fails the probe instead of being skipped after the terminal state update
 - after `wait_for_probe_terminal_state` has already succeeded, `run_probe` reuses the stream-backed conversation snapshot plus mirrored terminal `execution_status` instead of requiring one more terminal REST fetch
 - `RuntimeEventStream::close` clears any queued replay and deferred reconnect intent before closing the socket, so later polls on that stream instance stay closed instead of reopening the conversation
-- `opensymphony-testkit` can now force live socket drops and script per-connection frame sequences so reconnect and buffered-delivery coverage stay deterministic in CI
+- the internal `opensymphony_testkit` module can now force live socket drops and script per-connection frame sequences so reconnect and buffered-delivery coverage stay deterministic in CI
 
 ## 8.3 Decode failures
 
@@ -369,7 +369,7 @@ Cancellation sources:
 
 ## 10.1 Types
 
-Suggested modules and types in `opensymphony-openhands`:
+Suggested modules and types in `opensymphony_openhands`:
 
 - `WsUrlBuilder`
 - `WsAuthMode`

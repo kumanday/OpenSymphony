@@ -5,16 +5,16 @@ use std::{
     path::Path,
 };
 
-use chrono::{DateTime, Utc};
-use opensymphony_control::{
+use crate::opensymphony_control::{
     AgentServerStatus, ConversationEvent, DaemonSnapshot, DaemonState, DaemonStatus,
     IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
 };
-use opensymphony_domain::{
+use crate::opensymphony_domain::{
     HealthStatus, IssueIdentifier, OrchestratorSnapshot, SchedulerStatus, WorkerOutcomeKind,
 };
-use opensymphony_openhands::LocalServerSupervisor;
-use opensymphony_workflow::ResolvedWorkflow;
+use crate::opensymphony_openhands::LocalServerSupervisor;
+use crate::opensymphony_workflow::ResolvedWorkflow;
+use chrono::{DateTime, Utc};
 
 use super::timestamp_to_datetime;
 
@@ -66,7 +66,7 @@ pub(super) fn map_snapshot(
 }
 
 fn map_issue(
-    issue: &opensymphony_domain::IssueSnapshot,
+    issue: &crate::opensymphony_domain::IssueSnapshot,
     terminal_states: &HashSet<String>,
     generated_at: DateTime<Utc>,
 ) -> IssueSnapshot {
@@ -192,7 +192,7 @@ fn map_issue(
 }
 
 fn map_worker_outcome(
-    issue: &opensymphony_domain::IssueSnapshot,
+    issue: &crate::opensymphony_domain::IssueSnapshot,
     runtime_state: IssueRuntimeState,
 ) -> WorkerOutcome {
     match runtime_state {
@@ -238,7 +238,10 @@ pub(super) fn current_agent_server_status(
         && let Ok(status) = supervisor.status()
     {
         return AgentServerStatus {
-            reachable: matches!(status.state, opensymphony_openhands::ServerState::Ready),
+            reachable: matches!(
+                status.state,
+                crate::opensymphony_openhands::ServerState::Ready
+            ),
             base_url: status.base_url,
             conversation_count: 0,
             status_line: format!("{:?}", status.state).to_ascii_lowercase(),

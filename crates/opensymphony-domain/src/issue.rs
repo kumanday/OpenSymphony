@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{IssueId, IssueIdentifier, TimestampMs, TrackerStateId};
+use super::{IssueId, IssueIdentifier, TimestampMs, TrackerStateId};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

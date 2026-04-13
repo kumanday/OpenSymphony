@@ -1,7 +1,7 @@
 # Repository Layout
 
-This document records the intended crate and directory ownership for the
-OpenSymphony implementation repo.
+This document records the intended package, module, and directory ownership for
+the OpenSymphony implementation repo.
 
 ## 1. Top-level layout
 
@@ -19,15 +19,23 @@ OpenSymphony/
   .github/
 ```
 
-## 2. Crate boundaries
+`Cargo.toml` at the repository root is the only Cargo package manifest.
 
-### `opensymphony-domain`
+OpenSymphony publishes one crates.io package, `opensymphony`.
+
+The `crates/opensymphony-*` directories remain because they are useful internal
+subsystem boundaries, but they are source directories compiled into the main
+package, not standalone published crates.
+
+## 2. Internal subsystem boundaries
+
+### `opensymphony_domain`
 
 - shared domain types
 - scheduler state and transitions
 - snapshot models
 
-### `opensymphony-workflow`
+### `opensymphony_workflow`
 
 - `WORKFLOW.md` loading
 - typed front-matter resolution
@@ -35,39 +43,39 @@ OpenSymphony/
 - environment and path resolution
 - migration errors for removed workflow fields
 
-### `opensymphony-workspace`
+### `opensymphony_workspace`
 
 - workspace path resolution
 - containment and sanitization
 - lifecycle hooks
 - issue and conversation manifests
 
-### `opensymphony-linear`
+### `opensymphony_linear`
 
 - Linear GraphQL read adapter
 - pagination and normalization
 - tracker reconciliation helpers
 
-### `opensymphony-openhands`
+### `opensymphony_openhands`
 
 - local server supervision
 - REST client
 - WebSocket event stream
 - issue session runner
 
-### `opensymphony-orchestrator`
+### `opensymphony_orchestrator`
 
 - scheduler loop
 - retry queue
 - reconciliation
 - worker supervision
 
-### `opensymphony-control`
+### `opensymphony_control`
 
 - control-plane HTTP API
 - snapshot publication
 
-### `opensymphony-cli`
+### `opensymphony_cli`
 
 - `init`
 - `run`
@@ -77,17 +85,17 @@ OpenSymphony/
 - `doctor`
 - `rehydrate`
 
-### `opensymphony-tui`
+### `opensymphony_tui`
 
 - FrankenTUI operator UI
 
-### `opensymphony-testkit`
+### `opensymphony_testkit`
 
 - fake OpenHands helpers
 - fake Linear fixtures
 - contract-test utilities
 
-## 3. Shared non-crate assets
+## 3. Shared non-module assets
 
 ### `tools/openhands-server/`
 
@@ -121,6 +129,6 @@ That rule is now part of the supported public behavior.
 
 ## 5. Versioning note
 
-OpenSymphony `1.0.0` removed the old agent-side Linear bridge layer. The crate
-layout above is the post-removal structure and should stay free of dead bridge
-code.
+OpenSymphony `1.0.0` removed the old agent-side Linear bridge layer. The
+internal module layout above is the post-removal structure and should stay free
+of dead bridge code.

@@ -8,6 +8,21 @@ use std::{
     time::Duration,
 };
 
+use crate::opensymphony_domain::{
+    IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RetryAttempt,
+    RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
+};
+use crate::opensymphony_openhands::{
+    ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
+    IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig, LocalServerSupervisor,
+    LocalServerTooling, OpenHandsClient, RuntimeStreamConfig, SendMessageRequest,
+    SupervisedServerConfig, SupervisorConfig, TransportConfig,
+};
+use crate::opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
+use crate::opensymphony_workspace::{
+    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, WorkspaceManager,
+    WorkspaceManagerConfig,
+};
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -21,21 +36,6 @@ use axum::{
 };
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use opensymphony_domain::{
-    IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RetryAttempt,
-    RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
-};
-use opensymphony_openhands::{
-    ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
-    IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig, LocalServerSupervisor,
-    LocalServerTooling, OpenHandsClient, RuntimeStreamConfig, SendMessageRequest,
-    SupervisedServerConfig, SupervisorConfig, TransportConfig,
-};
-use opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
-use opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, WorkspaceManager,
-    WorkspaceManagerConfig,
-};
 use serde_json::{Value, json};
 use tokio::{
     net::TcpListener as TokioTcpListener,
@@ -801,7 +801,7 @@ fn run_attempt(
 
 async fn read_conversation_manifest(
     manager: &WorkspaceManager,
-    handle: &opensymphony_workspace::WorkspaceHandle,
+    handle: &crate::opensymphony_workspace::WorkspaceHandle,
 ) -> Result<IssueConversationManifest, String> {
     let raw = manager
         .read_text_artifact(handle, &handle.conversation_manifest_path())
@@ -814,7 +814,7 @@ async fn read_conversation_manifest(
 
 async fn read_session_context(
     manager: &WorkspaceManager,
-    handle: &opensymphony_workspace::WorkspaceHandle,
+    handle: &crate::opensymphony_workspace::WorkspaceHandle,
 ) -> Result<IssueSessionContext, String> {
     let raw = manager
         .read_text_artifact(handle, &handle.generated_dir().join("session-context.json"))
@@ -893,12 +893,17 @@ fn write_json(path: &Path, value: &Value) {
 }
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir should have workspace parent")
-        .parent()
-        .expect("workspace root should exist")
-        .to_path_buf()
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if manifest_dir.join("Cargo.toml").is_file() && manifest_dir.join("README.md").is_file() {
+        manifest_dir
+    } else {
+        manifest_dir
+            .parent()
+            .expect("crate dir should have workspace parent")
+            .parent()
+            .expect("workspace root should exist")
+            .to_path_buf()
+    }
 }
 
 fn free_port() -> u16 {
@@ -1215,9 +1220,7 @@ async fn proxy_websocket(socket: WebSocket, state: ProxyState, conversation_id: 
     } {
         match result {
             EitherMessage::Client(Ok(message)) => {
-                let Some(message) = axum_to_tungstenite(message) else {
-                    continue;
-                };
+                let message = axum_to_tungstenite(message);
                 if upstream_sender.send(message).await.is_err() {
                     break;
                 }
@@ -1278,18 +1281,18 @@ fn should_drop_after_ready(message: &TungsteniteMessage) -> bool {
     }
 }
 
-fn axum_to_tungstenite(message: AxumMessage) -> Option<TungsteniteMessage> {
+fn axum_to_tungstenite(message: AxumMessage) -> TungsteniteMessage {
     match message {
-        AxumMessage::Text(text) => Some(TungsteniteMessage::Text(text.to_string())),
-        AxumMessage::Binary(data) => Some(TungsteniteMessage::Binary(data.to_vec())),
-        AxumMessage::Ping(data) => Some(TungsteniteMessage::Ping(data.to_vec())),
-        AxumMessage::Pong(data) => Some(TungsteniteMessage::Pong(data.to_vec())),
-        AxumMessage::Close(frame) => Some(TungsteniteMessage::Close(frame.map(|frame| {
+        AxumMessage::Text(text) => TungsteniteMessage::Text(text.to_string()),
+        AxumMessage::Binary(data) => TungsteniteMessage::Binary(data.to_vec()),
+        AxumMessage::Ping(data) => TungsteniteMessage::Ping(data.to_vec()),
+        AxumMessage::Pong(data) => TungsteniteMessage::Pong(data.to_vec()),
+        AxumMessage::Close(frame) => TungsteniteMessage::Close(frame.map(|frame| {
             tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: frame.code.into(),
                 reason: frame.reason.to_string().into(),
             }
-        }))),
+        })),
     }
 }
 

@@ -1,5 +1,6 @@
 use std::{convert::Infallible, sync::Arc, time::Duration};
 
+use crate::opensymphony_domain::SnapshotEnvelope;
 use async_stream::stream;
 use axum::{
     Json, Router,
@@ -9,7 +10,6 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt;
-use opensymphony_domain::SnapshotEnvelope;
 use reqwest_eventsource::{Event as EventSourceEvent, EventSource};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -21,7 +21,7 @@ use tokio::{
 use tracing::warn;
 use url::Url;
 
-pub use opensymphony_domain::{
+pub use crate::opensymphony_domain::{
     ControlPlaneAgentServerStatus as AgentServerStatus,
     ControlPlaneConversationEvent as ConversationEvent,
     ControlPlaneDaemonSnapshot as PublicDaemonSnapshot, ControlPlaneDaemonState as DaemonState,
@@ -381,8 +381,7 @@ pub fn log_stream_error(error: &ControlPlaneClientError) {
 
 #[cfg(test)]
 mod tests {
-    use chrono::{TimeZone, Utc};
-    use opensymphony_domain::{
+    use crate::opensymphony_domain::{
         ControlPlaneAgentServerStatus as AgentServerStatus,
         ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
         ControlPlaneDaemonStatus as DaemonStatus,
@@ -391,6 +390,7 @@ mod tests {
         ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
         ControlPlaneWorkerOutcome as WorkerOutcome,
     };
+    use chrono::{TimeZone, Utc};
     use std::time::Duration;
     use tokio::{
         io::AsyncWriteExt,

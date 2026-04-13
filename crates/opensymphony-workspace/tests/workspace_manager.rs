@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use opensymphony_workspace::{
+use crate::opensymphony_workspace::{
     CleanupConfig, CleanupDecision, ConversationManifest, HookConfig, HookDefinition,
     HookExecutionStatus, HookKind, IssueContextArtifact, IssueDescriptor, IssueLifecycleState,
     PromptCaptureDescriptor, PromptKind, RunDescriptor, RunStatus, SessionContextArtifact,
@@ -953,21 +953,20 @@ async fn prompt_capture_writes_latest_and_per_run_artifacts() {
         "Continuation guidance"
     );
 
-    let latest_full_manifest =
-        serde_json::from_str::<opensymphony_workspace::PromptCaptureManifest>(
-            &tokio::fs::read_to_string(
-                ensured.handle.latest_prompt_manifest_path(PromptKind::Full),
-            )
+    let latest_full_manifest = serde_json::from_str::<
+        crate::opensymphony_workspace::PromptCaptureManifest,
+    >(
+        &tokio::fs::read_to_string(ensured.handle.latest_prompt_manifest_path(PromptKind::Full))
             .await
             .expect("latest full prompt manifest should exist"),
-        )
-        .expect("latest full prompt manifest should decode");
+    )
+    .expect("latest full prompt manifest should decode");
     assert_eq!(latest_full_manifest.sequence, 2);
     assert_eq!(latest_full_manifest.attempt, 17);
     assert_eq!(latest_full_manifest.prompt_kind, PromptKind::Full);
 
     let archived_run_manifest =
-        serde_json::from_str::<opensymphony_workspace::PromptCaptureManifest>(
+        serde_json::from_str::<crate::opensymphony_workspace::PromptCaptureManifest>(
             &tokio::fs::read_to_string(ensured.handle.run_prompt_manifest_path(
                 17,
                 PromptKind::Continuation,

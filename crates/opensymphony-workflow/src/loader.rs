@@ -1,6 +1,6 @@
 use std::{fs, path::Path};
 
-use crate::{WorkflowDefinition, WorkflowFrontMatter, error::WorkflowLoadError};
+use super::{WorkflowDefinition, WorkflowFrontMatter, error::WorkflowLoadError};
 
 pub(crate) fn load_workflow_from_path(
     path: &Path,
@@ -19,7 +19,7 @@ pub(crate) fn load_workflow_from_path(
 }
 
 pub(crate) fn parse_workflow(source: &str) -> Result<WorkflowDefinition, WorkflowLoadError> {
-    let Some((front_matter_source, prompt_source)) = split_front_matter(source)? else {
+    let Some((front_matter_source, prompt_source)) = split_front_matter(source) else {
         return Ok(WorkflowDefinition {
             front_matter: WorkflowFrontMatter::default(),
             prompt_template: source.to_owned(),
@@ -65,14 +65,12 @@ fn parse_front_matter(
     }
 }
 
-fn split_front_matter(source: &str) -> Result<Option<(&str, &str)>, WorkflowLoadError> {
+fn split_front_matter(source: &str) -> Option<(&str, &str)> {
     let mut lines = source.split_inclusive('\n');
-    let Some(first_line) = lines.next() else {
-        return Ok(None);
-    };
+    let first_line = lines.next()?;
 
     if trim_line(first_line) != "---" {
-        return Ok(None);
+        return None;
     }
 
     let mut offset = first_line.len();
@@ -80,16 +78,13 @@ fn split_front_matter(source: &str) -> Result<Option<(&str, &str)>, WorkflowLoad
         let line_length = line.len();
         if trim_line(line) == "---" {
             let body_start = offset + line_length;
-            return Ok(Some((
-                &source[first_line.len()..offset],
-                &source[body_start..],
-            )));
+            return Some((&source[first_line.len()..offset], &source[body_start..]));
         }
 
         offset += line_length;
     }
 
-    Ok(None)
+    None
 }
 
 fn trim_line(line: &str) -> &str {

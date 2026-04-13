@@ -1,5 +1,10 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use crate::opensymphony_openhands::{
+    AuthConfig, Conversation, ConversationCreateRequest, EventEnvelope, OpenHandsClient,
+    OpenHandsError, RuntimeStreamConfig, SearchConversationEventsResponse, SendMessageRequest,
+    TerminalExecutionStatus, TransportConfig,
+};
 use axum::{
     Json, Router,
     extract::{
@@ -11,11 +16,6 @@ use axum::{
     routing::{get, post},
 };
 use chrono::Utc;
-use opensymphony_openhands::{
-    AuthConfig, Conversation, ConversationCreateRequest, EventEnvelope, OpenHandsClient,
-    OpenHandsError, RuntimeStreamConfig, SearchConversationEventsResponse, SendMessageRequest,
-    TerminalExecutionStatus, TransportConfig,
-};
 use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::Mutex, task::JoinHandle};
 use uuid::Uuid;
@@ -436,7 +436,7 @@ async fn runtime_stream_does_not_replay_reconnect_readiness_barriers_without_new
     let mut stream = client
         .attach_runtime_stream(
             conversation.conversation_id,
-            opensymphony_openhands::RuntimeStreamConfig {
+            RuntimeStreamConfig {
                 readiness_timeout: Duration::from_secs(2),
                 reconnect_initial_backoff: Duration::from_millis(25),
                 reconnect_max_backoff: Duration::from_millis(100),

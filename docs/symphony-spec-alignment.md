@@ -27,23 +27,23 @@ Upstream intent:
 
 OpenSymphony mapping:
 
-- `opensymphony-orchestrator` owns the daemon workflow
-- `opensymphony-linear` implements Linear polling and reconciliation
-- `opensymphony-workspace` enforces per-issue workspace invariants
-- `opensymphony-openhands` adapts OpenHands conversation execution
-- `opensymphony-control` and `opensymphony-tui` provide optional visibility
+- the internal `opensymphony_orchestrator` module owns the daemon workflow
+- the internal `opensymphony_linear` module implements Linear polling and reconciliation
+- the internal `opensymphony_workspace` module enforces per-issue workspace invariants
+- the internal `opensymphony_openhands` module adapts OpenHands conversation execution
+- the internal `opensymphony_control` and `opensymphony_tui` modules provide optional visibility
 
 ## 2.2 Main components
 
-Upstream component | OpenSymphony component
+Upstream component | OpenSymphony internal module
 --- | ---
-Workflow Loader | `opensymphony-workflow`
-Config Layer | `opensymphony-workflow` + `opensymphony-domain`
-Issue Tracker Client | `opensymphony-linear`
-Orchestrator | `opensymphony-orchestrator`
-Workspace Manager | `opensymphony-workspace`
-Agent Runner | `opensymphony-openhands`
-Status Surface | `opensymphony-control` + `opensymphony-tui`
+Workflow Loader | `opensymphony_workflow`
+Config Layer | `opensymphony_workflow` + `opensymphony_domain`
+Issue Tracker Client | `opensymphony_linear`
+Orchestrator | `opensymphony_orchestrator`
+Workspace Manager | `opensymphony_workspace`
+Agent Runner | `opensymphony_openhands`
+Status Surface | `opensymphony_control` + `opensymphony_tui`
 Logging | shared tracing/logging setup
 
 ## 2.3 Domain model
@@ -59,7 +59,7 @@ OpenSymphony preserves the major Symphony runtime entities:
 
 Implementation note:
 
-- the shared scheduler state machine lives in `opensymphony-domain` so downstream crates can consume one stable model
+- the shared scheduler state machine lives in `opensymphony_domain` so downstream subsystems can consume one stable model
 - the agent-specific fields refer to OpenHands concepts instead of Codex fields
 - OpenSymphony adds conversation metadata such as `conversation_id`, `server_base_url`, `stream_state`, and `last_event_id`
 
@@ -176,7 +176,7 @@ Preserved exactly:
 
 OpenSymphony mapping:
 
-- `opensymphony-control` publishes a snapshot and event stream
+- `opensymphony_control` publishes a snapshot and event stream
 - FrankenTUI renders that snapshot
 
 ## 3. OpenSymphony-specific extensions

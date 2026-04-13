@@ -5,7 +5,7 @@ use std::{
 
 use url::{Host, Url};
 
-use crate::{
+use super::{
     error::WorkflowConfigError,
     model::{
         AgentConfig, AgentFrontMatter, DEFAULT_HOOK_TIMEOUT_MS, DEFAULT_LINEAR_ENDPOINT,
@@ -628,7 +628,7 @@ fn resolve_openhands_agent<E: Environment>(
 }
 
 fn resolve_openhands_agent_tools<E: Environment>(
-    tools: &[crate::model::OpenHandsConversationToolFrontMatter],
+    tools: &[super::model::OpenHandsConversationToolFrontMatter],
     env: &E,
 ) -> Result<Vec<OpenHandsConversationToolConfig>, WorkflowConfigError> {
     tools

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{
+use super::{
     ConversationMetadata, IssueExecution, NormalizedIssue, ReleaseReason, RetryEntry,
     SchedulerState, SchedulerStatus, TimestampMs, WorkerOutcomeRecord, WorkspaceRecord,
 };
@@ -69,15 +69,15 @@ impl DaemonSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerAttemptSnapshot {
-    pub worker_id: crate::WorkerId,
-    pub attempt: Option<crate::RetryAttempt>,
+    pub worker_id: super::WorkerId,
+    pub attempt: Option<super::RetryAttempt>,
     pub normal_retry_count: u32,
     pub turn_count: u32,
     pub max_turns: u32,
 }
 
-impl From<&crate::RunAttempt> for WorkerAttemptSnapshot {
-    fn from(run: &crate::RunAttempt) -> Self {
+impl From<&super::RunAttempt> for WorkerAttemptSnapshot {
+    fn from(run: &super::RunAttempt) -> Self {
         Self {
             worker_id: run.worker_id.clone(),
             attempt: run.attempt,
@@ -90,11 +90,11 @@ impl From<&crate::RunAttempt> for WorkerAttemptSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetrySnapshot {
-    pub attempt: crate::RetryAttempt,
+    pub attempt: super::RetryAttempt,
     pub normal_retry_count: u32,
     pub scheduled_at: TimestampMs,
     pub due_at: TimestampMs,
-    pub reason: crate::RetryReason,
+    pub reason: super::RetryReason,
     pub error: Option<String>,
 }
 

@@ -1,10 +1,10 @@
-use opensymphony_domain::{
+use crate::opensymphony_domain::{
     TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
     TrackerIssueStateSnapshot,
 };
 
-use crate::error::LinearError;
-use crate::graphql::{
+use super::error::LinearError;
+use super::graphql::{
     LinearBlockerNode, LinearChildNode, LinearIssueNode, LinearIssueStateNode, LinearLabelNode,
     LinearParentNode, LinearRelationNode, LinearWorkflowState,
 };
@@ -120,7 +120,7 @@ fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::normalize::normalize_priority;
+    use super::normalize_priority;
 
     #[test]
     fn priority_zero_becomes_none() {

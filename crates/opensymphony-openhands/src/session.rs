@@ -5,18 +5,18 @@ use std::{
     time::Duration,
 };
 
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use opensymphony_domain::{
+use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, NormalizedIssue, RunAttempt,
     RuntimeStreamState, TimestampMs, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord,
 };
-use opensymphony_workflow::{
+use crate::opensymphony_workflow::{
     Environment, OpenHandsConversationToolConfig, ProcessEnvironment, ResolvedWorkflow,
 };
-use opensymphony_workspace::{
+use crate::opensymphony_workspace::{
     RunManifest, RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager,
 };
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -24,7 +24,7 @@ use tokio::time::{Instant, timeout_at};
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::{
+use super::{
     AgentConfig, CondenserConfig, ConfirmationPolicy, Conversation, ConversationCreateRequest,
     ConversationStateMirror, EventEnvelope, KnownEvent, LlmConfig, OpenHandsClient, OpenHandsError,
     RuntimeEventStream, RuntimeStreamConfig, SendMessageRequest, TerminalExecutionStatus,
@@ -539,7 +539,7 @@ impl IssueConversationManifest {
 
     fn apply_transport_diagnostics(
         &mut self,
-        diagnostics: Option<&crate::TransportDiagnostics>,
+        diagnostics: Option<&super::TransportDiagnostics>,
         server_base_url: &str,
     ) {
         self.server_base_url = Some(server_base_url.to_string());
@@ -659,7 +659,7 @@ impl ActiveSession {
     /// Uses last_token_accumulation_at to avoid double-counting events,
     /// but also reads accumulated totals from conversation state (OpenHands tracks tokens there).
     fn accumulate_tokens(&mut self) {
-        use crate::events::KnownEvent;
+        use super::events::KnownEvent;
         use chrono::DateTime;
 
         let cutoff = self.manifest.last_token_accumulation_at;
@@ -702,7 +702,7 @@ impl ActiveSession {
             }
 
             // Track the latest event timestamp we've seen
-            if max_event_time.is_none() || event.timestamp > max_event_time.unwrap() {
+            if max_event_time.is_none_or(|current| event.timestamp > current) {
                 max_event_time = Some(event.timestamp);
             }
         }
@@ -2118,8 +2118,7 @@ impl IssueSessionRunner {
                 deadline - now
             };
 
-            let next_event =
-                tokio::time::timeout_at(now + event_timeout, session.stream.next_event()).await;
+            let next_event = timeout_at(now + event_timeout, session.stream.next_event()).await;
 
             match next_event {
                 Err(_) => {
@@ -2516,7 +2515,7 @@ fn build_summary_metadata(
     conversation: &Conversation,
     fresh_conversation: bool,
     stream_state: RuntimeStreamState,
-    diagnostics: Option<&crate::TransportDiagnostics>,
+    diagnostics: Option<&super::TransportDiagnostics>,
     server_base_url: &str,
 ) -> ConversationMetadata {
     ConversationMetadata {
@@ -2804,11 +2803,11 @@ fn finished_stream_error_is_tolerable(error: &OpenHandsError) -> bool {
 mod tests {
     use std::collections::HashSet;
 
-    use opensymphony_domain::WorkerOutcomeKind;
-    use opensymphony_testkit::FakeOpenHandsServer;
+    use crate::opensymphony_domain::WorkerOutcomeKind;
+    use crate::opensymphony_testkit::FakeOpenHandsServer;
 
+    use super::super::TransportConfig;
     use super::*;
-    use crate::TransportConfig;
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
         match result {
@@ -2889,10 +2888,10 @@ mod tests {
             http_auth_mode: None,
             websocket_auth_mode: None,
             websocket_query_param_name: None,
-            persistence_dir: std::path::PathBuf::from("/tmp/test"),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            last_attached_at: chrono::Utc::now(),
+            persistence_dir: PathBuf::from("/tmp/test"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_attached_at: Utc::now(),
             launch_profile: None,
             llm_config_fingerprint: None,
             fresh_conversation: true,
@@ -2976,7 +2975,7 @@ mod tests {
         );
 
         // Create a simple event cache and add the events
-        let mut cache = crate::events::EventCache::new();
+        let mut cache = super::super::events::EventCache::new();
         cache.insert(event1);
         cache.insert(event2);
         cache.insert(event3);
@@ -2986,8 +2985,7 @@ mod tests {
         let mut total_output = 0u64;
 
         for event in cache.items() {
-            if let crate::events::KnownEvent::LlmCompletionLog(llm_event) =
-                crate::events::KnownEvent::from_envelope(event)
+            if let KnownEvent::LlmCompletionLog(llm_event) = KnownEvent::from_envelope(event)
                 && let Some((input, output)) = llm_event.token_usage()
             {
                 total_input += input;

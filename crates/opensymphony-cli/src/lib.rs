@@ -13,23 +13,23 @@ use std::{
     time::Duration,
 };
 
+use crate::opensymphony_control::{
+    AgentServerStatus, ControlPlaneServer, DaemonSnapshot, DaemonState, DaemonStatus,
+    IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
+    WorkerOutcome,
+};
+use crate::opensymphony_openhands::{
+    ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
+    SupervisedServerConfig, SupervisorConfig, TransportConfig,
+};
+use crate::opensymphony_workflow::{
+    Environment, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
+};
 use chrono::{Duration as ChronoDuration, Utc};
 use clap::{Args, Parser, Subcommand};
 use install_tooling::{
     DEFAULT_MANAGED_OPENHANDS_TOOL_DIR, default_managed_openhands_tool_dir,
     ensure_openhands_tooling,
-};
-use opensymphony_control::{
-    AgentServerStatus, ControlPlaneServer, DaemonSnapshot, DaemonState, DaemonStatus,
-    IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, SnapshotStore,
-    WorkerOutcome,
-};
-use opensymphony_openhands::{
-    ConversationCreateRequest, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
-    SupervisedServerConfig, SupervisorConfig, TransportConfig,
-};
-use opensymphony_workflow::{
-    Environment, ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition,
 };
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
@@ -395,7 +395,7 @@ async fn run_tui(args: TuiArgs) -> ExitCode {
 
 async fn run_tui_command(url: Url, exit_after_ms: Option<u64>) -> Result<(), CommandError> {
     let exit_after = exit_after_ms.map(Duration::from_millis);
-    tokio::task::spawn_blocking(move || opensymphony_tui::run_operator(url, exit_after))
+    tokio::task::spawn_blocking(move || crate::opensymphony_tui::run_operator(url, exit_after))
         .await
         .map_err(CommandError::Join)?
         .map_err(CommandError::Tui)
@@ -677,51 +677,51 @@ async fn run_doctor_rehydration(
     no_summary: bool,
 ) -> Result<(usize, usize), String> {
     // Returns (success_count, total_count)
-    use opensymphony_domain::{
+    use crate::opensymphony_domain::{
         IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt, TimestampMs, WorkerId,
     };
-    use opensymphony_openhands::{
+    use crate::opensymphony_openhands::{
         IssueConversationManifest, IssueSessionRunner, IssueSessionRunnerConfig, RehydrationOptions,
     };
-    use opensymphony_workspace::{
+    use crate::opensymphony_workspace::{
         RunDescriptor, RunManifest, WorkspaceManager, WorkspaceManagerConfig,
     };
 
     // Create workspace manager
     let workspace_config = WorkspaceManagerConfig {
         root: runtime.workflow.config.workspace.root.clone(),
-        hooks: opensymphony_workspace::HookConfig {
+        hooks: crate::opensymphony_workspace::HookConfig {
             after_create: runtime
                 .workflow
                 .config
                 .hooks
                 .after_create
                 .clone()
-                .map(opensymphony_workspace::HookDefinition::shell),
+                .map(crate::opensymphony_workspace::HookDefinition::shell),
             before_run: runtime
                 .workflow
                 .config
                 .hooks
                 .before_run
                 .clone()
-                .map(opensymphony_workspace::HookDefinition::shell),
+                .map(crate::opensymphony_workspace::HookDefinition::shell),
             after_run: runtime
                 .workflow
                 .config
                 .hooks
                 .after_run
                 .clone()
-                .map(opensymphony_workspace::HookDefinition::shell),
+                .map(crate::opensymphony_workspace::HookDefinition::shell),
             before_remove: runtime
                 .workflow
                 .config
                 .hooks
                 .before_remove
                 .clone()
-                .map(opensymphony_workspace::HookDefinition::shell),
+                .map(crate::opensymphony_workspace::HookDefinition::shell),
             timeout: Duration::from_millis(runtime.workflow.config.hooks.timeout_ms),
         },
-        cleanup: opensymphony_workspace::CleanupConfig {
+        cleanup: crate::opensymphony_workspace::CleanupConfig {
             remove_terminal_workspaces: false,
         },
     };
@@ -810,7 +810,7 @@ async fn run_doctor_rehydration(
             8,
         );
 
-        let dummy_issue = opensymphony_domain::NormalizedIssue {
+        let dummy_issue = crate::opensymphony_domain::NormalizedIssue {
             id: IssueId::new(&issue_id).expect("valid issue id"),
             identifier: IssueIdentifier::new(&identifier).expect("valid identifier"),
             title: "Doctor Rehydration".to_string(),
@@ -1095,7 +1095,7 @@ fn resolve_doctor_workflow(
     workflow: &WorkflowDefinition,
     target_repo: &Path,
     linear_enabled: bool,
-) -> Result<ResolvedWorkflow, opensymphony_workflow::WorkflowConfigError> {
+) -> Result<ResolvedWorkflow, crate::opensymphony_workflow::WorkflowConfigError> {
     if linear_enabled || workflow.front_matter.tracker.api_key.is_some() {
         workflow.resolve_with_process_env(target_repo)
     } else {
@@ -1694,7 +1694,7 @@ fn build_doctor_probe_request(
     Ok(ConversationCreateRequest::doctor_probe_with_config(
         probe_workspace.display().to_string(),
         persistence_dir.display().to_string(),
-        opensymphony_openhands::DoctorProbeConfig {
+        crate::opensymphony_openhands::DoctorProbeConfig {
             max_iterations,
             stuck_detection: conversation.stuck_detection,
             confirmation_policy_kind: conversation.confirmation_policy.kind.clone(),
@@ -1984,16 +1984,16 @@ enum CommandError {
     #[error("daemon task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
     #[error("FrankenTUI failed: {0}")]
-    Tui(#[from] opensymphony_tui::TuiError),
+    Tui(#[from] crate::opensymphony_tui::TuiError),
 }
 
-use opensymphony_workspace::WorkspaceManagerConfig;
+use crate::opensymphony_workspace::WorkspaceManagerConfig;
 
 async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
-    use opensymphony_openhands::{
+    use crate::opensymphony_openhands::{
         IssueSessionRunner, IssueSessionRunnerConfig, RehydrationOptions,
     };
-    use opensymphony_workspace::{RunManifest, WorkspaceManager};
+    use crate::opensymphony_workspace::{RunManifest, WorkspaceManager};
 
     println!("Rehydrating conversation for issue: {}", args.issue);
     println!("Reason: {}", args.reason);
@@ -2032,7 +2032,7 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
             )
         })?;
 
-    let old_manifest: opensymphony_openhands::IssueConversationManifest =
+    let old_manifest: crate::opensymphony_openhands::IssueConversationManifest =
         serde_json::from_str(&manifest_content)
             .map_err(|e| format!("failed to parse conversation manifest: {}", e))?;
 
@@ -2056,12 +2056,12 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     let runner = IssueSessionRunner::new(client, runner_config);
 
     // Create a minimal run descriptor for the rehydration
-    use opensymphony_workspace::RunDescriptor;
+    use crate::opensymphony_workspace::RunDescriptor;
     let run_descriptor = RunDescriptor::new("rehydrate", 1);
     let mut run_manifest = RunManifest::new(&workspace, &run_descriptor);
 
     // Create a minimal RunAttempt for the rehydration
-    use opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
+    use crate::opensymphony_domain::{IssueId, IssueIdentifier, RunAttempt, TimestampMs, WorkerId};
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("valid system time")
@@ -2086,8 +2086,8 @@ async fn run_rehydrate_command(args: RehydrateArgs) -> Result<(), String> {
     println!("\nStarting rehydration...");
 
     // Create a minimal NormalizedIssue for the rehydration
-    use opensymphony_domain::{IssueState, IssueStateCategory};
-    let dummy_issue = opensymphony_domain::NormalizedIssue {
+    use crate::opensymphony_domain::{IssueState, IssueStateCategory};
+    let dummy_issue = crate::opensymphony_domain::NormalizedIssue {
         id: IssueId::new(workspace.issue_id()).expect("valid issue id"),
         identifier: IssueIdentifier::new(workspace.identifier()).expect("valid identifier"),
         title: "Rehydration".to_string(),
@@ -2216,7 +2216,7 @@ fn resolve_rehydrate_value(path: &Path, value: String) -> Result<String, String>
 }
 
 fn build_rehydrate_workspace_config(workflow: &ResolvedWorkflow) -> WorkspaceManagerConfig {
-    use opensymphony_workspace::{CleanupConfig, HookConfig, HookDefinition};
+    use crate::opensymphony_workspace::{CleanupConfig, HookConfig, HookDefinition};
     let hooks = &workflow.config.hooks;
     WorkspaceManagerConfig {
         root: workflow.config.workspace.root.clone(),
@@ -2293,7 +2293,10 @@ fn build_rehydrate_client(
                 format!("Started local OpenHands server at {base_url} for rehydration."),
             ))
         }
-        Err(opensymphony_openhands::SupervisorError::ExistingReadyServer { base_url, .. }) => {
+        Err(crate::opensymphony_openhands::SupervisorError::ExistingReadyServer {
+            base_url,
+            ..
+        }) => {
             let transport = TransportConfig::new(&base_url).with_auth(transport.auth().clone());
             Ok((
                 OpenHandsClient::new(transport),
@@ -2309,11 +2312,11 @@ fn build_rehydrate_client(
 mod tests {
     use std::{fs, path::PathBuf, time::Duration};
 
-    use clap::{Parser, error::ErrorKind};
-    use opensymphony_domain::{
+    use crate::opensymphony_domain::{
         ControlPlaneDaemonState as DaemonState, ControlPlaneIssueRuntimeState as IssueRuntimeState,
     };
-    use opensymphony_workflow::WorkflowDefinition;
+    use crate::opensymphony_workflow::WorkflowDefinition;
+    use clap::{Parser, error::ErrorKind};
     use tempfile::TempDir;
 
     use super::{
@@ -2497,9 +2500,9 @@ openhands:
     #[test]
     fn build_rehydrate_client_requires_tool_dir_for_managed_local_transport() {
         let runtime = sample_doctor_runtime();
-        let transport = opensymphony_openhands::TransportConfig::from_workflow(
+        let transport = crate::opensymphony_openhands::TransportConfig::from_workflow(
             &runtime.workflow,
-            &opensymphony_workflow::ProcessEnvironment,
+            &crate::opensymphony_workflow::ProcessEnvironment,
         )
         .expect("transport should resolve");
 
@@ -2519,9 +2522,9 @@ openhands:
     #[test]
     fn build_rehydrate_client_reports_install_guidance_for_invalid_tooling() {
         let runtime = sample_doctor_runtime();
-        let transport = opensymphony_openhands::TransportConfig::from_workflow(
+        let transport = crate::opensymphony_openhands::TransportConfig::from_workflow(
             &runtime.workflow,
-            &opensymphony_workflow::ProcessEnvironment,
+            &crate::opensymphony_workflow::ProcessEnvironment,
         )
         .expect("transport should resolve");
         let temp_dir = TempDir::new().expect("temp dir");

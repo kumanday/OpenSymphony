@@ -3,7 +3,7 @@ use std::{cmp::Ordering, collections::HashSet};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::models::{Conversation, ConversationStateUpdatePayload, EventEnvelope};
+use super::models::{Conversation, ConversationStateUpdatePayload, EventEnvelope};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LlmCompletionLogEvent {
@@ -140,9 +140,7 @@ impl KnownEvent {
             "ConversationErrorEvent" => KnownEvent::ConversationError(ConversationErrorEvent {
                 payload: event.payload.clone(),
             }),
-            "MessageEvent" => decode_message_event(event)
-                .map(KnownEvent::Message)
-                .unwrap_or_else(|| KnownEvent::Unknown(unknown_event(event))),
+            "MessageEvent" => KnownEvent::Message(decode_message_event(event)),
             "ActionEvent" => decode_action_event(event)
                 .map(KnownEvent::Action)
                 .unwrap_or_else(|| KnownEvent::Unknown(unknown_event(event))),
@@ -243,7 +241,7 @@ pub struct ActivitySummary {
     pub tool_name: Option<String>,
 }
 
-fn decode_message_event(event: &EventEnvelope) -> Option<MessageEventPayload> {
+fn decode_message_event(event: &EventEnvelope) -> MessageEventPayload {
     let role = event
         .payload
         .get("role")
@@ -265,11 +263,11 @@ fn decode_message_event(event: &EventEnvelope) -> Option<MessageEventPayload> {
         .next()
         .map(|t: &str| t.chars().take(80).collect());
 
-    Some(MessageEventPayload {
+    MessageEventPayload {
         role,
         content,
         text_preview,
-    })
+    }
 }
 
 fn decode_action_event(event: &EventEnvelope) -> Option<ActionEventPayload> {
@@ -581,12 +579,12 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use serde_json::json;
 
-    use super::{
-        ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus, UnknownEvent,
-    };
-    use crate::models::{
+    use super::super::models::{
         AgentConfig, ConfirmationPolicy, Conversation, ConversationStateUpdatePayload,
         EventEnvelope, LlmConfig, WorkspaceConfig,
+    };
+    use super::{
+        ConversationStateMirror, EventCache, KnownEvent, TerminalExecutionStatus, UnknownEvent,
     };
 
     #[test]

@@ -69,8 +69,8 @@ Supported variables:
 6. Run:
 
 ```bash
-cargo test --workspace
-cargo test -p opensymphony-cli --test init
+cargo test
+cargo test --test init
 ```
 
 ## Smoke checks

@@ -7,7 +7,7 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-use opensymphony_openhands::LocalServerTooling;
+use crate::opensymphony_openhands::LocalServerTooling;
 use tempfile::TempDir;
 
 #[test]
