@@ -54,6 +54,21 @@ OpenSymphony manages a local OpenHands agent-server; install the pinned runtime 
 ```bash
 opensymphony install openhands
 ```
+
+### Required Environment
+
+Before running `opensymphony run`, export your provider settings for the
+OpenHands conversation agent:
+
+```bash
+export LLM_MODEL="openai/accounts/fireworks/models/glm-5p1"
+export LLM_API_KEY="fw-..."
+export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
+```
+
+These `LLM_*` variables are required unless your target repo's `WORKFLOW.md`
+has been customized to resolve the LLM configuration some other way.
+
 ### Bootstrap A Target Repo
 
 Bootstrap the target repository in place:
