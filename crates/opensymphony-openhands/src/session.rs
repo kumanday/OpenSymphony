@@ -769,6 +769,7 @@ struct PreparedTurn {
     conversation_id: Uuid,
     prompt: String,
     baseline_event_ids: HashSet<String>,
+    launch_reported: bool,
     waited_for_prior_turn: bool,
 }
 
@@ -875,10 +876,26 @@ impl IssueSessionRunner {
             Step::EarlyResult(result) => return Ok(*result),
         };
 
+        let mut launch_reported = false;
+        if !active_session.manifest.fresh_conversation
+            && active_session
+                .stream
+                .state_mirror()
+                .execution_status()
+                .is_some_and(turn_is_in_progress)
+        {
+            observer.on_launch(
+                &active_session
+                    .manifest
+                    .to_domain_metadata(RuntimeStreamState::Ready),
+            );
+            launch_reported = true;
+        }
+
         let mut retry_count = 0;
         let mut current_session = active_session;
         let (final_session, outcome) = loop {
-            let (mut active_session, outcome) = match self
+            let (mut active_session, outcome, turn_launch_reported) = match self
                 .execute_turn(
                     workspace_manager,
                     workspace,
@@ -888,6 +905,7 @@ impl IssueSessionRunner {
                     issue,
                     run,
                     current_session,
+                    launch_reported,
                     observer,
                 )
                 .await?
@@ -895,6 +913,7 @@ impl IssueSessionRunner {
                 Step::Continue(result) => result,
                 Step::EarlyResult(result) => return Ok(*result),
             };
+            launch_reported = turn_launch_reported;
 
             if is_context_overflow_outcome(&outcome) && retry_count < MAX_CONTEXT_OVERFLOW_RETRIES {
                 retry_count += 1;
@@ -1017,8 +1036,9 @@ impl IssueSessionRunner {
         issue: &NormalizedIssue,
         run: &RunAttempt,
         active_session: ActiveSession,
+        launch_reported: bool,
         observer: &mut O,
-    ) -> Result<Step<(ActiveSession, NormalizedOutcome)>, IssueSessionError>
+    ) -> Result<Step<(ActiveSession, NormalizedOutcome, bool)>, IssueSessionError>
     where
         O: IssueSessionObserver,
     {
@@ -1032,6 +1052,7 @@ impl IssueSessionRunner {
                 issue,
                 run,
                 active_session,
+                launch_reported,
                 observer,
             )
             .await?
@@ -1064,7 +1085,11 @@ impl IssueSessionRunner {
             )
             .await;
 
-        Ok(Step::Continue((active_session, outcome)))
+        Ok(Step::Continue((
+            active_session,
+            outcome,
+            prepared_turn.launch_reported,
+        )))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1199,6 +1224,7 @@ impl IssueSessionRunner {
         issue: &NormalizedIssue,
         run: &RunAttempt,
         mut active_session: ActiveSession,
+        launch_reported: bool,
         observer: &mut O,
     ) -> Result<Step<(ActiveSession, PreparedTurn)>, IssueSessionError>
     where
@@ -1312,6 +1338,7 @@ impl IssueSessionRunner {
                 conversation_id,
                 prompt,
                 baseline_event_ids,
+                launch_reported,
                 waited_for_prior_turn,
             },
         )))
@@ -1467,11 +1494,14 @@ impl IssueSessionRunner {
         // Accumulate tokens from LLM completion events before creating metadata
         active_session.accumulate_tokens();
 
-        observer.on_launch(
-            &active_session
-                .manifest
-                .to_domain_metadata(RuntimeStreamState::Ready),
-        );
+        if !prepared_turn.launch_reported {
+            observer.on_launch(
+                &active_session
+                    .manifest
+                    .to_domain_metadata(RuntimeStreamState::Ready),
+            );
+            prepared_turn.launch_reported = true;
+        }
 
         Ok(Step::Continue(active_session))
     }

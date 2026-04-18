@@ -1,12 +1,12 @@
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use crate::opensymphony_domain::{
-    IssueId, IssueIdentifier, IssueState, IssueStateCategory, NormalizedIssue, RetryAttempt,
-    RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
+    ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
+    NormalizedIssue, RetryAttempt, RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
 };
 use crate::opensymphony_openhands::{
     ConversationCreateRequest, EventEnvelope, IssueConversationManifest, IssueSessionContext,
-    IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig,
+    IssueSessionObserver, IssueSessionPromptKind, IssueSessionRunner, IssueSessionRunnerConfig,
     LLM_SUMMARIZING_CONDENSER_KIND, LlmConfigFingerprint, OpenHandsClient, TransportConfig,
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
@@ -1194,17 +1194,45 @@ async fn issue_session_runner_waits_for_an_already_running_turn_before_retrying(
         max_turns,
     );
 
+    struct LaunchObserver {
+        launch_tx: Option<tokio::sync::oneshot::Sender<String>>,
+        launches: Vec<String>,
+    }
+
+    impl IssueSessionObserver for LaunchObserver {
+        fn on_launch(&mut self, conversation: &ConversationMetadata) {
+            let conversation_id = conversation.conversation_id.to_string();
+            self.launches.push(conversation_id.clone());
+            if let Some(launch_tx) = self.launch_tx.take() {
+                let _ = launch_tx.send(conversation_id);
+            }
+        }
+    }
+
+    let (launch_tx, launch_rx) = tokio::sync::oneshot::channel();
+    let mut observer = LaunchObserver {
+        launch_tx: Some(launch_tx),
+        launches: Vec::new(),
+    };
+
     let (second_result, _) = tokio::join!(
-        runner.run(
+        runner.run_with_observer(
             &manager,
             &ensured.handle,
             &mut second_manifest,
             &issue,
             &second_run,
             &workflow,
+            &mut observer,
         ),
         async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            let launched_conversation_id = tokio::time::timeout(Duration::from_secs(1), launch_rx)
+                .await
+                .expect(
+                    "reused running conversation should report launch before prior turn finishes",
+                )
+                .expect("launch observer should receive the conversation id");
+            assert_eq!(launched_conversation_id, conversation_id.to_string());
             server
                 .emit_state_update(conversation_id, "finished")
                 .await
@@ -1224,6 +1252,7 @@ async fn issue_session_runner_waits_for_an_already_running_turn_before_retrying(
         second_result.worker_outcome.outcome,
         WorkerOutcomeKind::Succeeded
     );
+    assert_eq!(observer.launches, vec![conversation_id.to_string()]);
 
     let messages = latest_message_texts(
         client
