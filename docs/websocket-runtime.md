@@ -241,6 +241,11 @@ The worker backend that bridges `RuntimeEventStream` into the scheduler should s
 - ordered runtime-event updates carrying `event_id`, `event_kind`, `summary`, and `observed_at`
 - a terminal worker outcome once the stream resolves to `finished`, `error`, `stuck`, or another final condition
 
+When a reused conversation is already `queued` or `running` at attach time, emit
+that launch-time metadata as soon as attach succeeds instead of waiting for the
+previous turn to finish. This lets the scheduler bind the worker to the live
+conversation before continuation-retry waiting completes.
+
 This keeps WebSocket protocol churn isolated inside the internal `opensymphony_openhands` module while still giving the orchestrator enough information for stall detection, reconciliation, and snapshot derivation.
 
 ## 7. Run lifecycle over REST plus WebSocket

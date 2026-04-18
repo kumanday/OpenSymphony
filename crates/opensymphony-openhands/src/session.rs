@@ -875,6 +875,20 @@ impl IssueSessionRunner {
             Step::EarlyResult(result) => return Ok(*result),
         };
 
+        if !active_session.manifest.fresh_conversation
+            && active_session
+                .stream
+                .state_mirror()
+                .execution_status()
+                .is_some_and(turn_is_in_progress)
+        {
+            observer.on_launch(
+                &active_session
+                    .manifest
+                    .to_domain_metadata(RuntimeStreamState::Ready),
+            );
+        }
+
         let mut retry_count = 0;
         let mut current_session = active_session;
         let (final_session, outcome) = loop {
@@ -1467,11 +1481,13 @@ impl IssueSessionRunner {
         // Accumulate tokens from LLM completion events before creating metadata
         active_session.accumulate_tokens();
 
-        observer.on_launch(
-            &active_session
-                .manifest
-                .to_domain_metadata(RuntimeStreamState::Ready),
-        );
+        if active_session.manifest.fresh_conversation || !prepared_turn.waited_for_prior_turn {
+            observer.on_launch(
+                &active_session
+                    .manifest
+                    .to_domain_metadata(RuntimeStreamState::Ready),
+            );
+        }
 
         Ok(Step::Continue(active_session))
     }

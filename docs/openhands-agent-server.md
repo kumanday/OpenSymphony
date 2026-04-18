@@ -115,6 +115,11 @@ The internal `opensymphony_openhands` module owns:
 - ready-state detection
 - issue session launch and reuse
 
+For reused conversations that are already `queued` or `running`, the runtime now
+surfaces launch metadata immediately after a successful attach so the
+orchestrator can keep tracking the live worker while it waits for the previous
+turn to settle.
+
 The orchestration layer should not need to know OpenHands wire details.
 
 ## 8. Tooling note
