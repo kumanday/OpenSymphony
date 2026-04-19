@@ -132,36 +132,43 @@ opensymphony --help
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     OpenSymphony Daemon                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ Orchestrator│  │   Linear    │  │   OpenHands Client  │  │
-│  │  Scheduler  │  │   Adapter   │  │  (REST + WebSocket) │  │
-│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
-│         │                │                    │             │
-│  ┌──────▼────────────────▼────────────────────▼──────────┐  │
-│  │              Workspace Manager                        │  │
-│  │   (per-issue directories, hooks, manifests)           │  │
-│  └───────────────────────────────────────────────────────┘  │
-│                           │                                 │
-│  ┌────────────────────────▼──────────────────────────────┐  │
-│  │           Control Plane API (read-only)               │  │
-│  │     GET /healthz, /api/v1/snapshot, /api/v1/events    │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-         │                           │
-         ▼                           ▼
-┌─────────────┐              ┌─────────────────┐
-│   Linear    │              │  OpenHands      │
-│   (Issues)  │              │  Agent-Server   │
-└─────────────┘              └─────────────────┘
-         ▲                           ▲
-         │                           │
-    ┌────┴────────────┐        ┌────┴────┐
-    │ GraphQL Helper  │        │  Agent  │
-    │ + Query Assets  │        │ Runtime │
-    └─────────────────┘        └─────────┘
+```mermaid
+flowchart TB
+    operator["Operator / CLI / TUI"]
+
+    subgraph daemon["OpenSymphony Daemon"]
+        direction TB
+        orchestrator["Orchestrator Scheduler"]
+        workspace["Workspace Manager"]
+        control["Read-only Control Plane API<br/>GET /healthz, /api/v1/snapshot, /api/v1/events"]
+        runtime["OpenHands Runtime Client<br/>(REST + WebSocket)"]
+        linear_read["Linear Read Adapter"]
+
+        orchestrator --> workspace
+        orchestrator --> runtime
+        orchestrator --> linear_read
+        orchestrator --> control
+    end
+
+    subgraph execution["Execution Environment"]
+        direction TB
+        issue_ws["Per-issue Workspace"]
+        agent["OpenHands Agent Runtime"]
+        graphql["GraphQL Helper + Query Assets"]
+
+        agent --> issue_ws
+        agent --> graphql
+    end
+
+    linear["Linear"]
+    openhands["OpenHands Agent-Server"]
+
+    operator --> control
+    workspace --> issue_ws
+    runtime --> openhands
+    openhands --> agent
+    linear_read -->|read issues| linear
+    graphql -->|agent-side writes| linear
 ```
 
 ### Internal Boundaries
