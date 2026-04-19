@@ -11,7 +11,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-
 DEFAULT_ENDPOINT = "https://api.linear.app/graphql"
 
 

@@ -1,0 +1,25 @@
+mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+    issue {
+      id
+      identifier
+      title
+      description
+      url
+      state {
+        id
+        name
+      }
+      project {
+        id
+        name
+        slugId
+      }
+      parent {
+        id
+        identifier
+      }
+    }
+  }
+}
