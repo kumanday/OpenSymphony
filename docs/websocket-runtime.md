@@ -244,7 +244,10 @@ The worker backend that bridges `RuntimeEventStream` into the scheduler should s
 When a reused conversation is already `queued` or `running` at attach time, emit
 that launch-time metadata as soon as attach succeeds instead of waiting for the
 previous turn to finish. This lets the scheduler bind the worker to the live
-conversation before continuation-retry waiting completes.
+conversation before continuation-retry waiting completes. Apply the same early
+launch reporting if the server later rejects `POST /run` with `409 Conflict`,
+because that conflict is authoritative evidence that the attached conversation
+is already active even if the attach-time mirror had not caught up yet.
 
 This keeps WebSocket protocol churn isolated inside the internal `opensymphony_openhands` module while still giving the orchestrator enough information for stall detection, reconciliation, and snapshot derivation.
 
@@ -267,8 +270,10 @@ For each turn:
    - prompt content
    - `run=false`
 5. `POST /api/conversations/{id}/run`
-   - if the server returns `409 Conflict`, wait for the active turn to finish,
-     reconcile the attached backlog, then retry `POST /run` on the same conversation
+   - if the server returns `409 Conflict`, first surface launch metadata if it
+     has not been reported yet, reconcile the attached backlog so the mirror can
+     observe the already-active turn, wait for that active turn to finish, then
+     retry `POST /run` on the same conversation
 6. Observe progress through the WebSocket event stream
 
 ## 7.2 Waiting for completion

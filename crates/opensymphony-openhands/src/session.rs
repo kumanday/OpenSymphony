@@ -1407,6 +1407,21 @@ impl IssueSessionRunner {
                     status_code: 409, ..
                 }) => {
                     had_run_conflict = true;
+                    if !prepared_turn.launch_reported {
+                        observer.on_launch(
+                            &active_session
+                                .manifest
+                                .to_domain_metadata(RuntimeStreamState::Ready),
+                        );
+                        prepared_turn.launch_reported = true;
+                    }
+                    if let Err(error) = active_session.stream.reconcile_events().await {
+                        debug!(
+                            %error,
+                            conversation_id = %active_session.manifest.conversation_id,
+                            "pre-wait reconcile failed after run retry conflict, proceeding anyway"
+                        );
+                    }
                     if let Err(error) = self
                         .wait_for_active_turn_to_finish(&mut active_session.stream, observer)
                         .await

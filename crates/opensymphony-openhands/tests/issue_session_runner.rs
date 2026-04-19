@@ -10,7 +10,7 @@ use crate::opensymphony_openhands::{
     LLM_SUMMARIZING_CONDENSER_KIND, LlmConfigFingerprint, OpenHandsClient, TransportConfig,
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
-use crate::opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
+use crate::opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer, FakeSearchScript};
 use crate::opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
 use crate::opensymphony_workspace::{
     CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
@@ -1259,6 +1259,158 @@ async fn issue_session_runner_waits_for_an_already_running_turn_before_retrying(
             .search_all_events(conversation_id)
             .await
             .expect("events should be searchable after retry")
+            .items(),
+    );
+    assert_eq!(messages.len(), 2);
+    assert!(messages[1].contains("The original workflow prompt is already present"));
+}
+
+#[tokio::test]
+async fn issue_session_runner_reports_launch_before_waiting_after_delayed_run_conflict() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_for(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-253-delayed-conflict");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::new(client.clone(), runner_config(&workflow));
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut first_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-1", 1))
+        .await
+        .expect("first run manifest should prepare");
+    let first_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-1",
+        None,
+        max_turns,
+    );
+    let first_result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut first_manifest,
+            &issue,
+            &first_run,
+            &workflow,
+        )
+        .await
+        .expect("first issue session run should succeed");
+    let conversation_id = uuid::Uuid::parse_str(
+        first_result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("conversation ID should parse");
+    let existing_events = client
+        .search_all_events(conversation_id)
+        .await
+        .expect("existing events should be searchable");
+
+    server
+        .script_search_responses(
+            conversation_id,
+            FakeSearchScript::new()
+                .response(existing_events.items().to_vec())
+                .response(vec![EventEnvelope::state_update(
+                    "evt-delayed-conflict-running",
+                    "running",
+                )]),
+        )
+        .await
+        .expect("search responses should be scriptable");
+    server
+        .set_execution_status_on_next_message_without_event(conversation_id, "running")
+        .await
+        .expect("next message should be able to force a delayed conflict");
+
+    let mut second_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("run-2", 2))
+        .await
+        .expect("second run manifest should prepare");
+    let second_run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-2",
+        Some(RetryAttempt::new(2).expect("retry attempt should be valid")),
+        max_turns,
+    );
+
+    struct LaunchObserver {
+        launch_tx: Option<tokio::sync::oneshot::Sender<String>>,
+        launches: Vec<String>,
+    }
+
+    impl IssueSessionObserver for LaunchObserver {
+        fn on_launch(&mut self, conversation: &ConversationMetadata) {
+            let conversation_id = conversation.conversation_id.to_string();
+            self.launches.push(conversation_id.clone());
+            if let Some(launch_tx) = self.launch_tx.take() {
+                let _ = launch_tx.send(conversation_id);
+            }
+        }
+    }
+
+    let (launch_tx, launch_rx) = tokio::sync::oneshot::channel();
+    let mut observer = LaunchObserver {
+        launch_tx: Some(launch_tx),
+        launches: Vec::new(),
+    };
+
+    let (second_result, _) = tokio::join!(
+        runner.run_with_observer(
+            &manager,
+            &ensured.handle,
+            &mut second_manifest,
+            &issue,
+            &second_run,
+            &workflow,
+            &mut observer,
+        ),
+        async {
+            let launched_conversation_id = tokio::time::timeout(Duration::from_secs(1), launch_rx)
+                .await
+                .expect("delayed run conflicts should still report launch before waiting")
+                .expect("launch observer should receive the conversation id");
+            assert_eq!(launched_conversation_id, conversation_id.to_string());
+            server
+                .emit_state_update(conversation_id, "finished")
+                .await
+                .expect("conflicting active turn should finish");
+        }
+    );
+    let second_result = second_result.expect("second issue session run should succeed");
+    assert_eq!(
+        second_result.prompt_kind,
+        IssueSessionPromptKind::Continuation
+    );
+    assert_eq!(
+        second_result.run_status,
+        crate::opensymphony_workspace::RunStatus::Succeeded
+    );
+    assert_eq!(
+        second_result.worker_outcome.outcome,
+        WorkerOutcomeKind::Succeeded
+    );
+    assert_eq!(observer.launches, vec![conversation_id.to_string()]);
+
+    let messages = latest_message_texts(
+        client
+            .search_all_events(conversation_id)
+            .await
+            .expect("events should be searchable after delayed conflict")
             .items(),
     );
     assert_eq!(messages.len(), 2);

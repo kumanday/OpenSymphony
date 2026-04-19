@@ -273,6 +273,7 @@ struct FakeConversation {
     control_sender: broadcast::Sender<SocketControl>,
     scripted_search_responses: VecDeque<SearchConversationEventsResponse>,
     socket_scripts: VecDeque<FakeSocketScript>,
+    next_message_execution_status: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -439,6 +440,20 @@ impl FakeOpenHandsServer {
         Ok(())
     }
 
+    pub async fn set_execution_status_on_next_message_without_event(
+        &self,
+        conversation_id: Uuid,
+        execution_status: impl Into<String>,
+    ) -> Result<(), FakeServerError> {
+        let mut inner = self.state.inner.lock().await;
+        let conversation = inner
+            .conversations
+            .get_mut(&conversation_id)
+            .ok_or(FakeServerError::ConversationNotFound(conversation_id))?;
+        conversation.next_message_execution_status = Some(execution_status.into());
+        Ok(())
+    }
+
     pub async fn script_socket_connections(
         &self,
         conversation_id: Uuid,
@@ -513,6 +528,7 @@ async fn create_conversation(
             control_sender,
             scripted_search_responses: VecDeque::new(),
             socket_scripts: VecDeque::new(),
+            next_message_execution_status: None,
         },
     );
 
@@ -583,6 +599,9 @@ async fn send_message(
         .get_mut(&conversation_id)
         .ok_or(StatusCode::NOT_FOUND)?;
     apply_event_to_conversation(conversation, event);
+    if let Some(execution_status) = conversation.next_message_execution_status.take() {
+        conversation.summary.execution_status = execution_status;
+    }
     Ok(Json(json!({ "success": true })))
 }
 

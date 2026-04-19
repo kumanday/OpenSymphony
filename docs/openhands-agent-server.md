@@ -118,7 +118,9 @@ The internal `opensymphony_openhands` module owns:
 For reused conversations that are already `queued` or `running`, the runtime now
 surfaces launch metadata immediately after a successful attach so the
 orchestrator can keep tracking the live worker while it waits for the previous
-turn to settle.
+turn to settle. The same early launch reporting now also applies when a reused
+conversation only reveals its active prior turn later through a `/run`
+`409 Conflict`, after the attach-time mirror looked idle.
 
 The orchestration layer should not need to know OpenHands wire details.
 
