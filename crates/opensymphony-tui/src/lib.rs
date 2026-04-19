@@ -1,6 +1,11 @@
 use std::{
     cmp::{max, min},
-    sync::{Arc, Mutex},
+    collections::{HashMap, HashSet, VecDeque},
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
 };
@@ -63,6 +68,12 @@ pub struct TuiState {
     pub selected_issue: usize,
     pub latest_snapshot: Option<SnapshotEnvelope>,
     pub status_line: String,
+    workspace_status: HashMap<String, WorkspaceStatusEntry>,
+    selected_changed_file: usize,
+    detail_diff_open: bool,
+    detail_issue_identifier: Option<String>,
+    conversation_scroll_offset: usize,
+    diff_scroll_offset: usize,
 }
 
 impl Default for TuiState {
@@ -74,8 +85,97 @@ impl Default for TuiState {
             selected_issue: 0,
             latest_snapshot: None,
             status_line: "connecting to control plane".to_owned(),
+            workspace_status: HashMap::new(),
+            selected_changed_file: 0,
+            detail_diff_open: false,
+            detail_issue_identifier: None,
+            conversation_scroll_offset: 0,
+            diff_scroll_offset: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceStatusData {
+    branch: String,
+    pr_url: Option<String>,
+    changes: WorkspaceChangeState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceStatusEntry {
+    Loading,
+    Loaded(WorkspaceStatusData),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspacePrDisplay {
+    Loading,
+    Available(String),
+    None,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceChangeState {
+    Available(WorkspaceChangeSummary),
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceChangeSummary {
+    pub files_changed: usize,
+    pub additions: u64,
+    pub deletions: u64,
+    pub files: Vec<WorkspaceFileChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceFileChange {
+    pub display_path: String,
+    pub query_path: String,
+    pub previous_path: Option<String>,
+    pub status_code: String,
+    pub additions: Option<u64>,
+    pub deletions: Option<u64>,
+    pub diff: WorkspaceFileDiffState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceFileDiffState {
+    Unloaded,
+    Loading,
+    Loaded(Vec<WorkspaceDiffLine>),
+    Unavailable(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceDiffLine {
+    pub kind: WorkspaceDiffLineKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceDiffLineKind {
+    Header,
+    Hunk,
+    Addition,
+    Deletion,
+    Context,
+    Note,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SelectedDiffDisplay {
+    Closed,
+    Loading(String),
+    Available {
+        title: String,
+        additions: Option<u64>,
+        deletions: Option<u64>,
+        lines: Vec<WorkspaceDiffLine>,
+    },
+    Unavailable(String),
 }
 
 impl TuiState {
@@ -97,6 +197,8 @@ impl TuiState {
                     };
                 }
                 self.restore_selection(selected_issue_identifier.as_deref());
+                self.retain_workspace_status_for_visible_issues();
+                self.sync_detail_state();
             }
             TuiAction::StreamAttached => {
                 self.connection = ConnectionState::Live;
@@ -106,27 +208,101 @@ impl TuiState {
                 self.connection = ConnectionState::Reconnecting(reason.clone());
                 self.status_line = format!("reconnecting after: {reason}");
             }
-            TuiAction::MoveSelectionUp => {
-                self.selected_issue = self.selected_issue.saturating_sub(1);
-            }
-            TuiAction::MoveSelectionDown => {
-                let count = self.issue_count();
-                if count > 0 {
-                    self.selected_issue = min(self.selected_issue + 1, count - 1);
+            TuiAction::MoveSelectionUp => match self.focus {
+                FocusPane::Issues => self.move_issue_selection_up(),
+                FocusPane::Detail => self.move_changed_file_selection_up(),
+                FocusPane::Activity => {
+                    if self.detail_diff_open {
+                        self.move_diff_scroll_up();
+                    } else {
+                        self.move_conversation_scroll_up();
+                    }
                 }
-            }
+                FocusPane::Timeline => {}
+            },
+            TuiAction::MoveSelectionDown => match self.focus {
+                FocusPane::Issues => self.move_issue_selection_down(),
+                FocusPane::Detail => self.move_changed_file_selection_down(),
+                FocusPane::Activity => {
+                    if self.detail_diff_open {
+                        self.move_diff_scroll_down();
+                    } else {
+                        self.move_conversation_scroll_down();
+                    }
+                }
+                FocusPane::Timeline => {}
+            },
             TuiAction::FocusNext => {
                 self.focus = match self.focus {
                     FocusPane::Issues => FocusPane::Detail,
-                    FocusPane::Detail => FocusPane::Timeline,
+                    FocusPane::Detail => FocusPane::Activity,
+                    FocusPane::Activity => FocusPane::Timeline,
                     FocusPane::Timeline => FocusPane::Issues,
                 };
+            }
+            TuiAction::ToggleDetailDiff => {
+                if matches!(self.focus, FocusPane::Detail | FocusPane::Activity)
+                    && self.selected_file_change().is_some()
+                {
+                    self.detail_diff_open = !self.detail_diff_open;
+                    if self.detail_diff_open {
+                        self.focus = FocusPane::Activity;
+                        self.diff_scroll_offset = 0;
+                    } else {
+                        self.diff_scroll_offset = 0;
+                    }
+                }
+                self.sync_detail_state();
             }
             TuiAction::ToggleTimelineMode => {
                 self.timeline_mode = match self.timeline_mode {
                     TimelineMode::Events => TimelineMode::Metrics,
                     TimelineMode::Metrics => TimelineMode::Events,
                 };
+            }
+            TuiAction::WorkspaceStatusRequested(issue_identifier) => {
+                self.workspace_status
+                    .entry(issue_identifier)
+                    .or_insert(WorkspaceStatusEntry::Loading);
+            }
+            TuiAction::WorkspaceStatusLoaded {
+                issue_identifier,
+                branch,
+                pr_url,
+                changes,
+            } => {
+                let changes = self.merge_workspace_changes(&issue_identifier, changes);
+                self.workspace_status.insert(
+                    issue_identifier,
+                    WorkspaceStatusEntry::Loaded(WorkspaceStatusData {
+                        branch,
+                        pr_url,
+                        changes,
+                    }),
+                );
+                self.sync_detail_state();
+            }
+            TuiAction::WorkspaceDiffRequested {
+                issue_identifier,
+                query_path,
+            } => {
+                self.set_file_diff_state(
+                    &issue_identifier,
+                    &query_path,
+                    WorkspaceFileDiffState::Loading,
+                );
+            }
+            TuiAction::WorkspaceDiffLoaded {
+                issue_identifier,
+                query_path,
+                diff,
+            } => {
+                let diff_state = match diff {
+                    Ok(lines) => WorkspaceFileDiffState::Loaded(lines),
+                    Err(message) => WorkspaceFileDiffState::Unavailable(message),
+                };
+                self.set_file_diff_state(&issue_identifier, &query_path, diff_state);
+                self.sync_detail_state();
             }
         }
     }
@@ -159,7 +335,7 @@ impl TuiState {
         header.push(format!("bottom={}", self.timeline_mode.label()));
         header.push(format!("issues={issue_count}"));
         header.push(format!("updated={generated}"));
-        header.push("q quit  tab focus  e toggle".to_owned());
+        header.push("q quit  tab focus  enter diff  e toggle".to_owned());
         lines.push(fit(&header.join(" | "), width));
         lines.push("=".repeat(width));
 
@@ -232,8 +408,9 @@ impl TuiState {
 
         // Calculate section heights
         let available_rows = height.saturating_sub(2); // After header
-        let upper_section_rows = (available_rows * 6) / 10; // 60% for upper
-        let bottom_section_rows = available_rows.saturating_sub(upper_section_rows + 1); // 40% for bottom (minus separator)
+        let split_rows = available_rows.saturating_sub(1); // separator between upper and lower panes
+        let upper_section_rows = split_rows / 2;
+        let bottom_section_rows = split_rows.saturating_sub(upper_section_rows);
 
         // Width configuration for recent events panel
         // Must accommodate: "HH:MM:SS snapshot_published polled tracker; running=N, retry_queue=N"
@@ -273,7 +450,7 @@ impl TuiState {
             // Bottom section: Metadata + Modified Files | Conversation Activity
             let meta_lines = self.metadata_and_files_lines(bottom_left_width, bottom_section_rows);
             let activity_lines =
-                self.conversation_activity_lines(bottom_right_width, bottom_section_rows);
+                self.bottom_right_lines_styled(bottom_right_width, bottom_section_rows);
             lines.extend(fit_section_styled(
                 two_column_block_styled(
                     &meta_lines,
@@ -309,7 +486,7 @@ impl TuiState {
             )));
 
             // Bottom: Selected issue detail (full width)
-            let detail_lines = self.selected_issue_detail_lines(width, bottom_section_rows);
+            let detail_lines = self.detail_lines_styled(width, bottom_section_rows);
             lines.extend(fit_section_styled(detail_lines, bottom_section_rows, width));
         } else {
             // Narrow layout: stacked vertically
@@ -327,7 +504,7 @@ impl TuiState {
                     Style::new().dim(),
                 )));
                 lines.extend(fit_section_styled(
-                    self.selected_issue_detail_lines(width, bottom_rows),
+                    self.detail_lines_styled(width, bottom_rows),
                     bottom_rows,
                     width,
                 ));
@@ -449,7 +626,7 @@ impl TuiState {
         ));
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(
-            "q quit  tab focus  e toggle",
+            "q quit  tab focus  enter diff  e toggle",
             Style::new().fg(BRIGHT_BLACK),
         ));
 
@@ -565,13 +742,13 @@ impl TuiState {
                     Span::raw(issue.last_outcome.as_str()),
                 ]));
 
+                let branch = self.branch_text(issue);
                 lines.push(Line::from_spans(vec![
-                    Span::styled("workspace: ", Style::new().dim()),
-                    Span::raw(&issue.workspace_path_suffix),
-                    Span::raw(" | "),
-                    Span::styled("conv: ", Style::new().dim()),
-                    Span::raw(&issue.conversation_id_suffix),
+                    Span::styled("branch: ", Style::new().dim()),
+                    Span::styled(branch, Style::new().fg(CYAN)),
                 ]));
+
+                lines.push(self.pr_line_styled(issue));
 
                 let blocked_style = if issue.blocked {
                     Style::new().fg(YELLOW)
@@ -589,27 +766,38 @@ impl TuiState {
                     Span::styled(format!("{}", issue.blocked), blocked_style),
                 ]));
 
-                let detail_header_rows = 5;
-                let remaining_rows = max_rows.saturating_sub(detail_header_rows);
-
-                if remaining_rows >= 4 {
+                if lines.len() < max_rows {
                     lines.push(Line::from(Span::styled(
                         "-".repeat(width.min(40)),
                         Style::new().dim(),
                     )));
-                    lines.extend(self.conversation_events_lines_styled(
-                        width,
-                        issue,
-                        remaining_rows / 2,
-                    ));
-                }
+                    let remaining_rows = max_rows.saturating_sub(lines.len());
+                    if matches!(self.selected_diff_display(), SelectedDiffDisplay::Closed) {
+                        let file_rows = remaining_rows.min(max(4, remaining_rows / 2));
+                        lines.extend(self.modified_files_lines_styled(width, issue, file_rows));
 
-                if remaining_rows >= 6 {
-                    lines.push(Line::from(Span::styled(
-                        "-".repeat(width.min(40)),
-                        Style::new().dim(),
-                    )));
-                    lines.extend(self.modified_files_lines_styled(width, issue));
+                        let conversation_rows = max_rows.saturating_sub(lines.len() + 1);
+                        if conversation_rows > 0 {
+                            lines.push(Line::from(Span::styled(
+                                "-".repeat(width.min(40)),
+                                Style::new().dim(),
+                            )));
+                            lines
+                                .extend(self.conversation_activity_lines(width, conversation_rows));
+                        }
+                    } else {
+                        let file_rows = remaining_rows.min(max(4, remaining_rows / 3));
+                        lines.extend(self.modified_files_lines_styled(width, issue, file_rows));
+
+                        let diff_rows = max_rows.saturating_sub(lines.len() + 1);
+                        if diff_rows > 0 {
+                            lines.push(Line::from(Span::styled(
+                                "-".repeat(width.min(40)),
+                                Style::new().dim(),
+                            )));
+                            lines.extend(self.selected_diff_lines_styled(width, diff_rows));
+                        }
+                    }
                 }
             }
             None => {
@@ -622,93 +810,178 @@ impl TuiState {
         lines
     }
 
-    #[allow(dead_code)]
-    fn conversation_events_lines_styled(
+    fn modified_files_lines_styled(
         &self,
-        _width: usize,
+        width: usize,
         issue: &IssueSnapshot,
         max_rows: usize,
     ) -> Vec<Line> {
-        let mut lines = vec![Line::from(Span::styled(
-            "[ ] CONVERSATION ACTIVITY",
-            Style::new().bold(),
-        ))];
-
-        if issue.recent_events.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "no recent activity",
-                Style::new().dim(),
-            )));
-        } else {
-            let show_count = max_rows.saturating_sub(1).min(issue.recent_events.len());
-            for event in issue.recent_events.iter().rev().take(show_count) {
-                let kind_style = event_kind_style(&event.kind);
-                let summary = if event.summary.len() > 40 {
-                    format!("{}...", &event.summary[..37])
-                } else {
-                    event.summary.clone()
-                };
-                lines.push(Line::from_spans(vec![
-                    Span::styled(
-                        format!("{} ", format_timestamp(event.happened_at)),
-                        Style::new().dim(),
-                    ),
-                    Span::styled(&event.kind, kind_style),
-                    Span::raw(" "),
-                    Span::raw(summary),
-                ]));
-            }
-        }
-        lines
-    }
-
-    #[allow(dead_code)]
-    fn modified_files_lines_styled(&self, width: usize, issue: &IssueSnapshot) -> Vec<Line> {
         let mut lines = vec![Line::from(Span::styled(
             "[ ] MODIFIED FILES",
             Style::new().bold(),
         ))];
 
-        if issue.modified_files.is_empty() {
+        if max_rows <= 1 {
+            return lines;
+        }
+
+        if issue.workspace_path_suffix == "-" {
             lines.push(Line::from(Span::styled(
-                "no modified files",
+                "workspace unavailable",
                 Style::new().dim(),
             )));
-        } else {
-            for file in &issue.modified_files {
-                let (change_symbol, change_style) = match file.change_kind {
-                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Created => {
-                        ("+", Style::new().fg(GREEN))
-                    }
-                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Modified => {
-                        ("~", Style::new().fg(YELLOW))
-                    }
-                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Removed => {
-                        ("-", Style::new().fg(RED))
-                    }
-                };
-                let path = if file.path.len() > width.saturating_sub(12) {
-                    let truncated_len = width.saturating_sub(15);
-                    format!(
-                        "...{}",
-                        &file.path[file.path.len().saturating_sub(truncated_len)..]
-                    )
-                } else {
-                    file.path.clone()
-                };
-                lines.push(Line::from_spans(vec![
-                    Span::styled(change_symbol, change_style.bold()),
-                    Span::raw(" "),
-                    Span::raw(path),
-                    Span::raw(" "),
-                    Span::styled(
-                        format!("(+{}/-{})", file.lines_added, file.lines_removed),
+            return lines;
+        }
+
+        match self.workspace_status_entry(issue) {
+            Some(WorkspaceStatusEntry::Loaded(status)) => match &status.changes {
+                WorkspaceChangeState::Unavailable(message) => {
+                    lines.push(Line::from(Span::styled(
+                        fit(message, width),
                         Style::new().dim(),
-                    ),
-                ]));
+                    )));
+                }
+                WorkspaceChangeState::Available(summary) => {
+                    lines.push(change_summary_line_styled(summary));
+                    if summary.files.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            "no modified files",
+                            Style::new().dim(),
+                        )));
+                        return lines;
+                    }
+
+                    let visible_rows = max_rows.saturating_sub(lines.len());
+                    if visible_rows == 0 {
+                        return lines;
+                    }
+
+                    let (start, end) = issue_window(
+                        summary.files.len(),
+                        self.selected_changed_file,
+                        visible_rows,
+                    );
+                    for (index, file) in summary.files[start..end].iter().enumerate() {
+                        let global_index = start + index;
+                        lines.push(self.changed_file_line_styled(
+                            file,
+                            global_index == self.selected_changed_file,
+                            width,
+                        ));
+                    }
+                }
+            },
+            _ => {
+                lines.push(Line::from(Span::styled(
+                    "loading git changes...",
+                    Style::new().dim(),
+                )));
             }
         }
+
         lines
+    }
+
+    fn changed_file_line_styled(
+        &self,
+        file: &WorkspaceFileChange,
+        is_selected: bool,
+        width: usize,
+    ) -> Line {
+        let marker = if is_selected {
+            if self.detail_diff_open { "v" } else { ">" }
+        } else {
+            " "
+        };
+        let additions_text = change_count_text('+', file.additions);
+        let deletions_text = change_count_text('-', file.deletions);
+        let reserved_width = 4 + display_width(&additions_text) + display_width(&deletions_text);
+        let path_width = max(1, width.saturating_sub(reserved_width));
+        let path_text = fit(&file.display_path, path_width);
+        let path_style = if is_selected {
+            Style::new().bold()
+        } else {
+            Style::new()
+        };
+
+        Line::from_spans(vec![
+            Span::styled(marker, Style::new().fg(BRIGHT_GREEN).bold()),
+            Span::raw(" "),
+            Span::styled(path_text, path_style),
+            Span::raw(" "),
+            Span::styled(additions_text, Style::new().fg(BRIGHT_GREEN).bold()),
+            Span::raw(" "),
+            Span::styled(deletions_text, Style::new().fg(RED).bold()),
+        ])
+    }
+
+    fn selected_diff_lines_styled(&self, width: usize, max_rows: usize) -> Vec<Line> {
+        let diff_focused = self.focus == FocusPane::Activity;
+        let title_style = if diff_focused {
+            Style::new().bold()
+        } else {
+            Style::new().dim()
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            pane_title("FILE DIFF", diff_focused),
+            title_style,
+        ))];
+
+        match self.selected_diff_display() {
+            SelectedDiffDisplay::Closed => {
+                lines.push(Line::from(Span::styled(
+                    "press enter on a changed file to show its diff",
+                    Style::new().dim(),
+                )));
+            }
+            SelectedDiffDisplay::Loading(title) => {
+                lines.push(change_target_line_styled(&title, None, None, width));
+                lines.push(Line::from(Span::styled(
+                    "loading diff...",
+                    Style::new().dim(),
+                )));
+            }
+            SelectedDiffDisplay::Available {
+                title,
+                additions,
+                deletions,
+                lines: diff_lines,
+            } => {
+                lines.push(change_target_line_styled(
+                    &title, additions, deletions, width,
+                ));
+                if diff_lines.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "no diff output",
+                        Style::new().dim(),
+                    )));
+                } else {
+                    let visible_rows = max_rows.saturating_sub(lines.len());
+                    let start = min(
+                        self.diff_scroll_offset,
+                        diff_lines.len().saturating_sub(visible_rows),
+                    );
+                    for diff_line in diff_lines.into_iter().skip(start).take(visible_rows) {
+                        lines.push(render_workspace_diff_line_styled(&diff_line, width));
+                    }
+                }
+            }
+            SelectedDiffDisplay::Unavailable(message) => {
+                lines.push(Line::from(Span::styled(
+                    fit(&message, width),
+                    Style::new().dim(),
+                )));
+            }
+        }
+
+        lines
+    }
+
+    fn bottom_right_lines_styled(&self, width: usize, max_rows: usize) -> Vec<Line> {
+        match self.selected_diff_display() {
+            SelectedDiffDisplay::Closed => self.conversation_activity_lines(width, max_rows),
+            _ => self.selected_diff_lines_styled(width, max_rows),
+        }
     }
 
     fn timeline_lines_styled(&self, _width: usize, max_rows: usize) -> Vec<Line> {
@@ -791,9 +1064,14 @@ impl TuiState {
     }
 
     fn metadata_and_files_lines(&self, width: usize, max_rows: usize) -> Vec<Line> {
-        let title_style = Style::new().bold();
+        let detail_files_focused = self.focus == FocusPane::Detail;
+        let title_style = if detail_files_focused {
+            Style::new().bold()
+        } else {
+            Style::new().dim()
+        };
         let mut lines = vec![Line::from(Span::styled(
-            "[ ] ISSUE + WORKSPACE DETAIL",
+            pane_title("ISSUE + WORKSPACE DETAIL", detail_files_focused),
             title_style,
         ))];
 
@@ -820,14 +1098,13 @@ impl TuiState {
                     Span::raw(issue.last_outcome.as_str()),
                 ]));
 
-                // Workspace and conversation
+                let branch = self.branch_text(issue);
                 lines.push(Line::from_spans(vec![
-                    Span::styled("workspace: ", Style::new().dim()),
-                    Span::raw(&issue.workspace_path_suffix),
-                    Span::raw(" | "),
-                    Span::styled("conv: ", Style::new().dim()),
-                    Span::raw(&issue.conversation_id_suffix),
+                    Span::styled("branch: ", Style::new().dim()),
+                    Span::styled(branch, Style::new().fg(CYAN)),
                 ]));
+
+                lines.push(self.pr_line_styled(issue));
 
                 // Last event, retries, blocked
                 let blocked_style = if issue.blocked {
@@ -885,57 +1162,13 @@ impl TuiState {
                     )));
                 }
 
-                // Modified files (placeholder for now - will integrate git diff later)
                 if lines.len() < max_rows {
-                    lines.push(Line::from(Span::styled(
-                        "[ ] MODIFIED FILES",
-                        Style::new().bold(),
-                    )));
-                    if issue.modified_files.is_empty() {
-                        if lines.len() < max_rows {
-                            lines.push(Line::from(Span::styled(
-                                "no modified files",
-                                Style::new().dim(),
-                            )));
-                        }
-                    } else {
-                        for file in issue
-                            .modified_files
-                            .iter()
-                            .take(max_rows.saturating_sub(lines.len()))
-                        {
-                            let (change_symbol, change_style) = match file.change_kind {
-                                crate::opensymphony_domain::ControlPlaneFileChangeKind::Created => {
-                                    ("+", Style::new().fg(GREEN))
-                                }
-                                crate::opensymphony_domain::ControlPlaneFileChangeKind::Modified => {
-                                    ("~", Style::new().fg(YELLOW))
-                                }
-                                crate::opensymphony_domain::ControlPlaneFileChangeKind::Removed => {
-                                    ("-", Style::new().fg(RED))
-                                }
-                            };
-                            let path = if file.path.len() > width.saturating_sub(12) {
-                                let truncated_len = width.saturating_sub(15);
-                                format!(
-                                    "...{}",
-                                    &file.path[file.path.len().saturating_sub(truncated_len)..]
-                                )
-                            } else {
-                                file.path.clone()
-                            };
-                            lines.push(Line::from_spans(vec![
-                                Span::styled(change_symbol, change_style.bold()),
-                                Span::raw(" "),
-                                Span::raw(path),
-                                Span::raw(" "),
-                                Span::styled(
-                                    format!("(+{}/-{})", file.lines_added, file.lines_removed),
-                                    Style::new().dim(),
-                                ),
-                            ]));
-                        }
-                    }
+                    let remaining_file_rows = max_rows.saturating_sub(lines.len());
+                    lines.extend(self.modified_files_lines_styled(
+                        width,
+                        issue,
+                        remaining_file_rows,
+                    ));
                 }
             }
             None => {
@@ -949,9 +1182,15 @@ impl TuiState {
     }
 
     fn conversation_activity_lines(&self, width: usize, max_rows: usize) -> Vec<Line> {
+        let activity_focused = self.focus == FocusPane::Activity && !self.detail_diff_open;
+        let title_style = if activity_focused {
+            Style::new().bold()
+        } else {
+            Style::new().dim()
+        };
         let mut lines = vec![Line::from(Span::styled(
-            "[ ] CONVERSATION ACTIVITY",
-            Style::new().bold(),
+            pane_title("CONVERSATION ACTIVITY", activity_focused),
+            title_style,
         ))];
 
         match self.selected_issue() {
@@ -962,127 +1201,18 @@ impl TuiState {
                         Style::new().dim(),
                     )));
                 } else {
-                    let show_count = max_rows.saturating_sub(1).min(issue.recent_events.len());
-                    for event in issue.recent_events.iter().rev().take(show_count) {
-                        let kind_style = event_kind_style(&event.kind);
-                        let summary = if event.summary.len() > width.saturating_sub(30) {
-                            format!("{}...", &event.summary[..width.saturating_sub(33)])
-                        } else {
-                            event.summary.clone()
-                        };
-                        lines.push(Line::from_spans(vec![
-                            Span::styled(
-                                format!("{} ", format_timestamp(event.happened_at)),
-                                Style::new().dim(),
-                            ),
-                            Span::styled(&event.kind, kind_style),
-                            Span::raw(" "),
-                            Span::raw(summary),
-                        ]));
-                    }
-                }
-            }
-            None => {
-                lines.push(Line::from(Span::styled(
-                    "no selected issue",
-                    Style::new().dim(),
-                )));
-            }
-        }
-        lines
-    }
-
-    fn selected_issue_detail_lines(&self, width: usize, max_rows: usize) -> Vec<Line> {
-        // For medium-width layout: combine metadata and activity in one column
-        let title_style = if self.focus == FocusPane::Detail {
-            Style::new().bold()
-        } else {
-            Style::new().dim()
-        };
-        let mut lines = vec![Line::from(Span::styled(
-            pane_title("ISSUE + WORKSPACE DETAIL", self.focus == FocusPane::Detail),
-            title_style,
-        ))];
-
-        match self.selected_issue() {
-            Some(issue) => {
-                let id_style = Style::new().fg(CYAN).bold();
-                lines.push(Line::from_spans(vec![
-                    Span::styled(&issue.identifier, id_style),
-                    Span::raw(" "),
-                    Span::styled(&issue.title, Style::new().bold()),
-                ]));
-
-                let runtime_style = Style::new().fg(runtime_state_color(&issue.runtime_state));
-                lines.push(Line::from_spans(vec![
-                    Span::styled("tracker: ", Style::new().dim()),
-                    Span::raw(&issue.tracker_state),
-                    Span::raw(" | "),
-                    Span::styled("runtime: ", Style::new().dim()),
-                    Span::styled(issue.runtime_state.as_str(), runtime_style),
-                    Span::raw(" | "),
-                    Span::styled("outcome: ", Style::new().dim()),
-                    Span::raw(issue.last_outcome.as_str()),
-                ]));
-
-                lines.push(Line::from_spans(vec![
-                    Span::styled("workspace: ", Style::new().dim()),
-                    Span::raw(&issue.workspace_path_suffix),
-                    Span::raw(" | "),
-                    Span::styled("conv: ", Style::new().dim()),
-                    Span::raw(&issue.conversation_id_suffix),
-                ]));
-
-                let blocked_style = if issue.blocked {
-                    Style::new().fg(YELLOW)
-                } else {
-                    Style::new().fg(GREEN)
-                };
-                lines.push(Line::from_spans(vec![
-                    Span::styled("last event: ", Style::new().dim()),
-                    Span::raw(format_timestamp(issue.last_event_at)),
-                    Span::raw(" | "),
-                    Span::styled("retries: ", Style::new().dim()),
-                    Span::raw(format!("{}", issue.retry_count)),
-                    Span::raw(" | "),
-                    Span::styled("blocked: ", Style::new().dim()),
-                    Span::styled(format!("{}", issue.blocked), blocked_style),
-                ]));
-
-                let detail_header_rows = 5;
-                let remaining_rows = max_rows.saturating_sub(detail_header_rows);
-
-                if remaining_rows >= 4 {
-                    lines.push(Line::from(Span::styled(
-                        "-".repeat(min(width, 40)),
-                        Style::new().dim(),
-                    )));
-                    // Show conversation activity
-                    if issue.recent_events.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            "no recent activity",
-                            Style::new().dim(),
-                        )));
-                    } else {
-                        let show_count = remaining_rows
-                            .saturating_sub(1)
-                            .min(issue.recent_events.len());
-                        for event in issue.recent_events.iter().rev().take(show_count) {
-                            let kind_style = event_kind_style(&event.kind);
-                            let summary = if event.summary.len() > 40 {
-                                format!("{}...", &event.summary[..37])
-                            } else {
-                                event.summary.clone()
-                            };
-                            lines.push(Line::from_spans(vec![
-                                Span::styled(
-                                    format!("{} ", format_timestamp(event.happened_at)),
-                                    Style::new().dim(),
-                                ),
-                                Span::styled(&event.kind, kind_style),
-                                Span::raw(" "),
-                                Span::raw(summary),
-                            ]));
+                    let visible_rows = max_rows.saturating_sub(1);
+                    'events: for event in issue
+                        .recent_events
+                        .iter()
+                        .rev()
+                        .skip(self.conversation_scroll_offset)
+                    {
+                        for line in wrap_conversation_event_styled(event, width) {
+                            if lines.len() >= visible_rows + 1 {
+                                break 'events;
+                            }
+                            lines.push(line);
                         }
                     }
                 }
@@ -1153,13 +1283,8 @@ impl TuiState {
                     ),
                     width,
                 ));
-                lines.push(fit(
-                    &format!(
-                        "workspace: {} | conv: {}",
-                        issue.workspace_path_suffix, issue.conversation_id_suffix
-                    ),
-                    width,
-                ));
+                lines.push(fit(&format!("branch: {}", self.branch_text(issue)), width));
+                lines.push(fit(&format!("pr: {}", self.pr_text(issue)), width));
                 lines.push(fit(
                     &format!(
                         "last event: {} | retries: {} | blocked: {}",
@@ -1170,17 +1295,32 @@ impl TuiState {
                     width,
                 ));
 
-                let detail_header_rows = 5;
-                let remaining_rows = max_rows.saturating_sub(detail_header_rows);
-
-                if remaining_rows >= 4 {
+                if lines.len() < max_rows {
                     lines.push("-".repeat(width.min(40)));
-                    lines.extend(self.conversation_events_lines(width, issue, remaining_rows / 2));
-                }
+                    let remaining_rows = max_rows.saturating_sub(lines.len());
+                    if matches!(self.selected_diff_display(), SelectedDiffDisplay::Closed) {
+                        let file_rows = remaining_rows.min(max(4, remaining_rows / 2));
+                        lines.extend(self.modified_files_lines(width, issue, file_rows));
 
-                if remaining_rows >= 6 {
-                    lines.push("-".repeat(width.min(40)));
-                    lines.extend(self.modified_files_lines(width, issue));
+                        let conversation_rows = max_rows.saturating_sub(lines.len() + 1);
+                        if conversation_rows > 0 {
+                            lines.push("-".repeat(width.min(40)));
+                            lines.extend(self.conversation_events_lines(
+                                width,
+                                issue,
+                                conversation_rows,
+                            ));
+                        }
+                    } else {
+                        let file_rows = remaining_rows.min(max(4, remaining_rows / 3));
+                        lines.extend(self.modified_files_lines(width, issue, file_rows));
+
+                        let diff_rows = max_rows.saturating_sub(lines.len() + 1);
+                        if diff_rows > 0 {
+                            lines.push("-".repeat(width.min(40)));
+                            lines.extend(self.selected_diff_lines(width, diff_rows));
+                        }
+                    }
                 }
             }
             None => {
@@ -1190,64 +1330,134 @@ impl TuiState {
         lines
     }
 
+    fn modified_files_lines(
+        &self,
+        width: usize,
+        issue: &IssueSnapshot,
+        max_rows: usize,
+    ) -> Vec<String> {
+        let mut lines = vec![fit("[ ] MODIFIED FILES", width)];
+
+        if max_rows <= 1 {
+            return lines;
+        }
+
+        if issue.workspace_path_suffix == "-" {
+            lines.push(fit("workspace unavailable", width));
+            return lines;
+        }
+
+        match self.workspace_status_entry(issue) {
+            Some(WorkspaceStatusEntry::Loaded(status)) => match &status.changes {
+                WorkspaceChangeState::Unavailable(message) => {
+                    lines.push(fit(message, width));
+                }
+                WorkspaceChangeState::Available(summary) => {
+                    lines.push(fit(&change_summary_line_text(summary), width));
+                    if summary.files.is_empty() {
+                        lines.push(fit("no modified files", width));
+                        return lines;
+                    }
+
+                    let visible_rows = max_rows.saturating_sub(lines.len());
+                    if visible_rows == 0 {
+                        return lines;
+                    }
+
+                    let (start, end) = issue_window(
+                        summary.files.len(),
+                        self.selected_changed_file,
+                        visible_rows,
+                    );
+                    for (index, file) in summary.files[start..end].iter().enumerate() {
+                        let global_index = start + index;
+                        lines.push(change_target_line_text(
+                            &file.display_path,
+                            file.additions,
+                            file.deletions,
+                            width,
+                            global_index == self.selected_changed_file,
+                            self.detail_diff_open,
+                        ));
+                    }
+                }
+            },
+            _ => lines.push(fit("loading git changes...", width)),
+        }
+
+        lines
+    }
+
+    fn selected_diff_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
+        let diff_focused = self.focus == FocusPane::Activity;
+        let mut lines = vec![fit(&pane_title("FILE DIFF", diff_focused), width)];
+
+        match self.selected_diff_display() {
+            SelectedDiffDisplay::Closed => {
+                lines.push(fit("press enter on a changed file to show its diff", width));
+            }
+            SelectedDiffDisplay::Loading(title) => {
+                lines.push(change_target_line_text(
+                    &title, None, None, width, false, false,
+                ));
+                lines.push(fit("loading diff...", width));
+            }
+            SelectedDiffDisplay::Available {
+                title,
+                additions,
+                deletions,
+                lines: diff_lines,
+            } => {
+                lines.push(change_target_line_text(
+                    &title, additions, deletions, width, false, false,
+                ));
+                if diff_lines.is_empty() {
+                    lines.push(fit("no diff output", width));
+                } else {
+                    let visible_rows = max_rows.saturating_sub(lines.len());
+                    let start = min(
+                        self.diff_scroll_offset,
+                        diff_lines.len().saturating_sub(visible_rows),
+                    );
+                    for diff_line in diff_lines.into_iter().skip(start).take(visible_rows) {
+                        lines.push(fit(&diff_line.text, width));
+                    }
+                }
+            }
+            SelectedDiffDisplay::Unavailable(message) => {
+                lines.push(fit(&message, width));
+            }
+        }
+
+        lines
+    }
     fn conversation_events_lines(
         &self,
         width: usize,
         issue: &IssueSnapshot,
         max_rows: usize,
     ) -> Vec<String> {
-        let mut lines = vec![fit("[ ] CONVERSATION ACTIVITY", width)];
+        let activity_focused = self.focus == FocusPane::Activity && !self.detail_diff_open;
+        let mut lines = vec![fit(
+            &pane_title("CONVERSATION ACTIVITY", activity_focused),
+            width,
+        )];
         if issue.recent_events.is_empty() {
             lines.push(fit("no recent activity", width));
         } else {
-            let show_count = max_rows.saturating_sub(1).min(issue.recent_events.len());
-            for event in issue.recent_events.iter().rev().take(show_count) {
-                let summary = if event.summary.len() > 40 {
-                    format!("{}...", &event.summary[..37])
-                } else {
-                    event.summary.clone()
-                };
-                lines.push(fit(
-                    &format!(
-                        "{} {} {}",
-                        format_timestamp(event.happened_at),
-                        event.kind,
-                        summary
-                    ),
-                    width,
-                ));
-            }
-        }
-        lines
-    }
-
-    fn modified_files_lines(&self, width: usize, issue: &IssueSnapshot) -> Vec<String> {
-        let mut lines = vec![fit("[ ] MODIFIED FILES", width)];
-        if issue.modified_files.is_empty() {
-            lines.push(fit("no modified files", width));
-        } else {
-            for file in &issue.modified_files {
-                let change_symbol = match file.change_kind {
-                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Created => "+",
-                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Modified => "~",
-                    crate::opensymphony_domain::ControlPlaneFileChangeKind::Removed => "-",
-                };
-                let path = if file.path.len() > width.saturating_sub(12) {
-                    let truncated_len = width.saturating_sub(15);
-                    format!(
-                        "...{}",
-                        &file.path[file.path.len().saturating_sub(truncated_len)..]
-                    )
-                } else {
-                    file.path.clone()
-                };
-                lines.push(fit(
-                    &format!(
-                        "{} {} (+{}/-{})",
-                        change_symbol, path, file.lines_added, file.lines_removed
-                    ),
-                    width,
-                ));
+            let visible_rows = max_rows.saturating_sub(1);
+            'events: for event in issue
+                .recent_events
+                .iter()
+                .rev()
+                .skip(self.conversation_scroll_offset)
+            {
+                for line in wrap_conversation_event_text(event, width) {
+                    if lines.len() >= visible_rows + 1 {
+                        break 'events;
+                    }
+                    lines.push(fit(&line, width));
+                }
             }
         }
         lines
@@ -1280,11 +1490,119 @@ impl TuiState {
             .and_then(|snapshot| snapshot.snapshot.issues.get(self.selected_issue))
     }
 
+    fn workspace_status_entry(&self, issue: &IssueSnapshot) -> Option<&WorkspaceStatusEntry> {
+        self.workspace_status.get(&issue.identifier)
+    }
+
+    fn branch_text(&self, issue: &IssueSnapshot) -> String {
+        if issue.workspace_path_suffix == "-" {
+            return "unavailable".to_owned();
+        }
+
+        match self.workspace_status_entry(issue) {
+            Some(WorkspaceStatusEntry::Loaded(status)) => status.branch.clone(),
+            _ => "loading...".to_owned(),
+        }
+    }
+
+    fn pr_display(&self, issue: &IssueSnapshot) -> WorkspacePrDisplay {
+        if issue.workspace_path_suffix == "-" {
+            return WorkspacePrDisplay::Unavailable;
+        }
+
+        match self.workspace_status_entry(issue) {
+            Some(WorkspaceStatusEntry::Loaded(status)) => match status.pr_url.clone() {
+                Some(pr_url) => WorkspacePrDisplay::Available(pr_url),
+                None => WorkspacePrDisplay::None,
+            },
+            _ => WorkspacePrDisplay::Loading,
+        }
+    }
+
+    fn pr_text(&self, issue: &IssueSnapshot) -> String {
+        match self.pr_display(issue) {
+            WorkspacePrDisplay::Loading => "loading...".to_owned(),
+            WorkspacePrDisplay::Available(pr_url) => pr_url,
+            WorkspacePrDisplay::None => "none".to_owned(),
+            WorkspacePrDisplay::Unavailable => "unavailable".to_owned(),
+        }
+    }
+
+    fn pr_line_styled(&self, issue: &IssueSnapshot) -> Line {
+        match self.pr_display(issue) {
+            WorkspacePrDisplay::Loading => Line::from_spans(vec![
+                Span::styled("pr: ", Style::new().dim()),
+                Span::styled("loading...", Style::new().dim()),
+            ]),
+            WorkspacePrDisplay::Available(pr_url) => Line::from_spans(vec![
+                Span::styled("pr: ", Style::new().dim()),
+                Span::styled(pr_url.clone(), Style::new().fg(BLUE).underline()).link(pr_url),
+            ]),
+            WorkspacePrDisplay::None => Line::from_spans(vec![
+                Span::styled("pr: ", Style::new().dim()),
+                Span::styled("none", Style::new().dim()),
+            ]),
+            WorkspacePrDisplay::Unavailable => Line::from_spans(vec![
+                Span::styled("pr: ", Style::new().dim()),
+                Span::styled("unavailable", Style::new().dim()),
+            ]),
+        }
+    }
+
     fn issue_count(&self) -> usize {
         self.latest_snapshot
             .as_ref()
             .map(|snapshot| snapshot.snapshot.issues.len())
             .unwrap_or_default()
+    }
+
+    fn move_issue_selection_up(&mut self) {
+        self.selected_issue = self.selected_issue.saturating_sub(1);
+        self.sync_detail_state();
+    }
+
+    fn move_issue_selection_down(&mut self) {
+        let count = self.issue_count();
+        if count > 0 {
+            self.selected_issue = min(self.selected_issue + 1, count - 1);
+        }
+        self.sync_detail_state();
+    }
+
+    fn move_changed_file_selection_up(&mut self) {
+        self.selected_changed_file = self.selected_changed_file.saturating_sub(1);
+        self.sync_detail_state();
+    }
+
+    fn move_changed_file_selection_down(&mut self) {
+        let file_count = self.selected_changed_file_count();
+        if file_count > 0 {
+            self.selected_changed_file = min(self.selected_changed_file + 1, file_count - 1);
+        }
+        self.sync_detail_state();
+    }
+
+    fn move_conversation_scroll_up(&mut self) {
+        self.conversation_scroll_offset = self.conversation_scroll_offset.saturating_sub(1);
+    }
+
+    fn move_conversation_scroll_down(&mut self) {
+        let event_count = self.selected_conversation_event_count();
+        if event_count > 0 {
+            self.conversation_scroll_offset =
+                min(self.conversation_scroll_offset + 1, event_count - 1);
+        }
+    }
+
+    fn move_diff_scroll_up(&mut self) {
+        self.diff_scroll_offset = self.diff_scroll_offset.saturating_sub(1);
+    }
+
+    fn move_diff_scroll_down(&mut self) {
+        let diff_line_count = self.selected_diff_line_count();
+        if diff_line_count > 0 {
+            self.diff_scroll_offset = min(self.diff_scroll_offset + 1, diff_line_count - 1);
+        }
     }
 
     fn restore_selection(&mut self, selected_issue_identifier: Option<&str>) {
@@ -1309,12 +1627,183 @@ impl TuiState {
 
         self.selected_issue = min(self.selected_issue, count - 1);
     }
+
+    fn retain_workspace_status_for_visible_issues(&mut self) {
+        let visible_issues = self
+            .latest_snapshot
+            .as_ref()
+            .map(|snapshot| {
+                snapshot
+                    .snapshot
+                    .issues
+                    .iter()
+                    .map(|issue| issue.identifier.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+
+        self.workspace_status
+            .retain(|issue_identifier, _| visible_issues.contains(issue_identifier));
+    }
+
+    fn workspace_change_summary(&self, issue: &IssueSnapshot) -> Option<&WorkspaceChangeSummary> {
+        match self.workspace_status_entry(issue) {
+            Some(WorkspaceStatusEntry::Loaded(status)) => match &status.changes {
+                WorkspaceChangeState::Available(summary) => Some(summary),
+                WorkspaceChangeState::Unavailable(_) => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn selected_changed_file_count(&self) -> usize {
+        self.selected_issue()
+            .and_then(|issue| self.workspace_change_summary(issue))
+            .map(|summary| summary.files.len())
+            .unwrap_or_default()
+    }
+
+    fn selected_file_change(&self) -> Option<&WorkspaceFileChange> {
+        let issue = self.selected_issue()?;
+        self.workspace_change_summary(issue)?
+            .files
+            .get(self.selected_changed_file)
+    }
+
+    fn selected_diff_display(&self) -> SelectedDiffDisplay {
+        if !self.detail_diff_open {
+            return SelectedDiffDisplay::Closed;
+        }
+
+        let Some(change) = self.selected_file_change() else {
+            return SelectedDiffDisplay::Unavailable("no changed file selected".to_owned());
+        };
+
+        match &change.diff {
+            WorkspaceFileDiffState::Unloaded | WorkspaceFileDiffState::Loading => {
+                SelectedDiffDisplay::Loading(change.display_path.clone())
+            }
+            WorkspaceFileDiffState::Loaded(lines) => SelectedDiffDisplay::Available {
+                title: change.display_path.clone(),
+                additions: change.additions,
+                deletions: change.deletions,
+                lines: lines.clone(),
+            },
+            WorkspaceFileDiffState::Unavailable(message) => {
+                SelectedDiffDisplay::Unavailable(message.clone())
+            }
+        }
+    }
+
+    fn selected_diff_line_count(&self) -> usize {
+        match self.selected_file_change().map(|change| &change.diff) {
+            Some(WorkspaceFileDiffState::Loaded(lines)) => lines.len(),
+            _ => 0,
+        }
+    }
+
+    fn selected_conversation_event_count(&self) -> usize {
+        self.selected_issue()
+            .map(|issue| issue.recent_events.len())
+            .unwrap_or_default()
+    }
+
+    fn sync_detail_state(&mut self) {
+        let selected_issue_identifier = self.selected_issue().map(|issue| issue.identifier.clone());
+        if self.detail_issue_identifier != selected_issue_identifier {
+            self.selected_changed_file = 0;
+            self.detail_diff_open = false;
+            self.conversation_scroll_offset = 0;
+            self.diff_scroll_offset = 0;
+        }
+        self.detail_issue_identifier = selected_issue_identifier;
+
+        let file_count = self.selected_changed_file_count();
+        if file_count == 0 {
+            self.selected_changed_file = 0;
+            self.detail_diff_open = false;
+            self.diff_scroll_offset = 0;
+        } else {
+            self.selected_changed_file = min(self.selected_changed_file, file_count - 1);
+        }
+
+        let event_count = self.selected_conversation_event_count();
+        if event_count == 0 {
+            self.conversation_scroll_offset = 0;
+        } else {
+            self.conversation_scroll_offset = min(self.conversation_scroll_offset, event_count - 1);
+        }
+
+        if !self.detail_diff_open {
+            self.diff_scroll_offset = 0;
+        } else {
+            self.diff_scroll_offset = min(
+                self.diff_scroll_offset,
+                self.selected_diff_line_count().saturating_sub(1),
+            );
+        }
+    }
+
+    fn merge_workspace_changes(
+        &self,
+        issue_identifier: &str,
+        changes: WorkspaceChangeState,
+    ) -> WorkspaceChangeState {
+        let WorkspaceChangeState::Available(mut summary) = changes else {
+            return changes;
+        };
+
+        if let Some(WorkspaceStatusEntry::Loaded(existing_status)) =
+            self.workspace_status.get(issue_identifier)
+            && let WorkspaceChangeState::Available(existing_summary) = &existing_status.changes
+        {
+            for file in &mut summary.files {
+                if let Some(existing_file) = existing_summary.files.iter().find(|existing_file| {
+                    existing_file.query_path == file.query_path
+                        && existing_file.previous_path == file.previous_path
+                        && existing_file.status_code == file.status_code
+                        && existing_file.additions == file.additions
+                        && existing_file.deletions == file.deletions
+                }) {
+                    file.diff = existing_file.diff.clone();
+                }
+            }
+        }
+
+        WorkspaceChangeState::Available(summary)
+    }
+
+    fn set_file_diff_state(
+        &mut self,
+        issue_identifier: &str,
+        query_path: &str,
+        diff: WorkspaceFileDiffState,
+    ) {
+        let Some(WorkspaceStatusEntry::Loaded(status)) =
+            self.workspace_status.get_mut(issue_identifier)
+        else {
+            return;
+        };
+
+        let WorkspaceChangeState::Available(summary) = &mut status.changes else {
+            return;
+        };
+
+        if let Some(file) = summary
+            .files
+            .iter_mut()
+            .find(|file| file.query_path == query_path)
+        {
+            file.diff = diff;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FocusPane {
     Issues,
     Detail,
+    Activity,
     Timeline,
 }
 
@@ -1323,6 +1812,7 @@ impl FocusPane {
         match self {
             FocusPane::Issues => "issues",
             FocusPane::Detail => "detail",
+            FocusPane::Activity => "activity",
             FocusPane::Timeline => "timeline",
         }
     }
@@ -1368,7 +1858,24 @@ pub enum TuiAction {
     MoveSelectionUp,
     MoveSelectionDown,
     FocusNext,
+    ToggleDetailDiff,
     ToggleTimelineMode,
+    WorkspaceStatusRequested(String),
+    WorkspaceStatusLoaded {
+        issue_identifier: String,
+        branch: String,
+        pr_url: Option<String>,
+        changes: WorkspaceChangeState,
+    },
+    WorkspaceDiffRequested {
+        issue_identifier: String,
+        query_path: String,
+    },
+    WorkspaceDiffLoaded {
+        issue_identifier: String,
+        query_path: String,
+        diff: Result<Vec<WorkspaceDiffLine>, String>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -1447,12 +1954,111 @@ impl BridgeHandle {
     }
 }
 
+#[derive(Debug)]
+enum WorkspaceStatusRequest {
+    Refresh {
+        issue_identifier: String,
+        workspace_path: PathBuf,
+    },
+    LoadDiff {
+        issue_identifier: String,
+        workspace_path: PathBuf,
+        query_path: String,
+        previous_path: Option<String>,
+        status_code: String,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Default)]
+struct WorkspaceStatusMailbox {
+    pending_actions: VecDeque<TuiAction>,
+}
+
+impl WorkspaceStatusMailbox {
+    fn push_loaded(
+        &mut self,
+        issue_identifier: String,
+        branch: String,
+        pr_url: Option<String>,
+        changes: WorkspaceChangeState,
+    ) {
+        self.pending_actions
+            .push_back(TuiAction::WorkspaceStatusLoaded {
+                issue_identifier,
+                branch,
+                pr_url,
+                changes,
+            });
+    }
+
+    fn push_diff_loaded(
+        &mut self,
+        issue_identifier: String,
+        query_path: String,
+        diff: Result<Vec<WorkspaceDiffLine>, String>,
+    ) {
+        self.pending_actions
+            .push_back(TuiAction::WorkspaceDiffLoaded {
+                issue_identifier,
+                query_path,
+                diff,
+            });
+    }
+
+    fn take_action(&mut self) -> Option<TuiAction> {
+        self.pending_actions.pop_front()
+    }
+}
+
+#[derive(Debug)]
+struct WorkspaceStatusHandle {
+    mailbox: Arc<Mutex<WorkspaceStatusMailbox>>,
+    request_tx: mpsc::Sender<WorkspaceStatusRequest>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl WorkspaceStatusHandle {
+    fn spawn() -> Self {
+        let mailbox = Arc::new(Mutex::new(WorkspaceStatusMailbox::default()));
+        let (request_tx, request_rx) = mpsc::channel();
+        let join_handle = thread::spawn({
+            let mailbox = Arc::clone(&mailbox);
+            move || run_workspace_status_thread(mailbox, request_rx)
+        });
+        Self {
+            mailbox,
+            request_tx,
+            join_handle: Some(join_handle),
+        }
+    }
+
+    fn mailbox(&self) -> Arc<Mutex<WorkspaceStatusMailbox>> {
+        Arc::clone(&self.mailbox)
+    }
+
+    fn request_sender(&self) -> mpsc::Sender<WorkspaceStatusRequest> {
+        self.request_tx.clone()
+    }
+
+    fn shutdown(mut self) -> Result<(), TuiError> {
+        let _ = self.request_tx.send(WorkspaceStatusRequest::Shutdown);
+        if let Some(join_handle) = self.join_handle.take() {
+            join_handle
+                .join()
+                .map_err(|_| TuiError::WorkspaceStatusThreadPanicked)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum AppMessage {
     Tick,
     MoveSelectionUp,
     MoveSelectionDown,
     FocusNext,
+    ToggleDetailDiff,
     ToggleTimelineMode,
     Quit,
 }
@@ -1465,6 +2071,7 @@ impl From<Event> for AppMessage {
                 KeyCode::Char('k') | KeyCode::Up => AppMessage::MoveSelectionUp,
                 KeyCode::Char('j') | KeyCode::Down => AppMessage::MoveSelectionDown,
                 KeyCode::Tab => AppMessage::FocusNext,
+                KeyCode::Enter => AppMessage::ToggleDetailDiff,
                 KeyCode::Char('e') => AppMessage::ToggleTimelineMode,
                 _ => AppMessage::Tick,
             },
@@ -1475,12 +2082,20 @@ impl From<Event> for AppMessage {
 
 pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), TuiError> {
     let bridge = BridgeHandle::spawn(base_url);
+    let workspace_status = WorkspaceStatusHandle::spawn();
     let outcome = Arc::new(Mutex::new(RunOutcome::default()));
-    let app = OperatorApp::new(bridge.mailbox(), exit_after, Arc::clone(&outcome));
+    let app = OperatorApp::new(
+        bridge.mailbox(),
+        workspace_status.mailbox(),
+        workspace_status.request_sender(),
+        exit_after,
+        Arc::clone(&outcome),
+    );
     let run_result = App::new(app)
         .screen_mode(ScreenMode::AltScreen)
         .run()
         .map_err(TuiError::Runtime);
+    let workspace_shutdown_result = workspace_status.shutdown();
     let shutdown_result = bridge.shutdown();
     let timeout_before_live = outcome
         .lock()
@@ -1488,10 +2103,11 @@ pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), T
         .timeout_before_live
         .clone();
 
-    match (run_result, shutdown_result) {
-        (Err(error), _) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Ok(()), Ok(())) => match timeout_before_live {
+    match (run_result, workspace_shutdown_result, shutdown_result) {
+        (Err(error), _, _) => Err(error),
+        (Ok(()), Err(error), _) => Err(error),
+        (Ok(()), Ok(()), Err(error)) => Err(error),
+        (Ok(()), Ok(()), Ok(())) => match timeout_before_live {
             Some(status_line) => Err(TuiError::AttachTimeout(status_line)),
             None => Ok(()),
         },
@@ -1503,10 +2119,27 @@ struct RunOutcome {
     timeout_before_live: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceStatusRequestKey {
+    issue_identifier: String,
+    sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceDiffRequestKey {
+    issue_identifier: String,
+    sequence: u64,
+    query_path: String,
+}
+
 #[derive(Debug)]
 struct OperatorApp {
     state: TuiState,
     bridge: Arc<Mutex<BridgeMailbox>>,
+    workspace_status: Arc<Mutex<WorkspaceStatusMailbox>>,
+    workspace_status_requests: mpsc::Sender<WorkspaceStatusRequest>,
+    last_workspace_status_request: Option<WorkspaceStatusRequestKey>,
+    last_workspace_diff_request: Option<WorkspaceDiffRequestKey>,
     exit_after: Option<Duration>,
     started_at: Instant,
     saw_live_stream: bool,
@@ -1516,12 +2149,18 @@ struct OperatorApp {
 impl OperatorApp {
     fn new(
         bridge: Arc<Mutex<BridgeMailbox>>,
+        workspace_status: Arc<Mutex<WorkspaceStatusMailbox>>,
+        workspace_status_requests: mpsc::Sender<WorkspaceStatusRequest>,
         exit_after: Option<Duration>,
         outcome: Arc<Mutex<RunOutcome>>,
     ) -> Self {
         Self {
             state: TuiState::default(),
             bridge,
+            workspace_status,
+            workspace_status_requests,
+            last_workspace_status_request: None,
+            last_workspace_diff_request: None,
             exit_after,
             started_at: Instant::now(),
             saw_live_stream: false,
@@ -1538,6 +2177,124 @@ impl OperatorApp {
             self.state.reduce(action);
         }
         self.saw_live_stream |= matches!(self.state.connection, ConnectionState::Live);
+    }
+
+    fn drain_workspace_status(&mut self) {
+        let mut workspace_status = self
+            .workspace_status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while let Some(action) = workspace_status.take_action() {
+            self.state.reduce(action);
+        }
+    }
+
+    fn request_selected_workspace_status(&mut self) {
+        let Some(snapshot) = self.state.latest_snapshot.as_ref() else {
+            self.last_workspace_status_request = None;
+            return;
+        };
+        let Some(issue) = self.state.selected_issue() else {
+            self.last_workspace_status_request = None;
+            return;
+        };
+        let issue_identifier = issue.identifier.clone();
+        let workspace_suffix = issue.workspace_path_suffix.clone();
+        let snapshot_sequence = snapshot.sequence;
+        if workspace_suffix == "-" {
+            self.last_workspace_status_request = None;
+            return;
+        }
+
+        let Some(workspace_path) = workspace_path_for_issue(snapshot, workspace_suffix.as_str())
+        else {
+            self.last_workspace_status_request = None;
+            return;
+        };
+
+        let request_key = WorkspaceStatusRequestKey {
+            issue_identifier: issue_identifier.clone(),
+            sequence: snapshot_sequence,
+        };
+        if self.last_workspace_status_request.as_ref() == Some(&request_key) {
+            return;
+        }
+
+        self.last_workspace_status_request = Some(request_key);
+        self.state.reduce(TuiAction::WorkspaceStatusRequested(
+            issue_identifier.clone(),
+        ));
+        let _ = self
+            .workspace_status_requests
+            .send(WorkspaceStatusRequest::Refresh {
+                issue_identifier,
+                workspace_path,
+            });
+    }
+
+    fn request_selected_workspace_diff(&mut self) {
+        let Some(snapshot) = self.state.latest_snapshot.as_ref() else {
+            self.last_workspace_diff_request = None;
+            return;
+        };
+        let Some(issue) = self.state.selected_issue() else {
+            self.last_workspace_diff_request = None;
+            return;
+        };
+        if !self.state.detail_diff_open {
+            self.last_workspace_diff_request = None;
+            return;
+        }
+
+        let Some(file_change) = self.state.selected_file_change() else {
+            self.last_workspace_diff_request = None;
+            return;
+        };
+
+        if !matches!(file_change.diff, WorkspaceFileDiffState::Unloaded) {
+            self.last_workspace_diff_request = None;
+            return;
+        }
+        let query_path = file_change.query_path.clone();
+        let previous_path = file_change.previous_path.clone();
+        let status_code = file_change.status_code.clone();
+
+        let issue_identifier = issue.identifier.clone();
+        let workspace_suffix = issue.workspace_path_suffix.clone();
+        if workspace_suffix == "-" {
+            self.last_workspace_diff_request = None;
+            return;
+        }
+
+        let Some(workspace_path) = workspace_path_for_issue(snapshot, workspace_suffix.as_str())
+        else {
+            self.last_workspace_diff_request = None;
+            return;
+        };
+
+        let request_key = WorkspaceDiffRequestKey {
+            issue_identifier: issue_identifier.clone(),
+            sequence: snapshot.sequence,
+            query_path: query_path.clone(),
+        };
+        if self.last_workspace_diff_request.as_ref() == Some(&request_key) {
+            return;
+        }
+
+        self.last_workspace_diff_request = Some(request_key);
+        self.state.reduce(TuiAction::WorkspaceDiffRequested {
+            issue_identifier: issue_identifier.clone(),
+            query_path: query_path.clone(),
+        });
+        let _ = self
+            .workspace_status_requests
+            .send(WorkspaceStatusRequest::LoadDiff {
+                issue_identifier,
+                workspace_path,
+                query_path,
+                previous_path,
+                status_code,
+            });
     }
 }
 
@@ -1677,19 +2434,384 @@ fn shutdown_requested(shutdown: &watch::Receiver<bool>) -> bool {
     *shutdown.borrow()
 }
 
+fn run_workspace_status_thread(
+    mailbox: Arc<Mutex<WorkspaceStatusMailbox>>,
+    request_rx: mpsc::Receiver<WorkspaceStatusRequest>,
+) {
+    while let Ok(request) = request_rx.recv() {
+        match request {
+            WorkspaceStatusRequest::Refresh {
+                issue_identifier,
+                workspace_path,
+            } => {
+                let status = inspect_workspace(&workspace_path);
+                let mut mailbox = mailbox
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                mailbox.push_loaded(
+                    issue_identifier,
+                    status.branch,
+                    status.pr_url,
+                    status.changes,
+                );
+            }
+            WorkspaceStatusRequest::LoadDiff {
+                issue_identifier,
+                workspace_path,
+                query_path,
+                previous_path,
+                status_code,
+            } => {
+                let diff = load_workspace_diff(
+                    &workspace_path,
+                    &query_path,
+                    previous_path.as_deref(),
+                    &status_code,
+                );
+                let mut mailbox = mailbox
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                mailbox.push_diff_loaded(issue_identifier, query_path, diff);
+            }
+            WorkspaceStatusRequest::Shutdown => return,
+        }
+    }
+}
+
+fn inspect_workspace(workspace_path: &Path) -> WorkspaceStatusData {
+    WorkspaceStatusData {
+        branch: git_branch(workspace_path),
+        pr_url: gh_pr_url(workspace_path),
+        changes: inspect_workspace_changes(workspace_path),
+    }
+}
+
+fn inspect_workspace_changes(workspace_path: &Path) -> WorkspaceChangeState {
+    match build_workspace_change_summary(workspace_path) {
+        Ok(summary) => WorkspaceChangeState::Available(summary),
+        Err(error) => WorkspaceChangeState::Unavailable(format!(
+            "git status unavailable: {}",
+            single_line(&error)
+        )),
+    }
+}
+
+fn build_workspace_change_summary(workspace_path: &Path) -> Result<WorkspaceChangeSummary, String> {
+    let mut files = tracked_workspace_file_changes(workspace_path)?;
+    files.extend(untracked_workspace_file_changes(workspace_path)?);
+    files.sort_by(|left, right| left.display_path.cmp(&right.display_path));
+
+    let additions = files.iter().filter_map(|file| file.additions).sum();
+    let deletions = files.iter().filter_map(|file| file.deletions).sum();
+
+    Ok(WorkspaceChangeSummary {
+        files_changed: files.len(),
+        additions,
+        deletions,
+        files,
+    })
+}
+
+fn tracked_workspace_file_changes(
+    workspace_path: &Path,
+) -> Result<Vec<WorkspaceFileChange>, String> {
+    let output = command_output(
+        workspace_path,
+        "git",
+        &[
+            "diff",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "HEAD",
+            "--",
+        ],
+    )?;
+    let mut fields = output
+        .split('\0')
+        .filter(|field| !field.is_empty())
+        .peekable();
+    let mut files = Vec::new();
+
+    while let Some(status_code) = fields.next() {
+        if status_code.starts_with('R') || status_code.starts_with('C') {
+            let previous_path = fields
+                .next()
+                .ok_or_else(|| "missing previous path for rename entry".to_owned())?;
+            let query_path = fields
+                .next()
+                .ok_or_else(|| "missing current path for rename entry".to_owned())?;
+            let (additions, deletions) =
+                git_numstat_for_change(workspace_path, query_path, Some(previous_path))?;
+            files.push(WorkspaceFileChange {
+                display_path: format!("{previous_path} -> {query_path}"),
+                query_path: query_path.to_owned(),
+                previous_path: Some(previous_path.to_owned()),
+                status_code: status_code.to_owned(),
+                additions,
+                deletions,
+                diff: WorkspaceFileDiffState::Unloaded,
+            });
+        } else {
+            let query_path = fields
+                .next()
+                .ok_or_else(|| "missing path for git diff entry".to_owned())?;
+            let (additions, deletions) = git_numstat_for_change(workspace_path, query_path, None)?;
+            files.push(WorkspaceFileChange {
+                display_path: query_path.to_owned(),
+                query_path: query_path.to_owned(),
+                previous_path: None,
+                status_code: status_code.to_owned(),
+                additions,
+                deletions,
+                diff: WorkspaceFileDiffState::Unloaded,
+            });
+        }
+    }
+
+    Ok(files)
+}
+
+fn untracked_workspace_file_changes(
+    workspace_path: &Path,
+) -> Result<Vec<WorkspaceFileChange>, String> {
+    let output = command_output(
+        workspace_path,
+        "git",
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+
+    let mut files = Vec::new();
+    for query_path in output.split('\0').filter(|field| !field.is_empty()) {
+        files.push(WorkspaceFileChange {
+            display_path: query_path.to_owned(),
+            query_path: query_path.to_owned(),
+            previous_path: None,
+            status_code: "??".to_owned(),
+            additions: count_untracked_lines(workspace_path, query_path),
+            deletions: Some(0),
+            diff: WorkspaceFileDiffState::Unloaded,
+        });
+    }
+
+    Ok(files)
+}
+
+fn git_numstat_for_change(
+    workspace_path: &Path,
+    query_path: &str,
+    previous_path: Option<&str>,
+) -> Result<(Option<u64>, Option<u64>), String> {
+    let mut args = vec![
+        "diff".to_owned(),
+        "--numstat".to_owned(),
+        "--find-renames".to_owned(),
+        "HEAD".to_owned(),
+        "--".to_owned(),
+    ];
+    if let Some(previous_path) = previous_path {
+        args.push(previous_path.to_owned());
+    }
+    args.push(query_path.to_owned());
+
+    let output = command_output_args(workspace_path, "git", args)?;
+    let Some(line) = output.lines().find(|line| !line.trim().is_empty()) else {
+        return Ok((Some(0), Some(0)));
+    };
+    let mut fields = line.split('\t');
+    Ok((
+        parse_numstat_count(fields.next()),
+        parse_numstat_count(fields.next()),
+    ))
+}
+
+fn parse_numstat_count(field: Option<&str>) -> Option<u64> {
+    match field.map(str::trim) {
+        Some("-") | None => None,
+        Some(value) => value.parse().ok(),
+    }
+}
+
+fn count_untracked_lines(workspace_path: &Path, query_path: &str) -> Option<u64> {
+    let bytes = fs::read(workspace_path.join(query_path)).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    Some(text.lines().count() as u64)
+}
+
+fn load_workspace_diff(
+    workspace_path: &Path,
+    query_path: &str,
+    previous_path: Option<&str>,
+    status_code: &str,
+) -> Result<Vec<WorkspaceDiffLine>, String> {
+    let output = if status_code.starts_with("??") {
+        command_output_args_allow_status(
+            workspace_path,
+            "git",
+            [
+                "diff".to_owned(),
+                "--no-index".to_owned(),
+                "--".to_owned(),
+                "/dev/null".to_owned(),
+                query_path.to_owned(),
+            ],
+            &[1],
+        )?
+    } else {
+        let mut args = vec![
+            "diff".to_owned(),
+            "--find-renames".to_owned(),
+            "HEAD".to_owned(),
+            "--".to_owned(),
+        ];
+        if let Some(previous_path) = previous_path {
+            args.push(previous_path.to_owned());
+        }
+        args.push(query_path.to_owned());
+        command_output_args(workspace_path, "git", args)?
+    };
+
+    Ok(parse_workspace_diff(&output))
+}
+
+fn parse_workspace_diff(output: &str) -> Vec<WorkspaceDiffLine> {
+    output
+        .lines()
+        .map(|line| WorkspaceDiffLine {
+            kind: if line.starts_with("diff --git")
+                || line.starts_with("index ")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ ")
+            {
+                WorkspaceDiffLineKind::Header
+            } else if line.starts_with("@@") {
+                WorkspaceDiffLineKind::Hunk
+            } else if line.starts_with('+') && !line.starts_with("+++") {
+                WorkspaceDiffLineKind::Addition
+            } else if line.starts_with('-') && !line.starts_with("---") {
+                WorkspaceDiffLineKind::Deletion
+            } else if line.starts_with("Binary files ") || line.starts_with("Only in ") {
+                WorkspaceDiffLineKind::Note
+            } else {
+                WorkspaceDiffLineKind::Context
+            },
+            text: single_line(line),
+        })
+        .collect()
+}
+
+fn git_branch(workspace_path: &Path) -> String {
+    match command_single_line(workspace_path, "git", &["branch", "--show-current"]) {
+        Ok(branch) if !branch.is_empty() => branch,
+        _ => match command_single_line(workspace_path, "git", &["rev-parse", "--short", "HEAD"]) {
+            Ok(commit) if !commit.is_empty() => format!("detached @ {commit}"),
+            _ => "unavailable".to_owned(),
+        },
+    }
+}
+
+fn gh_pr_url(workspace_path: &Path) -> Option<String> {
+    command_single_line(
+        workspace_path,
+        "gh",
+        &["pr", "view", "--json", "url", "--jq", ".url"],
+    )
+    .ok()
+    .filter(|url| !url.is_empty())
+}
+
+fn command_single_line(
+    workspace_path: &Path,
+    program: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    command_output_args(workspace_path, program, args.iter().copied())
+        .map(|output| single_line(output.trim()))
+}
+
+fn command_output(workspace_path: &Path, program: &str, args: &[&str]) -> Result<String, String> {
+    command_output_args(workspace_path, program, args.iter().copied())
+}
+
+fn command_output_args<I, S>(
+    workspace_path: &Path,
+    program: &str,
+    args: I,
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    command_output_args_allow_status(workspace_path, program, args, &[])
+}
+
+fn command_output_args_allow_status<I, S>(
+    workspace_path: &Path,
+    program: &str,
+    args: I,
+    allowed_status_codes: &[i32],
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(workspace_path)
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success()
+        || output
+            .status
+            .code()
+            .is_some_and(|code| allowed_status_codes.contains(&code))
+    {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = single_line(stderr.trim());
+        if stderr.is_empty() {
+            Err(format!("{program} exited with {}", output.status))
+        } else {
+            Err(stderr)
+        }
+    }
+}
+
+fn workspace_path_for_issue(
+    snapshot: &SnapshotEnvelope,
+    workspace_suffix: &str,
+) -> Option<PathBuf> {
+    let candidate = PathBuf::from(workspace_suffix);
+    if candidate.components().count() != 1 {
+        return None;
+    }
+
+    Some(PathBuf::from(&snapshot.snapshot.daemon.workspace_root).join(workspace_suffix))
+}
+
 impl Model for OperatorApp {
     type Message = AppMessage;
 
     fn update(&mut self, message: Self::Message) -> Cmd<Self::Message> {
         self.drain_bridge();
+        self.drain_workspace_status();
         match message {
             AppMessage::Tick => {}
             AppMessage::MoveSelectionUp => self.state.reduce(TuiAction::MoveSelectionUp),
             AppMessage::MoveSelectionDown => self.state.reduce(TuiAction::MoveSelectionDown),
             AppMessage::FocusNext => self.state.reduce(TuiAction::FocusNext),
+            AppMessage::ToggleDetailDiff => self.state.reduce(TuiAction::ToggleDetailDiff),
             AppMessage::ToggleTimelineMode => self.state.reduce(TuiAction::ToggleTimelineMode),
             AppMessage::Quit => return Cmd::quit(),
         }
+        self.request_selected_workspace_status();
+        self.request_selected_workspace_diff();
+        self.drain_workspace_status();
         self.saw_live_stream |= matches!(self.state.connection, ConnectionState::Live);
 
         if self
@@ -1729,6 +2851,8 @@ pub enum TuiError {
     Runtime(std::io::Error),
     #[error("background control-plane bridge thread panicked during shutdown")]
     BridgeThreadPanicked,
+    #[error("background workspace status thread panicked during shutdown")]
+    WorkspaceStatusThreadPanicked,
     #[error("control-plane stream did not become live before exit: {0}")]
     AttachTimeout(String),
 }
@@ -2152,6 +3276,203 @@ fn event_kind_style(kind: &str) -> Style {
     }
 }
 
+fn wrap_conversation_event_styled(
+    event: &crate::opensymphony_domain::ControlPlaneConversationEvent,
+    width: usize,
+) -> Vec<Line> {
+    let timestamp_text = format!("{} ", format_timestamp(event.happened_at));
+    let continuation_prefix = "  ";
+    let prefix_width = display_width(&timestamp_text) + display_width(&event.kind) + 1;
+    let chunks = wrap_text_by_widths(
+        &event.summary,
+        width.saturating_sub(prefix_width),
+        width.saturating_sub(display_width(continuation_prefix)),
+    );
+    let kind_style = event_kind_style(&event.kind);
+    let mut lines = Vec::new();
+
+    if let Some(first_chunk) = chunks.first() {
+        lines.push(Line::from_spans(vec![
+            Span::styled(timestamp_text, Style::new().dim()),
+            Span::styled(&event.kind, kind_style),
+            Span::raw(" "),
+            Span::raw(first_chunk.clone()),
+        ]));
+    }
+
+    for chunk in chunks.into_iter().skip(1) {
+        lines.push(Line::from_spans(vec![
+            Span::styled(continuation_prefix, Style::new().dim()),
+            Span::raw(chunk),
+        ]));
+    }
+
+    lines
+}
+
+fn wrap_conversation_event_text(
+    event: &crate::opensymphony_domain::ControlPlaneConversationEvent,
+    width: usize,
+) -> Vec<String> {
+    let timestamp_text = format!("{} ", format_timestamp(event.happened_at));
+    let continuation_prefix = "  ";
+    let prefix_width = display_width(&timestamp_text) + display_width(&event.kind) + 1;
+    let chunks = wrap_text_by_widths(
+        &event.summary,
+        width.saturating_sub(prefix_width),
+        width.saturating_sub(display_width(continuation_prefix)),
+    );
+    let mut lines = Vec::new();
+
+    if let Some(first_chunk) = chunks.first() {
+        lines.push(format!("{timestamp_text}{} {}", event.kind, first_chunk));
+    }
+
+    for chunk in chunks.into_iter().skip(1) {
+        lines.push(format!("{continuation_prefix}{chunk}"));
+    }
+
+    lines
+}
+
+fn wrap_text_by_widths(value: &str, first_width: usize, continuation_width: usize) -> Vec<String> {
+    let value = single_line(value);
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+    let mut target_width = max(1, first_width);
+
+    for ch in value.chars() {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width + ch_width > target_width && !current.is_empty() {
+            chunks.push(current.trim_end().to_owned());
+            current.clear();
+            current_width = 0;
+            target_width = max(1, continuation_width);
+        }
+
+        if current.is_empty() && ch.is_whitespace() {
+            continue;
+        }
+
+        current.push(ch);
+        current_width += ch_width;
+    }
+
+    if !current.is_empty() {
+        chunks.push(current.trim_end().to_owned());
+    }
+
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+
+    chunks
+}
+
+fn change_count_text(prefix: char, count: Option<u64>) -> String {
+    match count {
+        Some(count) => format!("{prefix}{count}"),
+        None => format!("{prefix}?"),
+    }
+}
+
+fn change_summary_line_text(summary: &WorkspaceChangeSummary) -> String {
+    let noun = if summary.files_changed == 1 {
+        "file"
+    } else {
+        "files"
+    };
+    format!(
+        "{} {} changed {} {}",
+        summary.files_changed,
+        noun,
+        change_count_text('+', Some(summary.additions)),
+        change_count_text('-', Some(summary.deletions))
+    )
+}
+
+fn change_summary_line_styled(summary: &WorkspaceChangeSummary) -> Line {
+    Line::from_spans(vec![
+        Span::raw(format!(
+            "{} {} changed ",
+            summary.files_changed,
+            if summary.files_changed == 1 {
+                "file"
+            } else {
+                "files"
+            }
+        )),
+        Span::styled(
+            change_count_text('+', Some(summary.additions)),
+            Style::new().fg(BRIGHT_GREEN).bold(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            change_count_text('-', Some(summary.deletions)),
+            Style::new().fg(RED).bold(),
+        ),
+    ])
+}
+
+fn change_target_line_text(
+    title: &str,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+    width: usize,
+    is_selected: bool,
+    is_open: bool,
+) -> String {
+    let marker = if is_selected {
+        if is_open { "v" } else { ">" }
+    } else {
+        " "
+    };
+    let additions_text = change_count_text('+', additions);
+    let deletions_text = change_count_text('-', deletions);
+    let reserved_width = 4 + display_width(&additions_text) + display_width(&deletions_text);
+    let path_width = max(1, width.saturating_sub(reserved_width));
+    format!(
+        "{marker} {} {} {}",
+        fit(title, path_width),
+        additions_text,
+        deletions_text
+    )
+}
+
+fn change_target_line_styled(
+    title: &str,
+    additions: Option<u64>,
+    deletions: Option<u64>,
+    width: usize,
+) -> Line {
+    let additions_text = change_count_text('+', additions);
+    let deletions_text = change_count_text('-', deletions);
+    let reserved_width = 4 + display_width(&additions_text) + display_width(&deletions_text);
+    let path_width = max(1, width.saturating_sub(reserved_width));
+
+    Line::from_spans(vec![
+        Span::raw("  "),
+        Span::styled(fit(title, path_width), Style::new().bold()),
+        Span::raw(" "),
+        Span::styled(additions_text, Style::new().fg(BRIGHT_GREEN).bold()),
+        Span::raw(" "),
+        Span::styled(deletions_text, Style::new().fg(RED).bold()),
+    ])
+}
+
+fn render_workspace_diff_line_styled(diff_line: &WorkspaceDiffLine, width: usize) -> Line {
+    let style = match diff_line.kind {
+        WorkspaceDiffLineKind::Header => Style::new().dim(),
+        WorkspaceDiffLineKind::Hunk => Style::new().fg(CYAN),
+        WorkspaceDiffLineKind::Addition => Style::new().fg(BRIGHT_GREEN),
+        WorkspaceDiffLineKind::Deletion => Style::new().fg(RED),
+        WorkspaceDiffLineKind::Context => Style::new(),
+        WorkspaceDiffLineKind::Note => Style::new().dim(),
+    };
+    Line::from(Span::styled(fit(&diff_line.text, width), style))
+}
+
 fn two_column_block_styled(
     left: &[Line],
     right: &[Line],
@@ -2187,10 +3508,12 @@ fn two_column_block_styled(
                     } else {
                         span_text
                     };
-                    spans.push(Span::styled(
-                        truncated.to_string(),
-                        span.style.unwrap_or_default(),
-                    ));
+                    let mut truncated_span =
+                        Span::styled(truncated.to_string(), span.style.unwrap_or_default());
+                    if let Some(link) = &span.link {
+                        truncated_span = truncated_span.link(link.clone().into_owned());
+                    }
+                    spans.push(truncated_span);
                     line_width += truncated.width();
                 }
                 // Pad if needed
@@ -2223,10 +3546,12 @@ fn two_column_block_styled(
                     } else {
                         span_text
                     };
-                    spans.push(Span::styled(
-                        truncated.to_string(),
-                        span.style.unwrap_or_default(),
-                    ));
+                    let mut truncated_span =
+                        Span::styled(truncated.to_string(), span.style.unwrap_or_default());
+                    if let Some(link) = &span.link {
+                        truncated_span = truncated_span.link(link.clone().into_owned());
+                    }
+                    spans.push(truncated_span);
                     line_width += truncated.width();
                 }
                 // Pad if needed
@@ -2313,9 +3638,11 @@ impl DaemonStateLabel for crate::opensymphony_domain::ControlPlaneDaemonState {
 #[cfg(test)]
 mod tests {
     use super::{
-        AppMessage, BridgeHandle, BridgeMailbox, ConnectionState, ControlPlaneClientError,
-        OperatorApp, RunOutcome, TuiAction, TuiState, display_width, fit, handle_bridge_error,
-        issue_window, section_layout, stacked_body_layout, visible_issue_count,
+        AppMessage, BLUE, BridgeHandle, BridgeMailbox, ConnectionState, ControlPlaneClientError,
+        FocusPane, OperatorApp, RunOutcome, TuiAction, TuiState, WorkspaceChangeState,
+        WorkspaceChangeSummary, WorkspaceDiffLine, WorkspaceDiffLineKind, WorkspaceFileChange,
+        WorkspaceFileDiffState, display_width, fit, handle_bridge_error, issue_window,
+        section_layout, stacked_body_layout, two_column_block_styled, visible_issue_count,
     };
     use crate::opensymphony_domain::{
         ControlPlaneAgentServerStatus as AgentServerStatus, ControlPlaneConversationEvent,
@@ -2327,7 +3654,11 @@ mod tests {
         ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
     };
     use chrono::{TimeZone, Utc};
-    use ftui::prelude::Model;
+    use ftui::{
+        Style,
+        prelude::Model,
+        text::text::{Line, Span},
+    };
     use std::{
         sync::{
             Arc, Mutex,
@@ -2549,8 +3880,17 @@ mod tests {
     #[test]
     fn draining_an_attached_snapshot_never_marks_live_on_the_old_snapshot() {
         let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let workspace_status = Arc::new(Mutex::new(super::WorkspaceStatusMailbox::default()));
+        let (workspace_status_tx, workspace_status_rx) = mpsc::channel();
+        drop(workspace_status_rx);
         let outcome = Arc::new(Mutex::new(RunOutcome::default()));
-        let mut app = OperatorApp::new(Arc::clone(&bridge), None, outcome);
+        let mut app = OperatorApp::new(
+            Arc::clone(&bridge),
+            workspace_status,
+            workspace_status_tx,
+            None,
+            outcome,
+        );
         app.state
             .reduce(TuiAction::SnapshotReceived(Box::new(fixture(4, 1))));
 
@@ -2578,9 +3918,14 @@ mod tests {
     #[test]
     fn timed_exit_records_a_failure_until_a_live_stream_is_seen() {
         let bridge = Arc::new(Mutex::new(BridgeMailbox::default()));
+        let workspace_status = Arc::new(Mutex::new(super::WorkspaceStatusMailbox::default()));
+        let (workspace_status_tx, workspace_status_rx) = mpsc::channel();
+        drop(workspace_status_rx);
         let outcome = Arc::new(Mutex::new(RunOutcome::default()));
         let mut app = OperatorApp::new(
             Arc::clone(&bridge),
+            workspace_status,
+            workspace_status_tx,
             Some(Duration::ZERO),
             Arc::clone(&outcome),
         );
@@ -2601,7 +3946,7 @@ mod tests {
 
         let rendered = state.render_text(72, 22);
         assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
-        assert!(rendered.contains("workspace: workspace-0"));
+        assert!(rendered.contains("branch: loading..."));
         assert!(rendered.contains("RECENT EVENTS"));
     }
 
@@ -2617,6 +3962,29 @@ mod tests {
         assert_eq!(issue_window(12, 0, 6), (0, 6));
         assert_eq!(issue_window(12, 7, 6), (4, 10));
         assert_eq!(issue_window(12, 11, 6), (6, 12));
+    }
+
+    #[test]
+    fn two_column_layout_preserves_hyperlinks() {
+        let left = vec![Line::from_spans(vec![
+            Span::styled(
+                "https://github.com/kumanday/OpenSymphony/pull/42",
+                Style::new().fg(BLUE).underline(),
+            )
+            .link("https://github.com/kumanday/OpenSymphony/pull/42"),
+        ])];
+        let right = vec![Line::from(Span::raw("activity"))];
+
+        let rendered = two_column_block_styled(&left, &right, 20, 10);
+        let first_span = rendered[0]
+            .spans()
+            .first()
+            .expect("left span should still exist");
+
+        assert_eq!(
+            first_span.link.as_deref(),
+            Some("https://github.com/kumanday/OpenSymphony/pull/42")
+        );
     }
 
     #[test]
@@ -2795,5 +4163,192 @@ mod tests {
     fn reserves_rows_for_detail_in_narrow_layout() {
         let (issue_rows, detail_rows) = stacked_body_layout(13);
         assert_eq!((issue_rows, detail_rows), (4, 8));
+    }
+
+    #[test]
+    fn wide_detail_metadata_marks_focus_when_detail_is_active() {
+        let mut state = TuiState::default();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(8, 1))));
+        state.focus = FocusPane::Detail;
+
+        let title = state.metadata_and_files_lines(48, 12)[0].to_plain_text();
+
+        assert_eq!(title.trim_end(), "[x] ISSUE + WORKSPACE DETAIL");
+    }
+
+    #[test]
+    fn diff_pane_claims_focus_when_opened_from_detail_navigation() {
+        let mut state = TuiState::default();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(8, 1))));
+        state.reduce(TuiAction::WorkspaceStatusLoaded {
+            issue_identifier: "COE-255".to_owned(),
+            branch: "codex/tui-workspace-git-status".to_owned(),
+            pr_url: None,
+            changes: WorkspaceChangeState::Available(WorkspaceChangeSummary {
+                files_changed: 1,
+                additions: 3,
+                deletions: 1,
+                files: vec![WorkspaceFileChange {
+                    display_path: "src/lib.rs".to_owned(),
+                    query_path: "src/lib.rs".to_owned(),
+                    previous_path: None,
+                    status_code: "M".to_owned(),
+                    additions: Some(3),
+                    deletions: Some(1),
+                    diff: WorkspaceFileDiffState::Loaded(vec![WorkspaceDiffLine {
+                        kind: WorkspaceDiffLineKind::Addition,
+                        text: "+assert!(true);".to_owned(),
+                    }]),
+                }],
+            }),
+        });
+        state.focus = FocusPane::Detail;
+        state.reduce(TuiAction::ToggleDetailDiff);
+
+        let detail_title = state.metadata_and_files_lines(48, 12)[0].to_plain_text();
+        let diff_title = state.selected_diff_lines_styled(48, 12)[0].to_plain_text();
+
+        assert_eq!(detail_title.trim_end(), "[ ] ISSUE + WORKSPACE DETAIL");
+        assert_eq!(diff_title.trim_end(), "[x] FILE DIFF");
+        assert_eq!(state.focus, FocusPane::Activity);
+    }
+
+    #[test]
+    fn activity_focus_scrolls_loaded_diff_instead_of_changing_selected_file() {
+        let mut state = TuiState::default();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(8, 1))));
+        state.reduce(TuiAction::WorkspaceStatusLoaded {
+            issue_identifier: "COE-255".to_owned(),
+            branch: "codex/tui-workspace-git-status".to_owned(),
+            pr_url: None,
+            changes: WorkspaceChangeState::Available(WorkspaceChangeSummary {
+                files_changed: 2,
+                additions: 5,
+                deletions: 1,
+                files: vec![
+                    WorkspaceFileChange {
+                        display_path: "src/lib.rs".to_owned(),
+                        query_path: "src/lib.rs".to_owned(),
+                        previous_path: None,
+                        status_code: "M".to_owned(),
+                        additions: Some(4),
+                        deletions: Some(1),
+                        diff: WorkspaceFileDiffState::Loaded(vec![
+                            WorkspaceDiffLine {
+                                kind: WorkspaceDiffLineKind::Context,
+                                text: " line 1".to_owned(),
+                            },
+                            WorkspaceDiffLine {
+                                kind: WorkspaceDiffLineKind::Addition,
+                                text: "+line 2".to_owned(),
+                            },
+                            WorkspaceDiffLine {
+                                kind: WorkspaceDiffLineKind::Addition,
+                                text: "+line 3".to_owned(),
+                            },
+                        ]),
+                    },
+                    WorkspaceFileChange {
+                        display_path: "src/main.rs".to_owned(),
+                        query_path: "src/main.rs".to_owned(),
+                        previous_path: None,
+                        status_code: "M".to_owned(),
+                        additions: Some(1),
+                        deletions: Some(0),
+                        diff: WorkspaceFileDiffState::Unloaded,
+                    },
+                ],
+            }),
+        });
+        state.focus = FocusPane::Detail;
+        state.reduce(TuiAction::ToggleDetailDiff);
+        state.reduce(TuiAction::MoveSelectionDown);
+
+        assert_eq!(state.selected_changed_file, 0);
+        assert_eq!(state.focus, FocusPane::Activity);
+        assert_eq!(state.diff_scroll_offset, 1);
+    }
+
+    #[test]
+    fn conversation_activity_lines_use_available_width_before_truncating() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 1);
+        let summary =
+            "this summary is intentionally longer than forty characters for the detail pane";
+        snapshot.snapshot.issues[0].recent_events = vec![ControlPlaneConversationEvent {
+            event_id: "evt-long".to_owned(),
+            happened_at: snapshot.snapshot.generated_at,
+            kind: "message".to_owned(),
+            summary: summary.to_owned(),
+        }];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.conversation_activity_lines(120, 4);
+        let rendered = lines[1].to_plain_text();
+
+        assert!(rendered.contains(summary));
+    }
+
+    #[test]
+    fn conversation_activity_wraps_long_summaries_across_multiple_rows() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 1);
+        snapshot.snapshot.issues[0].recent_events = vec![ControlPlaneConversationEvent {
+            event_id: "evt-wrap".to_owned(),
+            happened_at: snapshot.snapshot.generated_at,
+            kind: "ObservationEvent".to_owned(),
+            summary:
+                "this summary is long enough that it should wrap into the next visual row cleanly"
+                    .to_owned(),
+        }];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.conversation_activity_lines(48, 6);
+
+        assert!(lines.len() >= 3);
+        assert!(lines[1].to_plain_text().contains("ObservationEvent"));
+        assert!(!lines[2].to_plain_text().trim().is_empty());
+    }
+
+    #[test]
+    fn activity_focus_scrolls_conversation_history() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 1);
+        snapshot.snapshot.issues[0].recent_events = vec![
+            ControlPlaneConversationEvent {
+                event_id: "evt-1".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "oldest event".to_owned(),
+            },
+            ControlPlaneConversationEvent {
+                event_id: "evt-2".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "middle event".to_owned(),
+            },
+            ControlPlaneConversationEvent {
+                event_id: "evt-3".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "newest event".to_owned(),
+            },
+        ];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+        state.reduce(TuiAction::FocusNext);
+        state.reduce(TuiAction::FocusNext);
+        state.reduce(TuiAction::MoveSelectionDown);
+
+        let lines = state.conversation_activity_lines(80, 4);
+        let rendered = lines
+            .iter()
+            .map(Line::to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(state.focus, FocusPane::Activity);
+        assert!(rendered.contains("[x] CONVERSATION ACTIVITY"));
+        assert!(!rendered.contains("newest event"));
+        assert!(rendered.contains("middle event"));
     }
 }

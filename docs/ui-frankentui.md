@@ -127,6 +127,18 @@ Use pane-based layout so future views can expand without redesign.
 The implemented inline layout budgets rows per pane instead of truncating one giant body block.
 That keeps the bottom timeline visible under long issue lists, preserves the selected issue when snapshot ordering changes, and windows the issue pane around the current selection so narrower split terminals still keep the selected row and detail visible.
 Issue rows are rendered as compact single-line summaries so the default inline view can keep more issues visible before scrolling, while the detail pane still carries the full per-issue metadata.
+The detail pane now shows a git-backed changed-file summary for the selected workspace, including
+per-file `+/-` counts. In wide layouts the lower-right pane stays on conversation activity until an
+operator expands a changed file, at which point it becomes a diff viewer for that file while the
+lower-left pane keeps the file list visible for navigation.
+The conversation activity pane now uses the full retained recent-activity window from the
+control-plane snapshot instead of dropping older entries after the first ten, and it lets the
+split-pane fitter handle width trimming so event summaries use the available column width.
+Long conversation summaries now wrap within the pane instead of being forced onto a single clipped
+row, and the lower-right pane has its own focus state so operators can scroll conversation history
+directly without stealing file-selection focus from the workspace detail pane.
+The styled operator layout now splits the upper and lower pane regions evenly so the workspace
+detail and diff area get half of the terminal height instead of being squeezed into the bottom 40%.
 The always-visible status line now leads with daemon and local agent-server health before the
 connection and focus metadata so degraded runtime state is visible even when the issue list is
 otherwise stable.
@@ -144,14 +156,16 @@ Recommended commands:
 
 - move selection
 - cycle focus
+- toggle the selected file diff in the detail pane
 - switch between events and metrics
 - quit cleanly
 
 Current key map in the implemented client:
 
-- `j` or down arrow: move selection down
-- `k` or up arrow: move selection up
-- `tab`: cycle focus between issue list, detail, and timeline panes
+- `j` or down arrow: move selection down in the focused pane; detail focus moves through changed files, while the activity pane scrolls conversation history or the open diff
+- `k` or up arrow: move selection up in the focused pane; detail focus moves through changed files, while the activity pane scrolls conversation history or the open diff
+- `tab`: cycle focus between issue list, detail, conversation or diff activity, and timeline panes
+- `enter`: toggle the diff for the currently selected changed file when detail or activity focus is active; opening a diff moves focus to the diff pane, and closing it returns the activity pane to conversation scrolling
 - `e`: switch the bottom pane between recent events and metrics
 - `q`: quit cleanly
 

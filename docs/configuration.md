@@ -20,6 +20,7 @@ opensymphony init
 - prompts before overwriting other conflicting files
 - fills the `WORKFLOW.md` clone hook from `git remote` when possible
 - offers to fill the Linear project slug/key in `WORKFLOW.md`
+- creates or updates `.gitignore` to ensure `.opensymphony*` stays untracked
 - can optionally scaffold OpenHands AI PR review
 - can configure the GitHub Actions variables, label, and optional review secret
   automatically when `gh` is installed and can access the repository
@@ -38,6 +39,7 @@ Core bootstrap payload:
 - `WORKFLOW.md`
 - `AGENTS.md`
 - `config.yaml`
+- `.gitignore` created or updated to include `.opensymphony*`
 - `.agents/skills/` copied recursively, including skill-local `references/`, `scripts/`, and similar helper files
 - `.agents/skills/linear/references/`
 - `.github/CODEOWNERS`

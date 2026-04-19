@@ -162,7 +162,6 @@ fn map_issue(
                     .recent_activity
                     .iter()
                     .rev()
-                    .take(10)
                     .map(|activity| ConversationEvent {
                         event_id: activity.event_id.clone(),
                         happened_at: timestamp_to_datetime(activity.happened_at),
@@ -308,4 +307,161 @@ fn suffix_path(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    use crate::opensymphony_domain::{
+        BlockerRef, ComponentHealthSnapshot, ConversationId, ConversationMetadata, DaemonSnapshot,
+        HealthStatus, IssueId, IssueIdentifier, IssueRef, IssueSnapshot as DomainIssueSnapshot,
+        IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,
+        RuntimeStateSnapshot, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, TimestampMs,
+        WorkspaceKey, WorkspaceRecord,
+    };
+
+    use super::{map_snapshot, terminal_state_set};
+
+    fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    fn ts(value: u64) -> TimestampMs {
+        TimestampMs::new(value)
+    }
+
+    fn resolved_workflow_for_tests() -> crate::opensymphony_workflow::ResolvedWorkflow {
+        let workflow = crate::opensymphony_workflow::WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+
+        workflow
+            .resolve(
+                std::path::Path::new("/tmp"),
+                &BTreeMap::from([("LINEAR_API_KEY".to_owned(), "linear-token".to_owned())]),
+            )
+            .expect("workflow should resolve")
+    }
+
+    #[test]
+    fn map_snapshot_preserves_full_recent_conversation_window() {
+        let recent_activity = (0..12)
+            .map(
+                |index| crate::opensymphony_domain::ConversationActivityEvent {
+                    event_id: format!("evt-{index}"),
+                    happened_at: ts(1_000 + index),
+                    kind: "ActionEvent".to_owned(),
+                    summary: format!("summary {index}"),
+                },
+            )
+            .collect();
+
+        let snapshot = OrchestratorSnapshot::new(
+            ts(2_000),
+            DaemonSnapshot::new(
+                HealthStatus::Healthy,
+                1_000,
+                4,
+                Some(ts(2_000)),
+                ComponentHealthSnapshot::default(),
+                RuntimeUsageTotals::default(),
+            ),
+            vec![DomainIssueSnapshot {
+                issue: NormalizedIssue {
+                    id: must(IssueId::new("lin_352")),
+                    identifier: must(IssueIdentifier::new("COE-352")),
+                    title: "Render media pipeline".to_owned(),
+                    description: None,
+                    priority: None,
+                    state: IssueState {
+                        id: None,
+                        name: "In Progress".to_owned(),
+                        category: IssueStateCategory::Active,
+                    },
+                    branch_name: None,
+                    url: None,
+                    labels: Vec::new(),
+                    parent_id: None,
+                    blocked_by: Vec::<BlockerRef>::new(),
+                    sub_issues: Vec::<IssueRef>::new(),
+                    created_at: None,
+                    updated_at: None,
+                },
+                runtime: RuntimeStateSnapshot {
+                    state: SchedulerStatus::Running,
+                    claimed_at: None,
+                    started_at: None,
+                    released_at: None,
+                    release_reason: None,
+                    worker: None,
+                    last_event_at: Some(ts(1_011)),
+                    stalled_at: None,
+                },
+                workspace: Some(WorkspaceRecord {
+                    path: PathBuf::from("/tmp/workspaces/COE-352"),
+                    workspace_key: must(WorkspaceKey::new("COE-352")),
+                    created_now: false,
+                    created_at: None,
+                    updated_at: None,
+                    last_seen_tracker_refresh_at: None,
+                }),
+                conversation: Some(ConversationMetadata {
+                    conversation_id: must(ConversationId::new("conv_352")),
+                    server_base_url: Some("http://127.0.0.1:3000".to_owned()),
+                    transport_target: Some("loopback".to_owned()),
+                    http_auth_mode: Some("none".to_owned()),
+                    websocket_auth_mode: Some("none".to_owned()),
+                    websocket_query_param_name: None,
+                    fresh_conversation: false,
+                    runtime_contract_version: Some("openhands-sdk-agent-server-v1".to_owned()),
+                    stream_state: RuntimeStreamState::Ready,
+                    last_event_id: Some("evt-11".to_owned()),
+                    last_event_kind: Some("ActionEvent".to_owned()),
+                    last_event_at: Some(ts(1_011)),
+                    last_event_summary: Some("summary 11".to_owned()),
+                    recent_activity,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: 0,
+                    total_tokens: 0,
+                    runtime_seconds: 0,
+                }),
+                retry: None,
+                last_worker_outcome: None,
+                recent_worker_outcomes: Vec::new(),
+            }],
+        );
+
+        let mapped = map_snapshot(
+            &snapshot,
+            PathBuf::from("/tmp/workspaces").as_path(),
+            &terminal_state_set(&resolved_workflow_for_tests()),
+            crate::opensymphony_control::AgentServerStatus {
+                reachable: true,
+                base_url: "http://127.0.0.1:3000".to_owned(),
+                conversation_count: 1,
+                status_line: "healthy".to_owned(),
+            },
+            &std::collections::VecDeque::new(),
+        );
+
+        assert_eq!(mapped.issues[0].recent_events.len(), 12);
+        assert_eq!(mapped.issues[0].recent_events[0].summary, "summary 11");
+        assert_eq!(mapped.issues[0].recent_events[11].summary, "summary 0");
+    }
 }

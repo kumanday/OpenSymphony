@@ -79,7 +79,7 @@ opensymphony init
 ```
 
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
-can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo.
+can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` contains `.opensymphony*` so local OpenSymphony state stays out of version control.
 
 ### Running the Orchestrator
 

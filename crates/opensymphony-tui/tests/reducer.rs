@@ -6,7 +6,11 @@ use crate::opensymphony_domain::{
     ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
     ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
 };
-use crate::opensymphony_tui::{ConnectionState, FocusPane, TimelineMode, TuiAction, TuiState};
+use crate::opensymphony_tui::{
+    ConnectionState, FocusPane, TimelineMode, TuiAction, TuiState, WorkspaceChangeState,
+    WorkspaceChangeSummary, WorkspaceDiffLine, WorkspaceDiffLineKind, WorkspaceFileChange,
+    WorkspaceFileDiffState,
+};
 use chrono::{TimeZone, Utc};
 
 fn fixture(sequence: u64, issue_count: usize) -> SnapshotEnvelope {
@@ -175,12 +179,12 @@ fn preserves_selected_issue_when_snapshot_reorders() {
     let rendered = state.render_text(100, 20);
     assert!(rendered.contains("> COE-256 [running / In Progress]"));
     assert!(
-        rendered.contains("workspace:"),
+        rendered.contains("branch:"),
         "rendered output was: {}",
         rendered
     );
     assert!(
-        rendered.contains("conv:"),
+        rendered.contains("pr:"),
         "rendered output was: {}",
         rendered
     );
@@ -189,6 +193,7 @@ fn preserves_selected_issue_when_snapshot_reorders() {
 #[test]
 fn cycles_focus_and_timeline_mode() {
     let mut state = TuiState::default();
+    state.reduce(TuiAction::FocusNext);
     state.reduce(TuiAction::FocusNext);
     state.reduce(TuiAction::FocusNext);
     state.reduce(TuiAction::ToggleTimelineMode);
@@ -221,7 +226,7 @@ fn keeps_selected_detail_visible_in_narrow_layout() {
     let rendered = state.render_text(70, 22);
 
     assert!(rendered.contains("ISSUE + WORKSPACE DETAIL"));
-    assert!(rendered.contains("workspace: workspace-0"));
+    assert!(rendered.contains("branch: loading..."));
 }
 
 #[test]
@@ -235,7 +240,7 @@ fn keeps_selected_issue_visible_when_issue_list_is_windowed() {
     let rendered = state.render_text(70, 22);
 
     assert!(rendered.contains("> COE-264 [running / In Progress]"));
-    assert!(rendered.contains("workspace: workspace-9"));
+    assert!(rendered.contains("branch: loading..."));
     assert!(!rendered.contains("> COE-255 [running / In Progress]"));
 }
 
@@ -250,7 +255,7 @@ fn keeps_rendering_latest_snapshot_while_reconnecting() {
 
     assert!(rendered.contains("conn=reconnecting"));
     assert!(rendered.contains("COE-255"));
-    assert!(rendered.contains("workspace: workspace-0"));
+    assert!(rendered.contains("branch: loading..."));
 }
 
 #[test]
@@ -300,5 +305,104 @@ fn keeps_selected_issue_visible_in_long_issue_lists() {
     let rendered = state.render_text(100, 22);
 
     assert!(rendered.contains("> COE-263 [running / In Progress]"));
-    assert!(rendered.contains("workspace: workspace-8"));
+    assert!(rendered.contains("branch: loading..."));
+}
+
+#[test]
+fn renders_loaded_workspace_branch_pr_and_file_changes() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 1))));
+    state.reduce(TuiAction::WorkspaceStatusLoaded {
+        issue_identifier: "COE-255".to_owned(),
+        branch: "codex/tui-workspace-git-status".to_owned(),
+        pr_url: Some("https://github.com/kumanday/OpenSymphony/pull/42".to_owned()),
+        changes: WorkspaceChangeState::Available(WorkspaceChangeSummary {
+            files_changed: 2,
+            additions: 622,
+            deletions: 280,
+            files: vec![
+                WorkspaceFileChange {
+                    display_path: "crates/opensymphony-tui/src/lib.rs".to_owned(),
+                    query_path: "crates/opensymphony-tui/src/lib.rs".to_owned(),
+                    previous_path: None,
+                    status_code: "M".to_owned(),
+                    additions: Some(594),
+                    deletions: Some(274),
+                    diff: WorkspaceFileDiffState::Unloaded,
+                },
+                WorkspaceFileChange {
+                    display_path: "crates/opensymphony-tui/tests/reducer.rs".to_owned(),
+                    query_path: "crates/opensymphony-tui/tests/reducer.rs".to_owned(),
+                    previous_path: None,
+                    status_code: "M".to_owned(),
+                    additions: Some(28),
+                    deletions: Some(6),
+                    diff: WorkspaceFileDiffState::Unloaded,
+                },
+            ],
+        }),
+    });
+
+    let rendered = state.render_text(180, 24);
+
+    assert!(rendered.contains("branch: codex/tui-workspace-git-status"));
+    assert!(rendered.contains("pr: https://github.com/kumanday/OpenSymphony/pull/42"));
+    assert!(rendered.contains("2 files changed +622 -280"));
+    assert!(rendered.contains("> crates/opensymphony-tui/src/lib.rs"));
+    assert!(rendered.contains("+594 -274"));
+    assert!(rendered.contains("crates/opensymphony-tui/tests/reducer.rs"));
+    assert!(rendered.contains("+28 -6"));
+}
+
+#[test]
+fn detail_focus_moves_changed_file_selection_and_toggles_diff() {
+    let mut state = TuiState::default();
+    state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 1))));
+    state.reduce(TuiAction::WorkspaceStatusLoaded {
+        issue_identifier: "COE-255".to_owned(),
+        branch: "codex/tui-workspace-git-status".to_owned(),
+        pr_url: None,
+        changes: WorkspaceChangeState::Available(WorkspaceChangeSummary {
+            files_changed: 2,
+            additions: 10,
+            deletions: 4,
+            files: vec![
+                WorkspaceFileChange {
+                    display_path: "src/lib.rs".to_owned(),
+                    query_path: "src/lib.rs".to_owned(),
+                    previous_path: None,
+                    status_code: "M".to_owned(),
+                    additions: Some(7),
+                    deletions: Some(3),
+                    diff: WorkspaceFileDiffState::Unloaded,
+                },
+                WorkspaceFileChange {
+                    display_path: "tests/reducer.rs".to_owned(),
+                    query_path: "tests/reducer.rs".to_owned(),
+                    previous_path: None,
+                    status_code: "M".to_owned(),
+                    additions: Some(3),
+                    deletions: Some(1),
+                    diff: WorkspaceFileDiffState::Loaded(vec![WorkspaceDiffLine {
+                        kind: WorkspaceDiffLineKind::Addition,
+                        text: "+assert!(true);".to_owned(),
+                    }]),
+                },
+            ],
+        }),
+    });
+
+    state.reduce(TuiAction::FocusNext);
+    state.reduce(TuiAction::MoveSelectionDown);
+    state.reduce(TuiAction::ToggleDetailDiff);
+
+    let rendered = state.render_text(120, 24);
+
+    assert!(rendered.contains("focus=activity"));
+    assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
+    assert!(rendered.contains("[x] FILE DIFF"));
+    assert!(rendered.contains("v tests/reducer.rs"));
+    assert!(rendered.contains("+3 -1"));
+    assert!(rendered.contains("FILE DIFF"));
+    assert!(rendered.contains("+assert!(true);"));
 }
