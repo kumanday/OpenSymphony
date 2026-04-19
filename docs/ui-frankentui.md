@@ -131,6 +131,9 @@ The detail pane now shows a git-backed changed-file summary for the selected wor
 per-file `+/-` counts. In wide layouts the lower-right pane stays on conversation activity until an
 operator expands a changed file, at which point it becomes a diff viewer for that file while the
 lower-left pane keeps the file list visible for navigation.
+That changed-file summary and diff now compare the selected workspace against the branch merge-base
+with `main` (falling back to `origin/main` when needed), so the pane behaves more like a GitHub PR
+“Files changed” view and includes both committed branch work and any uncommitted edits.
 The conversation activity pane now uses the full retained recent-activity window from the
 control-plane snapshot instead of dropping older entries after the first ten, and it lets the
 split-pane fitter handle width trimming so event summaries use the available column width.
@@ -167,9 +170,10 @@ Current key map in the implemented client:
 
 - `j` or down arrow: move selection down in the focused pane; detail focus moves through changed files, while the activity pane scrolls toward newer conversation output or down through the open diff
 - `k` or up arrow: move selection up in the focused pane; detail focus moves through changed files, while the activity pane scrolls toward older conversation output or up through the open diff
-- `tab`: cycle focus between issue list, detail, conversation or diff activity, and timeline panes
+- `tab`: cycle focus forward between the issue list, detail pane, and conversation or diff activity pane
+- `shift-tab`: cycle focus backward through that same three-pane loop
 - `enter`: toggle the diff for the currently selected changed file when detail or activity focus is active; opening a diff moves focus to the diff pane, and closing it returns the activity pane to conversation scrolling
-- `e`: switch the bottom pane between recent events and metrics
+- `e`: switch the bottom status pane between recent events and metrics without moving focus into it
 - `q`: quit cleanly
 
 The rendered status line and pane headers explicitly show the active focus target, and the top header also surfaces the computed connection, daemon, and agent-server cause text when bootstrap, reconnect, or degraded states need explanation.

@@ -198,13 +198,14 @@ fn cycles_focus_and_timeline_mode() {
     state.reduce(TuiAction::FocusNext);
     state.reduce(TuiAction::ToggleTimelineMode);
 
-    assert_eq!(state.focus, FocusPane::Timeline);
+    assert_eq!(state.focus, FocusPane::Issues);
     assert_eq!(state.timeline_mode, TimelineMode::Metrics);
 
     let rendered = state.render_text(100, 20);
-    assert!(rendered.contains("focus=timeline"));
+    assert!(rendered.contains("focus=issues"));
     assert!(rendered.contains("bottom=metrics"));
-    assert!(rendered.contains("[x] METRICS"));
+    assert!(rendered.contains("METRICS"));
+    assert!(!rendered.contains("[x] METRICS"));
 }
 
 #[test]
@@ -227,6 +228,20 @@ fn keeps_selected_detail_visible_in_narrow_layout() {
 
     assert!(rendered.contains("ISSUE + WORKSPACE DETAIL"));
     assert!(rendered.contains("branch: loading..."));
+}
+
+#[test]
+fn cycles_focus_backwards_with_shift_tab_action() {
+    let mut state = TuiState::default();
+
+    state.reduce(TuiAction::FocusPrevious);
+    assert_eq!(state.focus, FocusPane::Activity);
+
+    state.reduce(TuiAction::FocusPrevious);
+    assert_eq!(state.focus, FocusPane::Detail);
+
+    state.reduce(TuiAction::FocusPrevious);
+    assert_eq!(state.focus, FocusPane::Issues);
 }
 
 #[test]
@@ -401,6 +416,8 @@ fn detail_focus_moves_changed_file_selection_and_toggles_diff() {
     assert!(rendered.contains("focus=activity"));
     assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
     assert!(rendered.contains("[x] FILE DIFF"));
+    assert!(rendered.contains("MODIFIED FILES"));
+    assert!(!rendered.contains("[ ] MODIFIED FILES"));
     assert!(rendered.contains("v tests/reducer.rs"));
     assert!(rendered.contains("+3 -1"));
     assert!(rendered.contains("FILE DIFF"));

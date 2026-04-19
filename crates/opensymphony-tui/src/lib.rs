@@ -218,7 +218,6 @@ impl TuiState {
                         self.move_conversation_scroll_up();
                     }
                 }
-                FocusPane::Timeline => {}
             },
             TuiAction::MoveSelectionDown => match self.focus {
                 FocusPane::Issues => self.move_issue_selection_down(),
@@ -230,14 +229,19 @@ impl TuiState {
                         self.move_conversation_scroll_down();
                     }
                 }
-                FocusPane::Timeline => {}
             },
             TuiAction::FocusNext => {
                 self.focus = match self.focus {
                     FocusPane::Issues => FocusPane::Detail,
                     FocusPane::Detail => FocusPane::Activity,
-                    FocusPane::Activity => FocusPane::Timeline,
-                    FocusPane::Timeline => FocusPane::Issues,
+                    FocusPane::Activity => FocusPane::Issues,
+                };
+            }
+            TuiAction::FocusPrevious => {
+                self.focus = match self.focus {
+                    FocusPane::Issues => FocusPane::Activity,
+                    FocusPane::Detail => FocusPane::Issues,
+                    FocusPane::Activity => FocusPane::Detail,
                 };
             }
             TuiAction::ToggleDetailDiff => {
@@ -335,7 +339,7 @@ impl TuiState {
         header.push(format!("bottom={}", self.timeline_mode.label()));
         header.push(format!("issues={issue_count}"));
         header.push(format!("updated={generated}"));
-        header.push("q quit  tab focus  enter diff  e toggle".to_owned());
+        header.push("q quit  tab focus  shift-tab back  enter diff  e toggle".to_owned());
         lines.push(fit(&header.join(" | "), width));
         lines.push("=".repeat(width));
 
@@ -626,7 +630,7 @@ impl TuiState {
         ));
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(
-            "q quit  tab focus  enter diff  e toggle",
+            "q quit  tab focus  shift-tab back  enter diff  e toggle",
             Style::new().fg(BRIGHT_BLACK),
         ));
 
@@ -817,8 +821,8 @@ impl TuiState {
         max_rows: usize,
     ) -> Vec<Line> {
         let mut lines = vec![Line::from(Span::styled(
-            "[ ] MODIFIED FILES",
-            Style::new().bold(),
+            "MODIFIED FILES",
+            Style::new().bold().dim(),
         ))];
 
         if max_rows <= 1 {
@@ -989,12 +993,7 @@ impl TuiState {
             TimelineMode::Events => "RECENT EVENTS",
             TimelineMode::Metrics => "METRICS",
         };
-        let title_style = if self.focus == FocusPane::Timeline {
-            Style::new().bold()
-        } else {
-            Style::new().dim()
-        };
-        let mut lines = vec![Line::from(Span::styled(title, title_style))];
+        let mut lines = vec![Line::from(Span::styled(title, Style::new().bold().dim()))];
 
         match &self.latest_snapshot {
             Some(snapshot) => match self.timeline_mode {
@@ -1332,7 +1331,7 @@ impl TuiState {
         issue: &IssueSnapshot,
         max_rows: usize,
     ) -> Vec<String> {
-        let mut lines = vec![fit("[ ] MODIFIED FILES", width)];
+        let mut lines = vec![fit("MODIFIED FILES", width)];
 
         if max_rows <= 1 {
             return lines;
@@ -1482,10 +1481,7 @@ impl TuiState {
             TimelineMode::Events => "RECENT EVENTS",
             TimelineMode::Metrics => "METRICS",
         };
-        let mut lines = vec![fit(
-            &pane_title(title, self.focus == FocusPane::Timeline),
-            width,
-        )];
+        let mut lines = vec![fit(title, width)];
         match (&self.timeline_mode, &self.latest_snapshot) {
             (_, None) => lines.push(fit("waiting for stream data", width)),
             (TimelineMode::Events, Some(snapshot)) => {
@@ -1808,7 +1804,6 @@ pub enum FocusPane {
     Issues,
     Detail,
     Activity,
-    Timeline,
 }
 
 impl FocusPane {
@@ -1817,7 +1812,6 @@ impl FocusPane {
             FocusPane::Issues => "issues",
             FocusPane::Detail => "detail",
             FocusPane::Activity => "activity",
-            FocusPane::Timeline => "timeline",
         }
     }
 }
@@ -1862,6 +1856,7 @@ pub enum TuiAction {
     MoveSelectionUp,
     MoveSelectionDown,
     FocusNext,
+    FocusPrevious,
     ToggleDetailDiff,
     ToggleTimelineMode,
     WorkspaceStatusRequested(String),
@@ -2062,6 +2057,7 @@ enum AppMessage {
     MoveSelectionUp,
     MoveSelectionDown,
     FocusNext,
+    FocusPrevious,
     ToggleDetailDiff,
     ToggleTimelineMode,
     Quit,
@@ -2075,6 +2071,7 @@ impl From<Event> for AppMessage {
                 KeyCode::Char('k') | KeyCode::Up => AppMessage::MoveSelectionUp,
                 KeyCode::Char('j') | KeyCode::Down => AppMessage::MoveSelectionDown,
                 KeyCode::Tab => AppMessage::FocusNext,
+                KeyCode::BackTab => AppMessage::FocusPrevious,
                 KeyCode::Enter => AppMessage::ToggleDetailDiff,
                 KeyCode::Char('e') => AppMessage::ToggleTimelineMode,
                 _ => AppMessage::Tick,
@@ -2494,14 +2491,15 @@ fn inspect_workspace_changes(workspace_path: &Path) -> WorkspaceChangeState {
     match build_workspace_change_summary(workspace_path) {
         Ok(summary) => WorkspaceChangeState::Available(summary),
         Err(error) => WorkspaceChangeState::Unavailable(format!(
-            "git status unavailable: {}",
+            "git comparison unavailable: {}",
             single_line(&error)
         )),
     }
 }
 
 fn build_workspace_change_summary(workspace_path: &Path) -> Result<WorkspaceChangeSummary, String> {
-    let mut files = tracked_workspace_file_changes(workspace_path)?;
+    let comparison_base = workspace_comparison_base(workspace_path)?;
+    let mut files = tracked_workspace_file_changes(workspace_path, &comparison_base)?;
     files.extend(untracked_workspace_file_changes(workspace_path)?);
     files.sort_by(|left, right| left.display_path.cmp(&right.display_path));
 
@@ -2518,17 +2516,18 @@ fn build_workspace_change_summary(workspace_path: &Path) -> Result<WorkspaceChan
 
 fn tracked_workspace_file_changes(
     workspace_path: &Path,
+    comparison_base: &WorkspaceComparisonBase,
 ) -> Result<Vec<WorkspaceFileChange>, String> {
-    let output = command_output(
+    let output = command_output_args(
         workspace_path,
         "git",
-        &[
-            "diff",
-            "--name-status",
-            "-z",
-            "--find-renames",
-            "HEAD",
-            "--",
+        [
+            "diff".to_owned(),
+            "--name-status".to_owned(),
+            "-z".to_owned(),
+            "--find-renames".to_owned(),
+            comparison_base.merge_base.clone(),
+            "--".to_owned(),
         ],
     )?;
     let mut fields = output
@@ -2545,8 +2544,12 @@ fn tracked_workspace_file_changes(
             let query_path = fields
                 .next()
                 .ok_or_else(|| "missing current path for rename entry".to_owned())?;
-            let (additions, deletions) =
-                git_numstat_for_change(workspace_path, query_path, Some(previous_path))?;
+            let (additions, deletions) = git_numstat_for_change(
+                workspace_path,
+                comparison_base,
+                query_path,
+                Some(previous_path),
+            )?;
             files.push(WorkspaceFileChange {
                 display_path: format!("{previous_path} -> {query_path}"),
                 query_path: query_path.to_owned(),
@@ -2560,7 +2563,8 @@ fn tracked_workspace_file_changes(
             let query_path = fields
                 .next()
                 .ok_or_else(|| "missing path for git diff entry".to_owned())?;
-            let (additions, deletions) = git_numstat_for_change(workspace_path, query_path, None)?;
+            let (additions, deletions) =
+                git_numstat_for_change(workspace_path, comparison_base, query_path, None)?;
             files.push(WorkspaceFileChange {
                 display_path: query_path.to_owned(),
                 query_path: query_path.to_owned(),
@@ -2603,6 +2607,7 @@ fn untracked_workspace_file_changes(
 
 fn git_numstat_for_change(
     workspace_path: &Path,
+    comparison_base: &WorkspaceComparisonBase,
     query_path: &str,
     previous_path: Option<&str>,
 ) -> Result<(Option<u64>, Option<u64>), String> {
@@ -2610,7 +2615,7 @@ fn git_numstat_for_change(
         "diff".to_owned(),
         "--numstat".to_owned(),
         "--find-renames".to_owned(),
-        "HEAD".to_owned(),
+        comparison_base.merge_base.clone(),
         "--".to_owned(),
     ];
     if let Some(previous_path) = previous_path {
@@ -2651,6 +2656,7 @@ fn load_workspace_diff(
     previous_path: Option<&str>,
     status_code: &str,
 ) -> Result<Vec<WorkspaceDiffLine>, String> {
+    let comparison_base = workspace_comparison_base(workspace_path)?;
     let output = if status_code.starts_with("??") {
         command_output_args_allow_status(
             workspace_path,
@@ -2668,7 +2674,7 @@ fn load_workspace_diff(
         let mut args = vec![
             "diff".to_owned(),
             "--find-renames".to_owned(),
-            "HEAD".to_owned(),
+            comparison_base.merge_base,
             "--".to_owned(),
         ];
         if let Some(previous_path) = previous_path {
@@ -2679,6 +2685,37 @@ fn load_workspace_diff(
     };
 
     Ok(parse_workspace_diff(&output))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceComparisonBase {
+    merge_base: String,
+}
+
+fn workspace_comparison_base(workspace_path: &Path) -> Result<WorkspaceComparisonBase, String> {
+    for reference in ["main", "origin/main"] {
+        if git_ref_exists(workspace_path, reference)? {
+            return Ok(WorkspaceComparisonBase {
+                merge_base: command_single_line(
+                    workspace_path,
+                    "git",
+                    &["merge-base", "HEAD", reference],
+                )?,
+            });
+        }
+    }
+
+    Err("main branch unavailable".to_owned())
+}
+
+fn git_ref_exists(workspace_path: &Path, reference: &str) -> Result<bool, String> {
+    let output = command_output_args_allow_status(
+        workspace_path,
+        "git",
+        ["rev-parse", "--verify", "--quiet", reference],
+        &[1],
+    )?;
+    Ok(!output.trim().is_empty())
 }
 
 fn parse_workspace_diff(output: &str) -> Vec<WorkspaceDiffLine> {
@@ -2809,6 +2846,7 @@ impl Model for OperatorApp {
             AppMessage::MoveSelectionUp => self.state.reduce(TuiAction::MoveSelectionUp),
             AppMessage::MoveSelectionDown => self.state.reduce(TuiAction::MoveSelectionDown),
             AppMessage::FocusNext => self.state.reduce(TuiAction::FocusNext),
+            AppMessage::FocusPrevious => self.state.reduce(TuiAction::FocusPrevious),
             AppMessage::ToggleDetailDiff => self.state.reduce(TuiAction::ToggleDetailDiff),
             AppMessage::ToggleTimelineMode => self.state.reduce(TuiAction::ToggleTimelineMode),
             AppMessage::Quit => return Cmd::quit(),
@@ -3653,8 +3691,9 @@ mod tests {
         AppMessage, BLUE, BridgeHandle, BridgeMailbox, ConnectionState, ControlPlaneClientError,
         FocusPane, OperatorApp, RunOutcome, TuiAction, TuiState, WorkspaceChangeState,
         WorkspaceChangeSummary, WorkspaceDiffLine, WorkspaceDiffLineKind, WorkspaceFileChange,
-        WorkspaceFileDiffState, display_width, fit, handle_bridge_error, issue_window,
-        section_layout, stacked_body_layout, two_column_block_styled, visible_issue_count,
+        WorkspaceFileDiffState, build_workspace_change_summary, display_width, fit,
+        handle_bridge_error, issue_window, load_workspace_diff, section_layout,
+        stacked_body_layout, two_column_block_styled, visible_issue_count,
     };
     use crate::opensymphony_domain::{
         ControlPlaneAgentServerStatus as AgentServerStatus, ControlPlaneConversationEvent,
@@ -3672,6 +3711,9 @@ mod tests {
         text::text::{Line, Span},
     };
     use std::{
+        fs,
+        path::Path,
+        process::Command,
         sync::{
             Arc, Mutex,
             atomic::{AtomicUsize, Ordering},
@@ -3680,6 +3722,7 @@ mod tests {
         thread,
         time::Duration,
     };
+    use tempfile::TempDir;
     use tracing::{
         Event, Id, Metadata, Subscriber,
         span::{Attributes, Record},
@@ -3802,6 +3845,20 @@ mod tests {
                 }],
             },
         }
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git command should spawn");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -4437,5 +4494,65 @@ mod tests {
         assert!(updated.contains("fourth event"));
         assert!(updated.contains("fifth event"));
         assert!(!updated.contains("third event"));
+    }
+
+    #[test]
+    fn workspace_change_summary_includes_branch_commits_and_uncommitted_edits_vs_main() {
+        let repo = TempDir::new().expect("temp repo should be created");
+        run_git(repo.path(), &["init", "-b", "main"]);
+        run_git(repo.path(), &["config", "user.name", "Test User"]);
+        run_git(repo.path(), &["config", "user.email", "test@example.com"]);
+
+        fs::create_dir_all(repo.path().join("src")).expect("src dir should exist");
+        fs::write(repo.path().join("src/lib.rs"), "alpha\nbeta\n")
+            .expect("base file should be written");
+        run_git(repo.path(), &["add", "src/lib.rs"]);
+        run_git(repo.path(), &["commit", "-m", "base"]);
+
+        run_git(repo.path(), &["switch", "-c", "feature"]);
+        fs::write(repo.path().join("src/lib.rs"), "alpha\nbeta\ngamma\n")
+            .expect("branch file should be written");
+        run_git(repo.path(), &["add", "src/lib.rs"]);
+        run_git(repo.path(), &["commit", "-m", "branch change"]);
+
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            "alpha\nbeta\ngamma\ndelta\n",
+        )
+        .expect("working tree edit should be written");
+        fs::write(repo.path().join("notes.txt"), "note one\nnote two\n")
+            .expect("untracked file should be written");
+
+        let summary =
+            build_workspace_change_summary(repo.path()).expect("workspace summary should load");
+        let lib_change = summary
+            .files
+            .iter()
+            .find(|file| file.query_path == "src/lib.rs")
+            .expect("lib.rs change should be present");
+        let notes_change = summary
+            .files
+            .iter()
+            .find(|file| file.query_path == "notes.txt")
+            .expect("notes.txt change should be present");
+
+        assert_eq!(summary.files_changed, 2);
+        assert_eq!(summary.additions, 4);
+        assert_eq!(summary.deletions, 0);
+        assert_eq!(lib_change.additions, Some(2));
+        assert_eq!(lib_change.deletions, Some(0));
+        assert_eq!(notes_change.additions, Some(2));
+        assert_eq!(notes_change.deletions, Some(0));
+
+        let diff = load_workspace_diff(repo.path(), "src/lib.rs", None, "M")
+            .expect("workspace diff should load");
+        let diff_text = diff
+            .into_iter()
+            .map(|line| line.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(diff_text.contains("+gamma"));
+        assert!(diff_text.contains("+delta"));
     }
 }
