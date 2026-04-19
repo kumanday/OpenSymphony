@@ -11,6 +11,7 @@ separately published dependencies.
 Recommended CLI commands:
 
 - `opensymphony init`
+- `opensymphony update`
 - `opensymphony run`
 - `opensymphony debug <issue-id>`
 - `opensymphony tui`
@@ -26,6 +27,7 @@ opensymphony --help
 
 cd /path/to/target-repo
 opensymphony init
+opensymphony update
 opensymphony run
 ```
 
@@ -46,6 +48,15 @@ Important `init` behavior:
 - keeps bootstrap guidance in CLI output and the central OpenSymphony docs
   instead of copying `docs/` files into the target repository
 
+For already-initialized repositories, `opensymphony update` is the fast
+maintenance path:
+
+- checks the latest published `opensymphony` version and skips
+  `cargo install opensymphony` when the running CLI is already current
+- refreshes changed or new template-managed files under `.agents/skills/`
+- leaves `WORKFLOW.md`, `AGENTS.md`, `.github/*`, and repo-local extra skills
+  alone
+
 ## 3. Recommended validation commands
 
 ```bash
@@ -54,6 +65,7 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo test --test init
 cargo test --test help
+cargo test --test update
 ./scripts/smoke_local.sh
 ```
 

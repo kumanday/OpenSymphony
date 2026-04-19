@@ -88,6 +88,7 @@ Current implementation:
 - `tests/live_pinned_server.rs` provides an opt-in live integration check against the pinned `openhands-agent-server==1.14.0` surface for external-mode auth success and failure
 - `tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, launch reporting for reused running conversations before prior-turn drain completes, delayed `/run` conflicts that surface an active prior turn only after attach, missing-conversation recreation that stays on continuation guidance, **simplified conversation resumption that reuses conversations as-is without LLM config drift checks**, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
 - `tests/supervisor.rs` now covers startup rejection when a foreign ready server is already bound to the supervised target port
+- `tests/update.rs` covers the new `opensymphony update` maintenance flow: skipping `cargo install opensymphony` when the running CLI already matches the newest published release, running the install when a newer release exists, refreshing template-managed skill files in place for an existing target repo, and skipping that skill refresh outside a repo that lacks `WORKFLOW.md` plus `config.yaml`
 
 ## 3. Minimum required test coverage by subsystem
 

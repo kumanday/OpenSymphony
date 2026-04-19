@@ -2,6 +2,7 @@ mod debug_session;
 mod init_repo;
 mod install_tooling;
 mod orchestrator_run;
+mod update_repo;
 
 use std::{
     collections::BTreeSet,
@@ -54,6 +55,8 @@ pub struct Cli {
 enum Command {
     #[command(about = "Initialize the current target repository with OpenSymphony files")]
     Init(init_repo::InitArgs),
+    #[command(about = "Update the installed CLI and refresh template-managed skills")]
+    Update(update_repo::UpdateArgs),
     #[command(about = "Install app-managed runtimes and integrations")]
     Install(InstallArgs),
     #[command(about = "Run the real orchestrator against the current project workflow")]
@@ -301,6 +304,7 @@ pub async fn run() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Init(args) => init_repo::run_command(args).await,
+        Command::Update(args) => update_repo::run_command(args).await,
         Command::Install(args) => run_install(args).await,
         Command::Run(args) => orchestrator_run::run_command(args).await,
         Command::Debug(args) => debug_session::run_command(args).await,

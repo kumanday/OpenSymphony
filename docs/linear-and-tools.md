@@ -49,6 +49,10 @@ Every initialized repository receives:
 - `.agents/skills/linear/queries/*.graphql`
 - `.agents/skills/linear/references/*.md`
 
+Later, `opensymphony update` refreshes the template-managed `.agents/skills/`
+tree in place for an existing target repo without rerunning the full bootstrap
+flow.
+
 The agent path is intentionally simple:
 
 1. require `LINEAR_API_KEY`
@@ -129,9 +133,12 @@ Before merging Linear-related changes:
 
 - run `cargo test`
 - run `cargo test --test init`
+- run `cargo test --test update`
 - initialize a sample repo with `opensymphony init`
 - confirm the copied `.agents/skills/linear/` tree includes scripts, queries,
   and references
+- update the same sample repo with `opensymphony update` and confirm changed or
+  new template-managed Linear skill files sync cleanly
 - smoke-test the helper with `queries/viewer.graphql`
 
 ## 9. Migration note

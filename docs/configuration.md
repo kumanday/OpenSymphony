@@ -25,6 +25,20 @@ opensymphony init
 - can configure the GitHub Actions variables, label, and optional review secret
   automatically when `gh` is installed and can access the repository
 
+For repositories that are already initialized, `opensymphony update` is the
+maintenance path for template-owned skills:
+
+```bash
+cd /path/to/target-repo
+opensymphony update
+```
+
+The command first checks whether the installed CLI is older than the newest
+published `opensymphony` release and only runs `cargo install opensymphony`
+when it actually needs to. If the current directory already looks like an
+OpenSymphony target repo because it has both `WORKFLOW.md` and `config.yaml`,
+the command then refreshes changed or new files under `.agents/skills/`.
+
 The template repository is still the upstream source of those starter assets,
 but it is an implementation detail of `opensymphony init`, not a required
 manual setup step:
@@ -44,6 +58,19 @@ Core bootstrap payload:
 - `.agents/skills/linear/references/`
 - `.github/CODEOWNERS`
 - `.github/pull_request_template.md`
+
+## Refreshing Template Skills
+
+`opensymphony update` only refreshes template-managed files under
+`.agents/skills/`.
+
+It does not:
+
+- rerun the interactive `init` prompts
+- modify `WORKFLOW.md`
+- merge or rewrite `AGENTS.md`
+- copy `.github/*` bootstrap files
+- delete repo-local extra skills that are not in the template tree
 
 Optional AI PR review scaffolding:
 

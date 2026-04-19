@@ -55,6 +55,16 @@ OpenSymphony manages a local OpenHands agent-server; install the pinned runtime 
 opensymphony install openhands
 ```
 
+To refresh the installed CLI later, run:
+
+```bash
+opensymphony update
+```
+
+When you run `opensymphony update` from a target-repo root that already has
+`WORKFLOW.md` and `config.yaml`, it also refreshes the template-managed
+`.agents/skills/` tree without rerunning the full `init` flow.
+
 ### Required Environment
 
 Before running `opensymphony run`, export your provider settings for the
@@ -80,6 +90,11 @@ opensymphony init
 
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
 can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` contains `.opensymphony*` so local OpenSymphony state stays out of version control.
+
+For an existing target repo, `opensymphony update` is the lighter-weight
+maintenance path: it refreshes changed or new template-owned skill files under
+`.agents/skills/` without touching `WORKFLOW.md`, `AGENTS.md`, or the broader
+bootstrap files.
 
 ### Running the Orchestrator
 

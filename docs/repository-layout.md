@@ -120,10 +120,11 @@ the template skill tree instead of a separate bridge crate:
 - `queries/*.graphql`
 - `references/*.md`
 
-## 4. Init propagation rule
+## 4. Template skill propagation rule
 
-`opensymphony init` must copy `.agents/skills/` recursively so that target repos
-receive the complete skill payload, including helper scripts and query assets.
+`opensymphony init` and `opensymphony update` must copy `.agents/skills/`
+recursively so that target repos receive the complete skill payload, including
+helper scripts and query assets.
 
 That rule is now part of the supported public behavior.
 

@@ -115,9 +115,12 @@ Important rule:
 
 - copy `.agents/skills/` recursively, not file-by-file, so helper scripts,
   query assets, and reference docs survive intact
+- keep `opensymphony update` aligned with the same recursive copy rule so
+  existing target repos can refresh the template-managed skill tree without
+  rerunning the full bootstrap flow
 
 When you change shared target-repo assets, update the template first and then
-make sure the init flow still copies the full tree.
+make sure the `init` and `update` flows still copy the full tree.
 
 ## Linear development rules
 

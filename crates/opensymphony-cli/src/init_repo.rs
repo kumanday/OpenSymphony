@@ -41,7 +41,7 @@ const OPENSYMPHONY_GITIGNORE_ENTRY: &str = ".opensymphony*";
 pub struct InitArgs {}
 
 #[derive(Debug, Error)]
-enum InitCommandError {
+pub(crate) enum InitCommandError {
     #[error("failed to determine the current working directory: {0}")]
     CurrentDir(#[source] io::Error),
     #[error("failed to build the template fetch client: {0}")]
@@ -134,10 +134,10 @@ enum AssetKind {
 }
 
 #[derive(Clone)]
-struct FetchedAsset {
-    path: String,
+pub(crate) struct FetchedAsset {
+    pub(crate) path: String,
     kind: AssetKind,
-    contents: String,
+    pub(crate) contents: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1038,12 +1038,18 @@ where
     })
 }
 
-fn template_fetch_timeout() -> Duration {
+pub(crate) fn template_fetch_timeout() -> Duration {
     template_fetch_timeout_from_env(
         env::var("OPENSYMPHONY_TEMPLATE_FETCH_TIMEOUT_MS")
             .ok()
             .as_deref(),
     )
+}
+
+pub(crate) async fn fetch_template_skill_assets(
+    client: &Client,
+) -> Result<Vec<FetchedAsset>, InitCommandError> {
+    fetch_template_assets(client, &[], CORE_TEMPLATE_DIRECTORIES).await
 }
 
 fn template_fetch_timeout_from_env(value: Option<&str>) -> Duration {
