@@ -137,6 +137,9 @@ split-pane fitter handle width trimming so event summaries use the available col
 Long conversation summaries now wrap within the pane instead of being forced onto a single clipped
 row, and the lower-right pane has its own focus state so operators can scroll conversation history
 directly without stealing file-selection focus from the workspace detail pane.
+When the lower-right pane is showing conversation activity, it now defaults to the latest visible
+output and keeps following new events as they arrive until the operator scrolls upward; scrolling
+back down returns the pane to that tail-following mode.
 The styled operator layout now splits the upper and lower pane regions evenly so the workspace
 detail and diff area get half of the terminal height instead of being squeezed into the bottom 40%.
 The always-visible status line now leads with daemon and local agent-server health before the
@@ -162,8 +165,8 @@ Recommended commands:
 
 Current key map in the implemented client:
 
-- `j` or down arrow: move selection down in the focused pane; detail focus moves through changed files, while the activity pane scrolls conversation history or the open diff
-- `k` or up arrow: move selection up in the focused pane; detail focus moves through changed files, while the activity pane scrolls conversation history or the open diff
+- `j` or down arrow: move selection down in the focused pane; detail focus moves through changed files, while the activity pane scrolls toward newer conversation output or down through the open diff
+- `k` or up arrow: move selection up in the focused pane; detail focus moves through changed files, while the activity pane scrolls toward older conversation output or up through the open diff
 - `tab`: cycle focus between issue list, detail, conversation or diff activity, and timeline panes
 - `enter`: toggle the diff for the currently selected changed file when detail or activity focus is active; opening a diff moves focus to the diff pane, and closing it returns the activity pane to conversation scrolling
 - `e`: switch the bottom pane between recent events and metrics

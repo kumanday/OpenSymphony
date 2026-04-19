@@ -2350,6 +2350,7 @@ mod tests {
             | Command::Tui(_)
             | Command::Doctor(_)
             | Command::Install(_)
+            | Command::Update(_)
             | Command::Rehydrate(_) => {
                 panic!("expected daemon command")
             }

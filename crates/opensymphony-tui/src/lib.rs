@@ -1195,25 +1195,21 @@ impl TuiState {
 
         match self.selected_issue() {
             Some(issue) => {
-                if issue.recent_events.is_empty() {
+                let body_lines = self.conversation_activity_body_lines_styled(issue, width);
+                if body_lines.is_empty() {
                     lines.push(Line::from(Span::styled(
                         "no recent activity",
                         Style::new().dim(),
                     )));
                 } else {
                     let visible_rows = max_rows.saturating_sub(1);
-                    'events: for event in issue
-                        .recent_events
-                        .iter()
-                        .rev()
-                        .skip(self.conversation_scroll_offset)
-                    {
-                        for line in wrap_conversation_event_styled(event, width) {
-                            if lines.len() > visible_rows {
-                                break 'events;
-                            }
-                            lines.push(line);
-                        }
+                    let start = conversation_scroll_start(
+                        body_lines.len(),
+                        visible_rows,
+                        self.conversation_scroll_offset,
+                    );
+                    for line in body_lines.into_iter().skip(start).take(visible_rows) {
+                        lines.push(line);
                     }
                 }
             }
@@ -1442,25 +1438,43 @@ impl TuiState {
             &pane_title("CONVERSATION ACTIVITY", activity_focused),
             width,
         )];
-        if issue.recent_events.is_empty() {
+        let body_lines = self.conversation_activity_body_lines(issue, width);
+        if body_lines.is_empty() {
             lines.push(fit("no recent activity", width));
         } else {
             let visible_rows = max_rows.saturating_sub(1);
-            'events: for event in issue
-                .recent_events
-                .iter()
-                .rev()
-                .skip(self.conversation_scroll_offset)
-            {
-                for line in wrap_conversation_event_text(event, width) {
-                    if lines.len() > visible_rows {
-                        break 'events;
-                    }
-                    lines.push(fit(&line, width));
-                }
+            let start = conversation_scroll_start(
+                body_lines.len(),
+                visible_rows,
+                self.conversation_scroll_offset,
+            );
+            for line in body_lines.into_iter().skip(start).take(visible_rows) {
+                lines.push(fit(&line, width));
             }
         }
         lines
+    }
+
+    fn conversation_activity_body_lines_styled(
+        &self,
+        issue: &IssueSnapshot,
+        width: usize,
+    ) -> Vec<Line> {
+        issue
+            .recent_events
+            .iter()
+            .rev()
+            .flat_map(|event| wrap_conversation_event_styled(event, width))
+            .collect()
+    }
+
+    fn conversation_activity_body_lines(&self, issue: &IssueSnapshot, width: usize) -> Vec<String> {
+        issue
+            .recent_events
+            .iter()
+            .rev()
+            .flat_map(|event| wrap_conversation_event_text(event, width))
+            .collect()
     }
 
     fn timeline_lines(&self, width: usize) -> Vec<String> {
@@ -1583,15 +1597,11 @@ impl TuiState {
     }
 
     fn move_conversation_scroll_up(&mut self) {
-        self.conversation_scroll_offset = self.conversation_scroll_offset.saturating_sub(1);
+        self.conversation_scroll_offset = self.conversation_scroll_offset.saturating_add(1);
     }
 
     fn move_conversation_scroll_down(&mut self) {
-        let event_count = self.selected_conversation_event_count();
-        if event_count > 0 {
-            self.conversation_scroll_offset =
-                min(self.conversation_scroll_offset + 1, event_count - 1);
-        }
+        self.conversation_scroll_offset = self.conversation_scroll_offset.saturating_sub(1);
     }
 
     fn move_diff_scroll_up(&mut self) {
@@ -1702,12 +1712,6 @@ impl TuiState {
         }
     }
 
-    fn selected_conversation_event_count(&self) -> usize {
-        self.selected_issue()
-            .map(|issue| issue.recent_events.len())
-            .unwrap_or_default()
-    }
-
     fn sync_detail_state(&mut self) {
         let selected_issue_identifier = self.selected_issue().map(|issue| issue.identifier.clone());
         if self.detail_issue_identifier != selected_issue_identifier {
@@ -1727,11 +1731,11 @@ impl TuiState {
             self.selected_changed_file = min(self.selected_changed_file, file_count - 1);
         }
 
-        let event_count = self.selected_conversation_event_count();
-        if event_count == 0 {
+        if self
+            .selected_issue()
+            .is_none_or(|issue| issue.recent_events.is_empty())
+        {
             self.conversation_scroll_offset = 0;
-        } else {
-            self.conversation_scroll_offset = min(self.conversation_scroll_offset, event_count - 1);
         }
 
         if !self.detail_diff_open {
@@ -3370,6 +3374,14 @@ fn wrap_text_by_widths(value: &str, first_width: usize, continuation_width: usiz
     chunks
 }
 
+fn conversation_scroll_start(
+    total_lines: usize,
+    visible_rows: usize,
+    scroll_offset_from_bottom: usize,
+) -> usize {
+    total_lines.saturating_sub(visible_rows.saturating_add(scroll_offset_from_bottom))
+}
+
 fn change_count_text(prefix: char, count: Option<u64>) -> String {
     match count {
         Some(count) => format!("{prefix}{count}"),
@@ -4316,10 +4328,16 @@ mod tests {
         let mut snapshot = fixture(8, 1);
         snapshot.snapshot.issues[0].recent_events = vec![
             ControlPlaneConversationEvent {
-                event_id: "evt-1".to_owned(),
+                event_id: "evt-4".to_owned(),
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
-                summary: "oldest event".to_owned(),
+                summary: "newest event".to_owned(),
+            },
+            ControlPlaneConversationEvent {
+                event_id: "evt-3".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "newer event".to_owned(),
             },
             ControlPlaneConversationEvent {
                 event_id: "evt-2".to_owned(),
@@ -4328,16 +4346,16 @@ mod tests {
                 summary: "middle event".to_owned(),
             },
             ControlPlaneConversationEvent {
-                event_id: "evt-3".to_owned(),
+                event_id: "evt-1".to_owned(),
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
-                summary: "newest event".to_owned(),
+                summary: "oldest event".to_owned(),
             },
         ];
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
         state.reduce(TuiAction::FocusNext);
         state.reduce(TuiAction::FocusNext);
-        state.reduce(TuiAction::MoveSelectionDown);
+        state.reduce(TuiAction::MoveSelectionUp);
 
         let lines = state.conversation_activity_lines(80, 4);
         let rendered = lines
@@ -4350,5 +4368,74 @@ mod tests {
         assert!(rendered.contains("[x] CONVERSATION ACTIVITY"));
         assert!(!rendered.contains("newest event"));
         assert!(rendered.contains("middle event"));
+        assert!(rendered.contains("oldest event"));
+    }
+
+    #[test]
+    fn conversation_activity_defaults_to_latest_output_and_tracks_new_snapshots() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 1);
+        snapshot.snapshot.issues[0].recent_events = vec![
+            ControlPlaneConversationEvent {
+                event_id: "evt-4".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "fourth event".to_owned(),
+            },
+            ControlPlaneConversationEvent {
+                event_id: "evt-3".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "third event".to_owned(),
+            },
+            ControlPlaneConversationEvent {
+                event_id: "evt-2".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "second event".to_owned(),
+            },
+            ControlPlaneConversationEvent {
+                event_id: "evt-1".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "first event".to_owned(),
+            },
+        ];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot.clone())));
+        state.reduce(TuiAction::FocusNext);
+        state.reduce(TuiAction::FocusNext);
+
+        let initial = state
+            .conversation_activity_lines(80, 3)
+            .iter()
+            .map(Line::to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        snapshot.snapshot.issues[0].recent_events.insert(
+            0,
+            ControlPlaneConversationEvent {
+                event_id: "evt-5".to_owned(),
+                happened_at: snapshot.snapshot.generated_at,
+                kind: "message".to_owned(),
+                summary: "fifth event".to_owned(),
+            },
+        );
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let updated = state
+            .conversation_activity_lines(80, 3)
+            .iter()
+            .map(Line::to_plain_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(initial.contains("third event"));
+        assert!(initial.contains("fourth event"));
+        assert!(!initial.contains("second event"));
+        assert!(!initial.contains("first event"));
+        assert!(updated.contains("fourth event"));
+        assert!(updated.contains("fifth event"));
+        assert!(!updated.contains("third event"));
     }
 }
