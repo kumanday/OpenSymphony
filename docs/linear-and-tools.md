@@ -69,6 +69,8 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 The checked-in query assets cover the current repository-supported write and
 inspection paths:
 
+- issue create and follow-up issue creation
+- issue body and metadata updates
 - issue lookup by key or ID
 - issue detail reads
 - team workflow-state lookup

@@ -36,7 +36,7 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 ## References
 
 - Start with [references/using-the-helper.md](references/using-the-helper.md).
-- For issue, comment, relation, and PR-link work, open
+- For issue creation, updates, comments, relations, and PR-link work, open
   [references/issue-and-comment-operations.md](references/issue-and-comment-operations.md).
 - For project overview/status updates, uploads, and introspection, open
   [references/project-and-advanced-operations.md](references/project-and-advanced-operations.md).
@@ -58,6 +58,10 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 
 ## Common workflows
 
+- Create an issue or sub-issue:
+  - `.agents/skills/linear/queries/issue_create.graphql`
+- Update an issue title, body, or metadata:
+  - `.agents/skills/linear/queries/issue_update.graphql`
 - Create a comment:
   - `.agents/skills/linear/queries/comment_create.graphql`
 - Edit a comment:

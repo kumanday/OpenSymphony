@@ -64,6 +64,18 @@ A successful conversion produces:
 - a local mapping table from document IDs to created Linear issue IDs and URLs
 - no stale document-only IDs left in created issue bodies unless explicitly preserved in a migration note
 
+## Preferred OpenSymphony Linear assets
+
+In an OpenSymphony-managed repository, use the checked-in Linear helper and
+query files instead of ad hoc inline GraphQL for the core conversion steps:
+
+- create parent issues and sub-issues with `.agents/skills/linear/queries/issue_create.graphql`
+- rewrite created issue bodies and metadata with `.agents/skills/linear/queries/issue_update.graphql`
+- attach blocker or related links with `.agents/skills/linear/queries/issue_relation_create.graphql`
+
+This keeps task conversion on the same supported GraphQL surface that
+`WORKFLOW.md` and the repo-local `linear` skill expect.
+
 ## Core rules
 
 1. Document-only IDs such as `TASK-001`, `BENCH-014`, or similar are not issue IDs.
@@ -400,6 +412,11 @@ This means the issue graph in Linear must be queryable through Linear's dependen
 ## Linear GraphQL API for Blocker Relationships
 
 Linear's REST API does not expose blocker relationships directly. Use the GraphQL API with `issueRelationCreate` mutation.
+
+In OpenSymphony-managed repos, prefer the repo-local helper with
+`.agents/skills/linear/queries/issue_relation_create.graphql`; the raw
+GraphQL and `curl` examples below are the fallback shape when you need to
+inspect or debug the underlying request directly.
 
 ### Authentication
 

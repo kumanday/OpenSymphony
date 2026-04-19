@@ -59,6 +59,18 @@ async fn init_copies_template_files_and_customizes_workflow() {
         "linear reference file should be created"
     );
     assert!(
+        repo.path()
+            .join(".agents/skills/linear/queries/issue_create.graphql")
+            .is_file(),
+        "linear issue creation query file should be created"
+    );
+    assert!(
+        repo.path()
+            .join(".agents/skills/linear/queries/issue_update.graphql")
+            .is_file(),
+        "linear issue update query file should be created"
+    );
+    assert!(
         repo.path().join("config.yaml").is_file(),
         "config.yaml should be created"
     );
@@ -589,6 +601,14 @@ openhands:
         (
             ".agents/skills/linear/queries/viewer.graphql".to_string(),
             "query Viewer { viewer { id } }\n".to_string(),
+        ),
+        (
+            ".agents/skills/linear/queries/issue_create.graphql".to_string(),
+            "mutation IssueCreate($input: IssueCreateInput!) { issueCreate(input: $input) { success } }\n".to_string(),
+        ),
+        (
+            ".agents/skills/linear/queries/issue_update.graphql".to_string(),
+            "mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }\n".to_string(),
         ),
         (
             ".agents/skills/pull/SKILL.md".to_string(),

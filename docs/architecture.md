@@ -146,6 +146,8 @@ Initialized repositories receive a checked-in Linear skill tree:
 - `references/*.md`
 
 Those assets are part of the supported public interface of `opensymphony init`.
+They include canonical query files for issue create/update flows, comments,
+relations, attachments, project content/status updates, and introspection.
 
 ## 5. Process model
 

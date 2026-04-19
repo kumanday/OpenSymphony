@@ -2,6 +2,8 @@
 
 Use these checked-in query files for common issue-side work:
 
+- Create an issue or sub-issue: `queries/issue_create.graphql`
+- Update an issue title, body, parent, project, or state metadata: `queries/issue_update.graphql`
 - Read an issue by key: `queries/issue_by_key.graphql`
 - Read a full issue snapshot by id: `queries/issue_details.graphql`
 - Resolve valid workflow states for an issue: `queries/issue_team_states.graphql`
@@ -14,6 +16,12 @@ Use these checked-in query files for common issue-side work:
 
 ## Notes
 
+- `issue_create.graphql` accepts a full `IssueCreateInput`; use it for parent
+  issues, follow-up issues, and sub-issues once the required `teamId` and any
+  optional `projectId`, `stateId`, or `parentId` values are known.
+- `issue_update.graphql` expects the internal issue id plus a partial
+  `IssueUpdateInput`; use it for post-create rewrite passes once real Linear
+  issue identifiers and URLs are known.
 - Prefer `attachmentLinkGitHubPR` for real PR links.
 - Use `attachmentLinkURL` only when the target is not a GitHub PR or the
   generic URL behavior is explicitly desired.

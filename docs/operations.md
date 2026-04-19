@@ -108,6 +108,8 @@ Operational implications:
   `.agents/skills/linear/scripts/linear_graphql.py`
 - checked-in query files under `.agents/skills/linear/queries/` are the
   supported mutation/query surface
+- issue creation, issue rewrite passes, blocker relations, comments, PR
+  attachments, and project updates should all use those checked-in assets
 
 Smoke test:
 

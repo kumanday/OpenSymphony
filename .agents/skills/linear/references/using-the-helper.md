@@ -25,6 +25,14 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
   --variables-file /tmp/project-vars.json
 ```
 
+Issue creation or rewrite example:
+
+```bash
+python3 .agents/skills/linear/scripts/linear_graphql.py \
+  --query-file .agents/skills/linear/queries/issue_create.graphql \
+  --variables-file /tmp/issue-create-vars.json
+```
+
 ## Rules
 
 - `LINEAR_API_KEY` must be set.
@@ -32,6 +40,9 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 - Prefer the checked-in query files over improvising large inline documents.
 - Treat top-level `errors` as failure.
 - Keep requested fields narrow.
+- For `issue_create.graphql`, pass the full `IssueCreateInput` object inside
+  `variables.input`; for `issue_update.graphql`, pass the target issue id plus
+  the partial `IssueUpdateInput` object inside `variables.input`.
 - For `fileUpload`, send the follow-up `PUT` with `Content-Type` equal to the
   `contentType` you requested, plus every header returned by Linear.
 - Use `queries/introspect_mutations.graphql` and
