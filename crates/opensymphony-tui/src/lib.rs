@@ -1209,7 +1209,7 @@ impl TuiState {
                         .skip(self.conversation_scroll_offset)
                     {
                         for line in wrap_conversation_event_styled(event, width) {
-                            if lines.len() >= visible_rows + 1 {
+                            if lines.len() > visible_rows {
                                 break 'events;
                             }
                             lines.push(line);
@@ -1453,7 +1453,7 @@ impl TuiState {
                 .skip(self.conversation_scroll_offset)
             {
                 for line in wrap_conversation_event_text(event, width) {
-                    if lines.len() >= visible_rows + 1 {
+                    if lines.len() > visible_rows {
                         break 'events;
                     }
                     lines.push(fit(&line, width));

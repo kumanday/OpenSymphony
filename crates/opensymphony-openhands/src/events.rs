@@ -257,11 +257,7 @@ fn decode_message_event(event: &EventEnvelope) -> MessageEventPayload {
         .and_then(|c| serde_json::from_value(c.clone()).ok())
         .unwrap_or_default();
 
-    let text_preview: Option<String> = content
-        .iter()
-        .filter_map(|c| c.text.as_deref())
-        .next()
-        .map(|t: &str| t.chars().take(80).collect());
+    let text_preview = first_text_content(&content);
 
     MessageEventPayload {
         role,
@@ -310,11 +306,7 @@ fn decode_observation_event(event: &EventEnvelope) -> Option<ObservationEventPay
         .and_then(|c| serde_json::from_value(c.clone()).ok())
         .unwrap_or_default();
 
-    let text_preview: Option<String> = content
-        .iter()
-        .filter_map(|c| c.text.as_deref())
-        .next()
-        .map(|t: &str| t.chars().take(80).collect());
+    let text_preview = first_text_content(&content);
 
     Some(ObservationEventPayload {
         observation_id,
@@ -323,6 +315,14 @@ fn decode_observation_event(event: &EventEnvelope) -> Option<ObservationEventPay
         text_preview,
         exit_code,
     })
+}
+
+fn first_text_content(content: &[TextContent]) -> Option<String> {
+    content
+        .iter()
+        .filter_map(|c| c.text.as_deref())
+        .next()
+        .map(ToOwned::to_owned)
 }
 
 fn unknown_event(event: &EventEnvelope) -> UnknownEvent {
@@ -657,6 +657,61 @@ mod tests {
                 value: None,
             })
         );
+    }
+
+    #[test]
+    fn known_event_decoding_preserves_full_message_text_preview() {
+        let long_text =
+            "this message should stay intact past eighty characters so the TUI can wrap it fully";
+        let event = EventEnvelope::new(
+            "evt-message",
+            Utc::now(),
+            "user",
+            "MessageEvent",
+            json!({
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": long_text,
+                    }
+                ],
+            }),
+        );
+
+        let KnownEvent::Message(payload) = KnownEvent::from_envelope(&event) else {
+            panic!("message event should decode");
+        };
+
+        assert_eq!(payload.text_preview.as_deref(), Some(long_text));
+    }
+
+    #[test]
+    fn known_event_decoding_preserves_full_observation_text_preview() {
+        let long_text = "this observation should stay intact past eighty characters so the TUI can wrap it fully";
+        let event = EventEnvelope::new(
+            "evt-observation",
+            Utc::now(),
+            "runtime",
+            "ObservationEvent",
+            json!({
+                "observation": {
+                    "tool_name": "cat",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": long_text,
+                        }
+                    ],
+                },
+            }),
+        );
+
+        let KnownEvent::Observation(payload) = KnownEvent::from_envelope(&event) else {
+            panic!("observation event should decode");
+        };
+
+        assert_eq!(payload.text_preview.as_deref(), Some(long_text));
     }
 
     #[test]
