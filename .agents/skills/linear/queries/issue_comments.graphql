@@ -1,0 +1,35 @@
+query IssueComments($id: String!, $first: Int = 100, $after: String) {
+  issue(id: $id) {
+    id
+    identifier
+    url
+    comments(
+      first: $first
+      after: $after
+      includeArchived: false
+      orderBy: updatedAt
+    ) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        body
+        url
+        createdAt
+        updatedAt
+        resolvedAt
+        parent {
+          id
+        }
+        user {
+          id
+          name
+          displayName
+          isMe
+        }
+      }
+    }
+  }
+}

@@ -159,7 +159,7 @@ workflow.
 3. Route to the matching flow:
    - `Backlog` -> do not modify issue content/state; stop and wait for human to move it to `Todo`.
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
-     - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
+     - If PR is already attached, start by reviewing the latest Linear issue comments and all open PR comments, then decide required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
    - `Human Review` -> wait and poll for decision/review updates.
    - `Merging` -> on entry, open and follow `.agents/skills/land/SKILL.md`; do not call `gh pr merge` directly.
@@ -212,12 +212,13 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 
 1. Identify the PR number from issue links/attachments.
 2. Gather feedback from all channels:
+   - Latest Linear issue comments (`.agents/skills/linear/queries/issue_comments.graphql`).
    - Top-level PR comments (`gh pr view --comments`).
    - Inline review comments (`gh api repos/<owner>/<repo>/pulls/<pr>/comments`).
    - Review summaries/states (`gh pr view --json reviews`).
-3. Treat every actionable reviewer comment (human or bot), including inline review comments, as blocking until one of these is true:
+3. Treat every actionable feedback item (human or bot), including Linear issue comments and inline PR review comments, as blocking until one of these is true:
    - code/test/docs updated to address it, or
-   - explicit, justified pushback reply is posted on that thread.
+   - explicit, justified pushback is recorded in the originating feedback channel.
 4. **Respond to inline review comments IN THE SAME THREAD** (required):
    - Use `gh api repos/<owner>/<repo>/pulls/<pr>/comments -f body="..." -f in_reply_to=<comment_id>` to reply directly in the thread.
    - Do NOT post new top-level comments or workpad updates to describe what was changed for a specific review item.
