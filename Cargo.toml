@@ -91,7 +91,7 @@ tempfile = "3"
 thiserror = "2"
 time = "=0.3.47"
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

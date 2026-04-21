@@ -1283,10 +1283,10 @@ fn should_drop_after_ready(message: &TungsteniteMessage) -> bool {
 
 fn axum_to_tungstenite(message: AxumMessage) -> TungsteniteMessage {
     match message {
-        AxumMessage::Text(text) => TungsteniteMessage::Text(text.to_string()),
-        AxumMessage::Binary(data) => TungsteniteMessage::Binary(data.to_vec()),
-        AxumMessage::Ping(data) => TungsteniteMessage::Ping(data.to_vec()),
-        AxumMessage::Pong(data) => TungsteniteMessage::Pong(data.to_vec()),
+        AxumMessage::Text(text) => TungsteniteMessage::Text(text.to_string().into()),
+        AxumMessage::Binary(data) => TungsteniteMessage::Binary(data),
+        AxumMessage::Ping(data) => TungsteniteMessage::Ping(data),
+        AxumMessage::Pong(data) => TungsteniteMessage::Pong(data),
         AxumMessage::Close(frame) => TungsteniteMessage::Close(frame.map(|frame| {
             tokio_tungstenite::tungstenite::protocol::CloseFrame {
                 code: frame.code.into(),
