@@ -67,8 +67,18 @@ When you run `opensymphony update` from a target-repo root that already has
 
 ### Required Environment
 
-Before running `opensymphony run`, export your provider settings for the
-OpenHands conversation agent:
+Before running `opensymphony run`, add the required tracker and OpenHands secret
+values to your shell startup file, such as `~/.zshrc` or `~/.bashrc`:
+
+```bash
+export LINEAR_API_KEY="lin_api_..."
+export OH_SECRET_KEY='any-random-key'
+```
+
+Use your real Linear API key for `LINEAR_API_KEY`. `OH_SECRET_KEY` can be any
+random secret string for the local OpenHands runtime.
+
+Also export your provider settings for the OpenHands conversation agent:
 
 ```bash
 export LLM_MODEL="openai/accounts/fireworks/models/glm-5p1"
