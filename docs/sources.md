@@ -153,6 +153,21 @@ Use these for:
 - project skill loading
 - `.agents/skills/` conventions
 
+### OpenHands PR review workflow
+
+- Workflow:
+  `.github/workflows/ai-pr-review.yml`
+- Extensions repository:
+  `https://github.com/OpenHands/extensions`
+- PR review action pin:
+  `75e39288f6c2366b75cf290441da06e187395f63`
+
+Use this pin for the automated advisory AI PR review workflow. The review
+action installs the current `openhands-sdk` package at runtime, so the action
+pin must remain compatible with the SDK's current project-skill loading API.
+Re-validate the action import path and repository skill loading behavior before
+changing the pin.
+
 ### OpenHands sandboxing
 
 - Process sandbox:
