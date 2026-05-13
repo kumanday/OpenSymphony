@@ -723,6 +723,46 @@ async fn graphql_internal_server_error_retries_even_with_graphql_envelope() {
 }
 
 #[tokio::test]
+async fn invalid_json_response_includes_operation_and_response_metadata() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::new(StatusCode::OK, "<html>not graphql json</html>")
+            .with_header("content-type", "text/html")
+            .with_header("content-length", "29"),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.retry_policy.max_attempts = 1;
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+
+    let error = client
+        .candidate_issues()
+        .await
+        .expect_err("invalid JSON response should fail");
+    let rendered = error.to_string();
+
+    assert!(matches!(
+        error.category(),
+        TrackerErrorCategory::InvalidResponse
+    ));
+    assert!(
+        rendered.contains("IssuesByState"),
+        "error should name the GraphQL operation: {rendered}"
+    );
+    assert!(
+        rendered.contains("HTTP 200 OK"),
+        "error should include the HTTP status: {rendered}"
+    );
+    assert!(
+        rendered.contains("content-type=text/html"),
+        "error should include safe response metadata: {rendered}"
+    );
+    assert!(
+        rendered.contains("body_bytes="),
+        "error should include response length without logging the body: {rendered}"
+    );
+}
+
+#[tokio::test]
 async fn permission_denied_maps_to_tracker_error_category() {
     let server = MockGraphqlServer::start(vec![QueuedResponse::new(
         StatusCode::FORBIDDEN,

@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{fmt, time::Duration};
 
 use crate::opensymphony_domain::TrackerErrorCategory;
 use reqwest::StatusCode;
@@ -9,12 +9,42 @@ pub struct GraphqlError {
     pub code: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseMetadata {
+    pub content_type: Option<String>,
+    pub content_length: Option<String>,
+    pub content_encoding: Option<String>,
+}
+
+impl fmt::Display for ResponseMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let content_type = self.content_type.as_deref().unwrap_or("<missing>");
+        let content_length = self.content_length.as_deref().unwrap_or("<missing>");
+        let content_encoding = self.content_encoding.as_deref().unwrap_or("<missing>");
+        write!(
+            formatter,
+            "content-type={content_type}, content-length={content_length}, content-encoding={content_encoding}"
+        )
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum LinearError {
     #[error("invalid Linear client configuration: {0}")]
     InvalidConfiguration(String),
     #[error("Linear request failed: {0}")]
     Request(Box<reqwest::Error>),
+    #[error(
+        "Linear response body read failed for {operation} after HTTP {status} ({metadata}): {source}"
+    )]
+    ResponseBody {
+        operation: String,
+        status: StatusCode,
+        metadata: Box<ResponseMetadata>,
+        retry_after: Option<Duration>,
+        #[source]
+        source: Box<reqwest::Error>,
+    },
     #[error("Linear API returned HTTP {status}: {body}")]
     HttpStatus {
         status: StatusCode,
@@ -63,6 +93,10 @@ impl LinearError {
             Self::InvalidConfiguration(_) | Self::InvalidResponse(_) => {
                 TrackerErrorCategory::InvalidResponse
             }
+            Self::ResponseBody { source, .. } if source.is_timeout() => {
+                TrackerErrorCategory::Timeout
+            }
+            Self::ResponseBody { .. } => TrackerErrorCategory::Transport,
             Self::Request(error) if error.is_timeout() => TrackerErrorCategory::Timeout,
             Self::Request(_) => TrackerErrorCategory::Transport,
             Self::HttpStatus { status, .. } => http_status_category(*status),
@@ -78,6 +112,7 @@ impl LinearError {
         match self {
             Self::HttpStatus { retry_after, .. } => *retry_after,
             Self::Graphql { retry_after, .. } => *retry_after,
+            Self::ResponseBody { retry_after, .. } => *retry_after,
             _ => None,
         }
     }

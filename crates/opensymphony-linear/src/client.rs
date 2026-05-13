@@ -3,14 +3,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot};
 use reqwest::{
     Client, StatusCode,
-    header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER},
+    header::{ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER},
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tokio::time::sleep;
 use tracing::debug;
 
-use super::error::{GraphqlError, LinearError};
+use super::error::{GraphqlError, LinearError, ResponseMetadata};
 use super::graphql::{
     GraphqlEnvelope, GraphqlErrorPayload, ISSUE_COMMENTS_QUERY, ISSUE_INVERSE_RELATIONS_QUERY,
     ISSUE_LABELS_QUERY, ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueCommentsData,
@@ -389,6 +389,7 @@ impl LinearClient {
             "variables": variables,
         });
         let authorization = self.config.api_key.as_str();
+        let operation = graphql_operation_name(query);
         let mut attempt = 1;
 
         loop {
@@ -406,10 +407,25 @@ impl LinearClient {
                 Ok(response) => {
                     let status = response.status();
                     let retry_after = parse_retry_delay(response.headers());
-                    let payload = response
-                        .text()
-                        .await
-                        .map_err(|error| LinearError::Request(Box::new(error)))?;
+                    let metadata = response_metadata(response.headers());
+                    let payload = match response.text().await {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            let error = LinearError::ResponseBody {
+                                operation: operation.clone(),
+                                status,
+                                metadata: Box::new(metadata),
+                                retry_after,
+                                source: Box::new(error),
+                            };
+                            if self.should_retry(&error, attempt) {
+                                self.sleep_before_retry(&error, attempt).await;
+                                attempt += 1;
+                                continue;
+                            }
+                            return Err(error);
+                        }
+                    };
 
                     if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
                         let error = LinearError::HttpStatus {
@@ -451,7 +467,8 @@ impl LinearClient {
                     let envelope: GraphqlEnvelope<T> =
                         serde_json::from_str(&payload).map_err(|error| {
                             LinearError::InvalidResponse(format!(
-                                "failed to decode Linear GraphQL response: {error}"
+                                "failed to decode Linear GraphQL response for {operation} after HTTP {status}: {error} ({metadata}, body_bytes={})",
+                                payload.len()
                             ))
                         })?;
 
@@ -470,7 +487,10 @@ impl LinearClient {
 
                     return envelope.data.ok_or_else(|| {
                         LinearError::InvalidResponse(
-                            "Linear GraphQL response omitted both data and errors".to_string(),
+                            format!(
+                                "Linear GraphQL response for {operation} omitted both data and errors ({metadata}, body_bytes={})",
+                                payload.len()
+                            ),
                         )
                     });
                 }
@@ -494,6 +514,7 @@ impl LinearClient {
 
         match error {
             LinearError::Request(_) => true,
+            LinearError::ResponseBody { .. } => true,
             LinearError::HttpStatus { status, .. } => {
                 *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
             }
@@ -554,6 +575,36 @@ fn decode_graphql_error_response(
             retry_after,
         )
     })
+}
+
+fn graphql_operation_name(query: &str) -> String {
+    let mut tokens = query.split_whitespace();
+    match tokens.next() {
+        Some("query" | "mutation" | "subscription") => tokens
+            .next()
+            .map(|token| token.split(['(', '{']).next().unwrap_or(token).to_string())
+            .filter(|token| !token.is_empty())
+            .unwrap_or_else(|| "<anonymous>".to_string()),
+        _ => "<anonymous>".to_string(),
+    }
+}
+
+fn response_metadata(headers: &reqwest::header::HeaderMap) -> ResponseMetadata {
+    ResponseMetadata {
+        content_type: header_value(headers, CONTENT_TYPE),
+        content_length: header_value(headers, CONTENT_LENGTH),
+        content_encoding: header_value(headers, CONTENT_ENCODING),
+    }
+}
+
+fn header_value(
+    headers: &reqwest::header::HeaderMap,
+    name: reqwest::header::HeaderName,
+) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
 }
 
 fn normalize_strings<S>(values: &[S]) -> Vec<String>
