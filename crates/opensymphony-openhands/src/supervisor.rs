@@ -1,9 +1,10 @@
 use std::{
     collections::BTreeMap,
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpStream, ToSocketAddrs},
     process::{Child, Command, Stdio},
     thread,
+    thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -151,6 +152,7 @@ struct LaunchedProcess {
     child: Child,
     launch: ResolvedLaunch,
     launched_at: SystemTime,
+    stderr_reader: Option<JoinHandle<()>>,
 }
 
 struct ExitedProcess {
@@ -215,7 +217,7 @@ impl LocalServerSupervisor {
                     .args(&launch.args)
                     .current_dir(&launch.working_dir)
                     .stdout(Stdio::null())
-                    .stderr(Stdio::inherit())
+                    .stderr(Stdio::piped())
                     .envs(&launch.env);
 
                 let mut child = command.spawn().map_err(|source| SupervisorError::Spawn {
@@ -224,6 +226,7 @@ impl LocalServerSupervisor {
                         .to_string(),
                     source,
                 })?;
+                let mut stderr_reader = child.stderr.take().map(spawn_filtered_stderr_forwarder);
                 let launched_at = SystemTime::now();
                 let deadline = Instant::now() + config.startup_timeout;
 
@@ -234,6 +237,7 @@ impl LocalServerSupervisor {
                             source,
                         })?
                     {
+                        join_output_reader(&mut stderr_reader);
                         return Err(SupervisorError::UnexpectedExit {
                             pid: child.id(),
                             code: status.code(),
@@ -247,6 +251,7 @@ impl LocalServerSupervisor {
                             child,
                             launch: launch.clone(),
                             launched_at,
+                            stderr_reader,
                         });
 
                         return Ok(ServerStatus {
@@ -264,6 +269,7 @@ impl LocalServerSupervisor {
                     if Instant::now() >= deadline {
                         let pid = child.id();
                         kill_child(&mut child)?;
+                        join_output_reader(&mut stderr_reader);
                         return Err(SupervisorError::StartupTimeout {
                             base_url: launch.base_url,
                             path: config.probe.path.clone(),
@@ -290,6 +296,7 @@ impl LocalServerSupervisor {
             {
                 kill_child(&mut launched.child)?;
             }
+            join_child_output(&mut launched);
 
             return Ok(ServerStatus {
                 mode: ServerMode::Supervised,
@@ -384,6 +391,8 @@ impl LocalServerSupervisor {
                 .map_err(|source| SupervisorError::Wait { pid, source })?
             {
                 let launched = self.launched.take().expect("launched process should exist");
+                let mut launched = launched;
+                join_child_output(&mut launched);
                 self.last_exit = Some(ExitedProcess {
                     launch: launched.launch,
                     launched_at: launched.launched_at,
@@ -400,9 +409,74 @@ impl LocalServerSupervisor {
         if let Some(mut launched) = self.launched.take() {
             let _ = launched.child.try_wait();
             let _ = kill_child(&mut launched.child);
+            join_child_output(&mut launched);
         }
         self.last_exit = None;
     }
+}
+
+fn spawn_filtered_stderr_forwarder(stderr: impl Read + Send + 'static) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut filter = OpenHandsLogFilter::default();
+        let stderr = std::io::stderr();
+        let mut output = stderr.lock();
+
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if filter.should_forward(&line) {
+                let _ = writeln!(output, "{line}");
+            }
+        }
+    })
+}
+
+fn join_child_output(launched: &mut LaunchedProcess) {
+    join_output_reader(&mut launched.stderr_reader);
+}
+
+fn join_output_reader(stderr_reader: &mut Option<JoinHandle<()>>) {
+    if let Some(handle) = stderr_reader.take() {
+        let _ = handle.join();
+    }
+}
+
+#[derive(Default)]
+struct OpenHandsLogFilter {
+    auto_title_suppression_remaining: usize,
+}
+
+impl OpenHandsLogFilter {
+    fn should_forward(&mut self, line: &str) -> bool {
+        if is_successful_openapi_access_log(line) {
+            return false;
+        }
+
+        if self.auto_title_suppression_remaining > 0 {
+            if line.contains("ValueError: No user messages found in conversation events") {
+                self.auto_title_suppression_remaining = 0;
+            } else {
+                self.auto_title_suppression_remaining -= 1;
+            }
+            return false;
+        }
+
+        if line.contains("Auto-title generation failed for conversation") {
+            self.auto_title_suppression_remaining = 80;
+            return false;
+        }
+
+        true
+    }
+}
+
+fn is_successful_openapi_access_log(line: &str) -> bool {
+    line.contains("\"GET ")
+        && line.contains("/openapi.json HTTP/1.1\" 200")
+        && !line.contains(" 404 ")
+        && !line.contains(" 500 ")
 }
 
 impl Drop for LocalServerSupervisor {
@@ -763,7 +837,7 @@ mod tests {
         time::Duration,
     };
 
-    use super::probe_resolved_addresses;
+    use super::{OpenHandsLogFilter, is_successful_openapi_access_log, probe_resolved_addresses};
 
     #[test]
     fn probe_resolved_addresses_tries_later_candidates_after_transient_failure() {
@@ -807,5 +881,40 @@ mod tests {
 
         assert!(ready);
         server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn openapi_access_filter_drops_successful_probe_noise_only() {
+        assert!(is_successful_openapi_access_log(
+            r#"INFO:     127.0.0.1:60000 - "GET /openapi.json HTTP/1.1" 200 OK"#
+        ));
+        assert!(is_successful_openapi_access_log(
+            r#"INFO:     127.0.0.1:60000 - "GET /runtime/openapi.json HTTP/1.1" 200 OK"#
+        ));
+        assert!(!is_successful_openapi_access_log(
+            r#"INFO:     127.0.0.1:60000 - "GET /openapi.json HTTP/1.1" 500 Internal Server Error"#
+        ));
+        assert!(!is_successful_openapi_access_log(
+            r#"INFO:     127.0.0.1:60000 - "GET /api/conversations HTTP/1.1" 200 OK"#
+        ));
+    }
+
+    #[test]
+    fn openhands_log_filter_suppresses_empty_conversation_auto_title_traceback() {
+        let mut filter = OpenHandsLogFilter::default();
+        let lines = [
+            "WARNING  Auto-title generation failed for conversation 87b36f15-7bf8-4740-8877-ccd2924d98a8",
+            "Traceback (most recent call last):",
+            "  File \"/path/to/title.py\", line 10, in generate",
+            "ValueError: No user messages found in conversation events",
+            "INFO:     server still healthy",
+        ];
+        let forwarded = lines
+            .iter()
+            .filter(|line| filter.should_forward(line))
+            .copied()
+            .collect::<Vec<_>>();
+
+        assert_eq!(forwarded, vec!["INFO:     server still healthy"]);
     }
 }
