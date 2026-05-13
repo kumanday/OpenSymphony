@@ -128,6 +128,25 @@ repo details behind `init`, see [Configuration](docs/configuration.md).
 For alternate config paths, `debug`, `rehydrate`, packaging, and local operator
 workflows, see [Operations](docs/operations.md).
 
+### Project Memory
+
+OpenSymphony can now preserve completed-issue knowledge before Linear archival.
+The CLI writes private issue capsules under `.opensymphony/memory/` by default,
+indexes them in DuckDB, and can sync selected knowledge into public topic docs:
+
+```bash
+opensymphony memory capture COE-123 --source-file completed.yaml --dry-run
+opensymphony memory capture COE-123 --source-file completed.yaml --write
+opensymphony memory brief COE-123
+opensymphony memory related --area openhands-runtime
+opensymphony memory sync-docs --issues COE-123 --dry-run
+opensymphony linear archive --issues COE-123 --dry-run
+```
+
+`opensymphony init` and `opensymphony update` also install an
+`opensymphony-memory` agent skill so implementation agents know when to consult
+memory and which mutations are reserved for explicit operator requests.
+
 Optional troubleshooting and validation:
 
 ```bash
@@ -190,11 +209,12 @@ installable crates.io package:
 |-----------|----------------|
 | `opensymphony_orchestrator` | Poll loop, scheduling, retries, state machine |
 | `opensymphony_linear` | GraphQL client for orchestrator-side Linear reads |
+| `opensymphony_memory` | Issue capsules, DuckDB memory index, docs sync, archive eligibility |
 | `opensymphony_openhands` | REST/WebSocket client for agent runtime |
 | `opensymphony_workspace` | Workspace lifecycle, hooks, containment |
 | `opensymphony_control` | Control plane API and snapshot derivation |
 | `opensymphony_tui` | FrankenTUI operator client |
-| `opensymphony_cli` | CLI entrypoints: init, run, debug, daemon (demo), tui, doctor, rehydrate |
+| `opensymphony_cli` | CLI entrypoints: init, run, debug, memory, linear archive, daemon (demo), tui, doctor, rehydrate |
 
 ## Deployment Modes
 

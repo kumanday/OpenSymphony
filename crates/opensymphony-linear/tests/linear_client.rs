@@ -174,6 +174,40 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
 }
 
 #[tokio::test]
+async fn issues_by_identifiers_fetches_archived_issue_details() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
+        "fixtures/candidate_issues_page.json"
+    ))])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should work");
+
+    let issues = client
+        .issues_by_identifiers(&["COE-260", "COE-264"])
+        .await
+        .expect("identifier lookup should succeed");
+
+    assert_eq!(issues.len(), 2);
+    let requests = server.recorded_requests().await;
+    assert_eq!(
+        requests[0].body["variables"]["identifiers"],
+        serde_json::json!(["COE-260", "COE-264"])
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("includeArchived: true")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("identifier: { in: $identifiers }")
+    );
+}
+
+#[tokio::test]
 async fn candidate_issues_fetch_all_label_pages() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(include_str!(
@@ -779,6 +813,32 @@ async fn permission_denied_maps_to_tracker_error_category() {
         .expect_err("permission denied response should fail");
 
     assert_eq!(error.category(), TrackerErrorCategory::PermissionDenied);
+}
+
+#[tokio::test]
+async fn archive_issue_uses_issue_archive_mutation() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(
+        r#"{"data":{"issueArchive":{"success":true}}}"#,
+    )])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should work");
+
+    client
+        .archive_issue("COE-123")
+        .await
+        .expect("archive mutation should succeed");
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["variables"]["id"], "COE-123");
+    assert_eq!(requests[0].body["variables"]["trash"], false);
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("issueArchive")
+    );
 }
 
 fn test_config(base_url: &str) -> LinearConfig {

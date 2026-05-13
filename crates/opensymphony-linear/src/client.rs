@@ -12,12 +12,13 @@ use tracing::debug;
 
 use super::error::{GraphqlError, LinearError, ResponseMetadata};
 use super::graphql::{
-    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_COMMENTS_QUERY, ISSUE_INVERSE_RELATIONS_QUERY,
-    ISSUE_LABELS_QUERY, ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueCommentsData,
-    IssueCommentsVariables, IssueInverseRelationsData, IssueInverseRelationsVariables,
-    IssueLabelsData, IssueLabelsVariables, IssueStatesByIdsData, IssueStatesByIdsVariables,
-    IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
-    LinearRelationConnection,
+    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_COMMENTS_QUERY,
+    ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY, ISSUE_STATES_BY_IDS_QUERY,
+    ISSUES_BY_IDENTIFIERS_QUERY, ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables,
+    IssueCommentsData, IssueCommentsVariables, IssueInverseRelationsData,
+    IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueStatesByIdsData,
+    IssueStatesByIdsVariables, IssuesByIdentifiersVariables, IssuesByStateData,
+    IssuesByStateVariables, LinearIssueNode, LinearLabelConnection, LinearRelationConnection,
 };
 use super::normalize::{normalize_issue, normalize_issue_state};
 
@@ -138,6 +139,52 @@ impl LinearClient {
     {
         self.issues_by_state_names_with_archived(state_names, false)
             .await
+    }
+
+    pub async fn issues_by_identifiers<S>(
+        &self,
+        identifiers: &[S],
+    ) -> Result<Vec<TrackerIssue>, LinearError>
+    where
+        S: AsRef<str>,
+    {
+        let identifiers = normalize_strings(identifiers);
+        if identifiers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut after = None;
+        let mut issues = Vec::new();
+
+        loop {
+            let variables = IssuesByIdentifiersVariables {
+                project_slug: self.config.project_slug.clone(),
+                identifiers: identifiers.clone(),
+                first: self.config.page_size,
+                after: after.clone(),
+                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
+            };
+            let response: IssuesByStateData = self
+                .execute_graphql(ISSUES_BY_IDENTIFIERS_QUERY, json!(variables))
+                .await?;
+
+            let page_info = response.issues.page_info;
+            for node in response.issues.nodes {
+                issues.push(normalize_issue(self.expand_issue(node).await?)?);
+            }
+
+            if !page_info.has_next_page {
+                return ensure_complete_issues_by_identifier(&identifiers, issues);
+            }
+
+            after = Some(page_info.end_cursor.ok_or_else(|| {
+                LinearError::InvalidResponse(
+                    "Linear issues-by-identifier page indicated a next page without an end cursor"
+                        .to_string(),
+                )
+            })?);
+        }
     }
 
     async fn issues_by_state_names_with_archived<S>(
@@ -284,6 +331,25 @@ impl LinearClient {
                     "Linear comments page for issue {issue_id} indicated a next page without an end cursor"
                 ))
             })?);
+        }
+    }
+
+    pub async fn archive_issue(&self, issue_id_or_identifier: &str) -> Result<(), LinearError> {
+        let issue_id_or_identifier =
+            normalize_required_string("issue_id_or_identifier", issue_id_or_identifier)?;
+        let variables = IssueArchiveVariables {
+            id: issue_id_or_identifier,
+            trash: false,
+        };
+        let response: IssueArchiveData = self
+            .execute_graphql(ISSUE_ARCHIVE_MUTATION, json!(variables))
+            .await?;
+        if response.issue_archive.success {
+            Ok(())
+        } else {
+            Err(LinearError::InvalidResponse(
+                "Linear issueArchive returned success=false".to_string(),
+            ))
         }
     }
 
@@ -655,6 +721,29 @@ fn normalize_required_string(field_name: &str, value: &str) -> Result<String, Li
 fn contains_workpad_marker(body: &str) -> bool {
     body.lines()
         .any(|line| line.trim_start().starts_with("## Agent Harness Workpad"))
+}
+
+fn ensure_complete_issues_by_identifier(
+    requested_identifiers: &[String],
+    issues: Vec<TrackerIssue>,
+) -> Result<Vec<TrackerIssue>, LinearError> {
+    let mut missing_issue_ids = Vec::new();
+    for identifier in requested_identifiers {
+        if !issues
+            .iter()
+            .any(|issue| issue.identifier.eq_ignore_ascii_case(identifier))
+        {
+            missing_issue_ids.push(identifier.clone());
+        }
+    }
+
+    if missing_issue_ids.is_empty() {
+        Ok(issues)
+    } else {
+        Err(LinearError::MissingIssueIds {
+            issue_ids: missing_issue_ids,
+        })
+    }
 }
 
 fn ensure_complete_issue_states(

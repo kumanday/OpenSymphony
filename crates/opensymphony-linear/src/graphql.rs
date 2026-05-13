@@ -148,6 +148,80 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $a
 }
 "#;
 
+pub(super) const ISSUES_BY_IDENTIFIERS_QUERY: &str = r#"
+query IssuesByIdentifiers($projectSlug: String!, $identifiers: [String!], $first: Int!, $after: String, $relationFirst: Int!, $labelFirst: Int!) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+      identifier: { in: $identifiers }
+    }
+    includeArchived: true
+    first: $first
+    after: $after
+  ) {
+    nodes {
+      id
+      identifier
+      url
+      title
+      description
+      priority
+      createdAt
+      updatedAt
+      state {
+        id
+        name
+        type
+      }
+      parent {
+        id
+      }
+      children(first: 50) {
+        nodes {
+          id
+          identifier
+          state {
+            name
+          }
+        }
+      }
+      labels(first: $labelFirst) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+      inverseRelations(first: $relationFirst) {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            title
+            state {
+              id
+              name
+              type
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"#;
+
 pub(super) const ISSUE_COMMENTS_QUERY: &str = r#"
 query IssueCommentsPage($issueId: ID!, $first: Int!, $after: String) {
   issue(id: $issueId) {
@@ -164,6 +238,14 @@ query IssueCommentsPage($issueId: ID!, $first: Int!, $after: String) {
         endCursor
       }
     }
+  }
+}
+"#;
+
+pub(super) const ISSUE_ARCHIVE_MUTATION: &str = r#"
+mutation IssueArchive($id: String!, $trash: Boolean) {
+  issueArchive(id: $id, trash: $trash) {
+    success
   }
 }
 "#;
@@ -208,6 +290,17 @@ pub(super) struct IssueStatesByIdsVariables {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct IssuesByIdentifiersVariables {
+    pub project_slug: String,
+    pub identifiers: Vec<String>,
+    pub first: usize,
+    pub after: Option<String>,
+    pub relation_first: usize,
+    pub label_first: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct IssueInverseRelationsVariables {
     pub issue_id: String,
     pub first: usize,
@@ -228,6 +321,13 @@ pub(super) struct IssueCommentsVariables {
     pub issue_id: String,
     pub first: usize,
     pub after: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueArchiveVariables {
+    pub id: String,
+    pub trash: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +353,17 @@ pub(super) struct IssueLabelsData {
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueCommentsData {
     pub issue: Option<LinearIssueCommentsNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueArchiveData {
+    pub issue_archive: IssueArchivePayload,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueArchivePayload {
+    pub success: bool,
 }
 
 #[derive(Debug, Deserialize)]

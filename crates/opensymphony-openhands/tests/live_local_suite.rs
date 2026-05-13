@@ -1299,9 +1299,9 @@ fn axum_to_tungstenite(message: AxumMessage) -> TungsteniteMessage {
 fn tungstenite_to_axum(message: TungsteniteMessage) -> Option<AxumMessage> {
     match message {
         TungsteniteMessage::Text(text) => Some(AxumMessage::Text(text.to_string().into())),
-        TungsteniteMessage::Binary(data) => Some(AxumMessage::Binary(data.into())),
-        TungsteniteMessage::Ping(data) => Some(AxumMessage::Ping(data.into())),
-        TungsteniteMessage::Pong(data) => Some(AxumMessage::Pong(data.into())),
+        TungsteniteMessage::Binary(data) => Some(AxumMessage::Binary(data)),
+        TungsteniteMessage::Ping(data) => Some(AxumMessage::Ping(data)),
+        TungsteniteMessage::Pong(data) => Some(AxumMessage::Pong(data)),
         TungsteniteMessage::Close(frame) => Some(AxumMessage::Close(frame.map(|frame| {
             axum::extract::ws::CloseFrame {
                 code: frame.code.into(),

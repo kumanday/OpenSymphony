@@ -175,6 +175,45 @@ the starting template if you want to inspect the checked-in example.
 developer-facing doctor fixture for this repository. It is not the runtime
 config that `opensymphony run` looks for in a target repo.
 
+## Memory Configuration
+
+Project memory is optional and defaults to private local state. If no memory
+config file exists, `opensymphony memory` uses:
+
+```text
+.opensymphony/memory/
+  issues/
+  indexes/
+  memory.duckdb
+```
+
+To customize areas and docs targets, add `opensymphony-memory.yaml` at the
+target repo root:
+
+```yaml
+memory_root: .opensymphony/memory
+visibility: private
+index_path: .opensymphony/memory/memory.duckdb
+markdown_indexes: true
+docs:
+  public_root: docs
+  default_visibility: public
+  deny_private_links: true
+areas:
+  openhands-runtime:
+    title: OpenHands Runtime
+    docs_target: docs/openhands-runtime.md
+    path_hints:
+      - openhands
+      - runtime
+    labels:
+      - runtime
+```
+
+Private memory should stay out of source control. Generated topic docs are
+ordinary repository files that users can review, commit, and publish when they
+choose.
+
 ## OpenHands PR Review
 
 If you opt into OpenHands PR review during `init`, the CLI will try to

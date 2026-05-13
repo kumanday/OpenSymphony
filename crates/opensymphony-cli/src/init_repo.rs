@@ -318,6 +318,9 @@ const AI_REVIEW_CUSTOM_GUIDE_ASSET: TemplateAsset = TemplateAsset {
     path: ".agents/skills/custom-codereview-guide.md",
     kind: AssetKind::Standard,
 };
+const OPENSYMPHONY_MEMORY_SKILL_PATH: &str = ".agents/skills/opensymphony-memory/SKILL.md";
+const OPENSYMPHONY_MEMORY_SKILL_CONTENTS: &str =
+    include_str!("../../opensymphony-memory/assets/opensymphony-memory/SKILL.md");
 
 pub async fn run_command(args: InitArgs) -> ExitCode {
     let stdin = io::stdin();
@@ -370,6 +373,7 @@ where
 
     let mut fetched_assets =
         fetch_template_assets(&client, CORE_TEMPLATE_ASSETS, CORE_TEMPLATE_DIRECTORIES).await?;
+    append_local_template_assets(&mut fetched_assets);
     if ai_review_config.is_some() {
         fetched_assets
             .extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS, &[]).await?);
@@ -1049,7 +1053,18 @@ pub(crate) fn template_fetch_timeout() -> Duration {
 pub(crate) async fn fetch_template_skill_assets(
     client: &Client,
 ) -> Result<Vec<FetchedAsset>, InitCommandError> {
-    fetch_template_assets(client, &[], CORE_TEMPLATE_DIRECTORIES).await
+    let mut assets = fetch_template_assets(client, &[], CORE_TEMPLATE_DIRECTORIES).await?;
+    append_local_template_assets(&mut assets);
+    Ok(assets)
+}
+
+fn append_local_template_assets(assets: &mut Vec<FetchedAsset>) {
+    assets.retain(|asset| asset.path != OPENSYMPHONY_MEMORY_SKILL_PATH);
+    assets.push(FetchedAsset {
+        path: OPENSYMPHONY_MEMORY_SKILL_PATH.to_string(),
+        kind: AssetKind::Standard,
+        contents: OPENSYMPHONY_MEMORY_SKILL_CONTENTS.to_string(),
+    });
 }
 
 fn template_fetch_timeout_from_env(value: Option<&str>) -> Duration {

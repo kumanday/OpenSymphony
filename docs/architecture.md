@@ -122,7 +122,9 @@ This keeps one canonical Linear API surface for the agent path.
 - `opensymphony_workspace`
   - workspace management and manifests
 - `opensymphony_linear`
-  - Linear GraphQL read adapter
+  - Linear GraphQL read adapter and guarded archive mutation
+- `opensymphony_memory`
+  - issue capsules, DuckDB memory index, docs sync, and archive eligibility
 - `opensymphony_openhands`
   - OpenHands transport and session runner
 - `opensymphony_orchestrator`

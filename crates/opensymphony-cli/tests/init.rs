@@ -48,6 +48,12 @@ async fn init_copies_template_files_and_customizes_workflow() {
     );
     assert!(
         repo.path()
+            .join(".agents/skills/opensymphony-memory/SKILL.md")
+            .is_file(),
+        "memory skill should be created from the CLI-bundled template"
+    );
+    assert!(
+        repo.path()
             .join(".agents/skills/commit/scripts/helper.sh")
             .is_file(),
         "skill helper files should be copied recursively"
