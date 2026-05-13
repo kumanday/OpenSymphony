@@ -147,6 +147,10 @@ opensymphony linear archive --issues COE-123 --dry-run
 `opensymphony-memory` agent skill so implementation agents know when to consult
 memory and which mutations are reserved for explicit operator requests.
 
+The memory index uses DuckDB's bundled build so local installs do not need a
+separate DuckDB system package. That choice adds compile time and binary size,
+but keeps the memory database portable for local-first operator workflows.
+
 Optional troubleshooting and validation:
 
 ```bash

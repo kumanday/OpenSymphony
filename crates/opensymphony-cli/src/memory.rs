@@ -475,9 +475,32 @@ async fn archive_in_linear(
     workflow_path: Option<&Path>,
     plan: &ArchivePlan,
 ) -> Result<(), MemoryError> {
+    let client = linear_client_from_workflow(repo_root, workflow_path)?;
+
+    for issue in plan.issues.iter().filter(|issue| issue.eligible) {
+        client
+            .archive_issue(&issue.issue_key)
+            .await
+            .map_err(|error| {
+                MemoryError::Linear(format!("failed to archive {}: {error}", issue.issue_key))
+            })?;
+    }
+    Ok(())
+}
+
+fn linear_client_from_workflow(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+) -> Result<LinearClient, MemoryError> {
     let workflow_path = workflow_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo_root.join("WORKFLOW.md"));
+    if !workflow_path.exists() {
+        return Err(MemoryError::InvalidInput(format!(
+            "{} not found",
+            workflow_path.display()
+        )));
+    }
     let workflow = WorkflowDefinition::load_from_path(&workflow_path)
         .map_err(|error| MemoryError::InvalidInput(format!("failed to load workflow: {error}")))?;
     let workflow_root = workflow_path.parent().unwrap_or(repo_root);
@@ -493,18 +516,8 @@ async fn archive_in_linear(
     linear_config.base_url = resolved.config.tracker.endpoint;
     linear_config.active_states = resolved.config.tracker.active_states;
     linear_config.terminal_states = resolved.config.tracker.terminal_states;
-    let client = LinearClient::new(linear_config)
-        .map_err(|error| MemoryError::InvalidInput(format!("invalid Linear config: {error}")))?;
-
-    for issue in plan.issues.iter().filter(|issue| issue.eligible) {
-        client
-            .archive_issue(&issue.issue_key)
-            .await
-            .map_err(|error| {
-                MemoryError::InvalidInput(format!("failed to archive {}: {error}", issue.issue_key))
-            })?;
-    }
-    Ok(())
+    LinearClient::new(linear_config)
+        .map_err(|error| MemoryError::Linear(format!("invalid Linear config: {error}")))
 }
 
 fn load_optional_source(path: Option<&Path>) -> Result<SourceFile, MemoryError> {
@@ -541,36 +554,11 @@ async fn load_linear_source(
     repo_root: &Path,
     identifiers: &[String],
 ) -> Result<SourceFile, MemoryError> {
-    let workflow_path = repo_root.join("WORKFLOW.md");
-    if !workflow_path.exists() {
-        return Err(MemoryError::InvalidInput(format!(
-            "{} not found",
-            workflow_path.display()
-        )));
-    }
-    let workflow = WorkflowDefinition::load_from_path(&workflow_path)
-        .map_err(|error| MemoryError::InvalidInput(format!("failed to load workflow: {error}")))?;
-    let workflow_root = workflow_path.parent().unwrap_or(repo_root);
-    let resolved = workflow
-        .resolve_with_process_env(workflow_root)
-        .map_err(|error| {
-            MemoryError::InvalidInput(format!("failed to resolve workflow: {error}"))
-        })?;
-    let mut linear_config = LinearConfig::new(
-        resolved.config.tracker.api_key,
-        resolved.config.tracker.project_slug,
-    );
-    linear_config.base_url = resolved.config.tracker.endpoint;
-    linear_config.active_states = resolved.config.tracker.active_states;
-    linear_config.terminal_states = resolved.config.tracker.terminal_states;
-    let client = LinearClient::new(linear_config)
-        .map_err(|error| MemoryError::InvalidInput(format!("invalid Linear config: {error}")))?;
+    let client = linear_client_from_workflow(repo_root, None)?;
     let tracker_issues = client
         .issues_by_identifiers(identifiers)
         .await
-        .map_err(|error| {
-            MemoryError::InvalidInput(format!("Linear issue lookup failed: {error}"))
-        })?;
+        .map_err(|error| MemoryError::Linear(format!("Linear issue lookup failed: {error}")))?;
 
     let mut issues = Vec::new();
     for issue in tracker_issues {
