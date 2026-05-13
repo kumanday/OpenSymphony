@@ -1,0 +1,100 @@
+planningWave: rich-client-hosted-mode
+tasksDir: docs/tasks
+milestones:
+  - "M1: Gateway And Stream Contract"
+  - "M2: Shared Client And Desktop Alpha"
+  - "M3: Task Graph Operations And OpenHands Run UI"
+  - "M4: Collaborative Planning Alpha"
+  - "M5: Web Client And External Gateway"
+  - "M6: Hosted Alpha"
+  - "M7: Provider, Harness, And Model Readiness"
+  - "M8: Hardening And Release Quality"
+tasks:
+  - id: OSYM-700
+    file: docs/tasks/osym-700-current-gateway-inventory-and-vocabulary.md
+  - id: OSYM-701
+    file: docs/tasks/osym-701-gateway-schemas-and-stream-feasibility.md
+  - id: OSYM-702
+    file: docs/tasks/osym-702-gateway-module-capabilities-and-dashboard-snapshot.md
+  - id: OSYM-703
+    file: docs/tasks/osym-703-task-graph-run-detail-file-and-diff-read-apis.md
+  - id: OSYM-704
+    file: docs/tasks/osym-704-event-journal-and-stream-broker.md
+  - id: OSYM-705
+    file: docs/tasks/osym-705-action-receipts-and-initial-run-actions.md
+  - id: OSYM-710
+    file: docs/tasks/osym-710-frontend-workspace-and-shared-schemas.md
+  - id: OSYM-711
+    file: docs/tasks/osym-711-gateway-api-client-transport-adapters-and-reducers.md
+  - id: OSYM-712
+    file: docs/tasks/osym-712-app-shell-dashboard-task-graph-and-run-views.md
+  - id: OSYM-713
+    file: docs/tasks/osym-713-terminal-and-log-renderer-prototype.md
+  - id: OSYM-714
+    file: docs/tasks/osym-714-tauri-shell-and-security-capabilities.md
+  - id: OSYM-715
+    file: docs/tasks/osym-715-desktop-connection-profiles-and-daemon-management.md
+  - id: OSYM-716
+    file: docs/tasks/osym-716-desktop-settings-keychain-and-native-actions.md
+  - id: OSYM-717
+    file: docs/tasks/osym-717-desktop-local-stream-optimization.md
+  - id: OSYM-720
+    file: docs/tasks/osym-720-linear-read-coverage-and-task-graph-cache.md
+  - id: OSYM-721
+    file: docs/tasks/osym-721-linear-milestone-issue-and-sub-issue-mutations.md
+  - id: OSYM-722
+    file: docs/tasks/osym-722-task-graph-editor-and-runtime-overlay-ui.md
+  - id: OSYM-723
+    file: docs/tasks/osym-723-openhands-event-normalization-and-runtime-mirror.md
+  - id: OSYM-724
+    file: docs/tasks/osym-724-runtime-timeline-and-terminal-log-association.md
+  - id: OSYM-725
+    file: docs/tasks/osym-725-diff-validation-approval-and-run-action-views.md
+  - id: OSYM-730
+    file: docs/tasks/osym-730-planning-artifact-schema-and-session-service.md
+  - id: OSYM-731
+    file: docs/tasks/osym-731-repository-linear-and-research-analysis.md
+  - id: OSYM-732
+    file: docs/tasks/osym-732-implementation-plan-generator-stage.md
+  - id: OSYM-733
+    file: docs/tasks/osym-733-milestone-issue-and-sub-issue-compiler.md
+  - id: OSYM-734
+    file: docs/tasks/osym-734-dependency-graph-and-plan-checks.md
+  - id: OSYM-735
+    file: docs/tasks/osym-735-planning-workspace-ui.md
+  - id: OSYM-736
+    file: docs/tasks/osym-736-linear-draft-preview-and-publish-flow.md
+  - id: OSYM-740
+    file: docs/tasks/osym-740-web-app-entry-and-deployment-modes.md
+  - id: OSYM-741
+    file: docs/tasks/osym-741-browser-transport-and-remote-stream-protocols.md
+  - id: OSYM-742
+    file: docs/tasks/osym-742-hosted-auth-placeholders-and-web-parity.md
+  - id: OSYM-750
+    file: docs/tasks/osym-750-hosted-identity-auth-and-rbac.md
+  - id: OSYM-751
+    file: docs/tasks/osym-751-hosted-secrets-and-linear-connections.md
+  - id: OSYM-752
+    file: docs/tasks/osym-752-hosted-workspace-isolation-and-runtime-pool.md
+  - id: OSYM-753
+    file: docs/tasks/osym-753-client-independent-run-persistence.md
+  - id: OSYM-754
+    file: docs/tasks/osym-754-hosted-audit-metrics-and-admin-controls.md
+  - id: OSYM-760
+    file: docs/tasks/osym-760-harness-adapter-and-capability-model.md
+  - id: OSYM-761
+    file: docs/tasks/osym-761-model-and-credential-settings.md
+  - id: OSYM-762
+    file: docs/tasks/osym-762-openhands-subscription-credential-adapter.md
+  - id: OSYM-763
+    file: docs/tasks/osym-763-model-configuration-ui-and-routing-metadata.md
+  - id: OSYM-764
+    file: docs/tasks/osym-764-codex-app-server-prototype-and-benchmarks.md
+  - id: OSYM-765
+    file: docs/tasks/osym-765-codex-approvals-and-cross-harness-routing.md
+  - id: OSYM-770
+    file: docs/tasks/osym-770-contract-and-local-end-to-end-tests.md
+  - id: OSYM-771
+    file: docs/tasks/osym-771-web-hosted-and-performance-tests.md
+  - id: OSYM-772
+    file: docs/tasks/osym-772-security-accessibility-documentation-and-developer-experience.md

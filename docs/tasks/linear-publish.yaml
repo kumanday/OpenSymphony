@@ -1,0 +1,249 @@
+planningWave: rich-client-hosted-mode
+linearProject: opensymphony-bootstrap-e7b957855cb7
+publishedAt: "2026-05-11T17:15:45-05:00"
+milestones:
+  "M1: Gateway And Stream Contract":
+    milestoneId: c32b5191-7349-4f30-bd46-6340af6da3e5
+    name: "M1: Gateway And Stream Contract"
+  "M2: Shared Client And Desktop Alpha":
+    milestoneId: dce95c78-504e-42d0-823f-227e68fb395b
+    name: "M2: Shared Client And Desktop Alpha"
+  "M3: Task Graph Operations And OpenHands Run UI":
+    milestoneId: 1b243af1-5678-431b-a66e-acae0b1ac2f5
+    name: "M3: Task Graph Operations And OpenHands Run UI"
+  "M4: Collaborative Planning Alpha":
+    milestoneId: 806afecc-4a9f-4862-8330-6ce70d606058
+    name: "M4: Collaborative Planning Alpha"
+  "M5: Web Client And External Gateway":
+    milestoneId: 58d8ef29-ea13-4cd2-b7a5-3768070e8a01
+    name: "M5: Web Client And External Gateway"
+  "M6: Hosted Alpha":
+    milestoneId: 4a82a4eb-1782-47a1-8a47-7afb0210cb76
+    name: "M6: Hosted Alpha"
+  "M7: Provider, Harness, And Model Readiness":
+    milestoneId: 5f7c2983-86fb-4ea3-8c91-de017a8698a3
+    name: "M7: Provider, Harness, And Model Readiness"
+  "M8: Hardening And Release Quality":
+    milestoneId: 0b105fe4-91be-42c2-98b3-75895d4de095
+    name: "M8: Hardening And Release Quality"
+tasks:
+  OSYM-700:
+    issue: COE-389
+    issueId: fb78e114-fcfa-4630-a8d6-6e37c9fb9e76
+    url: https://linear.app/trilogy-ai-coe/issue/COE-389/current-gateway-inventory-and-vocabulary
+    file: docs/tasks/osym-700-current-gateway-inventory-and-vocabulary.md
+  OSYM-701:
+    issue: COE-390
+    issueId: 62d48ff7-0899-429b-be96-6961c8cf3d92
+    url: https://linear.app/trilogy-ai-coe/issue/COE-390/gateway-schemas-and-stream-feasibility
+    file: docs/tasks/osym-701-gateway-schemas-and-stream-feasibility.md
+  OSYM-702:
+    issue: COE-391
+    issueId: ac6db1c5-cfee-48bd-b025-6007a81b24b2
+    url: https://linear.app/trilogy-ai-coe/issue/COE-391/gateway-module-capabilities-and-dashboard-snapshot
+    file: docs/tasks/osym-702-gateway-module-capabilities-and-dashboard-snapshot.md
+  OSYM-703:
+    issue: COE-392
+    issueId: d68519a7-73f5-4fe6-a683-1ee74240950f
+    url: https://linear.app/trilogy-ai-coe/issue/COE-392/task-graph-run-detail-file-and-diff-read-apis
+    file: docs/tasks/osym-703-task-graph-run-detail-file-and-diff-read-apis.md
+  OSYM-704:
+    issue: COE-393
+    issueId: a8fb930c-15ce-4fa3-910b-f29b7ad13f48
+    url: https://linear.app/trilogy-ai-coe/issue/COE-393/event-journal-and-stream-broker
+    file: docs/tasks/osym-704-event-journal-and-stream-broker.md
+  OSYM-705:
+    issue: COE-396
+    issueId: 4b0b2242-1290-4ec7-b121-e6f511c3cb35
+    url: https://linear.app/trilogy-ai-coe/issue/COE-396/action-receipts-and-initial-run-actions
+    file: docs/tasks/osym-705-action-receipts-and-initial-run-actions.md
+  OSYM-710:
+    issue: COE-394
+    issueId: 2d58dc8d-066a-4bfc-80ed-03d520840efc
+    url: https://linear.app/trilogy-ai-coe/issue/COE-394/frontend-workspace-and-shared-schemas
+    file: docs/tasks/osym-710-frontend-workspace-and-shared-schemas.md
+  OSYM-711:
+    issue: COE-397
+    issueId: db660982-4ee6-4add-86c7-835cc0e32a72
+    url: https://linear.app/trilogy-ai-coe/issue/COE-397/gateway-api-client-transport-adapters-and-reducers
+    file: docs/tasks/osym-711-gateway-api-client-transport-adapters-and-reducers.md
+  OSYM-712:
+    issue: COE-402
+    issueId: 406107c4-99f7-4993-ae54-5ba822fab6f8
+    url: https://linear.app/trilogy-ai-coe/issue/COE-402/app-shell-dashboard-task-graph-and-run-views
+    file: docs/tasks/osym-712-app-shell-dashboard-task-graph-and-run-views.md
+  OSYM-713:
+    issue: COE-403
+    issueId: 56889856-b8da-49a6-9a14-8ac557711a61
+    url: https://linear.app/trilogy-ai-coe/issue/COE-403/terminal-and-log-renderer-prototype
+    file: docs/tasks/osym-713-terminal-and-log-renderer-prototype.md
+  OSYM-714:
+    issue: COE-398
+    issueId: 9db3e469-5e68-407b-87c5-100d98d6279d
+    url: https://linear.app/trilogy-ai-coe/issue/COE-398/tauri-shell-and-security-capabilities
+    file: docs/tasks/osym-714-tauri-shell-and-security-capabilities.md
+  OSYM-715:
+    issue: COE-404
+    issueId: fba05f8d-c097-4eb3-919f-a8e93a6a37ec
+    url: https://linear.app/trilogy-ai-coe/issue/COE-404/desktop-connection-profiles-and-daemon-management
+    file: docs/tasks/osym-715-desktop-connection-profiles-and-daemon-management.md
+  OSYM-716:
+    issue: COE-409
+    issueId: 4bc24384-e4d5-4fab-8619-de34cb160ae7
+    url: https://linear.app/trilogy-ai-coe/issue/COE-409/desktop-settings-keychain-and-native-actions
+    file: docs/tasks/osym-716-desktop-settings-keychain-and-native-actions.md
+  OSYM-717:
+    issue: COE-410
+    issueId: 470d2975-0997-482e-9cc0-72fa4bbdeef8
+    url: https://linear.app/trilogy-ai-coe/issue/COE-410/desktop-local-stream-optimization
+    file: docs/tasks/osym-717-desktop-local-stream-optimization.md
+  OSYM-720:
+    issue: COE-399
+    issueId: 2670cf15-011b-4c1f-9c85-4fb100d1d164
+    url: https://linear.app/trilogy-ai-coe/issue/COE-399/linear-read-coverage-and-task-graph-cache
+    file: docs/tasks/osym-720-linear-read-coverage-and-task-graph-cache.md
+  OSYM-721:
+    issue: COE-405
+    issueId: bce6603c-428a-48ad-b747-60d726d95159
+    url: https://linear.app/trilogy-ai-coe/issue/COE-405/linear-milestone-issue-and-sub-issue-mutations
+    file: docs/tasks/osym-721-linear-milestone-issue-and-sub-issue-mutations.md
+  OSYM-722:
+    issue: COE-411
+    issueId: 88c47ea2-53b9-41e0-ba55-822a9686c27c
+    url: https://linear.app/trilogy-ai-coe/issue/COE-411/task-graph-editor-and-runtime-overlay-ui
+    file: docs/tasks/osym-722-task-graph-editor-and-runtime-overlay-ui.md
+  OSYM-723:
+    issue: COE-400
+    issueId: d5d429dc-ea53-4e03-99d5-3ee9b8297246
+    url: https://linear.app/trilogy-ai-coe/issue/COE-400/openhands-event-normalization-and-runtime-mirror
+    file: docs/tasks/osym-723-openhands-event-normalization-and-runtime-mirror.md
+  OSYM-724:
+    issue: COE-412
+    issueId: e1447362-00ca-4bfb-9fea-b657090a11bc
+    url: https://linear.app/trilogy-ai-coe/issue/COE-412/runtime-timeline-and-terminallog-association
+    file: docs/tasks/osym-724-runtime-timeline-and-terminal-log-association.md
+  OSYM-725:
+    issue: COE-414
+    issueId: bb5c40bc-107a-4ad6-be12-897705be86b5
+    url: https://linear.app/trilogy-ai-coe/issue/COE-414/diff-validation-approval-and-run-action-views
+    file: docs/tasks/osym-725-diff-validation-approval-and-run-action-views.md
+  OSYM-730:
+    issue: COE-395
+    issueId: f95c6539-7582-44b8-a508-5822c2346033
+    url: https://linear.app/trilogy-ai-coe/issue/COE-395/planning-artifact-schema-and-session-service
+    file: docs/tasks/osym-730-planning-artifact-schema-and-session-service.md
+  OSYM-731:
+    issue: COE-406
+    issueId: 41de4696-4ceb-41a2-87f9-d9559dd9cf90
+    url: https://linear.app/trilogy-ai-coe/issue/COE-406/repository-linear-and-research-analysis
+    file: docs/tasks/osym-731-repository-linear-and-research-analysis.md
+  OSYM-732:
+    issue: COE-413
+    issueId: e4571c1c-3766-4c67-94fd-33811dbbbf87
+    url: https://linear.app/trilogy-ai-coe/issue/COE-413/implementation-plan-generator-stage
+    file: docs/tasks/osym-732-implementation-plan-generator-stage.md
+  OSYM-733:
+    issue: COE-415
+    issueId: e3ae8518-c2f8-4a55-a59e-f83d94e37841
+    url: https://linear.app/trilogy-ai-coe/issue/COE-415/milestone-issue-and-sub-issue-compiler
+    file: docs/tasks/osym-733-milestone-issue-and-sub-issue-compiler.md
+  OSYM-734:
+    issue: COE-416
+    issueId: 0ca59c38-afcd-4130-ab1b-f8b075009c3a
+    url: https://linear.app/trilogy-ai-coe/issue/COE-416/dependency-graph-and-plan-checks
+    file: docs/tasks/osym-734-dependency-graph-and-plan-checks.md
+  OSYM-735:
+    issue: COE-417
+    issueId: 0539f50c-e861-435a-94de-94b0587bedb7
+    url: https://linear.app/trilogy-ai-coe/issue/COE-417/planning-workspace-ui
+    file: docs/tasks/osym-735-planning-workspace-ui.md
+  OSYM-736:
+    issue: COE-418
+    issueId: b360641b-ba85-407e-99ba-48e7b2caa795
+    url: https://linear.app/trilogy-ai-coe/issue/COE-418/linear-draft-preview-and-publish-flow
+    file: docs/tasks/osym-736-linear-draft-preview-and-publish-flow.md
+  OSYM-740:
+    issue: COE-401
+    issueId: 3882ea72-6fb3-47f8-b39c-391173a86c95
+    url: https://linear.app/trilogy-ai-coe/issue/COE-401/web-app-entry-and-deployment-modes
+    file: docs/tasks/osym-740-web-app-entry-and-deployment-modes.md
+  OSYM-741:
+    issue: COE-407
+    issueId: f37e5a12-e3bb-4f1d-89e4-8cc04eaaaa2a
+    url: https://linear.app/trilogy-ai-coe/issue/COE-407/browser-transport-and-remote-stream-protocols
+    file: docs/tasks/osym-741-browser-transport-and-remote-stream-protocols.md
+  OSYM-742:
+    issue: COE-419
+    issueId: d4170095-6d55-4c36-bdc6-2e3f9d434dbe
+    url: https://linear.app/trilogy-ai-coe/issue/COE-419/hosted-auth-placeholders-and-web-parity
+    file: docs/tasks/osym-742-hosted-auth-placeholders-and-web-parity.md
+  OSYM-750:
+    issue: COE-420
+    issueId: 862b20f6-df35-4721-9530-c242b028987d
+    url: https://linear.app/trilogy-ai-coe/issue/COE-420/hosted-identity-auth-and-rbac
+    file: docs/tasks/osym-750-hosted-identity-auth-and-rbac.md
+  OSYM-751:
+    issue: COE-421
+    issueId: 43dc1741-824b-4ac1-af75-fc9b97428d97
+    url: https://linear.app/trilogy-ai-coe/issue/COE-421/hosted-secrets-and-linear-connections
+    file: docs/tasks/osym-751-hosted-secrets-and-linear-connections.md
+  OSYM-752:
+    issue: COE-422
+    issueId: 31ea6749-c5cd-4828-aa45-8763f4cb01ac
+    url: https://linear.app/trilogy-ai-coe/issue/COE-422/hosted-workspace-isolation-and-runtime-pool
+    file: docs/tasks/osym-752-hosted-workspace-isolation-and-runtime-pool.md
+  OSYM-753:
+    issue: COE-424
+    issueId: 7db21ecd-dd54-4547-aec6-c490f91a597b
+    url: https://linear.app/trilogy-ai-coe/issue/COE-424/client-independent-run-persistence
+    file: docs/tasks/osym-753-client-independent-run-persistence.md
+  OSYM-754:
+    issue: COE-427
+    issueId: 2684469b-4ea6-465f-be81-11a2737c3d4f
+    url: https://linear.app/trilogy-ai-coe/issue/COE-427/hosted-audit-metrics-and-admin-controls
+    file: docs/tasks/osym-754-hosted-audit-metrics-and-admin-controls.md
+  OSYM-760:
+    issue: COE-408
+    issueId: 0be5de05-7f59-4217-a985-5a3787dde922
+    url: https://linear.app/trilogy-ai-coe/issue/COE-408/harness-adapter-and-capability-model
+    file: docs/tasks/osym-760-harness-adapter-and-capability-model.md
+  OSYM-761:
+    issue: COE-423
+    issueId: 8e3d1abf-acef-4465-8fa2-08361b25bb6f
+    url: https://linear.app/trilogy-ai-coe/issue/COE-423/model-and-credential-settings
+    file: docs/tasks/osym-761-model-and-credential-settings.md
+  OSYM-762:
+    issue: COE-425
+    issueId: 548c05c1-1b30-4d67-8f53-3c9a0074d2a4
+    url: https://linear.app/trilogy-ai-coe/issue/COE-425/openhands-subscription-credential-adapter
+    file: docs/tasks/osym-762-openhands-subscription-credential-adapter.md
+  OSYM-763:
+    issue: COE-428
+    issueId: bf2051cd-29f4-426f-bc6b-f1f6e68304c1
+    url: https://linear.app/trilogy-ai-coe/issue/COE-428/model-configuration-ui-and-routing-metadata
+    file: docs/tasks/osym-763-model-configuration-ui-and-routing-metadata.md
+  OSYM-764:
+    issue: COE-426
+    issueId: d545f1dc-040a-4951-96e7-84f021740cb2
+    url: https://linear.app/trilogy-ai-coe/issue/COE-426/codex-app-server-prototype-and-benchmarks
+    file: docs/tasks/osym-764-codex-app-server-prototype-and-benchmarks.md
+  OSYM-765:
+    issue: COE-429
+    issueId: 58baa8e2-9915-404d-9cda-1164ac2190e0
+    url: https://linear.app/trilogy-ai-coe/issue/COE-429/codex-approvals-and-cross-harness-routing
+    file: docs/tasks/osym-765-codex-approvals-and-cross-harness-routing.md
+  OSYM-770:
+    issue: COE-430
+    issueId: 73e4816c-758d-46b9-a598-3a9606961370
+    url: https://linear.app/trilogy-ai-coe/issue/COE-430/contract-and-local-end-to-end-tests
+    file: docs/tasks/osym-770-contract-and-local-end-to-end-tests.md
+  OSYM-771:
+    issue: COE-431
+    issueId: 7f96a927-765f-44e0-81a0-ede032aa4b92
+    url: https://linear.app/trilogy-ai-coe/issue/COE-431/web-hosted-and-performance-tests
+    file: docs/tasks/osym-771-web-hosted-and-performance-tests.md
+  OSYM-772:
+    issue: COE-432
+    issueId: 6a83c438-df12-49b6-b87f-585f02cb879a
+    url: https://linear.app/trilogy-ai-coe/issue/COE-432/security-accessibility-documentation-and-developer-experience
+    file: docs/tasks/osym-772-security-accessibility-documentation-and-developer-experience.md
