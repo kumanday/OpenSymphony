@@ -1,5 +1,13 @@
-use std::{fs, process::Command};
+use std::{
+    fs,
+    io::{Read, Write},
+    net::TcpListener,
+    process::Command,
+    sync::{Arc, Mutex},
+    thread,
+};
 
+use duckdb::Connection;
 use tempfile::TempDir;
 
 #[test]
@@ -220,6 +228,64 @@ fn memory_capture_discover_github_reports_missing_gh() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("gh CLI was not found"));
 }
 
+#[test]
+fn linear_archive_write_marks_successes_before_reporting_partial_failure() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    fs::write(repo.path().join("source.yaml"), sample_two_issue_source())
+        .expect("source evidence should write");
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "capture",
+                "--issues",
+                "COE-123,COE-124",
+                "--source-file",
+                "source.yaml",
+                "--write",
+            ],
+        ),
+        "capture two issues",
+    );
+
+    let server = TinyGraphqlServer::start([
+        r#"{"data":{"issueArchive":{"success":true}}}"#,
+        r#"{"data":{"issueArchive":{"success":false}}}"#,
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let archive = run(
+        repo.path(),
+        [
+            "linear",
+            "archive",
+            "--issues",
+            "COE-123,COE-124",
+            "--write",
+        ],
+    );
+
+    assert_failure(&archive, "partial archive failure");
+    assert!(String::from_utf8_lossy(&archive.stdout).contains("Archived 1 Linear issue(s)."));
+    assert!(String::from_utf8_lossy(&archive.stderr).contains("failed to archive COE-124"));
+    assert_eq!(
+        archive_status(repo.path(), "COE-123"),
+        "archived",
+        "successful mutation should be recorded locally",
+    );
+    assert_eq!(
+        archive_status(repo.path(), "COE-124"),
+        "not_archived",
+        "failed mutation should remain eligible for retry",
+    );
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].contains("\"id\":\"COE-123\""));
+    assert!(requests[1].contains("\"id\":\"COE-124\""));
+}
+
 fn run<const N: usize>(repo: &std::path::Path, args: [&str; N]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .args(args)
@@ -282,6 +348,120 @@ areas:
     .expect("memory config should write");
 }
 
+fn write_workflow(repo: &std::path::Path, linear_endpoint: &str) {
+    fs::write(
+        repo.join("WORKFLOW.md"),
+        format!(
+            r#"---
+tracker:
+  kind: linear
+  endpoint: {linear_endpoint}
+  api_key: test-token
+  project_slug: test-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+---
+{{{{ issue.identifier }}}}
+"#
+        ),
+    )
+    .expect("workflow should write");
+}
+
+fn archive_status(repo: &std::path::Path, issue_key: &str) -> String {
+    let connection = Connection::open(repo.join(".opensymphony/memory/memory.duckdb"))
+        .expect("memory index should open");
+    connection
+        .query_row(
+            "SELECT archive_status FROM issues WHERE issue_key = ?",
+            [issue_key],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("archive status should exist")
+}
+
+struct TinyGraphqlServer {
+    base_url: String,
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl TinyGraphqlServer {
+    fn start<const N: usize>(responses: [&'static str; N]) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded_requests = Arc::clone(&requests);
+        thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().expect("request should connect");
+                let body = read_http_body(&mut stream);
+                recorded_requests
+                    .lock()
+                    .expect("requests lock should be healthy")
+                    .push(body);
+                let http_response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response.len(),
+                    response
+                );
+                stream
+                    .write_all(http_response.as_bytes())
+                    .expect("response should write");
+            }
+        });
+
+        Self { base_url, requests }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .expect("requests lock should be healthy")
+            .clone()
+    }
+}
+
+fn read_http_body(stream: &mut std::net::TcpStream) -> String {
+    let mut buffer = Vec::new();
+    let mut chunk = [0; 1024];
+    loop {
+        let read = stream.read(&mut chunk).expect("request should read");
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let headers_end = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|position| position + 4)
+        .expect("headers should end");
+    let headers = String::from_utf8_lossy(&buffer[..headers_end]);
+    let content_length = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().expect("content length"))
+        })
+        .unwrap_or(0);
+    let already_read = buffer.len() - headers_end;
+    let remaining = content_length.saturating_sub(already_read);
+    if remaining > 0 {
+        let mut body_tail = vec![0; remaining];
+        stream
+            .read_exact(&mut body_tail)
+            .expect("request body should read");
+        buffer.extend_from_slice(&body_tail);
+    }
+    String::from_utf8_lossy(&buffer[headers_end..]).to_string()
+}
+
 fn sample_source() -> &'static str {
     r#"
 issues:
@@ -313,5 +493,42 @@ prs:
       - reviewer: reviewer
         state: APPROVED
         disposition: Reconnect ordering looked correct.
+"#
+}
+
+fn sample_two_issue_source() -> &'static str {
+    r#"
+issues:
+  - identifier: COE-123
+    title: First archive candidate
+    url: https://linear.app/example/issue/COE-123
+    description: First completed issue.
+    state: Done
+    labels:
+      - runtime
+    linked_prs:
+      - 456
+  - identifier: COE-124
+    title: Second archive candidate
+    url: https://linear.app/example/issue/COE-124
+    description: Second completed issue.
+    state: Done
+    labels:
+      - runtime
+    linked_prs:
+      - 457
+prs:
+  - number: 456
+    title: COE-123 first archive candidate
+    url: https://github.com/example/repo/pull/456
+    changed_files:
+      - path: crates/opensymphony-openhands/src/client.rs
+        change_kind: modified
+  - number: 457
+    title: COE-124 second archive candidate
+    url: https://github.com/example/repo/pull/457
+    changed_files:
+      - path: crates/opensymphony-openhands/src/client.rs
+        change_kind: modified
 "#
 }

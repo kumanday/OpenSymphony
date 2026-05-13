@@ -238,8 +238,8 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         MemoryCommand::Capture(args) => run_capture(&repo_root, &config, args).await,
         MemoryCommand::SyncDocs(args) => run_sync_docs(&config, args),
         MemoryCommand::Status(args) => run_status(&config, args),
-        MemoryCommand::Show(args) => run_show(&config, args, false),
-        MemoryCommand::Brief(args) => run_show(&config, args, true),
+        MemoryCommand::Show(args) => run_show(&config, args, ShowMode::Full),
+        MemoryCommand::Brief(args) => run_show(&config, args, ShowMode::Brief),
         MemoryCommand::Search(args) => run_search(&config, args),
         MemoryCommand::Related(args) => run_related(&config, args),
         MemoryCommand::Docs(args) => run_docs(&config, args),
@@ -355,17 +355,26 @@ fn run_status(config: &MemoryConfig, args: StatusArgs) -> Result<(), MemoryError
     Ok(())
 }
 
-fn run_show(config: &MemoryConfig, args: ShowArgs, compact: bool) -> Result<(), MemoryError> {
-    if compact {
-        println!("{}", brief(config, &args.issue)?);
-        return Ok(());
+#[derive(Debug, Clone, Copy)]
+enum ShowMode {
+    Full,
+    Brief,
+}
+
+fn run_show(config: &MemoryConfig, args: ShowArgs, mode: ShowMode) -> Result<(), MemoryError> {
+    match mode {
+        ShowMode::Brief => {
+            println!("{}", brief(config, &args.issue)?);
+        }
+        ShowMode::Full => {
+            let path = config.issue_capsule_path(&args.issue);
+            let contents = fs::read_to_string(&path).map_err(|source| MemoryError::ReadFile {
+                path: path.clone(),
+                source,
+            })?;
+            println!("{contents}");
+        }
     }
-    let path = config.issue_capsule_path(&args.issue);
-    let contents = fs::read_to_string(&path).map_err(|source| MemoryError::ReadFile {
-        path: path.clone(),
-        source,
-    })?;
-    println!("{contents}");
     Ok(())
 }
 
@@ -455,37 +464,50 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         println!("Dry run only. Re-run with `--write` to archive eligible Linear issues.");
         return Ok(());
     }
-    archive_in_linear(&repo_root, args.workflow.as_deref(), &plan).await?;
-    let archived = plan
-        .issues
-        .iter()
-        .filter(|issue| issue.eligible)
-        .map(|issue| issue.issue_key.clone())
-        .collect::<Vec<_>>();
-    mark_archived(&config, &archived)?;
-    println!("Archived {} Linear issue(s).", archived.len());
-    for issue_key in archived {
+    let report = archive_in_linear(&repo_root, args.workflow.as_deref(), &plan).await?;
+    if !report.archived.is_empty() {
+        mark_archived(&config, &report.archived)?;
+    }
+    println!("Archived {} Linear issue(s).", report.archived.len());
+    for issue_key in &report.archived {
         println!("- {issue_key}");
     }
+    if !report.failures.is_empty() {
+        for failure in &report.failures {
+            eprintln!("- {failure}");
+        }
+        return Err(MemoryError::Linear(format!(
+            "archived {} issue(s), failed to archive {} issue(s)",
+            report.archived.len(),
+            report.failures.len()
+        )));
+    }
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct LinearArchiveReport {
+    archived: Vec<String>,
+    failures: Vec<String>,
 }
 
 async fn archive_in_linear(
     repo_root: &Path,
     workflow_path: Option<&Path>,
     plan: &ArchivePlan,
-) -> Result<(), MemoryError> {
+) -> Result<LinearArchiveReport, MemoryError> {
     let client = linear_client_from_workflow(repo_root, workflow_path)?;
+    let mut report = LinearArchiveReport::default();
 
     for issue in plan.issues.iter().filter(|issue| issue.eligible) {
-        client
-            .archive_issue(&issue.issue_key)
-            .await
-            .map_err(|error| {
-                MemoryError::Linear(format!("failed to archive {}: {error}", issue.issue_key))
-            })?;
+        match client.archive_issue(&issue.issue_key).await {
+            Ok(()) => report.archived.push(issue.issue_key.clone()),
+            Err(error) => report
+                .failures
+                .push(format!("failed to archive {}: {error}", issue.issue_key)),
+        }
     }
-    Ok(())
+    Ok(report)
 }
 
 fn linear_client_from_workflow(
@@ -540,7 +562,7 @@ async fn load_capture_source(
     }
 
     match load_linear_source(repo_root, &selection.identifiers).await {
-        Ok(source) => Ok((source, Vec::new())),
+        Ok(result) => Ok(result),
         Err(error) => Ok((
             SourceFile::default(),
             vec![format!(
@@ -553,7 +575,7 @@ async fn load_capture_source(
 async fn load_linear_source(
     repo_root: &Path,
     identifiers: &[String],
-) -> Result<SourceFile, MemoryError> {
+) -> Result<(SourceFile, Vec<String>), MemoryError> {
     let client = linear_client_from_workflow(repo_root, None)?;
     let tracker_issues = client
         .issues_by_identifiers(identifiers)
@@ -561,15 +583,28 @@ async fn load_linear_source(
         .map_err(|error| MemoryError::Linear(format!("Linear issue lookup failed: {error}")))?;
 
     let mut issues = Vec::new();
+    let mut warnings = Vec::new();
     for issue in tracker_issues {
-        let workpad = client.fetch_workpad_comment(&issue.id).await.ok().flatten();
+        let workpad = match client.fetch_workpad_comment(&issue.id).await {
+            Ok(workpad) => workpad,
+            Err(error) => {
+                warnings.push(format!(
+                    "Linear workpad comment fetch failed for {}: {error}",
+                    issue.identifier
+                ));
+                None
+            }
+        };
         issues.push(issue_evidence_from_tracker(issue, workpad));
     }
 
-    Ok(SourceFile {
-        issues,
-        ..SourceFile::default()
-    })
+    Ok((
+        SourceFile {
+            issues,
+            ..SourceFile::default()
+        },
+        warnings,
+    ))
 }
 
 fn issue_evidence_from_tracker(

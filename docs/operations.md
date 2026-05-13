@@ -150,7 +150,9 @@ opensymphony memory lint --public-docs
 `.opensymphony/memory/memory.duckdb`, and refreshes markdown indexes when
 enabled. The index is built with DuckDB's bundled native library so operators
 do not need to install DuckDB separately, at the cost of heavier Rust compile
-time and a larger binary. It does not archive Linear issues.
+time and a larger binary. Treat that native dependency as part of the hosted
+deployment threat model before enabling memory in a multi-tenant service. It
+does not archive Linear issues.
 
 Linear archival is a separate command and is guarded by captured memory:
 
