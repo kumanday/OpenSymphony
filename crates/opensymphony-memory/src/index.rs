@@ -617,24 +617,70 @@ fn render_diff(before: &str, after: &str, path: &Path) -> String {
     if before == after {
         return format!("diff -- {}\n(no changes)\n", path.display());
     }
+    let operations = line_diff(before, after);
     let mut diff = String::new();
+    diff.push_str(&format!("diff -- {}\n", path.display()));
     diff.push_str(&format!("--- {}\n+++ {}\n", path.display(), path.display()));
     diff.push_str("@@\n");
-    if !before.is_empty() {
-        for line in before.lines().take(80) {
-            diff.push_str(&format!("-{line}\n"));
-        }
-        if before.lines().count() > 80 {
-            diff.push_str("-...\n");
+    const MAX_DIFF_LINES: usize = 240;
+    for operation in operations.iter().take(MAX_DIFF_LINES) {
+        match operation {
+            DiffOperation::Unchanged(line) => diff.push_str(&format!(" {line}\n")),
+            DiffOperation::Removed(line) => diff.push_str(&format!("-{line}\n")),
+            DiffOperation::Added(line) => diff.push_str(&format!("+{line}\n")),
         }
     }
-    for line in after.lines().take(120) {
-        diff.push_str(&format!("+{line}\n"));
-    }
-    if after.lines().count() > 120 {
-        diff.push_str("+...\n");
+    if operations.len() > MAX_DIFF_LINES {
+        diff.push_str("... diff truncated ...\n");
     }
     diff
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiffOperation<'a> {
+    Unchanged(&'a str),
+    Removed(&'a str),
+    Added(&'a str),
+}
+
+fn line_diff<'a>(before: &'a str, after: &'a str) -> Vec<DiffOperation<'a>> {
+    let before_lines = before.lines().collect::<Vec<_>>();
+    let after_lines = after.lines().collect::<Vec<_>>();
+    let mut lengths = vec![vec![0usize; after_lines.len() + 1]; before_lines.len() + 1];
+
+    for before_index in (0..before_lines.len()).rev() {
+        for after_index in (0..after_lines.len()).rev() {
+            lengths[before_index][after_index] =
+                if before_lines[before_index] == after_lines[after_index] {
+                    lengths[before_index + 1][after_index + 1] + 1
+                } else {
+                    lengths[before_index + 1][after_index]
+                        .max(lengths[before_index][after_index + 1])
+                };
+        }
+    }
+
+    let mut operations = Vec::new();
+    let mut before_index = 0;
+    let mut after_index = 0;
+    while before_index < before_lines.len() && after_index < after_lines.len() {
+        if before_lines[before_index] == after_lines[after_index] {
+            operations.push(DiffOperation::Unchanged(before_lines[before_index]));
+            before_index += 1;
+            after_index += 1;
+        } else if lengths[before_index + 1][after_index]
+            >= lengths[before_index][after_index + 1]
+        {
+            operations.push(DiffOperation::Removed(before_lines[before_index]));
+            before_index += 1;
+        } else {
+            operations.push(DiffOperation::Added(after_lines[after_index]));
+            after_index += 1;
+        }
+    }
+    operations.extend(before_lines[before_index..].iter().map(|line| DiffOperation::Removed(line)));
+    operations.extend(after_lines[after_index..].iter().map(|line| DiffOperation::Added(line)));
+    operations
 }
 
 fn all_known_areas(config: &MemoryConfig, issues: &[IndexedIssue]) -> Vec<AreaConfig> {

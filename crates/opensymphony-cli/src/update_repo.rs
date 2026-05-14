@@ -123,6 +123,7 @@ struct SkillSyncReport {
     created: Vec<String>,
     updated: Vec<String>,
     unchanged_count: usize,
+    replaced_template_memory_skill: bool,
 }
 
 pub async fn run_command(args: UpdateArgs) -> ExitCode {
@@ -168,6 +169,9 @@ async fn run_update(args: UpdateArgs) -> Result<(), UpdateCommandError> {
     print_paths("Created", &report.created);
     print_paths("Updated", &report.updated);
     println!("Unchanged: {} file(s)", report.unchanged_count);
+    if report.replaced_template_memory_skill {
+        println!("{}", init_repo::memory_skill_override_warning());
+    }
     println!("OpenSymphony update complete.");
     Ok(())
 }
@@ -273,8 +277,11 @@ async fn sync_template_skills(
     target_repo: &Path,
     client: &Client,
 ) -> Result<SkillSyncReport, UpdateCommandError> {
-    let assets = init_repo::fetch_template_skill_assets(client).await?;
-    let mut report = SkillSyncReport::default();
+    let (assets, local_template_report) = init_repo::fetch_template_skill_assets(client).await?;
+    let mut report = SkillSyncReport {
+        replaced_template_memory_skill: local_template_report.replaced_memory_skill,
+        ..SkillSyncReport::default()
+    };
 
     for asset in assets {
         let destination = target_repo.join(&asset.path);

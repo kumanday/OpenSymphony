@@ -579,6 +579,36 @@ mod tests {
     }
 
     #[test]
+    fn docs_sync_diff_is_line_level_not_full_replacement() {
+        let diff = render_diff(
+            "alpha\nshared\nold\nomega\n",
+            "alpha\nshared\nnew\nomega\n",
+            Path::new("docs/topic.md"),
+        );
+
+        assert!(diff.contains("\n alpha\n"));
+        assert!(diff.contains("\n shared\n"));
+        assert!(diff.contains("\n-old\n"));
+        assert!(diff.contains("\n+new\n"));
+        assert!(!diff.contains("\n-alpha\n"));
+        assert!(!diff.contains("\n-omega\n"));
+    }
+
+    #[test]
+    fn docs_sync_diff_for_new_docs_does_not_emit_fake_deletes() {
+        let diff = render_diff("", "alpha\nbeta\n", Path::new("docs/topic.md"));
+
+        assert!(diff.contains("\n+alpha\n"));
+        assert!(diff.contains("\n+beta\n"));
+        assert!(
+            !diff
+                .lines()
+                .any(|line| line.starts_with('-') && !line.starts_with("--- ")),
+            "new doc diff should not include deleted lines: {diff}",
+        );
+    }
+
+    #[test]
     fn archive_blocks_missing_memory_unless_forced() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
