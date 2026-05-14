@@ -1,20 +1,26 @@
 fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
-    let connection = open_index(config)?;
+    let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
         path: config.index_path.clone(),
         source,
     })?;
+    let transaction = connection
+        .transaction()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
     for issue_plan in &plan.selected {
         let issue_key = normalize_issue_key(&issue_plan.issue.identifier);
         let body = read_to_string(&issue_plan.capsule_path)?;
         let labels_json = serde_json::to_string(&issue_plan.issue.labels)?;
-        connection
+        transaction
             .execute("DELETE FROM issues WHERE issue_key = ?", params![issue_key])
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?;
-        connection
+        transaction
             .execute(
                 "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
@@ -43,7 +49,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 source,
             })?;
 
-        connection
+        transaction
             .execute(
                 "DELETE FROM issue_areas WHERE issue_key = ?",
                 params![issue_key],
@@ -53,7 +59,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 source,
             })?;
         for area in &issue_plan.areas {
-            connection
+            transaction
                 .execute(
                     "INSERT INTO issue_areas (issue_key, area) VALUES (?, ?)",
                     params![issue_key, area],
@@ -64,7 +70,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 })?;
         }
 
-        connection
+        transaction
             .execute(
                 "DELETE FROM pull_requests WHERE issue_key = ?",
                 params![issue_key],
@@ -73,7 +79,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 path: config.index_path.clone(),
                 source,
             })?;
-        connection
+        transaction
             .execute(
                 "DELETE FROM changed_files WHERE issue_key = ?",
                 params![issue_key],
@@ -82,13 +88,13 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                 path: config.index_path.clone(),
                 source,
             })?;
-        connection
+        transaction
             .execute("DELETE FROM checks WHERE issue_key = ?", params![issue_key])
             .map_err(|source| MemoryError::DuckDb {
                 path: config.index_path.clone(),
                 source,
             })?;
-        connection
+        transaction
             .execute(
                 "DELETE FROM reviews WHERE issue_key = ?",
                 params![issue_key],
@@ -99,7 +105,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             })?;
 
         for pr in &issue_plan.prs {
-            connection
+            transaction
                 .execute(
                     "INSERT INTO pull_requests (issue_key, number, title, url, branch, merge_sha, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                     params![
@@ -117,7 +123,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     source,
                 })?;
             for file in &pr.changed_files {
-                connection
+                transaction
                     .execute(
                         "INSERT INTO changed_files (issue_key, pr_number, file_path, change_kind) VALUES (?, ?, ?, ?)",
                         params![
@@ -130,10 +136,10 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     .map_err(|source| MemoryError::DuckDb {
                         path: config.index_path.clone(),
                         source,
-                    })?;
+                })?;
             }
             for check in &pr.checks {
-                connection
+                transaction
                     .execute(
                         "INSERT INTO checks (issue_key, pr_number, name, conclusion, completed_at) VALUES (?, ?, ?, ?, ?)",
                         params![
@@ -147,10 +153,10 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     .map_err(|source| MemoryError::DuckDb {
                         path: config.index_path.clone(),
                         source,
-                    })?;
+                })?;
             }
             for review in &pr.reviews {
-                connection
+                transaction
                     .execute(
                         "INSERT INTO reviews (issue_key, pr_number, reviewer, state, submitted_at, disposition) VALUES (?, ?, ?, ?, ?, ?)",
                         params![
@@ -171,13 +177,13 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
 
         for area in &issue_plan.areas {
             let area_config = config.area_or_default(area);
-            connection
+            transaction
                 .execute("DELETE FROM areas WHERE area = ?", params![area])
                 .map_err(|source| MemoryError::DuckDb {
                     path: config.index_path.clone(),
                     source,
                 })?;
-            connection
+            transaction
                 .execute(
                     "INSERT INTO areas (area, display_name, docs_target) VALUES (?, ?, ?)",
                     params![
@@ -193,6 +199,12 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         }
     }
 
+    transaction
+        .commit()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
     Ok(())
 }
 
@@ -547,18 +559,24 @@ fn gotchas_from_issues(issues: &[IndexedIssue]) -> String {
 }
 
 fn mark_docs_synced(config: &MemoryConfig, plan: &DocsSyncPlan) -> Result<(), MemoryError> {
-    let connection = open_index(config)?;
+    let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
         path: config.index_path.clone(),
         source,
     })?;
+    let transaction = connection
+        .transaction()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
     let run_id = format!("doc-sync-{}", Utc::now().timestamp_millis());
     let target_docs = plan
         .targets
         .iter()
         .map(|target| target.path.to_string_lossy().to_string())
         .collect::<Vec<_>>();
-    connection
+    transaction
         .execute(
             "INSERT INTO doc_sync_runs (run_id, selected_issues_json, target_docs_json, generated_at, status) VALUES (?, ?, ?, ?, ?)",
             params![
@@ -574,7 +592,7 @@ fn mark_docs_synced(config: &MemoryConfig, plan: &DocsSyncPlan) -> Result<(), Me
             source,
         })?;
     for issue_key in &plan.selected_issue_keys {
-        connection
+        transaction
             .execute(
                 "UPDATE issues SET docs_sync_status = 'synced' WHERE issue_key = ?",
                 params![issue_key],
@@ -585,7 +603,7 @@ fn mark_docs_synced(config: &MemoryConfig, plan: &DocsSyncPlan) -> Result<(), Me
             })?;
     }
     for target in &plan.targets {
-        connection
+        transaction
             .execute(
                 "DELETE FROM doc_memory_links WHERE topic_doc = ?",
                 params![target.path.to_string_lossy().to_string()],
@@ -595,7 +613,7 @@ fn mark_docs_synced(config: &MemoryConfig, plan: &DocsSyncPlan) -> Result<(), Me
                 source,
             })?;
         for issue_key in &target.issue_keys {
-            connection
+            transaction
                 .execute(
                     "INSERT INTO doc_memory_links (topic_doc, issue_key, visibility) VALUES (?, ?, ?)",
                     params![
@@ -610,6 +628,12 @@ fn mark_docs_synced(config: &MemoryConfig, plan: &DocsSyncPlan) -> Result<(), Me
                 })?;
         }
     }
+    transaction
+        .commit()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
     Ok(())
 }
 

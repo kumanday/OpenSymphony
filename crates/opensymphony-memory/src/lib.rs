@@ -545,6 +545,57 @@ mod tests {
     }
 
     #[test]
+    fn capture_index_rolls_back_when_a_later_issue_fails() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let mut source = sample_source();
+        source.issues.push(IssueEvidence {
+            identifier: "COE-124".to_string(),
+            title: "Missing capsule should abort".to_string(),
+            url: Some("https://linear.app/example/issue/COE-124".to_string()),
+            state: Some("Done".to_string()),
+            labels: vec!["runtime".to_string()],
+            ..IssueEvidence::default()
+        });
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string(), "COE-124".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("plan");
+        let first_issue = plan
+            .selected
+            .iter()
+            .find(|issue| issue.issue.identifier == "COE-123")
+            .expect("first issue should be planned");
+        fs::create_dir_all(first_issue.capsule_path.parent().expect("capsule parent"))
+            .expect("capsule dir should write");
+        fs::write(
+            &first_issue.capsule_path,
+            render_issue_capsule(&config, first_issue).expect("capsule should render"),
+        )
+        .expect("first capsule should write");
+
+        let result = index_capture_plan(&config, &plan);
+
+        assert!(
+            matches!(result, Err(MemoryError::ReadFile { .. })),
+            "missing second capsule should fail indexing: {result:?}",
+        );
+        assert!(
+            load_indexed_issues(&config)
+                .expect("index should load")
+                .is_empty(),
+            "first issue writes should roll back when a later issue fails",
+        );
+    }
+
+    #[test]
     fn docs_sync_omits_private_capsule_links_for_public_docs() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
