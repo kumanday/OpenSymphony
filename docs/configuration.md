@@ -56,6 +56,8 @@ Core bootstrap payload:
 - `.gitignore` created or updated to include `.opensymphony*`
 - `.agents/skills/` copied recursively, including skill-local `references/`, `scripts/`, and similar helper files
 - `.agents/skills/linear/references/`
+- `.agents/skills/opensymphony-memory/SKILL.md`, added from the CLI bundle
+  after the template payload is fetched
 - `.github/CODEOWNERS`
 - `.github/pull_request_template.md`
 
