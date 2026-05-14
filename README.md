@@ -145,10 +145,7 @@ opensymphony linear archive --issues COE-123 --dry-run
 
 `opensymphony init` and `opensymphony update` also install an
 `opensymphony-memory` agent skill so implementation agents know when to consult
-memory and which mutations are reserved for explicit operator requests. This
-skill is bundled in the OpenSymphony CLI and appended to the fetched template
-payload, so a branch-built CLI can test it before the template repository has a
-matching copy.
+memory and which mutations are reserved for explicit operator requests.
 
 The memory index uses DuckDB's bundled build so local installs do not need a
 separate DuckDB system package. That choice adds compile time and binary size,

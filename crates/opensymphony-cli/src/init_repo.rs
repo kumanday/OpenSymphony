@@ -1081,7 +1081,7 @@ fn append_local_template_assets(assets: &mut Vec<FetchedAsset>) -> LocalTemplate
 }
 
 pub(crate) fn memory_skill_override_warning() -> &'static str {
-    "Warning: template payload included `.agents/skills/opensymphony-memory/SKILL.md`; using the CLI-bundled copy so branch-built CLIs test the memory skill they ship."
+    "Warning: template payload included `.agents/skills/opensymphony-memory/SKILL.md`; using the CLI-bundled copy for consistency with this OpenSymphony binary."
 }
 
 fn template_fetch_timeout_from_env(value: Option<&str>) -> Duration {
