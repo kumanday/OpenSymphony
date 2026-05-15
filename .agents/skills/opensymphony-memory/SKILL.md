@@ -38,7 +38,7 @@ is pending docs sync, or has capture warnings. Use `opensymphony memory lint
 
 - Do not create or update issue capsules during ordinary implementation unless the user explicitly asks.
 - Do not archive Linear issues. Archival is a separate operator action guarded by `opensymphony linear archive`.
-- Do not rewrite public docs from private memory by hand; use `opensymphony memory sync-docs --dry-run` first.
+- Do not rewrite public docs from private memory by hand; use `opensymphony memory sync-docs` so the managed sections and indexes stay consistent.
 - Do not copy full agent transcripts into memory or docs.
 - Do not treat retrieved memory as authoritative over current source files, tests, or upstream specs.
 

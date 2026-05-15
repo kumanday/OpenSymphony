@@ -310,7 +310,7 @@ pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, Memo
                     severity: LintSeverity::Error,
                     path: Some(path),
                     message: "public docs contain a private memory path".to_string(),
-                    next_command: Some("opensymphony memory sync-docs --dry-run".to_string()),
+                    next_command: Some("opensymphony memory sync-docs".to_string()),
                 });
             }
         }

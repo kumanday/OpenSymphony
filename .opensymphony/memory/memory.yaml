@@ -1,0 +1,118 @@
+memory_root: .opensymphony/memory
+visibility: private
+index_path: .opensymphony/memory/memory.duckdb
+source_snapshots: hashes
+markdown_indexes: true
+
+docs:
+  public_root: docs
+  default_visibility: public
+  deny_private_links: true
+
+areas:
+  agent-runtime:
+    title: Agent Runtime
+    docs_target: docs/agent-runtime.md
+    path_hints:
+      - agent
+      - agent-runtime
+      - runtime
+    labels:
+      - agent-runtime
+  domain:
+    title: Domain
+    docs_target: docs/domain.md
+    path_hints:
+      - domain
+    labels:
+      - domain
+  foundation:
+    title: Foundation
+    docs_target: docs/foundation.md
+    path_hints:
+      - foundation
+    labels:
+      - foundation
+  hosted-follow-on:
+    title: Hosted Follow On
+    docs_target: docs/hosted-follow-on.md
+    path_hints:
+      - follow
+      - hosted
+      - hosted-follow-on
+      - on
+    labels:
+      - hosted-follow-on
+  openhands:
+    title: Openhands
+    docs_target: docs/openhands.md
+    path_hints:
+      - openhands
+    labels:
+      - openhands
+  orchestration:
+    title: Orchestration
+    docs_target: docs/orchestration.md
+    path_hints:
+      - orchestration
+    labels:
+      - orchestration
+  quality-ops:
+    title: Quality Ops
+    docs_target: docs/quality-ops.md
+    path_hints:
+      - ops
+      - quality
+      - quality-ops
+    labels:
+      - quality-ops
+  repo-harness:
+    title: Repo Harness
+    docs_target: docs/repo-harness.md
+    path_hints:
+      - harness
+      - repo
+      - repo-harness
+    labels:
+      - repo-harness
+  tracker:
+    title: Tracker
+    docs_target: docs/tracker.md
+    path_hints:
+      - tracker
+    labels:
+      - tracker
+  tracker-tools:
+    title: Tracker Tools
+    docs_target: docs/tracker-tools.md
+    path_hints:
+      - tools
+      - tracker
+      - tracker-tools
+    labels:
+      - tracker-tools
+  ui-observability:
+    title: Ui Observability
+    docs_target: docs/ui-observability.md
+    path_hints:
+      - observability
+      - ui
+      - ui-observability
+    labels:
+      - ui-observability
+  workflow-config:
+    title: Workflow Config
+    docs_target: docs/workflow-config.md
+    path_hints:
+      - config
+      - workflow
+      - workflow-config
+    labels:
+      - workflow-config
+  workspace:
+    title: Workspace
+    docs_target: docs/workspace.md
+    path_hints:
+      - workspace
+    labels:
+      - workspace

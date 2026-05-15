@@ -1,11 +1,15 @@
 fn default_config_path(repo_root: &Path) -> Option<PathBuf> {
+    let private = repo_root.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE);
+    if private.exists() {
+        return Some(private);
+    }
     let public = repo_root.join(DEFAULT_MEMORY_CONFIG_FILE);
     if public.exists() {
         return Some(public);
     }
-    let private = repo_root.join(FALLBACK_PRIVATE_MEMORY_CONFIG_FILE);
-    if private.exists() {
-        Some(private)
+    let legacy_private = repo_root.join(FALLBACK_PRIVATE_MEMORY_CONFIG_FILE);
+    if legacy_private.exists() {
+        Some(legacy_private)
     } else {
         None
     }
@@ -191,12 +195,7 @@ fn infer_areas(
     }
 
     if areas.is_empty() {
-        let first_path_area = prs
-            .iter()
-            .flat_map(|pr| pr.changed_files.iter())
-            .find_map(|file| file.path.components().next())
-            .map(|component| slugify(&component.as_os_str().to_string_lossy()));
-        areas.insert(first_path_area.unwrap_or_else(|| "general".to_string()));
+        areas.insert("general".to_string());
     }
 
     areas.into_iter().collect()

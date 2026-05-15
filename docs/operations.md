@@ -133,18 +133,22 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 
 ## 6. Project memory
 
-Memory capture is review-first. Live capture reads Linear and discovers GitHub
-PRs by default, so use dry runs before writing local memory or docs:
+Project memory stores shared area mapping in `.opensymphony/memory/memory.yaml`
+and private runtime artifacts under `.opensymphony/memory/`. Live capture reads
+Linear and discovers GitHub PRs by default:
 
 ```bash
-opensymphony memory capture COE-123 --dry-run
+opensymphony memory init
 opensymphony memory capture COE-123
 opensymphony memory status
 opensymphony memory brief COE-123
 opensymphony memory related --paths crates/opensymphony-openhands
-opensymphony memory sync-docs --issues COE-123 --dry-run
+opensymphony memory sync-docs --since-last-sync
 opensymphony memory lint --public-docs
 ```
+
+Add `--dry-run` to capture, import, sync, or archive commands when an operator
+wants a non-writing preview.
 
 Use `opensymphony memory import --source-file completed.yaml` only for
 deterministic imports, migrations, tests, or external exports. Failed Linear or
@@ -161,7 +165,6 @@ does not archive Linear issues.
 Linear archival is a separate command and is guarded by captured memory:
 
 ```bash
-opensymphony linear archive --issues COE-123 --dry-run
 opensymphony linear archive --issues COE-123
 ```
 

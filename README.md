@@ -99,7 +99,7 @@ opensymphony init
 ```
 
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
-can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` contains `.opensymphony*` so local OpenSymphony state stays out of version control.
+can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` ignores local OpenSymphony runtime state.
 
 For an existing target repo, `opensymphony update` is the lighter-weight
 maintenance path: it refreshes changed or new template-owned skill files under
@@ -136,12 +136,12 @@ writes private issue capsules under `.opensymphony/memory/`, indexes them in
 DuckDB, and can sync selected knowledge into public topic docs:
 
 ```bash
-opensymphony memory capture COE-123 --dry-run
+opensymphony memory init
 opensymphony memory capture COE-123
 opensymphony memory brief COE-123
 opensymphony memory related --area openhands-runtime
-opensymphony memory sync-docs --issues COE-123 --dry-run
-opensymphony linear archive --issues COE-123 --dry-run
+opensymphony memory sync-docs --since-last-sync
+opensymphony linear archive --issues COE-123
 ```
 
 See [Project Memory](docs/memory.md) for archive guards, YAML import/backfill,

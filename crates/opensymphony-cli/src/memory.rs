@@ -14,8 +14,9 @@ use crate::{
         ArchivePlan, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueSelection, LintSeverity,
         MemoryConfig, MemoryError, SourceFile, brief, context_for_issue, docs_for_area,
         expand_issue_range, lint, load_source_file, mark_archived, plan_archive, plan_capture,
-        plan_docs_sync, related_by_area, related_by_issue, related_by_paths, render_archive_plan,
-        render_capture_dry_run, search, status, write_capture_plan, write_docs_sync_plan,
+        plan_docs_sync, plan_memory_init, related_by_area, related_by_issue, related_by_paths,
+        render_archive_plan, render_capture_dry_run, search, status, write_capture_plan,
+        write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_workflow::WorkflowDefinition,
 };
@@ -30,6 +31,8 @@ pub struct MemoryArgs {
 
 #[derive(Debug, Subcommand)]
 enum MemoryCommand {
+    #[command(about = "Create project memory configuration")]
+    Init(InitArgs),
     #[command(about = "Capture completed issue evidence into issue memory")]
     Capture(CaptureArgs),
     #[command(about = "Import deterministic YAML issue evidence into issue memory")]
@@ -52,6 +55,14 @@ enum MemoryCommand {
     Context(ContextArgs),
     #[command(about = "Lint memory and docs for stale or unsafe state")]
     Lint(LintArgs),
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    #[arg(long, help = "Only show the proposed memory configuration")]
+    dry_run: bool,
+    #[arg(long, help = "Overwrite an existing memory configuration")]
+    force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -250,19 +261,56 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         path: PathBuf::from("."),
         source,
     })?;
-    let config = MemoryConfig::load(&repo_root, args.config.as_deref())?;
-    match args.command {
-        MemoryCommand::Capture(args) => run_capture(&repo_root, &config, args).await,
-        MemoryCommand::Import(args) => run_import(&config, args),
-        MemoryCommand::SyncDocs(args) => run_sync_docs(&config, args),
-        MemoryCommand::Status(args) => run_status(&config, args),
-        MemoryCommand::Show(args) => run_show(&config, args, ShowMode::Full),
-        MemoryCommand::Brief(args) => run_show(&config, args, ShowMode::Brief),
-        MemoryCommand::Search(args) => run_search(&config, args),
-        MemoryCommand::Related(args) => run_related(&config, args),
-        MemoryCommand::Docs(args) => run_docs(&config, args),
-        MemoryCommand::Context(args) => run_context(&config, args),
-        MemoryCommand::Lint(args) => run_lint(&config, args),
+    let MemoryArgs {
+        config: config_path,
+        command,
+    } = args;
+    match command {
+        MemoryCommand::Init(args) => run_init(&repo_root, config_path.as_deref(), args),
+        MemoryCommand::Capture(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_capture(&repo_root, &config, args).await
+        }
+        MemoryCommand::Import(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_import(&config, args)
+        }
+        MemoryCommand::SyncDocs(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_sync_docs(&config, args)
+        }
+        MemoryCommand::Status(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_status(&config, args)
+        }
+        MemoryCommand::Show(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_show(&config, args, ShowMode::Full)
+        }
+        MemoryCommand::Brief(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_show(&config, args, ShowMode::Brief)
+        }
+        MemoryCommand::Search(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_search(&config, args)
+        }
+        MemoryCommand::Related(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_related(&config, args)
+        }
+        MemoryCommand::Docs(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_docs(&config, args)
+        }
+        MemoryCommand::Context(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_context(&config, args)
+        }
+        MemoryCommand::Lint(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_lint(&config, args)
+        }
     }
 }
 
@@ -270,6 +318,32 @@ async fn run_linear(args: LinearArgs) -> Result<(), MemoryError> {
     match args.command {
         LinearCommand::Archive(args) => run_archive(args).await,
     }
+}
+
+fn run_init(
+    repo_root: &Path,
+    config_path: Option<&Path>,
+    args: InitArgs,
+) -> Result<(), MemoryError> {
+    let plan = plan_memory_init(repo_root, config_path, args.force)?;
+    println!("# Memory Init Plan\n");
+    println!("Config: {}", plan.config_path.display());
+    println!("Git ignore: {}", plan.gitignore_path.display());
+    if args.dry_run {
+        println!("\n## Proposed config\n");
+        println!("{}", plan.config_contents);
+        println!("Dry run only. Re-run without `--dry-run` to create memory configuration.");
+        return Ok(());
+    }
+
+    write_memory_init_plan(&plan)?;
+    println!("Wrote memory configuration: {}", plan.config_path.display());
+    if plan.gitignore_before.as_deref() == Some(plan.gitignore_after.as_str()) {
+        println!("Git ignore already allowed the shared memory config.");
+    } else {
+        println!("Updated git ignore: {}", plan.gitignore_path.display());
+    }
+    Ok(())
 }
 
 async fn run_capture(

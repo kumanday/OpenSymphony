@@ -388,14 +388,13 @@ source facts, issue capsules, areas, and docs sync results.
 
 ## Manual capture workflow
 
-Capture is manual and review-first.
+Capture is manual and writes by default unless `--dry-run` is supplied.
 
 Example command shape:
 
 ```bash
-opensymphony memory capture COE-123 --dry-run
 opensymphony memory capture COE-123
-opensymphony memory capture --issues COE-123,COE-124 --dry-run
+opensymphony memory capture --issues COE-123,COE-124
 opensymphony memory capture --issues-file completed-issues.csv
 opensymphony memory capture --issue-range COE-100..COE-199
 opensymphony memory capture --before-issue COE-300
@@ -433,11 +432,11 @@ Archival is a separate explicit action.
 Example command shape:
 
 ```bash
-opensymphony linear archive --issues COE-123,COE-124 --dry-run
-opensymphony linear archive --issues-file completed-issues.csv --dry-run
-opensymphony linear archive --milestone "M4: Collaborative Planning Alpha" --dry-run
-opensymphony linear archive --captured-before 2026-05-01 --dry-run
-opensymphony linear archive --from-memory --state captured --dry-run
+opensymphony linear archive --issues COE-123,COE-124
+opensymphony linear archive --issues-file completed-issues.csv
+opensymphony linear archive --milestone "M4: Collaborative Planning Alpha"
+opensymphony linear archive --captured-before 2026-05-01
+opensymphony linear archive --from-memory --state captured
 ```
 
 Archive should default to requiring a fresh issue capsule before it archives an
@@ -460,10 +459,11 @@ Documentation sync transforms captured issue memory into topic docs.
 Example command shape:
 
 ```bash
-opensymphony memory sync-docs --since-last-sync --dry-run
-opensymphony memory sync-docs --issues COE-123,COE-124 --dry-run
-opensymphony memory sync-docs --milestone "M4: Collaborative Planning Alpha" --dry-run
-opensymphony memory sync-docs --area authentication --dry-run
+opensymphony memory init
+opensymphony memory sync-docs --since-last-sync
+opensymphony memory sync-docs --issues COE-123,COE-124
+opensymphony memory sync-docs --milestone "M4: Collaborative Planning Alpha"
+opensymphony memory sync-docs --area authentication
 opensymphony memory sync-docs --issues-file completed-issues.csv
 ```
 
@@ -545,7 +545,7 @@ cross-issue knowledge.
 Diagram generation should be optional and reviewable:
 
 ```bash
-opensymphony memory sync-docs --area openhands-runtime --with-diagrams --dry-run
+opensymphony memory sync-docs --area openhands-runtime --with-diagrams
 ```
 
 Docs sync should avoid diagrams that expose private issue-capsule paths in

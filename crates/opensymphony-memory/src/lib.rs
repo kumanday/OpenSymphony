@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub const DEFAULT_PRIVATE_MEMORY_CONFIG_FILE: &str = ".opensymphony/memory/memory.yaml";
 pub const DEFAULT_MEMORY_CONFIG_FILE: &str = "opensymphony-memory.yaml";
 pub const FALLBACK_PRIVATE_MEMORY_CONFIG_FILE: &str = ".opensymphony/memory/config.yaml";
 pub const DEFAULT_MEMORY_ROOT: &str = ".opensymphony/memory";
@@ -137,6 +138,15 @@ pub struct AreaConfig {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RedactionConfig {
     pub deny_patterns: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryInitPlan {
+    pub config_path: PathBuf,
+    pub config_contents: String,
+    pub gitignore_path: PathBuf,
+    pub gitignore_before: Option<String>,
+    pub gitignore_after: String,
 }
 
 #[derive(Debug, Default, Deserialize)]

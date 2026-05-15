@@ -16,13 +16,14 @@ Project memory has two separate surfaces:
 ## Normal live capture
 
 Live capture requires Linear access from `WORKFLOW.md` and uses GitHub PR
-discovery by default through `gh`:
+discovery by default through `gh`. Initialize shared area mappings once, then
+capture and sync normally:
 
 ```bash
-opensymphony memory capture COE-123 --dry-run
+opensymphony memory init
 opensymphony memory capture COE-123
 opensymphony memory capture --issues COE-123,COE-124
-opensymphony memory capture --issue-range COE-120..COE-130 --dry-run
+opensymphony memory capture --issue-range COE-120..COE-130
 ```
 
 For each selected issue, OpenSymphony:
@@ -40,7 +41,7 @@ GitHub is also part of the default live flow. A missing or failing `gh` command
 is a command failure unless `--no-github` is supplied:
 
 ```bash
-opensymphony memory capture COE-123 --no-github --dry-run
+opensymphony memory capture COE-123 --no-github
 ```
 
 `--no-github` is intended for unusual non-PR work. If GitHub is available but no
@@ -54,10 +55,9 @@ exports. Failed Linear or GitHub access should be fixed before live capture is
 retried.
 
 ```bash
-opensymphony memory import --source-file completed.yaml --dry-run
 opensymphony memory import --source-file completed.yaml
 opensymphony memory import COE-123 --source-file completed.yaml
-opensymphony memory import --issue-range COE-120..COE-130 --source-file completed.yaml --dry-run
+opensymphony memory import --issue-range COE-120..COE-130 --source-file completed.yaml
 ```
 
 The source file is produced by a user or external export tool. OpenSymphony does
@@ -166,17 +166,21 @@ opensymphony memory search "reconnect recovery"
 opensymphony memory docs --area openhands-runtime
 ```
 
-Docs sync is review-first. It shows the managed-section diff before writing:
+Docs sync writes mapped topic docs by default and prints the managed-section
+diff it applied. Use `--dry-run` when you want to preview without writing:
 
 ```bash
-opensymphony memory sync-docs --issues COE-123 --dry-run
+opensymphony memory sync-docs --since-last-sync
 opensymphony memory sync-docs --issues COE-123
+opensymphony memory sync-docs --issues COE-123 --dry-run
 opensymphony memory lint --public-docs
 ```
 
-`opensymphony-memory.yaml` configures memory roots, visibility, area detection,
-docs targets, and redaction. See [Configuration](configuration.md#project-memory)
-for the config shape.
+`.opensymphony/memory/memory.yaml` configures memory roots, visibility, area
+detection, docs targets, and redaction. This shared config is commit-worthy;
+issue capsules, markdown indexes, source snapshots, and DuckDB remain local
+runtime artifacts. See [Configuration](configuration.md#project-memory) for the
+config shape.
 
 ## Archive guard
 
@@ -185,9 +189,8 @@ Archival is guarded by memory capture. For explicit issues,
 archives only eligible issues:
 
 ```bash
-opensymphony linear archive --issues COE-123 --dry-run
 opensymphony linear archive --issues COE-123
-opensymphony linear archive --issue-range COE-120..COE-130 --dry-run
+opensymphony linear archive --issue-range COE-120..COE-130
 ```
 
 An issue is eligible when fresh captured memory exists and has no unresolved
@@ -202,7 +205,7 @@ To archive from already captured memory without recapturing, use
 `--from-memory`:
 
 ```bash
-opensymphony linear archive --from-memory --state captured --dry-run
+opensymphony linear archive --from-memory --state captured
 opensymphony linear archive --from-memory --state pending
 ```
 
@@ -211,7 +214,8 @@ the normal live capture path.
 
 ## Troubleshooting
 
-- Use `opensymphony memory capture ... --dry-run` before running the writing command.
+- Use `--dry-run` on capture, import, sync, or archive commands when you need a
+  non-writing preview.
 - Use `opensymphony memory capture --help`,
   `opensymphony memory import --help`, and
   `opensymphony linear archive --help` for the current command surface.
@@ -219,5 +223,5 @@ the normal live capture path.
   Live capture does not fall back to placeholder records.
 - If GitHub discovery fails, install/authenticate `gh` or intentionally rerun
   with `--no-github`.
-- If archive is blocked by warnings, inspect the capture dry-run or capsule,
-  refresh capture, or use `--force` only after review.
+- If archive is blocked by warnings, inspect the capsule, preview capture with
+  `--dry-run` if useful, refresh capture, or use `--force` only after review.

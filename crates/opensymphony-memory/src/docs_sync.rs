@@ -4,6 +4,12 @@ pub fn plan_docs_sync(
     write: bool,
     with_diagrams: bool,
 ) -> Result<DocsSyncPlan, MemoryError> {
+    if config.areas.is_empty() {
+        return Err(MemoryError::InvalidInput(
+            "No docs area mapping found. Run opensymphony memory init.".to_string(),
+        ));
+    }
+
     let selected = select_indexed_issues_for_docs(config, selection)?;
     if selected.is_empty() {
         return Err(MemoryError::InvalidInput(
@@ -12,6 +18,7 @@ pub fn plan_docs_sync(
     }
 
     let mut by_area: BTreeMap<String, Vec<IndexedIssue>> = BTreeMap::new();
+    let mut unmapped_areas = BTreeSet::new();
     for issue in selected {
         for area in issue.areas() {
             if selection
@@ -21,14 +28,32 @@ pub fn plan_docs_sync(
             {
                 continue;
             }
+            if !config.areas.contains_key(&area) {
+                unmapped_areas.insert(area);
+                continue;
+            }
             by_area.entry(area).or_default().push(issue.clone());
         }
+    }
+    if by_area.is_empty() {
+        let areas = if unmapped_areas.is_empty() {
+            "none".to_string()
+        } else {
+            unmapped_areas.into_iter().collect::<Vec<_>>().join(", ")
+        };
+        return Err(MemoryError::InvalidInput(format!(
+            "selected issues only reference unmapped docs areas ({areas}). Run opensymphony memory init or update .opensymphony/memory/memory.yaml."
+        )));
     }
 
     let mut targets = Vec::new();
     let mut warnings = Vec::new();
     for (area_slug, issues) in by_area {
-        let area = config.area_or_default(&area_slug);
+        let area = config
+            .areas
+            .get(&area_slug)
+            .cloned()
+            .ok_or_else(|| MemoryError::InvalidInput(format!("area `{area_slug}` is not mapped")))?;
         let before = if area.docs_target.exists() {
             Some(read_to_string(&area.docs_target)?)
         } else {

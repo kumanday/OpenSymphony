@@ -91,6 +91,127 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
 }
 
 #[test]
+fn memory_init_creates_private_config_and_gitignore_policy() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::create_dir_all(repo.path().join("docs/tasks")).expect("tasks dir should write");
+    fs::write(
+        repo.path().join("docs/tasks/task.md"),
+        "---\narea: agent-runtime\n---\n# Task\n",
+    )
+    .expect("task should write");
+    fs::write(repo.path().join(".gitignore"), ".opensymphony*\n").expect("gitignore should write");
+
+    let output = run(repo.path(), ["memory", "init"]);
+    assert_success(&output, "memory init");
+
+    let config_path = repo.path().join(".opensymphony/memory/memory.yaml");
+    let config = fs::read_to_string(&config_path).expect("memory config should exist");
+    assert!(config.contains("agent-runtime:"));
+    assert!(config.contains("docs_target: docs/agent-runtime.md"));
+    assert!(
+        !repo
+            .path()
+            .join(".opensymphony/memory/memory.duckdb")
+            .exists()
+    );
+
+    let gitignore =
+        fs::read_to_string(repo.path().join(".gitignore")).expect("gitignore should be readable");
+    assert!(gitignore.contains("!.opensymphony/memory/memory.yaml"));
+    assert!(gitignore.contains(".opensymphony/memory/*"));
+
+    let duplicate = run(repo.path(), ["memory", "init"]);
+    assert_failure(&duplicate, "memory init duplicate");
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already exists"));
+
+    let forced = run(repo.path(), ["memory", "init", "--force"]);
+    assert_success(&forced, "memory init force");
+}
+
+#[test]
+fn memory_init_dry_run_does_not_write_files() {
+    let repo = TempDir::new().expect("temp repo should exist");
+
+    let output = run(repo.path(), ["memory", "init", "--dry-run"]);
+    assert_success(&output, "memory init dry-run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Proposed config"));
+    assert!(stdout.contains("general:"));
+    assert!(
+        !repo
+            .path()
+            .join(".opensymphony/memory/memory.yaml")
+            .exists()
+    );
+    assert!(!repo.path().join(".gitignore").exists());
+}
+
+#[test]
+fn sync_docs_requires_configured_area_mapping() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::write(repo.path().join("source.yaml"), sample_source())
+        .expect("source evidence should write");
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "COE-123",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture without config",
+    );
+
+    let output = run(repo.path(), ["memory", "sync-docs"]);
+    assert_failure(&output, "sync-docs without mappings");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("No docs area mapping found. Run opensymphony memory init.")
+    );
+}
+
+#[test]
+fn sync_docs_writes_only_configured_areas_and_dry_run_writes_nothing() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_general_memory_config(repo.path());
+    fs::write(repo.path().join("source.yaml"), noisy_file_source())
+        .expect("source evidence should write");
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "COE-123",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture noisy file source",
+    );
+
+    let dry_run = run(repo.path(), ["memory", "sync-docs", "--dry-run"]);
+    assert_success(&dry_run, "sync-docs dry-run");
+    assert!(
+        !repo.path().join("docs/general.md").exists(),
+        "dry run should not write docs"
+    );
+
+    let write = run(repo.path(), ["memory", "sync-docs"]);
+    assert_success(&write, "sync-docs write");
+    assert!(repo.path().join("docs/general.md").is_file());
+    for bad_path in ["docs/readme-md.md", "docs/cargo.md", "docs/cargo-lock.md"] {
+        assert!(
+            !repo.path().join(bad_path).exists(),
+            "{bad_path} should not be generated from changed filenames"
+        );
+    }
+}
+
+#[test]
 fn memory_import_reports_missing_source_file() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
@@ -523,6 +644,24 @@ areas:
     .expect("memory config should write");
 }
 
+fn write_general_memory_config(repo: &std::path::Path) {
+    fs::create_dir_all(repo.join(".opensymphony/memory")).expect("memory dir should write");
+    fs::write(
+        repo.join(".opensymphony/memory/memory.yaml"),
+        r#"
+areas:
+  general:
+    title: General
+    docs_target: docs/general.md
+    path_hints:
+      - general
+    labels:
+      - general
+"#,
+    )
+    .expect("memory config should write");
+}
+
 fn write_workflow(repo: &std::path::Path, linear_endpoint: &str) {
     fs::write(
         repo.join("WORKFLOW.md"),
@@ -887,6 +1026,32 @@ prs:
       - reviewer: reviewer
         state: APPROVED
         disposition: Reconnect ordering looked correct.
+"#
+}
+
+fn noisy_file_source() -> &'static str {
+    r#"
+issues:
+  - identifier: COE-123
+    title: Repo metadata cleanup
+    url: https://linear.app/example/issue/COE-123
+    description: Update root repository metadata.
+    state: Done
+    linked_prs:
+      - 456
+prs:
+  - number: 456
+    title: COE-123 update repository metadata
+    url: https://github.com/example/repo/pull/456
+    branch: coe-123-metadata
+    merge_sha: abcdef1234567890
+    changed_files:
+      - path: README.md
+        change_kind: modified
+      - path: Cargo.toml
+        change_kind: modified
+      - path: Cargo.lock
+        change_kind: modified
 "#
 }
 
