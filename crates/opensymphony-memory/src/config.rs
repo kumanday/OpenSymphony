@@ -229,12 +229,7 @@ fn parse_task_area(contents: &str) -> Option<String> {
 }
 
 fn docs_target_for_area(repo_root: &Path, area: &str) -> PathBuf {
-    let target = repo_root.join("docs").join(format!("{area}.md"));
-    if target.exists() {
-        target
-    } else {
-        repo_root.join("docs").join(format!("{area}.md"))
-    }
+    repo_root.join("docs").join(format!("{area}.md"))
 }
 
 fn path_hints_for_area(area: &str) -> Vec<String> {
