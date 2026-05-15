@@ -401,24 +401,140 @@ fn render_validation(plan: &CaptureIssuePlan) -> String {
 fn render_reviews(plan: &CaptureIssuePlan) -> String {
     let mut lines = Vec::new();
     for pr in &plan.prs {
+        let mut seen = BTreeSet::new();
+        let mut emitted = 0;
         for review in &pr.reviews {
-            let reviewer = review.reviewer.as_deref().unwrap_or("reviewer");
-            let state = review.state.as_deref().unwrap_or("reviewed");
-            let disposition = review
-                .disposition
-                .as_deref()
-                .map(|value| format!(": {}", summarize_text(value, 180)))
-                .unwrap_or_default();
-            lines.push(format!(
-                "- PR #{} {reviewer} {state}{disposition}",
-                pr.number
-            ));
+            let Some(entry) = review_signal(review) else {
+                continue;
+            };
+            if !seen.insert(entry.clone()) {
+                continue;
+            }
+            lines.push(format!("- PR #{} {entry}", pr.number));
+            emitted += 1;
+            if emitted >= 4 {
+                break;
+            }
         }
     }
     if lines.is_empty() {
-        lines.push("- No review summary source was found.".to_string());
+        lines.push("- No high-signal review or rework notes were found.".to_string());
     }
     lines.join("\n")
+}
+
+fn review_signal(review: &ReviewEvidence) -> Option<String> {
+    let reviewer = review.reviewer.as_deref().unwrap_or("reviewer");
+    let state = review.state.as_deref().unwrap_or("reviewed");
+    let state_upper = state.trim().to_ascii_uppercase();
+    let summary = review.disposition.as_deref().and_then(review_signal_summary);
+
+    if summary.is_none() && state_upper == "COMMENTED" {
+        return None;
+    }
+
+    let mut entry = format!("{reviewer} {state}");
+    if let Some(summary) = summary {
+        entry.push_str(": ");
+        entry.push_str(&summary);
+    }
+    Some(entry)
+}
+
+fn review_signal_summary(body: &str) -> Option<String> {
+    let lines = meaningful_review_lines(body);
+    if lines.is_empty() {
+        None
+    } else {
+        Some(summarize_text(&lines.join(" "), 180))
+    }
+}
+
+fn meaningful_review_lines(body: &str) -> Vec<String> {
+    let mut priority = Vec::new();
+    let mut fallback = Vec::new();
+    for raw in body.lines() {
+        let Some(line) = clean_review_line(raw) else {
+            continue;
+        };
+        let lower = line.to_ascii_lowercase();
+        if is_review_boilerplate(&lower) {
+            continue;
+        }
+        if is_priority_review_line(&lower) {
+            priority.push(line);
+            if priority.len() >= 3 {
+                break;
+            }
+        } else if fallback.len() < 2 {
+            fallback.push(line);
+        }
+    }
+    if priority.is_empty() {
+        fallback
+    } else {
+        priority
+    }
+}
+
+fn clean_review_line(raw: &str) -> Option<String> {
+    let mut line = raw
+        .trim()
+        .trim_start_matches('>')
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .trim_start_matches("- ")
+        .trim()
+        .replace("**", "")
+        .replace('`', "");
+    if line.contains("Badge]") && line.contains("</sub>")
+        && let Some(index) = line.rfind("</sub>")
+    {
+        line = line[index + "</sub>".len()..].trim().to_string();
+    }
+    let line = line.trim().trim_start_matches(|ch: char| !ch.is_ascii()).trim();
+    if line.is_empty() || line == "---" || line == "```" {
+        None
+    } else {
+        Some(line.to_string())
+    }
+}
+
+fn is_review_boilerplate(lower: &str) -> bool {
+    lower.contains("codex review")
+        || lower.starts_with("here are some automated review suggestions")
+        || lower.starts_with("reviewed commit:")
+        || lower.starts_with("<details")
+        || lower.starts_with("<summary")
+        || lower.starts_with("</")
+        || lower.starts_with("<br")
+        || lower.starts_with("https://github.com/")
+        || lower.contains("about codex in github")
+        || lower.starts_with("[your team has set up codex")
+        || lower.starts_with("reviews are triggered")
+        || lower.starts_with("if codex has suggestions")
+        || lower.starts_with("codex can also answer")
+        || lower.starts_with("try commenting")
+        || lower.starts_with("open a pull request")
+        || lower.starts_with("mark a draft")
+        || lower.starts_with("comment \"@codex")
+        || lower.starts_with("improve this review?")
+        || lower.starts_with("resolve with ai?")
+}
+
+fn is_priority_review_line(lower: &str) -> bool {
+    lower.contains("taste rating")
+        || lower.contains("good taste")
+        || lower.contains("needs rework")
+        || lower.contains("worth merging")
+        || lower.contains("no new issues")
+        || lower.contains("all previously flagged")
+        || lower.contains("previously flagged")
+        || lower.contains("unresolved")
+        || lower.contains("critical")
+        || lower.contains("important")
+        || lower.contains("verdict")
 }
 
 fn render_followups(plan: &CaptureIssuePlan) -> String {

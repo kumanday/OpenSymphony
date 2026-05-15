@@ -520,6 +520,101 @@ mod tests {
     }
 
     #[test]
+    fn capsule_generation_filters_low_signal_review_noise() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let mut source = sample_source();
+        source.prs[0].reviews = vec![
+            ReviewEvidence {
+                reviewer: Some("chatgpt-codex-connector".to_string()),
+                state: Some("COMMENTED".to_string()),
+                disposition: Some(
+                    r#"
+### Codex Review
+https://github.com/example/repo/blob/abc/src/lib.rs#L10
+**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Fail doctor config when env placeholders are unset**
+Missing env-backed config should be surfaced as an explicit doctor failure.
+"#
+                    .to_string(),
+                ),
+                ..ReviewEvidence::default()
+            },
+            ReviewEvidence {
+                reviewer: Some("chatgpt-codex-connector".to_string()),
+                state: Some("COMMENTED".to_string()),
+                disposition: Some(
+                    r#"
+### Codex Review
+
+Here are some automated review suggestions for this pull request.
+
+**Reviewed commit:** `abc1234`
+
+<details> <summary>About Codex in GitHub</summary>
+
+[Your team has set up Codex to review pull requests in this repo](https://example.com).
+Reviews are triggered when you open a pull request for review.
+"#
+                    .to_string(),
+                ),
+                ..ReviewEvidence::default()
+            },
+            ReviewEvidence {
+                reviewer: Some("kumanday".to_string()),
+                state: Some("COMMENTED".to_string()),
+                ..ReviewEvidence::default()
+            },
+            ReviewEvidence {
+                reviewer: Some("github-actions".to_string()),
+                state: Some("COMMENTED".to_string()),
+                disposition: Some(
+                    "Good taste. The changes address the remaining unresolved threads.".to_string(),
+                ),
+                ..ReviewEvidence::default()
+            },
+            ReviewEvidence {
+                reviewer: Some("github-actions".to_string()),
+                state: Some("COMMENTED".to_string()),
+                disposition: Some(
+                    "Good taste. The changes address the remaining unresolved threads.".to_string(),
+                ),
+                ..ReviewEvidence::default()
+            },
+            ReviewEvidence {
+                reviewer: Some("reviewer".to_string()),
+                state: Some("APPROVED".to_string()),
+                ..ReviewEvidence::default()
+            },
+        ];
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            false,
+            false,
+        )
+        .expect("plan");
+
+        let markdown = render_issue_capsule(&config, &plan.selected[0]).expect("capsule");
+
+        assert!(!markdown.contains("Codex Review"));
+        assert!(!markdown.contains("About Codex"));
+        assert!(!markdown.contains("github.com/example/repo/blob"));
+        assert!(!markdown.contains("P2 Badge"));
+        assert!(markdown.contains("Fail doctor config when env placeholders are unset"));
+        assert!(!markdown.contains("kumanday COMMENTED"));
+        assert_eq!(
+            markdown.matches("github-actions COMMENTED").count(),
+            1,
+            "duplicate automated summaries should collapse: {markdown}",
+        );
+        assert!(markdown.contains("reviewer APPROVED"));
+    }
+
+    #[test]
     fn write_capture_indexes_capsule_in_duckdb() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
