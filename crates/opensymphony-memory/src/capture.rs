@@ -120,6 +120,7 @@ pub fn write_capture_plan(
     }
 
     index_capture_plan(config, plan)?;
+    let milestone_nodes = write_milestone_nodes(config, plan)?;
     let markdown_indexes = if config.markdown_indexes {
         write_markdown_indexes(config)?
     } else {
@@ -134,6 +135,7 @@ pub fn write_capture_plan(
         written_capsules,
         index_path: config.index_path.clone(),
         markdown_indexes,
+        milestone_nodes,
         warnings,
     })
 }

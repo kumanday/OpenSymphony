@@ -312,6 +312,83 @@ fn memory_capture_reports_github_enrichment_warnings() {
 }
 
 #[test]
+fn memory_capture_expands_linear_children_and_links_graph() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_with_children_response("COE-123", "Parent capability", ["COE-124"]),
+        linear_child_issue_response("COE-124", "Child implementation", "COE-123"),
+        linear_empty_comments("issue-COE-123"),
+        linear_empty_comments("issue-COE-124"),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let output = run(
+        repo.path(),
+        ["memory", "capture", "COE-123", "--no-github", "--write"],
+    );
+
+    assert_success(&output, "capture parent and child");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Wrote 2 capsule(s)."));
+    let parent = fs::read_to_string(repo.path().join(".opensymphony/memory/issues/COE-123.md"))
+        .expect("parent capsule should be readable");
+    let child = fs::read_to_string(repo.path().join(".opensymphony/memory/issues/COE-124.md"))
+        .expect("child capsule should be readable");
+    assert!(parent.contains("[[COE-124|COE-124: Child implementation]]"));
+    assert!(child.contains("[[COE-123|COE-123: Parent capability]]"));
+    assert!(
+        parent.contains(
+            "[[milestones/m3-symphony-orchestration-core|M3: Symphony orchestration core]]"
+        )
+    );
+    assert!(
+        repo.path()
+            .join(".opensymphony/memory/milestones/m3-symphony-orchestration-core.md")
+            .is_file()
+    );
+    assert_eq!(server.requests().len(), 4);
+}
+
+#[test]
+fn linear_archive_live_capture_archives_expanded_children() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_with_children_response("COE-123", "Parent capability", ["COE-124"]),
+        linear_child_issue_response("COE-124", "Child implementation", "COE-123"),
+        linear_empty_comments("issue-COE-123"),
+        linear_empty_comments("issue-COE-124"),
+        r#"{"data":{"issueArchive":{"success":true}}}"#.to_string(),
+        r#"{"data":{"issueArchive":{"success":true}}}"#.to_string(),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let archive = run(
+        repo.path(),
+        [
+            "linear",
+            "archive",
+            "--issues",
+            "COE-123",
+            "--no-github",
+            "--write",
+            "--force",
+        ],
+    );
+
+    assert_success(&archive, "archive parent and expanded child");
+    let stdout = String::from_utf8_lossy(&archive.stdout);
+    assert!(stdout.contains("Wrote 2 capsule(s)."));
+    assert!(stdout.contains("Archived 2 Linear issue(s)."));
+    assert_eq!(archive_status(repo.path(), "COE-123"), "archived");
+    assert_eq!(archive_status(repo.path(), "COE-124"), "archived");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 6);
+    assert!(requests[4].contains("\"id\":\"COE-124\""));
+    assert!(requests[5].contains("\"id\":\"COE-123\""));
+}
+
+#[test]
 fn linear_archive_with_explicit_issues_captures_before_archiving() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
@@ -506,6 +583,101 @@ fn linear_issue_response(identifier: &str, title: &str) -> String {
       "parent": null,
       "children": {{
         "nodes": []
+      }},
+      "labels": {{
+        "nodes": [
+          {{ "name": "runtime" }}
+        ],
+        "pageInfo": {{
+          "hasNextPage": false,
+          "endCursor": null
+        }}
+      }},
+      "inverseRelations": {{
+        "nodes": [],
+        "pageInfo": {{
+        "hasNextPage": false,
+        "endCursor": null
+        }}
+      }}
+    }}
+  }}
+}}"#
+    )
+}
+
+fn linear_issue_with_children_response<const N: usize>(
+    identifier: &str,
+    title: &str,
+    children: [&str; N],
+) -> String {
+    linear_issue_tree_response(identifier, title, None, &children)
+}
+
+fn linear_child_issue_response(identifier: &str, title: &str, parent: &str) -> String {
+    linear_issue_tree_response(identifier, title, Some(parent), &[])
+}
+
+fn linear_issue_tree_response(
+    identifier: &str,
+    title: &str,
+    parent: Option<&str>,
+    children: &[&str],
+) -> String {
+    let issue_id = format!("issue-{identifier}");
+    let parent_json = parent.map_or_else(
+        || "null".to_string(),
+        |parent| {
+            format!(
+                r#"{{
+        "id": "issue-{parent}",
+        "identifier": "{parent}",
+        "url": "https://linear.app/example/issue/{parent}",
+        "title": "Parent capability",
+        "state": {{ "name": "Done" }}
+      }}"#
+            )
+        },
+    );
+    let children_json = children
+        .iter()
+        .map(|child| {
+            format!(
+                r#"{{
+          "id": "issue-{child}",
+          "identifier": "{child}",
+          "url": "https://linear.app/example/issue/{child}",
+          "title": "Child implementation",
+          "state": {{ "name": "Done" }}
+        }}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        r#"{{
+  "data": {{
+    "issue": {{
+      "id": "{issue_id}",
+      "identifier": "{identifier}",
+      "url": "https://linear.app/example/issue/{identifier}",
+      "title": "{title}",
+      "description": "Captured from Linear.",
+      "priority": 0.0,
+      "createdAt": "2026-03-20T10:00:00Z",
+      "updatedAt": "2026-03-21T12:00:00Z",
+      "state": {{
+        "id": "state-done",
+        "name": "Done",
+        "type": "completed"
+      }},
+      "parent": {parent_json},
+      "projectMilestone": {{
+        "id": "milestone-m3",
+        "name": "M3: Symphony orchestration core"
+      }},
+      "children": {{
+        "nodes": [{children_json}]
       }},
       "labels": {{
         "nodes": [

@@ -28,11 +28,23 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
       }
       parent {
         id
+        identifier
+        url
+        title
+        state {
+          name
+        }
       }
-      children(first: 50) {
+      projectMilestone {
+        id
+        name
+      }
+      children(includeArchived: true, first: 100) {
         nodes {
           id
           identifier
+          url
+          title
           state {
             name
           }
@@ -166,11 +178,23 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
     }
     parent {
       id
+      identifier
+      url
+      title
+      state {
+        name
+      }
     }
-    children(first: 50) {
+    projectMilestone {
+      id
+      name
+    }
+    children(includeArchived: true, first: 100) {
       nodes {
         id
         identifier
+        url
+        title
         state {
           name
         }
@@ -384,6 +408,8 @@ pub(super) struct LinearIssueNode {
     #[serde(default)]
     pub parent: Option<LinearParentNode>,
     #[serde(default)]
+    pub project_milestone: Option<LinearProjectMilestoneNode>,
+    #[serde(default)]
     pub children: LinearChildConnection,
     pub labels: LinearLabelConnection,
     pub inverse_relations: LinearRelationConnection,
@@ -430,6 +456,20 @@ pub(super) struct LinearWorkflowState {
 #[derive(Debug, Deserialize)]
 pub(super) struct LinearParentNode {
     pub id: String,
+    #[serde(default)]
+    pub identifier: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub state: Option<LinearIssueRefState>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearProjectMilestoneNode {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -441,6 +481,10 @@ pub(super) struct LinearChildConnection {
 pub(super) struct LinearChildNode {
     pub id: String,
     pub identifier: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
     pub state: LinearIssueRefState,
 }
 

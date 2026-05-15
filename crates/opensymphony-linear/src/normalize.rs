@@ -1,12 +1,12 @@
 use crate::opensymphony_domain::{
     TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
-    TrackerIssueStateSnapshot,
+    TrackerIssueStateSnapshot, TrackerProjectMilestone,
 };
 
 use super::error::LinearError;
 use super::graphql::{
     LinearBlockerNode, LinearChildNode, LinearIssueNode, LinearIssueStateNode, LinearLabelNode,
-    LinearParentNode, LinearRelationNode, LinearWorkflowState,
+    LinearParentNode, LinearProjectMilestoneNode, LinearRelationNode, LinearWorkflowState,
 };
 
 pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, LinearError> {
@@ -19,7 +19,9 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         priority: normalize_priority(node.priority)?,
         state: node.state.name,
         labels: normalize_labels(node.labels.nodes),
-        parent_id: normalize_parent_id(node.parent),
+        parent_id: normalize_parent_id(node.parent.as_ref()),
+        parent: normalize_parent(node.parent),
+        project_milestone: normalize_project_milestone(node.project_milestone),
         blocked_by: normalize_blockers(node.inverse_relations.nodes),
         sub_issues: normalize_sub_issues(node.children.nodes),
         created_at: node.created_at,
@@ -75,8 +77,32 @@ fn normalize_blocker(blocker: LinearBlockerNode) -> TrackerIssueBlocker {
     }
 }
 
-fn normalize_parent_id(parent: Option<LinearParentNode>) -> Option<String> {
-    parent.map(|parent| parent.id)
+fn normalize_parent_id(parent: Option<&LinearParentNode>) -> Option<String> {
+    parent.map(|parent| parent.id.clone())
+}
+
+fn normalize_parent(parent: Option<LinearParentNode>) -> Option<TrackerIssueRef> {
+    let parent = parent?;
+    let identifier = parent.identifier?;
+    Some(TrackerIssueRef {
+        id: parent.id,
+        identifier,
+        title: parent.title,
+        url: parent.url,
+        state: parent
+            .state
+            .map(|state| state.name)
+            .unwrap_or_else(|| "unknown".to_string()),
+    })
+}
+
+fn normalize_project_milestone(
+    milestone: Option<LinearProjectMilestoneNode>,
+) -> Option<TrackerProjectMilestone> {
+    milestone.map(|milestone| TrackerProjectMilestone {
+        id: milestone.id,
+        name: milestone.name,
+    })
 }
 
 fn normalize_sub_issues(children: Vec<LinearChildNode>) -> Vec<TrackerIssueRef> {
@@ -85,6 +111,8 @@ fn normalize_sub_issues(children: Vec<LinearChildNode>) -> Vec<TrackerIssueRef> 
         .map(|child| TrackerIssueRef {
             id: child.id,
             identifier: child.identifier,
+            title: child.title,
+            url: child.url,
             state: child.state.name,
         })
         .collect::<Vec<_>>();

@@ -36,7 +36,7 @@ pub use state_machine::{
 pub use time::{DurationMs, TimestampMs};
 pub use tracker::{
     TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
-    TrackerIssueStateKind, TrackerIssueStateSnapshot,
+    TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerProjectMilestone,
 };
 
 #[cfg(test)]

@@ -12,11 +12,7 @@ fn default_config_path(repo_root: &Path) -> Option<PathBuf> {
 }
 
 fn select_issues(source: &SourceFile, selection: &IssueSelection) -> Vec<IssueEvidence> {
-    let selected_identifiers = selection
-        .identifiers
-        .iter()
-        .map(|identifier| normalize_issue_key(identifier))
-        .collect::<BTreeSet<_>>();
+    let selected_identifiers = expanded_selected_identifiers(source, &selection.identifiers);
     let mut issues = source.issues.clone();
     issues.retain(|issue| {
         let issue_key = normalize_issue_key(&issue.identifier);
@@ -60,6 +56,35 @@ fn select_issues(source: &SourceFile, selection: &IssueSelection) -> Vec<IssueEv
     });
     issues.sort_by(|left, right| left.identifier.cmp(&right.identifier));
     issues
+}
+
+fn expanded_selected_identifiers(source: &SourceFile, identifiers: &[String]) -> BTreeSet<String> {
+    let mut selected = identifiers
+        .iter()
+        .map(|identifier| normalize_issue_key(identifier))
+        .collect::<BTreeSet<_>>();
+    if selected.is_empty() {
+        return selected;
+    }
+
+    let issue_by_key = source
+        .issues
+        .iter()
+        .map(|issue| (normalize_issue_key(&issue.identifier), issue))
+        .collect::<BTreeMap<_, _>>();
+    let mut queue = selected.iter().cloned().collect::<Vec<_>>();
+    while let Some(issue_key) = queue.pop() {
+        let Some(issue) = issue_by_key.get(&issue_key) else {
+            continue;
+        };
+        for child in &issue.children {
+            let child_key = normalize_issue_key(&child.identifier);
+            if selected.insert(child_key.clone()) {
+                queue.push(child_key);
+            }
+        }
+    }
+    selected
 }
 
 fn matched_prs(
@@ -196,7 +221,15 @@ fn render_issue_capsule(
         title: issue_title(&plan.issue),
         state: plan.issue.state.clone(),
         milestone: plan.issue.milestone.clone(),
+        milestone_id: plan.issue.milestone_id.clone(),
         linear_url: plan.issue.url.clone(),
+        parent: plan.issue.parent.as_ref().map(CapsuleIssueLink::from),
+        children: plan
+            .issue
+            .children
+            .iter()
+            .map(CapsuleIssueLink::from)
+            .collect(),
         prs: plan
             .prs
             .iter()
@@ -213,6 +246,22 @@ fn render_issue_capsule(
                 .url
                 .as_ref()
                 .map(|_| format!("linear:{issue_key}")),
+            linear_parent: plan
+                .issue
+                .parent
+                .as_ref()
+                .map(|parent| format!("linear:{}", normalize_issue_key(&parent.identifier))),
+            linear_children: plan
+                .issue
+                .children
+                .iter()
+                .map(|child| format!("linear:{}", normalize_issue_key(&child.identifier)))
+                .collect(),
+            linear_milestone: plan
+                .issue
+                .milestone_id
+                .as_ref()
+                .map(|milestone_id| format!("linear:project-milestone:{milestone_id}")),
             github_prs: plan
                 .prs
                 .iter()
@@ -239,6 +288,10 @@ fn render_issue_capsule(
     markdown.push_str(&format!("# {issue_key}: {}\n\n", issue_title(&plan.issue)));
     markdown.push_str("## Original intent\n\n");
     markdown.push_str(&render_original_intent(&plan.issue));
+    if let Some(relationships) = render_relationships(&plan.issue) {
+        markdown.push_str("\n\n## Relationships\n\n");
+        markdown.push_str(&relationships);
+    }
     markdown.push_str("\n\n## Outcome\n\n");
     markdown.push_str(&render_outcome(plan));
     markdown.push_str("\n\n## Decisions and actions\n\n");
@@ -271,6 +324,12 @@ fn render_issue_capsule(
         );
         markdown.push_str(&format!("- PR: {label}\n"));
     }
+    if let Some(milestone) = plan.issue.milestone.as_deref() {
+        markdown.push_str(&format!(
+            "- Milestone: {}\n",
+            milestone_link(markdown_slug(milestone), milestone)
+        ));
+    }
     markdown.push_str(&format!("- Debug: `opensymphony debug {issue_key}`\n"));
     markdown.push('\n');
     markdown.push_str(ISSUE_CAPSULE_END);
@@ -291,7 +350,13 @@ struct IssueCapsuleFrontmatter {
     #[serde(skip_serializing_if = "Option::is_none")]
     milestone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    milestone_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     linear_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<CapsuleIssueLink>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    children: Vec<CapsuleIssueLink>,
     prs: Vec<CapsulePr>,
     areas: Vec<String>,
     source_refs: SourceRefs,
@@ -309,9 +374,34 @@ struct CapsulePr {
 }
 
 #[derive(Debug, Serialize)]
+struct CapsuleIssueLink {
+    issue: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+}
+
+impl From<&IssueLinkEvidence> for CapsuleIssueLink {
+    fn from(link: &IssueLinkEvidence) -> Self {
+        Self {
+            issue: normalize_issue_key(&link.identifier),
+            title: link.title.clone(),
+            url: link.url.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
 struct SourceRefs {
     #[serde(skip_serializing_if = "Option::is_none")]
     linear_issue: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linear_parent: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    linear_children: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linear_milestone: Option<String>,
     github_prs: Vec<String>,
 }
 
@@ -325,6 +415,49 @@ fn render_original_intent(issue: &IssueEvidence) -> String {
         || "- Source issue description was not available.".to_string(),
         |description| summarize_markdown(description, 900),
     )
+}
+
+fn render_relationships(issue: &IssueEvidence) -> Option<String> {
+    let mut lines = Vec::new();
+    if let Some(parent) = &issue.parent {
+        lines.push(format!("- Parent: {}", issue_link(parent)));
+    }
+    if !issue.children.is_empty() {
+        lines.push("- Children:".to_string());
+        for child in &issue.children {
+            lines.push(format!("  - {}", issue_link(child)));
+        }
+    }
+    if let Some(milestone) = issue.milestone.as_deref().and_then(normalize_optional) {
+        lines.push(format!(
+            "- Milestone: {}",
+            milestone_link(markdown_slug(&milestone), &milestone)
+        ));
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn issue_link(issue: &IssueLinkEvidence) -> String {
+    let issue_key = normalize_issue_key(&issue.identifier);
+    let label = issue
+        .title
+        .as_deref()
+        .and_then(normalize_optional)
+        .map(|title| format!("{issue_key}: {title}"))
+        .unwrap_or_else(|| issue_key.clone());
+    format!("[[{issue_key}|{label}]]")
+}
+
+fn milestone_link(slug: String, label: &str) -> String {
+    format!("[[milestones/{slug}|{label}]]")
+}
+
+fn markdown_slug(value: &str) -> String {
+    slugify(value)
 }
 
 fn render_outcome(plan: &CaptureIssuePlan) -> String {

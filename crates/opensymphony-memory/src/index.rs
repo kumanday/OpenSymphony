@@ -420,6 +420,55 @@ fn write_markdown_indexes(config: &MemoryConfig) -> Result<Vec<PathBuf>, MemoryE
     Ok(vec![index_path, log_path])
 }
 
+fn write_milestone_nodes(
+    config: &MemoryConfig,
+    plan: &CapturePlan,
+) -> Result<Vec<PathBuf>, MemoryError> {
+    let milestone_names = plan
+        .selected
+        .iter()
+        .filter_map(|issue| issue.issue.milestone.as_deref())
+        .filter_map(normalize_optional)
+        .collect::<BTreeSet<_>>();
+    if milestone_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let issues = load_indexed_issues(config)?;
+    let milestone_dir = config.memory_root.join("milestones");
+    create_dir_all(&milestone_dir)?;
+    let mut written = Vec::new();
+    for milestone in milestone_names {
+        let slug = slugify(&milestone);
+        let path = milestone_dir.join(format!("{slug}.md"));
+        let mut markdown = String::new();
+        markdown.push_str("---\n");
+        markdown.push_str("type: milestone-memory-node\n");
+        markdown.push_str(&format!("milestone: {}\n", serde_json::to_string(&milestone)?));
+        markdown.push_str(&format!("updated_at: {}\n", Utc::now().to_rfc3339()));
+        markdown.push_str("---\n\n");
+        markdown.push_str(&format!("# {milestone}\n\n"));
+        markdown.push_str("## Issues\n\n");
+        let milestone_issues = issues
+            .iter()
+            .filter(|issue| issue.milestone.as_deref() == Some(milestone.as_str()))
+            .collect::<Vec<_>>();
+        if milestone_issues.is_empty() {
+            markdown.push_str("- No captured issues currently reference this milestone.\n");
+        } else {
+            for issue in milestone_issues {
+                markdown.push_str(&format!(
+                    "- [[{}|{}: {}]]\n",
+                    issue.issue_key, issue.issue_key, issue.title
+                ));
+            }
+        }
+        write_file(&path, &markdown)?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
 fn select_indexed_issues_for_docs(
     config: &MemoryConfig,
     selection: &IssueSelection,

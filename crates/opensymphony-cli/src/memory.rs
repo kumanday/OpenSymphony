@@ -8,7 +8,7 @@ use chrono::NaiveDate;
 use clap::{Args, Subcommand};
 
 use crate::{
-    opensymphony_domain::TrackerIssue,
+    opensymphony_domain::{TrackerIssue, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
         ArchivePlan, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueSelection, LintSeverity,
@@ -354,6 +354,9 @@ fn print_capture_write_report(report: crate::opensymphony_memory::CaptureWriteRe
     for path in report.markdown_indexes {
         println!("Updated markdown index: {}", path.display());
     }
+    for path in report.milestone_nodes {
+        println!("Updated milestone node: {}", path.display());
+    }
     if !report.warnings.is_empty() {
         println!("\nWarnings:");
         for warning in report.warnings {
@@ -598,7 +601,7 @@ async fn run_archive_with_live_capture(
     let capture_report = write_capture_plan(config, &capture_plan, args.force)?;
     print_capture_write_report(capture_report);
 
-    let archive_plan = plan_archive(config, &identifiers, false, None, true, args.force)?;
+    let archive_plan = archive_plan_after_capture(config, &capture_plan, true, args.force);
     if archive_plan.issues.iter().all(|issue| !issue.eligible) {
         println!("\n{}", render_archive_plan(config, &archive_plan));
         return Err(MemoryError::InvalidInput(
@@ -621,7 +624,15 @@ fn archive_plan_after_capture(
 ) -> ArchivePlan {
     let mut issues = Vec::new();
     let mut warnings = Vec::new();
-    for issue in &capture_plan.selected {
+    let mut selected = capture_plan.selected.iter().collect::<Vec<_>>();
+    selected.sort_by(|left, right| {
+        left.issue
+            .children
+            .len()
+            .cmp(&right.issue.children.len())
+            .then_with(|| left.issue.identifier.cmp(&right.issue.identifier))
+    });
+    for issue in selected {
         let issue_key = issue.issue.identifier.clone();
         let warning_count = issue.warnings.len() + capture_plan.warnings.len();
         let (eligible, reason) = if force {
@@ -749,10 +760,7 @@ async fn load_linear_source(
     identifiers: &[String],
 ) -> Result<SourceFile, MemoryError> {
     let client = linear_client_from_workflow(repo_root, workflow_path)?;
-    let tracker_issues = client
-        .issues_by_identifiers(identifiers)
-        .await
-        .map_err(|error| MemoryError::Linear(format!("Linear issue lookup failed: {error}")))?;
+    let tracker_issues = load_linear_issue_tree(&client, identifiers).await?;
 
     let mut issues = Vec::new();
     for issue in tracker_issues {
@@ -774,10 +782,54 @@ async fn load_linear_source(
     })
 }
 
+async fn load_linear_issue_tree(
+    client: &LinearClient,
+    identifiers: &[String],
+) -> Result<Vec<TrackerIssue>, MemoryError> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut pending = identifiers
+        .iter()
+        .map(|identifier| identifier.trim().to_string())
+        .filter(|identifier| !identifier.is_empty())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut issues = Vec::new();
+
+    while !pending.is_empty() {
+        let batch = pending.iter().cloned().collect::<Vec<_>>();
+        pending.clear();
+        let tracker_issues = client
+            .issues_by_identifiers(&batch)
+            .await
+            .map_err(|error| MemoryError::Linear(format!("Linear issue lookup failed: {error}")))?;
+        for issue in tracker_issues {
+            let issue_key = issue.identifier.clone();
+            if !seen.insert(issue_key) {
+                continue;
+            }
+            for child in &issue.sub_issues {
+                if !seen.contains(&child.identifier) {
+                    pending.insert(child.identifier.clone());
+                }
+            }
+            issues.push(issue);
+        }
+    }
+
+    issues.sort_by(|left, right| left.identifier.cmp(&right.identifier));
+    Ok(issues)
+}
+
 fn issue_evidence_from_tracker(
     issue: TrackerIssue,
     workpad: Option<crate::opensymphony_linear::WorkpadComment>,
 ) -> IssueEvidence {
+    let parent = issue.parent.as_ref().map(issue_link_from_tracker_ref);
+    let children = issue
+        .sub_issues
+        .iter()
+        .map(issue_link_from_tracker_ref)
+        .collect::<Vec<_>>();
+    let milestone = issue.project_milestone.clone();
     IssueEvidence {
         id: Some(issue.id),
         identifier: issue.identifier,
@@ -785,6 +837,10 @@ fn issue_evidence_from_tracker(
         url: Some(issue.url),
         description: issue.description,
         state: Some(issue.state),
+        milestone: milestone.as_ref().map(|milestone| milestone.name.clone()),
+        milestone_id: milestone.map(|milestone| milestone.id),
+        parent,
+        children,
         labels: issue.labels,
         comments: workpad
             .map(|comment| {
@@ -798,6 +854,17 @@ fn issue_evidence_from_tracker(
             .unwrap_or_default(),
         updated_at: Some(issue.updated_at),
         ..IssueEvidence::default()
+    }
+}
+
+fn issue_link_from_tracker_ref(
+    issue: &TrackerIssueRef,
+) -> crate::opensymphony_memory::IssueLinkEvidence {
+    crate::opensymphony_memory::IssueLinkEvidence {
+        id: Some(issue.id.clone()),
+        identifier: issue.identifier.clone(),
+        title: issue.title.clone(),
+        url: issue.url.clone(),
     }
 }
 

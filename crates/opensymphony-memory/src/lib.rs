@@ -217,6 +217,12 @@ pub struct IssueEvidence {
     #[serde(default)]
     pub milestone: Option<String>,
     #[serde(default)]
+    pub milestone_id: Option<String>,
+    #[serde(default)]
+    pub parent: Option<IssueLinkEvidence>,
+    #[serde(default)]
+    pub children: Vec<IssueLinkEvidence>,
+    #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
     pub comments: Vec<CommentEvidence>,
@@ -228,6 +234,17 @@ pub struct IssueEvidence {
     pub updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueLinkEvidence {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub identifier: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,6 +367,7 @@ pub struct CaptureWriteReport {
     pub written_capsules: Vec<PathBuf>,
     pub index_path: PathBuf,
     pub markdown_indexes: Vec<PathBuf>,
+    pub milestone_nodes: Vec<PathBuf>,
     pub warnings: Vec<String>,
 }
 

@@ -108,7 +108,7 @@ async fn candidate_issues_normalize_fixture_payloads() {
         requests[0].body["query"]
             .as_str()
             .expect("query should be a string")
-            .contains("children(first: 50)")
+            .contains("children(includeArchived: true, first: 100)")
     );
     assert!(
         requests[0].body["query"]
