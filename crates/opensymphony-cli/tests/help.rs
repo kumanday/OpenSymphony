@@ -63,6 +63,29 @@ fn memory_help_explains_capture_and_query_surface() {
 }
 
 #[test]
+fn memory_capture_help_uses_dry_run_as_only_write_gate() {
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["memory", "capture", "--help"])
+        .output()
+        .expect("memory capture help should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "memory capture help should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("--dry-run"),
+        "capture help should include --dry-run: stdout={stdout}",
+    );
+    assert!(
+        !stdout.contains("--write"),
+        "capture help should not include removed --write flag: stdout={stdout}",
+    );
+}
+
+#[test]
 fn linear_help_explains_archive_guard() {
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .args(["linear", "--help"])
@@ -85,6 +108,29 @@ fn linear_help_explains_archive_guard() {
             "linear help should include `{snippet}`: stdout={stdout}",
         );
     }
+}
+
+#[test]
+fn linear_archive_help_uses_dry_run_as_only_write_gate() {
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["linear", "archive", "--help"])
+        .output()
+        .expect("linear archive help should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "linear archive help should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        stdout.contains("--dry-run"),
+        "archive help should include --dry-run: stdout={stdout}",
+    );
+    assert!(
+        !stdout.contains("--write"),
+        "archive help should not include removed --write flag: stdout={stdout}",
+    );
 }
 
 #[test]

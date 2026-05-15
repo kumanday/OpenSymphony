@@ -30,7 +30,8 @@ description:
 4. Check mergeability and conflicts against main.
 5. If conflicts exist, use the `pull` skill to fetch/merge `origin/main` and
    resolve conflicts, then use the `push` skill to publish the updated branch.
-6. Address any review comments before merging (see Review Handling below).
+6. Address any Linear issue comments and PR review comments before merging
+   (see Review Handling below).
 7. Watch checks until complete.
 8. If checks fail, pull logs, fix the issue, commit with the `commit` skill,
    push with the `push` skill, and re-run checks.
@@ -118,6 +119,11 @@ echo "**DO NOT MERGE** - the user reviews and merges."
 
 This repo uses the OpenHands PR Review plugin for automated reviews. Reviews
 post as inline comments on specific lines of code.
+
+Before inspecting GitHub review comments, fetch the latest Linear issue comments
+with `.agents/skills/linear/queries/issue_comments.graphql`. Treat unresolved,
+actionable operator comments there as blocking review feedback even when the PR
+has no new GitHub comments.
 
 ### AI Review Comments
 

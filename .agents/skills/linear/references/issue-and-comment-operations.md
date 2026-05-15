@@ -6,6 +6,7 @@ Use these checked-in query files for common issue-side work:
 - Update an issue title, body, parent, project, or state metadata: `queries/issue_update.graphql`
 - Read an issue by key: `queries/issue_by_key.graphql`
 - Read a full issue snapshot by id: `queries/issue_details.graphql`
+- Read issue comments by id: `queries/issue_comments.graphql`
 - Resolve valid workflow states for an issue: `queries/issue_team_states.graphql`
 - Create a comment: `queries/comment_create.graphql`
 - Update a comment: `queries/comment_update.graphql`
@@ -27,3 +28,6 @@ Use these checked-in query files for common issue-side work:
   generic URL behavior is explicitly desired.
 - `issue_move_to_state.graphql` expects a `stateId`; resolve it first with
   `issue_team_states.graphql`.
+- `issue_comments.graphql` returns active comments with `resolvedAt`, `updatedAt`,
+  and author identity so agents can sort recent operator feedback and ignore
+  resolved workpad/comment threads when needed.

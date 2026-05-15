@@ -58,10 +58,18 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 
 ## Common workflows
 
+- Review feedback polling:
+  - When a workflow asks for PR feedback, review polling, rework feedback, or a
+    final merge-readiness sweep, read latest Linear issue comments first with
+    `.agents/skills/linear/queries/issue_comments.graphql`.
+  - Treat unresolved, actionable operator comments on the Linear issue as
+    feedback even when the GitHub PR has no new review comments.
 - Create an issue or sub-issue:
   - `.agents/skills/linear/queries/issue_create.graphql`
 - Update an issue title, body, or metadata:
   - `.agents/skills/linear/queries/issue_update.graphql`
+- Read issue comments:
+  - `.agents/skills/linear/queries/issue_comments.graphql`
 - Create a comment:
   - `.agents/skills/linear/queries/comment_create.graphql`
 - Edit a comment:
@@ -75,6 +83,11 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
   - `.agents/skills/linear/queries/attachment_link_url.graphql`
 - Create an issue relation:
   - `.agents/skills/linear/queries/issue_relation_create.graphql`
+- Read project planning state:
+  - `.agents/skills/linear/queries/project_planning_state.graphql`
+- Create or update a project milestone:
+  - `.agents/skills/linear/queries/project_milestone_create.graphql`
+  - `.agents/skills/linear/queries/project_milestone_update.graphql`
 - Update project overview/content:
   - `.agents/skills/linear/queries/project_by_slug.graphql`
   - `.agents/skills/linear/queries/project_update_content.graphql`

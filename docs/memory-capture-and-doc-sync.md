@@ -394,14 +394,14 @@ Example command shape:
 
 ```bash
 opensymphony memory capture COE-123 --dry-run
-opensymphony memory capture COE-123 --write
+opensymphony memory capture COE-123
 opensymphony memory capture --issues COE-123,COE-124 --dry-run
-opensymphony memory capture --issues-file completed-issues.csv --write
-opensymphony memory capture --issue-range COE-100..COE-199 --write
-opensymphony memory capture --before-issue COE-300 --write
-opensymphony memory capture --milestone "M4: Collaborative Planning Alpha" --write
-opensymphony memory capture --milestones-file milestones.csv --write
-opensymphony memory capture --state Done --before-date 2026-05-01 --write
+opensymphony memory capture --issues-file completed-issues.csv
+opensymphony memory capture --issue-range COE-100..COE-199
+opensymphony memory capture --before-issue COE-300
+opensymphony memory capture --milestone "M4: Collaborative Planning Alpha"
+opensymphony memory capture --milestones-file milestones.csv
+opensymphony memory capture --state Done --before-date 2026-05-01
 ```
 
 Dry run should show:
@@ -464,7 +464,7 @@ opensymphony memory sync-docs --since-last-sync --dry-run
 opensymphony memory sync-docs --issues COE-123,COE-124 --dry-run
 opensymphony memory sync-docs --milestone "M4: Collaborative Planning Alpha" --dry-run
 opensymphony memory sync-docs --area authentication --dry-run
-opensymphony memory sync-docs --issues-file completed-issues.csv --write
+opensymphony memory sync-docs --issues-file completed-issues.csv
 ```
 
 Dry run should show:
@@ -650,10 +650,9 @@ The first user experience can be CLI-first.
 
 Important CLI affordances:
 
-- dry-run by default for broad selections
+- explicit `--dry-run` previews before writes
 - clear source discovery output
 - confidence and warning summaries
-- explicit write flags
 - reviewable diffs for docs sync
 - separate capture and archive actions
 - commands that open or print generated capsules

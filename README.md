@@ -137,7 +137,7 @@ DuckDB, and can sync selected knowledge into public topic docs:
 
 ```bash
 opensymphony memory capture COE-123 --dry-run
-opensymphony memory capture COE-123 --write
+opensymphony memory capture COE-123
 opensymphony memory brief COE-123
 opensymphony memory related --area openhands-runtime
 opensymphony memory sync-docs --issues COE-123 --dry-run

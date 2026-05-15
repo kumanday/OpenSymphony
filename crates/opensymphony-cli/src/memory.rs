@@ -71,8 +71,6 @@ struct CaptureArgs {
     no_github: bool,
     #[arg(long, help = "Only show the capture plan")]
     dry_run: bool,
-    #[arg(long, help = "Write capsules and update the DuckDB index")]
-    write: bool,
     #[arg(long, help = "Overwrite generated or non-generated existing capsules")]
     force: bool,
 }
@@ -105,8 +103,6 @@ struct ImportArgs {
     source_file: PathBuf,
     #[arg(long, help = "Only show the capture plan")]
     dry_run: bool,
-    #[arg(long, help = "Write capsules and update the DuckDB index")]
-    write: bool,
     #[arg(long, help = "Overwrite generated or non-generated existing capsules")]
     force: bool,
 }
@@ -126,8 +122,6 @@ struct SyncDocsArgs {
     area: Option<String>,
     #[arg(long, help = "Only show the proposed documentation diff")]
     dry_run: bool,
-    #[arg(long, help = "Write topic docs and mark selected memory synced")]
-    write: bool,
     #[arg(
         long,
         help = "Include simple Mermaid diagrams in managed docs sections"
@@ -225,8 +219,6 @@ struct ArchiveArgs {
     state: Option<String>,
     #[arg(long, help = "Only show archive eligibility")]
     dry_run: bool,
-    #[arg(long, help = "Archive eligible issues in Linear")]
-    write: bool,
     #[arg(long, help = "Bypass missing or warning capture checks")]
     force: bool,
     #[arg(long, help = "Runtime workflow path for Linear credentials")]
@@ -301,7 +293,7 @@ async fn run_capture(
         ..IssueSelection::default()
     };
     let source = load_linear_source(repo_root, None, &identifiers).await?;
-    let write = args.write && !args.dry_run;
+    let write = !args.dry_run;
     let plan = plan_capture(config, &source, &selection, write, !args.no_github)?;
     print_or_write_capture_plan(config, &plan, args.force)?;
     Ok(())
@@ -323,7 +315,7 @@ fn run_import(config: &MemoryConfig, args: ImportArgs) -> Result<(), MemoryError
         since_last_sync: false,
     };
     let source = load_source_file(&args.source_file)?;
-    let write = args.write && !args.dry_run;
+    let write = !args.dry_run;
     let plan = plan_capture(config, &source, &selection, write, false)?;
     print_or_write_capture_plan(config, &plan, args.force)?;
     Ok(())
@@ -336,7 +328,9 @@ fn print_or_write_capture_plan(
 ) -> Result<(), MemoryError> {
     if !plan.write {
         println!("{}", render_capture_dry_run(config, plan));
-        println!("Dry run only. Re-run with `--write` to create capsules and update the index.");
+        println!(
+            "Dry run only. Re-run without `--dry-run` to create capsules and update the index."
+        );
         return Ok(());
     }
 
@@ -377,11 +371,11 @@ fn run_sync_docs(config: &MemoryConfig, args: SyncDocsArgs) -> Result<(), Memory
         since_last_sync: args.since_last_sync,
         ..IssueSelection::default()
     };
-    let write = args.write && !args.dry_run;
+    let write = !args.dry_run;
     let plan = plan_docs_sync(config, &selection, write, args.with_diagrams)?;
     print_docs_plan(&plan);
     if !write {
-        println!("Dry run only. Re-run with `--write` to update topic docs.");
+        println!("Dry run only. Re-run without `--dry-run` to update topic docs.");
         return Ok(());
     }
     let written = write_docs_sync_plan(config, &plan)?;
@@ -529,7 +523,7 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
                 .to_string(),
         ));
     }
-    let write = args.write && !args.dry_run;
+    let write = !args.dry_run;
 
     if !args.from_memory {
         if identifiers.is_empty() {
@@ -550,7 +544,7 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
     )?;
     if !write {
         println!("{}", render_archive_plan(&config, &plan));
-        println!("Dry run only. Re-run with `--write` to archive eligible Linear issues.");
+        println!("Dry run only. Re-run without `--dry-run` to archive eligible Linear issues.");
         return Ok(());
     }
     let report = archive_in_linear(&repo_root, args.workflow.as_deref(), &plan).await?;
@@ -593,7 +587,7 @@ async fn run_archive_with_live_capture(
         let archive_plan = archive_plan_after_capture(config, &capture_plan, false, args.force);
         println!("\n{}", render_archive_plan(config, &archive_plan));
         println!(
-            "Dry run only. Re-run with `--write` to capture memory and archive eligible Linear issues."
+            "Dry run only. Re-run without `--dry-run` to capture memory and archive eligible Linear issues."
         );
         return Ok(());
     }

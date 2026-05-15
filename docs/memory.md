@@ -20,8 +20,8 @@ discovery by default through `gh`:
 
 ```bash
 opensymphony memory capture COE-123 --dry-run
-opensymphony memory capture COE-123 --write
-opensymphony memory capture --issues COE-123,COE-124 --write
+opensymphony memory capture COE-123
+opensymphony memory capture --issues COE-123,COE-124
 opensymphony memory capture --issue-range COE-120..COE-130 --dry-run
 ```
 
@@ -55,8 +55,8 @@ retried.
 
 ```bash
 opensymphony memory import --source-file completed.yaml --dry-run
-opensymphony memory import --source-file completed.yaml --write
-opensymphony memory import COE-123 --source-file completed.yaml --write
+opensymphony memory import --source-file completed.yaml
+opensymphony memory import COE-123 --source-file completed.yaml
 opensymphony memory import --issue-range COE-120..COE-130 --source-file completed.yaml --dry-run
 ```
 
@@ -170,7 +170,7 @@ Docs sync is review-first. It shows the managed-section diff before writing:
 
 ```bash
 opensymphony memory sync-docs --issues COE-123 --dry-run
-opensymphony memory sync-docs --issues COE-123 --write
+opensymphony memory sync-docs --issues COE-123
 opensymphony memory lint --public-docs
 ```
 
@@ -186,7 +186,7 @@ archives only eligible issues:
 
 ```bash
 opensymphony linear archive --issues COE-123 --dry-run
-opensymphony linear archive --issues COE-123 --write
+opensymphony linear archive --issues COE-123
 opensymphony linear archive --issue-range COE-120..COE-130 --dry-run
 ```
 
@@ -195,7 +195,7 @@ capture warnings. `--force` bypasses the guard when an operator has reviewed the
 risk:
 
 ```bash
-opensymphony linear archive --issues COE-123 --force --write
+opensymphony linear archive --issues COE-123 --force
 ```
 
 To archive from already captured memory without recapturing, use
@@ -203,7 +203,7 @@ To archive from already captured memory without recapturing, use
 
 ```bash
 opensymphony linear archive --from-memory --state captured --dry-run
-opensymphony linear archive --from-memory --state pending --write
+opensymphony linear archive --from-memory --state pending
 ```
 
 `--state` only applies to `--from-memory`. Explicit issue archive selectors use
@@ -211,7 +211,7 @@ the normal live capture path.
 
 ## Troubleshooting
 
-- Use `opensymphony memory capture ... --dry-run` before `--write`.
+- Use `opensymphony memory capture ... --dry-run` before running the writing command.
 - Use `opensymphony memory capture --help`,
   `opensymphony memory import --help`, and
   `opensymphony linear archive --help` for the current command surface.

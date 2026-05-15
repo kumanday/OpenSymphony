@@ -138,7 +138,7 @@ PRs by default, so use dry runs before writing local memory or docs:
 
 ```bash
 opensymphony memory capture COE-123 --dry-run
-opensymphony memory capture COE-123 --write
+opensymphony memory capture COE-123
 opensymphony memory status
 opensymphony memory brief COE-123
 opensymphony memory related --paths crates/opensymphony-openhands
@@ -150,7 +150,7 @@ Use `opensymphony memory import --source-file completed.yaml` only for
 deterministic imports, migrations, tests, or external exports. Failed Linear or
 GitHub access should be fixed before live capture is retried.
 
-`memory capture --write` creates or refreshes issue capsules, updates
+`memory capture` creates or refreshes issue capsules, updates
 `.opensymphony/memory/memory.duckdb`, and refreshes markdown indexes when
 enabled. The index is built with DuckDB's bundled native library so operators
 do not need to install DuckDB separately, at the cost of heavier Rust compile
@@ -162,12 +162,12 @@ Linear archival is a separate command and is guarded by captured memory:
 
 ```bash
 opensymphony linear archive --issues COE-123 --dry-run
-opensymphony linear archive --issues COE-123 --write
+opensymphony linear archive --issues COE-123
 ```
 
 For explicit issue selectors, the archive command captures live Linear and
 GitHub evidence before evaluating the guard. It blocks issues that have no
-capsule or unresolved capture warnings unless `--force` is supplied. Write mode
+capsule or unresolved capture warnings unless `--force` is supplied. Normal mode
 resolves Linear credentials from `WORKFLOW.md` and calls the Linear GraphQL
 archive mutation.
 

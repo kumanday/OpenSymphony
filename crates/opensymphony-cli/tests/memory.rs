@@ -40,7 +40,6 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
             "COE-123",
             "--source-file",
             "source.yaml",
-            "--write",
         ],
     );
     assert_success(&write, "capture write");
@@ -128,7 +127,6 @@ fn memory_import_force_overwrites_non_generated_capsule() {
             "COE-123",
             "--source-file",
             "source.yaml",
-            "--write",
         ],
     );
     assert_failure(&blocked, "capture without force");
@@ -142,7 +140,6 @@ fn memory_import_force_overwrites_non_generated_capsule() {
             "COE-123",
             "--source-file",
             "source.yaml",
-            "--write",
             "--force",
         ],
     );
@@ -165,7 +162,6 @@ fn memory_lint_related_paths_and_from_memory_archive_cover_private_doc_links() {
                 "COE-123",
                 "--source-file",
                 "source.yaml",
-                "--write",
             ],
         ),
         "capture write",
@@ -323,10 +319,7 @@ fn memory_capture_expands_linear_children_and_links_graph() {
     ]);
     write_workflow(repo.path(), &server.base_url);
 
-    let output = run(
-        repo.path(),
-        ["memory", "capture", "COE-123", "--no-github", "--write"],
-    );
+    let output = run(repo.path(), ["memory", "capture", "COE-123", "--no-github"]);
 
     assert_success(&output, "capture parent and child");
     assert!(String::from_utf8_lossy(&output.stdout).contains("Wrote 2 capsule(s)."));
@@ -371,7 +364,6 @@ fn linear_archive_live_capture_archives_expanded_children() {
             "--issues",
             "COE-123",
             "--no-github",
-            "--write",
             "--force",
         ],
     );
@@ -406,7 +398,7 @@ fn linear_archive_with_explicit_issues_captures_before_archiving() {
 
     let archive = run_with_path(
         repo.path(),
-        ["linear", "archive", "--issues", "COE-123", "--write"],
+        ["linear", "archive", "--issues", "COE-123"],
         bin_dir.to_str().expect("bin path should be utf-8"),
     );
 
@@ -434,7 +426,6 @@ fn linear_archive_write_marks_successes_before_reporting_partial_failure() {
                 "COE-123,COE-124",
                 "--source-file",
                 "source.yaml",
-                "--write",
             ],
         ),
         "capture two issues",
@@ -448,14 +439,7 @@ fn linear_archive_write_marks_successes_before_reporting_partial_failure() {
 
     let archive = run(
         repo.path(),
-        [
-            "linear",
-            "archive",
-            "--from-memory",
-            "--state",
-            "captured",
-            "--write",
-        ],
+        ["linear", "archive", "--from-memory", "--state", "captured"],
     );
 
     assert_failure(&archive, "partial archive failure");
