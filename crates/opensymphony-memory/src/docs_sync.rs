@@ -94,11 +94,14 @@ fn missing_docs_area_mapping_error(
         );
     }
 
-    let areas = if unmapped_areas.is_empty() {
-        "none".to_string()
-    } else {
-        unmapped_areas.into_iter().collect::<Vec<_>>().join(", ")
-    };
+    if unmapped_areas.is_empty() {
+        return MemoryError::InvalidInput(
+            "Selected issues have no docs areas. Run opensymphony memory init or update .opensymphony/memory/memory.yaml."
+                .to_string(),
+        );
+    }
+
+    let areas = unmapped_areas.into_iter().collect::<Vec<_>>().join(", ");
     MemoryError::InvalidInput(format!(
         "selected issues only reference unmapped docs areas ({areas}). Run opensymphony memory init or update .opensymphony/memory/memory.yaml."
     ))
