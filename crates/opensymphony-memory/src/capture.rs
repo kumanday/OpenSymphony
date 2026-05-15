@@ -44,7 +44,10 @@ pub fn plan_capture(
         let mut prs = matched_prs(source, &issue, &issue_key);
         if discover_github {
             match discover_github_prs(&config.repo_root, &issue_key) {
-                Ok(discovered) => merge_prs(&mut prs, discovered),
+                Ok((discovered, github_warnings)) => {
+                    merge_prs(&mut prs, discovered);
+                    issue_warnings.extend(github_warnings);
+                }
                 Err(error) => return Err(MemoryError::InvalidInput(error)),
             }
         }

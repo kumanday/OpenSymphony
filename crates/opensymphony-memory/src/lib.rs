@@ -365,7 +365,6 @@ pub struct SearchResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusReport {
     pub issue_count: usize,
-    pub stale_count: usize,
     pub warning_count: usize,
     pub docs_pending_count: usize,
     pub issues: Vec<StatusIssue>,

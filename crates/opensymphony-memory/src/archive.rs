@@ -125,13 +125,19 @@ pub fn mark_archived(config: &MemoryConfig, issue_keys: &[String]) -> Result<(),
     if !config.index_path.exists() {
         return Ok(());
     }
-    let connection = open_index(config)?;
+    let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
         path: config.index_path.clone(),
         source,
     })?;
+    let transaction = connection
+        .transaction()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
     for issue_key in issue_keys {
-        connection
+        transaction
             .execute(
                 "UPDATE issues SET archive_status = 'archived' WHERE issue_key = ?",
                 params![normalize_issue_key(issue_key)],
@@ -141,6 +147,12 @@ pub fn mark_archived(config: &MemoryConfig, issue_keys: &[String]) -> Result<(),
                 source,
             })?;
     }
+    transaction
+        .commit()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
     Ok(())
 }
 

@@ -1,7 +1,7 @@
 fn discover_github_prs(
     repo_root: &Path,
     issue_key: &str,
-) -> Result<Vec<PullRequestEvidence>, String> {
+) -> Result<(Vec<PullRequestEvidence>, Vec<String>), String> {
     let output = Command::new("gh")
         .args([
             "pr",
@@ -34,6 +34,7 @@ fn discover_github_prs(
             format!("GitHub PR discovery failed: failed to parse gh JSON: {error}")
         })?;
     let mut prs = Vec::new();
+    let mut warnings = Vec::new();
     for value in values {
         let Some(number) = value.get("number").and_then(serde_json::Value::as_u64) else {
             continue;
@@ -92,13 +93,15 @@ fn discover_github_prs(
             merged_at,
             ..PullRequestEvidence::default()
         };
-        enrich_pr_from_gh(repo_root, &mut pr);
+        if let Err(warning) = enrich_pr_from_gh(repo_root, &mut pr) {
+            warnings.push(warning);
+        }
         prs.push(pr);
     }
-    Ok(prs)
+    Ok((prs, warnings))
 }
 
-fn enrich_pr_from_gh(repo_root: &Path, pr: &mut PullRequestEvidence) {
+fn enrich_pr_from_gh(repo_root: &Path, pr: &mut PullRequestEvidence) -> Result<(), String> {
     let output = Command::new("gh")
         .args([
             "pr",
@@ -108,16 +111,34 @@ fn enrich_pr_from_gh(repo_root: &Path, pr: &mut PullRequestEvidence) {
             "files,commits,reviews,statusCheckRollup,mergeCommit",
         ])
         .current_dir(repo_root)
-        .output();
-    let Ok(output) = output else {
-        return;
-    };
+        .output()
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                format!(
+                    "GitHub PR enrichment for PR #{} failed: gh CLI was not found in PATH",
+                    pr.number
+                )
+            } else {
+                format!(
+                    "GitHub PR enrichment for PR #{} failed: failed to run gh pr view: {error}",
+                    pr.number
+                )
+            }
+        })?;
     if !output.status.success() {
-        return;
+        return Err(format!(
+            "GitHub PR enrichment for PR #{} failed: gh exited with {}: {}",
+            pr.number,
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-        return;
-    };
+    let value = serde_json::from_slice::<serde_json::Value>(&output.stdout).map_err(|error| {
+        format!(
+            "GitHub PR enrichment for PR #{} failed: failed to parse gh JSON: {error}",
+            pr.number
+        )
+    })?;
     if pr.merge_sha.is_none() {
         pr.merge_sha = value
             .get("mergeCommit")
@@ -125,11 +146,9 @@ fn enrich_pr_from_gh(repo_root: &Path, pr: &mut PullRequestEvidence) {
             .and_then(serde_json::Value::as_str)
             .map(ToOwned::to_owned);
     }
-    pr.changed_files = value
-        .get("files")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+    let files = github_array(&value, "files", pr.number)?;
+    pr.changed_files = files
+        .iter()
         .filter_map(|file| {
             file.get("path")
                 .and_then(serde_json::Value::as_str)
@@ -142,11 +161,9 @@ fn enrich_pr_from_gh(repo_root: &Path, pr: &mut PullRequestEvidence) {
                 })
         })
         .collect();
-    pr.commits = value
-        .get("commits")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+    let commits = github_array(&value, "commits", pr.number)?;
+    pr.commits = commits
+        .iter()
         .filter_map(|commit| {
             let sha = commit
                 .get("oid")
@@ -165,11 +182,9 @@ fn enrich_pr_from_gh(repo_root: &Path, pr: &mut PullRequestEvidence) {
             })
         })
         .collect();
-    pr.reviews = value
-        .get("reviews")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+    let reviews = github_array(&value, "reviews", pr.number)?;
+    pr.reviews = reviews
+        .iter()
         .map(|review| ReviewEvidence {
             reviewer: review
                 .get("author")
@@ -191,11 +206,9 @@ fn enrich_pr_from_gh(repo_root: &Path, pr: &mut PullRequestEvidence) {
                 .and_then(normalize_optional),
         })
         .collect();
-    pr.checks = value
-        .get("statusCheckRollup")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
+    let checks = github_array(&value, "statusCheckRollup", pr.number)?;
+    pr.checks = checks
+        .iter()
         .filter_map(|check| {
             let name = check
                 .get("name")
@@ -216,4 +229,21 @@ fn enrich_pr_from_gh(repo_root: &Path, pr: &mut PullRequestEvidence) {
             })
         })
         .collect();
+    Ok(())
+}
+
+fn github_array<'a>(
+    value: &'a serde_json::Value,
+    field: &str,
+    pr_number: u64,
+) -> Result<&'a [serde_json::Value], String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| {
+            format!(
+                "GitHub PR enrichment for PR #{pr_number} returned unexpected JSON: `{field}` was missing or not an array"
+            )
+        })
 }

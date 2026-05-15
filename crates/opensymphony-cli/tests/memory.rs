@@ -286,6 +286,32 @@ fn memory_capture_discovers_matching_github_prs_by_default() {
 }
 
 #[test]
+fn memory_capture_reports_github_enrichment_warnings() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let bin_dir = repo.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should write");
+    write_fake_gh_enrichment_failure(bin_dir.join("gh"));
+
+    let output = run_with_path(
+        repo.path(),
+        ["memory", "capture", "COE-123", "--dry-run"],
+        bin_dir.to_str().expect("bin path should be utf-8"),
+    );
+
+    assert_success(&output, "capture with partial github evidence");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("GitHub PRs: #456"));
+    assert!(stdout.contains("GitHub PR enrichment for PR #456 failed"));
+}
+
+#[test]
 fn linear_archive_with_explicit_issues_captures_before_archiving() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
@@ -542,6 +568,25 @@ exit 1
 "#,
             log_path.display(),
         ),
+    );
+}
+
+fn write_fake_gh_enrichment_failure(path: std::path::PathBuf) {
+    write_executable(
+        path,
+        r#"#!/bin/sh
+set -eu
+if [ "${1-}" = "pr" ] && [ "${2-}" = "list" ]; then
+  printf '%s\n' '[{"number":456,"title":"COE-123 recover websocket reconnects","url":"https://github.com/example/repo/pull/456","headRefName":"coe-123-reconnect","mergedAt":"2026-03-22T10:00:00Z","body":"Fixes COE-123","mergeCommit":{"oid":"abcdef1234567890"}}]'
+  exit 0
+fi
+if [ "${1-}" = "pr" ] && [ "${2-}" = "view" ]; then
+  printf '%s\n' 'simulated gh view failure' >&2
+  exit 2
+fi
+printf 'unexpected gh command: %s\n' "$*" >&2
+exit 1
+"#,
     );
 }
 

@@ -239,10 +239,6 @@ pub fn status(
         issues.retain(|issue| issue.milestone.as_deref() == Some(milestone.as_str()));
     }
 
-    let stale_count = issues
-        .iter()
-        .filter(|issue| issue.docs_sync_status == "pending")
-        .count();
     let warning_count = issues.iter().map(|issue| issue.warning_count).sum();
     let docs_pending_count = issues
         .iter()
@@ -268,7 +264,6 @@ pub fn status(
 
     Ok(StatusReport {
         issue_count: status_issues.len(),
-        stale_count,
         warning_count,
         docs_pending_count,
         issues: status_issues,
