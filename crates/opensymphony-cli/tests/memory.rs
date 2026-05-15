@@ -217,7 +217,7 @@ fn memory_capture_discovers_github_by_default_and_reports_missing_gh() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
     let server = TinyGraphqlServer::start([
-        linear_issue_page("COE-123", "WebSocket reconnect recovery"),
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
         linear_empty_comments("issue-COE-123"),
     ]);
     write_workflow(repo.path(), &server.base_url);
@@ -237,7 +237,7 @@ fn memory_capture_can_skip_github_discovery() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
     let server = TinyGraphqlServer::start([
-        linear_issue_page("COE-123", "WebSocket reconnect recovery"),
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
         linear_empty_comments("issue-COE-123"),
     ]);
     write_workflow(repo.path(), &server.base_url);
@@ -259,7 +259,7 @@ fn memory_capture_discovers_matching_github_prs_by_default() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
     let server = TinyGraphqlServer::start([
-        linear_issue_page("COE-123", "WebSocket reconnect recovery"),
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
         linear_empty_comments("issue-COE-123"),
     ]);
     write_workflow(repo.path(), &server.base_url);
@@ -290,7 +290,7 @@ fn linear_archive_with_explicit_issues_captures_before_archiving() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
     let server = TinyGraphqlServer::start([
-        linear_issue_page("COE-123", "WebSocket reconnect recovery"),
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
         linear_empty_comments("issue-COE-123"),
         r#"{"data":{"issueArchive":{"success":true}}}"#.to_string(),
     ]);
@@ -458,52 +458,44 @@ tracker:
     .expect("workflow should write");
 }
 
-fn linear_issue_page(identifier: &str, title: &str) -> String {
+fn linear_issue_response(identifier: &str, title: &str) -> String {
     let issue_id = format!("issue-{identifier}");
     format!(
         r#"{{
   "data": {{
-    "issues": {{
-      "nodes": [
-        {{
-          "id": "{issue_id}",
-          "identifier": "{identifier}",
-          "url": "https://linear.app/example/issue/{identifier}",
-          "title": "{title}",
-          "description": "Captured from Linear.",
-          "priority": 0.0,
-          "createdAt": "2026-03-20T10:00:00Z",
-          "updatedAt": "2026-03-21T12:00:00Z",
-          "state": {{
-            "id": "state-done",
-            "name": "Done",
-            "type": "completed"
-          }},
-          "parent": null,
-          "children": {{
-            "nodes": []
-          }},
-          "labels": {{
-            "nodes": [
-              {{ "name": "runtime" }}
-            ],
-            "pageInfo": {{
-              "hasNextPage": false,
-              "endCursor": null
-            }}
-          }},
-          "inverseRelations": {{
-            "nodes": [],
-            "pageInfo": {{
-              "hasNextPage": false,
-              "endCursor": null
-            }}
-          }}
+    "issue": {{
+      "id": "{issue_id}",
+      "identifier": "{identifier}",
+      "url": "https://linear.app/example/issue/{identifier}",
+      "title": "{title}",
+      "description": "Captured from Linear.",
+      "priority": 0.0,
+      "createdAt": "2026-03-20T10:00:00Z",
+      "updatedAt": "2026-03-21T12:00:00Z",
+      "state": {{
+        "id": "state-done",
+        "name": "Done",
+        "type": "completed"
+      }},
+      "parent": null,
+      "children": {{
+        "nodes": []
+      }},
+      "labels": {{
+        "nodes": [
+          {{ "name": "runtime" }}
+        ],
+        "pageInfo": {{
+          "hasNextPage": false,
+          "endCursor": null
         }}
-      ],
-      "pageInfo": {{
+      }},
+      "inverseRelations": {{
+        "nodes": [],
+        "pageInfo": {{
         "hasNextPage": false,
         "endCursor": null
+        }}
       }}
     }}
   }}
