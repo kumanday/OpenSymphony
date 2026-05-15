@@ -151,15 +151,6 @@ fn fallback_title(value: &str, fallback: &str) -> String {
     normalize_optional(value).unwrap_or_else(|| fallback.to_string())
 }
 
-fn placeholder_issue(identifier: &str) -> IssueEvidence {
-    let identifier = normalize_issue_key(identifier);
-    IssueEvidence {
-        identifier: identifier.clone(),
-        title: format!("{identifier} (source details unavailable)"),
-        ..IssueEvidence::default()
-    }
-}
-
 fn normalize_list(values: Vec<String>) -> Vec<String> {
     let mut normalized = values
         .into_iter()

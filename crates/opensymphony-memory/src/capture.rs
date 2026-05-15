@@ -20,20 +20,8 @@ pub fn plan_capture(
         ));
     }
 
-    let mut selected = select_issues(source, selection);
-    let mut warnings = Vec::new();
-
-    if selected.is_empty() && !selection.identifiers.is_empty() {
-        selected = selection
-            .identifiers
-            .iter()
-            .map(|identifier| placeholder_issue(identifier))
-            .collect();
-        warnings.push(
-            "no source file issue records matched; using issue identifiers with missing-source warnings"
-                .to_string(),
-        );
-    }
+    let selected = select_issues(source, selection);
+    let warnings = Vec::new();
 
     if selected.is_empty() {
         return Err(MemoryError::InvalidInput(
@@ -57,7 +45,7 @@ pub fn plan_capture(
         if discover_github {
             match discover_github_prs(&config.repo_root, &issue_key) {
                 Ok(discovered) => merge_prs(&mut prs, discovered),
-                Err(error) => issue_warnings.push(error),
+                Err(error) => return Err(MemoryError::InvalidInput(error)),
             }
         }
         if prs.is_empty() {

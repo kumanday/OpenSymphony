@@ -32,6 +32,8 @@ pub struct MemoryArgs {
 enum MemoryCommand {
     #[command(about = "Capture completed issue evidence into issue memory")]
     Capture(CaptureArgs),
+    #[command(about = "Import deterministic YAML issue evidence into issue memory")]
+    Import(ImportArgs),
     #[command(name = "sync-docs", about = "Sync issue memory into topic docs")]
     SyncDocs(SyncDocsArgs),
     #[command(about = "Show capture and docs-sync status")]
@@ -65,6 +67,29 @@ struct CaptureArgs {
     issues_file: Option<PathBuf>,
     #[arg(long, help = "Inclusive issue range, e.g. COE-100..COE-199")]
     issue_range: Option<String>,
+    #[arg(long, help = "Skip default GitHub PR discovery")]
+    no_github: bool,
+    #[arg(long, help = "Only show the capture plan")]
+    dry_run: bool,
+    #[arg(long, help = "Write capsules and update the DuckDB index")]
+    write: bool,
+    #[arg(long, help = "Overwrite generated or non-generated existing capsules")]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct ImportArgs {
+    #[arg(help = "Issue identifier to import, e.g. COE-123")]
+    issue: Option<String>,
+    #[arg(long, help = "Comma-separated issue identifiers")]
+    issues: Option<String>,
+    #[arg(
+        long,
+        help = "File containing one issue identifier per line or CSV cell"
+    )]
+    issues_file: Option<PathBuf>,
+    #[arg(long, help = "Inclusive issue range, e.g. COE-100..COE-199")]
+    issue_range: Option<String>,
     #[arg(long, help = "Select source-file issues before this issue key")]
     before_issue: Option<String>,
     #[arg(long, help = "Select source-file issues in this milestone")]
@@ -76,16 +101,14 @@ struct CaptureArgs {
         help = "Select source-file issues completed or updated before YYYY-MM-DD"
     )]
     before_date: Option<NaiveDate>,
-    #[arg(long, help = "YAML source evidence file for deterministic capture")]
-    source_file: Option<PathBuf>,
+    #[arg(long, help = "YAML source evidence file for deterministic import")]
+    source_file: PathBuf,
     #[arg(long, help = "Only show the capture plan")]
     dry_run: bool,
     #[arg(long, help = "Write capsules and update the DuckDB index")]
     write: bool,
     #[arg(long, help = "Overwrite generated or non-generated existing capsules")]
     force: bool,
-    #[arg(long, help = "Use gh to discover matching GitHub PRs")]
-    discover_github: bool,
 }
 
 #[derive(Debug, Args)]
@@ -156,8 +179,6 @@ struct DocsArgs {
 struct ContextArgs {
     #[arg(long, help = "Issue identifier")]
     issue: String,
-    #[arg(long, help = "Optional YAML source evidence file")]
-    source_file: Option<PathBuf>,
     #[arg(long, default_value = "8", help = "Maximum related memories")]
     limit: usize,
 }
@@ -191,6 +212,10 @@ struct ArchiveArgs {
         help = "File containing one issue identifier per line or CSV cell"
     )]
     issues_file: Option<PathBuf>,
+    #[arg(long, help = "Inclusive issue range, e.g. COE-100..COE-199")]
+    issue_range: Option<String>,
+    #[arg(long, help = "Skip default GitHub PR discovery during live capture")]
+    no_github: bool,
     #[arg(long, help = "Select archive candidates from captured memory")]
     from_memory: bool,
     #[arg(
@@ -236,6 +261,7 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
     let config = MemoryConfig::load(&repo_root, args.config.as_deref())?;
     match args.command {
         MemoryCommand::Capture(args) => run_capture(&repo_root, &config, args).await,
+        MemoryCommand::Import(args) => run_import(&config, args),
         MemoryCommand::SyncDocs(args) => run_sync_docs(&config, args),
         MemoryCommand::Status(args) => run_status(&config, args),
         MemoryCommand::Show(args) => run_show(&config, args, ShowMode::Full),
@@ -259,6 +285,29 @@ async fn run_capture(
     config: &MemoryConfig,
     args: CaptureArgs,
 ) -> Result<(), MemoryError> {
+    let identifiers = collect_issue_ids(
+        args.issue.as_deref(),
+        args.issues.as_deref(),
+        args.issues_file.as_deref(),
+        args.issue_range.as_deref(),
+    )?;
+    if identifiers.is_empty() {
+        return Err(MemoryError::InvalidInput(
+            "provide at least one issue identifier for live memory capture".to_string(),
+        ));
+    }
+    let selection = IssueSelection {
+        identifiers: identifiers.clone(),
+        ..IssueSelection::default()
+    };
+    let source = load_linear_source(repo_root, None, &identifiers).await?;
+    let write = args.write && !args.dry_run;
+    let plan = plan_capture(config, &source, &selection, write, !args.no_github)?;
+    print_or_write_capture_plan(config, &plan, args.force)?;
+    Ok(())
+}
+
+fn run_import(config: &MemoryConfig, args: ImportArgs) -> Result<(), MemoryError> {
     let selection = IssueSelection {
         identifiers: collect_issue_ids(
             args.issue.as_deref(),
@@ -273,18 +322,30 @@ async fn run_capture(
         area: None,
         since_last_sync: false,
     };
-    let (source, source_warnings) =
-        load_capture_source(repo_root, args.source_file.as_deref(), &selection).await?;
+    let source = load_source_file(&args.source_file)?;
     let write = args.write && !args.dry_run;
-    let mut plan = plan_capture(config, &source, &selection, write, args.discover_github)?;
-    plan.warnings.extend(source_warnings);
-    if !write {
-        println!("{}", render_capture_dry_run(config, &plan));
+    let plan = plan_capture(config, &source, &selection, write, false)?;
+    print_or_write_capture_plan(config, &plan, args.force)?;
+    Ok(())
+}
+
+fn print_or_write_capture_plan(
+    config: &MemoryConfig,
+    plan: &crate::opensymphony_memory::CapturePlan,
+    force: bool,
+) -> Result<(), MemoryError> {
+    if !plan.write {
+        println!("{}", render_capture_dry_run(config, plan));
         println!("Dry run only. Re-run with `--write` to create capsules and update the index.");
         return Ok(());
     }
 
-    let report = write_capture_plan(config, &plan, args.force)?;
+    let report = write_capture_plan(config, plan, force)?;
+    print_capture_write_report(report);
+    Ok(())
+}
+
+fn print_capture_write_report(report: crate::opensymphony_memory::CaptureWriteReport) {
     println!("Wrote {} capsule(s).", report.written_capsules.len());
     for path in report.written_capsules {
         println!("- {}", path.display());
@@ -299,7 +360,6 @@ async fn run_capture(
             println!("- {warning}");
         }
     }
-    Ok(())
 }
 
 fn run_sync_docs(config: &MemoryConfig, args: SyncDocsArgs) -> Result<(), MemoryError> {
@@ -406,7 +466,7 @@ fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
 }
 
 fn run_context(config: &MemoryConfig, args: ContextArgs) -> Result<(), MemoryError> {
-    let source = load_optional_source(args.source_file.as_deref())?;
+    let source = SourceFile::default();
     println!(
         "{}",
         context_for_issue(config, &source, &args.issue, args.limit)?
@@ -448,9 +508,35 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
         None,
         args.issues.as_deref(),
         args.issues_file.as_deref(),
-        None,
+        args.issue_range.as_deref(),
     )?;
+    if args.from_memory && !identifiers.is_empty() {
+        return Err(MemoryError::InvalidInput(
+            "choose either --from-memory or explicit issue selectors, not both".to_string(),
+        ));
+    }
+    if args.state.is_some() && !args.from_memory {
+        return Err(MemoryError::InvalidInput(
+            "--state only applies with --from-memory".to_string(),
+        ));
+    }
+    if args.no_github && args.from_memory {
+        return Err(MemoryError::InvalidInput(
+            "--no-github only applies when archive performs live capture for explicit issues"
+                .to_string(),
+        ));
+    }
     let write = args.write && !args.dry_run;
+
+    if !args.from_memory {
+        if identifiers.is_empty() {
+            return Err(MemoryError::InvalidInput(
+                "provide explicit issues or use --from-memory".to_string(),
+            ));
+        }
+        return run_archive_with_live_capture(&repo_root, &config, args, identifiers, write).await;
+    }
+
     let plan = plan_archive(
         &config,
         &identifiers,
@@ -467,6 +553,121 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
     let report = archive_in_linear(&repo_root, args.workflow.as_deref(), &plan).await?;
     if !report.archived.is_empty() {
         mark_archived(&config, &report.archived)?;
+    }
+    println!("Archived {} Linear issue(s).", report.archived.len());
+    for issue_key in &report.archived {
+        println!("- {issue_key}");
+    }
+    if !report.failures.is_empty() {
+        for failure in &report.failures {
+            eprintln!("- {failure}");
+        }
+        return Err(MemoryError::Linear(format!(
+            "archived {} issue(s), failed to archive {} issue(s)",
+            report.archived.len(),
+            report.failures.len()
+        )));
+    }
+    Ok(())
+}
+
+async fn run_archive_with_live_capture(
+    repo_root: &Path,
+    config: &MemoryConfig,
+    args: ArchiveArgs,
+    identifiers: Vec<String>,
+    write: bool,
+) -> Result<(), MemoryError> {
+    let selection = IssueSelection {
+        identifiers: identifiers.clone(),
+        ..IssueSelection::default()
+    };
+    let source = load_linear_source(repo_root, args.workflow.as_deref(), &identifiers).await?;
+    let capture_plan = plan_capture(config, &source, &selection, write, !args.no_github)?;
+
+    if !write {
+        println!("{}", render_capture_dry_run(config, &capture_plan));
+        let archive_plan = archive_plan_after_capture(config, &capture_plan, false, args.force);
+        println!("\n{}", render_archive_plan(config, &archive_plan));
+        println!(
+            "Dry run only. Re-run with `--write` to capture memory and archive eligible Linear issues."
+        );
+        return Ok(());
+    }
+
+    let capture_report = write_capture_plan(config, &capture_plan, args.force)?;
+    print_capture_write_report(capture_report);
+
+    let archive_plan = plan_archive(config, &identifiers, false, None, true, args.force)?;
+    if archive_plan.issues.iter().all(|issue| !issue.eligible) {
+        println!("\n{}", render_archive_plan(config, &archive_plan));
+        return Err(MemoryError::InvalidInput(
+            "no archive-eligible issues after memory capture".to_string(),
+        ));
+    }
+    if !archive_plan.warnings.is_empty() {
+        println!("\n{}", render_archive_plan(config, &archive_plan));
+    }
+
+    let report = archive_in_linear(repo_root, args.workflow.as_deref(), &archive_plan).await?;
+    finish_archive_write(config, report)
+}
+
+fn archive_plan_after_capture(
+    config: &MemoryConfig,
+    capture_plan: &crate::opensymphony_memory::CapturePlan,
+    write: bool,
+    force: bool,
+) -> ArchivePlan {
+    let mut issues = Vec::new();
+    let mut warnings = Vec::new();
+    for issue in &capture_plan.selected {
+        let issue_key = issue.issue.identifier.clone();
+        let warning_count = issue.warnings.len() + capture_plan.warnings.len();
+        let (eligible, reason) = if force {
+            (
+                true,
+                "eligible because --force bypasses capture warning checks after live capture"
+                    .to_string(),
+            )
+        } else if warning_count == 0 {
+            (
+                true,
+                "eligible after live capture writes fresh memory with no unresolved warnings"
+                    .to_string(),
+            )
+        } else {
+            (
+                false,
+                format!(
+                    "blocked: live capture would produce {warning_count} unresolved warning(s); rerun capture or use --force"
+                ),
+            )
+        };
+        if !eligible {
+            warnings.push(format!("{issue_key}: {reason}"));
+        }
+        issues.push(crate::opensymphony_memory::ArchiveIssuePlan {
+            issue_key,
+            eligible,
+            reason,
+            capsule_path: Some(config.issue_capsule_path(&issue.issue.identifier)),
+        });
+    }
+    ArchivePlan {
+        write,
+        force,
+        issues,
+        warnings,
+    }
+}
+
+fn finish_archive_write(
+    config: &MemoryConfig,
+    report: LinearArchiveReport,
+) -> Result<(), MemoryError> {
+    if !report.archived.is_empty() {
+        mark_archived(config, &report.archived)?;
     }
     println!("Archived {} Linear issue(s).", report.archived.len());
     for issue_key in &report.archived {
@@ -542,69 +743,35 @@ fn linear_client_from_workflow(
         .map_err(|error| MemoryError::Linear(format!("invalid Linear config: {error}")))
 }
 
-fn load_optional_source(path: Option<&Path>) -> Result<SourceFile, MemoryError> {
-    match path {
-        Some(path) => load_source_file(path),
-        None => Ok(SourceFile::default()),
-    }
-}
-
-async fn load_capture_source(
-    repo_root: &Path,
-    source_file: Option<&Path>,
-    selection: &IssueSelection,
-) -> Result<(SourceFile, Vec<String>), MemoryError> {
-    if let Some(path) = source_file {
-        return Ok((load_source_file(path)?, Vec::new()));
-    }
-    if selection.identifiers.is_empty() {
-        return Ok((SourceFile::default(), Vec::new()));
-    }
-
-    match load_linear_source(repo_root, &selection.identifiers).await {
-        Ok(result) => Ok(result),
-        Err(error) => Ok((
-            SourceFile::default(),
-            vec![format!(
-                "Linear source discovery skipped; using supplied issue identifiers only: {error}"
-            )],
-        )),
-    }
-}
-
 async fn load_linear_source(
     repo_root: &Path,
+    workflow_path: Option<&Path>,
     identifiers: &[String],
-) -> Result<(SourceFile, Vec<String>), MemoryError> {
-    let client = linear_client_from_workflow(repo_root, None)?;
+) -> Result<SourceFile, MemoryError> {
+    let client = linear_client_from_workflow(repo_root, workflow_path)?;
     let tracker_issues = client
         .issues_by_identifiers(identifiers)
         .await
         .map_err(|error| MemoryError::Linear(format!("Linear issue lookup failed: {error}")))?;
 
     let mut issues = Vec::new();
-    let mut warnings = Vec::new();
     for issue in tracker_issues {
-        let workpad = match client.fetch_workpad_comment(&issue.id).await {
-            Ok(workpad) => workpad,
-            Err(error) => {
-                warnings.push(format!(
-                    "Linear workpad comment fetch failed for {}: {error}",
+        let workpad = client
+            .fetch_workpad_comment(&issue.id)
+            .await
+            .map_err(|error| {
+                MemoryError::Linear(format!(
+                    "Linear workpad comment lookup failed for {}: {error}",
                     issue.identifier
-                ));
-                None
-            }
-        };
+                ))
+            })?;
         issues.push(issue_evidence_from_tracker(issue, workpad));
     }
 
-    Ok((
-        SourceFile {
-            issues,
-            ..SourceFile::default()
-        },
-        warnings,
-    ))
+    Ok(SourceFile {
+        issues,
+        ..SourceFile::default()
+    })
 }
 
 fn issue_evidence_from_tracker(

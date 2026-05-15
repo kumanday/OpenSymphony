@@ -133,18 +133,22 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 
 ## 6. Project memory
 
-Memory capture is manual and review-first. Use dry runs before writing local
-memory or docs:
+Memory capture is review-first. Live capture reads Linear and discovers GitHub
+PRs by default, so use dry runs before writing local memory or docs:
 
 ```bash
-opensymphony memory capture COE-123 --source-file completed.yaml --dry-run
-opensymphony memory capture COE-123 --source-file completed.yaml --write
+opensymphony memory capture COE-123 --dry-run
+opensymphony memory capture COE-123 --write
 opensymphony memory status
 opensymphony memory brief COE-123
 opensymphony memory related --paths crates/opensymphony-openhands
 opensymphony memory sync-docs --issues COE-123 --dry-run
 opensymphony memory lint --public-docs
 ```
+
+Use `opensymphony memory import --source-file completed.yaml` only for
+deterministic imports, migrations, tests, or external exports. Failed Linear or
+GitHub access should be fixed before live capture is retried.
 
 `memory capture --write` creates or refreshes issue capsules, updates
 `.opensymphony/memory/memory.duckdb`, and refreshes markdown indexes when
@@ -161,9 +165,14 @@ opensymphony linear archive --issues COE-123 --dry-run
 opensymphony linear archive --issues COE-123 --write
 ```
 
-The archive command blocks issues that have no capsule or unresolved capture
-warnings unless `--force` is supplied. Write mode resolves Linear credentials
-from `WORKFLOW.md` and calls the Linear GraphQL archive mutation.
+For explicit issue selectors, the archive command captures live Linear and
+GitHub evidence before evaluating the guard. It blocks issues that have no
+capsule or unresolved capture warnings unless `--force` is supplied. Write mode
+resolves Linear credentials from `WORKFLOW.md` and calls the Linear GraphQL
+archive mutation.
+
+See [Project Memory](memory.md) for the full command surface, import YAML
+schema, and troubleshooting notes.
 
 ## 7. Rehydration
 

@@ -47,10 +47,11 @@ async fn init_copies_template_files_and_customizes_workflow() {
         "skill file should be created"
     );
     assert!(
-        repo.path()
+        !repo
+            .path()
             .join(".agents/skills/opensymphony-memory/SKILL.md")
-            .is_file(),
-        "memory skill should be created from the CLI-bundled template"
+            .exists(),
+        "memory skill should only be created when the template repo provides it"
     );
     assert!(
         repo.path()
@@ -105,7 +106,7 @@ async fn init_copies_template_files_and_customizes_workflow() {
 }
 
 #[tokio::test]
-async fn init_warns_when_template_memory_skill_is_replaced_by_cli_bundle() {
+async fn init_uses_template_memory_skill_when_template_provides_it() {
     let server = TemplateServer::start_with_assets(template_assets_with_memory_skill()).await;
     let repo = TempDir::new().expect("temp repo should exist");
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
@@ -125,8 +126,8 @@ async fn init_warns_when_template_memory_skill_is_replaced_by_cli_bundle() {
         "init should succeed: stdout={stdout}, stderr={stderr}",
     );
     assert!(
-        stdout.contains("using the CLI-bundled copy"),
-        "stdout should warn about replacing the template memory skill: {stdout}",
+        !stdout.contains("CLI-bundled"),
+        "stdout should not mention a CLI-bundled memory skill: {stdout}",
     );
 
     let memory_skill = fs::read_to_string(
@@ -135,12 +136,8 @@ async fn init_warns_when_template_memory_skill_is_replaced_by_cli_bundle() {
     )
     .expect("memory skill should exist");
     assert!(
-        memory_skill.contains("# OpenSymphony Memory"),
-        "CLI-bundled memory skill should be written: {memory_skill}",
-    );
-    assert!(
-        !memory_skill.contains("template memory skill"),
-        "template-fetched memory skill should not silently win: {memory_skill}",
+        memory_skill.contains("template memory skill"),
+        "template-fetched memory skill should be written: {memory_skill}",
     );
 }
 

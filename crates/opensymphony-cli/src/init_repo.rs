@@ -318,9 +318,6 @@ const AI_REVIEW_CUSTOM_GUIDE_ASSET: TemplateAsset = TemplateAsset {
     path: ".agents/skills/custom-codereview-guide.md",
     kind: AssetKind::Standard,
 };
-const OPENSYMPHONY_MEMORY_SKILL_PATH: &str = ".agents/skills/opensymphony-memory/SKILL.md";
-const OPENSYMPHONY_MEMORY_SKILL_CONTENTS: &str =
-    include_str!("../../opensymphony-memory/assets/opensymphony-memory/SKILL.md");
 
 pub async fn run_command(args: InitArgs) -> ExitCode {
     let stdin = io::stdin();
@@ -373,10 +370,6 @@ where
 
     let mut fetched_assets =
         fetch_template_assets(&client, CORE_TEMPLATE_ASSETS, CORE_TEMPLATE_DIRECTORIES).await?;
-    let local_template_report = append_local_template_assets(&mut fetched_assets);
-    if local_template_report.replaced_memory_skill {
-        ui.line(memory_skill_override_warning())?;
-    }
     if ai_review_config.is_some() {
         fetched_assets
             .extend(fetch_template_assets(&client, AI_REVIEW_TEMPLATE_ASSETS, &[]).await?);
@@ -1055,33 +1048,8 @@ pub(crate) fn template_fetch_timeout() -> Duration {
 
 pub(crate) async fn fetch_template_skill_assets(
     client: &Client,
-) -> Result<(Vec<FetchedAsset>, LocalTemplateAssetReport), InitCommandError> {
-    let mut assets = fetch_template_assets(client, &[], CORE_TEMPLATE_DIRECTORIES).await?;
-    let local_template_report = append_local_template_assets(&mut assets);
-    Ok((assets, local_template_report))
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct LocalTemplateAssetReport {
-    pub(crate) replaced_memory_skill: bool,
-}
-
-fn append_local_template_assets(assets: &mut Vec<FetchedAsset>) -> LocalTemplateAssetReport {
-    let original_len = assets.len();
-    assets.retain(|asset| asset.path != OPENSYMPHONY_MEMORY_SKILL_PATH);
-    let replaced_memory_skill = assets.len() != original_len;
-    assets.push(FetchedAsset {
-        path: OPENSYMPHONY_MEMORY_SKILL_PATH.to_string(),
-        kind: AssetKind::Standard,
-        contents: OPENSYMPHONY_MEMORY_SKILL_CONTENTS.to_string(),
-    });
-    LocalTemplateAssetReport {
-        replaced_memory_skill,
-    }
-}
-
-pub(crate) fn memory_skill_override_warning() -> &'static str {
-    "Warning: template payload included `.agents/skills/opensymphony-memory/SKILL.md`; using the CLI-bundled copy for consistency with this OpenSymphony binary."
+) -> Result<Vec<FetchedAsset>, InitCommandError> {
+    fetch_template_assets(client, &[], CORE_TEMPLATE_DIRECTORIES).await
 }
 
 fn template_fetch_timeout_from_env(value: Option<&str>) -> Duration {

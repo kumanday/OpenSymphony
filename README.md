@@ -130,22 +130,23 @@ workflows, see [Operations](docs/operations.md).
 
 ### Project Memory
 
-OpenSymphony can now preserve completed-issue knowledge before Linear archival.
-The CLI writes private issue capsules under `.opensymphony/memory/` by default,
-indexes them in DuckDB, and can sync selected knowledge into public topic docs:
+OpenSymphony can preserve completed-issue knowledge as you build. Live memory
+capture reads Linear evidence and discovers matching GitHub PRs by default,
+writes private issue capsules under `.opensymphony/memory/`, indexes them in
+DuckDB, and can sync selected knowledge into public topic docs:
 
 ```bash
-opensymphony memory capture COE-123 --source-file completed.yaml --dry-run
-opensymphony memory capture COE-123 --source-file completed.yaml --write
+opensymphony memory capture COE-123 --dry-run
+opensymphony memory capture COE-123 --write
 opensymphony memory brief COE-123
 opensymphony memory related --area openhands-runtime
 opensymphony memory sync-docs --issues COE-123 --dry-run
 opensymphony linear archive --issues COE-123 --dry-run
 ```
 
-`opensymphony init` and `opensymphony update` also install an
-`opensymphony-memory` agent skill so implementation agents know when to consult
-memory and which mutations are reserved for explicit operator requests.
+See [Project Memory](docs/memory.md) for archive guards, YAML import/backfill,
+source schema, and the distinction between CLI commands and template-managed
+agent skills.
 
 The memory index uses DuckDB's bundled build so local installs do not need a
 separate DuckDB system package. That choice adds compile time and binary size,

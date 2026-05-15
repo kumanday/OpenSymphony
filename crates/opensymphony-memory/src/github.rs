@@ -17,22 +17,21 @@ fn discover_github_prs(
         .output()
         .map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
-                "GitHub PR discovery skipped: gh CLI was not found in PATH; install GitHub CLI or provide --source-file"
-                    .to_string()
+                "GitHub PR discovery failed: gh CLI was not found in PATH; install GitHub CLI or rerun with --no-github".to_string()
             } else {
-                format!("GitHub PR discovery skipped: failed to run gh: {error}")
+                format!("GitHub PR discovery failed: failed to run gh: {error}")
             }
         })?;
     if !output.status.success() {
         return Err(format!(
-            "GitHub PR discovery skipped: gh exited with {}: {}",
+            "GitHub PR discovery failed: gh exited with {}: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
     let values =
         serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout).map_err(|error| {
-            format!("GitHub PR discovery skipped: failed to parse gh JSON: {error}")
+            format!("GitHub PR discovery failed: failed to parse gh JSON: {error}")
         })?;
     let mut prs = Vec::new();
     for value in values {

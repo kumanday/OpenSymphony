@@ -587,8 +587,10 @@ implementation.
 
 ## Agent UX: repo-local memory skill
 
-The memory feature should add an agent skill that can be installed into target
-repositories by `opensymphony init` or a dedicated setup command.
+The memory feature should add a template-managed agent skill that can be
+installed into target repositories by `opensymphony init` or a dedicated setup
+command when the template repo provides it. The OpenSymphony binary should not
+carry or inject its own copy of the skill.
 
 The skill should be named clearly, for example `opensymphony-memory`.
 
@@ -910,8 +912,9 @@ The first version should:
 
 ### 9. Agent skill installation
 
-Add a repo-local `.agents/skills/opensymphony-memory` skill template and install
-or update it through repository initialization.
+Add a template-managed `.agents/skills/opensymphony-memory` skill and install
+or update it through repository initialization when the target template provides
+the file. Do not embed the skill in the OpenSymphony binary.
 
 The skill should guide agents to consult memory at kickoff and after discovering
 likely areas, while forbidding ordinary implementation agents from mutating

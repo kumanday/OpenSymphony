@@ -19,7 +19,7 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
         repo.path(),
         [
             "memory",
-            "capture",
+            "import",
             "COE-123",
             "--source-file",
             "source.yaml",
@@ -36,7 +36,7 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
         repo.path(),
         [
             "memory",
-            "capture",
+            "import",
             "COE-123",
             "--source-file",
             "source.yaml",
@@ -77,7 +77,14 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
 
     let archive = run(
         repo.path(),
-        ["linear", "archive", "--issues", "COE-123", "--dry-run"],
+        [
+            "linear",
+            "archive",
+            "--from-memory",
+            "--state",
+            "captured",
+            "--dry-run",
+        ],
     );
     assert_success(&archive, "archive dry-run");
     let stdout = String::from_utf8_lossy(&archive.stdout);
@@ -85,7 +92,7 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
 }
 
 #[test]
-fn memory_capture_reports_missing_source_file() {
+fn memory_import_reports_missing_source_file() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
 
@@ -93,7 +100,7 @@ fn memory_capture_reports_missing_source_file() {
         repo.path(),
         [
             "memory",
-            "capture",
+            "import",
             "COE-123",
             "--source-file",
             "missing.yaml",
@@ -106,7 +113,7 @@ fn memory_capture_reports_missing_source_file() {
 }
 
 #[test]
-fn memory_capture_force_overwrites_non_generated_capsule() {
+fn memory_import_force_overwrites_non_generated_capsule() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_fixture(repo.path());
     let issue_dir = repo.path().join(".opensymphony/memory/issues");
@@ -117,7 +124,7 @@ fn memory_capture_force_overwrites_non_generated_capsule() {
         repo.path(),
         [
             "memory",
-            "capture",
+            "import",
             "COE-123",
             "--source-file",
             "source.yaml",
@@ -131,7 +138,7 @@ fn memory_capture_force_overwrites_non_generated_capsule() {
         repo.path(),
         [
             "memory",
-            "capture",
+            "import",
             "COE-123",
             "--source-file",
             "source.yaml",
@@ -154,7 +161,7 @@ fn memory_lint_related_paths_and_from_memory_archive_cover_private_doc_links() {
             repo.path(),
             [
                 "memory",
-                "capture",
+                "import",
                 "COE-123",
                 "--source-file",
                 "source.yaml",
@@ -206,26 +213,106 @@ fn memory_lint_related_paths_and_from_memory_archive_cover_private_doc_links() {
 }
 
 #[test]
-fn memory_capture_discover_github_reports_missing_gh() {
+fn memory_capture_discovers_github_by_default_and_reports_missing_gh() {
     let repo = TempDir::new().expect("temp repo should exist");
-    write_memory_fixture(repo.path());
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_page("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
 
     let output = run_with_path(
         repo.path(),
-        [
-            "memory",
-            "capture",
-            "COE-123",
-            "--source-file",
-            "source.yaml",
-            "--discover-github",
-            "--dry-run",
-        ],
+        ["memory", "capture", "COE-123", "--dry-run"],
         "",
     );
 
-    assert_success(&output, "discover github without gh");
-    assert!(String::from_utf8_lossy(&output.stdout).contains("gh CLI was not found"));
+    assert_failure(&output, "discover github without gh");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("gh CLI was not found"));
+}
+
+#[test]
+fn memory_capture_can_skip_github_discovery() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_page("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let output = run_with_path(
+        repo.path(),
+        ["memory", "capture", "COE-123", "--no-github", "--dry-run"],
+        "",
+    );
+
+    assert_success(&output, "capture without github discovery");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("GitHub PRs: none"));
+    assert!(stdout.contains("no GitHub PR source was matched"));
+}
+
+#[test]
+fn memory_capture_discovers_matching_github_prs_by_default() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_page("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let bin_dir = repo.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should write");
+    let gh_log = repo.path().join("gh.log");
+    write_fake_gh_discovery(bin_dir.join("gh"), &gh_log);
+
+    let output = run_with_path(
+        repo.path(),
+        ["memory", "capture", "COE-123", "--dry-run"],
+        bin_dir.to_str().expect("bin path should be utf-8"),
+    );
+
+    assert_success(&output, "capture with github discovery");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("GitHub PRs: #456"));
+    assert!(
+        fs::read_to_string(gh_log)
+            .expect("gh log should be readable")
+            .contains("pr list")
+    );
+}
+
+#[test]
+fn linear_archive_with_explicit_issues_captures_before_archiving() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_page("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+        r#"{"data":{"issueArchive":{"success":true}}}"#.to_string(),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let bin_dir = repo.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should write");
+    let gh_log = repo.path().join("gh.log");
+    write_fake_gh_discovery(bin_dir.join("gh"), &gh_log);
+
+    let archive = run_with_path(
+        repo.path(),
+        ["linear", "archive", "--issues", "COE-123", "--write"],
+        bin_dir.to_str().expect("bin path should be utf-8"),
+    );
+
+    assert_success(&archive, "archive with live capture");
+    assert!(String::from_utf8_lossy(&archive.stdout).contains("Wrote 1 capsule(s)."));
+    assert_eq!(archive_status(repo.path(), "COE-123"), "archived");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].contains("\"id\":\"COE-123\""));
 }
 
 #[test]
@@ -239,7 +326,7 @@ fn linear_archive_write_marks_successes_before_reporting_partial_failure() {
             repo.path(),
             [
                 "memory",
-                "capture",
+                "import",
                 "--issues",
                 "COE-123,COE-124",
                 "--source-file",
@@ -261,8 +348,9 @@ fn linear_archive_write_marks_successes_before_reporting_partial_failure() {
         [
             "linear",
             "archive",
-            "--issues",
-            "COE-123,COE-124",
+            "--from-memory",
+            "--state",
+            "captured",
             "--write",
         ],
     );
@@ -370,6 +458,115 @@ tracker:
     .expect("workflow should write");
 }
 
+fn linear_issue_page(identifier: &str, title: &str) -> String {
+    let issue_id = format!("issue-{identifier}");
+    format!(
+        r#"{{
+  "data": {{
+    "issues": {{
+      "nodes": [
+        {{
+          "id": "{issue_id}",
+          "identifier": "{identifier}",
+          "url": "https://linear.app/example/issue/{identifier}",
+          "title": "{title}",
+          "description": "Captured from Linear.",
+          "priority": 0.0,
+          "createdAt": "2026-03-20T10:00:00Z",
+          "updatedAt": "2026-03-21T12:00:00Z",
+          "state": {{
+            "id": "state-done",
+            "name": "Done",
+            "type": "completed"
+          }},
+          "parent": null,
+          "children": {{
+            "nodes": []
+          }},
+          "labels": {{
+            "nodes": [
+              {{ "name": "runtime" }}
+            ],
+            "pageInfo": {{
+              "hasNextPage": false,
+              "endCursor": null
+            }}
+          }},
+          "inverseRelations": {{
+            "nodes": [],
+            "pageInfo": {{
+              "hasNextPage": false,
+              "endCursor": null
+            }}
+          }}
+        }}
+      ],
+      "pageInfo": {{
+        "hasNextPage": false,
+        "endCursor": null
+      }}
+    }}
+  }}
+}}"#
+    )
+}
+
+fn linear_empty_comments(issue_id: &str) -> String {
+    format!(
+        r#"{{
+  "data": {{
+    "issue": {{
+      "id": "{issue_id}",
+      "comments": {{
+        "nodes": [],
+        "pageInfo": {{
+          "hasNextPage": false,
+          "endCursor": null
+        }}
+      }}
+    }}
+  }}
+}}"#
+    )
+}
+
+fn write_fake_gh_discovery(path: std::path::PathBuf, log_path: &std::path::Path) {
+    write_executable(
+        path,
+        &format!(
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "{}"
+if [ "${{1-}}" = "pr" ] && [ "${{2-}}" = "list" ]; then
+  printf '%s\n' '[{{"number":456,"title":"COE-123 recover websocket reconnects","url":"https://github.com/example/repo/pull/456","headRefName":"coe-123-reconnect","mergedAt":"2026-03-22T10:00:00Z","body":"Fixes COE-123","mergeCommit":{{"oid":"abcdef1234567890"}}}}]'
+  exit 0
+fi
+if [ "${{1-}}" = "pr" ] && [ "${{2-}}" = "view" ]; then
+  printf '%s\n' '{{"files":[{{"path":"crates/opensymphony-openhands/src/client.rs","changeType":"MODIFIED"}}],"commits":[{{"oid":"abcdef1234567890","messageHeadline":"COE-123 recover websocket reconnects"}}],"reviews":[{{"author":{{"login":"reviewer"}},"state":"APPROVED","submittedAt":"2026-03-22T11:00:00Z","body":"Looks correct."}}],"statusCheckRollup":[{{"name":"cargo test","conclusion":"SUCCESS","completedAt":"2026-03-22T11:30:00Z"}}],"mergeCommit":{{"oid":"abcdef1234567890"}}}}'
+  exit 0
+fi
+printf 'unexpected gh command: %s\n' "$*" >&2
+exit 1
+"#,
+            log_path.display(),
+        ),
+    );
+}
+
+fn write_executable(path: std::path::PathBuf, contents: &str) {
+    fs::write(&path, contents).expect("executable should write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(&path)
+            .expect("executable metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&path, permissions).expect("executable should be executable");
+    }
+}
+
 fn archive_status(repo: &std::path::Path, issue_key: &str) -> String {
     let connection = Connection::open(repo.join(".opensymphony/memory/memory.duckdb"))
         .expect("memory index should open");
@@ -388,11 +585,15 @@ struct TinyGraphqlServer {
 }
 
 impl TinyGraphqlServer {
-    fn start<const N: usize>(responses: [&'static str; N]) -> Self {
+    fn start<const N: usize, S>(responses: [S; N]) -> Self
+    where
+        S: Into<String>,
+    {
         let listener = TcpListener::bind("127.0.0.1:0").expect("server should bind");
         let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
         let requests = Arc::new(Mutex::new(Vec::new()));
         let recorded_requests = Arc::clone(&requests);
+        let responses = responses.map(Into::into);
         thread::spawn(move || {
             for response in responses {
                 let (mut stream, _) = listener.accept().expect("request should connect");

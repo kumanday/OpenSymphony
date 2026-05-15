@@ -74,10 +74,11 @@ async fn update_skips_reinstall_when_current_matches_latest_and_refreshes_skills
         "new template-managed skills should be created",
     );
     assert!(
-        repo.path()
+        !repo
+            .path()
             .join(".agents/skills/opensymphony-memory/SKILL.md")
-            .is_file(),
-        "CLI-bundled memory skill should be refreshed alongside template skills",
+            .exists(),
+        "memory skill should only be refreshed when the template repo provides it",
     );
     assert_eq!(
         fs::read_to_string(repo.path().join(".agents/skills/local-only/SKILL.md"))
@@ -107,7 +108,7 @@ async fn update_skips_reinstall_when_current_matches_latest_and_refreshes_skills
     assert!(
         stdout.contains("Created:")
             && stdout.contains("- .agents/skills/push/SKILL.md")
-            && stdout.contains("- .agents/skills/opensymphony-memory/SKILL.md"),
+            && !stdout.contains("- .agents/skills/opensymphony-memory/SKILL.md"),
         "stdout should list created skill files: {stdout}",
     );
 }
