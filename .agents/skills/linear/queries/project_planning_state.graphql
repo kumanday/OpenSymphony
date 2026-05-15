@@ -1,0 +1,49 @@
+query ProjectPlanningState($slug: String!) {
+  projects(filter: { slugId: { eq: $slug } }, first: 1) {
+    nodes {
+      id
+      name
+      slugId
+      url
+      content
+      teams {
+        nodes {
+          id
+          key
+          name
+        }
+      }
+      projectMilestones(first: 100) {
+        nodes {
+          id
+          name
+          description
+        }
+      }
+      issues(first: 250) {
+        nodes {
+          id
+          identifier
+          title
+          url
+          description
+          priority
+          estimate
+          parent {
+            id
+            identifier
+          }
+          projectMilestone {
+            id
+            name
+          }
+          state {
+            id
+            name
+            type
+          }
+        }
+      }
+    }
+  }
+}

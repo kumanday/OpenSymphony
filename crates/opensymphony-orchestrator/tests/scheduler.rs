@@ -48,6 +48,8 @@ fn tracker_issue(id: &str, identifier: &str, state: &str, created_at: u64) -> Tr
         state: state.to_string(),
         labels: Vec::new(),
         parent_id: None,
+        parent: None,
+        project_milestone: None,
         blocked_by: Vec::new(),
         sub_issues: Vec::new(),
         created_at: dt(created_at),

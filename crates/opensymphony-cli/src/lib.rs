@@ -1,6 +1,7 @@
 mod debug_session;
 mod init_repo;
 mod install_tooling;
+mod memory;
 mod orchestrator_run;
 mod update_repo;
 
@@ -63,6 +64,10 @@ enum Command {
     Run(orchestrator_run::RunArgs),
     #[command(about = "Resume an issue conversation for interactive debugging")]
     Debug(debug_session::DebugArgs),
+    #[command(about = "Capture, query, and sync project memory")]
+    Memory(memory::MemoryArgs),
+    #[command(about = "Linear operations guarded by OpenSymphony state")]
+    Linear(memory::LinearArgs),
     #[command(about = "Serve the local control-plane demo stream")]
     Daemon(DaemonArgs),
     #[command(about = "Attach the FrankenTUI operator client to a control plane")]
@@ -308,6 +313,8 @@ pub async fn run() -> ExitCode {
         Command::Install(args) => run_install(args).await,
         Command::Run(args) => orchestrator_run::run_command(args).await,
         Command::Debug(args) => debug_session::run_command(args).await,
+        Command::Memory(args) => memory::run_command(args).await,
+        Command::Linear(args) => memory::run_linear_command(args).await,
         Command::Doctor(args) => run_doctor(args).await,
         Command::Daemon(args) => run_daemon(args).await,
         Command::Tui(args) => run_tui(args).await,
@@ -2350,6 +2357,8 @@ mod tests {
             | Command::Tui(_)
             | Command::Doctor(_)
             | Command::Install(_)
+            | Command::Memory(_)
+            | Command::Linear(_)
             | Command::Update(_)
             | Command::Rehydrate(_) => {
                 panic!("expected daemon command")

@@ -55,6 +55,15 @@ package, not standalone published crates.
 - Linear GraphQL read adapter
 - pagination and normalization
 - tracker reconciliation helpers
+- guarded operator-side issue archival for memory cleanup
+
+### `opensymphony_memory`
+
+- issue capsule generation
+- DuckDB memory index and markdown indexes
+- memory search, related-context lookup, and compact briefs
+- docs sync planning and public/private link checks
+- archive eligibility checks
 
 ### `opensymphony_openhands`
 
@@ -80,6 +89,8 @@ package, not standalone published crates.
 - `init`
 - `run`
 - `debug`
+- `memory`
+- `linear archive`
 - `daemon`
 - `tui`
 - `doctor`

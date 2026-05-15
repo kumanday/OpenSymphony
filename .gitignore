@@ -21,6 +21,7 @@ target
 #.idea/
 
 # Local validation artifacts
+.opensymphony*
 .venv/
 var/
 tools/openhands-server/workspace/

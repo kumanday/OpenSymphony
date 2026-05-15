@@ -12,12 +12,13 @@ use tracing::debug;
 
 use super::error::{GraphqlError, LinearError, ResponseMetadata};
 use super::graphql::{
-    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_COMMENTS_QUERY, ISSUE_INVERSE_RELATIONS_QUERY,
-    ISSUE_LABELS_QUERY, ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueCommentsData,
-    IssueCommentsVariables, IssueInverseRelationsData, IssueInverseRelationsVariables,
-    IssueLabelsData, IssueLabelsVariables, IssueStatesByIdsData, IssueStatesByIdsVariables,
-    IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
-    LinearRelationConnection,
+    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
+    ISSUE_COMMENTS_QUERY, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
+    ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables,
+    IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables,
+    IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
+    IssueLabelsVariables, IssueStatesByIdsData, IssueStatesByIdsVariables, IssuesByStateData,
+    IssuesByStateVariables, LinearIssueNode, LinearLabelConnection, LinearRelationConnection,
 };
 use super::normalize::{normalize_issue, normalize_issue_state};
 
@@ -138,6 +139,54 @@ impl LinearClient {
     {
         self.issues_by_state_names_with_archived(state_names, false)
             .await
+    }
+
+    pub async fn issues_by_identifiers<S>(
+        &self,
+        identifiers: &[S],
+    ) -> Result<Vec<TrackerIssue>, LinearError>
+    where
+        S: AsRef<str>,
+    {
+        let identifiers = normalize_strings(identifiers);
+        if identifiers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut issues = Vec::new();
+        let mut missing_issue_ids = Vec::new();
+
+        for identifier in &identifiers {
+            let variables = IssueByIdentifierVariables {
+                identifier: identifier.clone(),
+                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
+            };
+            let response: IssueByIdentifierData = self
+                .execute_graphql(ISSUE_BY_IDENTIFIER_QUERY, json!(variables))
+                .await?;
+            let Some(issue) = response.issue else {
+                missing_issue_ids.push(identifier.clone());
+                continue;
+            };
+            let issue = normalize_issue(self.expand_issue(issue).await?)?;
+            if issue.identifier.eq_ignore_ascii_case(identifier) {
+                issues.push(issue);
+            } else {
+                return Err(LinearError::InvalidResponse(format!(
+                    "Linear issue lookup for {identifier} returned {}",
+                    issue.identifier
+                )));
+            }
+        }
+
+        if missing_issue_ids.is_empty() {
+            Ok(issues)
+        } else {
+            Err(LinearError::MissingIssueIds {
+                issue_ids: missing_issue_ids,
+            })
+        }
     }
 
     async fn issues_by_state_names_with_archived<S>(
@@ -284,6 +333,25 @@ impl LinearClient {
                     "Linear comments page for issue {issue_id} indicated a next page without an end cursor"
                 ))
             })?);
+        }
+    }
+
+    pub async fn archive_issue(&self, issue_id_or_identifier: &str) -> Result<(), LinearError> {
+        let issue_id_or_identifier =
+            normalize_required_string("issue_id_or_identifier", issue_id_or_identifier)?;
+        let variables = IssueArchiveVariables {
+            id: issue_id_or_identifier,
+            trash: false,
+        };
+        let response: IssueArchiveData = self
+            .execute_graphql(ISSUE_ARCHIVE_MUTATION, json!(variables))
+            .await?;
+        if response.issue_archive.success {
+            Ok(())
+        } else {
+            Err(LinearError::InvalidResponse(
+                "Linear issueArchive returned success=false".to_string(),
+            ))
         }
     }
 

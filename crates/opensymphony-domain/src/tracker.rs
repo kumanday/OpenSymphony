@@ -15,6 +15,10 @@ pub struct TrackerIssue {
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<TrackerIssueRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_milestone: Option<TrackerProjectMilestone>,
     pub blocked_by: Vec<TrackerIssueBlocker>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sub_issues: Vec<TrackerIssueRef>,
@@ -63,6 +67,10 @@ impl TrackerIssueBlocker {
 pub struct TrackerIssueRef {
     pub id: String,
     pub identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     pub state: String,
 }
 
@@ -73,6 +81,12 @@ impl TrackerIssueRef {
             .iter()
             .any(|terminal_state| terminal_state.trim().eq_ignore_ascii_case(state))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerProjectMilestone {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +217,8 @@ mod tests {
         let issue = TrackerIssueRef {
             id: "issue-1".to_string(),
             identifier: "COE-1".to_string(),
+            title: None,
+            url: None,
             state: "done".to_string(),
         };
         let terminal_states = HashSet::from([String::from("Done"), String::from("Canceled")]);

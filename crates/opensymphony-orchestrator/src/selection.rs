@@ -111,6 +111,8 @@ mod tests {
         TrackerIssueRef {
             id: format!("issue-{}", identifier.to_ascii_lowercase()),
             identifier: identifier.to_string(),
+            title: None,
+            url: None,
             state: state.to_string(),
         }
     }
@@ -132,6 +134,8 @@ mod tests {
             state: "In Progress".to_string(),
             labels: Vec::new(),
             parent_id: None,
+            parent: None,
+            project_milestone: None,
             blocked_by,
             sub_issues,
             created_at: ts(created_at),

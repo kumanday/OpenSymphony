@@ -113,6 +113,9 @@ The expected behavior is:
 - GraphQL write failures do not change scheduler correctness
 - the orchestrator continues to reconcile issue state from its own read adapter
 - target-repo skills must treat a top-level GraphQL `errors` array as failure
+- `opensymphony linear archive` is an operator command, not an agent-side write;
+  it refuses to archive issues without fresh captured memory unless `--force`
+  is supplied
 
 ## 7. Repository ownership
 

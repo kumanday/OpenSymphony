@@ -128,6 +128,30 @@ repo details behind `init`, see [Configuration](docs/configuration.md).
 For alternate config paths, `debug`, `rehydrate`, packaging, and local operator
 workflows, see [Operations](docs/operations.md).
 
+### Project Memory
+
+OpenSymphony can preserve completed-issue knowledge as you build. Live memory
+capture reads Linear evidence and discovers matching GitHub PRs by default,
+writes private issue capsules under `.opensymphony/memory/`, indexes them in
+DuckDB, and can sync selected knowledge into public topic docs:
+
+```bash
+opensymphony memory capture COE-123 --dry-run
+opensymphony memory capture COE-123
+opensymphony memory brief COE-123
+opensymphony memory related --area openhands-runtime
+opensymphony memory sync-docs --issues COE-123 --dry-run
+opensymphony linear archive --issues COE-123 --dry-run
+```
+
+See [Project Memory](docs/memory.md) for archive guards, YAML import/backfill,
+source schema, and the distinction between CLI commands and template-managed
+agent skills.
+
+The memory index uses DuckDB's bundled build so local installs do not need a
+separate DuckDB system package. That choice adds compile time and binary size,
+but keeps the memory database portable for local-first operator workflows.
+
 Optional troubleshooting and validation:
 
 ```bash
@@ -190,11 +214,12 @@ installable crates.io package:
 |-----------|----------------|
 | `opensymphony_orchestrator` | Poll loop, scheduling, retries, state machine |
 | `opensymphony_linear` | GraphQL client for orchestrator-side Linear reads |
+| `opensymphony_memory` | Issue capsules, DuckDB memory index, docs sync, archive eligibility |
 | `opensymphony_openhands` | REST/WebSocket client for agent runtime |
 | `opensymphony_workspace` | Workspace lifecycle, hooks, containment |
 | `opensymphony_control` | Control plane API and snapshot derivation |
 | `opensymphony_tui` | FrankenTUI operator client |
-| `opensymphony_cli` | CLI entrypoints: init, run, debug, daemon (demo), tui, doctor, rehydrate |
+| `opensymphony_cli` | CLI entrypoints: init, run, debug, memory, linear archive, daemon (demo), tui, doctor, rehydrate |
 
 ## Deployment Modes
 

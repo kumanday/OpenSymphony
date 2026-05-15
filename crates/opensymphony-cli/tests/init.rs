@@ -47,6 +47,13 @@ async fn init_copies_template_files_and_customizes_workflow() {
         "skill file should be created"
     );
     assert!(
+        !repo
+            .path()
+            .join(".agents/skills/opensymphony-memory/SKILL.md")
+            .exists(),
+        "memory skill should only be created when the template repo provides it"
+    );
+    assert!(
         repo.path()
             .join(".agents/skills/commit/scripts/helper.sh")
             .is_file(),
@@ -95,6 +102,42 @@ async fn init_copies_template_files_and_customizes_workflow() {
     assert!(
         stdout.contains("Created:") && stdout.contains("- .gitignore"),
         "stdout should report the generated ignore entry: {stdout}",
+    );
+}
+
+#[tokio::test]
+async fn init_uses_template_memory_skill_when_template_provides_it() {
+    let server = TemplateServer::start_with_assets(template_assets_with_memory_skill()).await;
+    let repo = TempDir::new().expect("temp repo should exist");
+    init_git_repo(repo.path(), "https://github.com/example/demo.git");
+
+    let mut child = spawn_init_child(repo.path(), server.base_url(), &[]);
+    write_stdin(&mut child, "\ndemo-project\n").await;
+
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("init command should finish");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "init should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    assert!(
+        !stdout.contains("CLI-bundled"),
+        "stdout should not mention a CLI-bundled memory skill: {stdout}",
+    );
+
+    let memory_skill = fs::read_to_string(
+        repo.path()
+            .join(".agents/skills/opensymphony-memory/SKILL.md"),
+    )
+    .expect("memory skill should exist");
+    assert!(
+        memory_skill.contains("template memory skill"),
+        "template-fetched memory skill should be written: {memory_skill}",
     );
 }
 
@@ -470,8 +513,19 @@ impl TemplateServer {
         Self::start_with_delay(Duration::ZERO).await
     }
 
+    async fn start_with_assets(assets: BTreeMap<String, String>) -> Self {
+        Self::start_with_assets_and_delay(assets, Duration::ZERO).await
+    }
+
     async fn start_with_delay(delay: Duration) -> Self {
-        let assets = Arc::new(template_assets());
+        Self::start_with_assets_and_delay(template_assets(), delay).await
+    }
+
+    async fn start_with_assets_and_delay(
+        assets: BTreeMap<String, String>,
+        delay: Duration,
+    ) -> Self {
+        let assets = Arc::new(assets);
         let app = Router::new()
             .fallback(get(template_handler))
             .with_state((assets, delay));
@@ -628,6 +682,15 @@ openhands:
             "name: ai-pr-review\n".to_string(),
         ),
     ])
+}
+
+fn template_assets_with_memory_skill() -> BTreeMap<String, String> {
+    let mut assets = template_assets();
+    assets.insert(
+        ".agents/skills/opensymphony-memory/SKILL.md".to_string(),
+        "# template memory skill\n".to_string(),
+    );
+    assets
 }
 
 fn fake_gh_script() -> &'static str {

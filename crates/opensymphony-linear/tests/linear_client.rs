@@ -108,7 +108,7 @@ async fn candidate_issues_normalize_fixture_payloads() {
         requests[0].body["query"]
             .as_str()
             .expect("query should be a string")
-            .contains("children(first: 50)")
+            .contains("children(includeArchived: true, first: 100)")
     );
     assert!(
         requests[0].body["query"]
@@ -149,6 +149,12 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
             .expect("query should be a string")
             .contains("query IssueInverseRelationsPage")
     );
+    assert!(
+        requests[1].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("$issueId: String!")
+    );
     assert_eq!(
         requests[1].body["variables"]["issueId"],
         Value::String("issue-264".to_string())
@@ -170,6 +176,54 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
             .as_str()
             .expect("query should be a string")
             .contains("labels(first: $labelFirst)")
+    );
+}
+
+#[tokio::test]
+async fn issues_by_identifiers_fetches_archived_issue_details() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::json(issue_by_identifier_response(
+            "issue-260",
+            "COE-260",
+            "Domain model and orchestrator state machine",
+        )),
+        QueuedResponse::json(issue_by_identifier_response(
+            "issue-264",
+            "COE-264",
+            "Linear read adapter and issue normalization",
+        )),
+    ])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should work");
+
+    let issues = client
+        .issues_by_identifiers(&["COE-260", "COE-264"])
+        .await
+        .expect("identifier lookup should succeed");
+
+    assert_eq!(issues.len(), 2);
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].body["variables"]["identifier"],
+        serde_json::json!("COE-260")
+    );
+    assert_eq!(
+        requests[1].body["variables"]["identifier"],
+        serde_json::json!("COE-264")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("query IssueByIdentifier")
+    );
+    assert!(
+        !requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("identifier: {")
     );
 }
 
@@ -201,6 +255,12 @@ async fn candidate_issues_fetch_all_label_pages() {
             .as_str()
             .expect("query should be a string")
             .contains("query IssueLabelsPage")
+    );
+    assert!(
+        requests[1].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("$issueId: String!")
     );
     assert_eq!(
         requests[1].body["variables"]["issueId"],
@@ -464,6 +524,12 @@ async fn fetch_workpad_comment_returns_latest_active_workpad_comment() {
             .as_str()
             .expect("query should be a string")
             .contains("query IssueCommentsPage")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("$issueId: String!")
     );
     assert_eq!(
         requests[0].body["variables"]["issueId"],
@@ -781,6 +847,32 @@ async fn permission_denied_maps_to_tracker_error_category() {
     assert_eq!(error.category(), TrackerErrorCategory::PermissionDenied);
 }
 
+#[tokio::test]
+async fn archive_issue_uses_issue_archive_mutation() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(
+        r#"{"data":{"issueArchive":{"success":true}}}"#,
+    )])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should work");
+
+    client
+        .archive_issue("COE-123")
+        .await
+        .expect("archive mutation should succeed");
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["variables"]["id"], "COE-123");
+    assert_eq!(requests[0].body["variables"]["trash"], false);
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("issueArchive")
+    );
+}
+
 fn test_config(base_url: &str) -> LinearConfig {
     let mut config = LinearConfig::new("test-token", "e7b957855cb7");
     config.base_url = base_url.to_string();
@@ -793,6 +885,48 @@ fn test_config(base_url: &str) -> LinearConfig {
         max_backoff: Duration::from_millis(1),
     };
     config
+}
+
+fn issue_by_identifier_response(issue_id: &str, identifier: &str, title: &str) -> String {
+    format!(
+        r#"{{
+  "data": {{
+    "issue": {{
+      "id": "{issue_id}",
+      "identifier": "{identifier}",
+      "url": "https://linear.app/example/issue/{identifier}",
+      "title": "{title}",
+      "description": "Issue looked up by identifier.",
+      "priority": 0.0,
+      "createdAt": "2026-03-20T10:00:00Z",
+      "updatedAt": "2026-03-21T12:00:00Z",
+      "state": {{
+        "id": "state-done",
+        "name": "Done",
+        "type": "completed"
+      }},
+      "parent": null,
+      "children": {{
+        "nodes": []
+      }},
+      "labels": {{
+        "nodes": [],
+        "pageInfo": {{
+          "hasNextPage": false,
+          "endCursor": null
+        }}
+      }},
+      "inverseRelations": {{
+        "nodes": [],
+        "pageInfo": {{
+          "hasNextPage": false,
+          "endCursor": null
+        }}
+      }}
+    }}
+  }}
+}}"#
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -893,14 +1027,14 @@ struct QueuedResponse {
 }
 
 impl QueuedResponse {
-    fn json(body: &str) -> Self {
+    fn json(body: impl Into<String>) -> Self {
         Self::new(StatusCode::OK, body).with_header("content-type", "application/json")
     }
 
-    fn new(status: StatusCode, body: &str) -> Self {
+    fn new(status: StatusCode, body: impl Into<String>) -> Self {
         Self {
             status,
-            body: body.to_string(),
+            body: body.into(),
             headers: Vec::new(),
         }
     }

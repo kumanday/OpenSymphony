@@ -131,7 +131,50 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
   --query-file .agents/skills/linear/queries/viewer.graphql
 ```
 
-## 6. Rehydration
+## 6. Project memory
+
+Memory capture is review-first. Live capture reads Linear and discovers GitHub
+PRs by default, so use dry runs before writing local memory or docs:
+
+```bash
+opensymphony memory capture COE-123 --dry-run
+opensymphony memory capture COE-123
+opensymphony memory status
+opensymphony memory brief COE-123
+opensymphony memory related --paths crates/opensymphony-openhands
+opensymphony memory sync-docs --issues COE-123 --dry-run
+opensymphony memory lint --public-docs
+```
+
+Use `opensymphony memory import --source-file completed.yaml` only for
+deterministic imports, migrations, tests, or external exports. Failed Linear or
+GitHub access should be fixed before live capture is retried.
+
+`memory capture` creates or refreshes issue capsules, updates
+`.opensymphony/memory/memory.duckdb`, and refreshes markdown indexes when
+enabled. The index is built with DuckDB's bundled native library so operators
+do not need to install DuckDB separately, at the cost of heavier Rust compile
+time and a larger binary. Treat that native dependency as part of the hosted
+deployment threat model before enabling memory in a multi-tenant service. It
+does not archive Linear issues.
+
+Linear archival is a separate command and is guarded by captured memory:
+
+```bash
+opensymphony linear archive --issues COE-123 --dry-run
+opensymphony linear archive --issues COE-123
+```
+
+For explicit issue selectors, the archive command captures live Linear and
+GitHub evidence before evaluating the guard. It blocks issues that have no
+capsule or unresolved capture warnings unless `--force` is supplied. Normal mode
+resolves Linear credentials from `WORKFLOW.md` and calls the Linear GraphQL
+archive mutation.
+
+See [Project Memory](memory.md) for the full command surface, import YAML
+schema, and troubleshooting notes.
+
+## 7. Rehydration
 
 Rehydration is the explicit recreation of an OpenHands conversation while
 preserving enough history for continuation.
@@ -149,14 +192,14 @@ opensymphony rehydrate COE-123 --reason "API key rotation"
 opensymphony doctor --config ./config.yaml --rehydrate
 ```
 
-## 7. Local safety
+## 8. Local safety
 
 - prefer loopback-only OpenHands targets for local development
 - treat target repos and prompts as trusted local input
 - do not keep unrelated OpenHands servers running on the same configured port
 - do not store provider secrets in checked-in files
 
-## 8. Migration note
+## 9. Migration note
 
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the

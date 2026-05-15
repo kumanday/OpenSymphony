@@ -6,6 +6,8 @@ pub mod opensymphony_control;
 pub mod opensymphony_domain;
 #[path = "../crates/opensymphony-linear/src/lib.rs"]
 pub mod opensymphony_linear;
+#[path = "../crates/opensymphony-memory/src/lib.rs"]
+pub mod opensymphony_memory;
 #[path = "../crates/opensymphony-openhands/src/lib.rs"]
 pub mod opensymphony_openhands;
 #[path = "../crates/opensymphony-orchestrator/src/lib.rs"]
