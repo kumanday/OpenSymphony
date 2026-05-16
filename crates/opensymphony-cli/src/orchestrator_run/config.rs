@@ -23,6 +23,8 @@ struct RunConfigFile {
     control_plane: ControlPlaneConfigFile,
     #[serde(default)]
     openhands: RunOpenHandsConfigFile,
+    #[serde(default)]
+    memory: RunMemoryConfigFile,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -37,6 +39,19 @@ struct RunOpenHandsConfigFile {
     tool_dir: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RunMemoryConfigFile {
+    #[serde(default)]
+    auto_capture: Option<bool>,
+    #[serde(default)]
+    auto_archive: Option<bool>,
+}
+
+pub(super) struct RunMemoryConfig {
+    pub(super) auto_capture: bool,
+    pub(super) auto_archive: bool,
+}
+
 pub(super) struct RunRuntimeConfig {
     pub(super) config_path: Option<PathBuf>,
     pub(super) target_repo: PathBuf,
@@ -44,6 +59,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) workflow: ResolvedWorkflow,
     pub(super) bind: SocketAddr,
     pub(super) tool_dir: Option<PathBuf>,
+    pub(super) memory: RunMemoryConfig,
 }
 
 pub(super) async fn resolve_runtime_config(
@@ -100,6 +116,10 @@ pub(super) async fn resolve_runtime_config(
         .tool_dir
         .as_deref()
         .map(|path| super::super::resolve_path(config_root, path));
+    let memory = RunMemoryConfig {
+        auto_capture: config.memory.auto_capture.unwrap_or(true),
+        auto_archive: config.memory.auto_archive.unwrap_or(false),
+    };
 
     Ok(RunRuntimeConfig {
         config_path,
@@ -108,6 +128,7 @@ pub(super) async fn resolve_runtime_config(
         workflow,
         bind,
         tool_dir,
+        memory,
     })
 }
 

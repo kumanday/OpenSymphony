@@ -133,9 +133,19 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 
 ## 6. Project memory
 
-Project memory stores shared area mapping in `.opensymphony/memory/memory.yaml`
-and private runtime artifacts under `.opensymphony/memory/`. Live capture reads
-Linear and discovers GitHub PRs by default:
+Project memory stores policy and learned structure in
+`.opensymphony/memory/memory.yaml` and private runtime artifacts under
+`.opensymphony/memory/`. `opensymphony run` captures terminal issue transitions
+automatically when `memory.auto_capture` is enabled in `config.yaml`:
+
+```yaml
+memory:
+  auto_capture: true
+  auto_archive: false
+```
+
+Manual commands remain available for setup, backfill, inspection, and guarded
+archive operations:
 
 ```bash
 opensymphony memory init
@@ -147,8 +157,7 @@ opensymphony memory sync-docs --since-last-sync
 opensymphony memory lint --public-docs
 ```
 
-Add `--dry-run` to capture, import, sync, or archive commands when an operator
-wants a non-writing preview.
+Add `--dry-run` to write commands when an operator wants a non-writing preview.
 
 Use `opensymphony memory import --source-file completed.yaml` only for
 deterministic imports, migrations, tests, or external exports. Failed Linear or

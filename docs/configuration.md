@@ -156,6 +156,10 @@ control_plane:
 
 openhands:
   tool_dir: ~/.opensymphony/openhands-server
+
+memory:
+  auto_capture: true
+  auto_archive: false
 ```
 
 Provision that app-managed directory with:
@@ -177,17 +181,29 @@ config that `opensymphony run` looks for in a target repo.
 
 ## Memory Configuration
 
-Project memory is optional and stores runtime state under `.opensymphony/memory`.
-Initialize shared docs area mappings with:
+Project memory stores runtime state under `.opensymphony/memory` and can be
+captured automatically by `opensymphony run`. Runtime automation is controlled
+by `config.yaml`:
+
+```yaml
+memory:
+  auto_capture: true
+  auto_archive: false
+```
+
+`auto_capture` defaults to `true`. It captures terminal issue transitions
+observed by the run loop. `auto_archive` defaults to `false`; when enabled, it
+archives only after successful capture with no blocking warnings.
+
+Initialize the shared memory policy and learned ontology file with:
 
 ```bash
 opensymphony memory init
 ```
 
 This creates `.opensymphony/memory/memory.yaml` and updates `.gitignore` so only
-that shared config is tracked. If no memory config file exists, memory capture
-can still write local capsules, but docs sync refuses broad topic-doc generation
-until mappings exist:
+that shared config is tracked. Capsules, markdown indexes, DuckDB, source
+snapshots, and runtime logs remain local:
 
 ```text
 .opensymphony/memory/
@@ -197,12 +213,16 @@ until mappings exist:
   memory.duckdb
 ```
 
-To customize areas and docs targets, edit `.opensymphony/memory/memory.yaml`:
+`memory.yaml` contains policy plus learned structure. `memory init` seeds stable
+areas from existing top-level `docs/*.md` files when present; otherwise it
+starts with an empty `areas` map and capture evolves it from Linear and PR
+narrative evidence:
 
 ```yaml
 memory_root: .opensymphony/memory
 visibility: private
 index_path: .opensymphony/memory/memory.duckdb
+confidence_threshold: 75
 markdown_indexes: true
 docs:
   public_root: docs
@@ -212,17 +232,22 @@ areas:
   openhands-runtime:
     title: OpenHands Runtime
     docs_target: docs/openhands-runtime.md
-    path_hints:
-      - openhands
-      - runtime
-    labels:
-      - runtime
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+      - OpenHands Runtime
+    source_refs:
+      docs:
+        - docs/openhands-runtime.md
+      linear_labels:
+        - runtime
 ```
 
-Private memory should stay out of source control. Generated topic docs are
-ordinary repository files that users can review, commit, and publish when they
-choose. Commit `.opensymphony/memory/memory.yaml`; do not commit issue
-capsules, markdown indexes, DuckDB, source snapshots, or runtime state.
+Private memory should stay out of source control. Commit
+`.opensymphony/memory/memory.yaml` and generated public docs when appropriate;
+do not commit issue capsules, markdown indexes, DuckDB, source snapshots, or
+runtime state.
 
 ## OpenHands PR Review
 

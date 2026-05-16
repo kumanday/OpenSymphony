@@ -130,10 +130,12 @@ workflows, see [Operations](docs/operations.md).
 
 ### Project Memory
 
-OpenSymphony can preserve completed-issue knowledge as you build. Live memory
-capture reads Linear evidence and discovers matching GitHub PRs by default,
-writes private issue capsules under `.opensymphony/memory/`, indexes them in
-DuckDB, and can sync selected knowledge into public topic docs:
+OpenSymphony can preserve completed-issue knowledge as you build. When
+`memory.auto_capture` is enabled in `config.yaml` (the default),
+`opensymphony run` captures terminal issue transitions from Linear and matching
+GitHub PR narrative, writes private memory under `.opensymphony/memory/`, and
+syncs stable learned topics into public docs. Manual commands remain available
+for setup, backfill, inspection, and guarded archival:
 
 ```bash
 opensymphony memory init
@@ -145,8 +147,8 @@ opensymphony linear archive --issues COE-123
 ```
 
 See [Project Memory](docs/memory.md) for archive guards, YAML import/backfill,
-source schema, and the distinction between CLI commands and template-managed
-agent skills.
+source schema, automation flags, and the distinction between CLI commands and
+template-managed agent skills.
 
 The memory index uses DuckDB's bundled build so local installs do not need a
 separate DuckDB system package. That choice adds compile time and binary size,

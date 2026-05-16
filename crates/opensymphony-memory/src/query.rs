@@ -289,9 +289,9 @@ pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, Memo
             findings.push(LintFinding {
                 severity: LintSeverity::Error,
                 path: Some(issue.capsule_path.clone()),
-                message: format!("{} has no area mapping", issue.issue_key),
+                message: format!("{} has no learned memory area", issue.issue_key),
                 next_command: Some(format!(
-                    "opensymphony memory capture {} --write --force",
+                    "opensymphony memory capture {} --force",
                     issue.issue_key
                 )),
             });

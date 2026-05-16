@@ -8,6 +8,9 @@ impl MemoryConfig {
             Some(path) => Some(resolve_path(&repo_root, path)),
             None => default_config_path(&repo_root),
         };
+        let resolved_config_path = config_file
+            .clone()
+            .unwrap_or_else(|| repo_root.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE));
 
         let parsed = match config_file {
             Some(path) => {
@@ -59,8 +62,10 @@ impl MemoryConfig {
                         .map(|path| resolve_path(&repo_root, path))
                         .unwrap_or_else(|| public_root.join(format!("{slug}.md"))),
                     visibility: area.visibility.unwrap_or(default_doc_visibility),
-                    path_hints: normalize_list(area.path_hints),
-                    labels: normalize_list(area.labels),
+                    status: area.status.unwrap_or(AreaStatus::Candidate),
+                    confidence: area.confidence.unwrap_or_default(),
+                    aliases: normalize_list(area.aliases),
+                    source_refs: normalize_area_source_refs(area.source_refs),
                     slug,
                 },
             );
@@ -68,10 +73,12 @@ impl MemoryConfig {
 
         Ok(Self {
             enabled: parsed.enabled.unwrap_or(true),
+            config_path: resolved_config_path,
             repo_root,
             memory_root,
             visibility,
             index_path,
+            confidence_threshold: parsed.confidence_threshold.unwrap_or(75),
             source_snapshot_policy: parsed.source_snapshots.unwrap_or_default(),
             markdown_indexes: parsed.markdown_indexes.unwrap_or(true),
             docs: DocsConfig {
@@ -103,8 +110,10 @@ impl MemoryConfig {
                 title: titleize_slug(&slug),
                 docs_target: self.docs.public_root.join(format!("{slug}.md")),
                 visibility: self.docs.default_visibility,
-                path_hints: Vec::new(),
-                labels: Vec::new(),
+                status: AreaStatus::Candidate,
+                confidence: 0,
+                aliases: Vec::new(),
+                source_refs: AreaSourceRefs::default(),
                 slug,
             })
     }
@@ -145,99 +154,175 @@ pub fn write_memory_init_plan(plan: &MemoryInitPlan) -> Result<(), MemoryError> 
     Ok(())
 }
 
-fn render_memory_init_config(repo_root: &Path) -> Result<String, MemoryError> {
-    let areas = discover_task_areas(repo_root)?;
-    let areas = if areas.is_empty() {
-        vec!["general".to_string()]
-    } else {
-        areas
-    };
-
-    let mut output = String::from(
-        "memory_root: .opensymphony/memory\n\
-visibility: private\n\
-index_path: .opensymphony/memory/memory.duckdb\n\
-source_snapshots: hashes\n\
-markdown_indexes: true\n\n\
-docs:\n\
-  public_root: docs\n\
-  default_visibility: public\n\
-  deny_private_links: true\n\n\
-areas:\n",
-    );
-    for area in areas {
-        let docs_target = docs_target_for_area(repo_root, &area);
-        output.push_str(&format!("  {area}:\n"));
-        output.push_str(&format!("    title: {}\n", titleize_slug(&area)));
-        output.push_str(&format!(
-            "    docs_target: {}\n",
-            display_path(repo_root, &docs_target)
-        ));
-        output.push_str("    path_hints:\n");
-        for hint in path_hints_for_area(&area) {
-            output.push_str(&format!("      - {hint}\n"));
-        }
-        output.push_str("    labels:\n");
-        output.push_str(&format!("      - {area}\n"));
+fn write_memory_config(config: &MemoryConfig) -> Result<(), MemoryError> {
+    let mut areas = BTreeMap::new();
+    for (slug, area) in &config.areas {
+        areas.insert(
+            slug.clone(),
+            AreaConfigFile {
+                title: Some(area.title.clone()),
+                docs_target: Some(PathBuf::from(path_relative_to(
+                    &config.repo_root,
+                    &area.docs_target,
+                ))),
+                visibility: Some(area.visibility),
+                status: Some(area.status),
+                confidence: Some(area.confidence),
+                aliases: area.aliases.clone(),
+                source_refs: area.source_refs.clone(),
+            },
+        );
     }
-    Ok(output)
+    let file = MemoryConfigFile {
+        enabled: Some(config.enabled),
+        memory_root: Some(PathBuf::from(path_relative_to(
+            &config.repo_root,
+            &config.memory_root,
+        ))),
+        visibility: Some(config.visibility),
+        index_path: Some(PathBuf::from(path_relative_to(
+            &config.repo_root,
+            &config.index_path,
+        ))),
+        confidence_threshold: Some(config.confidence_threshold),
+        source_snapshots: Some(config.source_snapshot_policy),
+        markdown_indexes: Some(config.markdown_indexes),
+        docs: Some(DocsConfigFile {
+            public_root: Some(PathBuf::from(path_relative_to(
+                &config.repo_root,
+                &config.docs.public_root,
+            ))),
+            default_visibility: Some(config.docs.default_visibility),
+            deny_private_links: Some(config.docs.deny_private_links),
+        }),
+        areas,
+        redaction: Some(RedactionConfigFile {
+            deny_patterns: config.redaction.deny_patterns.clone(),
+        }),
+    };
+    let contents = serde_yaml::to_string(&file).map_err(|source| MemoryError::ParseYaml {
+        path: config.config_path.clone(),
+        source,
+    })?;
+    write_file(&config.config_path, &contents)
 }
 
-fn discover_task_areas(repo_root: &Path) -> Result<Vec<String>, MemoryError> {
-    let tasks_root = repo_root.join("docs/tasks");
-    if !tasks_root.is_dir() {
+fn render_memory_init_config(repo_root: &Path) -> Result<String, MemoryError> {
+    let mut areas = BTreeMap::new();
+    for area in discover_doc_areas(repo_root)? {
+        areas.insert(
+            area.slug,
+            AreaConfigFile {
+                title: Some(area.title.clone()),
+                docs_target: Some(PathBuf::from(display_path(repo_root, &area.docs_target))),
+                visibility: Some(MemoryVisibility::Public),
+                status: Some(AreaStatus::Stable),
+                confidence: Some(85),
+                aliases: vec![area.title],
+                source_refs: AreaSourceRefs {
+                    docs: vec![display_path(repo_root, &area.docs_target)],
+                    ..AreaSourceRefs::default()
+                },
+            },
+        );
+    }
+    let config = MemoryConfigFile {
+        memory_root: Some(PathBuf::from(DEFAULT_MEMORY_ROOT)),
+        visibility: Some(MemoryVisibility::Private),
+        index_path: Some(PathBuf::from(format!(
+            "{DEFAULT_MEMORY_ROOT}/{DEFAULT_INDEX_FILE_NAME}"
+        ))),
+        confidence_threshold: Some(75),
+        source_snapshots: Some(SourceSnapshotPolicy::Hashes),
+        markdown_indexes: Some(true),
+        docs: Some(DocsConfigFile {
+            public_root: Some(PathBuf::from(DEFAULT_PUBLIC_DOCS_ROOT)),
+            default_visibility: Some(MemoryVisibility::Public),
+            deny_private_links: Some(true),
+        }),
+        areas,
+        ..MemoryConfigFile::default()
+    };
+    serde_yaml::to_string(&config).map_err(|source| MemoryError::ParseYaml {
+        path: repo_root.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE),
+        source,
+    })
+}
+
+struct DiscoveredDocArea {
+    slug: String,
+    title: String,
+    docs_target: PathBuf,
+}
+
+fn discover_doc_areas(repo_root: &Path) -> Result<Vec<DiscoveredDocArea>, MemoryError> {
+    let docs_root = repo_root.join("docs");
+    if !docs_root.is_dir() {
         return Ok(Vec::new());
     }
 
-    let mut areas = BTreeSet::new();
-    for entry in fs::read_dir(&tasks_root).map_err(|source| MemoryError::ReadFile {
-        path: tasks_root.clone(),
+    let mut areas = BTreeMap::new();
+    for entry in fs::read_dir(&docs_root).map_err(|source| MemoryError::ReadFile {
+        path: docs_root.clone(),
         source,
     })? {
         let entry = entry.map_err(|source| MemoryError::ReadFile {
-            path: tasks_root.clone(),
+            path: docs_root.clone(),
             source,
         })?;
         let path = entry.path();
         if path.extension().and_then(OsStr::to_str) != Some("md") {
             continue;
         }
-        let contents = read_to_string(&path)?;
-        if let Some(area) = parse_task_area(&contents) {
-            areas.insert(area);
-        }
-    }
-    Ok(areas.into_iter().collect())
-}
-
-fn parse_task_area(contents: &str) -> Option<String> {
-    let mut lines = contents.lines();
-    if lines.next()?.trim() != "---" {
-        return None;
-    }
-    for line in lines {
-        let trimmed = line.trim();
-        if trimmed == "---" {
-            return None;
-        }
-        let Some(value) = trimmed.strip_prefix("area:") else {
+        let Some(stem) = path.file_stem().and_then(OsStr::to_str) else {
             continue;
         };
-        return normalize_optional(value).map(|area| slugify(&area));
+        let slug = slugify(stem);
+        if slug.is_empty() {
+            continue;
+        }
+        let contents = read_to_string(&path)?;
+        let title = first_markdown_heading(&contents).unwrap_or_else(|| titleize_slug(&slug));
+        areas.insert(
+            slug.clone(),
+            DiscoveredDocArea {
+                slug,
+                title,
+                docs_target: path,
+            },
+        );
+    }
+    Ok(areas.into_values().collect())
+}
+
+fn first_markdown_heading(contents: &str) -> Option<String> {
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        let Some(value) = trimmed.strip_prefix("# ") else {
+            continue;
+        };
+        return normalize_optional(value);
     }
     None
 }
 
-fn docs_target_for_area(repo_root: &Path, area: &str) -> PathBuf {
-    repo_root.join("docs").join(format!("{area}.md"))
+fn normalize_area_source_refs(mut refs: AreaSourceRefs) -> AreaSourceRefs {
+    refs.docs = normalize_source_ref_list(refs.docs);
+    refs.linear_labels = normalize_source_ref_list(refs.linear_labels);
+    refs.linear_milestones = normalize_source_ref_list(refs.linear_milestones);
+    refs.linear_issues = normalize_source_ref_list(refs.linear_issues);
+    refs.github_prs = normalize_source_ref_list(refs.github_prs);
+    refs
 }
 
-fn path_hints_for_area(area: &str) -> Vec<String> {
-    let mut hints = BTreeSet::from([area.to_string()]);
-    for token in area.split('-').filter(|token| !token.is_empty()) {
-        hints.insert(token.to_string());
-    }
-    hints.into_iter().collect()
+fn normalize_source_ref_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = values
+        .into_iter()
+        .filter_map(|value| normalize_optional(&value))
+        .collect::<Vec<_>>();
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn render_memory_gitignore(before: Option<&str>) -> String {

@@ -260,6 +260,35 @@ mutation IssueArchive($id: String!, $trash: Boolean) {
 }
 "#;
 
+pub(super) const PROJECT_BY_SLUG_QUERY: &str = r#"
+query ProjectBySlug($slug: String!) {
+  projects(filter: { slugId: { eq: $slug } }, first: 1) {
+    nodes {
+      id
+      name
+      slugId
+      url
+      content
+    }
+  }
+}
+"#;
+
+pub(super) const PROJECT_UPDATE_CONTENT_MUTATION: &str = r#"
+mutation UpdateProjectContent($id: String!, $content: String!) {
+  projectUpdate(id: $id, input: { content: $content }) {
+    success
+    project {
+      id
+      name
+      slugId
+      content
+      updatedAt
+    }
+  }
+}
+"#;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct GraphqlEnvelope<T> {
     pub data: Option<T>,
@@ -337,6 +366,17 @@ pub(super) struct IssueArchiveVariables {
     pub trash: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub(super) struct ProjectBySlugVariables {
+    pub slug: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ProjectUpdateContentVariables {
+    pub id: String,
+    pub content: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct IssuesByStateData {
     pub issues: IssuesConnection<LinearIssueNode>,
@@ -374,8 +414,39 @@ pub(super) struct IssueArchiveData {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct ProjectBySlugData {
+    pub projects: ProjectsConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectUpdateContentData {
+    pub project_update: ProjectUpdatePayload,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct IssueArchivePayload {
     pub success: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectUpdatePayload {
+    pub success: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectsConnection {
+    pub nodes: Vec<LinearProjectNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LinearProjectNode {
+    pub id: String,
+    pub name: String,
+    pub slug_id: String,
+    pub url: String,
+    pub content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

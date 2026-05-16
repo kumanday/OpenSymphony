@@ -70,7 +70,7 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
     );
     assert_success(&docs, "docs dry-run");
     let stdout = String::from_utf8_lossy(&docs.stdout);
-    assert!(stdout.contains("Docs Sync Plan"));
+    assert!(stdout.contains("Docs Sync Summary"));
     assert!(stdout.contains("COE-123"));
     assert!(!stdout.contains(".opensymphony/memory/issues"));
 
@@ -99,6 +99,11 @@ fn memory_init_creates_private_config_and_gitignore_policy() {
         "---\narea: agent-runtime\n---\n# Task\n",
     )
     .expect("task should write");
+    fs::write(
+        repo.path().join("docs/agent-runtime.md"),
+        "# Agent Runtime\n",
+    )
+    .expect("doc should write");
     fs::write(repo.path().join(".gitignore"), ".opensymphony*\n").expect("gitignore should write");
 
     let output = run(repo.path(), ["memory", "init"]);
@@ -108,6 +113,8 @@ fn memory_init_creates_private_config_and_gitignore_policy() {
     let config = fs::read_to_string(&config_path).expect("memory config should exist");
     assert!(config.contains("agent-runtime:"));
     assert!(config.contains("docs_target: docs/agent-runtime.md"));
+    assert!(config.contains("status: stable"));
+    assert!(config.contains("confidence: 85"));
     assert!(
         !repo
             .path()
@@ -136,7 +143,8 @@ fn memory_init_dry_run_does_not_write_files() {
     assert_success(&output, "memory init dry-run");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Proposed config"));
-    assert!(stdout.contains("general:"));
+    assert!(stdout.contains("areas:"));
+    assert!(!stdout.contains("general:"));
     assert!(
         !repo
             .path()
@@ -149,7 +157,7 @@ fn memory_init_dry_run_does_not_write_files() {
 #[test]
 fn sync_docs_requires_configured_area_mapping() {
     let repo = TempDir::new().expect("temp repo should exist");
-    fs::write(repo.path().join("source.yaml"), sample_source())
+    fs::write(repo.path().join("source.yaml"), candidate_only_source())
         .expect("source evidence should write");
     assert_success(
         &run(
@@ -166,11 +174,11 @@ fn sync_docs_requires_configured_area_mapping() {
     );
 
     let output = run(repo.path(), ["memory", "sync-docs"]);
-    assert_failure(&output, "sync-docs without mappings");
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("No docs area mapping found. Run opensymphony memory init.")
-    );
+    assert_success(&output, "sync-docs without stable mappings");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("candidate or unmapped docs areas"));
+    assert!(stdout.contains("confidence improves"));
+    assert!(!repo.path().join("docs/readme-md.md").exists());
 }
 
 #[test]
@@ -635,10 +643,14 @@ areas:
   openhands-runtime:
     title: OpenHands Runtime
     docs_target: docs/openhands-runtime.md
-    path_hints:
-      - openhands
-    labels:
+    status: stable
+    confidence: 90
+    aliases:
       - runtime
+      - OpenHands Runtime
+    source_refs:
+      linear_labels:
+        - runtime
 "#,
     )
     .expect("memory config should write");
@@ -653,10 +665,13 @@ areas:
   general:
     title: General
     docs_target: docs/general.md
-    path_hints:
+    status: stable
+    confidence: 90
+    aliases:
       - general
-    labels:
-      - general
+    source_refs:
+      linear_labels:
+        - general
 "#,
     )
     .expect("memory config should write");
@@ -1037,6 +1052,8 @@ issues:
     url: https://linear.app/example/issue/COE-123
     description: Update root repository metadata.
     state: Done
+    labels:
+      - general
     linked_prs:
       - 456
 prs:
@@ -1051,6 +1068,28 @@ prs:
       - path: Cargo.toml
         change_kind: modified
       - path: Cargo.lock
+        change_kind: modified
+"#
+}
+
+fn candidate_only_source() -> &'static str {
+    r#"
+issues:
+  - identifier: COE-123
+    title: Repo metadata cleanup
+    url: https://linear.app/example/issue/COE-123
+    description: Update root repository metadata.
+    state: Done
+    linked_prs:
+      - 456
+prs:
+  - number: 456
+    title: COE-123 update repository metadata
+    url: https://github.com/example/repo/pull/456
+    branch: coe-123-metadata
+    merge_sha: abcdef1234567890
+    changed_files:
+      - path: README.md
         change_kind: modified
 "#
 }

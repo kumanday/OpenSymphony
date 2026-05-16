@@ -119,10 +119,12 @@ pub fn write_capture_plan(
         written_capsules.push(issue_plan.capsule_path.clone());
     }
 
-    index_capture_plan(config, plan)?;
-    let milestone_nodes = write_milestone_nodes(config, plan)?;
-    let markdown_indexes = if config.markdown_indexes {
-        write_markdown_indexes(config)?
+    let evolved_config = evolve_memory_config(config, plan);
+    write_memory_config(&evolved_config)?;
+    index_capture_plan(&evolved_config, plan)?;
+    let milestone_nodes = write_milestone_nodes(&evolved_config, plan)?;
+    let markdown_indexes = if evolved_config.markdown_indexes {
+        write_markdown_indexes(&evolved_config)?
     } else {
         Vec::new()
     };
@@ -133,7 +135,7 @@ pub fn write_capture_plan(
 
     Ok(CaptureWriteReport {
         written_capsules,
-        index_path: config.index_path.clone(),
+        index_path: evolved_config.index_path.clone(),
         markdown_indexes,
         milestone_nodes,
         warnings,

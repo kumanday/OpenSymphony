@@ -328,9 +328,14 @@ fn snippet_for_terms(body: &str, terms: &[String]) -> String {
 }
 
 fn contains_private_memory_link(contents: &str) -> bool {
-    contents.contains(".opensymphony/memory")
-        || contents.contains(".opensymphony\\memory")
-        || contents.contains("../.opensymphony")
+    let contents = contents.to_ascii_lowercase();
+    [
+        ".opensymphony/memory/issues",
+        ".opensymphony\\memory\\issues",
+        "../.opensymphony/memory/issues",
+    ]
+    .iter()
+    .any(|private_path| contents.contains(private_path))
 }
 
 fn display_path(repo_root: &Path, path: &Path) -> String {

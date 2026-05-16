@@ -57,7 +57,7 @@ pub fn plan_archive(
             ),
             None => (
                 false,
-                "blocked: no captured memory found; run `opensymphony memory capture --write` first"
+                "blocked: no captured memory found; run `opensymphony memory capture` first"
                     .to_string(),
                 None,
             ),

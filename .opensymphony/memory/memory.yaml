@@ -1,118 +1,370 @@
+enabled: true
 memory_root: .opensymphony/memory
 visibility: private
 index_path: .opensymphony/memory/memory.duckdb
+confidence_threshold: 75
 source_snapshots: hashes
 markdown_indexes: true
-
 docs:
   public_root: docs
   default_visibility: public
   deny_private_links: true
-
 areas:
-  agent-runtime:
-    title: Agent Runtime
-    docs_target: docs/agent-runtime.md
-    path_hints:
-      - agent
-      - agent-runtime
-      - runtime
-    labels:
-      - agent-runtime
-  domain:
-    title: Domain
-    docs_target: docs/domain.md
-    path_hints:
-      - domain
-    labels:
-      - domain
-  foundation:
-    title: Foundation
-    docs_target: docs/foundation.md
-    path_hints:
-      - foundation
-    labels:
-      - foundation
-  hosted-follow-on:
-    title: Hosted Follow On
-    docs_target: docs/hosted-follow-on.md
-    path_hints:
-      - follow
-      - hosted
-      - hosted-follow-on
-      - on
-    labels:
-      - hosted-follow-on
-  openhands:
-    title: Openhands
-    docs_target: docs/openhands.md
-    path_hints:
-      - openhands
-    labels:
-      - openhands
-  orchestration:
-    title: Orchestration
-    docs_target: docs/orchestration.md
-    path_hints:
-      - orchestration
-    labels:
-      - orchestration
-  quality-ops:
-    title: Quality Ops
-    docs_target: docs/quality-ops.md
-    path_hints:
-      - ops
-      - quality
-      - quality-ops
-    labels:
-      - quality-ops
-  repo-harness:
-    title: Repo Harness
-    docs_target: docs/repo-harness.md
-    path_hints:
-      - harness
-      - repo
-      - repo-harness
-    labels:
-      - repo-harness
-  tracker:
-    title: Tracker
-    docs_target: docs/tracker.md
-    path_hints:
-      - tracker
-    labels:
-      - tracker
-  tracker-tools:
-    title: Tracker Tools
-    docs_target: docs/tracker-tools.md
-    path_hints:
-      - tools
-      - tracker
-      - tracker-tools
-    labels:
-      - tracker-tools
-  ui-observability:
-    title: Ui Observability
-    docs_target: docs/ui-observability.md
-    path_hints:
-      - observability
-      - ui
-      - ui-observability
-    labels:
-      - ui-observability
-  workflow-config:
-    title: Workflow Config
-    docs_target: docs/workflow-config.md
-    path_hints:
-      - config
-      - workflow
-      - workflow-config
-    labels:
-      - workflow-config
-  workspace:
-    title: Workspace
-    docs_target: docs/workspace.md
-    path_hints:
-      - workspace
-    labels:
-      - workspace
+  ai-pr-review-human-setup:
+    title: OpenHands PR Review - Human Setup Guide
+    docs_target: docs/ai-pr-review-human-setup.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - openhands pr review - human setup guide
+    source_refs:
+      docs:
+      - docs/ai-pr-review-human-setup.md
+  ai-pr-review-system-spec:
+    title: Provider-agnostic AI PR review system for GitHub using OpenHands
+    docs_target: docs/ai-pr-review-system-spec.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - provider-agnostic ai pr review system for github using openhands
+    source_refs:
+      docs:
+      - docs/ai-pr-review-system-spec.md
+  architecture:
+    title: Architecture
+    docs_target: docs/architecture.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - architecture
+    source_refs:
+      docs:
+      - docs/architecture.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      linear_issues:
+      - COE-252
+      - COE-259
+      - COE-260
+      github_prs:
+      - '#10'
+      - '#11'
+      - '#26'
+      - '#29'
+      - '#32'
+  configuration:
+    title: Configuration
+    docs_target: docs/configuration.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - configuration
+    source_refs:
+      docs:
+      - docs/configuration.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      linear_issues:
+      - COE-252
+      - COE-258
+      github_prs:
+      - '#10'
+      - '#11'
+      - '#26'
+  deployment-modes:
+    title: Deployment Modes
+    docs_target: docs/deployment-modes.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - deployment modes
+    source_refs:
+      docs:
+      - docs/deployment-modes.md
+  development:
+    title: Development Guide
+    docs_target: docs/DEVELOPMENT.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - development
+    - development guide
+    source_refs:
+      docs:
+      - docs/DEVELOPMENT.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      linear_issues:
+      - COE-252
+      github_prs:
+      - '#10'
+      - '#11'
+      - '#26'
+  elixir-hierarchy-changes:
+    title: Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
+    docs_target: docs/elixir-hierarchy-changes.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - changes needed in upstream elixir implementation for hierarchy-aware task selection
+    source_refs:
+      docs:
+      - docs/elixir-hierarchy-changes.md
+  host-client-architecture:
+    title: OpenSymphony Host-Client Architecture
+    docs_target: docs/host-client-architecture.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - opensymphony host-client architecture
+    source_refs:
+      docs:
+      - docs/host-client-architecture.md
+  host-client-implementation-plan:
+    title: OpenSymphony Rich Client, Hosted Mode, and Planning Implementation Plan
+    docs_target: docs/host-client-implementation_plan.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - opensymphony rich client, hosted mode, and planning implementation plan
+    source_refs:
+      docs:
+      - docs/host-client-implementation_plan.md
+  hosted-client-prd:
+    title: OpenSymphony Rich Client, Hosted Mode, and Collaborative Planning PRD
+    docs_target: docs/hosted-client-PRD.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - opensymphony rich client, hosted mode, and collaborative planning prd
+    source_refs:
+      docs:
+      - docs/hosted-client-PRD.md
+  implementation-plan:
+    title: Implementation Plan
+    docs_target: docs/implementation-plan.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - implementation plan
+    - implementation-plan
+    source_refs:
+      docs:
+      - docs/implementation-plan.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      linear_issues:
+      - COE-252
+      - COE-258
+      github_prs:
+      - '#10'
+      - '#11'
+      - '#26'
+  linear-and-tools:
+    title: Linear and Tools
+    docs_target: docs/linear-and-tools.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - linear and tools
+    source_refs:
+      docs:
+      - docs/linear-and-tools.md
+  memory:
+    title: Project Memory
+    docs_target: docs/memory.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - project memory
+    source_refs:
+      docs:
+      - docs/memory.md
+  memory-capture-and-doc-sync:
+    title: OpenSymphony Memory Capture and Documentation Sync
+    docs_target: docs/memory-capture-and-doc-sync.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - opensymphony memory capture and documentation sync
+    source_refs:
+      docs:
+      - docs/memory-capture-and-doc-sync.md
+  migration-1-0-0:
+    title: OpenSymphony 1.0.0 Migration Guide
+    docs_target: docs/migration-1.0.0.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - opensymphony 1.0.0 migration guide
+    source_refs:
+      docs:
+      - docs/migration-1.0.0.md
+  openhands-agent-server:
+    title: OpenHands Agent-Server Integration
+    docs_target: docs/openhands-agent-server.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - openhands agent-server integration
+    source_refs:
+      docs:
+      - docs/openhands-agent-server.md
+  openhands-agent-server-subscription-auth-analysis:
+    title: Subscription-Based OpenAI ChatGPT/Codex Authentication with `openhands agent-server`
+    docs_target: docs/openhands_agent_server_subscription_auth_analysis.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - subscription-based openai chatgpt/codex authentication with `openhands agent-server`
+    source_refs:
+      docs:
+      - docs/openhands_agent_server_subscription_auth_analysis.md
+  operations:
+    title: Operations
+    docs_target: docs/operations.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - operations
+    source_refs:
+      docs:
+      - docs/operations.md
+  prerequisites:
+    title: Prerequisites
+    docs_target: docs/prerequisites.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - prerequisites
+    source_refs:
+      docs:
+      - docs/prerequisites.md
+  repository-layout:
+    title: Repository Layout
+    docs_target: docs/repository-layout.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - repository layout
+    - repository-layout
+    source_refs:
+      docs:
+      - docs/repository-layout.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      linear_issues:
+      - COE-252
+      - COE-258
+      github_prs:
+      - '#10'
+      - '#11'
+      - '#26'
+  sources:
+    title: Sources and Trust Notes
+    docs_target: docs/sources.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - sources and trust notes
+    source_refs:
+      docs:
+      - docs/sources.md
+  symphony-spec-alignment:
+    title: Symphony Spec Alignment
+    docs_target: docs/symphony-spec-alignment.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - symphony spec alignment
+    - symphony-spec-alignment
+    source_refs:
+      docs:
+      - docs/symphony-spec-alignment.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      linear_issues:
+      - COE-259
+      - COE-260
+      github_prs:
+      - '#29'
+      - '#32'
+  testing-and-operations:
+    title: Testing
+    docs_target: docs/testing-and-operations.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - testing
+    - testing-and-operations
+    source_refs:
+      docs:
+      - docs/testing-and-operations.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      linear_issues:
+      - COE-252
+      - COE-259
+      github_prs:
+      - '#10'
+      - '#11'
+      - '#26'
+      - '#29'
+  ui-frankentui:
+    title: FrankenTUI Operator UI
+    docs_target: docs/ui-frankentui.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - frankentui operator ui
+    source_refs:
+      docs:
+      - docs/ui-frankentui.md
+  websocket-runtime:
+    title: WebSocket Runtime Contract
+    docs_target: docs/websocket-runtime.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - websocket runtime contract
+    source_refs:
+      docs:
+      - docs/websocket-runtime.md
+  workspace-and-lifecycle:
+    title: Workspace and Lifecycle
+    docs_target: docs/workspace-and-lifecycle.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - workspace and lifecycle
+    source_refs:
+      docs:
+      - docs/workspace-and-lifecycle.md
+redaction:
+  deny_patterns: []

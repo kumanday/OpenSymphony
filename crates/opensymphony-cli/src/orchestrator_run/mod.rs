@@ -2,13 +2,20 @@ pub(crate) mod backends;
 mod config;
 mod snapshot;
 
-use std::{collections::VecDeque, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+};
 
 use crate::opensymphony_control::{ControlPlaneServer, RecentEventKind, SnapshotStore};
 use crate::opensymphony_domain::TimestampMs;
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::OpenHandsError;
-use crate::opensymphony_orchestrator::{Scheduler, SchedulerConfig, SchedulerError};
+use crate::opensymphony_orchestrator::{
+    IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
+};
 use crate::opensymphony_workspace::WorkspaceError;
 use chrono::{DateTime, Utc};
 use clap::Args;
@@ -170,6 +177,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
 
     let bootstrap_snapshot = scheduler.bootstrap(now_timestamp()).await?;
+    let mut known_terminal_issues = terminal_issue_identifiers(&bootstrap_snapshot);
     push_recent_event(
         &mut recent_events,
         RecentEventKind::SnapshotPublished,
@@ -213,6 +221,12 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                 let observed_at = now_timestamp();
                 match scheduler.tick(observed_at).await {
                     Ok(snapshot) => {
+                        let current_terminal_issues = terminal_issue_identifiers(&snapshot);
+                        let newly_terminal_issues = current_terminal_issues
+                            .difference(&known_terminal_issues)
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        known_terminal_issues = current_terminal_issues;
                         push_recent_event(
                             &mut recent_events,
                             RecentEventKind::SnapshotPublished,
@@ -231,6 +245,78 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             current_agent_server_status(&mut supervisor, client.base_url()),
                             &recent_events,
                         )).await;
+                        if runtime.memory.auto_capture && !newly_terminal_issues.is_empty() {
+                            match super::memory::auto_capture_terminal(
+                                &runtime.target_repo,
+                                &runtime.workflow_path,
+                                &newly_terminal_issues,
+                                runtime.memory.auto_archive,
+                            )
+                            .await
+                            {
+                                Ok(report) => {
+                                    if !report.captured_issue_keys.is_empty() {
+                                        let mut summary = format!(
+                                            "memory captured {} issue(s)",
+                                            report.captured_issue_keys.len()
+                                        );
+                                        if !report.docs_written.is_empty() {
+                                            summary.push_str(&format!(
+                                                ", synced {} doc(s)",
+                                                report.docs_written.len()
+                                            ));
+                                        }
+                                        if !report.archived_issue_keys.is_empty() {
+                                            summary.push_str(&format!(
+                                                ", archived {} issue(s)",
+                                                report.archived_issue_keys.len()
+                                            ));
+                                        }
+                                        if !report.warnings.is_empty() {
+                                            summary.push_str(&format!(
+                                                ", {} warning(s)",
+                                                report.warnings.len()
+                                            ));
+                                        }
+                                        push_recent_event(
+                                            &mut recent_events,
+                                            if report.warnings.is_empty() {
+                                                RecentEventKind::SnapshotPublished
+                                            } else {
+                                                RecentEventKind::Warning
+                                            },
+                                            None,
+                                            summary,
+                                            Utc::now(),
+                                        );
+                                        store.publish(map_snapshot(
+                                            &snapshot,
+                                            runtime.workflow.config.workspace.root.as_path(),
+                                            &terminal_state_set(&runtime.workflow),
+                                            current_agent_server_status(&mut supervisor, client.base_url()),
+                                            &recent_events,
+                                        )).await;
+                                    }
+                                }
+                                Err(error) => {
+                                    warn!(%error, "automatic memory capture failed");
+                                    push_recent_event(
+                                        &mut recent_events,
+                                        RecentEventKind::Warning,
+                                        None,
+                                        format!("automatic memory capture failed: {error}"),
+                                        Utc::now(),
+                                    );
+                                    store.publish(map_snapshot(
+                                        &snapshot,
+                                        runtime.workflow.config.workspace.root.as_path(),
+                                        &terminal_state_set(&runtime.workflow),
+                                        current_agent_server_status(&mut supervisor, client.base_url()),
+                                        &recent_events,
+                                    )).await;
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
                         warn!(%error, "scheduler tick failed");
@@ -260,6 +346,15 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     Ok(())
+}
+
+fn terminal_issue_identifiers(snapshot: &OrchestratorSnapshot) -> BTreeSet<String> {
+    snapshot
+        .issues
+        .iter()
+        .filter(|issue| issue.issue.state.category == IssueStateCategory::Terminal)
+        .map(|issue| issue.issue.identifier.to_string())
+        .collect()
 }
 
 pub(super) fn timestamp_to_datetime(value: TimestampMs) -> DateTime<Utc> {
