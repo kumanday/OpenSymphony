@@ -31,3 +31,36 @@ Rust installed via `rustup` uses the stable toolchain by default, which is what 
 
 **Alternative**
 If you already have Python 3.12 or newer installed, you can keep it and just install `uv`. If you need a manual Python installer, use the official [Python downloads page](https://www.python.org/downloads/).
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-275 contributed: PR #1: COE-257: tighten hosted deployment guidance
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Prerequisites"]
+  area --> docs["docs/prerequisites.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-275: Remote agent-server mode and auth hardening
+
+## Source refs
+
+- COE-275
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

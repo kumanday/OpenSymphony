@@ -193,3 +193,39 @@ Notable removals:
 - workflow-owned `openhands.mcp`
 - the old bridge CLI command
 - provider-specific AI review secret naming
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-283 contributed: PR #50: Cache per-state running counts in the orchestrator scheduler (merge `0378518`)
+- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Architecture"]
+  area --> docs["docs/architecture.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-283: Cache per-state running counts in the orchestrator scheduler
+- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
+
+## Source refs
+
+- COE-283
+- COE-286
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

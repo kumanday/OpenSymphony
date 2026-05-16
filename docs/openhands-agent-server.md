@@ -152,3 +152,36 @@ When validating a local setup, confirm that:
 OpenSymphony 1.0.0 removed workflow-owned `openhands.mcp`. Older repos should
 remove that block and rely on the repo-local Linear GraphQL helper assets
 copied by `opensymphony init`.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-293 contributed: PR #56: fix: add OpenHands filesystem tools to coding agents (merge `2f34058`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["OpenHands Agent-Server Integration"]
+  area --> docs["docs/openhands-agent-server.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+
+## Source refs
+
+- COE-293
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

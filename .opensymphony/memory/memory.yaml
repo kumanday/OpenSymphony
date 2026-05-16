@@ -45,16 +45,103 @@ areas:
       - docs/architecture.md
       linear_milestones:
       - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
       linear_issues:
       - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
+      - COE-258
       - COE-259
       - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-283
+      - COE-284
+      - COE-286
+      - COE-287
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
       github_prs:
+      - '#1'
       - '#10'
       - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
       - '#26'
+      - '#27'
       - '#29'
       - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#49'
+      - '#50'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
+  cli:
+    title: Cli
+    docs_target: docs/cli.md
+    visibility: public
+    status: stable
+    confidence: 90
+    aliases:
+    - cli
+    source_refs:
+      linear_labels:
+      - cli
+      linear_issues:
+      - COE-284
+      github_prs:
+      - '#47'
+      - '#83'
   configuration:
     title: Configuration
     docs_target: docs/configuration.md
@@ -68,13 +155,89 @@ areas:
       - docs/configuration.md
       linear_milestones:
       - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
       linear_issues:
       - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
       - COE-258
+      - COE-259
+      - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-284
+      - COE-286
+      - COE-287
+      - COE-288
+      - COE-293
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
       github_prs:
+      - '#1'
       - '#10'
       - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
       - '#26'
+      - '#27'
+      - '#29'
+      - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#49'
+      - '#51'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#56'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
   deployment-modes:
     title: Deployment Modes
     docs_target: docs/deployment-modes.md
@@ -83,9 +246,52 @@ areas:
     confidence: 85
     aliases:
     - deployment modes
+    - deployment-modes
     source_refs:
       docs:
       - docs/deployment-modes.md
+      linear_milestones:
+      - 'M2: OpenHands runtime adapter'
+      - 'M5: Validation and local packaging'
+      - 'M6: Hosted deployment follow-on'
+      linear_issues:
+      - COE-253
+      - COE-256
+      - COE-261
+      - COE-262
+      - COE-265
+      - COE-266
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-275
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
+      github_prs:
+      - '#1'
+      - '#13'
+      - '#19'
+      - '#20'
+      - '#34'
+      - '#36'
+      - '#40'
+      - '#41'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#83'
   development:
     title: Development Guide
     docs_target: docs/DEVELOPMENT.md
@@ -100,12 +306,113 @@ areas:
       - docs/DEVELOPMENT.md
       linear_milestones:
       - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
       linear_issues:
       - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
+      - COE-258
+      - COE-259
+      - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-284
+      - COE-287
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
       github_prs:
+      - '#1'
       - '#10'
       - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
       - '#26'
+      - '#27'
+      - '#29'
+      - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
+  devex:
+    title: Devex
+    docs_target: docs/devex.md
+    visibility: public
+    status: stable
+    confidence: 90
+    aliases:
+    - devex
+    source_refs:
+      linear_labels:
+      - devex
+      linear_issues:
+      - COE-284
+      github_prs:
+      - '#47'
+      - '#83'
+  doctor-live-probe:
+    title: Doctor Live Probe
+    docs_target: docs/doctor-live-probe.md
+    visibility: public
+    status: candidate
+    confidence: 60
+    aliases:
+    - doctor live probe
+    - doctor-live-probe
+    source_refs:
+      linear_issues:
+      - COE-278
+      github_prs:
+      - '#36'
   elixir-hierarchy-changes:
     title: Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
     docs_target: docs/elixir-hierarchy-changes.md
@@ -114,9 +421,31 @@ areas:
     confidence: 85
     aliases:
     - changes needed in upstream elixir implementation for hierarchy-aware task selection
+    - elixir-hierarchy-changes
     source_refs:
       docs:
       - docs/elixir-hierarchy-changes.md
+      linear_milestones:
+      - 'M3: Symphony orchestration core'
+      linear_issues:
+      - COE-254
+      - COE-263
+      - COE-264
+      - COE-267
+      - COE-268
+      - COE-270
+      - COE-277
+      github_prs:
+      - '#14'
+      - '#18'
+      - '#24'
+      - '#33'
+      - '#35'
+      - '#39'
+      - '#42'
+      - '#43'
+      - '#6'
+      - '#83'
   host-client-architecture:
     title: OpenSymphony Host-Client Architecture
     docs_target: docs/host-client-architecture.md
@@ -164,13 +493,85 @@ areas:
       - docs/implementation-plan.md
       linear_milestones:
       - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
+      - 'M6: Hosted deployment follow-on'
       linear_issues:
       - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
       - COE-258
+      - COE-259
+      - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-275
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-284
+      - COE-287
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
       github_prs:
+      - '#1'
       - '#10'
       - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
       - '#26'
+      - '#27'
+      - '#29'
+      - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
   linear-and-tools:
     title: Linear and Tools
     docs_target: docs/linear-and-tools.md
@@ -179,9 +580,31 @@ areas:
     confidence: 85
     aliases:
     - linear and tools
+    - linear-and-tools
     source_refs:
       docs:
       - docs/linear-and-tools.md
+      linear_milestones:
+      - 'M3: Symphony orchestration core'
+      linear_issues:
+      - COE-254
+      - COE-263
+      - COE-264
+      - COE-267
+      - COE-268
+      - COE-270
+      - COE-277
+      github_prs:
+      - '#14'
+      - '#18'
+      - '#24'
+      - '#33'
+      - '#35'
+      - '#39'
+      - '#42'
+      - '#43'
+      - '#6'
+      - '#83'
   memory:
     title: Project Memory
     docs_target: docs/memory.md
@@ -189,10 +612,90 @@ areas:
     status: stable
     confidence: 85
     aliases:
+    - memory
     - project memory
     source_refs:
       docs:
       - docs/memory.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
+      linear_issues:
+      - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
+      - COE-258
+      - COE-259
+      - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-284
+      - COE-287
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
+      github_prs:
+      - '#1'
+      - '#10'
+      - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
+      - '#26'
+      - '#27'
+      - '#29'
+      - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
   memory-capture-and-doc-sync:
     title: OpenSymphony Memory Capture and Documentation Sync
     docs_target: docs/memory-capture-and-doc-sync.md
@@ -223,9 +726,93 @@ areas:
     confidence: 85
     aliases:
     - openhands agent-server integration
+    - openhands-agent-server
     source_refs:
       docs:
       - docs/openhands-agent-server.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
+      - 'M6: Hosted deployment follow-on'
+      linear_issues:
+      - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
+      - COE-258
+      - COE-259
+      - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-275
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-284
+      - COE-287
+      - COE-293
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
+      github_prs:
+      - '#1'
+      - '#10'
+      - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
+      - '#26'
+      - '#27'
+      - '#29'
+      - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#56'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
   openhands-agent-server-subscription-auth-analysis:
     title: Subscription-Based OpenAI ChatGPT/Codex Authentication with `openhands agent-server`
     docs_target: docs/openhands_agent_server_subscription_auth_analysis.md
@@ -248,6 +835,91 @@ areas:
     source_refs:
       docs:
       - docs/operations.md
+      linear_milestones:
+      - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
+      - 'M6: Hosted deployment follow-on'
+      linear_issues:
+      - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
+      - COE-258
+      - COE-259
+      - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-275
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-284
+      - COE-286
+      - COE-287
+      - COE-293
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
+      github_prs:
+      - '#1'
+      - '#10'
+      - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
+      - '#26'
+      - '#27'
+      - '#29'
+      - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#49'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#56'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
   prerequisites:
     title: Prerequisites
     docs_target: docs/prerequisites.md
@@ -259,6 +931,52 @@ areas:
     source_refs:
       docs:
       - docs/prerequisites.md
+      linear_milestones:
+      - 'M5: Validation and local packaging'
+      - 'M6: Hosted deployment follow-on'
+      linear_issues:
+      - COE-256
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-275
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
+      github_prs:
+      - '#1'
+      - '#13'
+      - '#20'
+      - '#41'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#83'
+  refactor-orchestrator-run:
+    title: Refactor Orchestrator Run
+    docs_target: docs/refactor-orchestrator-run.md
+    visibility: public
+    status: candidate
+    confidence: 60
+    aliases:
+    - refactor orchestrator run
+    - refactor-orchestrator-run
+    source_refs:
+      linear_issues:
+      - COE-285
+      github_prs:
+      - '#53'
   repository-layout:
     title: Repository Layout
     docs_target: docs/repository-layout.md
@@ -273,13 +991,83 @@ areas:
       - docs/repository-layout.md
       linear_milestones:
       - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
       linear_issues:
       - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
       - COE-258
+      - COE-259
+      - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-284
+      - COE-287
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
       github_prs:
+      - '#1'
       - '#10'
       - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
       - '#26'
+      - '#27'
+      - '#29'
+      - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
   sources:
     title: Sources and Trust Notes
     docs_target: docs/sources.md
@@ -287,10 +1075,63 @@ areas:
     status: stable
     confidence: 85
     aliases:
+    - sources
     - sources and trust notes
     source_refs:
       docs:
       - docs/sources.md
+      linear_milestones:
+      - 'M2: OpenHands runtime adapter'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
+      - 'M6: Hosted deployment follow-on'
+      linear_issues:
+      - COE-253
+      - COE-255
+      - COE-256
+      - COE-261
+      - COE-262
+      - COE-265
+      - COE-266
+      - COE-269
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-275
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-287
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
+      github_prs:
+      - '#1'
+      - '#13'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#27'
+      - '#34'
+      - '#36'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#48'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#7'
+      - '#83'
   symphony-spec-alignment:
     title: Symphony Spec Alignment
     docs_target: docs/symphony-spec-alignment.md
@@ -305,12 +1146,83 @@ areas:
       - docs/symphony-spec-alignment.md
       linear_milestones:
       - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
       linear_issues:
+      - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
+      - COE-258
       - COE-259
       - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-277
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-284
+      - COE-287
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
       github_prs:
+      - '#1'
+      - '#10'
+      - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
+      - '#26'
+      - '#27'
       - '#29'
       - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
   testing-and-operations:
     title: Testing
     docs_target: docs/testing-and-operations.md
@@ -325,14 +1237,90 @@ areas:
       - docs/testing-and-operations.md
       linear_milestones:
       - 'M1: Foundation and contracts'
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      - 'M5: Validation and local packaging'
+      - 'M6: Hosted deployment follow-on'
       linear_issues:
       - COE-252
+      - COE-253
+      - COE-254
+      - COE-255
+      - COE-256
+      - COE-258
       - COE-259
+      - COE-260
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-269
+      - COE-270
+      - COE-271
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-275
+      - COE-277
+      - COE-279
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-283
+      - COE-284
+      - COE-287
+      - COE-288
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
       github_prs:
+      - '#1'
       - '#10'
       - '#11'
+      - '#13'
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#20'
+      - '#23'
+      - '#24'
       - '#26'
+      - '#27'
       - '#29'
+      - '#32'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#4'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#47'
+      - '#48'
+      - '#50'
+      - '#51'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#6'
+      - '#7'
+      - '#83'
   ui-frankentui:
     title: FrankenTUI Operator UI
     docs_target: docs/ui-frankentui.md
@@ -341,9 +1329,27 @@ areas:
     confidence: 85
     aliases:
     - frankentui operator ui
+    - ui-frankentui
     source_refs:
       docs:
       - docs/ui-frankentui.md
+      linear_milestones:
+      - 'M4: Operator UX and repo harness'
+      linear_issues:
+      - COE-255
+      - COE-269
+      - COE-271
+      - COE-287
+      - COE-321
+      github_prs:
+      - '#23'
+      - '#27'
+      - '#4'
+      - '#41'
+      - '#48'
+      - '#59'
+      - '#7'
+      - '#83'
   websocket-runtime:
     title: WebSocket Runtime Contract
     docs_target: docs/websocket-runtime.md
@@ -352,9 +1358,52 @@ areas:
     confidence: 85
     aliases:
     - websocket runtime contract
+    - websocket-runtime
     source_refs:
       docs:
       - docs/websocket-runtime.md
+      linear_milestones:
+      - 'M2: OpenHands runtime adapter'
+      - 'M5: Validation and local packaging'
+      - 'M6: Hosted deployment follow-on'
+      linear_issues:
+      - COE-253
+      - COE-256
+      - COE-261
+      - COE-262
+      - COE-265
+      - COE-266
+      - COE-272
+      - COE-273
+      - COE-274
+      - COE-275
+      - COE-280
+      - COE-281
+      - COE-282
+      - COE-294
+      - COE-382
+      - COE-383
+      - COE-384
+      - COE-385
+      - COE-386
+      - COE-387
+      github_prs:
+      - '#1'
+      - '#13'
+      - '#19'
+      - '#20'
+      - '#34'
+      - '#36'
+      - '#40'
+      - '#41'
+      - '#44'
+      - '#45'
+      - '#46'
+      - '#52'
+      - '#54'
+      - '#55'
+      - '#58'
+      - '#83'
   workspace-and-lifecycle:
     title: Workspace and Lifecycle
     docs_target: docs/workspace-and-lifecycle.md
@@ -363,8 +1412,44 @@ areas:
     confidence: 85
     aliases:
     - workspace and lifecycle
+    - workspace-and-lifecycle
     source_refs:
       docs:
       - docs/workspace-and-lifecycle.md
+      linear_milestones:
+      - 'M2: OpenHands runtime adapter'
+      - 'M3: Symphony orchestration core'
+      - 'M4: Operator UX and repo harness'
+      linear_issues:
+      - COE-253
+      - COE-254
+      - COE-261
+      - COE-262
+      - COE-263
+      - COE-264
+      - COE-265
+      - COE-266
+      - COE-267
+      - COE-268
+      - COE-270
+      - COE-277
+      - COE-287
+      github_prs:
+      - '#14'
+      - '#18'
+      - '#19'
+      - '#24'
+      - '#33'
+      - '#34'
+      - '#35'
+      - '#36'
+      - '#39'
+      - '#40'
+      - '#41'
+      - '#42'
+      - '#43'
+      - '#48'
+      - '#6'
+      - '#83'
 redaction:
   deny_patterns: []

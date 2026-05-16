@@ -264,3 +264,42 @@ manual `gh` commands. The full verification and branch-protection guidance
 lives in the OpenSymphony docs at
 [ai-pr-review-human-setup.md](ai-pr-review-human-setup.md); `init` does not
 copy that guide into the target repository.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
+- COE-288 contributed: PR #51: Add configurable OpenHands context condenser support (merge `102a93c`)
+- COE-293 contributed: PR #56: fix: add OpenHands filesystem tools to coding agents (merge `2f34058`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Configuration"]
+  area --> docs["docs/configuration.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
+- COE-288: Add context condenser support to prevent LLM context window overflow
+- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+
+## Source refs
+
+- COE-286
+- COE-288
+- COE-293
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -357,3 +357,36 @@ That document covers:
 - doctor scope and live probe behavior
 - logging, manifests, and recovery inspection
 - version pinning, CI, and local safety posture
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-279 contributed: No merged PR source was matched during capture.
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Testing"]
+  area --> docs["docs/testing-and-operations.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-279: Reject or propagate unsupported OpenHands agent option passthrough
+
+## Source refs
+
+- COE-279
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -152,3 +152,48 @@ Breaking changes in this line include:
 - `docs/testing-and-operations.md`
 - `docs/repository-layout.md`
 - `docs/migration-1.0.0.md`
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-280 contributed: PR #54: Support workflow-owned OpenHands runtime overrides (merge `5663898`)
+- COE-281 contributed: PR #55: COE-281: support path-prefixed OpenHands URLs and MCP config (merge `a50e435`)
+- COE-282 contributed: PR #52: Support workflow-owned OpenHands conversation reuse policy at runtime (merge `ad111a3`)
+- COE-287 contributed: PR #48: Add opensymphony debug command for issue conversations (merge `021f5ad`)
+- COE-294 contributed: PR #58: COE-294: detect LLM config drift and rehydrate conversations (merge `5ab7015`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Development Guide"]
+  area --> docs["docs/DEVELOPMENT.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
+- COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
+- COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
+- COE-287: Add opensymphony debug command for conversational session debugging
+- COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
+
+## Source refs
+
+- COE-280
+- COE-281
+- COE-282
+- COE-287
+- COE-294
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

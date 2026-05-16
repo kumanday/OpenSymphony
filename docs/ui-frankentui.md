@@ -295,3 +295,36 @@ Possible later additions:
 - hosted dashboard mode using the same snapshot model
 
 Keep the MVP read-only and reliable first.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-321 contributed: PR #59: Show more issues in the TUI issue list (merge `d9bd68c`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["FrankenTUI Operator UI"]
+  area --> docs["docs/ui-frankentui.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-321: Add more lines to TUI issue list for better visibility
+
+## Source refs
+
+- COE-321
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

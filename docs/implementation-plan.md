@@ -179,3 +179,36 @@ Required evidence:
 - one end-to-end run in a temp repo
 
 If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-275 contributed: PR #1: COE-257: tighten hosted deployment guidance
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Implementation Plan"]
+  area --> docs["docs/implementation-plan.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-275: Remote agent-server mode and auth hardening
+
+## Source refs
+
+- COE-275
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

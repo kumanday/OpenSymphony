@@ -480,3 +480,36 @@ trait WorkspaceManager {
 - terminal cleanup
 - issue and run metadata file write and reload
 - conversation reset path preserves workspace safety
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-287 contributed: PR #48: Add opensymphony debug command for issue conversations (merge `021f5ad`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Workspace and Lifecycle"]
+  area --> docs["docs/workspace-and-lifecycle.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-287: Add opensymphony debug command for conversational session debugging
+
+## Source refs
+
+- COE-287
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
