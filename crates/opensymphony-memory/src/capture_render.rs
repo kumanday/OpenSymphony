@@ -224,6 +224,8 @@ fn area_matches_evidence(
 }
 
 fn token_sequence_contains(haystack: &[String], needle: &[String]) -> bool {
+    // Whole-token equality keeps aliases like "runtime" from matching tokens
+    // such as "gruntime" or "runtimeerror".
     !needle.is_empty()
         && needle.len() <= haystack.len()
         && haystack

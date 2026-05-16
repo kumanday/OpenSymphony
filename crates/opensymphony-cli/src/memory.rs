@@ -859,6 +859,7 @@ fn finish_archive_write(
 }
 
 const AUTO_MEMORY_STATUS_LOG_LIMIT: usize = 100;
+const AUTO_MEMORY_STATUS_LOG_MAX_BYTES: usize = 64 * 1024;
 
 fn record_auto_memory_status(
     config: &MemoryConfig,
@@ -890,11 +891,15 @@ fn record_auto_memory_status(
         }
     }
     contents.push('\n');
-    let contents = trim_auto_memory_status_log(&contents, AUTO_MEMORY_STATUS_LOG_LIMIT);
+    let contents = trim_auto_memory_status_log(
+        &contents,
+        AUTO_MEMORY_STATUS_LOG_LIMIT,
+        AUTO_MEMORY_STATUS_LOG_MAX_BYTES,
+    );
     fs::write(&path, contents).map_err(|source| MemoryError::WriteFile { path, source })
 }
 
-fn trim_auto_memory_status_log(contents: &str, max_entries: usize) -> String {
+fn trim_auto_memory_status_log(contents: &str, max_entries: usize, max_bytes: usize) -> String {
     let mut entries = Vec::new();
     let mut current = Vec::new();
     for line in contents.lines() {
@@ -912,8 +917,19 @@ fn trim_auto_memory_status_log(contents: &str, max_entries: usize) -> String {
     }
 
     let start = entries.len().saturating_sub(max_entries);
+    let mut retained = entries.into_iter().skip(start).collect::<Vec<_>>();
+    loop {
+        let rendered = render_auto_memory_status_log(&retained);
+        if rendered.len() <= max_bytes || retained.len() <= 1 {
+            return rendered;
+        }
+        retained.remove(0);
+    }
+}
+
+fn render_auto_memory_status_log(entries: &[String]) -> String {
     let mut output = "# OpenSymphony Memory Automation Log\n\n".to_string();
-    for entry in entries.into_iter().skip(start) {
+    for entry in entries {
         output.push_str(entry.trim_end());
         output.push_str("\n\n");
     }
@@ -976,6 +992,8 @@ fn replace_or_append_managed_section(
     replacement: &str,
 ) -> String {
     if let Some(begin_index) = existing.find(begin) {
+        // A missing end marker means the managed block was truncated; replace
+        // from BEGIN to the end so repeated updates cannot append duplicates.
         let end_index = existing[begin_index..]
             .find(end)
             .map(|relative_end| begin_index + relative_end + end.len())
@@ -1333,11 +1351,37 @@ mod tests {
 - Captured: COE-3
 ";
 
-        let trimmed = trim_auto_memory_status_log(contents, 2);
+        let trimmed = trim_auto_memory_status_log(contents, 2, usize::MAX);
 
         assert!(!trimmed.contains("COE-1"));
         assert!(trimmed.contains("COE-2"));
         assert!(trimmed.contains("COE-3"));
         assert_eq!(trimmed.matches("## ").count(), 2);
+    }
+
+    #[test]
+    fn auto_memory_status_log_respects_size_limit() {
+        let contents = "\
+# OpenSymphony Memory Automation Log
+
+## 2026-05-16T00:00:00Z
+
+- Captured: COE-1
+
+## 2026-05-16T00:01:00Z
+
+- Captured: COE-2 with a longer status line
+
+## 2026-05-16T00:02:00Z
+
+- Captured: COE-3 with a longer status line
+";
+
+        let trimmed = trim_auto_memory_status_log(contents, 100, 120);
+
+        assert!(!trimmed.contains("COE-1"));
+        assert!(!trimmed.contains("COE-2"));
+        assert!(trimmed.contains("COE-3"));
+        assert!(trimmed.len() <= 120);
     }
 }

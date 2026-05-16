@@ -33,7 +33,7 @@ use self::{
         RuntimeWorkerBackend, RuntimeWorkspaceBackend, build_runtime_transport,
         build_tracker_backend, build_workspace_manager_config,
     },
-    config::resolve_runtime_config,
+    config::{RunRuntimeConfig, resolve_runtime_config},
     snapshot::{current_agent_server_status, map_snapshot, push_recent_event, terminal_state_set},
 };
 
@@ -248,8 +248,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             &recent_events,
                         )).await;
                         if runtime.memory.auto_capture && !newly_terminal_issues.is_empty() {
-                            let memory_event_added = record_auto_capture_recent_event(
-                                &mut recent_events,
+                            publish_auto_capture_event(
                                 super::memory::auto_capture_terminal(
                                     &runtime.target_repo,
                                     &runtime.workflow_path,
@@ -257,16 +256,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                     runtime.memory.auto_archive,
                                 )
                                 .await,
-                            );
-                            if memory_event_added {
-                                store.publish(map_snapshot(
-                                    &snapshot,
-                                    runtime.workflow.config.workspace.root.as_path(),
-                                    &terminal_state_set(&runtime.workflow),
-                                    current_agent_server_status(&mut supervisor, client.base_url()),
-                                    &recent_events,
-                                )).await;
-                            }
+                                &snapshot,
+                                &runtime,
+                                &mut supervisor,
+                                client.base_url(),
+                                &mut recent_events,
+                                &store,
+                            ).await;
                         }
                     }
                     Err(error) => {
@@ -299,19 +295,45 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     Ok(())
 }
 
+async fn publish_auto_capture_event(
+    result: Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
+    snapshot: &OrchestratorSnapshot,
+    runtime: &RunRuntimeConfig,
+    supervisor: &mut Option<crate::opensymphony_openhands::LocalServerSupervisor>,
+    agent_server_base_url: &str,
+    recent_events: &mut VecDeque<RecentEvent>,
+    store: &SnapshotStore,
+) {
+    if record_auto_capture_recent_event(recent_events, result) {
+        store
+            .publish(map_snapshot(
+                snapshot,
+                runtime.workflow.config.workspace.root.as_path(),
+                &terminal_state_set(&runtime.workflow),
+                current_agent_server_status(supervisor, agent_server_base_url),
+                recent_events,
+            ))
+            .await;
+    }
+}
+
 fn record_auto_capture_recent_event(
     recent_events: &mut VecDeque<RecentEvent>,
     result: Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
 ) -> bool {
     match result {
         Ok(report) => {
-            if report.captured_issue_keys.is_empty() {
+            if report.captured_issue_keys.is_empty() && report.warnings.is_empty() {
                 return false;
             }
-            let mut summary = format!(
-                "memory captured {} issue(s)",
-                report.captured_issue_keys.len()
-            );
+            let mut summary = if report.captured_issue_keys.is_empty() {
+                "memory capture reported no new capsules".to_string()
+            } else {
+                format!(
+                    "memory captured {} issue(s)",
+                    report.captured_issue_keys.len()
+                )
+            };
             if !report.docs_written.is_empty() {
                 summary.push_str(&format!(", synced {} doc(s)", report.docs_written.len()));
             }
