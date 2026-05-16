@@ -131,6 +131,19 @@ repo details behind `init`, see [Configuration](docs/configuration.md).
 For alternate config paths, `debug`, `rehydrate`, packaging, and local operator
 workflows, see [Operations](docs/operations.md).
 
+Optional troubleshooting and validation:
+
+```bash
+cd /path/to/target-repo
+opensymphony doctor
+```
+
+To inspect the command surface, run:
+
+```bash
+opensymphony --help
+```
+
 ### Project Memory
 
 OpenSymphony can preserve completed-issue knowledge as you build. When
@@ -138,8 +151,17 @@ OpenSymphony can preserve completed-issue knowledge as you build. When
 `opensymphony run` captures terminal issue transitions from Linear and matching
 GitHub PR narrative, writes private memory under `.opensymphony/memory/`, and
 syncs stable learned topics into public docs. Repos initialized or updated with
-this release get the required memory config automatically. Manual commands
-remain available for setup repair, backfill, inspection, and guarded archival:
+this release get the required memory config automatically.
+
+![OpenSymphony memory graph](docs/images/opensymphony-memory-graph.png)
+
+The generated issue capsules are Markdown files, so `.opensymphony/memory/` can
+also be opened as an Obsidian vault. That gives operators a graph view of issue,
+milestone, and documentation-topic relationships while keeping private capture
+artifacts out of the public docs.
+
+Manual commands remain available for setup repair, backfill, inspection, and
+guarded archival:
 
 ```bash
 opensymphony memory init
@@ -157,18 +179,6 @@ template-managed agent skills.
 The memory index uses DuckDB's bundled build so local installs do not need a
 separate DuckDB system package. That choice adds compile time and binary size,
 but keeps the memory database portable for local-first operator workflows.
-
-Optional troubleshooting and validation:
-
-```bash
-cd /path/to/target-repo
-opensymphony doctor
-```
-
-To inspect the command surface, run:
-```
-opensymphony --help
-```
 
 ## Architecture
 
