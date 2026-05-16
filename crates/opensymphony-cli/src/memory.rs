@@ -302,41 +302,84 @@ pub(crate) async fn auto_capture_terminal(
         .collect::<Vec<_>>();
     let capture_report = write_capture_plan(&config, &capture_plan, false)?;
 
-    let evolved_config = MemoryConfig::load(repo_root, None)?;
+    let mut warnings = capture_report.warnings;
+    let evolved_config = match MemoryConfig::load(repo_root, None) {
+        Ok(config) => config,
+        Err(error) => {
+            warnings.push(format!(
+                "failed to reload evolved memory config after capture: {error}"
+            ));
+            let _ = record_auto_memory_status(&config, &captured_issue_keys, &warnings);
+            return Ok(AutoMemoryReport {
+                captured_issue_keys,
+                archived_issue_keys: Vec::new(),
+                docs_written: Vec::new(),
+                warnings,
+            });
+        }
+    };
     let docs_selection = IssueSelection {
         identifiers: captured_issue_keys.clone(),
         since_last_sync: true,
         ..IssueSelection::default()
     };
-    let docs_plan = plan_docs_sync(&evolved_config, &docs_selection, true, false)?;
-    let docs_written = if docs_plan.targets.is_empty() {
-        Vec::new()
-    } else {
-        write_docs_sync_plan(&evolved_config, &docs_plan)?
-    };
 
     let mut archived_issue_keys = Vec::new();
-    let mut warnings = capture_report.warnings;
-    warnings.extend(docs_plan.warnings);
+    let mut docs_written = Vec::new();
+    match plan_docs_sync(&evolved_config, &docs_selection, true, false) {
+        Ok(docs_plan) => {
+            warnings.extend(docs_plan.warnings.clone());
+            if !docs_plan.targets.is_empty() {
+                match write_docs_sync_plan(&evolved_config, &docs_plan) {
+                    Ok(written) => docs_written = written,
+                    Err(error) => {
+                        warnings.push(format!("failed to sync captured memory docs: {error}"));
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            warnings.push(format!("failed to plan captured memory docs sync: {error}"));
+        }
+    }
+
     if auto_archive {
         let archive_plan = archive_plan_after_capture(&evolved_config, &capture_plan, true, false);
         warnings.extend(archive_plan.warnings.clone());
-        let archive_report =
-            archive_in_linear(repo_root, Some(workflow_path), &archive_plan).await?;
-        if !archive_report.archived.is_empty() {
-            mark_archived(&evolved_config, &archive_report.archived)?;
+        match archive_in_linear(repo_root, Some(workflow_path), &archive_plan).await {
+            Ok(archive_report) => {
+                if !archive_report.archived.is_empty()
+                    && let Err(error) = mark_archived(&evolved_config, &archive_report.archived)
+                {
+                    warnings.push(format!("failed to mark archived memory capsules: {error}"));
+                }
+                archived_issue_keys = archive_report.archived;
+                warnings.extend(archive_report.failures);
+            }
+            Err(error) => {
+                warnings.push(format!("failed to archive captured Linear issues: {error}"));
+            }
         }
-        archived_issue_keys = archive_report.archived;
-        warnings.extend(archive_report.failures);
     }
 
-    record_auto_memory_status(&evolved_config, &captured_issue_keys, &warnings)?;
+    if let Err(error) = record_auto_memory_status(&evolved_config, &captured_issue_keys, &warnings)
+    {
+        warnings.push(format!(
+            "failed to record local memory automation status: {error}"
+        ));
+    }
     if !warnings.is_empty()
         && let Err(error) =
             update_linear_memory_status(&client, &captured_issue_keys, &warnings).await
     {
         warnings.push(format!("failed to update Linear memory status: {error}"));
-        record_auto_memory_status(&evolved_config, &captured_issue_keys, &warnings)?;
+        if let Err(error) =
+            record_auto_memory_status(&evolved_config, &captured_issue_keys, &warnings)
+        {
+            warnings.push(format!(
+                "failed to record local memory automation status after Linear update failure: {error}"
+            ));
+        }
     }
     Ok(AutoMemoryReport {
         captured_issue_keys,
