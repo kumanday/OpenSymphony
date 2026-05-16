@@ -858,6 +858,8 @@ fn finish_archive_write(
     Ok(())
 }
 
+const AUTO_MEMORY_STATUS_LOG_LIMIT: usize = 100;
+
 fn record_auto_memory_status(
     config: &MemoryConfig,
     issue_keys: &[String],
@@ -888,7 +890,34 @@ fn record_auto_memory_status(
         }
     }
     contents.push('\n');
+    let contents = trim_auto_memory_status_log(&contents, AUTO_MEMORY_STATUS_LOG_LIMIT);
     fs::write(&path, contents).map_err(|source| MemoryError::WriteFile { path, source })
+}
+
+fn trim_auto_memory_status_log(contents: &str, max_entries: usize) -> String {
+    let mut entries = Vec::new();
+    let mut current = Vec::new();
+    for line in contents.lines() {
+        if line.starts_with("## ") {
+            if !current.is_empty() {
+                entries.push(current.join("\n"));
+            }
+            current = vec![line.to_string()];
+        } else if !current.is_empty() {
+            current.push(line.to_string());
+        }
+    }
+    if !current.is_empty() {
+        entries.push(current.join("\n"));
+    }
+
+    let start = entries.len().saturating_sub(max_entries);
+    let mut output = "# OpenSymphony Memory Automation Log\n\n".to_string();
+    for entry in entries.into_iter().skip(start) {
+        output.push_str(entry.trim_end());
+        output.push_str("\n\n");
+    }
+    output
 }
 
 const LINEAR_MEMORY_STATUS_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED MEMORY STATUS -->";
@@ -1245,6 +1274,7 @@ fn print_search_results(
 mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, replace_or_append_managed_section,
+        trim_auto_memory_status_log,
     };
 
     #[test]
@@ -1283,5 +1313,31 @@ mod tests {
         assert!(updated.contains("new"));
         assert_eq!(updated.matches(LINEAR_MEMORY_STATUS_BEGIN).count(), 1);
         assert!(!updated.contains("old without end marker"));
+    }
+
+    #[test]
+    fn auto_memory_status_log_keeps_recent_entries() {
+        let contents = "\
+# OpenSymphony Memory Automation Log
+
+## 2026-05-16T00:00:00Z
+
+- Captured: COE-1
+
+## 2026-05-16T00:01:00Z
+
+- Captured: COE-2
+
+## 2026-05-16T00:02:00Z
+
+- Captured: COE-3
+";
+
+        let trimmed = trim_auto_memory_status_log(contents, 2);
+
+        assert!(!trimmed.contains("COE-1"));
+        assert!(trimmed.contains("COE-2"));
+        assert!(trimmed.contains("COE-3"));
+        assert_eq!(trimmed.matches("## ").count(), 2);
     }
 }

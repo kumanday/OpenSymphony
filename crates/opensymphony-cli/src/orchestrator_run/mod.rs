@@ -9,7 +9,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::opensymphony_control::{ControlPlaneServer, RecentEventKind, SnapshotStore};
+use crate::opensymphony_control::{
+    ControlPlaneServer, RecentEvent, RecentEventKind, SnapshotStore,
+};
 use crate::opensymphony_domain::TimestampMs;
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::OpenHandsError;
@@ -246,75 +248,24 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             &recent_events,
                         )).await;
                         if runtime.memory.auto_capture && !newly_terminal_issues.is_empty() {
-                            match super::memory::auto_capture_terminal(
-                                &runtime.target_repo,
-                                &runtime.workflow_path,
-                                &newly_terminal_issues,
-                                runtime.memory.auto_archive,
-                            )
-                            .await
-                            {
-                                Ok(report) => {
-                                    if !report.captured_issue_keys.is_empty() {
-                                        let mut summary = format!(
-                                            "memory captured {} issue(s)",
-                                            report.captured_issue_keys.len()
-                                        );
-                                        if !report.docs_written.is_empty() {
-                                            summary.push_str(&format!(
-                                                ", synced {} doc(s)",
-                                                report.docs_written.len()
-                                            ));
-                                        }
-                                        if !report.archived_issue_keys.is_empty() {
-                                            summary.push_str(&format!(
-                                                ", archived {} issue(s)",
-                                                report.archived_issue_keys.len()
-                                            ));
-                                        }
-                                        if !report.warnings.is_empty() {
-                                            summary.push_str(&format!(
-                                                ", {} warning(s)",
-                                                report.warnings.len()
-                                            ));
-                                        }
-                                        push_recent_event(
-                                            &mut recent_events,
-                                            if report.warnings.is_empty() {
-                                                RecentEventKind::SnapshotPublished
-                                            } else {
-                                                RecentEventKind::Warning
-                                            },
-                                            None,
-                                            summary,
-                                            Utc::now(),
-                                        );
-                                        store.publish(map_snapshot(
-                                            &snapshot,
-                                            runtime.workflow.config.workspace.root.as_path(),
-                                            &terminal_state_set(&runtime.workflow),
-                                            current_agent_server_status(&mut supervisor, client.base_url()),
-                                            &recent_events,
-                                        )).await;
-                                    }
-                                }
-                                Err(error) => {
-                                    warn!(%error, "automatic memory capture failed");
-                                    push_recent_event(
-                                        &mut recent_events,
-                                        RecentEventKind::Warning,
-                                        None,
-                                        format!("automatic memory capture failed: {error}"),
-                                        Utc::now(),
-                                    );
-                                    store.publish(map_snapshot(
-                                        &snapshot,
-                                        runtime.workflow.config.workspace.root.as_path(),
-                                        &terminal_state_set(&runtime.workflow),
-                                        current_agent_server_status(&mut supervisor, client.base_url()),
-                                        &recent_events,
-                                    )).await;
-                                }
+                            let memory_event_added = record_auto_capture_recent_event(
+                                &mut recent_events,
+                                super::memory::auto_capture_terminal(
+                                    &runtime.target_repo,
+                                    &runtime.workflow_path,
+                                    &newly_terminal_issues,
+                                    runtime.memory.auto_archive,
+                                )
+                                .await,
+                            );
+                            if memory_event_added {
+                                store.publish(map_snapshot(
+                                    &snapshot,
+                                    runtime.workflow.config.workspace.root.as_path(),
+                                    &terminal_state_set(&runtime.workflow),
+                                    current_agent_server_status(&mut supervisor, client.base_url()),
+                                    &recent_events,
+                                )).await;
                             }
                         }
                     }
@@ -346,6 +297,58 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     Ok(())
+}
+
+fn record_auto_capture_recent_event(
+    recent_events: &mut VecDeque<RecentEvent>,
+    result: Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
+) -> bool {
+    match result {
+        Ok(report) => {
+            if report.captured_issue_keys.is_empty() {
+                return false;
+            }
+            let mut summary = format!(
+                "memory captured {} issue(s)",
+                report.captured_issue_keys.len()
+            );
+            if !report.docs_written.is_empty() {
+                summary.push_str(&format!(", synced {} doc(s)", report.docs_written.len()));
+            }
+            if !report.archived_issue_keys.is_empty() {
+                summary.push_str(&format!(
+                    ", archived {} issue(s)",
+                    report.archived_issue_keys.len()
+                ));
+            }
+            if !report.warnings.is_empty() {
+                summary.push_str(&format!(", {} warning(s)", report.warnings.len()));
+            }
+            push_recent_event(
+                recent_events,
+                if report.warnings.is_empty() {
+                    RecentEventKind::SnapshotPublished
+                } else {
+                    RecentEventKind::Warning
+                },
+                None,
+                summary,
+                Utc::now(),
+            );
+            true
+        }
+        Err(error) => {
+            warn!(%error, "automatic memory capture failed");
+            push_recent_event(
+                recent_events,
+                RecentEventKind::Warning,
+                None,
+                format!("automatic memory capture failed: {error}"),
+                Utc::now(),
+            );
+            true
+        }
+    }
 }
 
 fn terminal_issue_identifiers(snapshot: &OrchestratorSnapshot) -> BTreeSet<String> {
