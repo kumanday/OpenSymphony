@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::opensymphony_memory::DEFAULT_PRIVATE_MEMORY_CONFIG_FILE;
 use crate::opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
 use serde::Deserialize;
 use tokio::fs;
@@ -23,6 +24,8 @@ struct RunConfigFile {
     control_plane: ControlPlaneConfigFile,
     #[serde(default)]
     openhands: RunOpenHandsConfigFile,
+    #[serde(default)]
+    memory: RunMemoryConfigFile,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -37,6 +40,19 @@ struct RunOpenHandsConfigFile {
     tool_dir: Option<String>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RunMemoryConfigFile {
+    #[serde(default)]
+    auto_capture: Option<bool>,
+    #[serde(default)]
+    auto_archive: Option<bool>,
+}
+
+pub(super) struct RunMemoryConfig {
+    pub(super) auto_capture: bool,
+    pub(super) auto_archive: bool,
+}
+
 pub(super) struct RunRuntimeConfig {
     pub(super) config_path: Option<PathBuf>,
     pub(super) target_repo: PathBuf,
@@ -44,6 +60,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) workflow: ResolvedWorkflow,
     pub(super) bind: SocketAddr,
     pub(super) tool_dir: Option<PathBuf>,
+    pub(super) memory: RunMemoryConfig,
 }
 
 pub(super) async fn resolve_runtime_config(
@@ -100,6 +117,11 @@ pub(super) async fn resolve_runtime_config(
         .tool_dir
         .as_deref()
         .map(|path| super::super::resolve_path(config_root, path));
+    let memory = RunMemoryConfig {
+        auto_capture: config.memory.auto_capture.unwrap_or(true),
+        auto_archive: config.memory.auto_archive.unwrap_or(false),
+    };
+    validate_memory_bootstrap(&target_repo, &memory)?;
 
     Ok(RunRuntimeConfig {
         config_path,
@@ -108,7 +130,22 @@ pub(super) async fn resolve_runtime_config(
         workflow,
         bind,
         tool_dir,
+        memory,
     })
+}
+
+fn validate_memory_bootstrap(
+    target_repo: &Path,
+    memory: &RunMemoryConfig,
+) -> Result<(), RunCommandError> {
+    if !memory.auto_capture {
+        return Ok(());
+    }
+    let path = target_repo.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE);
+    if path.is_file() {
+        return Ok(());
+    }
+    Err(RunCommandError::MissingMemoryConfig { path })
 }
 
 async fn load_run_config(path: &Path) -> Result<RunConfigFile, RunCommandError> {
@@ -163,5 +200,53 @@ fn resolve_relative_to(base: &Path, path: &Path) -> PathBuf {
         path.to_path_buf()
     } else {
         base.join(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn memory_bootstrap_is_required_when_auto_capture_is_enabled() {
+        let repo = tempfile::tempdir().expect("temp repo should exist");
+        let memory = RunMemoryConfig {
+            auto_capture: true,
+            auto_archive: false,
+        };
+
+        let result = validate_memory_bootstrap(repo.path(), &memory);
+
+        assert!(matches!(
+            result,
+            Err(RunCommandError::MissingMemoryConfig { .. })
+        ));
+    }
+
+    #[test]
+    fn memory_bootstrap_is_not_required_when_auto_capture_is_disabled() {
+        let repo = tempfile::tempdir().expect("temp repo should exist");
+        let memory = RunMemoryConfig {
+            auto_capture: false,
+            auto_archive: false,
+        };
+
+        validate_memory_bootstrap(repo.path(), &memory).expect("disabled auto-capture should pass");
+    }
+
+    #[test]
+    fn memory_bootstrap_accepts_initialized_repo() {
+        let repo = tempfile::tempdir().expect("temp repo should exist");
+        let path = repo.path().join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE);
+        std::fs::create_dir_all(path.parent().expect("memory config should have parent"))
+            .expect("memory config parent should be created");
+        std::fs::write(&path, "memory_root: .opensymphony/memory\n")
+            .expect("memory config should be written");
+        let memory = RunMemoryConfig {
+            auto_capture: true,
+            auto_archive: false,
+        };
+
+        validate_memory_bootstrap(repo.path(), &memory).expect("memory config should satisfy run");
     }
 }

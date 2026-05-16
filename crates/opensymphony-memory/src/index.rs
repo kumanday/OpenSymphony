@@ -38,7 +38,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     issue_plan.capsule_path.to_string_lossy().to_string(),
                     config.visibility.as_str(),
                     issue_plan.source_hash.clone(),
-                    issue_plan.warnings.len() as i64,
+                    archive_blocking_warning_count(&issue_plan.warnings) as i64,
                     "pending",
                     body,
                     Utc::now().to_rfc3339(),
@@ -527,7 +527,7 @@ fn render_topic_doc(
     for issue in issues {
         managed.push_str(&format!("- {}: {}\n", issue.issue_key, issue.title));
     }
-    managed.push_str("\n## Provenance\n\n");
+    managed.push_str("\n## Source refs\n\n");
     for issue in issues {
         managed.push_str(&format!("- {}\n", issue.issue_key));
     }
@@ -584,7 +584,7 @@ fn invariants_from_issues(issues: &[IndexedIssue]) -> String {
         }
     }
     if lines.is_empty() {
-        "- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.\n- Use capsule provenance to inspect the original PR or Linear issue when context is ambiguous.".to_string()
+        "- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.\n- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.".to_string()
     } else {
         lines.join("\n")
     }
@@ -686,27 +686,27 @@ fn mark_docs_synced(config: &MemoryConfig, plan: &DocsSyncPlan) -> Result<(), Me
     Ok(())
 }
 
-fn render_diff(before: &str, after: &str, path: &Path) -> String {
+fn render_diff_stat(before: &str, after: &str, path: &Path) -> String {
     if before == after {
-        return format!("diff -- {}\n(no changes)\n", path.display());
+        return format!("{} | no changes\n", path.display());
     }
     let operations = line_diff(before, after);
-    let mut diff = String::new();
-    diff.push_str(&format!("diff -- {}\n", path.display()));
-    diff.push_str(&format!("--- {}\n+++ {}\n", path.display(), path.display()));
-    diff.push_str("@@\n");
-    const MAX_DIFF_LINES: usize = 240;
-    for operation in operations.iter().take(MAX_DIFF_LINES) {
-        match operation {
-            DiffOperation::Unchanged(line) => diff.push_str(&format!(" {line}\n")),
-            DiffOperation::Removed(line) => diff.push_str(&format!("-{line}\n")),
-            DiffOperation::Added(line) => diff.push_str(&format!("+{line}\n")),
-        }
-    }
-    if operations.len() > MAX_DIFF_LINES {
-        diff.push_str("... diff truncated ...\n");
-    }
-    diff
+    let added = operations
+        .iter()
+        .filter(|operation| matches!(operation, DiffOperation::Added(_)))
+        .count();
+    let removed = operations
+        .iter()
+        .filter(|operation| matches!(operation, DiffOperation::Removed(_)))
+        .count();
+    format!(
+        "{} | {} -> {} lines, +{} -{}\n",
+        path.display(),
+        before.lines().count(),
+        after.lines().count(),
+        added,
+        removed
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+use super::memory_init_summary::record_memory_init_changes;
+use crate::opensymphony_memory::ensure_memory_initialized;
 use clap::Args;
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
@@ -35,7 +37,6 @@ const AI_REVIEW_LABEL_NAME: &str = "review-this";
 const PRESERVED_AGENTS_MARKER: &str = "## Preserved Existing AGENTS.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
 const WORKFLOW_GIT_REMOTE_PLACEHOLDER: &str = "https://github.com/YOUR-ORG/YOUR-REPO.git";
-const OPENSYMPHONY_GITIGNORE_ENTRY: &str = ".opensymphony*";
 
 #[derive(Debug, Args, Clone)]
 pub struct InitArgs {}
@@ -112,6 +113,8 @@ pub(crate) enum InitCommandError {
     PromptClosed,
     #[error("initialization aborted")]
     AbortedByUser,
+    #[error("failed to initialize project memory: {0}")]
+    MemoryInit(#[from] crate::opensymphony_memory::MemoryError),
 }
 
 #[derive(Clone, Copy)]
@@ -459,14 +462,13 @@ where
         }
     }
 
-    match ensure_opensymphony_gitignore_entry(&target_repo)? {
-        AppliedChange::Created => created.push(".gitignore".to_owned()),
-        AppliedChange::Updated => updated.push(".gitignore".to_owned()),
-        AppliedChange::Unchanged => unchanged.push(".gitignore".to_owned()),
-        AppliedChange::Overwritten | AppliedChange::Merged | AppliedChange::Skipped => {
-            unreachable!("gitignore management is create/update only")
-        }
-    }
+    record_memory_init_changes(
+        &ensure_memory_initialized(&target_repo, None)?,
+        &target_repo,
+        &mut created,
+        &mut updated,
+        &mut unchanged,
+    );
 
     ui.blank_line()?;
     ui.line("Initialization summary:")?;
@@ -836,48 +838,6 @@ fn build_final_contents(
         }),
         PlannedAction::Skip | PlannedAction::Unchanged => None,
         PlannedAction::Prompt => None,
-    }
-}
-
-fn ensure_opensymphony_gitignore_entry(
-    target_repo: &Path,
-) -> Result<AppliedChange, InitCommandError> {
-    let gitignore_path = target_repo.join(".gitignore");
-    match fs::read_to_string(&gitignore_path) {
-        Ok(existing) => {
-            if existing
-                .lines()
-                .any(|line| line.trim() == OPENSYMPHONY_GITIGNORE_ENTRY)
-            {
-                return Ok(AppliedChange::Unchanged);
-            }
-
-            let mut updated = existing;
-            if !updated.is_empty() && !updated.ends_with('\n') {
-                updated.push('\n');
-            }
-            updated.push_str(OPENSYMPHONY_GITIGNORE_ENTRY);
-            updated.push('\n');
-
-            fs::write(&gitignore_path, updated).map_err(|source| InitCommandError::WriteFile {
-                path: gitignore_path,
-                source,
-            })?;
-            Ok(AppliedChange::Updated)
-        }
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            fs::write(&gitignore_path, format!("{OPENSYMPHONY_GITIGNORE_ENTRY}\n")).map_err(
-                |source| InitCommandError::WriteFile {
-                    path: gitignore_path.clone(),
-                    source,
-                },
-            )?;
-            Ok(AppliedChange::Created)
-        }
-        Err(source) => Err(InitCommandError::ReadFile {
-            path: gitignore_path,
-            source,
-        }),
     }
 }
 
@@ -1656,13 +1616,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::Duration;
 
-    use tempfile::TempDir;
-
     use super::{
         DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS,
-        GitRemoteDetection, OPENSYMPHONY_GITIGNORE_ENTRY, PRESERVED_AGENTS_MARKER, PromptUi,
-        agents_already_initialized, comparable_text, custom_codereview_guide_contents,
-        customize_workflow, ensure_opensymphony_gitignore_entry, git_remote_url,
+        GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi, agents_already_initialized,
+        comparable_text, custom_codereview_guide_contents, customize_workflow, git_remote_url,
         github_repo_slug_from_remote, merge_agents, normalize_github_repo_slug,
         prompt_ai_review_config, prompt_for_missing_llm_env, prompt_yes_no, select_remote_name,
         shell_single_quote, template_fetch_timeout_from_env,
@@ -1743,41 +1700,6 @@ hooks:
     #[test]
     fn comparable_text_ignores_crlf_and_trailing_newlines() {
         assert_eq!(comparable_text("a\r\nb\r\n"), comparable_text("a\nb\n\n"));
-    }
-
-    #[test]
-    fn gitignore_helper_creates_rule_when_missing() {
-        let repo = TempDir::new().expect("temp repo should exist");
-
-        let change =
-            ensure_opensymphony_gitignore_entry(repo.path()).expect("gitignore helper should run");
-
-        assert!(matches!(change, super::AppliedChange::Created));
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join(".gitignore"))
-                .expect(".gitignore should exist"),
-            format!("{OPENSYMPHONY_GITIGNORE_ENTRY}\n")
-        );
-    }
-
-    #[test]
-    fn gitignore_helper_is_idempotent_when_rule_already_exists() {
-        let repo = TempDir::new().expect("temp repo should exist");
-        std::fs::write(
-            repo.path().join(".gitignore"),
-            format!("target/\n{OPENSYMPHONY_GITIGNORE_ENTRY}\n"),
-        )
-        .expect(".gitignore should write");
-
-        let change =
-            ensure_opensymphony_gitignore_entry(repo.path()).expect("gitignore helper should run");
-
-        assert!(matches!(change, super::AppliedChange::Unchanged));
-        assert_eq!(
-            std::fs::read_to_string(repo.path().join(".gitignore"))
-                .expect(".gitignore should exist"),
-            format!("target/\n{OPENSYMPHONY_GITIGNORE_ENTRY}\n")
-        );
     }
 
     #[test]

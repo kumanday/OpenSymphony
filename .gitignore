@@ -21,8 +21,13 @@ target
 #.idea/
 
 # Local validation artifacts
-.opensymphony*
 .venv/
 var/
 tools/openhands-server/workspace/
 .DS_Store
+.opensymphony*
+!.opensymphony/
+.opensymphony/*
+!.opensymphony/memory/
+.opensymphony/memory/*
+!.opensymphony/memory/memory.yaml

@@ -944,6 +944,10 @@ Run the scheduler.
             workflow,
             bind: "127.0.0.1:3000".parse().expect("bind should parse"),
             tool_dir: None,
+            memory: super::super::config::RunMemoryConfig {
+                auto_capture: true,
+                auto_archive: false,
+            },
         };
 
         let error = match build_runtime_transport(&runtime).await {

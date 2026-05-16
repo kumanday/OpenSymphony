@@ -11,7 +11,9 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::process::Command;
 
+use super::memory_init_summary::memory_init_change_lists;
 use crate::opensymphony_cli::init_repo::{self, InitCommandError};
+use crate::opensymphony_memory::{MemoryInitApplyReport, ensure_memory_initialized};
 
 const DEFAULT_CRATE_METADATA_URL: &str = "https://crates.io/api/v1/crates/opensymphony";
 
@@ -50,6 +52,8 @@ enum UpdateCommandError {
     CargoInstallFailed { status: String },
     #[error("{0}")]
     Template(#[from] InitCommandError),
+    #[error("failed to initialize project memory: {0}")]
+    MemoryInit(#[from] crate::opensymphony_memory::MemoryError),
     #[error("failed to read {path}: {source}")]
     ReadFile {
         path: PathBuf,
@@ -163,11 +167,13 @@ async fn run_update(args: UpdateArgs) -> Result<(), UpdateCommandError> {
 
     println!("Detected an OpenSymphony target repo; refreshing template-managed skill files.");
     let report = sync_template_skills(&current_dir, &client).await?;
+    let memory_report = ensure_memory_initialized(&current_dir, None)?;
 
     println!("Skill refresh summary:");
     print_paths("Created", &report.created);
     print_paths("Updated", &report.updated);
     println!("Unchanged: {} file(s)", report.unchanged_count);
+    print_memory_init_summary(&current_dir, &memory_report);
     println!("OpenSymphony update complete.");
     Ok(())
 }
@@ -338,6 +344,15 @@ fn print_paths(label: &str, paths: &[String]) {
     for path in paths {
         println!("- {path}");
     }
+}
+
+fn print_memory_init_summary(target_repo: &Path, report: &MemoryInitApplyReport) {
+    let (created, updated, unchanged) = memory_init_change_lists(report, target_repo);
+
+    println!("Memory init summary:");
+    print_paths("Created", &created);
+    print_paths("Updated", &updated);
+    println!("Unchanged: {} file(s)", unchanged.len());
 }
 
 fn join_for_display(items: &[&str]) -> String {

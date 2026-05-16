@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub const DEFAULT_PRIVATE_MEMORY_CONFIG_FILE: &str = ".opensymphony/memory/memory.yaml";
 pub const DEFAULT_MEMORY_CONFIG_FILE: &str = "opensymphony-memory.yaml";
 pub const FALLBACK_PRIVATE_MEMORY_CONFIG_FILE: &str = ".opensymphony/memory/config.yaml";
 pub const DEFAULT_MEMORY_ROOT: &str = ".opensymphony/memory";
@@ -106,10 +107,12 @@ pub enum SourceSnapshotPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryConfig {
     pub enabled: bool,
+    pub config_path: PathBuf,
     pub repo_root: PathBuf,
     pub memory_root: PathBuf,
     pub visibility: MemoryVisibility,
     pub index_path: PathBuf,
+    pub confidence_threshold: u8,
     pub source_snapshot_policy: SourceSnapshotPolicy,
     pub markdown_indexes: bool,
     pub docs: DocsConfig,
@@ -130,8 +133,51 @@ pub struct AreaConfig {
     pub title: String,
     pub docs_target: PathBuf,
     pub visibility: MemoryVisibility,
-    pub path_hints: Vec<String>,
-    pub labels: Vec<String>,
+    pub status: AreaStatus,
+    pub confidence: u8,
+    pub aliases: Vec<String>,
+    pub source_refs: AreaSourceRefs,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AreaStatus {
+    #[default]
+    Candidate,
+    Stable,
+}
+
+impl AreaStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Stable => "stable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AreaSourceRefs {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub docs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linear_labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linear_milestones: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub linear_issues: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub github_prs: Vec<String>,
+}
+
+impl AreaSourceRefs {
+    fn is_empty(&self) -> bool {
+        self.docs.is_empty()
+            && self.linear_labels.is_empty()
+            && self.linear_milestones.is_empty()
+            && self.linear_issues.is_empty()
+            && self.github_prs.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -139,53 +185,83 @@ pub struct RedactionConfig {
     pub deny_patterns: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryInitPlan {
+    pub config_path: PathBuf,
+    pub config_contents: String,
+    pub gitignore_path: PathBuf,
+    pub gitignore_before: Option<String>,
+    pub gitignore_after: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryInitFileChange {
+    Created,
+    Updated,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryInitApplyReport {
+    pub config_path: PathBuf,
+    pub config: MemoryInitFileChange,
+    pub gitignore_path: PathBuf,
+    pub gitignore: MemoryInitFileChange,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct MemoryConfigFile {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     memory_root: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     visibility: Option<MemoryVisibility>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     index_path: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confidence_threshold: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     source_snapshots: Option<SourceSnapshotPolicy>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     markdown_indexes: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     docs: Option<DocsConfigFile>,
     #[serde(default)]
     areas: BTreeMap<String, AreaConfigFile>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     redaction: Option<RedactionConfigFile>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct DocsConfigFile {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     public_root: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     default_visibility: Option<MemoryVisibility>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     deny_private_links: Option<bool>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct AreaConfigFile {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     title: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     docs_target: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     visibility: Option<MemoryVisibility>,
-    #[serde(default)]
-    path_hints: Vec<String>,
-    #[serde(default)]
-    labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    status: Option<AreaStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confidence: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "AreaSourceRefs::is_empty")]
+    source_refs: AreaSourceRefs,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct RedactionConfigFile {
     #[serde(default)]
     deny_patterns: Vec<String>,
@@ -249,6 +325,8 @@ pub struct IssueLinkEvidence {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommentEvidence {
+    #[serde(default)]
+    pub id: Option<String>,
     #[serde(default)]
     pub author: Option<String>,
     #[serde(default)]
@@ -490,6 +568,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ensure_memory_initialized_creates_config_and_gitignore_policy_once() {
+        let repo = TempDir::new().expect("temp repo");
+
+        let first = ensure_memory_initialized(repo.path(), None).expect("memory init");
+
+        assert_eq!(first.config, MemoryInitFileChange::Created);
+        assert_eq!(first.gitignore, MemoryInitFileChange::Created);
+        assert!(
+            repo.path()
+                .join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE)
+                .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(repo.path().join(".gitignore")).expect(".gitignore"),
+            ".opensymphony*\n!.opensymphony/\n.opensymphony/*\n!.opensymphony/memory/\n.opensymphony/memory/*\n!.opensymphony/memory/memory.yaml\n"
+        );
+
+        let second = ensure_memory_initialized(repo.path(), None).expect("memory init idempotent");
+
+        assert_eq!(second.config, MemoryInitFileChange::Unchanged);
+        assert_eq!(second.gitignore, MemoryInitFileChange::Unchanged);
+    }
+
+    #[test]
     fn capture_plan_matches_prs_and_infers_areas() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
@@ -657,6 +759,131 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn capture_evolves_memory_config_and_keeps_changed_files_index_only() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("default config");
+        let source = sample_source();
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("plan");
+
+        write_capture_plan(&config, &plan, false).expect("write");
+
+        let evolved = MemoryConfig::load(repo.path(), None).expect("evolved config");
+        let area = evolved.areas.get("runtime").expect("runtime area");
+        assert_eq!(area.status, AreaStatus::Stable);
+        assert!(area.confidence >= evolved.confidence_threshold);
+        assert!(
+            area.source_refs
+                .linear_labels
+                .contains(&"runtime".to_string())
+        );
+        assert!(
+            area.source_refs.linear_issues.is_empty(),
+            "per-issue inventory belongs in capsules and DuckDB, not tracked memory.yaml"
+        );
+        assert!(
+            area.source_refs.github_prs.is_empty(),
+            "per-PR inventory belongs in capsules and DuckDB, not tracked memory.yaml"
+        );
+
+        let capsule =
+            fs::read_to_string(evolved.issue_capsule_path("COE-123")).expect("capsule should read");
+        assert!(capsule.contains("github_merge_shas"));
+        assert!(capsule.contains("abcdef1234567890"));
+        assert!(
+            !capsule.contains("crates/opensymphony-openhands/src/client.rs"),
+            "changed files should stay out of capsule prose and frontmatter"
+        );
+
+        let connection = Connection::open(&evolved.index_path).expect("index should open");
+        let changed_file: String = connection
+            .query_row(
+                "SELECT file_path FROM changed_files WHERE issue_key = 'COE-123'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("changed file should be indexed");
+        assert_eq!(changed_file, "crates/opensymphony-openhands/src/client.rs");
+    }
+
+    #[test]
+    fn capture_creates_candidate_area_from_linear_and_pr_narrative() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("default config");
+        let mut source = sample_source();
+        source.issues[0].title = "OpenHands runtime adapter".to_string();
+        source.issues[0].milestone = None;
+        source.issues[0].labels.clear();
+        source.prs[0].title = "COE-123 support OpenHands runtime adapter".to_string();
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("plan");
+
+        assert_eq!(plan.selected[0].areas, vec!["openhands-runtime-adapter"]);
+        write_capture_plan(&config, &plan, false).expect("write");
+
+        let evolved = MemoryConfig::load(repo.path(), None).expect("evolved config");
+        let area = evolved
+            .areas
+            .get("openhands-runtime-adapter")
+            .expect("candidate area");
+        assert_eq!(area.status, AreaStatus::Candidate);
+        assert!(area.confidence < evolved.confidence_threshold);
+        assert!(
+            area.source_refs.linear_issues.is_empty(),
+            "candidate areas should not accumulate issue inventory in tracked config"
+        );
+    }
+
+    #[test]
+    fn area_evidence_matching_requires_whole_tokens() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let mut source = sample_source();
+        source.issues[0].title = "OpenHands gruntimeerror handling".to_string();
+        source.issues[0].description =
+            Some("Fix gruntimeerror handling without ownership changes.".to_string());
+        source.issues[0].labels.clear();
+        source.prs[0].title = "COE-123 harden gruntimeerror handling".to_string();
+        source.prs[0].body = Some("No ownership area changed.".to_string());
+
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("plan");
+
+        assert!(
+            !plan.selected[0]
+                .areas
+                .contains(&"openhands-runtime".to_string())
+        );
+    }
+
+    #[test]
     fn capture_index_rolls_back_when_a_later_issue_fails() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
@@ -742,33 +969,37 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
-    fn docs_sync_diff_is_line_level_not_full_replacement() {
-        let diff = render_diff(
+    fn private_link_guard_allows_tracked_memory_config_path() {
+        assert!(!contains_private_memory_link(
+            "Commit .opensymphony/memory/memory.yaml"
+        ));
+        assert!(contains_private_memory_link(
+            "See .opensymphony/memory/issues/COE-123.md"
+        ));
+        assert!(!contains_private_memory_link(
+            "Do not publish .opensymphony/memory/memory.duckdb"
+        ));
+    }
+
+    #[test]
+    fn docs_sync_summary_reports_changed_line_counts() {
+        let diff = render_diff_stat(
             "alpha\nshared\nold\nomega\n",
             "alpha\nshared\nnew\nomega\n",
             Path::new("docs/topic.md"),
         );
 
-        assert!(diff.contains("\n alpha\n"));
-        assert!(diff.contains("\n shared\n"));
-        assert!(diff.contains("\n-old\n"));
-        assert!(diff.contains("\n+new\n"));
-        assert!(!diff.contains("\n-alpha\n"));
-        assert!(!diff.contains("\n-omega\n"));
+        assert!(diff.contains("docs/topic.md"));
+        assert!(diff.contains("4 -> 4 lines"));
+        assert!(diff.contains("+1 -1"));
     }
 
     #[test]
-    fn docs_sync_diff_for_new_docs_does_not_emit_fake_deletes() {
-        let diff = render_diff("", "alpha\nbeta\n", Path::new("docs/topic.md"));
+    fn docs_sync_summary_for_new_docs_reports_only_adds() {
+        let diff = render_diff_stat("", "alpha\nbeta\n", Path::new("docs/topic.md"));
 
-        assert!(diff.contains("\n+alpha\n"));
-        assert!(diff.contains("\n+beta\n"));
-        assert!(
-            !diff
-                .lines()
-                .any(|line| line.starts_with('-') && !line.starts_with("--- ")),
-            "new doc diff should not include deleted lines: {diff}",
-        );
+        assert!(diff.contains("0 -> 2 lines"));
+        assert!(diff.contains("+2 -0"));
     }
 
     #[test]
@@ -826,10 +1057,14 @@ areas:
   openhands-runtime:
     title: OpenHands Runtime
     docs_target: docs/openhands-runtime.md
-    path_hints:
-      - openhands
-    labels:
+    status: stable
+    confidence: 90
+    aliases:
       - runtime
+      - OpenHands Runtime
+    source_refs:
+      linear_labels:
+        - runtime
 "#,
         )
         .expect("config");

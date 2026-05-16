@@ -2,6 +2,7 @@ mod debug_session;
 mod init_repo;
 mod install_tooling;
 mod memory;
+mod memory_init_summary;
 mod orchestrator_run;
 mod update_repo;
 

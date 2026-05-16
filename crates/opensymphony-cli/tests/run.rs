@@ -26,6 +26,7 @@ async fn run_auto_detects_config_and_workflow_from_project_directory() {
         openhands.base_url(),
         format!("control_plane:\n  bind: {bind_addr}\n"),
     );
+    write_memory_config(project.path());
 
     let mut child = spawn_run_child(project.path(), &[]);
 
@@ -52,6 +53,7 @@ async fn run_config_flag_overrides_auto_detected_config_file() {
         openhands.base_url(),
         format!("control_plane:\n  bind: {default_bind}\n"),
     );
+    write_memory_config(project.path());
     std::fs::write(
         project.path().join("override.yaml"),
         format!("control_plane:\n  bind: {override_bind}\n"),
@@ -88,6 +90,7 @@ async fn run_accepts_existing_repo_config_shape_with_extra_doctor_fields() {
             "target_repo: .\ncontrol_plane:\n  bind: {bind_addr}\nopenhands:\n  probe_model: fake-model\n  probe_api_key_env: FAKE_API_KEY\nlinear:\n  enabled: false\n"
         ),
     );
+    write_memory_config(project.path());
 
     let mut child = spawn_run_child(project.path(), &[]);
 
@@ -133,6 +136,7 @@ Run the scheduler.
         ),
     )
     .expect("config should be written");
+    write_memory_config(project.path());
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .arg("run")
@@ -183,6 +187,13 @@ fn write_project_files(
     .expect("workflow should be written");
     std::fs::write(project_root.join("config.yaml"), config_contents)
         .expect("config should be written");
+}
+
+fn write_memory_config(project_root: &std::path::Path) {
+    let memory_dir = project_root.join(".opensymphony/memory");
+    std::fs::create_dir_all(&memory_dir).expect("memory dir should be written");
+    std::fs::write(memory_dir.join("memory.yaml"), "areas: {}\n")
+        .expect("memory config should be written");
 }
 
 fn reserve_socket_addr() -> std::net::SocketAddr {

@@ -3,3 +3,7 @@ control_plane:
 
 openhands:
   tool_dir: ~/.opensymphony/openhands-server
+
+memory:
+  auto_capture: true
+  auto_archive: false

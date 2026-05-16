@@ -18,7 +18,10 @@ use super::graphql::{
     IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables,
     IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
     IssueLabelsVariables, IssueStatesByIdsData, IssueStatesByIdsVariables, IssuesByStateData,
-    IssuesByStateVariables, LinearIssueNode, LinearLabelConnection, LinearRelationConnection,
+    IssuesByStateVariables, LinearIssueNode, LinearLabelConnection, LinearProjectNode,
+    LinearRelationConnection, PROJECT_BY_SLUG_QUERY, PROJECT_UPDATE_CONTENT_MUTATION,
+    ProjectBySlugData, ProjectBySlugVariables, ProjectUpdateContentData,
+    ProjectUpdateContentVariables,
 };
 use super::normalize::{normalize_issue, normalize_issue_state};
 
@@ -83,6 +86,15 @@ pub struct WorkpadComment {
     pub id: String,
     pub body: String,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinearProjectOverview {
+    pub id: String,
+    pub name: String,
+    pub slug_id: String,
+    pub url: String,
+    pub content: Option<String>,
 }
 
 impl LinearClient {
@@ -355,6 +367,42 @@ impl LinearClient {
         }
     }
 
+    pub async fn project_overview(&self) -> Result<Option<LinearProjectOverview>, LinearError> {
+        let variables = ProjectBySlugVariables {
+            slug: self.config.project_slug.clone(),
+        };
+        let response: ProjectBySlugData = self
+            .execute_graphql(PROJECT_BY_SLUG_QUERY, json!(variables))
+            .await?;
+        Ok(response
+            .projects
+            .nodes
+            .into_iter()
+            .next()
+            .map(LinearProjectOverview::from))
+    }
+
+    pub async fn update_project_content(
+        &self,
+        project_id: &str,
+        content: &str,
+    ) -> Result<(), LinearError> {
+        let variables = ProjectUpdateContentVariables {
+            id: normalize_required_string("project_id", project_id)?,
+            content: content.to_string(),
+        };
+        let response: ProjectUpdateContentData = self
+            .execute_graphql(PROJECT_UPDATE_CONTENT_MUTATION, json!(variables))
+            .await?;
+        if response.project_update.success {
+            Ok(())
+        } else {
+            Err(LinearError::InvalidResponse(
+                "Linear projectUpdate returned success=false".to_string(),
+            ))
+        }
+    }
+
     async fn expand_issue(
         &self,
         mut issue: LinearIssueNode,
@@ -615,6 +663,18 @@ impl LinearClient {
             }
         }
         delay
+    }
+}
+
+impl From<LinearProjectNode> for LinearProjectOverview {
+    fn from(node: LinearProjectNode) -> Self {
+        Self {
+            id: node.id,
+            name: node.name,
+            slug_id: node.slug_id,
+            url: node.url,
+            content: node.content,
+        }
     }
 }
 

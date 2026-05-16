@@ -233,3 +233,36 @@ Support external local server mode for debugging and CI.
 Harden hosted remote mode beyond the current transport/auth support, including stronger workspace isolation and broader hosted-operations concerns.
 
 This sequencing gives the project the fastest path to a working developer-focused MVP while preserving the right long-term boundaries.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-275 contributed: PR #1: COE-257: tighten hosted deployment guidance
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Deployment Modes"]
+  area --> docs["docs/deployment-modes.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-275: Remote agent-server mode and auth hardening
+
+## Source refs
+
+- COE-275
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

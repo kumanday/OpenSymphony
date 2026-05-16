@@ -65,27 +65,29 @@ The memory system should support two different outputs:
 - Issue-centric memory captures what happened for one completed issue.
 - Component-oriented docs describe what is now true about the codebase.
 
-Those are different artifacts. The first is provenance. The second is
-documentation.
+Those are different artifacts. The first is issue-level source refs and
+distillation. The second is documentation.
 
 ## Goals
 
 - Preserve important completed-issue knowledge before Linear archival.
 - Avoid making feature branches responsible for memory merges.
-- Support manual capture and manual archive commands with dry-run review.
+- Support run-loop auto-capture for completed work, plus manual capture and
+  archive commands for backfill and recovery.
 - Keep private memory private by default.
 - Allow users who build in public to publish memory if they choose.
 - Support public repository documentation generated or updated from private or
   public memory.
 - Provide agent discoverability through a real `.agents/skills` skill, not just
   ad hoc CLI commands.
-- Use a queryable embedded index for structured search and provenance queries.
+- Use a queryable embedded index for structured search and source-ref queries.
 - Keep Obsidian and similar markdown tools optional.
 - Avoid storing full agent transcripts or duplicated run logs.
 
 ## Non-goals
 
-- No automatic Linear archival after merge.
+- No automatic Linear archival by default. Auto-archive is an explicit
+  configuration opt-in after successful capture.
 - No requirement to commit private memory into the source repository.
 - No full run transcript storage.
 - No new top-level `decisions` or `components` memory hierarchy as the canonical
@@ -103,7 +105,7 @@ An issue capsule is the primary memory artifact.
 
 It is a markdown page centered on one completed Linear issue. It contains the
 distilled record of intent, outcome, decisions, actions, validation, review,
-follow-ups, and provenance.
+follow-ups, and source refs.
 
 The issue capsule is not a play-by-play transcript. It is a compact closeout
 document with enough links and source references to reconstruct the full record
@@ -186,7 +188,7 @@ Implications:
 
 - Private issue capsules may link to public docs.
 - Public docs should not contain direct links to private issue capsule paths.
-- Public docs may include public provenance such as issue identifiers, PR
+- Public docs may include public source refs such as issue identifiers, PR
   numbers, commit SHAs, and public URLs.
 - A private DuckDB index can preserve the full mapping from public docs back to
   private issue capsules.
@@ -346,10 +348,11 @@ What shipped after review and merge.
 
 - Topic docs that should be created or updated.
 
-## Provenance
+## Source refs
 
 - Linear: link
 - PR: link
+- Merge SHA: immutable audit pointer to merged code state
 - Debug: `opensymphony debug COE-123`
 ```
 
@@ -388,14 +391,13 @@ source facts, issue capsules, areas, and docs sync results.
 
 ## Manual capture workflow
 
-Capture is manual and review-first.
+Capture is manual and writes by default unless `--dry-run` is supplied.
 
 Example command shape:
 
 ```bash
-opensymphony memory capture COE-123 --dry-run
 opensymphony memory capture COE-123
-opensymphony memory capture --issues COE-123,COE-124 --dry-run
+opensymphony memory capture --issues COE-123,COE-124
 opensymphony memory capture --issues-file completed-issues.csv
 opensymphony memory capture --issue-range COE-100..COE-199
 opensymphony memory capture --before-issue COE-300
@@ -433,11 +435,11 @@ Archival is a separate explicit action.
 Example command shape:
 
 ```bash
-opensymphony linear archive --issues COE-123,COE-124 --dry-run
-opensymphony linear archive --issues-file completed-issues.csv --dry-run
-opensymphony linear archive --milestone "M4: Collaborative Planning Alpha" --dry-run
-opensymphony linear archive --captured-before 2026-05-01 --dry-run
-opensymphony linear archive --from-memory --state captured --dry-run
+opensymphony linear archive --issues COE-123,COE-124
+opensymphony linear archive --issues-file completed-issues.csv
+opensymphony linear archive --milestone "M4: Collaborative Planning Alpha"
+opensymphony linear archive --captured-before 2026-05-01
+opensymphony linear archive --from-memory --state captured
 ```
 
 Archive should default to requiring a fresh issue capsule before it archives an
@@ -460,10 +462,11 @@ Documentation sync transforms captured issue memory into topic docs.
 Example command shape:
 
 ```bash
-opensymphony memory sync-docs --since-last-sync --dry-run
-opensymphony memory sync-docs --issues COE-123,COE-124 --dry-run
-opensymphony memory sync-docs --milestone "M4: Collaborative Planning Alpha" --dry-run
-opensymphony memory sync-docs --area authentication --dry-run
+opensymphony memory init
+opensymphony memory sync-docs --since-last-sync
+opensymphony memory sync-docs --issues COE-123,COE-124
+opensymphony memory sync-docs --milestone "M4: Collaborative Planning Alpha"
+opensymphony memory sync-docs --area authentication
 opensymphony memory sync-docs --issues-file completed-issues.csv
 ```
 
@@ -515,7 +518,7 @@ Failure modes, integration quirks, and constraints.
 
 Short bullets derived from issue capsules.
 
-## Provenance
+## Source refs
 
 Public PRs, commits, and issue identifiers. Private capsule links only when the
 docs visibility allows them.
@@ -545,7 +548,7 @@ cross-issue knowledge.
 Diagram generation should be optional and reviewable:
 
 ```bash
-opensymphony memory sync-docs --area openhands-runtime --with-diagrams --dry-run
+opensymphony memory sync-docs --area openhands-runtime --with-diagrams
 ```
 
 Docs sync should avoid diagrams that expose private issue-capsule paths in
@@ -636,7 +639,7 @@ The output should be optimized for agent use:
 
 - concise markdown by default
 - optional JSON for tools
-- explicit provenance links
+- explicit source refs
 - warnings when memory is stale
 - separation between "facts from source evidence" and "LLM-generated synthesis"
 - suggested docs or tests to inspect
@@ -653,7 +656,7 @@ Important CLI affordances:
 - explicit `--dry-run` previews before writes
 - clear source discovery output
 - confidence and warning summaries
-- reviewable diffs for docs sync
+- stat-style write output for docs sync
 - separate capture and archive actions
 - commands that open or print generated capsules
 - status commands that show what has been captured, stale, synced, or archived
@@ -718,49 +721,53 @@ Areas are the bridge between issue memory and topic docs.
 
 Area inference can use:
 
-- Linear labels
-- task frontmatter
-- changed file paths
-- PR title and description
-- issue capsule content
-- user overrides
-- existing docs target configuration
+- Linear title, description, labels, milestone, parent, children, and active
+  Workpad comment
+- PR title, description, checks, and review discussions
+- existing learned areas and aliases in the memory config
 
-Area inference should be editable. The capture dry run should show proposed
-areas and let users override them.
+Area inference should not inspect code or diffs. GitHub changed files are useful
+structured metadata for later path-to-issue lookup, but they should not create
+areas or appear in capsule/doc prose. Merge SHA is source-ref metadata, not
+inference input.
 
-Example area configuration:
+Example learned area configuration:
 
 ```yaml
 areas:
   openhands-runtime:
     title: OpenHands Runtime
     docs_target: docs/openhands-runtime.md
-    path_hints:
-      - openhands
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+      - OpenHands Runtime
       - runtime
-  workspace-lifecycle:
-    title: Workspace Lifecycle
-    docs_target: docs/workspace-lifecycle.md
-    path_hints:
-      - workspace
-      - lifecycle
+    source_refs:
+      docs:
+        - docs/openhands-runtime.md
+      linear_labels:
+        - runtime
+      linear_issues:
+        - COE-123
 ```
 
-The initial implementation can keep this configuration in the memory settings
-file. Hosted mode can later move it to project settings.
+`opensymphony memory init` seeds stable areas from existing top-level
+`docs/*.md` files only. Capture then evolves this file from Linear and GitHub
+narrative evidence.
 
 ## Linting and health checks
 
 Memory lint should check:
 
-- issue capsules with missing provenance
+- issue capsules with missing source refs
 - stale capsules where source evidence changed
 - public docs that link to private memory paths
 - docs sync runs that failed or were never reviewed
 - issues marked archive-eligible without fresh capture
-- issue capsules with no area mapping
-- area mappings with no docs target
+- issue capsules with no learned area
+- stable areas with no docs target
 - unresolved follow-ups that were never converted into issues or explicitly
   dismissed
 
@@ -777,7 +784,7 @@ Required behaviors:
 - The default memory root is not committed to the source repository.
 - Public memory mode requires explicit configuration.
 - Public docs sync must detect and warn about private links.
-- Public docs sync should prefer public provenance: PR URLs, commit SHAs, and
+- Public docs sync should prefer public source refs: PR URLs, commit SHAs, and
   issue identifiers.
 - Redaction hooks should exist before writing public memory or public docs.
 - Source snapshots should be optional and private by default.
@@ -850,7 +857,7 @@ Add memory configuration for:
 - DuckDB index path
 - source snapshot policy
 - docs sync targets
-- area mappings
+- learned areas
 - public/private link policy
 - redaction hooks or deny patterns
 
@@ -904,9 +911,9 @@ The first version should:
 
 - select capsules by issue, milestone, area, date, or since-last-sync
 - propose target docs
-- update current model, invariants, gotchas, recent changes, and provenance
+- update current model, invariants, gotchas, recent changes, and source refs
 - optionally generate Mermaid diagrams
-- produce reviewable diffs
+- produce stat-style write output
 - enforce public/private link policy
 
 ### 9. Agent skill installation

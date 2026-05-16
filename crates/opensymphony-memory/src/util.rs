@@ -118,6 +118,19 @@ fn normalize_issue_key(value: &str) -> String {
     value.trim().to_ascii_uppercase()
 }
 
+pub fn archive_blocking_warning_count(warnings: &[String]) -> usize {
+    warnings
+        .iter()
+        .filter(|warning| is_archive_blocking_capture_warning(warning))
+        .count()
+}
+
+pub fn is_archive_blocking_capture_warning(warning: &str) -> bool {
+    !warning
+        .trim()
+        .eq_ignore_ascii_case("no GitHub PR source was matched")
+}
+
 fn sanitize_issue_key(value: &str) -> String {
     let normalized = normalize_issue_key(value);
     let sanitized = normalized
@@ -328,9 +341,14 @@ fn snippet_for_terms(body: &str, terms: &[String]) -> String {
 }
 
 fn contains_private_memory_link(contents: &str) -> bool {
-    contents.contains(".opensymphony/memory")
-        || contents.contains(".opensymphony\\memory")
-        || contents.contains("../.opensymphony")
+    let contents = contents.to_ascii_lowercase();
+    [
+        ".opensymphony/memory/issues",
+        ".opensymphony\\memory\\issues",
+        "../.opensymphony/memory/issues",
+    ]
+    .iter()
+    .any(|private_path| contents.contains(private_path))
 }
 
 fn display_path(repo_root: &Path, path: &Path) -> String {

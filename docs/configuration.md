@@ -20,7 +20,7 @@ opensymphony init
 - prompts before overwriting other conflicting files
 - fills the `WORKFLOW.md` clone hook from `git remote` when possible
 - offers to fill the Linear project slug/key in `WORKFLOW.md`
-- creates or updates `.gitignore` to ensure `.opensymphony*` stays untracked
+- creates or updates `.gitignore` so local OpenSymphony runtime state stays untracked
 - can optionally scaffold OpenHands AI PR review
 - can configure the GitHub Actions variables, label, and optional review secret
   automatically when `gh` is installed and can access the repository
@@ -53,7 +53,7 @@ Core bootstrap payload:
 - `WORKFLOW.md`
 - `AGENTS.md`
 - `config.yaml`
-- `.gitignore` created or updated to include `.opensymphony*`
+- `.gitignore` created or updated to ignore OpenSymphony runtime state
 - `.agents/skills/` copied recursively, including skill-local `references/`, `scripts/`, and similar helper files
 - `.agents/skills/linear/references/`
 - `.github/CODEOWNERS`
@@ -156,6 +156,10 @@ control_plane:
 
 openhands:
   tool_dir: ~/.opensymphony/openhands-server
+
+memory:
+  auto_capture: true
+  auto_archive: false
 ```
 
 Provision that app-managed directory with:
@@ -177,23 +181,48 @@ config that `opensymphony run` looks for in a target repo.
 
 ## Memory Configuration
 
-Project memory is optional and defaults to private local state. If no memory
-config file exists, `opensymphony memory` uses:
+Project memory stores runtime state under `.opensymphony/memory` and can be
+captured automatically by `opensymphony run`. Runtime automation is controlled
+by `config.yaml`:
+
+```yaml
+memory:
+  auto_capture: true
+  auto_archive: false
+```
+
+`auto_capture` defaults to `true`. It captures terminal issue transitions
+observed by the run loop. `auto_archive` defaults to `false`; when enabled, it
+archives only after successful capture with no blocking warnings.
+
+Initialize the shared memory policy and learned ontology file with:
+
+```bash
+opensymphony memory init
+```
+
+This creates `.opensymphony/memory/memory.yaml` and updates `.gitignore` so only
+that shared config is tracked. Capsules, markdown indexes, DuckDB, source
+snapshots, and runtime logs remain local:
 
 ```text
 .opensymphony/memory/
+  memory.yaml
   issues/
   indexes/
   memory.duckdb
 ```
 
-To customize areas and docs targets, add `opensymphony-memory.yaml` at the
-target repo root:
+`memory.yaml` contains policy plus learned structure. `memory init` seeds stable
+areas from existing top-level `docs/*.md` files when present; otherwise it
+starts with an empty `areas` map and capture evolves it from Linear and PR
+narrative evidence:
 
 ```yaml
 memory_root: .opensymphony/memory
 visibility: private
 index_path: .opensymphony/memory/memory.duckdb
+confidence_threshold: 75
 markdown_indexes: true
 docs:
   public_root: docs
@@ -203,16 +232,22 @@ areas:
   openhands-runtime:
     title: OpenHands Runtime
     docs_target: docs/openhands-runtime.md
-    path_hints:
-      - openhands
-      - runtime
-    labels:
-      - runtime
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+      - OpenHands Runtime
+    source_refs:
+      docs:
+        - docs/openhands-runtime.md
+      linear_labels:
+        - runtime
 ```
 
-Private memory should stay out of source control. Generated topic docs are
-ordinary repository files that users can review, commit, and publish when they
-choose.
+Private memory should stay out of source control. Commit
+`.opensymphony/memory/memory.yaml` and generated public docs when appropriate;
+do not commit issue capsules, markdown indexes, DuckDB, source snapshots, or
+runtime state.
 
 ## OpenHands PR Review
 
@@ -229,3 +264,42 @@ manual `gh` commands. The full verification and branch-protection guidance
 lives in the OpenSymphony docs at
 [ai-pr-review-human-setup.md](ai-pr-review-human-setup.md); `init` does not
 copy that guide into the target repository.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
+- COE-288 contributed: PR #51: Add configurable OpenHands context condenser support (merge `102a93c`)
+- COE-293 contributed: PR #56: fix: add OpenHands filesystem tools to coding agents (merge `2f34058`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Configuration"]
+  area --> docs["docs/configuration.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
+- COE-288: Add context condenser support to prevent LLM context window overflow
+- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+
+## Source refs
+
+- COE-286
+- COE-288
+- COE-293
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

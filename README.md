@@ -99,12 +99,15 @@ opensymphony init
 ```
 
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
-can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` contains `.opensymphony*` so local OpenSymphony state stays out of version control.
+can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` ignores local OpenSymphony runtime state.
+It also initializes `.opensymphony/memory/memory.yaml`, the shared policy and
+learned structure file required for default-on memory auto-capture.
 
 For an existing target repo, `opensymphony update` is the lighter-weight
 maintenance path: it refreshes changed or new template-owned skill files under
 `.agents/skills/` without touching `WORKFLOW.md`, `AGENTS.md`, or the broader
-bootstrap files.
+bootstrap files. When run from an OpenSymphony target repo, `update` also
+initializes or repairs the memory config and `.gitignore` policy if needed.
 
 ### Running the Orchestrator
 
@@ -130,23 +133,26 @@ workflows, see [Operations](docs/operations.md).
 
 ### Project Memory
 
-OpenSymphony can preserve completed-issue knowledge as you build. Live memory
-capture reads Linear evidence and discovers matching GitHub PRs by default,
-writes private issue capsules under `.opensymphony/memory/`, indexes them in
-DuckDB, and can sync selected knowledge into public topic docs:
+OpenSymphony can preserve completed-issue knowledge as you build. When
+`memory.auto_capture` is enabled in `config.yaml` (the default),
+`opensymphony run` captures terminal issue transitions from Linear and matching
+GitHub PR narrative, writes private memory under `.opensymphony/memory/`, and
+syncs stable learned topics into public docs. Repos initialized or updated with
+this release get the required memory config automatically. Manual commands
+remain available for setup repair, backfill, inspection, and guarded archival:
 
 ```bash
-opensymphony memory capture COE-123 --dry-run
+opensymphony memory init
 opensymphony memory capture COE-123
 opensymphony memory brief COE-123
 opensymphony memory related --area openhands-runtime
-opensymphony memory sync-docs --issues COE-123 --dry-run
-opensymphony linear archive --issues COE-123 --dry-run
+opensymphony memory sync-docs --since-last-sync
+opensymphony linear archive --issues COE-123
 ```
 
 See [Project Memory](docs/memory.md) for archive guards, YAML import/backfill,
-source schema, and the distinction between CLI commands and template-managed
-agent skills.
+source schema, automation flags, and the distinction between CLI commands and
+template-managed agent skills.
 
 The memory index uses DuckDB's bundled build so local installs do not need a
 separate DuckDB system package. That choice adds compile time and binary size,

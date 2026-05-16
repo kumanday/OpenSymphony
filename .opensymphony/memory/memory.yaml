@@ -1,0 +1,319 @@
+memory_root: .opensymphony/memory
+visibility: private
+index_path: .opensymphony/memory/memory.duckdb
+confidence_threshold: 75
+source_snapshots: hashes
+markdown_indexes: true
+docs:
+  public_root: docs
+  default_visibility: public
+  deny_private_links: true
+areas:
+  ai-pr-review-human-setup:
+    title: OpenHands PR Review - Human Setup Guide
+    docs_target: docs/ai-pr-review-human-setup.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - OpenHands PR Review - Human Setup Guide
+    source_refs:
+      docs:
+      - docs/ai-pr-review-human-setup.md
+  ai-pr-review-system-spec:
+    title: Provider-agnostic AI PR review system for GitHub using OpenHands
+    docs_target: docs/ai-pr-review-system-spec.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Provider-agnostic AI PR review system for GitHub using OpenHands
+    source_refs:
+      docs:
+      - docs/ai-pr-review-system-spec.md
+  architecture:
+    title: Architecture
+    docs_target: docs/architecture.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Architecture
+    source_refs:
+      docs:
+      - docs/architecture.md
+  cli:
+    title: Cli
+    docs_target: docs/cli.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Cli
+    source_refs:
+      docs:
+      - docs/cli.md
+  configuration:
+    title: Configuration
+    docs_target: docs/configuration.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Configuration
+    source_refs:
+      docs:
+      - docs/configuration.md
+  deployment-modes:
+    title: Deployment Modes
+    docs_target: docs/deployment-modes.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Deployment Modes
+    source_refs:
+      docs:
+      - docs/deployment-modes.md
+  development:
+    title: Development Guide
+    docs_target: docs/DEVELOPMENT.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Development Guide
+    source_refs:
+      docs:
+      - docs/DEVELOPMENT.md
+  devex:
+    title: Devex
+    docs_target: docs/devex.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Devex
+    source_refs:
+      docs:
+      - docs/devex.md
+  elixir-hierarchy-changes:
+    title: Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
+    docs_target: docs/elixir-hierarchy-changes.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
+    source_refs:
+      docs:
+      - docs/elixir-hierarchy-changes.md
+  host-client-architecture:
+    title: OpenSymphony Host-Client Architecture
+    docs_target: docs/host-client-architecture.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - OpenSymphony Host-Client Architecture
+    source_refs:
+      docs:
+      - docs/host-client-architecture.md
+  host-client-implementation-plan:
+    title: OpenSymphony Rich Client, Hosted Mode, and Planning Implementation Plan
+    docs_target: docs/host-client-implementation_plan.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - OpenSymphony Rich Client, Hosted Mode, and Planning Implementation Plan
+    source_refs:
+      docs:
+      - docs/host-client-implementation_plan.md
+  hosted-client-prd:
+    title: OpenSymphony Rich Client, Hosted Mode, and Collaborative Planning PRD
+    docs_target: docs/hosted-client-PRD.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - OpenSymphony Rich Client, Hosted Mode, and Collaborative Planning PRD
+    source_refs:
+      docs:
+      - docs/hosted-client-PRD.md
+  implementation-plan:
+    title: Implementation Plan
+    docs_target: docs/implementation-plan.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Implementation Plan
+    source_refs:
+      docs:
+      - docs/implementation-plan.md
+  linear-and-tools:
+    title: Linear and Tools
+    docs_target: docs/linear-and-tools.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Linear and Tools
+    source_refs:
+      docs:
+      - docs/linear-and-tools.md
+  memory:
+    title: Project Memory
+    docs_target: docs/memory.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Project Memory
+    source_refs:
+      docs:
+      - docs/memory.md
+  memory-capture-and-doc-sync:
+    title: OpenSymphony Memory Capture and Documentation Sync
+    docs_target: docs/memory-capture-and-doc-sync.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - OpenSymphony Memory Capture and Documentation Sync
+    source_refs:
+      docs:
+      - docs/memory-capture-and-doc-sync.md
+  migration-1-0-0:
+    title: OpenSymphony 1.0.0 Migration Guide
+    docs_target: docs/migration-1.0.0.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - OpenSymphony 1.0.0 Migration Guide
+    source_refs:
+      docs:
+      - docs/migration-1.0.0.md
+  openhands-agent-server:
+    title: OpenHands Agent-Server Integration
+    docs_target: docs/openhands-agent-server.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - OpenHands Agent-Server Integration
+    source_refs:
+      docs:
+      - docs/openhands-agent-server.md
+  openhands-agent-server-subscription-auth-analysis:
+    title: Subscription-Based OpenAI ChatGPT/Codex Authentication with `openhands agent-server`
+    docs_target: docs/openhands_agent_server_subscription_auth_analysis.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Subscription-Based OpenAI ChatGPT/Codex Authentication with `openhands agent-server`
+    source_refs:
+      docs:
+      - docs/openhands_agent_server_subscription_auth_analysis.md
+  operations:
+    title: Operations
+    docs_target: docs/operations.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Operations
+    source_refs:
+      docs:
+      - docs/operations.md
+  prerequisites:
+    title: Prerequisites
+    docs_target: docs/prerequisites.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Prerequisites
+    source_refs:
+      docs:
+      - docs/prerequisites.md
+  repository-layout:
+    title: Repository Layout
+    docs_target: docs/repository-layout.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Repository Layout
+    source_refs:
+      docs:
+      - docs/repository-layout.md
+  sources:
+    title: Sources and Trust Notes
+    docs_target: docs/sources.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Sources and Trust Notes
+    source_refs:
+      docs:
+      - docs/sources.md
+  symphony-spec-alignment:
+    title: Symphony Spec Alignment
+    docs_target: docs/symphony-spec-alignment.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Symphony Spec Alignment
+    source_refs:
+      docs:
+      - docs/symphony-spec-alignment.md
+  testing-and-operations:
+    title: Testing
+    docs_target: docs/testing-and-operations.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Testing
+    source_refs:
+      docs:
+      - docs/testing-and-operations.md
+  ui-frankentui:
+    title: FrankenTUI Operator UI
+    docs_target: docs/ui-frankentui.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - FrankenTUI Operator UI
+    source_refs:
+      docs:
+      - docs/ui-frankentui.md
+  websocket-runtime:
+    title: WebSocket Runtime Contract
+    docs_target: docs/websocket-runtime.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - WebSocket Runtime Contract
+    source_refs:
+      docs:
+      - docs/websocket-runtime.md
+  workspace-and-lifecycle:
+    title: Workspace and Lifecycle
+    docs_target: docs/workspace-and-lifecycle.md
+    visibility: public
+    status: stable
+    confidence: 85
+    aliases:
+    - Workspace and Lifecycle
+    source_refs:
+      docs:
+      - docs/workspace-and-lifecycle.md

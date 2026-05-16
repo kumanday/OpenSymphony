@@ -57,7 +57,7 @@ pub fn plan_archive(
             ),
             None => (
                 false,
-                "blocked: no captured memory found; run `opensymphony memory capture --write` first"
+                "blocked: no captured memory found; run `opensymphony memory capture` first"
                     .to_string(),
                 None,
             ),
@@ -93,7 +93,11 @@ fn archive_state_matches(issue: &IndexedIssue, state: &str) -> bool {
 
 pub fn render_archive_plan(config: &MemoryConfig, plan: &ArchivePlan) -> String {
     let mut output = String::new();
-    output.push_str("# Linear Archive Dry Run\n\n");
+    if plan.write {
+        output.push_str("# Linear Archive Eligibility\n\n");
+    } else {
+        output.push_str("# Linear Archive Dry Run\n\n");
+    }
     for issue in &plan.issues {
         output.push_str(&format!(
             "- {}: {} ({})\n",

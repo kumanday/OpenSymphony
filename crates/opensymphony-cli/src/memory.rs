@@ -1,10 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{self, ExitCode},
 };
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand};
 
 use crate::{
@@ -12,10 +12,12 @@ use crate::{
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
         ArchivePlan, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueSelection, LintSeverity,
-        MemoryConfig, MemoryError, SourceFile, brief, context_for_issue, docs_for_area,
-        expand_issue_range, lint, load_source_file, mark_archived, plan_archive, plan_capture,
-        plan_docs_sync, related_by_area, related_by_issue, related_by_paths, render_archive_plan,
+        MemoryConfig, MemoryError, SourceFile, archive_blocking_warning_count, brief,
+        context_for_issue, docs_for_area, expand_issue_range, lint, load_source_file,
+        mark_archived, plan_archive, plan_capture, plan_docs_sync, plan_memory_init,
+        related_by_area, related_by_issue, related_by_paths, render_archive_plan,
         render_capture_dry_run, search, status, write_capture_plan, write_docs_sync_plan,
+        write_memory_init_plan,
     },
     opensymphony_workflow::WorkflowDefinition,
 };
@@ -30,6 +32,8 @@ pub struct MemoryArgs {
 
 #[derive(Debug, Subcommand)]
 enum MemoryCommand {
+    #[command(about = "Create project memory configuration")]
+    Init(InitArgs),
     #[command(about = "Capture completed issue evidence into issue memory")]
     Capture(CaptureArgs),
     #[command(about = "Import deterministic YAML issue evidence into issue memory")]
@@ -52,6 +56,14 @@ enum MemoryCommand {
     Context(ContextArgs),
     #[command(about = "Lint memory and docs for stale or unsafe state")]
     Lint(LintArgs),
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    #[arg(long, help = "Only show the proposed memory configuration")]
+    dry_run: bool,
+    #[arg(long, help = "Overwrite an existing memory configuration")]
+    force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -245,24 +257,244 @@ pub async fn run_linear_command(args: LinearArgs) -> ExitCode {
     }
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct AutoMemoryReport {
+    pub(crate) completed_issue_keys: Vec<String>,
+    pub(crate) captured_issue_keys: Vec<String>,
+    pub(crate) archived_issue_keys: Vec<String>,
+    pub(crate) docs_written: Vec<PathBuf>,
+    pub(crate) capture_completed: bool,
+    pub(crate) docs_sync_completed: bool,
+    pub(crate) archive_completed: bool,
+    pub(crate) warnings: Vec<String>,
+}
+
+impl AutoMemoryReport {
+    pub(crate) fn workflow_completed(&self) -> bool {
+        self.capture_completed && self.docs_sync_completed && self.archive_completed
+    }
+}
+
+pub(crate) async fn auto_capture_terminal(
+    repo_root: &Path,
+    workflow_path: &Path,
+    identifiers: &[String],
+    auto_archive: bool,
+) -> Result<AutoMemoryReport, MemoryError> {
+    let mut identifiers = identifiers
+        .iter()
+        .filter_map(|identifier| non_empty(identifier))
+        .collect::<Vec<_>>();
+    identifiers.sort();
+    identifiers.dedup();
+    if identifiers.is_empty() {
+        return Ok(AutoMemoryReport::default());
+    }
+
+    let config = MemoryConfig::load(repo_root, None)?;
+    let client = linear_client_from_workflow(repo_root, Some(workflow_path))?;
+    let source = load_linear_source_from_client(&client, &identifiers).await?;
+    let selection = IssueSelection {
+        identifiers,
+        ..IssueSelection::default()
+    };
+    let mut capture_plan = plan_capture(&config, &source, &selection, true, true)?;
+    let issue_keys = capture_plan
+        .selected
+        .iter()
+        .map(|issue| issue.issue.identifier.clone())
+        .collect::<Vec<_>>();
+    capture_plan
+        .selected
+        .retain(|issue| !issue.already_captured || issue.stale);
+    if issue_keys.is_empty() {
+        return Ok(AutoMemoryReport::default());
+    }
+
+    let captured_issue_keys = capture_plan
+        .selected
+        .iter()
+        .map(|issue| issue.issue.identifier.clone())
+        .collect::<Vec<_>>();
+    let mut warnings = Vec::new();
+    let mut capture_completed = true;
+    let evolved_config = if capture_plan.selected.is_empty() {
+        config.clone()
+    } else {
+        let capture_report = write_capture_plan(&config, &capture_plan, false)?;
+        warnings.extend(capture_report.warnings);
+        match MemoryConfig::load(repo_root, None) {
+            Ok(config) => config,
+            Err(error) => {
+                capture_completed = false;
+                warnings.push(format!(
+                    "failed to reload evolved memory config after capture: {error}"
+                ));
+                let _ = record_auto_memory_status(&config, &issue_keys, &warnings);
+                return Ok(AutoMemoryReport {
+                    completed_issue_keys: Vec::new(),
+                    captured_issue_keys,
+                    archived_issue_keys: Vec::new(),
+                    docs_written: Vec::new(),
+                    capture_completed,
+                    docs_sync_completed: false,
+                    archive_completed: !auto_archive,
+                    warnings,
+                });
+            }
+        }
+    };
+    let docs_selection = IssueSelection {
+        identifiers: issue_keys.clone(),
+        since_last_sync: true,
+        ..IssueSelection::default()
+    };
+
+    let mut archived_issue_keys = Vec::new();
+    let mut docs_written = Vec::new();
+    let mut docs_sync_completed = false;
+    match plan_docs_sync(&evolved_config, &docs_selection, true, false) {
+        Ok(docs_plan) => {
+            warnings.extend(docs_plan.warnings.clone());
+            if !docs_plan.targets.is_empty() {
+                match write_docs_sync_plan(&evolved_config, &docs_plan) {
+                    Ok(written) => {
+                        docs_written = written;
+                        docs_sync_completed = true;
+                    }
+                    Err(error) => {
+                        warnings.push(format!("failed to sync captured memory docs: {error}"));
+                    }
+                }
+            } else {
+                docs_sync_completed = true;
+            }
+        }
+        Err(error) => {
+            warnings.push(format!("failed to plan captured memory docs sync: {error}"));
+        }
+    }
+
+    let mut archive_completed = !auto_archive;
+    if auto_archive {
+        match plan_archive(&evolved_config, &issue_keys, false, None, true, false) {
+            Ok(archive_plan) => {
+                warnings.extend(archive_plan.warnings.clone());
+                match archive_in_linear(repo_root, Some(workflow_path), &archive_plan).await {
+                    Ok(archive_report) => {
+                        archive_completed =
+                            archive_plan.warnings.is_empty() && archive_report.failures.is_empty();
+                        if !archive_report.archived.is_empty()
+                            && let Err(error) =
+                                mark_archived(&evolved_config, &archive_report.archived)
+                        {
+                            archive_completed = false;
+                            warnings
+                                .push(format!("failed to mark archived memory capsules: {error}"));
+                        }
+                        archived_issue_keys = archive_report.archived;
+                        warnings.extend(archive_report.failures);
+                    }
+                    Err(error) => {
+                        warnings.push(format!("failed to archive captured Linear issues: {error}"));
+                    }
+                }
+            }
+            Err(error) => {
+                warnings.push(format!(
+                    "failed to plan captured Linear issue archive: {error}"
+                ));
+            }
+        }
+    }
+
+    if let Err(error) = record_auto_memory_status(&evolved_config, &issue_keys, &warnings) {
+        warnings.push(format!(
+            "failed to record local memory automation status: {error}"
+        ));
+    }
+    if !warnings.is_empty()
+        && let Err(error) = update_linear_memory_status(&client, &issue_keys, &warnings).await
+    {
+        warnings.push(format!("failed to update Linear memory status: {error}"));
+        if let Err(error) = record_auto_memory_status(&evolved_config, &issue_keys, &warnings) {
+            warnings.push(format!(
+                "failed to record local memory automation status after Linear update failure: {error}"
+            ));
+        }
+    }
+    let completed_issue_keys = if capture_completed && docs_sync_completed && archive_completed {
+        issue_keys
+    } else {
+        Vec::new()
+    };
+    Ok(AutoMemoryReport {
+        completed_issue_keys,
+        captured_issue_keys,
+        archived_issue_keys,
+        docs_written,
+        capture_completed,
+        docs_sync_completed,
+        archive_completed,
+        warnings,
+    })
+}
+
 async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
     let repo_root = std::env::current_dir().map_err(|source| MemoryError::ReadFile {
         path: PathBuf::from("."),
         source,
     })?;
-    let config = MemoryConfig::load(&repo_root, args.config.as_deref())?;
-    match args.command {
-        MemoryCommand::Capture(args) => run_capture(&repo_root, &config, args).await,
-        MemoryCommand::Import(args) => run_import(&config, args),
-        MemoryCommand::SyncDocs(args) => run_sync_docs(&config, args),
-        MemoryCommand::Status(args) => run_status(&config, args),
-        MemoryCommand::Show(args) => run_show(&config, args, ShowMode::Full),
-        MemoryCommand::Brief(args) => run_show(&config, args, ShowMode::Brief),
-        MemoryCommand::Search(args) => run_search(&config, args),
-        MemoryCommand::Related(args) => run_related(&config, args),
-        MemoryCommand::Docs(args) => run_docs(&config, args),
-        MemoryCommand::Context(args) => run_context(&config, args),
-        MemoryCommand::Lint(args) => run_lint(&config, args),
+    let MemoryArgs {
+        config: config_path,
+        command,
+    } = args;
+    match command {
+        MemoryCommand::Init(args) => run_init(&repo_root, config_path.as_deref(), args),
+        MemoryCommand::Capture(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_capture(&repo_root, &config, args).await
+        }
+        MemoryCommand::Import(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_import(&config, args)
+        }
+        MemoryCommand::SyncDocs(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_sync_docs(&config, args)
+        }
+        MemoryCommand::Status(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_status(&config, args)
+        }
+        MemoryCommand::Show(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_show(&config, args, ShowMode::Full)
+        }
+        MemoryCommand::Brief(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_show(&config, args, ShowMode::Brief)
+        }
+        MemoryCommand::Search(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_search(&config, args)
+        }
+        MemoryCommand::Related(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_related(&config, args)
+        }
+        MemoryCommand::Docs(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_docs(&config, args)
+        }
+        MemoryCommand::Context(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_context(&config, args)
+        }
+        MemoryCommand::Lint(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_lint(&config, args)
+        }
     }
 }
 
@@ -270,6 +502,32 @@ async fn run_linear(args: LinearArgs) -> Result<(), MemoryError> {
     match args.command {
         LinearCommand::Archive(args) => run_archive(args).await,
     }
+}
+
+fn run_init(
+    repo_root: &Path,
+    config_path: Option<&Path>,
+    args: InitArgs,
+) -> Result<(), MemoryError> {
+    let plan = plan_memory_init(repo_root, config_path, args.force)?;
+    println!("# Memory Init Plan\n");
+    println!("Config: {}", plan.config_path.display());
+    println!("Git ignore: {}", plan.gitignore_path.display());
+    if args.dry_run {
+        println!("\n## Proposed config\n");
+        println!("{}", plan.config_contents);
+        println!("Dry run only. Re-run without `--dry-run` to create memory configuration.");
+        return Ok(());
+    }
+
+    write_memory_init_plan(&plan)?;
+    println!("Wrote memory configuration: {}", plan.config_path.display());
+    if plan.gitignore_before.as_deref() == Some(plan.gitignore_after.as_str()) {
+        println!("Git ignore already allowed the shared memory config.");
+    } else {
+        println!("Updated git ignore: {}", plan.gitignore_path.display());
+    }
+    Ok(())
 }
 
 async fn run_capture(
@@ -376,6 +634,9 @@ fn run_sync_docs(config: &MemoryConfig, args: SyncDocsArgs) -> Result<(), Memory
     print_docs_plan(&plan);
     if !write {
         println!("Dry run only. Re-run without `--dry-run` to update topic docs.");
+        return Ok(());
+    }
+    if plan.targets.is_empty() {
         return Ok(());
     }
     let written = write_docs_sync_plan(config, &plan)?;
@@ -628,7 +889,13 @@ fn archive_plan_after_capture(
     });
     for issue in selected {
         let issue_key = issue.issue.identifier.clone();
-        let warning_count = issue.warnings.len() + capture_plan.warnings.len();
+        let capture_warnings = issue
+            .warnings
+            .iter()
+            .chain(capture_plan.warnings.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let warning_count = archive_blocking_warning_count(&capture_warnings);
         let (eligible, reason) = if force {
             (
                 true,
@@ -689,6 +956,197 @@ fn finish_archive_write(
         )));
     }
     Ok(())
+}
+
+const AUTO_MEMORY_STATUS_LOG_LIMIT: usize = 100;
+const AUTO_MEMORY_STATUS_LOG_MAX_BYTES: usize = 64 * 1024;
+
+fn record_auto_memory_status(
+    config: &MemoryConfig,
+    issue_keys: &[String],
+    warnings: &[String],
+) -> Result<(), MemoryError> {
+    if issue_keys.is_empty() && warnings.is_empty() {
+        return Ok(());
+    }
+    let path = config.memory_root.join("indexes/automation.md");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| MemoryError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let mut contents = fs::read_to_string(&path)
+        .unwrap_or_else(|_| "# OpenSymphony Memory Automation Log\n\n".to_string());
+    contents = trim_auto_memory_status_log(
+        &contents,
+        AUTO_MEMORY_STATUS_LOG_LIMIT,
+        AUTO_MEMORY_STATUS_LOG_MAX_BYTES,
+    );
+    contents.push_str(&format!("## {}\n\n", Utc::now().to_rfc3339()));
+    if !issue_keys.is_empty() {
+        contents.push_str(&format!("- Issues: {}\n", issue_keys.join(", ")));
+    }
+    if warnings.is_empty() {
+        contents.push_str("- Status: completed without blocking warnings\n");
+    } else {
+        contents.push_str("- Warnings:\n");
+        for warning in warnings {
+            contents.push_str(&format!("  - {warning}\n"));
+        }
+    }
+    contents.push('\n');
+    let contents = trim_auto_memory_status_log(
+        &contents,
+        AUTO_MEMORY_STATUS_LOG_LIMIT,
+        AUTO_MEMORY_STATUS_LOG_MAX_BYTES,
+    );
+    atomic_write_auto_memory_status(&path, &contents)
+}
+
+fn atomic_write_auto_memory_status(path: &Path, contents: &str) -> Result<(), MemoryError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("automation.md");
+    let temp_path = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&temp_path, contents).map_err(|source| MemoryError::WriteFile {
+        path: temp_path.clone(),
+        source,
+    })?;
+    fs::rename(&temp_path, path).map_err(|source| {
+        let _ = fs::remove_file(&temp_path);
+        MemoryError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
+}
+
+fn trim_auto_memory_status_log(contents: &str, max_entries: usize, max_bytes: usize) -> String {
+    let mut entries = Vec::new();
+    let mut current = Vec::new();
+    for line in contents.lines() {
+        if line.starts_with("## ") {
+            if !current.is_empty() {
+                entries.push(current.join("\n"));
+            }
+            current = vec![line.to_string()];
+        } else if !current.is_empty() {
+            current.push(line.to_string());
+        }
+    }
+    if !current.is_empty() {
+        entries.push(current.join("\n"));
+    }
+
+    let start = entries.len().saturating_sub(max_entries);
+    let mut retained = entries.into_iter().skip(start).collect::<Vec<_>>();
+    loop {
+        let rendered = render_auto_memory_status_log(&retained);
+        if rendered.len() <= max_bytes || retained.len() <= 1 {
+            return rendered;
+        }
+        retained.remove(0);
+    }
+}
+
+fn render_auto_memory_status_log(entries: &[String]) -> String {
+    let mut output = "# OpenSymphony Memory Automation Log\n\n".to_string();
+    for entry in entries {
+        output.push_str(entry.trim_end());
+        output.push_str("\n\n");
+    }
+    output
+}
+
+const LINEAR_MEMORY_STATUS_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED MEMORY STATUS -->";
+const LINEAR_MEMORY_STATUS_END: &str = "<!-- END OPENSYMPHONY MANAGED MEMORY STATUS -->";
+
+async fn update_linear_memory_status(
+    client: &LinearClient,
+    issue_keys: &[String],
+    warnings: &[String],
+) -> Result<(), MemoryError> {
+    let Some(project) = client
+        .project_overview()
+        .await
+        .map_err(|error| MemoryError::Linear(format!("Linear project lookup failed: {error}")))?
+    else {
+        return Ok(());
+    };
+    let existing = project.content.unwrap_or_default();
+    let section = render_linear_memory_status_section(issue_keys, warnings);
+    let updated = replace_or_append_managed_section(
+        &existing,
+        LINEAR_MEMORY_STATUS_BEGIN,
+        LINEAR_MEMORY_STATUS_END,
+        &section,
+    );
+    client
+        .update_project_content(&project.id, &updated)
+        .await
+        .map_err(|error| MemoryError::Linear(format!("Linear project update failed: {error}")))
+}
+
+fn render_linear_memory_status_section(issue_keys: &[String], warnings: &[String]) -> String {
+    let mut section = String::new();
+    section.push_str(LINEAR_MEMORY_STATUS_BEGIN);
+    section.push_str("\n\n## OpenSymphony Memory Status\n\n");
+    section.push_str(&format!("- Updated: {}\n", Utc::now().to_rfc3339()));
+    if !issue_keys.is_empty() {
+        section.push_str(&format!("- Captured: {}\n", issue_keys.join(", ")));
+    }
+    section.push_str("- Attention needed:\n");
+    for warning in warnings.iter().take(10) {
+        section.push_str(&format!("  - {warning}\n"));
+    }
+    if warnings.len() > 10 {
+        section.push_str(&format!("  - ...and {} more\n", warnings.len() - 10));
+    }
+    section.push('\n');
+    section.push_str(LINEAR_MEMORY_STATUS_END);
+    section
+}
+
+fn replace_or_append_managed_section(
+    existing: &str,
+    begin: &str,
+    end: &str,
+    replacement: &str,
+) -> String {
+    if let Some(begin_index) = existing.find(begin) {
+        // A missing end marker means the managed block was truncated; replace
+        // from BEGIN to the end so repeated updates cannot append duplicates.
+        let end_index = existing[begin_index..]
+            .find(end)
+            .map(|relative_end| begin_index + relative_end + end.len())
+            .unwrap_or(existing.len());
+        let mut output = String::new();
+        output.push_str(existing[..begin_index].trim_end());
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(replacement.trim_end());
+        let tail = existing[end_index..].trim_start();
+        if !tail.is_empty() {
+            output.push_str("\n\n");
+            output.push_str(tail);
+        }
+        output
+    } else {
+        let mut output = existing.trim_end().to_string();
+        if !output.is_empty() {
+            output.push_str("\n\n");
+        }
+        output.push_str(replacement.trim_end());
+        output
+    }
 }
 
 #[derive(Debug, Default)]
@@ -754,7 +1212,14 @@ async fn load_linear_source(
     identifiers: &[String],
 ) -> Result<SourceFile, MemoryError> {
     let client = linear_client_from_workflow(repo_root, workflow_path)?;
-    let tracker_issues = load_linear_issue_tree(&client, identifiers).await?;
+    load_linear_source_from_client(&client, identifiers).await
+}
+
+async fn load_linear_source_from_client(
+    client: &LinearClient,
+    identifiers: &[String],
+) -> Result<SourceFile, MemoryError> {
+    let tracker_issues = load_linear_issue_tree(client, identifiers).await?;
 
     let mut issues = Vec::new();
     for issue in tracker_issues {
@@ -839,6 +1304,7 @@ fn issue_evidence_from_tracker(
         comments: workpad
             .map(|comment| {
                 vec![CommentEvidence {
+                    id: Some(comment.id),
                     body: comment.body,
                     updated_at: Some(comment.updated_at),
                     source: Some("linear:workpad".to_string()),
@@ -906,11 +1372,14 @@ fn non_empty(value: &str) -> Option<String> {
 }
 
 fn print_docs_plan(plan: &DocsSyncPlan) {
-    println!("# Docs Sync Plan\n");
+    println!("# Docs Sync Summary\n");
     println!("Selected issues: {}", plan.selected_issue_keys.join(", "));
+    if plan.targets.is_empty() {
+        println!("No stable topic docs selected for writing.");
+    }
     for target in &plan.targets {
         println!(
-            "\n## {} ({})\n\n{}",
+            "\n## {} ({})\n{}",
             target.title,
             if target.create { "create" } else { "update" },
             target.diff
@@ -945,5 +1414,103 @@ fn print_search_results(
             path.display(),
             result.snippet
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, replace_or_append_managed_section,
+        trim_auto_memory_status_log,
+    };
+
+    #[test]
+    fn managed_linear_memory_status_replaces_existing_section() {
+        let existing = format!(
+            "Intro\n\n{LINEAR_MEMORY_STATUS_BEGIN}\nold\n{LINEAR_MEMORY_STATUS_END}\n\nTail"
+        );
+        let replacement = format!("{LINEAR_MEMORY_STATUS_BEGIN}\nnew\n{LINEAR_MEMORY_STATUS_END}");
+
+        let updated = replace_or_append_managed_section(
+            &existing,
+            LINEAR_MEMORY_STATUS_BEGIN,
+            LINEAR_MEMORY_STATUS_END,
+            &replacement,
+        );
+
+        assert!(updated.contains("Intro"));
+        assert!(updated.contains("new"));
+        assert!(updated.contains("Tail"));
+        assert!(!updated.contains("old"));
+    }
+
+    #[test]
+    fn managed_linear_memory_status_replaces_truncated_section() {
+        let existing = format!("Intro\n\n{LINEAR_MEMORY_STATUS_BEGIN}\nold without end marker");
+        let replacement = format!("{LINEAR_MEMORY_STATUS_BEGIN}\nnew\n{LINEAR_MEMORY_STATUS_END}");
+
+        let updated = replace_or_append_managed_section(
+            &existing,
+            LINEAR_MEMORY_STATUS_BEGIN,
+            LINEAR_MEMORY_STATUS_END,
+            &replacement,
+        );
+
+        assert!(updated.contains("Intro"));
+        assert!(updated.contains("new"));
+        assert_eq!(updated.matches(LINEAR_MEMORY_STATUS_BEGIN).count(), 1);
+        assert!(!updated.contains("old without end marker"));
+    }
+
+    #[test]
+    fn auto_memory_status_log_keeps_recent_entries() {
+        let contents = "\
+# OpenSymphony Memory Automation Log
+
+## 2026-05-16T00:00:00Z
+
+- Captured: COE-1
+
+## 2026-05-16T00:01:00Z
+
+- Captured: COE-2
+
+## 2026-05-16T00:02:00Z
+
+- Captured: COE-3
+";
+
+        let trimmed = trim_auto_memory_status_log(contents, 2, usize::MAX);
+
+        assert!(!trimmed.contains("COE-1"));
+        assert!(trimmed.contains("COE-2"));
+        assert!(trimmed.contains("COE-3"));
+        assert_eq!(trimmed.matches("## ").count(), 2);
+    }
+
+    #[test]
+    fn auto_memory_status_log_respects_size_limit() {
+        let contents = "\
+# OpenSymphony Memory Automation Log
+
+## 2026-05-16T00:00:00Z
+
+- Captured: COE-1
+
+## 2026-05-16T00:01:00Z
+
+- Captured: COE-2 with a longer status line
+
+## 2026-05-16T00:02:00Z
+
+- Captured: COE-3 with a longer status line
+";
+
+        let trimmed = trim_auto_memory_status_log(contents, 100, 120);
+
+        assert!(!trimmed.contains("COE-1"));
+        assert!(!trimmed.contains("COE-2"));
+        assert!(trimmed.contains("COE-3"));
+        assert!(trimmed.len() <= 120);
     }
 }

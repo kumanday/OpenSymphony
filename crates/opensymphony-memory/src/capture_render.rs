@@ -1,11 +1,15 @@
 fn default_config_path(repo_root: &Path) -> Option<PathBuf> {
+    let private = repo_root.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE);
+    if private.exists() {
+        return Some(private);
+    }
     let public = repo_root.join(DEFAULT_MEMORY_CONFIG_FILE);
     if public.exists() {
         return Some(public);
     }
-    let private = repo_root.join(FALLBACK_PRIVATE_MEMORY_CONFIG_FILE);
-    if private.exists() {
-        Some(private)
+    let legacy_private = repo_root.join(FALLBACK_PRIVATE_MEMORY_CONFIG_FILE);
+    if legacy_private.exists() {
+        Some(legacy_private)
     } else {
         None
     }
@@ -157,49 +161,320 @@ fn infer_areas(
     let mut areas = BTreeSet::new();
     let labels = normalize_list(issue.labels.clone());
     for (slug, area) in &config.areas {
-        if labels.iter().any(|label| area.labels.contains(label)) {
+        if labels.iter().any(|label| area_alias_matches(area, label))
+            || area_matches_evidence(area, issue, prs)
+        {
             areas.insert(slug.clone());
         }
     }
-    let changed_files = prs
-        .iter()
-        .flat_map(|pr| pr.changed_files.iter())
-        .map(|file| file.path.to_string_lossy().to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    for (slug, area) in &config.areas {
-        if area.path_hints.iter().any(|hint| {
-            changed_files
-                .iter()
-                .any(|file| file.contains(&hint.to_ascii_lowercase()))
-        }) {
-            areas.insert(slug.clone());
-        }
-    }
-
-    let configured_labels = config
-        .areas
-        .values()
-        .flat_map(|area| area.labels.iter().cloned())
-        .collect::<BTreeSet<_>>();
     for label in labels {
-        if label != "done" && label != "bug" && label != "feature" {
+        if !is_generic_label(&label) {
             let label_slug = slugify(&label);
-            if !configured_labels.contains(&label) && !areas.contains(&label_slug) {
+            if !areas.contains(&label_slug) {
                 areas.insert(label_slug);
             }
         }
     }
 
+    if areas.is_empty()
+        && let Some(milestone) = issue.milestone.as_deref().and_then(normalize_optional)
+        && !is_generic_milestone(&milestone)
+    {
+        areas.insert(slugify(&milestone));
+    }
+    if areas.is_empty()
+        && let Some(candidate) = infer_candidate_area_from_narrative(issue, prs)
+    {
+        areas.insert(candidate);
+    }
     if areas.is_empty() {
-        let first_path_area = prs
-            .iter()
-            .flat_map(|pr| pr.changed_files.iter())
-            .find_map(|file| file.path.components().next())
-            .map(|component| slugify(&component.as_os_str().to_string_lossy()));
-        areas.insert(first_path_area.unwrap_or_else(|| "general".to_string()));
+        areas.insert("general".to_string());
     }
 
     areas.into_iter().collect()
+}
+
+fn area_alias_matches(area: &AreaConfig, value: &str) -> bool {
+    let value_slug = slugify(value);
+    value_slug == area.slug
+        || area.aliases.iter().any(|alias| {
+            let alias_slug = slugify(alias);
+            value_slug == alias_slug || value == alias
+        })
+        || area
+            .source_refs
+            .linear_labels
+            .iter()
+            .any(|label| value_slug == slugify(label))
+}
+
+fn area_matches_evidence(
+    area: &AreaConfig,
+    issue: &IssueEvidence,
+    prs: &[PullRequestEvidence],
+) -> bool {
+    let evidence = search_tokens(&area_evidence_text(issue, prs));
+    let mut candidates = vec![area.slug.clone(), area.title.to_ascii_lowercase()];
+    candidates.extend(area.aliases.clone());
+    candidates.extend(area.source_refs.linear_milestones.clone());
+    candidates.into_iter().any(|candidate| {
+        let candidate = candidate.trim().to_ascii_lowercase();
+        candidate.len() >= 4 && token_sequence_contains(&evidence, &search_tokens(&candidate))
+    })
+}
+
+fn token_sequence_contains(haystack: &[String], needle: &[String]) -> bool {
+    // Whole-token equality keeps aliases like "runtime" from matching tokens
+    // such as "gruntime" or "runtimeerror".
+    !needle.is_empty()
+        && needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn search_tokens(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(normalize_optional)
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn area_evidence_text(issue: &IssueEvidence, prs: &[PullRequestEvidence]) -> String {
+    let mut parts = vec![issue.title.clone()];
+    if let Some(description) = &issue.description {
+        parts.push(description.clone());
+    }
+    if let Some(milestone) = &issue.milestone {
+        parts.push(milestone.clone());
+    }
+    if let Some(parent) = &issue.parent
+        && let Some(title) = &parent.title
+    {
+        parts.push(title.clone());
+    }
+    for child in &issue.children {
+        if let Some(title) = &child.title {
+            parts.push(title.clone());
+        }
+    }
+    parts.extend(issue.comments.iter().map(|comment| comment.body.clone()));
+    for pr in prs {
+        parts.push(pr.title.clone());
+        if let Some(body) = &pr.body {
+            parts.push(body.clone());
+        }
+        for review in &pr.reviews {
+            if let Some(disposition) = &review.disposition {
+                parts.push(disposition.clone());
+            }
+        }
+        for check in &pr.checks {
+            parts.push(check.name.clone());
+            if let Some(conclusion) = &check.conclusion {
+                parts.push(conclusion.clone());
+            }
+        }
+    }
+    parts.join("\n").to_ascii_lowercase()
+}
+
+fn is_generic_label(label: &str) -> bool {
+    matches!(
+        label,
+        "done"
+            | "bug"
+            | "feature"
+            | "enhancement"
+            | "documentation"
+            | "docs"
+            | "urgent"
+            | "high"
+            | "medium"
+            | "low"
+            | "priority"
+    )
+}
+
+fn is_generic_milestone(milestone: &str) -> bool {
+    let slug = slugify(milestone);
+    slug.is_empty()
+        || slug.chars().all(|character| character.is_ascii_digit())
+        || slug.len() <= 2
+        || matches!(slug.as_str(), "mvp" | "v1" | "v2" | "m1" | "m2" | "m3" | "m4")
+}
+
+fn infer_candidate_area_from_narrative(
+    issue: &IssueEvidence,
+    prs: &[PullRequestEvidence],
+) -> Option<String> {
+    for text in std::iter::once(issue.title.as_str())
+        .chain(issue.description.iter().map(String::as_str))
+        .chain(
+            issue
+                .parent
+                .iter()
+                .filter_map(|parent| parent.title.as_deref()),
+        )
+        .chain(issue.children.iter().filter_map(|child| child.title.as_deref()))
+        .chain(issue.comments.iter().map(|comment| comment.body.as_str()))
+        .chain(prs.iter().map(|pr| pr.title.as_str()))
+        .chain(prs.iter().filter_map(|pr| pr.body.as_deref()))
+        .chain(
+            prs.iter()
+                .flat_map(|pr| pr.reviews.iter())
+                .filter_map(|review| review.disposition.as_deref()),
+        )
+        .chain(
+            prs.iter()
+                .flat_map(|pr| pr.checks.iter())
+                .map(|check| check.name.as_str()),
+        )
+    {
+        if let Some(slug) = candidate_area_slug_from_text(text) {
+            return Some(slug);
+        }
+    }
+    None
+}
+
+fn candidate_area_slug_from_text(text: &str) -> Option<String> {
+    let mut tokens = Vec::new();
+    let raw_tokens = text
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.trim().is_empty())
+        .collect::<Vec<_>>();
+    for (index, raw) in raw_tokens.iter().enumerate() {
+        if raw.len() <= 5
+            && raw.chars().all(|character| character.is_ascii_uppercase())
+            && raw_tokens
+                .get(index + 1)
+                .is_some_and(|next| next.chars().all(|character| character.is_ascii_digit()))
+        {
+            continue;
+        }
+        let token = raw.trim().to_ascii_lowercase();
+        if token.len() < 3
+            || token.chars().all(|character| character.is_ascii_digit())
+            || looks_like_issue_key_token(&token)
+            || is_area_stopword(&token)
+        {
+            continue;
+        }
+        tokens.push(token);
+        if tokens.len() == 3 {
+            break;
+        }
+    }
+    if tokens.is_empty() {
+        return None;
+    }
+    Some(slugify(&tokens.join("-")))
+}
+
+fn looks_like_issue_key_token(token: &str) -> bool {
+    let Some((prefix, suffix)) = token.split_once('-') else {
+        return false;
+    };
+    prefix.chars().all(|character| character.is_ascii_alphabetic())
+        && suffix.chars().all(|character| character.is_ascii_digit())
+}
+
+fn is_area_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "add"
+            | "adds"
+            | "added"
+            | "build"
+            | "create"
+            | "define"
+            | "fix"
+            | "for"
+            | "from"
+            | "implement"
+            | "implements"
+            | "issue"
+            | "make"
+            | "new"
+            | "support"
+            | "the"
+            | "this"
+            | "update"
+            | "updates"
+            | "with"
+    )
+}
+
+fn evolve_memory_config(
+    config: &MemoryConfig,
+    plan: &CapturePlan,
+) -> MemoryConfig {
+    let mut evolved = config.clone();
+    for issue_plan in &plan.selected {
+        for area_slug in &issue_plan.areas {
+            let mut area = evolved.area_or_default(area_slug);
+            merge_area_evidence(&mut area, issue_plan, config.confidence_threshold);
+            evolved.areas.insert(area.slug.clone(), area);
+        }
+    }
+    evolved
+}
+
+fn merge_area_evidence(
+    area: &mut AreaConfig,
+    issue_plan: &CaptureIssuePlan,
+    confidence_threshold: u8,
+) {
+    if let Some(milestone) = issue_plan.issue.milestone.as_deref().and_then(normalize_optional) {
+        push_unique(&mut area.source_refs.linear_milestones, milestone);
+    }
+    for label in normalize_list(issue_plan.issue.labels.clone()) {
+        if slugify(&label) == area.slug || area_alias_matches(area, &label) {
+            push_unique(&mut area.source_refs.linear_labels, label.clone());
+            push_unique(&mut area.aliases, label);
+        }
+    }
+    push_unique(&mut area.aliases, area.slug.clone());
+    push_unique(&mut area.aliases, area.title.to_ascii_lowercase());
+    let confidence = inferred_area_confidence(area, issue_plan);
+    area.confidence = area.confidence.max(confidence);
+    if area.confidence >= confidence_threshold {
+        area.status = AreaStatus::Stable;
+    }
+}
+
+fn inferred_area_confidence(area: &AreaConfig, issue_plan: &CaptureIssuePlan) -> u8 {
+    let base: u8 = if normalize_list(issue_plan.issue.labels.clone())
+        .iter()
+        .any(|label| slugify(label) == area.slug && !is_generic_label(label))
+    {
+        90
+    } else if issue_plan
+        .issue
+        .milestone
+        .as_deref()
+        .is_some_and(|milestone| slugify(milestone) == area.slug)
+    {
+        65
+    } else if area.slug == "general" {
+        40
+    } else {
+        60
+    };
+    let reinforcement = u8::from(!issue_plan.prs.is_empty()).saturating_mul(10)
+        + u8::from(issue_plan.issue.milestone.is_some()).saturating_mul(5);
+    base.saturating_add(reinforcement).min(95)
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if normalize_optional(&value).is_none() {
+        return;
+    }
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+        values.sort();
+    }
 }
 
 fn source_hash(issue: &IssueEvidence, prs: &[PullRequestEvidence]) -> Result<String, MemoryError> {
@@ -262,10 +537,22 @@ fn render_issue_capsule(
                 .milestone_id
                 .as_ref()
                 .map(|milestone_id| format!("linear:project-milestone:{milestone_id}")),
+            linear_workpad_comment: plan
+                .issue
+                .comments
+                .iter()
+                .find(|comment| comment.source.as_deref() == Some("linear:workpad"))
+                .and_then(|comment| comment.id.as_ref())
+                .map(|id| format!("linear:comment:{id}")),
             github_prs: plan
                 .prs
                 .iter()
                 .map(|pr| format!("github:pr:{}", pr.number))
+                .collect(),
+            github_merge_shas: plan
+                .prs
+                .iter()
+                .filter_map(|pr| pr.merge_sha.clone())
                 .collect(),
         },
         captured_at: Utc::now(),
@@ -312,7 +599,7 @@ fn render_issue_capsule(
             markdown.push_str(&format!("- {warning}\n"));
         }
     }
-    markdown.push_str("\n## Provenance\n\n");
+    markdown.push_str("\n## Source refs\n\n");
     match &plan.issue.url {
         Some(url) => markdown.push_str(&format!("- Linear: {url}\n")),
         None => markdown.push_str(&format!("- Linear: {issue_key}\n")),
@@ -323,6 +610,9 @@ fn render_issue_capsule(
             |url| format!("[#{}]({url})", pr.number),
         );
         markdown.push_str(&format!("- PR: {label}\n"));
+        if let Some(sha) = pr.merge_sha.as_deref() {
+            markdown.push_str(&format!("- Merge SHA: `{sha}`\n"));
+        }
     }
     if let Some(milestone) = plan.issue.milestone.as_deref() {
         markdown.push_str(&format!(
@@ -402,7 +692,11 @@ struct SourceRefs {
     linear_children: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     linear_milestone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    linear_workpad_comment: Option<String>,
     github_prs: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    github_merge_shas: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -476,17 +770,6 @@ fn render_outcome(plan: &CaptureIssuePlan) -> String {
             }
             lines.push(line);
         }
-    }
-    let changed_files = plan
-        .prs
-        .iter()
-        .flat_map(|pr| pr.changed_files.iter())
-        .take(8)
-        .map(|file| format!("  - {}", file.path.display()))
-        .collect::<Vec<_>>();
-    if !changed_files.is_empty() {
-        lines.push("- Notable changed files:".to_string());
-        lines.extend(changed_files);
     }
     lines.join("\n")
 }

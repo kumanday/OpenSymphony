@@ -87,7 +87,13 @@ async fn init_copies_template_files_and_customizes_workflow() {
     );
     let gitignore =
         fs::read_to_string(repo.path().join(".gitignore")).expect(".gitignore should exist");
-    assert_eq!(gitignore, ".opensymphony*\n");
+    assert_eq!(gitignore, memory_gitignore_policy(""));
+    let memory_config = fs::read_to_string(repo.path().join(".opensymphony/memory/memory.yaml"))
+        .expect("memory config should be initialized");
+    assert!(
+        memory_config.contains("memory_root: .opensymphony/memory"),
+        "memory config should contain the default memory root: {memory_config}",
+    );
     assert!(
         !repo
             .path()
@@ -100,8 +106,10 @@ async fn init_copies_template_files_and_customizes_workflow() {
         "stdout should contain a summary: {stdout}",
     );
     assert!(
-        stdout.contains("Created:") && stdout.contains("- .gitignore"),
-        "stdout should report the generated ignore entry: {stdout}",
+        stdout.contains("Created:")
+            && stdout.contains("- .gitignore")
+            && stdout.contains("- .opensymphony/memory/memory.yaml"),
+        "stdout should report the generated memory files: {stdout}",
     );
 }
 
@@ -327,7 +335,7 @@ async fn init_merges_agents_and_skips_conflicting_file_when_requested() {
 }
 
 #[tokio::test]
-async fn init_appends_opensymphony_rule_to_existing_gitignore() {
+async fn init_repairs_gitignore_for_memory_policy() {
     let server = TemplateServer::start().await;
     let repo = TempDir::new().expect("temp repo should exist");
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
@@ -350,7 +358,7 @@ async fn init_appends_opensymphony_rule_to_existing_gitignore() {
 
     let gitignore =
         fs::read_to_string(repo.path().join(".gitignore")).expect(".gitignore should exist");
-    assert_eq!(gitignore, "node_modules/\n.opensymphony*\n");
+    assert_eq!(gitignore, memory_gitignore_policy("node_modules/\n"));
     assert!(
         stdout.contains("Updated:") && stdout.contains("- .gitignore"),
         "stdout should report the updated ignore entry: {stdout}",
@@ -501,6 +509,12 @@ fn run_git(repo_root: &std::path::Path, args: &[&str]) {
         .status()
         .expect("git should run");
     assert!(status.success(), "git {:?} should succeed", args);
+}
+
+fn memory_gitignore_policy(prefix: &str) -> String {
+    format!(
+        "{prefix}.opensymphony*\n!.opensymphony/\n.opensymphony/*\n!.opensymphony/memory/\n.opensymphony/memory/*\n!.opensymphony/memory/memory.yaml\n"
+    )
 }
 
 struct TemplateServer {

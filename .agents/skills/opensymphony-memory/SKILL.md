@@ -36,16 +36,17 @@ is pending docs sync, or has capture warnings. Use `opensymphony memory lint
 
 ## Rules
 
-- Do not create or update issue capsules during ordinary implementation unless the user explicitly asks.
-- Do not archive Linear issues. Archival is a separate operator action guarded by `opensymphony linear archive`.
-- Do not rewrite public docs from private memory by hand; use `opensymphony memory sync-docs --dry-run` first.
+- Do not create or update issue capsules during ordinary implementation unless the user explicitly asks; normal capture is run-loop infrastructure when `memory.auto_capture` is enabled.
+- Do not archive Linear issues unless the user explicitly asks. Run-loop auto-archive is disabled by default and still requires successful capture.
+- Do not rewrite public docs from private memory by hand; use `opensymphony memory sync-docs` so the managed sections and indexes stay consistent.
 - Do not copy full agent transcripts into memory or docs.
 - Do not treat retrieved memory as authoritative over current source files, tests, or upstream specs.
 
 ## Interpretation
 
 Memory output separates source-derived facts from generated synthesis when the
-capture has enough evidence. Prefer source provenance such as PR URLs, commit
-SHAs, and issue identifiers when making claims. If memory is stale, missing, or
-warning-heavy, inspect the linked PRs, current docs, and `opensymphony debug
-ISSUE-ID` before depending on it.
+capture has enough evidence. Prefer source refs such as Linear issue IDs, PR
+URLs, and merge SHAs when making audit claims. Merge SHA is an immutable pointer
+to the merged code state, not an area inference signal. If memory is stale,
+missing, or warning-heavy, inspect the linked PRs, current docs, and
+`opensymphony debug ISSUE-ID` before depending on it.

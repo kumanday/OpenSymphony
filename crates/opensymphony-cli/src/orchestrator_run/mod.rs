@@ -2,13 +2,22 @@ pub(crate) mod backends;
 mod config;
 mod snapshot;
 
-use std::{collections::VecDeque, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::PathBuf,
+    process::ExitCode,
+    sync::Arc,
+};
 
-use crate::opensymphony_control::{ControlPlaneServer, RecentEventKind, SnapshotStore};
+use crate::opensymphony_control::{
+    ControlPlaneServer, RecentEvent, RecentEventKind, SnapshotStore,
+};
 use crate::opensymphony_domain::TimestampMs;
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::OpenHandsError;
-use crate::opensymphony_orchestrator::{Scheduler, SchedulerConfig, SchedulerError};
+use crate::opensymphony_orchestrator::{
+    IssueStateCategory, OrchestratorSnapshot, Scheduler, SchedulerConfig, SchedulerError,
+};
 use crate::opensymphony_workspace::WorkspaceError;
 use chrono::{DateTime, Utc};
 use clap::Args;
@@ -24,7 +33,7 @@ use self::{
         RuntimeWorkerBackend, RuntimeWorkspaceBackend, build_runtime_transport,
         build_tracker_backend, build_workspace_manager_config,
     },
-    config::resolve_runtime_config,
+    config::{RunRuntimeConfig, resolve_runtime_config},
     snapshot::{current_agent_server_status, map_snapshot, push_recent_event, terminal_state_set},
 };
 
@@ -71,6 +80,10 @@ enum RunCommandError {
         #[source]
         source: crate::opensymphony_workflow::WorkflowConfigError,
     },
+    #[error(
+        "memory auto-capture is enabled but {path} is missing; run `opensymphony memory init` or `opensymphony update` from the target repo before `opensymphony run`"
+    )]
+    MissingMemoryConfig { path: PathBuf },
     #[error("failed to build tracker client: {0}")]
     Tracker(#[from] LinearError),
     #[error("failed to create workspace manager: {0}")]
@@ -170,6 +183,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
 
     let bootstrap_snapshot = scheduler.bootstrap(now_timestamp()).await?;
+    let mut auto_capture_completed_issues = terminal_issue_identifiers(&bootstrap_snapshot);
     push_recent_event(
         &mut recent_events,
         RecentEventKind::SnapshotPublished,
@@ -213,6 +227,12 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                 let observed_at = now_timestamp();
                 match scheduler.tick(observed_at).await {
                     Ok(snapshot) => {
+                        let current_terminal_issues = terminal_issue_identifiers(&snapshot);
+                        let auto_capture_candidates = auto_capture_candidates(
+                            &current_terminal_issues,
+                            &mut auto_capture_completed_issues,
+                            runtime.memory.auto_capture,
+                        );
                         push_recent_event(
                             &mut recent_events,
                             RecentEventKind::SnapshotPublished,
@@ -231,6 +251,29 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             current_agent_server_status(&mut supervisor, client.base_url()),
                             &recent_events,
                         )).await;
+                        if !auto_capture_candidates.is_empty() {
+                            let auto_capture_result = super::memory::auto_capture_terminal(
+                                &runtime.target_repo,
+                                &runtime.workflow_path,
+                                &auto_capture_candidates,
+                                runtime.memory.auto_archive,
+                            )
+                            .await;
+                            mark_auto_capture_completed(
+                                &mut auto_capture_completed_issues,
+                                &auto_capture_candidates,
+                                &auto_capture_result,
+                            );
+                            publish_auto_capture_event(
+                                auto_capture_result,
+                                &snapshot,
+                                &runtime,
+                                &mut supervisor,
+                                client.base_url(),
+                                &mut recent_events,
+                                &store,
+                            ).await;
+                        }
                     }
                     Err(error) => {
                         warn!(%error, "scheduler tick failed");
@@ -262,6 +305,125 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     Ok(())
 }
 
+async fn publish_auto_capture_event(
+    result: Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
+    snapshot: &OrchestratorSnapshot,
+    runtime: &RunRuntimeConfig,
+    supervisor: &mut Option<crate::opensymphony_openhands::LocalServerSupervisor>,
+    agent_server_base_url: &str,
+    recent_events: &mut VecDeque<RecentEvent>,
+    store: &SnapshotStore,
+) {
+    if record_auto_capture_recent_event(recent_events, result) {
+        store
+            .publish(map_snapshot(
+                snapshot,
+                runtime.workflow.config.workspace.root.as_path(),
+                &terminal_state_set(&runtime.workflow),
+                current_agent_server_status(supervisor, agent_server_base_url),
+                recent_events,
+            ))
+            .await;
+    }
+}
+
+fn record_auto_capture_recent_event(
+    recent_events: &mut VecDeque<RecentEvent>,
+    result: Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
+) -> bool {
+    match result {
+        Ok(report) => {
+            if report.captured_issue_keys.is_empty() && report.warnings.is_empty() {
+                return false;
+            }
+            let mut summary = if report.captured_issue_keys.is_empty() {
+                "memory capture reported no new capsules".to_string()
+            } else {
+                format!(
+                    "memory captured {} issue(s)",
+                    report.captured_issue_keys.len()
+                )
+            };
+            if !report.docs_written.is_empty() {
+                summary.push_str(&format!(", synced {} doc(s)", report.docs_written.len()));
+            }
+            if !report.archived_issue_keys.is_empty() {
+                summary.push_str(&format!(
+                    ", archived {} issue(s)",
+                    report.archived_issue_keys.len()
+                ));
+            }
+            if !report.warnings.is_empty() {
+                summary.push_str(&format!(", {} warning(s)", report.warnings.len()));
+            }
+            push_recent_event(
+                recent_events,
+                if report.warnings.is_empty() {
+                    RecentEventKind::SnapshotPublished
+                } else {
+                    RecentEventKind::Warning
+                },
+                None,
+                summary,
+                Utc::now(),
+            );
+            true
+        }
+        Err(error) => {
+            warn!(%error, "automatic memory capture failed");
+            push_recent_event(
+                recent_events,
+                RecentEventKind::Warning,
+                None,
+                format!("automatic memory capture failed: {error}"),
+                Utc::now(),
+            );
+            true
+        }
+    }
+}
+
+fn terminal_issue_identifiers(snapshot: &OrchestratorSnapshot) -> BTreeSet<String> {
+    snapshot
+        .issues
+        .iter()
+        .filter(|issue| issue.issue.state.category == IssueStateCategory::Terminal)
+        .map(|issue| issue.issue.identifier.to_string())
+        .collect()
+}
+
+fn auto_capture_candidates(
+    current_terminal_issues: &BTreeSet<String>,
+    completed_issues: &mut BTreeSet<String>,
+    auto_capture_enabled: bool,
+) -> Vec<String> {
+    completed_issues.retain(|issue| current_terminal_issues.contains(issue));
+    if !auto_capture_enabled {
+        *completed_issues = current_terminal_issues.clone();
+        return Vec::new();
+    }
+    current_terminal_issues
+        .difference(completed_issues)
+        .cloned()
+        .collect()
+}
+
+fn mark_auto_capture_completed(
+    completed_issues: &mut BTreeSet<String>,
+    candidates: &[String],
+    result: &Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
+) {
+    match result {
+        Ok(report) if report.workflow_completed() && !report.completed_issue_keys.is_empty() => {
+            completed_issues.extend(report.completed_issue_keys.iter().cloned());
+        }
+        Ok(report) if report.workflow_completed() && report.warnings.is_empty() => {
+            completed_issues.extend(candidates.iter().cloned());
+        }
+        Ok(_) | Err(_) => {}
+    }
+}
+
 pub(super) fn timestamp_to_datetime(value: TimestampMs) -> DateTime<Utc> {
     DateTime::from_timestamp_millis(value.as_u64() as i64).unwrap_or_else(Utc::now)
 }
@@ -272,4 +434,95 @@ pub(super) fn datetime_to_timestamp_ms(value: DateTime<Utc>) -> TimestampMs {
 
 pub(super) fn now_timestamp() -> TimestampMs {
     TimestampMs::new(Utc::now().timestamp_millis().max(0) as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::opensymphony_memory::MemoryError;
+
+    fn issue_set(keys: &[&str]) -> BTreeSet<String> {
+        keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    #[test]
+    fn auto_capture_candidates_retry_until_capture_completes() {
+        let current = issue_set(&["COE-1", "COE-2"]);
+        let mut completed = issue_set(&["COE-1"]);
+
+        let candidates = auto_capture_candidates(&current, &mut completed, true);
+
+        assert_eq!(candidates, vec!["COE-2".to_string()]);
+        mark_auto_capture_completed(
+            &mut completed,
+            &candidates,
+            &Err(MemoryError::InvalidInput("capture failed".to_string())),
+        );
+        assert_eq!(completed, issue_set(&["COE-1"]));
+
+        let retry_candidates = auto_capture_candidates(&current, &mut completed, true);
+        assert_eq!(retry_candidates, vec!["COE-2".to_string()]);
+    }
+
+    #[test]
+    fn auto_capture_candidates_forget_reopened_issues() {
+        let current = issue_set(&["COE-2"]);
+        let mut completed = issue_set(&["COE-1", "COE-2"]);
+
+        let candidates = auto_capture_candidates(&current, &mut completed, true);
+
+        assert!(candidates.is_empty());
+        assert_eq!(completed, issue_set(&["COE-2"]));
+    }
+
+    #[test]
+    fn auto_capture_result_waits_for_post_capture_steps_before_completing() {
+        let mut completed = issue_set(&["COE-1"]);
+        let candidates = vec!["COE-2".to_string()];
+        let result = Ok(super::super::memory::AutoMemoryReport {
+            completed_issue_keys: Vec::new(),
+            captured_issue_keys: vec!["COE-2".to_string()],
+            archived_issue_keys: Vec::new(),
+            docs_written: Vec::new(),
+            capture_completed: true,
+            docs_sync_completed: false,
+            archive_completed: true,
+            warnings: vec!["docs sync failed after capture".to_string()],
+        });
+
+        mark_auto_capture_completed(&mut completed, &candidates, &result);
+
+        assert_eq!(completed, issue_set(&["COE-1"]));
+    }
+
+    #[test]
+    fn auto_capture_result_marks_full_workflow_complete() {
+        let mut completed = issue_set(&["COE-1"]);
+        let candidates = vec!["COE-2".to_string()];
+        let result = Ok(super::super::memory::AutoMemoryReport {
+            completed_issue_keys: vec!["COE-2".to_string()],
+            captured_issue_keys: vec!["COE-2".to_string()],
+            archived_issue_keys: Vec::new(),
+            docs_written: vec![PathBuf::from("docs/runtime.md")],
+            capture_completed: true,
+            docs_sync_completed: true,
+            archive_completed: true,
+            warnings: Vec::new(),
+        });
+
+        mark_auto_capture_completed(&mut completed, &candidates, &result);
+
+        assert_eq!(completed, issue_set(&["COE-1", "COE-2"]));
+    }
+
+    #[test]
+    fn auto_capture_result_does_not_mark_default_noop_complete() {
+        let mut completed = issue_set(&["COE-1"]);
+        let candidates = vec!["COE-2".to_string()];
+        let result = Ok(super::super::memory::AutoMemoryReport::default());
+
+        mark_auto_capture_completed(&mut completed, &candidates, &result);
+
+        assert_eq!(completed, issue_set(&["COE-1"]));
+    }
 }

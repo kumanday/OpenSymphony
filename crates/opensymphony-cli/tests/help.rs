@@ -50,6 +50,7 @@ fn memory_help_explains_capture_and_query_surface() {
     );
     for snippet in [
         "Capture, query, and sync project memory",
+        "init",
         "capture",
         "sync-docs",
         "related",

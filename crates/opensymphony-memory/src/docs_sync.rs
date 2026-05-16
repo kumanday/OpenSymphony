@@ -10,8 +10,13 @@ pub fn plan_docs_sync(
             "no captured issues selected for docs sync".to_string(),
         ));
     }
+    let all_selected_issue_keys = selected
+        .iter()
+        .map(|issue| issue.issue_key.clone())
+        .collect::<BTreeSet<_>>();
 
-    let mut by_area: BTreeMap<String, Vec<IndexedIssue>> = BTreeMap::new();
+    let mut by_area: BTreeMap<String, (AreaConfig, Vec<IndexedIssue>)> = BTreeMap::new();
+    let mut unmapped_areas = BTreeSet::new();
     for issue in selected {
         for area in issue.areas() {
             if selection
@@ -21,14 +26,29 @@ pub fn plan_docs_sync(
             {
                 continue;
             }
-            by_area.entry(area).or_default().push(issue.clone());
+            if let Some(area_config) = config.areas.get(&area) {
+                if area_config.status != AreaStatus::Stable
+                    || area_config.confidence < config.confidence_threshold
+                {
+                    unmapped_areas.insert(area);
+                    continue;
+                }
+                by_area
+                    .entry(area)
+                    .or_insert_with(|| (area_config.clone(), Vec::new()))
+                    .1
+                    .push(issue.clone());
+            } else {
+                unmapped_areas.insert(area);
+            }
         }
     }
-
     let mut targets = Vec::new();
     let mut warnings = Vec::new();
-    for (area_slug, issues) in by_area {
-        let area = config.area_or_default(&area_slug);
+    if by_area.is_empty() {
+        warnings.push(missing_docs_area_mapping_message(config, unmapped_areas));
+    }
+    for (_area_slug, (area, issues)) in by_area {
         let before = if area.docs_target.exists() {
             Some(read_to_string(&area.docs_target)?)
         } else {
@@ -44,7 +64,7 @@ pub fn plan_docs_sync(
                 display_path(&config.repo_root, &area.docs_target)
             ));
         }
-        let diff = render_diff(before.as_deref().unwrap_or(""), &after, &area.docs_target);
+        let diff = render_diff_stat(before.as_deref().unwrap_or(""), &after, &area.docs_target);
         targets.push(DocsTargetPlan {
             area: area.slug,
             title: area.title,
@@ -58,12 +78,15 @@ pub fn plan_docs_sync(
         });
     }
 
-    let selected_issue_keys = targets
+    let mut selected_issue_keys = targets
         .iter()
         .flat_map(|target| target.issue_keys.clone())
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    if selected_issue_keys.is_empty() {
+        selected_issue_keys = all_selected_issue_keys.into_iter().collect();
+    }
 
     Ok(DocsSyncPlan {
         write,
@@ -71,6 +94,24 @@ pub fn plan_docs_sync(
         targets,
         warnings,
     })
+}
+
+fn missing_docs_area_mapping_message(
+    config: &MemoryConfig,
+    unmapped_areas: BTreeSet<String>,
+) -> String {
+    if config.areas.is_empty() {
+        return "No stable learned docs area found. Run opensymphony memory init or capture issues with stronger Linear/PR evidence.".to_string();
+    }
+
+    if unmapped_areas.is_empty() {
+        return "Selected issues have no stable docs areas yet; capture kept their memory private until confidence improves.".to_string();
+    }
+
+    let areas = unmapped_areas.into_iter().collect::<Vec<_>>().join(", ");
+    format!(
+        "selected issues only reference candidate or unmapped docs areas ({areas}); capture kept them private until confidence improves."
+    )
 }
 
 pub fn write_docs_sync_plan(

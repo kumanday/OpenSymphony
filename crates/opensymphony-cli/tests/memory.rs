@@ -70,7 +70,7 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
     );
     assert_success(&docs, "docs dry-run");
     let stdout = String::from_utf8_lossy(&docs.stdout);
-    assert!(stdout.contains("Docs Sync Plan"));
+    assert!(stdout.contains("Docs Sync Summary"));
     assert!(stdout.contains("COE-123"));
     assert!(!stdout.contains(".opensymphony/memory/issues"));
 
@@ -88,6 +88,135 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
     assert_success(&archive, "archive dry-run");
     let stdout = String::from_utf8_lossy(&archive.stdout);
     assert!(stdout.contains("eligible"));
+}
+
+#[test]
+fn memory_init_creates_private_config_and_gitignore_policy() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::create_dir_all(repo.path().join("docs/tasks")).expect("tasks dir should write");
+    fs::write(
+        repo.path().join("docs/tasks/task.md"),
+        "---\narea: agent-runtime\n---\n# Task\n",
+    )
+    .expect("task should write");
+    fs::write(
+        repo.path().join("docs/agent-runtime.md"),
+        "# Agent Runtime\n",
+    )
+    .expect("doc should write");
+    fs::write(repo.path().join(".gitignore"), ".opensymphony*\n").expect("gitignore should write");
+
+    let output = run(repo.path(), ["memory", "init"]);
+    assert_success(&output, "memory init");
+
+    let config_path = repo.path().join(".opensymphony/memory/memory.yaml");
+    let config = fs::read_to_string(&config_path).expect("memory config should exist");
+    assert!(config.contains("agent-runtime:"));
+    assert!(config.contains("docs_target: docs/agent-runtime.md"));
+    assert!(config.contains("status: stable"));
+    assert!(config.contains("confidence: 85"));
+    assert!(
+        !repo
+            .path()
+            .join(".opensymphony/memory/memory.duckdb")
+            .exists()
+    );
+
+    let gitignore =
+        fs::read_to_string(repo.path().join(".gitignore")).expect("gitignore should be readable");
+    assert!(gitignore.contains("!.opensymphony/memory/memory.yaml"));
+    assert!(gitignore.contains(".opensymphony/memory/*"));
+
+    let duplicate = run(repo.path(), ["memory", "init"]);
+    assert_failure(&duplicate, "memory init duplicate");
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already exists"));
+
+    let forced = run(repo.path(), ["memory", "init", "--force"]);
+    assert_success(&forced, "memory init force");
+}
+
+#[test]
+fn memory_init_dry_run_does_not_write_files() {
+    let repo = TempDir::new().expect("temp repo should exist");
+
+    let output = run(repo.path(), ["memory", "init", "--dry-run"]);
+    assert_success(&output, "memory init dry-run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Proposed config"));
+    assert!(stdout.contains("areas:"));
+    assert!(!stdout.contains("general:"));
+    assert!(
+        !repo
+            .path()
+            .join(".opensymphony/memory/memory.yaml")
+            .exists()
+    );
+    assert!(!repo.path().join(".gitignore").exists());
+}
+
+#[test]
+fn sync_docs_requires_configured_area_mapping() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::write(repo.path().join("source.yaml"), candidate_only_source())
+        .expect("source evidence should write");
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "COE-123",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture without config",
+    );
+
+    let output = run(repo.path(), ["memory", "sync-docs"]);
+    assert_success(&output, "sync-docs without stable mappings");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("candidate or unmapped docs areas"));
+    assert!(stdout.contains("confidence improves"));
+    assert!(!repo.path().join("docs/readme-md.md").exists());
+}
+
+#[test]
+fn sync_docs_writes_only_configured_areas_and_dry_run_writes_nothing() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_general_memory_config(repo.path());
+    fs::write(repo.path().join("source.yaml"), noisy_file_source())
+        .expect("source evidence should write");
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "COE-123",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture noisy file source",
+    );
+
+    let dry_run = run(repo.path(), ["memory", "sync-docs", "--dry-run"]);
+    assert_success(&dry_run, "sync-docs dry-run");
+    assert!(
+        !repo.path().join("docs/general.md").exists(),
+        "dry run should not write docs"
+    );
+
+    let write = run(repo.path(), ["memory", "sync-docs"]);
+    assert_success(&write, "sync-docs write");
+    assert!(repo.path().join("docs/general.md").is_file());
+    for bad_path in ["docs/readme-md.md", "docs/cargo.md", "docs/cargo-lock.md"] {
+        assert!(
+            !repo.path().join(bad_path).exists(),
+            "{bad_path} should not be generated from changed filenames"
+        );
+    }
 }
 
 #[test]
@@ -411,6 +540,60 @@ fn linear_archive_with_explicit_issues_captures_before_archiving() {
 }
 
 #[test]
+fn linear_archive_does_not_block_when_no_github_pr_matches() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+        r#"{"data":{"issueArchive":{"success":true}}}"#.to_string(),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let bin_dir = repo.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should write");
+    write_fake_gh_no_matches(bin_dir.join("gh"));
+
+    let archive = run_with_path(
+        repo.path(),
+        ["linear", "archive", "--issues", "COE-123"],
+        bin_dir.to_str().expect("bin path should be utf-8"),
+    );
+
+    assert_success(&archive, "archive without matched GitHub PR");
+    let stdout = String::from_utf8_lossy(&archive.stdout);
+    assert!(stdout.contains("no GitHub PR source was matched"));
+    assert!(!stdout.contains("Linear Archive Dry Run"));
+    assert!(stdout.contains("Archived 1 Linear issue(s)."));
+    assert_eq!(archive_status(repo.path(), "COE-123"), "archived");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].contains("\"id\":\"COE-123\""));
+}
+
+#[test]
+fn archive_from_memory_does_not_block_when_only_warning_is_no_github_pr() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+        r#"{"data":{"issueArchive":{"success":true}}}"#.to_string(),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    assert_success(
+        &run(repo.path(), ["memory", "capture", "COE-123", "--no-github"]),
+        "capture without matched GitHub PR",
+    );
+    let archive = run(repo.path(), ["linear", "archive", "--from-memory"]);
+
+    assert_success(&archive, "archive from memory without matched GitHub PR");
+    assert!(String::from_utf8_lossy(&archive.stdout).contains("Archived 1 Linear issue(s)."));
+    assert_eq!(archive_status(repo.path(), "COE-123"), "archived");
+}
+
+#[test]
 fn linear_archive_write_marks_successes_before_reporting_partial_failure() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
@@ -514,10 +697,35 @@ areas:
   openhands-runtime:
     title: OpenHands Runtime
     docs_target: docs/openhands-runtime.md
-    path_hints:
-      - openhands
-    labels:
+    status: stable
+    confidence: 90
+    aliases:
       - runtime
+      - OpenHands Runtime
+    source_refs:
+      linear_labels:
+        - runtime
+"#,
+    )
+    .expect("memory config should write");
+}
+
+fn write_general_memory_config(repo: &std::path::Path) {
+    fs::create_dir_all(repo.join(".opensymphony/memory")).expect("memory dir should write");
+    fs::write(
+        repo.join(".opensymphony/memory/memory.yaml"),
+        r#"
+areas:
+  general:
+    title: General
+    docs_target: docs/general.md
+    status: stable
+    confidence: 90
+    aliases:
+      - general
+    source_refs:
+      linear_labels:
+        - general
 "#,
     )
     .expect("memory config should write");
@@ -746,6 +954,21 @@ exit 1
     );
 }
 
+fn write_fake_gh_no_matches(path: std::path::PathBuf) {
+    write_executable(
+        path,
+        r#"#!/bin/sh
+set -eu
+if [ "${1-}" = "pr" ] && [ "${2-}" = "list" ]; then
+  printf '%s\n' '[]'
+  exit 0
+fi
+printf 'unexpected gh command: %s\n' "$*" >&2
+exit 1
+"#,
+    );
+}
+
 fn write_executable(path: std::path::PathBuf, contents: &str) {
     fs::write(&path, contents).expect("executable should write");
     #[cfg(unix)]
@@ -887,6 +1110,56 @@ prs:
       - reviewer: reviewer
         state: APPROVED
         disposition: Reconnect ordering looked correct.
+"#
+}
+
+fn noisy_file_source() -> &'static str {
+    r#"
+issues:
+  - identifier: COE-123
+    title: Repo metadata cleanup
+    url: https://linear.app/example/issue/COE-123
+    description: Update root repository metadata.
+    state: Done
+    labels:
+      - general
+    linked_prs:
+      - 456
+prs:
+  - number: 456
+    title: COE-123 update repository metadata
+    url: https://github.com/example/repo/pull/456
+    branch: coe-123-metadata
+    merge_sha: abcdef1234567890
+    changed_files:
+      - path: README.md
+        change_kind: modified
+      - path: Cargo.toml
+        change_kind: modified
+      - path: Cargo.lock
+        change_kind: modified
+"#
+}
+
+fn candidate_only_source() -> &'static str {
+    r#"
+issues:
+  - identifier: COE-123
+    title: Repo metadata cleanup
+    url: https://linear.app/example/issue/COE-123
+    description: Update root repository metadata.
+    state: Done
+    linked_prs:
+      - 456
+prs:
+  - number: 456
+    title: COE-123 update repository metadata
+    url: https://github.com/example/repo/pull/456
+    branch: coe-123-metadata
+    merge_sha: abcdef1234567890
+    changed_files:
+      - path: README.md
+        change_kind: modified
 "#
 }
 

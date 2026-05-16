@@ -301,3 +301,53 @@ end
 - Sub-issues are fetched inline with the main issue query (no N+1)
 - The hierarchy check is O(n) where n = number of sub-issues (typically small)
 - Sorting now includes an additional field but complexity remains O(n log n)
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-254 contributed: PR #6: COE-254: bootstrap tracker, workspace, and orchestration core
+- COE-263 contributed: PR #35: COE-263: Implement workspace manager and lifecycle hooks (merge `2693eea`)
+- COE-264 contributed: PR #33: COE-264: Linear read adapter and issue normalization (merge `45cca3c`)
+- COE-267 contributed: PR #83: Add memory init and mapped docs sync
+- COE-268 contributed: PR #43: Implement orchestrator scheduler retries and reconciliation (merge `2ad73ad`)
+- COE-270 contributed: PR #39: COE-270: add deterministic workspace context artifacts (merge `3a90eea`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection"]
+  area --> docs["docs/elixir-hierarchy-changes.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-254: Tracker, Workspaces, and Orchestration
+- COE-263: Workspace manager and lifecycle hooks
+- COE-264: Linear read adapter and issue normalization
+- COE-267: Linear MCP write surface
+- COE-268: Orchestrator scheduler, retries, and reconciliation
+- COE-270: Repository harness and generated context artifacts
+- COE-277: Implement hierarchy-aware task selection
+
+## Source refs
+
+- COE-254
+- COE-263
+- COE-264
+- COE-267
+- COE-268
+- COE-270
+- COE-277
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

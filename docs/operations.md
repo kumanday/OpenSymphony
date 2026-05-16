@@ -133,18 +133,31 @@ python3 .agents/skills/linear/scripts/linear_graphql.py \
 
 ## 6. Project memory
 
-Memory capture is review-first. Live capture reads Linear and discovers GitHub
-PRs by default, so use dry runs before writing local memory or docs:
+Project memory stores policy and learned structure in
+`.opensymphony/memory/memory.yaml` and private runtime artifacts under
+`.opensymphony/memory/`. `opensymphony run` captures terminal issue transitions
+automatically when `memory.auto_capture` is enabled in `config.yaml`:
+
+```yaml
+memory:
+  auto_capture: true
+  auto_archive: false
+```
+
+Manual commands remain available for setup, backfill, inspection, and guarded
+archive operations:
 
 ```bash
-opensymphony memory capture COE-123 --dry-run
+opensymphony memory init
 opensymphony memory capture COE-123
 opensymphony memory status
 opensymphony memory brief COE-123
 opensymphony memory related --paths crates/opensymphony-openhands
-opensymphony memory sync-docs --issues COE-123 --dry-run
+opensymphony memory sync-docs --since-last-sync
 opensymphony memory lint --public-docs
 ```
+
+Add `--dry-run` to write commands when an operator wants a non-writing preview.
 
 Use `opensymphony memory import --source-file completed.yaml` only for
 deterministic imports, migrations, tests, or external exports. Failed Linear or
@@ -161,7 +174,6 @@ does not archive Linear issues.
 Linear archival is a separate command and is guarded by captured memory:
 
 ```bash
-opensymphony linear archive --issues COE-123 --dry-run
 opensymphony linear archive --issues COE-123
 ```
 
@@ -204,3 +216,39 @@ opensymphony doctor --config ./config.yaml --rehydrate
 If an older target repo still contains `openhands.mcp`, remove that block.
 OpenSymphony 1.0.0 expects Linear access through `LINEAR_API_KEY` and the
 repo-local GraphQL helper assets copied by `opensymphony init`.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
+- COE-293 contributed: PR #56: fix: add OpenHands filesystem tools to coding agents (merge `2f34058`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+```mermaid
+flowchart TD
+  memory["Captured issue memory"] --> area["Operations"]
+  area --> docs["docs/operations.md"]
+```
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
+- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+
+## Source refs
+
+- COE-286
+- COE-293
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
