@@ -154,6 +154,53 @@ pub fn write_memory_init_plan(plan: &MemoryInitPlan) -> Result<(), MemoryError> 
     Ok(())
 }
 
+pub fn ensure_memory_initialized(
+    repo_root: impl AsRef<Path>,
+    config_path: Option<&Path>,
+) -> Result<MemoryInitApplyReport, MemoryError> {
+    let repo_root = normalize_path(repo_root.as_ref());
+    let config_path = config_path
+        .map(|path| resolve_path(&repo_root, path))
+        .unwrap_or_else(|| repo_root.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE));
+    let config = if config_path.exists() {
+        MemoryInitFileChange::Unchanged
+    } else {
+        write_file(&config_path, &render_memory_init_config(&repo_root)?)?;
+        MemoryInitFileChange::Created
+    };
+
+    let gitignore_path = repo_root.join(".gitignore");
+    let gitignore_before = match fs::read_to_string(&gitignore_path) {
+        Ok(contents) => Some(contents),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => None,
+        Err(source) => {
+            return Err(MemoryError::ReadFile {
+                path: gitignore_path,
+                source,
+            });
+        }
+    };
+    let gitignore_after = render_memory_gitignore(gitignore_before.as_deref());
+    let gitignore = match gitignore_before {
+        Some(before) if before == gitignore_after => MemoryInitFileChange::Unchanged,
+        Some(_) => {
+            write_file(&gitignore_path, &gitignore_after)?;
+            MemoryInitFileChange::Updated
+        }
+        None => {
+            write_file(&gitignore_path, &gitignore_after)?;
+            MemoryInitFileChange::Created
+        }
+    };
+
+    Ok(MemoryInitApplyReport {
+        config_path,
+        config,
+        gitignore_path,
+        gitignore,
+    })
+}
+
 fn write_memory_config(config: &MemoryConfig) -> Result<(), MemoryError> {
     let mut areas = BTreeMap::new();
     for (slug, area) in &config.areas {

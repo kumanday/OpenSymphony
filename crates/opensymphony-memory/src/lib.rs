@@ -194,6 +194,21 @@ pub struct MemoryInitPlan {
     pub gitignore_after: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryInitFileChange {
+    Created,
+    Updated,
+    Unchanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryInitApplyReport {
+    pub config_path: PathBuf,
+    pub config: MemoryInitFileChange,
+    pub gitignore_path: PathBuf,
+    pub gitignore: MemoryInitFileChange,
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct MemoryConfigFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -551,6 +566,30 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn ensure_memory_initialized_creates_config_and_gitignore_policy_once() {
+        let repo = TempDir::new().expect("temp repo");
+
+        let first = ensure_memory_initialized(repo.path(), None).expect("memory init");
+
+        assert_eq!(first.config, MemoryInitFileChange::Created);
+        assert_eq!(first.gitignore, MemoryInitFileChange::Created);
+        assert!(
+            repo.path()
+                .join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE)
+                .is_file()
+        );
+        assert_eq!(
+            fs::read_to_string(repo.path().join(".gitignore")).expect(".gitignore"),
+            ".opensymphony*\n!.opensymphony/\n.opensymphony/*\n!.opensymphony/memory/\n.opensymphony/memory/*\n!.opensymphony/memory/memory.yaml\n"
+        );
+
+        let second = ensure_memory_initialized(repo.path(), None).expect("memory init idempotent");
+
+        assert_eq!(second.config, MemoryInitFileChange::Unchanged);
+        assert_eq!(second.gitignore, MemoryInitFileChange::Unchanged);
+    }
 
     #[test]
     fn capture_plan_matches_prs_and_infers_areas() {

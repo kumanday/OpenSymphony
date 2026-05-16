@@ -100,11 +100,14 @@ opensymphony init
 
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
 can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` ignores local OpenSymphony runtime state.
+It also initializes `.opensymphony/memory/memory.yaml`, the shared policy and
+learned structure file required for default-on memory auto-capture.
 
 For an existing target repo, `opensymphony update` is the lighter-weight
 maintenance path: it refreshes changed or new template-owned skill files under
 `.agents/skills/` without touching `WORKFLOW.md`, `AGENTS.md`, or the broader
-bootstrap files.
+bootstrap files. When run from an OpenSymphony target repo, `update` also
+initializes or repairs the memory config and `.gitignore` policy if needed.
 
 ### Running the Orchestrator
 
@@ -134,8 +137,9 @@ OpenSymphony can preserve completed-issue knowledge as you build. When
 `memory.auto_capture` is enabled in `config.yaml` (the default),
 `opensymphony run` captures terminal issue transitions from Linear and matching
 GitHub PR narrative, writes private memory under `.opensymphony/memory/`, and
-syncs stable learned topics into public docs. Manual commands remain available
-for setup, backfill, inspection, and guarded archival:
+syncs stable learned topics into public docs. Repos initialized or updated with
+this release get the required memory config automatically. Manual commands
+remain available for setup repair, backfill, inspection, and guarded archival:
 
 ```bash
 opensymphony memory init

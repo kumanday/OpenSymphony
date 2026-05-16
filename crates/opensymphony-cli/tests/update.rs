@@ -85,6 +85,16 @@ async fn update_skips_reinstall_when_current_matches_latest_and_refreshes_skills
             .expect("local-only skill should survive"),
         "# keep me\n",
     );
+    let memory_config = fs::read_to_string(repo.path().join(".opensymphony/memory/memory.yaml"))
+        .expect("update should initialize memory config in target repos");
+    assert!(
+        memory_config.contains("memory_root: .opensymphony/memory"),
+        "memory config should contain the default memory root: {memory_config}",
+    );
+    assert_eq!(
+        fs::read_to_string(repo.path().join(".gitignore")).expect(".gitignore should exist"),
+        memory_gitignore_policy("")
+    );
     assert!(
         !repo.path().join("AGENTS.md").exists(),
         "update should not create other bootstrap assets",
@@ -110,6 +120,12 @@ async fn update_skips_reinstall_when_current_matches_latest_and_refreshes_skills
             && stdout.contains("- .agents/skills/push/SKILL.md")
             && !stdout.contains("- .agents/skills/opensymphony-memory/SKILL.md"),
         "stdout should list created skill files: {stdout}",
+    );
+    assert!(
+        stdout.contains("Memory init summary:")
+            && stdout.contains("- .opensymphony/memory/memory.yaml")
+            && stdout.contains("- .gitignore"),
+        "stdout should list memory initialization files: {stdout}",
     );
 }
 
@@ -292,6 +308,12 @@ fn cargo_invocation_count(log_path: &Path) -> usize {
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => 0,
         Err(source) => panic!("cargo log should be readable: {source}"),
     }
+}
+
+fn memory_gitignore_policy(prefix: &str) -> String {
+    format!(
+        "{prefix}.opensymphony*\n!.opensymphony/\n.opensymphony/*\n!.opensymphony/memory/\n.opensymphony/memory/*\n!.opensymphony/memory/memory.yaml\n"
+    )
 }
 
 fn path_only(path: &Path) -> OsString {

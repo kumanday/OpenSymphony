@@ -80,6 +80,10 @@ enum RunCommandError {
         #[source]
         source: crate::opensymphony_workflow::WorkflowConfigError,
     },
+    #[error(
+        "memory auto-capture is enabled but {path} is missing; run `opensymphony memory init` or `opensymphony update` from the target repo before `opensymphony run`"
+    )]
+    MissingMemoryConfig { path: PathBuf },
     #[error("failed to build tracker client: {0}")]
     Tracker(#[from] LinearError),
     #[error("failed to create workspace manager: {0}")]
