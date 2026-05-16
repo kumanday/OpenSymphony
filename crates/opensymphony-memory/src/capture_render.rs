@@ -213,14 +213,29 @@ fn area_matches_evidence(
     issue: &IssueEvidence,
     prs: &[PullRequestEvidence],
 ) -> bool {
-    let evidence = area_evidence_text(issue, prs);
+    let evidence = search_tokens(&area_evidence_text(issue, prs));
     let mut candidates = vec![area.slug.clone(), area.title.to_ascii_lowercase()];
     candidates.extend(area.aliases.clone());
     candidates.extend(area.source_refs.linear_milestones.clone());
     candidates.into_iter().any(|candidate| {
         let candidate = candidate.trim().to_ascii_lowercase();
-        candidate.len() >= 4 && evidence.contains(&candidate)
+        candidate.len() >= 4 && token_sequence_contains(&evidence, &search_tokens(&candidate))
     })
+}
+
+fn token_sequence_contains(haystack: &[String], needle: &[String]) -> bool {
+    !needle.is_empty()
+        && needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+fn search_tokens(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter_map(normalize_optional)
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
 }
 
 fn area_evidence_text(issue: &IssueEvidence, prs: &[PullRequestEvidence]) -> String {

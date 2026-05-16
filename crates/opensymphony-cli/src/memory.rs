@@ -946,8 +946,11 @@ fn replace_or_append_managed_section(
     end: &str,
     replacement: &str,
 ) -> String {
-    if let (Some(begin_index), Some(end_index)) = (existing.find(begin), existing.find(end)) {
-        let end_index = end_index + end.len();
+    if let Some(begin_index) = existing.find(begin) {
+        let end_index = existing[begin_index..]
+            .find(end)
+            .map(|relative_end| begin_index + relative_end + end.len())
+            .unwrap_or(existing.len());
         let mut output = String::new();
         output.push_str(existing[..begin_index].trim_end());
         if !output.is_empty() {
@@ -1262,5 +1265,23 @@ mod tests {
         assert!(updated.contains("new"));
         assert!(updated.contains("Tail"));
         assert!(!updated.contains("old"));
+    }
+
+    #[test]
+    fn managed_linear_memory_status_replaces_truncated_section() {
+        let existing = format!("Intro\n\n{LINEAR_MEMORY_STATUS_BEGIN}\nold without end marker");
+        let replacement = format!("{LINEAR_MEMORY_STATUS_BEGIN}\nnew\n{LINEAR_MEMORY_STATUS_END}");
+
+        let updated = replace_or_append_managed_section(
+            &existing,
+            LINEAR_MEMORY_STATUS_BEGIN,
+            LINEAR_MEMORY_STATUS_END,
+            &replacement,
+        );
+
+        assert!(updated.contains("Intro"));
+        assert!(updated.contains("new"));
+        assert_eq!(updated.matches(LINEAR_MEMORY_STATUS_BEGIN).count(), 1);
+        assert!(!updated.contains("old without end marker"));
     }
 }

@@ -813,6 +813,37 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn area_evidence_matching_requires_whole_tokens() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let mut source = sample_source();
+        source.issues[0].title = "OpenHands gruntimeerror handling".to_string();
+        source.issues[0].description =
+            Some("Fix gruntimeerror handling without ownership changes.".to_string());
+        source.issues[0].labels.clear();
+        source.prs[0].title = "COE-123 harden gruntimeerror handling".to_string();
+        source.prs[0].body = Some("No ownership area changed.".to_string());
+
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("plan");
+
+        assert!(
+            !plan.selected[0]
+                .areas
+                .contains(&"openhands-runtime".to_string())
+        );
+    }
+
+    #[test]
     fn capture_index_rolls_back_when_a_later_issue_fails() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
