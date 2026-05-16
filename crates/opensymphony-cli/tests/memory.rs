@@ -540,6 +540,60 @@ fn linear_archive_with_explicit_issues_captures_before_archiving() {
 }
 
 #[test]
+fn linear_archive_does_not_block_when_no_github_pr_matches() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+        r#"{"data":{"issueArchive":{"success":true}}}"#.to_string(),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    let bin_dir = repo.path().join("bin");
+    fs::create_dir_all(&bin_dir).expect("bin dir should write");
+    write_fake_gh_no_matches(bin_dir.join("gh"));
+
+    let archive = run_with_path(
+        repo.path(),
+        ["linear", "archive", "--issues", "COE-123"],
+        bin_dir.to_str().expect("bin path should be utf-8"),
+    );
+
+    assert_success(&archive, "archive without matched GitHub PR");
+    let stdout = String::from_utf8_lossy(&archive.stdout);
+    assert!(stdout.contains("no GitHub PR source was matched"));
+    assert!(!stdout.contains("Linear Archive Dry Run"));
+    assert!(stdout.contains("Archived 1 Linear issue(s)."));
+    assert_eq!(archive_status(repo.path(), "COE-123"), "archived");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].contains("\"id\":\"COE-123\""));
+}
+
+#[test]
+fn archive_from_memory_does_not_block_when_only_warning_is_no_github_pr() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let server = TinyGraphqlServer::start([
+        linear_issue_response("COE-123", "WebSocket reconnect recovery"),
+        linear_empty_comments("issue-COE-123"),
+        r#"{"data":{"issueArchive":{"success":true}}}"#.to_string(),
+    ]);
+    write_workflow(repo.path(), &server.base_url);
+
+    assert_success(
+        &run(repo.path(), ["memory", "capture", "COE-123", "--no-github"]),
+        "capture without matched GitHub PR",
+    );
+    let archive = run(repo.path(), ["linear", "archive", "--from-memory"]);
+
+    assert_success(&archive, "archive from memory without matched GitHub PR");
+    assert!(String::from_utf8_lossy(&archive.stdout).contains("Archived 1 Linear issue(s)."));
+    assert_eq!(archive_status(repo.path(), "COE-123"), "archived");
+}
+
+#[test]
 fn linear_archive_write_marks_successes_before_reporting_partial_failure() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
@@ -893,6 +947,21 @@ fi
 if [ "${1-}" = "pr" ] && [ "${2-}" = "view" ]; then
   printf '%s\n' 'simulated gh view failure' >&2
   exit 2
+fi
+printf 'unexpected gh command: %s\n' "$*" >&2
+exit 1
+"#,
+    );
+}
+
+fn write_fake_gh_no_matches(path: std::path::PathBuf) {
+    write_executable(
+        path,
+        r#"#!/bin/sh
+set -eu
+if [ "${1-}" = "pr" ] && [ "${2-}" = "list" ]; then
+  printf '%s\n' '[]'
+  exit 0
 fi
 printf 'unexpected gh command: %s\n' "$*" >&2
 exit 1

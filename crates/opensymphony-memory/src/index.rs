@@ -38,7 +38,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     issue_plan.capsule_path.to_string_lossy().to_string(),
                     config.visibility.as_str(),
                     issue_plan.source_hash.clone(),
-                    issue_plan.warnings.len() as i64,
+                    archive_blocking_warning_count(&issue_plan.warnings) as i64,
                     "pending",
                     body,
                     Utc::now().to_rfc3339(),

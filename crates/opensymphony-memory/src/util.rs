@@ -118,6 +118,19 @@ fn normalize_issue_key(value: &str) -> String {
     value.trim().to_ascii_uppercase()
 }
 
+pub fn archive_blocking_warning_count(warnings: &[String]) -> usize {
+    warnings
+        .iter()
+        .filter(|warning| is_archive_blocking_capture_warning(warning))
+        .count()
+}
+
+pub fn is_archive_blocking_capture_warning(warning: &str) -> bool {
+    !warning
+        .trim()
+        .eq_ignore_ascii_case("no GitHub PR source was matched")
+}
+
 fn sanitize_issue_key(value: &str) -> String {
     let normalized = normalize_issue_key(value);
     let sanitized = normalized

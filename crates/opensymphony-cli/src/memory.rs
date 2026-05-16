@@ -12,11 +12,12 @@ use crate::{
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
         ArchivePlan, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueSelection, LintSeverity,
-        MemoryConfig, MemoryError, SourceFile, brief, context_for_issue, docs_for_area,
-        expand_issue_range, lint, load_source_file, mark_archived, plan_archive, plan_capture,
-        plan_docs_sync, plan_memory_init, related_by_area, related_by_issue, related_by_paths,
-        render_archive_plan, render_capture_dry_run, search, status, write_capture_plan,
-        write_docs_sync_plan, write_memory_init_plan,
+        MemoryConfig, MemoryError, SourceFile, archive_blocking_warning_count, brief,
+        context_for_issue, docs_for_area, expand_issue_range, lint, load_source_file,
+        mark_archived, plan_archive, plan_capture, plan_docs_sync, plan_memory_init,
+        related_by_area, related_by_issue, related_by_paths, render_archive_plan,
+        render_capture_dry_run, search, status, write_capture_plan, write_docs_sync_plan,
+        write_memory_init_plan,
     },
     opensymphony_workflow::WorkflowDefinition,
 };
@@ -838,7 +839,13 @@ fn archive_plan_after_capture(
     });
     for issue in selected {
         let issue_key = issue.issue.identifier.clone();
-        let warning_count = issue.warnings.len() + capture_plan.warnings.len();
+        let capture_warnings = issue
+            .warnings
+            .iter()
+            .chain(capture_plan.warnings.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let warning_count = archive_blocking_warning_count(&capture_warnings);
         let (eligible, reason) = if force {
             (
                 true,
