@@ -108,7 +108,7 @@ fn status_preserves_exited_state_after_supervised_child_crashes() {
         .insert("FAKE_SERVER_MODE".to_string(), "crash".to_string());
     config
         .extra_env
-        .insert("FAKE_CRASH_DELAY_SECS".to_string(), "0.1".to_string());
+        .insert("FAKE_CRASH_DELAY_SECS".to_string(), "0.5".to_string());
     config
         .extra_env
         .insert("FAKE_EXIT_CODE".to_string(), "42".to_string());
