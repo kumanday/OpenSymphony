@@ -11,10 +11,9 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::process::Command;
 
+use super::memory_init_summary::memory_init_change_lists;
 use crate::opensymphony_cli::init_repo::{self, InitCommandError};
-use crate::opensymphony_memory::{
-    MemoryInitApplyReport, MemoryInitFileChange, ensure_memory_initialized,
-};
+use crate::opensymphony_memory::{MemoryInitApplyReport, ensure_memory_initialized};
 
 const DEFAULT_CRATE_METADATA_URL: &str = "https://crates.io/api/v1/crates/opensymphony";
 
@@ -348,49 +347,12 @@ fn print_paths(label: &str, paths: &[String]) {
 }
 
 fn print_memory_init_summary(target_repo: &Path, report: &MemoryInitApplyReport) {
-    let mut created = Vec::new();
-    let mut updated = Vec::new();
-    let mut unchanged = Vec::new();
-    record_memory_init_change(
-        relative_path_for_summary(target_repo, &report.config_path),
-        report.config,
-        &mut created,
-        &mut updated,
-        &mut unchanged,
-    );
-    record_memory_init_change(
-        relative_path_for_summary(target_repo, &report.gitignore_path),
-        report.gitignore,
-        &mut created,
-        &mut updated,
-        &mut unchanged,
-    );
+    let (created, updated, unchanged) = memory_init_change_lists(report, target_repo);
 
     println!("Memory init summary:");
     print_paths("Created", &created);
     print_paths("Updated", &updated);
     println!("Unchanged: {} file(s)", unchanged.len());
-}
-
-fn record_memory_init_change(
-    path: String,
-    change: MemoryInitFileChange,
-    created: &mut Vec<String>,
-    updated: &mut Vec<String>,
-    unchanged: &mut Vec<String>,
-) {
-    match change {
-        MemoryInitFileChange::Created => created.push(path),
-        MemoryInitFileChange::Updated => updated.push(path),
-        MemoryInitFileChange::Unchanged => unchanged.push(path),
-    }
-}
-
-fn relative_path_for_summary(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn join_for_display(items: &[&str]) -> String {

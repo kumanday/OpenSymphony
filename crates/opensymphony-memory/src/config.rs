@@ -216,7 +216,7 @@ fn write_memory_config(config: &MemoryConfig) -> Result<(), MemoryError> {
                 status: Some(area.status),
                 confidence: Some(area.confidence),
                 aliases: area.aliases.clone(),
-                source_refs: area.source_refs.clone(),
+                source_refs: tracked_area_source_refs(&area.source_refs),
             },
         );
     }
@@ -360,6 +360,16 @@ fn normalize_area_source_refs(mut refs: AreaSourceRefs) -> AreaSourceRefs {
     refs.linear_issues = normalize_source_ref_list(refs.linear_issues);
     refs.github_prs = normalize_source_ref_list(refs.github_prs);
     refs
+}
+
+fn tracked_area_source_refs(refs: &AreaSourceRefs) -> AreaSourceRefs {
+    AreaSourceRefs {
+        docs: refs.docs.clone(),
+        linear_labels: refs.linear_labels.clone(),
+        linear_milestones: refs.linear_milestones.clone(),
+        linear_issues: Vec::new(),
+        github_prs: Vec::new(),
+    }
 }
 
 fn normalize_source_ref_list(values: Vec<String>) -> Vec<String> {

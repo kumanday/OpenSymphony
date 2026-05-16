@@ -426,8 +426,6 @@ fn merge_area_evidence(
     issue_plan: &CaptureIssuePlan,
     confidence_threshold: u8,
 ) {
-    let issue_key = normalize_issue_key(&issue_plan.issue.identifier);
-    push_unique(&mut area.source_refs.linear_issues, issue_key);
     if let Some(milestone) = issue_plan.issue.milestone.as_deref().and_then(normalize_optional) {
         push_unique(&mut area.source_refs.linear_milestones, milestone);
     }
@@ -437,10 +435,6 @@ fn merge_area_evidence(
             push_unique(&mut area.aliases, label);
         }
     }
-    for pr in &issue_plan.prs {
-        push_unique(&mut area.source_refs.github_prs, format!("#{}", pr.number));
-    }
-
     push_unique(&mut area.aliases, area.slug.clone());
     push_unique(&mut area.aliases, area.title.to_ascii_lowercase());
     let confidence = inferred_area_confidence(area, issue_plan);
@@ -468,13 +462,8 @@ fn inferred_area_confidence(area: &AreaConfig, issue_plan: &CaptureIssuePlan) ->
     } else {
         60
     };
-    let reinforcement = area
-        .source_refs
-        .linear_issues
-        .len()
-        .saturating_sub(1)
-        .saturating_mul(10)
-        .min(25) as u8;
+    let reinforcement = u8::from(!issue_plan.prs.is_empty()).saturating_mul(10)
+        + u8::from(issue_plan.issue.milestone.is_some()).saturating_mul(5);
     base.saturating_add(reinforcement).min(95)
 }
 

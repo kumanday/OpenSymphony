@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{self, ExitCode},
 };
 
 use chrono::{NaiveDate, Utc};
@@ -259,10 +259,20 @@ pub async fn run_linear_command(args: LinearArgs) -> ExitCode {
 
 #[derive(Debug, Default)]
 pub(crate) struct AutoMemoryReport {
+    pub(crate) completed_issue_keys: Vec<String>,
     pub(crate) captured_issue_keys: Vec<String>,
     pub(crate) archived_issue_keys: Vec<String>,
     pub(crate) docs_written: Vec<PathBuf>,
+    pub(crate) capture_completed: bool,
+    pub(crate) docs_sync_completed: bool,
+    pub(crate) archive_completed: bool,
     pub(crate) warnings: Vec<String>,
+}
+
+impl AutoMemoryReport {
+    pub(crate) fn workflow_completed(&self) -> bool {
+        self.capture_completed && self.docs_sync_completed && self.archive_completed
+    }
 }
 
 pub(crate) async fn auto_capture_terminal(
@@ -289,10 +299,15 @@ pub(crate) async fn auto_capture_terminal(
         ..IssueSelection::default()
     };
     let mut capture_plan = plan_capture(&config, &source, &selection, true, true)?;
+    let issue_keys = capture_plan
+        .selected
+        .iter()
+        .map(|issue| issue.issue.identifier.clone())
+        .collect::<Vec<_>>();
     capture_plan
         .selected
         .retain(|issue| !issue.already_captured || issue.stale);
-    if capture_plan.selected.is_empty() {
+    if issue_keys.is_empty() {
         return Ok(AutoMemoryReport::default());
     }
 
@@ -301,42 +316,58 @@ pub(crate) async fn auto_capture_terminal(
         .iter()
         .map(|issue| issue.issue.identifier.clone())
         .collect::<Vec<_>>();
-    let capture_report = write_capture_plan(&config, &capture_plan, false)?;
-
-    let mut warnings = capture_report.warnings;
-    let evolved_config = match MemoryConfig::load(repo_root, None) {
-        Ok(config) => config,
-        Err(error) => {
-            warnings.push(format!(
-                "failed to reload evolved memory config after capture: {error}"
-            ));
-            let _ = record_auto_memory_status(&config, &captured_issue_keys, &warnings);
-            return Ok(AutoMemoryReport {
-                captured_issue_keys,
-                archived_issue_keys: Vec::new(),
-                docs_written: Vec::new(),
-                warnings,
-            });
+    let mut warnings = Vec::new();
+    let mut capture_completed = true;
+    let evolved_config = if capture_plan.selected.is_empty() {
+        config.clone()
+    } else {
+        let capture_report = write_capture_plan(&config, &capture_plan, false)?;
+        warnings.extend(capture_report.warnings);
+        match MemoryConfig::load(repo_root, None) {
+            Ok(config) => config,
+            Err(error) => {
+                capture_completed = false;
+                warnings.push(format!(
+                    "failed to reload evolved memory config after capture: {error}"
+                ));
+                let _ = record_auto_memory_status(&config, &issue_keys, &warnings);
+                return Ok(AutoMemoryReport {
+                    completed_issue_keys: Vec::new(),
+                    captured_issue_keys,
+                    archived_issue_keys: Vec::new(),
+                    docs_written: Vec::new(),
+                    capture_completed,
+                    docs_sync_completed: false,
+                    archive_completed: !auto_archive,
+                    warnings,
+                });
+            }
         }
     };
     let docs_selection = IssueSelection {
-        identifiers: captured_issue_keys.clone(),
+        identifiers: issue_keys.clone(),
         since_last_sync: true,
         ..IssueSelection::default()
     };
 
     let mut archived_issue_keys = Vec::new();
     let mut docs_written = Vec::new();
+    let mut docs_sync_completed = false;
     match plan_docs_sync(&evolved_config, &docs_selection, true, false) {
         Ok(docs_plan) => {
             warnings.extend(docs_plan.warnings.clone());
             if !docs_plan.targets.is_empty() {
                 match write_docs_sync_plan(&evolved_config, &docs_plan) {
-                    Ok(written) => docs_written = written,
+                    Ok(written) => {
+                        docs_written = written;
+                        docs_sync_completed = true;
+                    }
                     Err(error) => {
                         warnings.push(format!("failed to sync captured memory docs: {error}"));
                     }
                 }
+            } else {
+                docs_sync_completed = true;
             }
         }
         Err(error) => {
@@ -344,48 +375,67 @@ pub(crate) async fn auto_capture_terminal(
         }
     }
 
+    let mut archive_completed = !auto_archive;
     if auto_archive {
-        let archive_plan = archive_plan_after_capture(&evolved_config, &capture_plan, true, false);
-        warnings.extend(archive_plan.warnings.clone());
-        match archive_in_linear(repo_root, Some(workflow_path), &archive_plan).await {
-            Ok(archive_report) => {
-                if !archive_report.archived.is_empty()
-                    && let Err(error) = mark_archived(&evolved_config, &archive_report.archived)
-                {
-                    warnings.push(format!("failed to mark archived memory capsules: {error}"));
+        match plan_archive(&evolved_config, &issue_keys, false, None, true, false) {
+            Ok(archive_plan) => {
+                warnings.extend(archive_plan.warnings.clone());
+                match archive_in_linear(repo_root, Some(workflow_path), &archive_plan).await {
+                    Ok(archive_report) => {
+                        archive_completed =
+                            archive_plan.warnings.is_empty() && archive_report.failures.is_empty();
+                        if !archive_report.archived.is_empty()
+                            && let Err(error) =
+                                mark_archived(&evolved_config, &archive_report.archived)
+                        {
+                            archive_completed = false;
+                            warnings
+                                .push(format!("failed to mark archived memory capsules: {error}"));
+                        }
+                        archived_issue_keys = archive_report.archived;
+                        warnings.extend(archive_report.failures);
+                    }
+                    Err(error) => {
+                        warnings.push(format!("failed to archive captured Linear issues: {error}"));
+                    }
                 }
-                archived_issue_keys = archive_report.archived;
-                warnings.extend(archive_report.failures);
             }
             Err(error) => {
-                warnings.push(format!("failed to archive captured Linear issues: {error}"));
+                warnings.push(format!(
+                    "failed to plan captured Linear issue archive: {error}"
+                ));
             }
         }
     }
 
-    if let Err(error) = record_auto_memory_status(&evolved_config, &captured_issue_keys, &warnings)
-    {
+    if let Err(error) = record_auto_memory_status(&evolved_config, &issue_keys, &warnings) {
         warnings.push(format!(
             "failed to record local memory automation status: {error}"
         ));
     }
     if !warnings.is_empty()
-        && let Err(error) =
-            update_linear_memory_status(&client, &captured_issue_keys, &warnings).await
+        && let Err(error) = update_linear_memory_status(&client, &issue_keys, &warnings).await
     {
         warnings.push(format!("failed to update Linear memory status: {error}"));
-        if let Err(error) =
-            record_auto_memory_status(&evolved_config, &captured_issue_keys, &warnings)
-        {
+        if let Err(error) = record_auto_memory_status(&evolved_config, &issue_keys, &warnings) {
             warnings.push(format!(
                 "failed to record local memory automation status after Linear update failure: {error}"
             ));
         }
     }
+    let completed_issue_keys = if capture_completed && docs_sync_completed && archive_completed {
+        issue_keys
+    } else {
+        Vec::new()
+    };
     Ok(AutoMemoryReport {
+        completed_issue_keys,
         captured_issue_keys,
         archived_issue_keys,
         docs_written,
+        capture_completed,
+        docs_sync_completed,
+        archive_completed,
         warnings,
     })
 }
@@ -928,9 +978,14 @@ fn record_auto_memory_status(
     }
     let mut contents = fs::read_to_string(&path)
         .unwrap_or_else(|_| "# OpenSymphony Memory Automation Log\n\n".to_string());
+    contents = trim_auto_memory_status_log(
+        &contents,
+        AUTO_MEMORY_STATUS_LOG_LIMIT,
+        AUTO_MEMORY_STATUS_LOG_MAX_BYTES,
+    );
     contents.push_str(&format!("## {}\n\n", Utc::now().to_rfc3339()));
     if !issue_keys.is_empty() {
-        contents.push_str(&format!("- Captured: {}\n", issue_keys.join(", ")));
+        contents.push_str(&format!("- Issues: {}\n", issue_keys.join(", ")));
     }
     if warnings.is_empty() {
         contents.push_str("- Status: completed without blocking warnings\n");
@@ -946,7 +1001,31 @@ fn record_auto_memory_status(
         AUTO_MEMORY_STATUS_LOG_LIMIT,
         AUTO_MEMORY_STATUS_LOG_MAX_BYTES,
     );
-    fs::write(&path, contents).map_err(|source| MemoryError::WriteFile { path, source })
+    atomic_write_auto_memory_status(&path, &contents)
+}
+
+fn atomic_write_auto_memory_status(path: &Path, contents: &str) -> Result<(), MemoryError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("automation.md");
+    let temp_path = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        process::id(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    ));
+    fs::write(&temp_path, contents).map_err(|source| MemoryError::WriteFile {
+        path: temp_path.clone(),
+        source,
+    })?;
+    fs::rename(&temp_path, path).map_err(|source| {
+        let _ = fs::remove_file(&temp_path);
+        MemoryError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        }
+    })
 }
 
 fn trim_auto_memory_status_log(contents: &str, max_entries: usize, max_bytes: usize) -> String {

@@ -787,11 +787,13 @@ Reviews are triggered when you open a pull request for review.
                 .contains(&"runtime".to_string())
         );
         assert!(
-            area.source_refs
-                .linear_issues
-                .contains(&"COE-123".to_string())
+            area.source_refs.linear_issues.is_empty(),
+            "per-issue inventory belongs in capsules and DuckDB, not tracked memory.yaml"
         );
-        assert!(area.source_refs.github_prs.contains(&"#456".to_string()));
+        assert!(
+            area.source_refs.github_prs.is_empty(),
+            "per-PR inventory belongs in capsules and DuckDB, not tracked memory.yaml"
+        );
 
         let capsule =
             fs::read_to_string(evolved.issue_capsule_path("COE-123")).expect("capsule should read");
@@ -845,9 +847,8 @@ Reviews are triggered when you open a pull request for review.
         assert_eq!(area.status, AreaStatus::Candidate);
         assert!(area.confidence < evolved.confidence_threshold);
         assert!(
-            area.source_refs
-                .linear_issues
-                .contains(&"COE-123".to_string())
+            area.source_refs.linear_issues.is_empty(),
+            "candidate areas should not accumulate issue inventory in tracked config"
         );
     }
 

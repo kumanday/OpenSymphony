@@ -6,9 +6,8 @@ use std::{
     time::Duration,
 };
 
-use crate::opensymphony_memory::{
-    MemoryInitApplyReport, MemoryInitFileChange, ensure_memory_initialized,
-};
+use super::memory_init_summary::record_memory_init_changes;
+use crate::opensymphony_memory::ensure_memory_initialized;
 use clap::Args;
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
@@ -840,50 +839,6 @@ fn build_final_contents(
         PlannedAction::Skip | PlannedAction::Unchanged => None,
         PlannedAction::Prompt => None,
     }
-}
-
-fn record_memory_init_changes(
-    report: &MemoryInitApplyReport,
-    target_repo: &Path,
-    created: &mut Vec<String>,
-    updated: &mut Vec<String>,
-    unchanged: &mut Vec<String>,
-) {
-    record_memory_init_change(
-        relative_path_for_summary(target_repo, &report.config_path),
-        report.config,
-        created,
-        updated,
-        unchanged,
-    );
-    record_memory_init_change(
-        relative_path_for_summary(target_repo, &report.gitignore_path),
-        report.gitignore,
-        created,
-        updated,
-        unchanged,
-    );
-}
-
-fn record_memory_init_change(
-    path: String,
-    change: MemoryInitFileChange,
-    created: &mut Vec<String>,
-    updated: &mut Vec<String>,
-    unchanged: &mut Vec<String>,
-) {
-    match change {
-        MemoryInitFileChange::Created => created.push(path),
-        MemoryInitFileChange::Updated => updated.push(path),
-        MemoryInitFileChange::Unchanged => unchanged.push(path),
-    }
-}
-
-fn relative_path_for_summary(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn prompt_for_missing_llm_env<R, W, E>(

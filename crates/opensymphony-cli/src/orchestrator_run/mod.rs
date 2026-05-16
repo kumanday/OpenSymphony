@@ -414,10 +414,10 @@ fn mark_auto_capture_completed(
     result: &Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
 ) {
     match result {
-        Ok(report) if !report.captured_issue_keys.is_empty() => {
-            completed_issues.extend(report.captured_issue_keys.iter().cloned());
+        Ok(report) if report.workflow_completed() && !report.completed_issue_keys.is_empty() => {
+            completed_issues.extend(report.completed_issue_keys.iter().cloned());
         }
-        Ok(report) if report.warnings.is_empty() => {
+        Ok(report) if report.workflow_completed() && report.warnings.is_empty() => {
             completed_issues.extend(candidates.iter().cloned());
         }
         Ok(_) | Err(_) => {}
@@ -476,14 +476,38 @@ mod tests {
     }
 
     #[test]
-    fn auto_capture_result_marks_capture_success_even_with_warnings() {
+    fn auto_capture_result_waits_for_post_capture_steps_before_completing() {
         let mut completed = issue_set(&["COE-1"]);
         let candidates = vec!["COE-2".to_string()];
         let result = Ok(super::super::memory::AutoMemoryReport {
+            completed_issue_keys: Vec::new(),
             captured_issue_keys: vec!["COE-2".to_string()],
             archived_issue_keys: Vec::new(),
             docs_written: Vec::new(),
+            capture_completed: true,
+            docs_sync_completed: false,
+            archive_completed: true,
             warnings: vec!["docs sync failed after capture".to_string()],
+        });
+
+        mark_auto_capture_completed(&mut completed, &candidates, &result);
+
+        assert_eq!(completed, issue_set(&["COE-1"]));
+    }
+
+    #[test]
+    fn auto_capture_result_marks_full_workflow_complete() {
+        let mut completed = issue_set(&["COE-1"]);
+        let candidates = vec!["COE-2".to_string()];
+        let result = Ok(super::super::memory::AutoMemoryReport {
+            completed_issue_keys: vec!["COE-2".to_string()],
+            captured_issue_keys: vec!["COE-2".to_string()],
+            archived_issue_keys: Vec::new(),
+            docs_written: vec![PathBuf::from("docs/runtime.md")],
+            capture_completed: true,
+            docs_sync_completed: true,
+            archive_completed: true,
+            warnings: Vec::new(),
         });
 
         mark_auto_capture_completed(&mut completed, &candidates, &result);
@@ -492,13 +516,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_capture_result_marks_fresh_noop_as_complete() {
+    fn auto_capture_result_does_not_mark_default_noop_complete() {
         let mut completed = issue_set(&["COE-1"]);
         let candidates = vec!["COE-2".to_string()];
         let result = Ok(super::super::memory::AutoMemoryReport::default());
 
         mark_auto_capture_completed(&mut completed, &candidates, &result);
 
-        assert_eq!(completed, issue_set(&["COE-1", "COE-2"]));
+        assert_eq!(completed, issue_set(&["COE-1"]));
     }
 }
