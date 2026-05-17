@@ -232,7 +232,7 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         })
         .map(Path::to_path_buf);
     let (client, mut supervisor, server_message) = build_debug_client(&runtime, store_kind)?;
-    let mut stream = attach_or_rehydrate_stream(
+    let mut stream = match attach_or_rehydrate_stream(
         &client,
         &runtime.workflow,
         &workspace,
@@ -241,7 +241,18 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         store_kind != Some(ConversationStoreKind::Archived),
         selected_store_path.as_deref(),
     )
-    .await?;
+    .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            if let Some(supervisor) = supervisor.as_mut()
+                && let Err(stop_error) = supervisor.stop()
+            {
+                tracing::warn!(%stop_error, "failed to stop debug OpenHands supervisor after attach failure");
+            }
+            return Err(error);
+        }
+    };
 
     println!(
         "Resumed conversation {} for issue {} in {}",
