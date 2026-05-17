@@ -49,4 +49,4 @@ capture has enough evidence. Prefer source refs such as Linear issue IDs, PR
 URLs, and merge SHAs when making audit claims. Merge SHA is an immutable pointer
 to the merged code state, not an area inference signal. If memory is stale,
 missing, or warning-heavy, inspect the linked PRs, current docs, and
-`opensymphony debug ISSUE-ID` before depending on it.
+current repository state before depending on it.
