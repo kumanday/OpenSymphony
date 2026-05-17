@@ -387,9 +387,8 @@ async fn gateway_and_control_plane_are_reachable() {
 #[tokio::test]
 async fn event_journal_cursor_returns_events_page() {
     use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
-    use opensymphony::opensymphony_gateway_schema::{
-        cursor::StreamCursor,
-        event_journal::{EventActor, EventKind, EventPage, EventRecord},
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventPage, EventRecord,
     };
 
     let store = SnapshotStore::new(fixture_snapshot(0));
@@ -408,8 +407,7 @@ async fn event_journal_cursor_returns_events_page() {
         journal.append(event).await.expect("append");
     }
 
-    let server =
-        opensymphony::opensymphony_gateway::GatewayServer::with_journal(store, journal, broker);
+    let server = GatewayServer::with_journal(store, journal, broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -439,7 +437,7 @@ async fn event_journal_cursor_returns_events_page() {
     assert!(page.next_cursor.is_some());
 
     // Follow the cursor to get the next page.
-    let next_seq = page.next_cursor.unwrap().sequence;
+    let next_seq = page.next_cursor.expect("next cursor must exist").sequence;
     let url = format!("http://{address}/api/v1/event-journal?cursor={next_seq}&limit=2");
     let page2: EventPage = client
         .get(&url)
@@ -454,7 +452,7 @@ async fn event_journal_cursor_returns_events_page() {
     assert!(page2.has_more);
 
     // Last page.
-    let next_seq2 = page2.next_cursor.unwrap().sequence;
+    let next_seq2 = page2.next_cursor.expect("next cursor must exist").sequence;
     let url = format!("http://{address}/api/v1/event-journal?cursor={next_seq2}&limit=2");
     let page3: EventPage = client
         .get(&url)
@@ -505,8 +503,7 @@ async fn event_journal_partition_filtering() {
     journal.append(terminal).await.expect("append");
 
     let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
-    let server =
-        opensymphony::opensymphony_gateway::GatewayServer::with_journal(store, journal, broker);
+    let server = GatewayServer::with_journal(store, journal, broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -576,8 +573,7 @@ async fn event_journal_raw_payload_ref_retained() {
     journal.append(event).await.expect("append");
 
     let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
-    let server =
-        opensymphony::opensymphony_gateway::GatewayServer::with_journal(store, journal, broker);
+    let server = GatewayServer::with_journal(store, journal, broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -631,8 +627,7 @@ async fn event_journal_duplicate_detection() {
     journal.append(event).await.expect("append");
 
     let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
-    let server =
-        opensymphony::opensymphony_gateway::GatewayServer::with_journal(store, journal, broker);
+    let server = GatewayServer::with_journal(store, journal, broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -675,7 +670,6 @@ async fn websocket_event_stream_delivers_events() {
         EventActor, EventKind, EventRecord,
     };
     use tokio_tungstenite::tungstenite::Message as WsMessage;
-    use url::Url;
 
     let store = SnapshotStore::new(fixture_snapshot(0));
     let journal = DomainJournal::new(100, 64);

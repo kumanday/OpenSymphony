@@ -441,7 +441,7 @@ mod tests {
     async fn cursor_replay_returns_events_in_sequence() {
         let journal = test_journal();
 
-        for i in 0..5 {
+        for _ in 0..5 {
             let event = sample_event(0, EventKind::RunStarted);
             journal.append(event).await.expect("append");
         }
