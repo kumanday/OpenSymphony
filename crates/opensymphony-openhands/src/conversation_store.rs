@@ -318,10 +318,28 @@ fn conversation_dir_name(conversation_id: &str) -> Result<String, ConversationSt
 }
 
 fn move_conversation_dir(from: &Path, to: &Path) -> Result<(), ConversationStoreError> {
-    match fs::rename(from, to) {
+    move_conversation_dir_with_ops(
+        from,
+        to,
+        |from, to| fs::rename(from, to),
+        copy_conversation_dir,
+    )
+}
+
+fn move_conversation_dir_with_ops<R, C>(
+    from: &Path,
+    to: &Path,
+    rename: R,
+    copy: C,
+) -> Result<(), ConversationStoreError>
+where
+    R: FnOnce(&Path, &Path) -> io::Result<()>,
+    C: FnOnce(&Path, &Path) -> Result<(), ConversationStoreError>,
+{
+    match rename(from, to) {
         Ok(()) => Ok(()),
         Err(source) if source.kind() == io::ErrorKind::CrossesDevices => {
-            if let Err(error) = copy_conversation_dir(from, to) {
+            if let Err(error) = copy(from, to) {
                 let _ = fs::remove_dir_all(to);
                 return Err(error);
             }
@@ -572,5 +590,71 @@ mod tests {
                 .expect("event should read"),
             "{\"id\":\"1\"}"
         );
+    }
+
+    #[test]
+    fn move_conversation_dir_falls_back_to_copy_on_cross_device_rename() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(source.join("events")).expect("source should be created");
+        std::fs::write(source.join("events").join("1.json"), "{\"id\":\"1\"}")
+            .expect("event should write");
+
+        super::move_conversation_dir_with_ops(
+            &source,
+            &destination,
+            |_from, _to| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::CrossesDevices,
+                    "exdev",
+                ))
+            },
+            super::copy_conversation_dir,
+        )
+        .expect("cross-device fallback should copy then remove source");
+
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::read_to_string(destination.join("events").join("1.json"))
+                .expect("event should read"),
+            "{\"id\":\"1\"}"
+        );
+    }
+
+    #[test]
+    fn move_conversation_dir_removes_partial_copy_after_cross_device_failure() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        std::fs::create_dir_all(&source).expect("source should be created");
+
+        let error = super::move_conversation_dir_with_ops(
+            &source,
+            &destination,
+            |_from, _to| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::CrossesDevices,
+                    "exdev",
+                ))
+            },
+            |from, to| {
+                std::fs::create_dir_all(to).expect("partial destination should be created");
+                std::fs::write(to.join("partial"), "partial").expect("partial should write");
+                Err(super::ConversationStoreError::CopyConversation {
+                    from: from.to_path_buf(),
+                    to: to.to_path_buf(),
+                    source: std::io::Error::other("copy failed"),
+                })
+            },
+        )
+        .expect_err("copy failure should be returned");
+
+        assert!(matches!(
+            error,
+            super::ConversationStoreError::CopyConversation { .. }
+        ));
+        assert!(source.is_dir());
+        assert!(!destination.exists());
     }
 }

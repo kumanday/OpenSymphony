@@ -139,7 +139,14 @@ enum DebugCommandError {
     #[error("rehydrated conversation {conversation_id} did not expose persisted history")]
     PersistedHistoryMissing { conversation_id: Uuid },
     #[error(
-        "archived conversation {conversation_id} could not be attached from expected store {store_path}. The conversation may be missing from that store, or an already-running OpenHands server on the configured port may be using a different `OH_CONVERSATIONS_PATH`. Stop the existing server or free the port, then retry."
+        "archived conversation {conversation_id} was not found in managed OpenHands store {store_path}. The debug session launched OpenHands with this `OH_CONVERSATIONS_PATH`; verify the conversation directory exists in that store or rerun archive/migration for the issue."
+    )]
+    ArchivedConversationMissingFromManagedStore {
+        conversation_id: Uuid,
+        store_path: PathBuf,
+    },
+    #[error(
+        "archived conversation {conversation_id} could not be attached from expected store {store_path}. The conversation may be missing from that store, or the already-running/external OpenHands server may be using a different `OH_CONVERSATIONS_PATH`. Stop the existing server or free the port, then retry."
     )]
     ArchivedConversationUnavailable {
         conversation_id: Uuid,
@@ -197,6 +204,11 @@ struct TranscriptEntry {
     text: String,
 }
 
+struct ArchivedAttachContext<'a> {
+    selected_store_path: Option<&'a Path>,
+    launched_managed_server: bool,
+}
+
 pub async fn run_command(args: DebugArgs) -> ExitCode {
     match run_debug_session(args).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -232,6 +244,7 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         })
         .map(Path::to_path_buf);
     let (client, mut supervisor, server_message) = build_debug_client(&runtime, store_kind)?;
+    let launched_managed_server = supervisor.is_some();
     let mut stream = match attach_or_rehydrate_stream(
         &client,
         &runtime.workflow,
@@ -239,7 +252,10 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         &manifest,
         &config,
         store_kind != Some(ConversationStoreKind::Archived),
-        selected_store_path.as_deref(),
+        ArchivedAttachContext {
+            selected_store_path: selected_store_path.as_deref(),
+            launched_managed_server,
+        },
     )
     .await
     {
@@ -414,6 +430,7 @@ fn prepare_debug_conversation_store(
     let Some(store) = runtime.conversation_store.as_ref() else {
         return Ok(None);
     };
+    store.ensure_active_and_archived()?;
 
     match store.locate_conversation(&conversation_id.to_string())? {
         Some(located) if located.kind != ConversationStoreKind::Legacy => Ok(Some(located.kind)),
@@ -489,9 +506,6 @@ fn build_debug_client(
             .as_ref()
             .map(|paths| paths.path_for(kind))
     });
-    if let Some(conversation_store) = runtime.conversation_store.as_ref() {
-        conversation_store.ensure_active_and_archived()?;
-    }
     if let Some(path) = conversation_store_path {
         config.extra_env.insert(
             OPENHANDS_CONVERSATIONS_PATH_ENV.to_string(),
@@ -582,7 +596,7 @@ async fn attach_or_rehydrate_stream(
     manifest: &IssueConversationManifest,
     config: &IssueSessionRunnerConfig,
     rehydrate_on_missing: bool,
-    selected_store_path: Option<&Path>,
+    archived_context: ArchivedAttachContext<'_>,
 ) -> Result<RuntimeEventStream, DebugCommandError> {
     let conversation_id = parse_conversation_id(manifest)?;
     let stream_config = config.runtime_stream.clone();
@@ -592,12 +606,23 @@ async fn attach_or_rehydrate_stream(
     {
         Ok(stream) => Ok(stream),
         Err(error) if should_rehydrate_after_attach_failure(&error) && !rehydrate_on_missing => {
-            Err(DebugCommandError::ArchivedConversationUnavailable {
-                conversation_id,
-                store_path: selected_store_path
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| PathBuf::from("<unknown>")),
-            })
+            let store_path = archived_context
+                .selected_store_path
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("<unknown>"));
+            if archived_context.launched_managed_server {
+                Err(
+                    DebugCommandError::ArchivedConversationMissingFromManagedStore {
+                        conversation_id,
+                        store_path,
+                    },
+                )
+            } else {
+                Err(DebugCommandError::ArchivedConversationUnavailable {
+                    conversation_id,
+                    store_path,
+                })
+            }
         }
         Err(error) if should_rehydrate_after_attach_failure(&error) => {
             let launch_profile = resolve_launch_profile(manifest, workflow)
