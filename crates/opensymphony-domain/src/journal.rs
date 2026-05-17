@@ -378,9 +378,8 @@ impl EventStream {
                         self.last_sequence = event.sequence;
                         return Some(Ok(event));
                     }
-                    // Non-matching partition: track global progress so we don't
-                    // re-deliver if the cursor is later reset to a lower value.
-                    self.last_sequence = event.sequence.max(self.last_sequence);
+                    // Non-matching partition: skip without advancing last_sequence
+                    // so we never accidentally drop a target-partition event.
                 }
                 Ok(Err(err)) => return Some(Err(err)),
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {

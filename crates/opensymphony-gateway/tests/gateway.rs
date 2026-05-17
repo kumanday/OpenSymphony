@@ -278,7 +278,7 @@ async fn gateway_events_stream_yields_snapshot_updates() {
     );
     let _ = journal.append(event).await;
 
-    // Read the initial "connected" event into a buffer.
+    // Read the journal event into a buffer.
     let mut first_buf = Vec::new();
     #[allow(clippy::while_let_loop)]
     loop {
@@ -294,39 +294,13 @@ async fn gateway_events_stream_yields_snapshot_updates() {
     }
     let first_text =
         String::from_utf8(first_buf).expect("SSE event is valid UTF-8 when fully assembled");
-    // The first event should be a "connected" event with a cursor.
     assert!(
-        !first_text.is_empty() && first_text.contains("event: connected"),
-        "SSE first event should be 'connected', got: {first_text}"
-    );
-    assert!(
-        first_text.contains("cursor"),
-        "SSE connected event should contain cursor, got: {first_text}"
-    );
-
-    // Read the journal event into a buffer.
-    let mut event_buf = Vec::new();
-    #[allow(clippy::while_let_loop)]
-    loop {
-        match tokio::time::timeout(timeout_dur, stream.next()).await {
-            Ok(Some(Ok(chunk))) => {
-                event_buf.extend_from_slice(&chunk);
-                if event_buf.ends_with(b"\n\n") || event_buf.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-            }
-            Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
-        }
-    }
-    let event_text =
-        String::from_utf8(event_buf).expect("SSE event is valid UTF-8 when fully assembled");
-    assert!(
-        !event_text.is_empty() && event_text.contains("event: event"),
-        "SSE event should be a journal event, got: {event_text}"
+        !first_text.is_empty() && first_text.contains("event: event"),
+        "SSE event should be a journal event, got: {first_text}"
     );
 
     // Verify the payload is a valid EventRecord.
-    let data_line = event_text
+    let data_line = first_text
         .lines()
         .find(|l| l.starts_with("data:"))
         .expect("SSE event contains data line");
@@ -728,18 +702,6 @@ async fn websocket_event_stream_delivers_events() {
         .send(WsMessage::Text(init_msg.into()))
         .await
         .expect("send init");
-
-    // Receive the connected event first.
-    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
-        .await
-        .expect("timed out waiting for connected event")
-        .expect("should receive a message")
-        .expect("no WS error");
-    let text = msg.to_text().expect("text message");
-    assert!(
-        text.starts_with("__connected__"),
-        "Expected __connected__ prefix, got: {text}"
-    );
 
     // Receive the backlog event.
     let msg = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
