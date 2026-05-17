@@ -81,9 +81,7 @@ impl GatewayServer {
     }
 
     /// Extract the journal and broker so the caller can keep clones for testing.
-    pub fn journal_and_broker(
-        self,
-    ) -> (InMemoryEventJournal, StreamBroker) {
+    pub fn journal_and_broker(self) -> (InMemoryEventJournal, StreamBroker) {
         (self.journal, self.broker)
     }
 
@@ -541,5 +539,3 @@ fn default_partition() -> String {
 fn default_limit() -> usize {
     50
 }
-
-
