@@ -50,7 +50,6 @@ pub struct ProjectSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotEventSummary {
-    pub sequence: u64,
     pub happened_at: DateTime<Utc>,
     pub issue_identifier: Option<String>,
     pub kind: SnapshotEventKind,

@@ -132,7 +132,6 @@ fn dashboard_snapshot_roundtrips() {
             failed_count: 0,
         }],
         recent_events: vec![SnapshotEventSummary {
-            sequence: 1,
             happened_at: Utc::now(),
             issue_identifier: Some("COE-390".into()),
             kind: SnapshotEventKind::WorkerStarted,

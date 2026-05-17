@@ -10,6 +10,10 @@ pub mod opensymphony_domain {
     pub use opensymphony::opensymphony_domain::*;
 }
 
+pub mod opensymphony_gateway {
+    pub use opensymphony::opensymphony_gateway::*;
+}
+
 pub mod opensymphony_linear {
     pub use opensymphony::opensymphony_linear::*;
 }
