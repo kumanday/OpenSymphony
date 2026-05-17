@@ -80,6 +80,13 @@ impl GatewayServer {
         }
     }
 
+    /// Extract the journal and broker so the caller can keep clones for testing.
+    pub fn journal_and_broker(
+        self,
+    ) -> (InMemoryEventJournal, StreamBroker) {
+        (self.journal, self.broker)
+    }
+
     pub fn router(&self) -> Router {
         let state = GatewayState {
             store: self.store.clone(),
@@ -306,20 +313,44 @@ async fn dashboard_snapshot(State(state): State<GatewayState>) -> Json<Dashboard
     Json(control_plane_to_dashboard_snapshot(&envelope))
 }
 
-/// SSE snapshot stream: `GET /api/v1/events`
+/// SSE journal event stream: `GET /api/v1/events`
+///
+/// Streams committed journal events as Server-Sent Events. Unlike the old
+/// snapshot-based stream, this endpoint delivers individual journal events
+/// with stable IDs, monotonic sequence numbers, and typed payloads.
 async fn events_sse(
     State(state): State<GatewayState>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let mut receiver = state.store.subscribe();
-    let initial = state.store.current().await;
-    let store = state.store.clone();
+    let journal = state.journal.clone();
     let stream = stream! {
-        let mut last_sent_sequence = initial.sequence;
-        yield Ok(snapshot_event(&initial));
-        while let Some(envelope) =
-            next_snapshot_envelope(&store, &mut receiver, &mut last_sent_sequence).await
-        {
-            yield Ok(snapshot_event(&envelope));
+        let mut receiver = journal.subscribe();
+        let mut last_sequence = 0u64;
+        loop {
+            match receiver.recv().await {
+                Ok(Ok(event)) => {
+                    if event.sequence <= last_sequence {
+                        continue;
+                    }
+                    last_sequence = event.sequence;
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        yield Ok(Event::default().event("event").data(json));
+                    }
+                }
+                Ok(Err(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Ok(page) = journal.query_after(&StreamCursor::new(last_sequence, "events"), GATEWAY_EVENT_PAGE_LIMIT).await {
+                        for event in &page.events {
+                            if event.sequence > last_sequence {
+                                last_sequence = event.sequence;
+                                if let Ok(json) = serde_json::to_string(event) {
+                                    yield Ok(Event::default().event("event").data(json));
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
         }
     };
 
@@ -366,14 +397,20 @@ async fn event_stream_ws(
             let connection_id: Arc<str> = Arc::from(format!("ws-{}", uuid::Uuid::new_v4()));
             broker.register_connection(connection_id.clone()).await;
 
-            // Read optional init message for cursor/partition.
-            let (cursor, partition) = if let Some(Ok(init_msg)) = socket.recv().await {
-                match parse_init_message(&init_msg) {
+            // Read optional init message for cursor/partition with a timeout.
+            // Without a timeout, a slow client could hold the broker registration
+            // indefinitely.
+            let init_timeout = tokio::time::timeout(Duration::from_secs(10), socket.recv());
+            let (cursor, partition) = match init_timeout.await {
+                Ok(Some(Ok(init_msg))) => match parse_init_message(&init_msg) {
                     Ok((c, p)) => (c, p),
                     Err(_) => (StreamCursor::new(0, "events"), "events".to_string()),
+                },
+                Ok(_) => (StreamCursor::new(0, "events"), "events".to_string()),
+                Err(_) => {
+                    tracing::warn!(connection_id = %connection_id, "Init message timed out, using defaults");
+                    (StreamCursor::new(0, "events"), "events".to_string())
                 }
-            } else {
-                (StreamCursor::new(0, "events"), "events".to_string())
             };
 
             // Subscribe to live events FIRST to prevent losing any events that arrive
@@ -389,10 +426,23 @@ async fn event_stream_ws(
             {
                 Ok(page) => {
                     for event in &page.events {
-                        if let Ok(json) = serde_json::to_string(&event) {
-                            let _ = socket
-                                .send(Message::Text(format!("__event__ {}", json).into()))
-                                .await;
+                        match serde_json::to_string(event) {
+                            Ok(json) => {
+                                if socket
+                                    .send(Message::Text(format!("__event__ {}", json).into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    event_id = %event.event_id,
+                                    error = %e,
+                                    "Failed to serialize backlog event"
+                                );
+                            }
                         }
                         last_backlog_sequence = event.sequence.max(last_backlog_sequence);
                     }
@@ -416,13 +466,23 @@ async fn event_stream_ws(
             loop {
                 match event_stream.recv().await {
                     Some(Ok(event)) => {
-                        if let Ok(json) = serde_json::to_string(&event)
-                            && socket
-                                .send(Message::Text(format!("__event__ {}", json).into()))
-                                .await
-                                .is_err()
-                        {
-                            break;
+                        match serde_json::to_string(&event) {
+                            Ok(json) => {
+                                if socket
+                                    .send(Message::Text(format!("__event__ {}", json).into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    event_id = %event.event_id,
+                                    error = %e,
+                                    "Failed to serialize live event"
+                                );
+                            }
                         }
                     }
                     Some(Err(err)) => {
@@ -482,45 +542,4 @@ fn default_limit() -> usize {
     50
 }
 
-fn snapshot_event(envelope: &SnapshotEnvelope) -> Event {
-    let dashboard = control_plane_to_dashboard_snapshot(envelope);
-    let payload =
-        serde_json::to_string(&dashboard).expect("DashboardSnapshot is always serializable");
-    Event::default()
-        .event("snapshot")
-        .id(envelope.sequence.to_string())
-        .data(payload)
-}
 
-async fn next_snapshot_envelope(
-    store: &SnapshotStore,
-    receiver: &mut broadcast::Receiver<SnapshotEnvelope>,
-    last_sent_sequence: &mut u64,
-) -> Option<SnapshotEnvelope> {
-    loop {
-        match receiver.recv().await {
-            Ok(envelope) => {
-                if envelope.sequence <= *last_sent_sequence {
-                    continue;
-                }
-                *last_sent_sequence = envelope.sequence;
-                return Some(envelope);
-            }
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                if let Some(envelope) = latest_from_store(store, *last_sent_sequence).await {
-                    *last_sent_sequence = envelope.sequence;
-                    return Some(envelope);
-                }
-            }
-            Err(broadcast::error::RecvError::Closed) => return None,
-        }
-    }
-}
-
-async fn latest_from_store(
-    store: &SnapshotStore,
-    last_sent_sequence: u64,
-) -> Option<SnapshotEnvelope> {
-    let latest = store.current().await;
-    (latest.sequence > last_sent_sequence).then_some(latest)
-}

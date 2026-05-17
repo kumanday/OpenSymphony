@@ -111,9 +111,37 @@ pub enum EventKind {
 impl EventKind {
     /// Serialize the event kind to a dotted string for the envelope.
     pub fn kind_tag(&self) -> String {
-        serde_json::to_value(self)
-            .map(|v| v.as_str().unwrap_or("unknown").to_owned())
-            .unwrap_or_else(|_| "unknown".to_owned())
+        match self {
+            Self::OrchestratorStateTransition { .. } => "orchestrator.state_transition".into(),
+            Self::OrchestratorWorkerStarted => "orchestrator.worker_started".into(),
+            Self::OrchestratorWorkerCompleted { .. } => "orchestrator.worker_completed".into(),
+            Self::OrchestratorWorkerFailed { .. } => "orchestrator.worker_failed".into(),
+            Self::OrchestratorRetryScheduled { .. } => "orchestrator.retry_scheduled".into(),
+            Self::GatewayActionDispatched { .. } => "gateway.action_dispatched".into(),
+            Self::GatewayActionCompleted { .. } => "gateway.action_completed".into(),
+            Self::GatewayActionFailed { .. } => "gateway.action_failed".into(),
+            Self::HarnessEventNormalized { .. } => "harness.event_normalized".into(),
+            Self::HarnessSseEvent => "harness.sse_event".into(),
+            Self::HarnessToolCall => "harness.tool_call".into(),
+            Self::HarnessToolResult => "harness.tool_result".into(),
+            Self::HarnessConversationStateUpdate => "harness.conversation_state_update".into(),
+            Self::RunStarted => "run.started".into(),
+            Self::RunCompleted => "run.completed".into(),
+            Self::RunFailed => "run.failed".into(),
+            Self::RunCancelled => "run.cancelled".into(),
+            Self::TerminalFrame { .. } => "terminal.frame".into(),
+            Self::LogEntry { .. } => "log.entry".into(),
+            Self::ApprovalRequested => "approval.requested".into(),
+            Self::ApprovalGranted => "approval.granted".into(),
+            Self::ApprovalDenied => "approval.denied".into(),
+            Self::PlanningSessionStarted => "planning.session_started".into(),
+            Self::PlanningMessage => "planning.message".into(),
+            Self::PlanningArtifactGenerated => "planning.artifact_generated".into(),
+            Self::StreamConnected { .. } => "stream.connected".into(),
+            Self::StreamDisconnected { .. } => "stream.disconnected".into(),
+            Self::StreamReconnected { .. } => "stream.reconnected".into(),
+            Self::Unknown { raw_kind } => raw_kind.clone(),
+        }
     }
 
     /// Whether this event is high-volume (terminal/log frames).

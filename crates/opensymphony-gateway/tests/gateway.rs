@@ -226,6 +226,9 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
 }
 
 #[tokio::test]
+/// SSE endpoint now streams journal events (not snapshot updates).
+/// This test verifies the SSE transport works with journal events and
+/// delivers new events appended after the stream opens.
 async fn gateway_events_stream_yields_snapshot_updates() {
     let store = SnapshotStore::new(fixture_snapshot(0));
     let server = GatewayServer::new(store.clone());
@@ -233,6 +236,10 @@ async fn gateway_events_stream_yields_snapshot_updates() {
         .await
         .expect("bind test listener");
     let address = listener.local_addr().expect("test listener address");
+
+    // Keep a clone of the journal so we can append events after the stream opens.
+    let (journal, broker) = server.journal_and_broker();
+    let server = GatewayServer::with_journal(store.clone(), journal.clone(), broker);
     let server_task = tokio::spawn(async move {
         server
             .serve(listener)
@@ -261,10 +268,18 @@ async fn gateway_events_stream_yields_snapshot_updates() {
     );
 
     let mut stream = response.bytes_stream();
-
-    // Read the initial snapshot event into a buffer.
-    let mut first_buf = Vec::new();
     let timeout_dur = std::time::Duration::from_secs(2);
+
+    // Append an event after the stream opens and expect it to arrive via SSE.
+    let event = opensymphony::opensymphony_domain::InMemoryEventJournal::orchestrator_event(
+        opensymphony::opensymphony_gateway_schema::event_journal::EventKind::RunStarted,
+        "test run started",
+        None,
+    );
+    let _ = journal.append(event).await;
+
+    // Read the journal event into a buffer.
+    let mut first_buf = Vec::new();
     #[allow(clippy::while_let_loop)]
     loop {
         match tokio::time::timeout(timeout_dur, stream.next()).await {
@@ -280,44 +295,19 @@ async fn gateway_events_stream_yields_snapshot_updates() {
     let first_text =
         String::from_utf8(first_buf).expect("SSE event is valid UTF-8 when fully assembled");
     assert!(
-        !first_text.is_empty() && first_text.contains("event: snapshot"),
-        "first SSE event should be a snapshot"
+        !first_text.is_empty() && first_text.contains("event: event"),
+        "SSE event should be a journal event, got: {first_text}"
     );
 
-    // Publish a new snapshot through the store and expect a second event.
-    let new_snapshot = fixture_snapshot(1);
-    store.publish(new_snapshot).await;
-
-    // Read the second event into a buffer.
-    let mut second_buf = Vec::new();
-    #[allow(clippy::while_let_loop)]
-    loop {
-        match tokio::time::timeout(timeout_dur, stream.next()).await {
-            Ok(Some(Ok(chunk))) => {
-                second_buf.extend_from_slice(&chunk);
-                if second_buf.ends_with(b"\n\n") || second_buf.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-            }
-            Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
-        }
-    }
-    let second_text =
-        String::from_utf8(second_buf).expect("SSE event is valid UTF-8 when fully assembled");
-    assert!(
-        !second_text.is_empty() && second_text.contains("event: snapshot"),
-        "second SSE event should be a snapshot"
-    );
-
-    // Verify the payload in the second event is a valid DashboardSnapshot.
-    let data_line = second_text
+    // Verify the payload is a valid EventRecord.
+    let data_line = first_text
         .lines()
         .find(|l| l.starts_with("data:"))
-        .expect("second event contains data line");
+        .expect("SSE event contains data line");
     let json_payload = data_line.trim_start_matches("data:").trim();
-    let dashboard: opensymphony::opensymphony_gateway_schema::snapshot::DashboardSnapshot =
-        serde_json::from_str(json_payload).expect("deserialize SSE payload as DashboardSnapshot");
-    assert_eq!(dashboard.sequence, 2);
+    let record: opensymphony::opensymphony_gateway_schema::event_journal::EventRecord =
+        serde_json::from_str(json_payload).expect("deserialize SSE payload as EventRecord");
+    assert_eq!(record.kind.kind_tag(), "run.started");
 
     server_task.abort();
 }
