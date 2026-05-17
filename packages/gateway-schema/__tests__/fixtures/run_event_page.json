@@ -1,0 +1,15 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "run_id": "run-1",
+  "events": [
+    {
+      "sequence": 1,
+      "event_id": "evt-1",
+      "happened_at": "2025-01-15T09:01:05Z",
+      "kind": "ConversationStateUpdateEvent",
+      "summary": "ready",
+      "payload": {"execution_status": "ready"},
+      "raw_payload": {"execution_status": "ready"}
+    }
+  ]
+}

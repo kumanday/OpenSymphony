@@ -1,0 +1,8 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "cursor": {"sequence": 8, "partition": "unknown:run-2"},
+  "entity_ref": {"kind": "run", "id": "run-2"},
+  "event_kind": "future_event",
+  "raw_payload": {"unknown_field": 42},
+  "emitted_at": "2025-01-15T10:01:00Z"
+}

@@ -1,0 +1,11 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "frame_sequence": 1,
+  "stream_id": "stream-1",
+  "run_id": "run-1",
+  "terminal_session_id": "term-1",
+  "frame_kind": "stdout",
+  "encoding": "utf8",
+  "content": "hello world\n",
+  "timestamp": "2025-01-15T10:00:00Z"
+}

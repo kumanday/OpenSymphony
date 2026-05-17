@@ -1,0 +1,23 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "gateway_version": "1.6.0",
+  "supported_api_versions": ["1.0.0"],
+  "transports": [
+    {
+      "transport": "websocket",
+      "modes": ["json", "binary"],
+      "supported_encodings": ["utf-8", "base64"],
+      "bidirectional": true
+    }
+  ],
+  "features": [
+    {
+      "feature": "task_graph",
+      "available": true,
+      "requires_auth": false
+    }
+  ],
+  "auth_modes": ["none", "api_key"],
+  "max_event_page_size": 1000,
+  "max_terminal_frame_batch": 500
+}

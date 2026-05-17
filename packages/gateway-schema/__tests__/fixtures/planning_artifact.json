@@ -1,0 +1,13 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "artifact_id": "art-1",
+  "session_id": "sess-1",
+  "kind": "milestone_draft",
+  "title": "M1: Gateway Contract",
+  "content": "# Milestone\n\nDraft gateway schemas.",
+  "created_at": "2025-01-15T10:00:00Z",
+  "updated_at": "2025-01-15T10:00:00Z",
+  "generated_by": "planning-agent",
+  "approved": false,
+  "published_to_tracker": false
+}

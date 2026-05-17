@@ -1,0 +1,10 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "correlation_id": "corr-1",
+  "action_kind": "retry",
+  "target_entity": {
+    "entity_kind": "run",
+    "entity_id": "run-1"
+  },
+  "idempotency_key": "idem-1"
+}

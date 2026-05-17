@@ -31,3 +31,10 @@ tools/openhands-server/workspace/
 !.opensymphony/memory/
 .opensymphony/memory/*
 !.opensymphony/memory/memory.yaml
+
+# Frontend workspace
+node_modules/
+apps/*/dist/
+packages/*/dist/
+*.tsbuildinfo
+package-lock.json

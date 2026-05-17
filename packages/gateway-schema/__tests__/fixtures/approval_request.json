@@ -1,0 +1,13 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "approval_id": "apr-1",
+  "run_id": "run-1",
+  "issue_id": "issue-1",
+  "kind": "tool_use",
+  "title": "Approve file write",
+  "description": "Agent wants to write to src/main.rs",
+  "proposed_action": {"path": "src/main.rs", "content": "fn main() {}"},
+  "requested_at": "2025-01-15T10:00:00Z",
+  "status": "pending",
+  "correlation_id": "corr-1"
+}
