@@ -348,6 +348,13 @@ async fn events_sse(
                                 sequence = event.sequence,
                                 "Failed to serialize SSE journal event"
                             );
+                            // Notify the client so they know data was lost rather
+                            // than silently swallowing the event.
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(
+                                    r#"{"error_type":"serialization","message":"Failed to serialize journal event","recoverable":true}"#
+                                ));
                         }
                     }
                 }
@@ -385,6 +392,13 @@ async fn events_sse(
                                 cursor = last_sequence,
                                 "Lag recovery failed for SSE stream"
                             );
+                            // Notify the client that lag recovery failed so they
+                            // know their cursor may be stale and should reconnect.
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(
+                                    r#"{"error_type":"cursor_stale","message":"Lag recovery failed; cursor may be stale","recoverable":true}"#
+                                ));
                         }
                     }
                 }

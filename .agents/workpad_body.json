@@ -1,0 +1,44 @@
+## Agent Harness Workpad
+
+```text
+magos@MacBook-Pro-Air:/Users/magos/.opensymphony/workspaces/COE-393@0f185a4
+```
+
+### Plan
+
+- [x] 1. Event journal schema and storage
+- [x] 2. Cursor query API and endpoint
+- [x] 3. SSE event stream
+- [x] 4. WebSocket event stream
+- [x] 5. StreamBroker and connection state
+- [x] 6. Test coverage (302 tests: 290 lib + 12 gateway)
+- [x] 7. Address AI review feedback round 2
+  - [x] 7.1 EventStream::recv() no longer advances last_sequence for non-matching partitions
+  - [x] 7.2 SSE error serialization uses structured StreamError JSON
+  - [x] 7.3 Removed synthetic connected events (SSE and WebSocket)
+  - [x] 7.4 Partition filter uses kind.default_partition()
+
+### Acceptance Criteria
+
+- [x] Clients can resume from cursor and receive committed events in sequence
+- [x] Duplicate events identifiable and reducible by stable ID or sequence
+- [x] Unknown harness payloads retained through raw references
+- [x] Stream errors and degraded states visible to clients
+
+### Validation
+
+- [x] cargo test --lib: 290 passed
+- [x] cargo test --test gateway: 12 passed
+- [x] cargo clippy: clean
+- [x] CI rust: SUCCESS, CI openhands-review: SUCCESS
+
+### Notes
+
+2025-05-17 22:00Z: Committed 0f185a4: fixed EventStream::recv() last_sequence, SSE error serialization, removed synthetic connected events, WebSocket __connected__ removed
+2025-05-17 22:15Z: Pushed to remote, added review-this label
+2025-05-17 22:30Z: CI checks SUCCESS (rust + openhands-review)
+2025-05-17 22:30Z: All 302 tests pass, clippy clean, awaiting human review
+
+### Confusions
+
+- AI review system persists CHANGES_REQUESTED despite SUCCESS checks; review triggered new pass
