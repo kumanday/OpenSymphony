@@ -118,17 +118,16 @@ impl InMemoryEventJournal {
 
         // Validate cursor against oldest available sequence.
         // Cursor sequence 0 is always valid (means "start from beginning").
-        if cursor.sequence > 0 {
-            if let Some(oldest) = state.events.front().map(|e| e.sequence) {
-                if cursor.sequence < oldest {
-                    return Err(JournalError::InvalidCursor {
-                        reason: format!(
-                            "Cursor sequence {} is older than oldest available sequence {}",
-                            cursor.sequence, oldest
-                        ),
-                    });
-                }
-            }
+        if cursor.sequence > 0
+            && let Some(oldest) = state.events.front().map(|e| e.sequence)
+            && cursor.sequence < oldest
+        {
+            return Err(JournalError::InvalidCursor {
+                reason: format!(
+                    "Cursor sequence {} is older than oldest available sequence {}",
+                    cursor.sequence, oldest
+                ),
+            });
         }
 
         let mut iter = state.events.iter().filter(|e| {
@@ -155,8 +154,7 @@ impl InMemoryEventJournal {
         let newest = state
             .events
             .iter()
-            .filter(|e| e.kind.default_partition() == partition)
-            .last()
+            .rfind(|e| e.kind.default_partition() == partition)
             .map(|e| e.sequence)
             .unwrap_or(0);
         StreamCursor::new(newest, partition)
@@ -518,14 +516,14 @@ mod tests {
         assert!(page.next_cursor.is_some());
 
         // Use next cursor to get the next page.
-        let next = page.next_cursor.unwrap();
+        let next = page.next_cursor.expect("next cursor should exist");
         let page2 = journal.query_after(&next, 2).await.expect("query");
 
         assert_eq!(page2.events.len(), 2);
         assert!(page2.has_more);
 
         // Get the last page.
-        let next2 = page2.next_cursor.unwrap();
+        let next2 = page2.next_cursor.expect("next cursor should exist");
         let page3 = journal.query_after(&next2, 2).await.expect("query");
 
         assert_eq!(page3.events.len(), 1);
@@ -739,7 +737,10 @@ mod tests {
             .expect("channel should not be closed");
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().kind, EventKind::RunStarted);
+        assert_eq!(
+            result.expect("event should be Ok").kind,
+            EventKind::RunStarted
+        );
     }
 
     #[tokio::test]
@@ -794,7 +795,7 @@ mod tests {
 
         let state = broker.connection_state("conn-1").await;
         assert!(state.is_some());
-        assert!(state.unwrap().connected);
+        assert!(state.expect("connection should exist").connected);
 
         broker.unregister_connection("conn-1").await;
         assert_eq!(broker.active_connection_count().await, 0);

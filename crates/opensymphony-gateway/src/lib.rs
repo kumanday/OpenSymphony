@@ -336,7 +336,7 @@ async fn event_journal_query(
     axum::extract::Query(params): axum::extract::Query<EventJournalQueryParams>,
 ) -> Result<Json<EventPage>, (axum::http::StatusCode, Json<JournalError>)> {
     let cursor = StreamCursor::new(params.cursor, &params.partition);
-    let limit = params.limit.max(1).min(GATEWAY_EVENT_PAGE_LIMIT);
+    let limit = params.limit.clamp(1, GATEWAY_EVENT_PAGE_LIMIT);
     match state.journal.query_after(&cursor, limit).await {
         Ok(page) => Ok(Json(page)),
         Err(err) => {
@@ -420,14 +420,13 @@ async fn event_stream_ws(
             loop {
                 match event_stream.recv().await {
                     Some(Ok(event)) => {
-                        if let Ok(json) = serde_json::to_string(&event) {
-                            if socket
+                        if let Ok(json) = serde_json::to_string(&event)
+                            && socket
                                 .send(Message::Text(format!("__event__ {}", json).into()))
                                 .await
                                 .is_err()
-                            {
-                                break;
-                            }
+                        {
+                            break;
                         }
                     }
                     Some(Err(err)) => {

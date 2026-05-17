@@ -185,7 +185,7 @@ impl EventRecord {
 }
 
 /// Builder for constructing EventRecord instances.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct EventRecordBuilder {
     event_id: Option<EventId>,
     sequence: Option<u64>,
@@ -198,24 +198,6 @@ pub struct EventRecordBuilder {
     kind: Option<EventKind>,
     payload: Option<Value>,
     raw_payload_ref: Option<String>,
-}
-
-impl Default for EventRecordBuilder {
-    fn default() -> Self {
-        Self {
-            event_id: None,
-            sequence: None,
-            schema_version: None,
-            actor: None,
-            correlation_id: None,
-            entity_refs: Vec::new(),
-            happened_at: None,
-            summary: String::new(),
-            kind: None,
-            payload: None,
-            raw_payload_ref: None,
-        }
-    }
 }
 
 impl EventRecordBuilder {
