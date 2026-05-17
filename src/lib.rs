@@ -4,6 +4,8 @@ pub mod opensymphony_cli;
 pub mod opensymphony_control;
 #[path = "../crates/opensymphony-domain/src/lib.rs"]
 pub mod opensymphony_domain;
+#[path = "../crates/opensymphony-gateway-schema/src/lib.rs"]
+pub mod opensymphony_gateway_schema;
 #[path = "../crates/opensymphony-linear/src/lib.rs"]
 pub mod opensymphony_linear;
 #[path = "../crates/opensymphony-memory/src/lib.rs"]
