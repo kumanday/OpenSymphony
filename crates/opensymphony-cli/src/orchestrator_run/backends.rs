@@ -94,6 +94,12 @@ pub(super) struct ActiveConversationStorePreparation {
     pub skipped_invalid_manifest: usize,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct ManagedLocalPreparation {
+    pub active_conversations: ActiveConversationStorePreparation,
+    pub tooling: Option<LocalServerTooling>,
+}
+
 pub(super) struct RuntimeWorkspaceBackend {
     manager: Arc<WorkspaceManager>,
     active_states: HashSet<String>,
@@ -212,21 +218,21 @@ pub(super) async fn prepare_active_conversation_store(
     runtime: &RunRuntimeConfig,
     tracker: &mut RuntimeTrackerBackend,
     workspace_manager: &WorkspaceManager,
-) -> Result<ActiveConversationStorePreparation, RunCommandError> {
+) -> Result<ManagedLocalPreparation, RunCommandError> {
     let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() else {
-        return Ok(ActiveConversationStorePreparation::default());
+        return Ok(ManagedLocalPreparation::default());
     };
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
     let supervised = transport.managed_local_server_base_url()?.is_some()
         && runtime.workflow.extensions.openhands.local_server.enabled;
     if !supervised {
-        return Ok(ActiveConversationStorePreparation::default());
+        return Ok(ManagedLocalPreparation::default());
     }
     let tool_dir = runtime
         .tool_dir
         .clone()
         .ok_or(RunCommandError::MissingToolDir)?;
-    LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
+    let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
         RunCommandError::ToolingSetupRequired {
             tool_dir,
             detail: error.to_string(),
@@ -234,12 +240,16 @@ pub(super) async fn prepare_active_conversation_store(
     })?;
     conversation_store.ensure_active_and_archived()?;
     let active_issues = tracker.client.candidate_issues().await?;
-    prepare_active_conversation_store_for_issues(
+    let active_conversations = prepare_active_conversation_store_for_issues(
         workspace_manager,
         conversation_store,
         &active_issues,
     )
-    .await
+    .await?;
+    Ok(ManagedLocalPreparation {
+        active_conversations,
+        tooling: Some(tooling),
+    })
 }
 
 async fn prepare_active_conversation_store_for_issues(
@@ -331,6 +341,7 @@ pub(super) fn build_workspace_manager_config(
 
 pub(super) async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
+    prepared_tooling: Option<LocalServerTooling>,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
     let local_server = &runtime.workflow.extensions.openhands.local_server;
@@ -356,12 +367,15 @@ pub(super) async fn build_runtime_transport(
         .tool_dir
         .clone()
         .ok_or(RunCommandError::MissingToolDir)?;
-    let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
-        RunCommandError::ToolingSetupRequired {
-            tool_dir,
-            detail: error.to_string(),
-        }
-    })?;
+    let tooling = match prepared_tooling {
+        Some(tooling) => tooling,
+        None => LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
+            RunCommandError::ToolingSetupRequired {
+                tool_dir,
+                detail: error.to_string(),
+            }
+        })?,
+    };
     let url =
         Url::parse(&supervisor_base_url).expect("validated managed supervisor URL should parse");
     let mut config = SupervisedServerConfig::new(tooling);
@@ -1119,7 +1133,7 @@ Run the scheduler.
             },
         };
 
-        let error = match build_runtime_transport(&runtime).await {
+        let error = match build_runtime_transport(&runtime, None).await {
             Ok(_) => panic!("external targets should reject launcher overrides"),
             Err(error) => error,
         };

@@ -143,9 +143,10 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         build_workspace_manager_config(&runtime.workflow),
     )?);
     let workspace = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &runtime.workflow);
-    let active_store_preparation =
+    let managed_local_preparation =
         prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())
             .await?;
+    let active_store_preparation = &managed_local_preparation.active_conversations;
     if active_store_preparation.moved > 0 {
         info!(
             moved = active_store_preparation.moved,
@@ -158,7 +159,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         );
     }
 
-    let (transport, mut supervisor) = build_runtime_transport(&runtime).await?;
+    let (transport, mut supervisor) =
+        build_runtime_transport(&runtime, managed_local_preparation.tooling).await?;
     let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
     client.openapi_probe().await?;
 

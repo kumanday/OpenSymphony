@@ -139,7 +139,7 @@ enum DebugCommandError {
     #[error("rehydrated conversation {conversation_id} did not expose persisted history")]
     PersistedHistoryMissing { conversation_id: Uuid },
     #[error(
-        "archived conversation {conversation_id} was not loaded from {store_path}; stop any OpenHands server already bound to the configured port and retry"
+        "archived conversation {conversation_id} could not be attached from expected store {store_path}. The conversation may be missing from that store, or an already-running OpenHands server on the configured port may be using a different `OH_CONVERSATIONS_PATH`. Stop the existing server or free the port, then retry."
     )]
     ArchivedConversationUnavailable {
         conversation_id: Uuid,

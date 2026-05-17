@@ -1036,14 +1036,19 @@ struct ConversationArchiveReport {
     failures: Vec<String>,
 }
 
+struct ConversationArchiveContext<'a> {
+    conversation_store: &'a OpenHandsConversationStorePaths,
+    manager: WorkspaceManager,
+}
+
 async fn archive_openhands_conversations_from_config(
     repo_root: &Path,
     workflow_path: Option<&Path>,
     issue_keys: &[String],
 ) -> Result<ConversationArchiveReport, MemoryError> {
     let store = conversation_store_from_run_config(repo_root, workflow_path)?;
-    archive_openhands_conversations_for_issues(repo_root, workflow_path, store.as_ref(), issue_keys)
-        .await
+    let context = conversation_archive_context(repo_root, workflow_path, store.as_ref())?;
+    archive_openhands_conversations_for_issues_with_context(context.as_ref(), issue_keys).await
 }
 
 async fn archive_openhands_conversations_for_issues(
@@ -1052,17 +1057,18 @@ async fn archive_openhands_conversations_for_issues(
     conversation_store: Option<&OpenHandsConversationStorePaths>,
     issue_keys: &[String],
 ) -> Result<ConversationArchiveReport, MemoryError> {
-    let mut report = ConversationArchiveReport::default();
-    if issue_keys.is_empty() {
-        return Ok(report);
-    }
-    let Some(conversation_store) = conversation_store else {
-        report.warnings.push(
-            "skipped OpenHands conversation archive: no managed tool_dir configured".to_string(),
-        );
-        return Ok(report);
-    };
+    let context = conversation_archive_context(repo_root, workflow_path, conversation_store)?;
+    archive_openhands_conversations_for_issues_with_context(context.as_ref(), issue_keys).await
+}
 
+fn conversation_archive_context<'a>(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+    conversation_store: Option<&'a OpenHandsConversationStorePaths>,
+) -> Result<Option<ConversationArchiveContext<'a>>, MemoryError> {
+    let Some(conversation_store) = conversation_store else {
+        return Ok(None);
+    };
     let workflow = load_resolved_workflow(repo_root, workflow_path)?;
     let manager = WorkspaceManager::new(WorkspaceManagerConfig {
         root: workflow.config.workspace.root.clone(),
@@ -1074,9 +1080,30 @@ async fn archive_openhands_conversations_for_issues(
     .map_err(|error| {
         MemoryError::InvalidInput(format!("failed to build workspace manager: {error}"))
     })?;
+    Ok(Some(ConversationArchiveContext {
+        conversation_store,
+        manager,
+    }))
+}
+
+async fn archive_openhands_conversations_for_issues_with_context(
+    context: Option<&ConversationArchiveContext<'_>>,
+    issue_keys: &[String],
+) -> Result<ConversationArchiveReport, MemoryError> {
+    let mut report = ConversationArchiveReport::default();
+    if issue_keys.is_empty() {
+        return Ok(report);
+    }
+    let Some(context) = context else {
+        report.warnings.push(
+            "skipped OpenHands conversation archive: no managed tool_dir configured".to_string(),
+        );
+        return Ok(report);
+    };
 
     for issue_key in issue_keys {
-        let Some(workspace) = manager
+        let Some(workspace) = context
+            .manager
             .find_workspace_by_issue_reference(issue_key)
             .await
             .map_err(|error| {
@@ -1091,7 +1118,8 @@ async fn archive_openhands_conversations_for_issues(
             continue;
         };
         let manifest_path = workspace.conversation_manifest_path();
-        let Some(raw_manifest) = manager
+        let Some(raw_manifest) = context
+            .manager
             .read_text_artifact(&workspace, &manifest_path)
             .await
             .map_err(|error| {
@@ -1113,7 +1141,8 @@ async fn archive_openhands_conversations_for_issues(
                 ))
             })?;
 
-        match conversation_store
+        match context
+            .conversation_store
             .move_conversation_to(
                 manifest.conversation_id.as_str(),
                 crate::opensymphony_openhands::ConversationStoreKind::Archived,
