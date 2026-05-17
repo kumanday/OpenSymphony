@@ -1,3 +1,14 @@
+//! Event journal domain types for durable event records and replayable streams.
+//!
+//! The journal records state transitions from gateway, orchestrator, task graph,
+//! run lifecycle, terminal/log, approval, and planning activity. Each record carries
+//! a stable ID, monotonic sequence number, schema version, actor, correlation ID,
+//! entity references, timestamp, summary, payload, and optional raw payload reference.
+//!
+//! Cursors enable clients to resume from a specific sequence position and receive
+//! committed events in order. Unknown harness payloads are retained through raw
+//! JSON references for diagnostics without requiring schema evolution.
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
