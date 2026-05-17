@@ -368,15 +368,29 @@ impl EventStream {
         loop {
             match self.inner.recv().await {
                 Ok(Ok(event)) => {
-                    // Always update last_sequence so the cursor tracks global progress,
-                    // even for events from other partitions that we drop.
-                    self.last_sequence = event.sequence.max(self.last_sequence);
+                    // Skip events we already delivered (e.g., backlog overlap after
+                    // set_last_sequence() advances past the initial query results).
+                    if event.sequence <= self.last_sequence {
+                        continue;
+                    }
+                    // Only deliver events for this partition.
                     if event.kind.default_partition() == self.partition {
+                        self.last_sequence = event.sequence;
                         return Some(Ok(event));
                     }
+                    // Non-matching partition: track global progress so we don't
+                    // re-deliver if the cursor is later reset to a lower value.
+                    self.last_sequence = event.sequence.max(self.last_sequence);
                 }
                 Ok(Err(err)) => return Some(Err(err)),
-                Err(broadcast::error::RecvError::Lagged(_)) => {
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    // We missed messages in the broadcast buffer. Report backpressure
+                    // so the client can decide whether to reconnect from a cursor.
+                    tracing::warn!(
+                        skipped = skipped,
+                        partition = %self.partition,
+                        "Broadcast receiver lagged; some events may have been skipped"
+                    );
                     return Some(Err(StreamError::backpressure()));
                 }
                 Err(broadcast::error::RecvError::Closed) => return None,

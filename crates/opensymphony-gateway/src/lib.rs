@@ -9,7 +9,7 @@ use axum::{
 };
 use tokio::{net::TcpListener, sync::broadcast};
 
-use crate::opensymphony_domain::{InMemoryEventJournal, StreamBroker};
+use crate::opensymphony_domain::{EventJournalBackend, InMemoryEventJournal, StreamBroker};
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
     event_journal::{EventPage, JournalError},
@@ -321,8 +321,17 @@ async fn events_sse(
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let journal = state.journal.clone();
     let stream = stream! {
+        // Emit an initial "connected" event so the client knows the stream is live
+        // and has a starting cursor position.
+        let latest_cursor = journal.latest_cursor().await;
+        if let Ok(json) = serde_json::to_string(&latest_cursor) {
+            yield Ok(Event::default()
+                .event("connected")
+                .data(format!("{{\"cursor\":{}}}", json)));
+        }
+
         let mut receiver = journal.subscribe();
-        let mut last_sequence = 0u64;
+        let mut last_sequence = latest_cursor.sequence;
         loop {
             match receiver.recv().await {
                 Ok(Ok(event)) => {
@@ -330,20 +339,53 @@ async fn events_sse(
                         continue;
                     }
                     last_sequence = event.sequence;
-                    if let Ok(json) = serde_json::to_string(&event) {
-                        yield Ok(Event::default().event("event").data(json));
+                    match serde_json::to_string(&event) {
+                        Ok(json) => {
+                            yield Ok(Event::default().event("event").data(json));
+                        }
+                        Err(e) => {
+                            // Report serialization failure to the client so they know
+                            // an event was dropped rather than silently swallowing it.
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(format!(
+                                    "{{\"error_type\":\"serialization\",\"message\":\"{}\",\"recoverable\":true}}",
+                                    e
+                                )));
+                        }
                     }
                 }
-                Ok(Err(_)) => {}
+                Ok(Err(err)) => {
+                    // Forward journal stream errors to the client.
+                    yield Ok(Event::default()
+                        .event("error")
+                        .data(format!(
+                            "{{\"error_type\":\"{}\",\"message\":\"{}\",\"recoverable\":{}}}",
+                            serde_json::to_string(&err.error_type).unwrap_or_default(),
+                            err.message,
+                            err.recoverable
+                        )));
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    if let Ok(page) = journal.query_after(&StreamCursor::new(last_sequence, "events"), GATEWAY_EVENT_PAGE_LIMIT).await {
-                        for event in &page.events {
-                            if event.sequence > last_sequence {
-                                last_sequence = event.sequence;
-                                if let Ok(json) = serde_json::to_string(event) {
-                                    yield Ok(Event::default().event("event").data(json));
+                    // Lag recovery: replay missed events from the journal backlog.
+                    match journal.query_after(&StreamCursor::new(last_sequence, "events"), GATEWAY_EVENT_PAGE_LIMIT).await {
+                        Ok(page) => {
+                            for event in &page.events {
+                                if event.sequence > last_sequence {
+                                    last_sequence = event.sequence;
+                                    if let Ok(json) = serde_json::to_string(event) {
+                                        yield Ok(Event::default().event("event").data(json));
+                                    }
                                 }
                             }
+                        }
+                        Err(_) => {
+                            // Cursor may be stale after lag; emit error event.
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(
+                                    r#"{"error_type":"cursor_stale","message":"Lag recovery failed; cursor may be stale","recoverable":true}"#
+                                ));
                         }
                     }
                 }
@@ -396,20 +438,70 @@ async fn event_stream_ws(
             broker.register_connection(connection_id.clone()).await;
 
             // Read optional init message for cursor/partition with a timeout.
-            // Without a timeout, a slow client could hold the broker registration
-            // indefinitely.
             let init_timeout = tokio::time::timeout(Duration::from_secs(10), socket.recv());
             let (cursor, partition) = match init_timeout.await {
                 Ok(Some(Ok(init_msg))) => match parse_init_message(&init_msg) {
                     Ok((c, p)) => (c, p),
-                    Err(_) => (StreamCursor::new(0, "events"), "events".to_string()),
+                    Err(e) => {
+                        tracing::warn!(
+                            connection_id = %connection_id,
+                            error = %e,
+                            "Failed to parse init message, closing connection"
+                        );
+                        // Send error event to client before closing.
+                        let _ = socket
+                            .send(Message::Text(
+                                r#"__error__ {"error_type":"invalid_init_message","message":"Failed to parse init message","recoverable":false}"#
+                                    .into(),
+                            ))
+                            .await;
+                        broker.unregister_connection(&connection_id).await;
+                        return;
+                    }
                 },
-                Ok(_) => (StreamCursor::new(0, "events"), "events".to_string()),
+                Ok(Some(Err(e))) => {
+                    // WebSocket error while reading init message (client disconnected).
+                    tracing::warn!(
+                        connection_id = %connection_id,
+                        error = %e,
+                        "WebSocket error during init read, closing connection"
+                    );
+                    broker.unregister_connection(&connection_id).await;
+                    return;
+                }
+                Ok(None) => {
+                    // Client sent close frame before init.
+                    tracing::info!(
+                        connection_id = %connection_id,
+                        "Client closed connection before sending init message"
+                    );
+                    broker.unregister_connection(&connection_id).await;
+                    return;
+                }
                 Err(_) => {
-                    tracing::warn!(connection_id = %connection_id, "Init message timed out, using defaults");
+                    // Timeout: client didn't send init message in time. Proceed with
+                    // defaults and send a connected event so the client knows we're live.
+                    tracing::warn!(
+                        connection_id = %connection_id,
+                        "Init message timed out; proceeding with defaults"
+                    );
+                    if let Ok(json) = serde_json::to_string(&StreamCursor::new(0, "events")) {
+                        let _ = socket
+                            .send(Message::Text(
+                                format!("__connected__ {{\"cursor\":{}}}", json).into(),
+                            ))
+                            .await;
+                    }
                     (StreamCursor::new(0, "events"), "events".to_string())
                 }
             };
+
+            // Send a connected event with the negotiated cursor.
+            if let Ok(json) = serde_json::to_string(&cursor) {
+                let _ = socket
+                    .send(Message::Text(format!("__connected__ {{\"cursor\":{}}}", json).into()))
+                    .await;
+            }
 
             // Subscribe to live events FIRST to prevent losing any events that arrive
             // between the backlog query and the live stream subscription.
@@ -446,6 +538,16 @@ async fn event_stream_ws(
                                 }
                             }
                             Err(e) => {
+                                // Report serialization failure to the client.
+                                let _ = socket
+                                    .send(Message::Text(
+                                        format!(
+                                            "__error__ {{\"error_type\":\"serialization\",\"message\":\"Failed to serialize event {}\",\"recoverable\":true}}",
+                                            event.event_id
+                                        )
+                                        .into(),
+                                    ))
+                                    .await;
                                 tracing::warn!(
                                     event_id = %event.event_id,
                                     error = %e,
@@ -486,6 +588,17 @@ async fn event_stream_ws(
                                 }
                             }
                             Err(e) => {
+                                // Report serialization failure to the client instead
+                                // of silently dropping the event.
+                                let _ = socket
+                                    .send(Message::Text(
+                                        format!(
+                                            "__error__ {{\"error_type\":\"serialization\",\"message\":\"Failed to serialize event {}\",\"recoverable\":true}}",
+                                            event.event_id
+                                        )
+                                        .into(),
+                                    ))
+                                    .await;
                                 tracing::warn!(
                                     event_id = %event.event_id,
                                     error = %e,
