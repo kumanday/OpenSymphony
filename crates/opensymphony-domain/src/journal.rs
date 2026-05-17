@@ -102,7 +102,7 @@ impl InMemoryEventJournal {
             }
         }
 
-        state.next_sequence = event.sequence.saturating_add(1).max(state.next_sequence);
+        state.next_sequence = state.next_sequence.saturating_add(1);
         state.events.push_back(event.clone());
 
         // Broadcast to subscribers (ignore errors from lagged/dropped receivers).
@@ -163,8 +163,8 @@ impl InMemoryEventJournal {
             .iter()
             .filter(|e| e.kind.default_partition() == partition)
             .last()
-            .map(|e| e.sequence + 1)
-            .unwrap_or(1);
+            .map(|e| e.sequence)
+            .unwrap_or(0);
         StreamCursor::new(newest, partition)
     }
 
@@ -377,8 +377,10 @@ impl EventStream {
         loop {
             match self.inner.recv().await {
                 Ok(Ok(event)) => {
+                    // Always update last_sequence so the cursor tracks global progress,
+                    // even for events from other partitions that we drop.
+                    self.last_sequence = event.sequence.max(self.last_sequence);
                     if event.kind.default_partition() == self.partition {
-                        self.last_sequence = event.sequence.max(self.last_sequence);
                         return Some(Ok(event));
                     }
                 }

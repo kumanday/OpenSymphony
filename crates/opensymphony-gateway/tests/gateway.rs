@@ -668,3 +668,104 @@ async fn event_journal_duplicate_detection() {
 
     server_task.abort();
 }
+
+/// Test that the WebSocket event stream endpoint works end-to-end.
+/// Connects, sends an init message, receives backlog events, then a live event.
+#[tokio::test]
+async fn websocket_event_stream_delivers_events() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::{
+        event_journal::{EventActor, EventKind, EventRecord},
+    };
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    use url::Url;
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+
+    // Seed a backlog event.
+    let backlog_event = EventRecord::builder()
+        .event_id("ws_test_1")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::RunStarted)
+        .summary("Backlog event")
+        .build();
+    journal.append(backlog_event).await.expect("append");
+
+    let server = GatewayServer::with_journal(
+        store, journal.clone(), broker,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    // Connect via WebSocket.
+    let ws_url = format!("ws://{address}/api/v1/streams/events");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect("connect to WS endpoint");
+
+    let (mut write, mut read) = ws_stream.split();
+
+    // Send init message to start from the beginning.
+    let init = serde_json::json!({ "sequence": 0, "partition": "events" });
+    let init_msg = serde_json::to_string(&init).expect("serialize init");
+    write
+        .send(WsMessage::Text(init_msg.into()))
+        .await
+        .expect("send init");
+
+    // Receive the backlog event.
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .expect("timed out waiting for backlog event")
+        .expect("should receive a message")
+        .expect("no WS error");
+    let text = msg.to_text().expect("text message");
+    assert!(
+        text.starts_with("__event__"),
+        "Expected __event__ prefix, got: {text}"
+    );
+    assert!(
+        text.contains("ws_test_1"),
+        "Backlog event should contain event_id ws_test_1, got: {text}"
+    );
+
+    // Emit a live event through the journal.
+    let live_event = EventRecord::builder()
+        .event_id("ws_test_2")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::RunCompleted)
+        .summary("Live event")
+        .build();
+    journal.append(live_event).await.expect("append live");
+
+    // Receive the live event.
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .expect("timed out waiting for live event")
+        .expect("should receive a message")
+        .expect("no WS error");
+    let text = msg.to_text().expect("text message");
+    assert!(
+        text.starts_with("__event__"),
+        "Expected __event__ prefix, got: {text}"
+    );
+    assert!(
+        text.contains("ws_test_2"),
+        "Live event should contain event_id ws_test_2, got: {text}"
+    );
+
+    server_task.abort();
+}

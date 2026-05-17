@@ -375,15 +375,27 @@ async fn event_stream_ws(
                 (StreamCursor::new(0, "events"), "events".to_string())
             };
 
-            // Deliver backlog events.
+            // Deliver backlog events (report errors to the client instead of swallowing).
             let query_cursor = StreamCursor::new(cursor.sequence, &partition);
-            if let Ok(page) = journal.query_after(&query_cursor, GATEWAY_EVENT_PAGE_LIMIT).await {
-                for event in page.events {
-                    if let Ok(json) = serde_json::to_string(&event) {
+            match journal.query_after(&query_cursor, GATEWAY_EVENT_PAGE_LIMIT).await {
+                Ok(page) => {
+                    for event in page.events {
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            let _ = socket
+                                .send(Message::Text(format!("__event__ {}", json).into()))
+                                .await;
+                        }
+                    }
+                }
+                Err(err) => {
+                    if let Ok(json) = serde_json::to_string(&err) {
                         let _ = socket
-                            .send(Message::Text(format!("__event__ {}", json).into()))
+                            .send(Message::Text(format!("__error__ {}", json).into()))
                             .await;
                     }
+                    // Stale cursor is unrecoverable via WS; close the connection.
+                    broker.unregister_connection(&connection_id).await;
+                    return;
                 }
             }
 
