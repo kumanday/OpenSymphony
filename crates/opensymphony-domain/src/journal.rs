@@ -28,9 +28,7 @@ pub trait EventJournalBackend: Send + Sync + 'static {
     ) -> impl Future<Output = Result<EventPage, JournalError>> + Send;
 
     /// Get the latest cursor position.
-    fn latest_cursor(
-        &self,
-    ) -> impl Future<Output = StreamCursor> + Send;
+    fn latest_cursor(&self) -> impl Future<Output = StreamCursor> + Send;
 
     /// Get the oldest available sequence number (for cursor staleness checks).
     fn oldest_sequence(&self) -> impl Future<Output = Option<u64>> + Send;
@@ -133,13 +131,9 @@ impl InMemoryEventJournal {
             }
         }
 
-        let mut iter = state
-            .events
-            .iter()
-            .filter(|e| {
-                e.sequence > cursor.sequence
-                    && e.kind.default_partition() == cursor.partition
-            });
+        let mut iter = state.events.iter().filter(|e| {
+            e.sequence > cursor.sequence && e.kind.default_partition() == cursor.partition
+        });
         let events: Vec<EventRecord> = iter.by_ref().take(limit).cloned().collect();
         let has_more = iter.next().is_some();
 
@@ -287,12 +281,13 @@ impl StreamBroker {
     }
 
     /// Create a new event stream starting from the given cursor.
-    pub fn create_stream(
-        &self,
-        cursor: &StreamCursor,
-    ) -> Result<EventStream, StreamError> {
+    pub fn create_stream(&self, cursor: &StreamCursor) -> Result<EventStream, StreamError> {
         let receiver = self.journal.subscribe();
-        Ok(EventStream::new(receiver, cursor.sequence, cursor.partition.clone()))
+        Ok(EventStream::new(
+            receiver,
+            cursor.sequence,
+            cursor.partition.clone(),
+        ))
     }
 
     /// Register a connection with the given ID.
@@ -316,10 +311,7 @@ impl StreamBroker {
     }
 
     /// Get the connection state for a specific connection.
-    pub async fn connection_state(
-        &self,
-        connection_id: &str,
-    ) -> Option<StreamConnectionState> {
+    pub async fn connection_state(&self, connection_id: &str) -> Option<StreamConnectionState> {
         let connections = self.connections.lock().await;
         connections.get(connection_id).cloned()
     }
@@ -333,10 +325,7 @@ impl StreamBroker {
     /// Get the total number of active connections.
     pub async fn active_connection_count(&self) -> usize {
         let connections = self.connections.lock().await;
-        connections
-            .values()
-            .filter(|s| s.connected)
-            .count()
+        connections.values().filter(|s| s.connected).count()
     }
 
     /// Get the underlying journal for direct access.
@@ -428,8 +417,14 @@ mod tests {
     async fn append_assigns_monotonic_sequence() {
         let journal = test_journal();
 
-        let e1 = journal.append(sample_event(0, EventKind::RunStarted)).await.expect("append");
-        let e2 = journal.append(sample_event(0, EventKind::RunCompleted)).await.expect("append");
+        let e1 = journal
+            .append(sample_event(0, EventKind::RunStarted))
+            .await
+            .expect("append");
+        let e2 = journal
+            .append(sample_event(0, EventKind::RunCompleted))
+            .await
+            .expect("append");
 
         assert_eq!(e1.sequence, 1);
         assert_eq!(e2.sequence, 2);
@@ -480,7 +475,10 @@ mod tests {
 
         // After eviction and append, oldest sequence should be higher.
         let oldest = journal.oldest_sequence().await;
-        assert!(oldest.map(|o| o >= 3).unwrap_or(false), "old events should be evicted");
+        assert!(
+            oldest.map(|o| o >= 3).unwrap_or(false),
+            "old events should be evicted"
+        );
     }
 
     #[tokio::test]
@@ -705,7 +703,11 @@ mod tests {
 
         // oldest_sequence should be > 1 after evictions.
         let oldest = journal.oldest_sequence().await.expect("should have events");
-        assert!(oldest > 1, "oldest should be > 1 after evictions, got {}", oldest);
+        assert!(
+            oldest > 1,
+            "oldest should be > 1 after evictions, got {}",
+            oldest
+        );
 
         // A cursor between 0 and oldest should fail (cursor > 0, cursor < oldest).
         let stale_seq = oldest - 1;
@@ -731,13 +733,10 @@ mod tests {
         journal.append(event).await.expect("append");
 
         // Receiver should get the event.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            receiver.recv(),
-        )
-        .await
-        .expect("should receive in time")
-        .expect("channel should not be closed");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("should receive in time")
+            .expect("channel should not be closed");
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().kind, EventKind::RunStarted);

@@ -408,9 +408,8 @@ async fn event_journal_cursor_returns_events_page() {
         journal.append(event).await.expect("append");
     }
 
-    let server = opensymphony::opensymphony_gateway::GatewayServer::with_journal(
-        store, journal, broker,
-    );
+    let server =
+        opensymphony::opensymphony_gateway::GatewayServer::with_journal(store, journal, broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -476,8 +475,8 @@ async fn event_journal_cursor_returns_events_page() {
 #[tokio::test]
 async fn event_journal_partition_filtering() {
     use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
-    use opensymphony::opensymphony_gateway_schema::{
-        event_journal::{EventActor, EventKind, EventPage, EventRecord},
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventPage, EventRecord,
     };
 
     let store = SnapshotStore::new(fixture_snapshot(0));
@@ -506,9 +505,8 @@ async fn event_journal_partition_filtering() {
     journal.append(terminal).await.expect("append");
 
     let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
-    let server = opensymphony::opensymphony_gateway::GatewayServer::with_journal(
-        store, journal, broker,
-    );
+    let server =
+        opensymphony::opensymphony_gateway::GatewayServer::with_journal(store, journal, broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -557,8 +555,8 @@ async fn event_journal_partition_filtering() {
 #[tokio::test]
 async fn event_journal_raw_payload_ref_retained() {
     use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
-    use opensymphony::opensymphony_gateway_schema::{
-        event_journal::{EventActor, EventKind, EventPage, EventRecord},
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventPage, EventRecord,
     };
 
     let store = SnapshotStore::new(fixture_snapshot(0));
@@ -578,9 +576,8 @@ async fn event_journal_raw_payload_ref_retained() {
     journal.append(event).await.expect("append");
 
     let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
-    let server = opensymphony::opensymphony_gateway::GatewayServer::with_journal(
-        store, journal, broker,
-    );
+    let server =
+        opensymphony::opensymphony_gateway::GatewayServer::with_journal(store, journal, broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -615,8 +612,8 @@ async fn event_journal_raw_payload_ref_retained() {
 #[tokio::test]
 async fn event_journal_duplicate_detection() {
     use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
-    use opensymphony::opensymphony_gateway_schema::{
-        event_journal::{EventActor, EventKind, EventPage, EventRecord},
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventPage, EventRecord,
     };
 
     let store = SnapshotStore::new(fixture_snapshot(0));
@@ -634,9 +631,8 @@ async fn event_journal_duplicate_detection() {
     journal.append(event).await.expect("append");
 
     let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
-    let server = opensymphony::opensymphony_gateway::GatewayServer::with_journal(
-        store, journal, broker,
-    );
+    let server =
+        opensymphony::opensymphony_gateway::GatewayServer::with_journal(store, journal, broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -673,11 +669,11 @@ async fn event_journal_duplicate_detection() {
 /// Connects, sends an init message, receives backlog events, then a live event.
 #[tokio::test]
 async fn websocket_event_stream_delivers_events() {
-    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
-    use opensymphony::opensymphony_gateway_schema::{
-        event_journal::{EventActor, EventKind, EventRecord},
-    };
     use futures_util::SinkExt;
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventRecord,
+    };
     use tokio_tungstenite::tungstenite::Message as WsMessage;
     use url::Url;
 
@@ -695,9 +691,7 @@ async fn websocket_event_stream_delivers_events() {
         .build();
     journal.append(backlog_event).await.expect("append");
 
-    let server = GatewayServer::with_journal(
-        store, journal.clone(), broker,
-    );
+    let server = GatewayServer::with_journal(store, journal.clone(), broker);
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");

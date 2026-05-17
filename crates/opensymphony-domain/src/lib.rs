@@ -22,6 +22,7 @@ pub use identifiers::{
     WorkspaceKey,
 };
 pub use issue::{BlockerRef, IssueRef, IssueState, IssueStateCategory, NormalizedIssue};
+pub use journal::{EventJournalBackend, EventStream, InMemoryEventJournal, StreamBroker};
 pub use runtime::{
     ConversationActivityEvent, ConversationMetadata, ReleaseReason, RetryAttempt,
     RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeStreamState,
@@ -38,9 +39,6 @@ pub use time::{DurationMs, TimestampMs};
 pub use tracker::{
     TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
     TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerProjectMilestone,
-};
-pub use journal::{
-    EventJournalBackend, EventStream, InMemoryEventJournal, StreamBroker,
 };
 
 #[cfg(test)]

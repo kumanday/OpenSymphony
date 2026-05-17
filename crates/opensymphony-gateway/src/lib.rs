@@ -58,7 +58,8 @@ pub struct GatewayServer {
 impl GatewayServer {
     /// Create a new gateway server with the default journal capacity.
     pub fn new(store: SnapshotStore) -> Self {
-        let journal = InMemoryEventJournal::new(GATEWAY_JOURNAL_CAPACITY, GATEWAY_SUBSCRIBER_CAPACITY);
+        let journal =
+            InMemoryEventJournal::new(GATEWAY_JOURNAL_CAPACITY, GATEWAY_SUBSCRIBER_CAPACITY);
         Self {
             journal: journal.clone(),
             broker: StreamBroker::new(journal),
@@ -377,7 +378,10 @@ async fn event_stream_ws(
 
             // Deliver backlog events (report errors to the client instead of swallowing).
             let query_cursor = StreamCursor::new(cursor.sequence, &partition);
-            match journal.query_after(&query_cursor, GATEWAY_EVENT_PAGE_LIMIT).await {
+            match journal
+                .query_after(&query_cursor, GATEWAY_EVENT_PAGE_LIMIT)
+                .await
+            {
                 Ok(page) => {
                     for event in page.events {
                         if let Ok(json) = serde_json::to_string(&event) {
@@ -458,7 +462,10 @@ fn parse_init_message(
         partition: String,
     }
     let init: InitMessage = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    Ok((StreamCursor::new(init.cursor, &init.partition), init.partition))
+    Ok((
+        StreamCursor::new(init.cursor, &init.partition),
+        init.partition,
+    ))
 }
 
 /// Query parameters for event journal endpoint.

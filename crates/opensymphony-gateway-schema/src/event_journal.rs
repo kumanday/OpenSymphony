@@ -118,10 +118,7 @@ impl EventKind {
 
     /// Whether this event is high-volume (terminal/log frames).
     pub fn is_high_volume(&self) -> bool {
-        matches!(
-            self,
-            Self::TerminalFrame { .. } | Self::LogEntry { .. }
-        )
+        matches!(self, Self::TerminalFrame { .. } | Self::LogEntry { .. })
     }
 
     /// Partition name for this event kind.
@@ -431,8 +428,7 @@ mod tests {
             .build();
 
         let json = serde_json::to_string(&record).expect("serialize");
-        let deserialized: EventRecord =
-            serde_json::from_str(&json).expect("deserialize");
+        let deserialized: EventRecord = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(record, deserialized);
         assert_eq!(deserialized.event_id, "evt_test_001");
@@ -497,12 +493,25 @@ mod tests {
 
     #[test]
     fn high_volume_events_use_terminal_log_partition() {
-        assert!(EventKind::TerminalFrame { frame_id: "f1".into() }.is_high_volume());
-        assert!(EventKind::LogEntry { level: "info".into() }.is_high_volume());
+        assert!(
+            EventKind::TerminalFrame {
+                frame_id: "f1".into()
+            }
+            .is_high_volume()
+        );
+        assert!(
+            EventKind::LogEntry {
+                level: "info".into()
+            }
+            .is_high_volume()
+        );
         assert!(!EventKind::RunStarted.is_high_volume());
 
         assert_eq!(
-            EventKind::TerminalFrame { frame_id: "f1".into() }.default_partition(),
+            EventKind::TerminalFrame {
+                frame_id: "f1".into()
+            }
+            .default_partition(),
             "terminal_log"
         );
         assert_eq!(EventKind::RunStarted.default_partition(), "events");
