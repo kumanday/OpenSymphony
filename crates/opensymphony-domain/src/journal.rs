@@ -356,6 +356,10 @@ impl EventStream {
         self.last_sequence
     }
 
+    pub fn set_last_sequence(&mut self, seq: u64) {
+        self.last_sequence = seq.max(self.last_sequence);
+    }
+
     pub fn partition(&self) -> &str {
         &self.partition
     }

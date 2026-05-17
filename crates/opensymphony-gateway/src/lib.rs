@@ -376,19 +376,25 @@ async fn event_stream_ws(
                 (StreamCursor::new(0, "events"), "events".to_string())
             };
 
+            // Subscribe to live events FIRST to prevent losing any events that arrive
+            // between the backlog query and the live stream subscription.
+            let mut event_stream = broker.create_stream(&cursor).expect("create_stream");
+
             // Deliver backlog events (report errors to the client instead of swallowing).
             let query_cursor = StreamCursor::new(cursor.sequence, &partition);
+            let mut last_backlog_sequence = cursor.sequence;
             match journal
                 .query_after(&query_cursor, GATEWAY_EVENT_PAGE_LIMIT)
                 .await
             {
                 Ok(page) => {
-                    for event in page.events {
+                    for event in &page.events {
                         if let Ok(json) = serde_json::to_string(&event) {
                             let _ = socket
                                 .send(Message::Text(format!("__event__ {}", json).into()))
                                 .await;
                         }
+                        last_backlog_sequence = event.sequence.max(last_backlog_sequence);
                     }
                 }
                 Err(err) => {
@@ -403,19 +409,9 @@ async fn event_stream_ws(
                 }
             }
 
-            // Stream live events.
-            let mut event_stream = match broker.create_stream(&cursor) {
-                Ok(s) => s,
-                Err(err) => {
-                    if let Ok(json) = serde_json::to_string(&err) {
-                        let _ = socket
-                            .send(Message::Text(format!("__error__ {}", json).into()))
-                            .await;
-                    }
-                    broker.unregister_connection(&connection_id).await;
-                    return;
-                }
-            };
+            // Advance the event stream's cursor past the backlog so recv() won't
+            // re-deliver events already sent above.
+            event_stream.set_last_sequence(last_backlog_sequence);
 
             loop {
                 match event_stream.recv().await {
