@@ -413,7 +413,18 @@ async fn event_stream_ws(
 
             // Subscribe to live events FIRST to prevent losing any events that arrive
             // between the backlog query and the live stream subscription.
-            let mut event_stream = broker.create_stream(&cursor).expect("create_stream");
+            let mut event_stream = match broker.create_stream(&cursor) {
+                Ok(s) => s,
+                Err(err) => {
+                    if let Ok(json) = serde_json::to_string(&err) {
+                        let _ = socket
+                            .send(Message::Text(format!("__error__ {}", json).into()))
+                            .await;
+                    }
+                    broker.unregister_connection(&connection_id).await;
+                    return;
+                }
+            };
 
             // Deliver backlog events (report errors to the client instead of swallowing).
             let query_cursor = StreamCursor::new(cursor.sequence, &partition);
