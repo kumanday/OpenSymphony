@@ -1,6 +1,7 @@
 mod control_plane;
 mod identifiers;
 mod issue;
+mod journal;
 mod runtime;
 mod snapshot;
 mod state_machine;
@@ -37,6 +38,9 @@ pub use time::{DurationMs, TimestampMs};
 pub use tracker::{
     TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
     TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerProjectMilestone,
+};
+pub use journal::{
+    EventJournalBackend, EventStream, InMemoryEventJournal, StreamBroker,
 };
 
 #[cfg(test)]
