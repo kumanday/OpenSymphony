@@ -1,0 +1,367 @@
+use std::{
+    fmt, fs, io,
+    path::{Path, PathBuf},
+};
+
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use uuid::Uuid;
+
+pub const OPENHANDS_CONVERSATIONS_PATH_ENV: &str = "OH_CONVERSATIONS_PATH";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationStoreKind {
+    Active,
+    Archived,
+    Legacy,
+}
+
+impl ConversationStoreKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Archived => "archived",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+impl fmt::Display for ConversationStoreKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedConversation {
+    pub kind: ConversationStoreKind,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConversationMoveOutcome {
+    Moved {
+        from: ConversationStoreKind,
+        from_path: PathBuf,
+        to: ConversationStoreKind,
+        to_path: PathBuf,
+    },
+    AlreadyInTarget {
+        kind: ConversationStoreKind,
+        path: PathBuf,
+    },
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenHandsConversationStorePaths {
+    pub repo_key: String,
+    pub legacy_root: PathBuf,
+    pub repo_root: PathBuf,
+    pub active: PathBuf,
+    pub archived: PathBuf,
+}
+
+impl OpenHandsConversationStorePaths {
+    pub fn for_tool_dir(
+        tool_dir: impl AsRef<Path>,
+        target_repo: impl AsRef<Path>,
+    ) -> Result<Self, ConversationStoreError> {
+        let target_repo = canonicalize_repo_path(target_repo.as_ref())?;
+        let repo_key = repo_store_key(&target_repo);
+        let legacy_root = tool_dir.as_ref().join("workspace").join("conversations");
+        let repo_root = legacy_root.join("repos").join(&repo_key);
+        Ok(Self {
+            repo_key,
+            active: repo_root.join("active"),
+            archived: repo_root.join("archived"),
+            repo_root,
+            legacy_root,
+        })
+    }
+
+    pub fn ensure_active_and_archived(&self) -> Result<(), ConversationStoreError> {
+        self.create_store_dir(&self.active)?;
+        self.create_store_dir(&self.archived)
+    }
+
+    pub fn path_for(&self, kind: ConversationStoreKind) -> &Path {
+        match kind {
+            ConversationStoreKind::Active => &self.active,
+            ConversationStoreKind::Archived => &self.archived,
+            ConversationStoreKind::Legacy => &self.legacy_root,
+        }
+    }
+
+    pub fn locate_conversation(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<LocatedConversation>, ConversationStoreError> {
+        let names = conversation_dir_names(conversation_id)?;
+        for kind in [
+            ConversationStoreKind::Active,
+            ConversationStoreKind::Archived,
+            ConversationStoreKind::Legacy,
+        ] {
+            for name in &names {
+                let path = self.path_for(kind).join(name);
+                if path.is_dir() {
+                    return Ok(Some(LocatedConversation { kind, path }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn move_conversation_to(
+        &self,
+        conversation_id: &str,
+        target: ConversationStoreKind,
+    ) -> Result<ConversationMoveOutcome, ConversationStoreError> {
+        if target == ConversationStoreKind::Legacy {
+            return Err(ConversationStoreError::InvalidTarget { target });
+        }
+
+        self.ensure_active_and_archived()?;
+        let Some(located) = self.locate_conversation(conversation_id)? else {
+            return Ok(ConversationMoveOutcome::Missing);
+        };
+        if located.kind == target {
+            return Ok(ConversationMoveOutcome::AlreadyInTarget {
+                kind: located.kind,
+                path: located.path,
+            });
+        }
+
+        let destination = self
+            .path_for(target)
+            .join(conversation_dir_name(conversation_id)?);
+        if destination.exists() {
+            return Err(ConversationStoreError::DestinationExists { destination });
+        }
+        fs::rename(&located.path, &destination).map_err(|source| {
+            ConversationStoreError::MoveConversation {
+                from: located.path.clone(),
+                to: destination.clone(),
+                source,
+            }
+        })?;
+
+        Ok(ConversationMoveOutcome::Moved {
+            from: located.kind,
+            from_path: located.path,
+            to: target,
+            to_path: destination,
+        })
+    }
+
+    fn create_store_dir(&self, path: &Path) -> Result<(), ConversationStoreError> {
+        fs::create_dir_all(path).map_err(|source| ConversationStoreError::CreateDirectory {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ConversationStoreError {
+    #[error("failed to resolve target repository path {path}: {source}")]
+    ResolveRepoPath {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("conversation id `{value}` is not a UUID: {source}")]
+    InvalidConversationId {
+        value: String,
+        #[source]
+        source: uuid::Error,
+    },
+    #[error("failed to create OpenHands conversation store {path}: {source}")]
+    CreateDirectory {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot move conversations into the {target} OpenHands store")]
+    InvalidTarget { target: ConversationStoreKind },
+    #[error("OpenHands conversation archive destination already exists: {destination}")]
+    DestinationExists { destination: PathBuf },
+    #[error("failed to move OpenHands conversation from {from} to {to}: {source}")]
+    MoveConversation {
+        from: PathBuf,
+        to: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+}
+
+fn canonicalize_repo_path(path: &Path) -> Result<PathBuf, ConversationStoreError> {
+    fs::canonicalize(path).map_err(|source| ConversationStoreError::ResolveRepoPath {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn repo_store_key(target_repo: &Path) -> String {
+    let slug_source = target_repo
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("repo");
+    let slug = sanitize_repo_slug(slug_source);
+    let digest = Sha256::digest(target_repo.to_string_lossy().as_bytes());
+    let hash = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{slug}-{hash}")
+}
+
+fn sanitize_repo_slug(value: &str) -> String {
+    let mut output = String::new();
+    let mut last_was_separator = false;
+    for character in value.chars() {
+        let next = if character.is_ascii_alphanumeric() {
+            last_was_separator = false;
+            Some(character.to_ascii_lowercase())
+        } else if matches!(character, '-' | '_' | '.') {
+            if last_was_separator {
+                None
+            } else {
+                last_was_separator = true;
+                Some('-')
+            }
+        } else if last_was_separator {
+            None
+        } else {
+            last_was_separator = true;
+            Some('-')
+        };
+        if let Some(next) = next
+            && output.len() < 48
+        {
+            output.push(next);
+        }
+    }
+    let trimmed = output.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "repo".to_string()
+    } else {
+        trimmed
+    }
+}
+
+fn conversation_dir_names(conversation_id: &str) -> Result<Vec<String>, ConversationStoreError> {
+    let compact = conversation_dir_name(conversation_id)?;
+    let raw = conversation_id.trim().to_string();
+    if raw == compact {
+        Ok(vec![compact])
+    } else {
+        Ok(vec![compact, raw])
+    }
+}
+
+fn conversation_dir_name(conversation_id: &str) -> Result<String, ConversationStoreError> {
+    Uuid::parse_str(conversation_id.trim())
+        .map(|uuid| uuid.simple().to_string())
+        .map_err(|source| ConversationStoreError::InvalidConversationId {
+            value: conversation_id.to_string(),
+            source,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConversationMoveOutcome, ConversationStoreKind, OpenHandsConversationStorePaths};
+
+    #[test]
+    fn store_paths_are_repo_scoped_under_managed_conversations() {
+        let tool_dir = tempfile::tempdir().expect("tool dir");
+        let repo = tempfile::tempdir().expect("repo");
+
+        let paths = OpenHandsConversationStorePaths::for_tool_dir(tool_dir.path(), repo.path())
+            .expect("paths should resolve");
+
+        assert!(paths.legacy_root.ends_with("workspace/conversations"));
+        assert!(paths.repo_root.starts_with(&paths.legacy_root));
+        assert!(paths.repo_root.ends_with(&paths.repo_key));
+        assert_eq!(paths.active, paths.repo_root.join("active"));
+        assert_eq!(paths.archived, paths.repo_root.join("archived"));
+    }
+
+    #[test]
+    fn locate_checks_active_archived_then_legacy_compact_uuid_dirs() {
+        let tool_dir = tempfile::tempdir().expect("tool dir");
+        let repo = tempfile::tempdir().expect("repo");
+        let paths = OpenHandsConversationStorePaths::for_tool_dir(tool_dir.path(), repo.path())
+            .expect("paths should resolve");
+        let conversation_id = "dd258bb7-cc1b-415c-9892-e19af34a2e66";
+        let compact_id = "dd258bb7cc1b415c9892e19af34a2e66";
+        std::fs::create_dir_all(paths.archived.join(compact_id))
+            .expect("archived conversation should be created");
+        std::fs::create_dir_all(paths.legacy_root.join(compact_id))
+            .expect("legacy duplicate should be created");
+
+        let located = paths
+            .locate_conversation(conversation_id)
+            .expect("lookup should succeed")
+            .expect("conversation should be found");
+
+        assert_eq!(located.kind, ConversationStoreKind::Archived);
+        assert_eq!(located.path, paths.archived.join(compact_id));
+    }
+
+    #[test]
+    fn move_conversation_to_archive_moves_from_active_store() {
+        let tool_dir = tempfile::tempdir().expect("tool dir");
+        let repo = tempfile::tempdir().expect("repo");
+        let paths = OpenHandsConversationStorePaths::for_tool_dir(tool_dir.path(), repo.path())
+            .expect("paths should resolve");
+        let conversation_id = "dd258bb7-cc1b-415c-9892-e19af34a2e66";
+        let compact_id = "dd258bb7cc1b415c9892e19af34a2e66";
+        let active = paths.active.join(compact_id);
+        std::fs::create_dir_all(&active).expect("active conversation should be created");
+
+        let outcome = paths
+            .move_conversation_to(conversation_id, ConversationStoreKind::Archived)
+            .expect("move should succeed");
+
+        assert!(matches!(
+            outcome,
+            ConversationMoveOutcome::Moved {
+                from: ConversationStoreKind::Active,
+                to: ConversationStoreKind::Archived,
+                ..
+            }
+        ));
+        assert!(!active.exists());
+        assert!(paths.archived.join(compact_id).is_dir());
+    }
+
+    #[test]
+    fn move_conversation_to_archive_migrates_legacy_flat_store() {
+        let tool_dir = tempfile::tempdir().expect("tool dir");
+        let repo = tempfile::tempdir().expect("repo");
+        let paths = OpenHandsConversationStorePaths::for_tool_dir(tool_dir.path(), repo.path())
+            .expect("paths should resolve");
+        let conversation_id = "dd258bb7-cc1b-415c-9892-e19af34a2e66";
+        let compact_id = "dd258bb7cc1b415c9892e19af34a2e66";
+        let legacy = paths.legacy_root.join(compact_id);
+        std::fs::create_dir_all(&legacy).expect("legacy conversation should be created");
+
+        let outcome = paths
+            .move_conversation_to(conversation_id, ConversationStoreKind::Archived)
+            .expect("move should succeed");
+
+        assert!(matches!(
+            outcome,
+            ConversationMoveOutcome::Moved {
+                from: ConversationStoreKind::Legacy,
+                to: ConversationStoreKind::Archived,
+                ..
+            }
+        ));
+        assert!(!legacy.exists());
+        assert!(paths.archived.join(compact_id).is_dir());
+    }
+}

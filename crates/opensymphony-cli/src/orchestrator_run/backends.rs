@@ -9,14 +9,16 @@ use std::{
 
 use crate::opensymphony_domain::{
     ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-    NormalizedIssue, TimestampMs, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
+    NormalizedIssue, TimestampMs, TrackerIssue, WorkerOutcomeKind, WorkerOutcomeRecord,
+    WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
-    IssueSessionError, IssueSessionObserver, IssueSessionResult, IssueSessionRunner,
-    IssueSessionRunnerConfig, LocalServerSupervisor, LocalServerTooling, OpenHandsClient,
-    OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
-    WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
+    ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest, IssueSessionError,
+    IssueSessionObserver, IssueSessionResult, IssueSessionRunner, IssueSessionRunnerConfig,
+    LocalServerSupervisor, LocalServerTooling, OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient,
+    OpenHandsConversationStorePaths, OpenHandsError, SupervisedServerConfig, SupervisorConfig,
+    TransportConfig, WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
 use crate::opensymphony_orchestrator::{
     RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerLaunch,
@@ -80,6 +82,16 @@ enum LaunchReport {
 
 pub(super) struct RuntimeTrackerBackend {
     client: LinearClient,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct ActiveConversationStorePreparation {
+    pub moved: usize,
+    pub already_active: usize,
+    pub missing: usize,
+    pub skipped_without_workspace: usize,
+    pub skipped_without_manifest: usize,
+    pub skipped_invalid_manifest: usize,
 }
 
 pub(super) struct RuntimeWorkspaceBackend {
@@ -196,6 +208,108 @@ pub(super) fn build_tracker_backend(
     })
 }
 
+pub(super) async fn prepare_active_conversation_store(
+    runtime: &RunRuntimeConfig,
+    tracker: &mut RuntimeTrackerBackend,
+    workspace_manager: &WorkspaceManager,
+) -> Result<ActiveConversationStorePreparation, RunCommandError> {
+    let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() else {
+        return Ok(ActiveConversationStorePreparation::default());
+    };
+    let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
+    let supervised = transport.managed_local_server_base_url()?.is_some()
+        && runtime.workflow.extensions.openhands.local_server.enabled;
+    if !supervised {
+        return Ok(ActiveConversationStorePreparation::default());
+    }
+    let tool_dir = runtime
+        .tool_dir
+        .clone()
+        .ok_or(RunCommandError::MissingToolDir)?;
+    LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
+        RunCommandError::ToolingSetupRequired {
+            tool_dir,
+            detail: error.to_string(),
+        }
+    })?;
+    conversation_store.ensure_active_and_archived()?;
+    let active_issues = tracker.client.candidate_issues().await?;
+    prepare_active_conversation_store_for_issues(
+        workspace_manager,
+        conversation_store,
+        &active_issues,
+    )
+    .await
+}
+
+async fn prepare_active_conversation_store_for_issues(
+    workspace_manager: &WorkspaceManager,
+    conversation_store: &OpenHandsConversationStorePaths,
+    active_issues: &[TrackerIssue],
+) -> Result<ActiveConversationStorePreparation, RunCommandError> {
+    let mut report = ActiveConversationStorePreparation::default();
+
+    for issue in active_issues {
+        let Some(workspace) = workspace_manager
+            .find_workspace_by_issue_reference(issue.identifier.as_str())
+            .await?
+        else {
+            report.skipped_without_workspace += 1;
+            continue;
+        };
+
+        let manifest_path = workspace.conversation_manifest_path();
+        let Some(raw_manifest) = workspace_manager
+            .read_text_artifact(&workspace, &manifest_path)
+            .await?
+        else {
+            report.skipped_without_manifest += 1;
+            continue;
+        };
+        let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                report.skipped_invalid_manifest += 1;
+                tracing::warn!(
+                    issue = %issue.identifier,
+                    manifest = %manifest_path.display(),
+                    %error,
+                    "skipping active OpenHands conversation store migration for invalid manifest"
+                );
+                continue;
+            }
+        };
+
+        match conversation_store.move_conversation_to(
+            manifest.conversation_id.as_str(),
+            ConversationStoreKind::Active,
+        )? {
+            ConversationMoveOutcome::Moved { from, .. } => {
+                report.moved += 1;
+                tracing::info!(
+                    issue = %issue.identifier,
+                    conversation_id = %manifest.conversation_id,
+                    from = %from,
+                    "moved active OpenHands conversation into the repo active store"
+                );
+            }
+            ConversationMoveOutcome::AlreadyInTarget { .. } => {
+                report.already_active += 1;
+            }
+            ConversationMoveOutcome::Missing => {
+                report.missing += 1;
+                tracing::warn!(
+                    issue = %issue.identifier,
+                    conversation_id = %manifest.conversation_id,
+                    "active OpenHands conversation was not found in active, archived, or legacy stores"
+                );
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 pub(super) fn build_workspace_manager_config(
     workflow: &ResolvedWorkflow,
 ) -> WorkspaceManagerConfig {
@@ -253,6 +367,13 @@ pub(super) async fn build_runtime_transport(
     let mut config = SupervisedServerConfig::new(tooling);
     config.command = local_server.command.clone();
     config.extra_env = local_server.env.clone();
+    if let Some(conversation_store) = runtime.openhands_conversation_store.as_ref() {
+        conversation_store.ensure_active_and_archived()?;
+        config.extra_env.insert(
+            OPENHANDS_CONVERSATIONS_PATH_ENV.to_string(),
+            conversation_store.active.display().to_string(),
+        );
+    }
     config.startup_timeout = Duration::from_millis(local_server.startup_timeout_ms);
     config.probe.path = local_server.readiness_probe_path.clone();
     config.port_override = Some(transport_port_override(&url)?);
@@ -266,15 +387,11 @@ pub(super) async fn build_runtime_transport(
 impl TrackerBackend for RuntimeTrackerBackend {
     type Error = LinearError;
 
-    async fn candidate_issues(
-        &mut self,
-    ) -> Result<Vec<crate::opensymphony_domain::TrackerIssue>, Self::Error> {
+    async fn candidate_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
         self.client.candidate_issues().await
     }
 
-    async fn terminal_issues(
-        &mut self,
-    ) -> Result<Vec<crate::opensymphony_domain::TrackerIssue>, Self::Error> {
+    async fn terminal_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
         self.client.terminal_issues().await
     }
 
@@ -788,11 +905,12 @@ mod tests {
     use std::{fs, future::pending, path::Path};
 
     use crate::opensymphony_domain::{
-        IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt, WorkerId,
-        WorkspaceKey,
+        ConversationId, IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt,
+        WorkerId, WorkspaceKey,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     use super::*;
 
@@ -905,6 +1023,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_store_preparation_moves_legacy_current_issue_before_startup() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let tool_dir = tempdir.path().join("openhands-server");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+        fs::create_dir_all(&tool_dir).expect("tool dir should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be created");
+        let conversation_id =
+            Uuid::parse_str("dd258bb7-cc1b-415c-9892-e19af34a2e66").expect("uuid");
+        let store = OpenHandsConversationStorePaths::for_tool_dir(&tool_dir, tempdir.path())
+            .expect("conversation store paths should resolve");
+        let legacy_path = store.legacy_root.join(conversation_id.simple().to_string());
+        fs::create_dir_all(&legacy_path).expect("legacy conversation should be created");
+        let manifest = sample_issue_conversation_manifest(&issue, &ensured.handle, conversation_id);
+        workspace_manager
+            .write_json_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &manifest,
+            )
+            .await
+            .expect("conversation manifest should be written");
+
+        let report = prepare_active_conversation_store_for_issues(
+            &workspace_manager,
+            &store,
+            &[sample_tracker_issue(&issue)],
+        )
+        .await
+        .expect("active conversation store should prepare");
+
+        assert_eq!(report.moved, 1);
+        assert!(!legacy_path.exists());
+        assert!(
+            store
+                .active
+                .join(conversation_id.simple().to_string())
+                .is_dir()
+        );
+    }
+
+    #[tokio::test]
     async fn build_runtime_transport_rejects_launcher_overrides_for_external_targets() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workflow = WorkflowDefinition::parse(
@@ -944,6 +1112,7 @@ Run the scheduler.
             workflow,
             bind: "127.0.0.1:3000".parse().expect("bind should parse"),
             tool_dir: None,
+            openhands_conversation_store: None,
             memory: super::super::config::RunMemoryConfig {
                 auto_capture: true,
                 auto_archive: false,
@@ -1037,6 +1206,71 @@ Run the scheduler.
             sub_issues: Vec::new(),
             created_at: None,
             updated_at: None,
+        }
+    }
+
+    fn sample_issue_conversation_manifest(
+        issue: &NormalizedIssue,
+        workspace: &crate::opensymphony_workspace::WorkspaceHandle,
+        conversation_id: Uuid,
+    ) -> IssueConversationManifest {
+        let now = chrono::Utc::now();
+        IssueConversationManifest {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            conversation_id: ConversationId::new(conversation_id.to_string())
+                .expect("conversation id should be valid"),
+            reuse_policy: "per_issue".to_string(),
+            server_base_url: None,
+            transport_target: None,
+            http_auth_mode: None,
+            websocket_auth_mode: None,
+            websocket_query_param_name: None,
+            persistence_dir: workspace.workspace_path().join(".openhands"),
+            created_at: now,
+            updated_at: now,
+            last_attached_at: now,
+            launch_profile: None,
+            llm_config_fingerprint: None,
+            fresh_conversation: false,
+            workflow_prompt_seeded: true,
+            reset_reason: None,
+            runtime_contract_version: None,
+            last_prompt_kind: None,
+            last_prompt_at: None,
+            last_prompt_path: None,
+            last_execution_status: None,
+            last_event_id: None,
+            last_event_kind: None,
+            last_event_at: None,
+            last_event_summary: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            last_token_accumulation_at: None,
+        }
+    }
+
+    fn sample_tracker_issue(issue: &NormalizedIssue) -> TrackerIssue {
+        TrackerIssue {
+            id: issue.id.to_string(),
+            identifier: issue.identifier.to_string(),
+            url: issue
+                .url
+                .clone()
+                .unwrap_or_else(|| format!("https://linear.example/{}", issue.identifier)),
+            title: issue.title.clone(),
+            description: issue.description.clone(),
+            priority: issue.priority,
+            state: issue.state.name.clone(),
+            labels: issue.labels.clone(),
+            parent_id: issue.parent_id.as_ref().map(ToString::to_string),
+            parent: None,
+            project_milestone: None,
+            blocked_by: Vec::new(),
+            sub_issues: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         }
     }
 

@@ -237,7 +237,7 @@ impl LocalServerSupervisor {
                             source,
                         })?
                     {
-                        join_output_reader(&mut stderr_reader);
+                        detach_output_reader(&mut stderr_reader);
                         return Err(SupervisorError::UnexpectedExit {
                             pid: child.id(),
                             code: status.code(),
@@ -441,6 +441,10 @@ fn join_output_reader(stderr_reader: &mut Option<JoinHandle<()>>) {
     if let Some(handle) = stderr_reader.take() {
         let _ = handle.join();
     }
+}
+
+fn detach_output_reader(stderr_reader: &mut Option<JoinHandle<()>>) {
+    let _ = stderr_reader.take();
 }
 
 #[derive(Default)]

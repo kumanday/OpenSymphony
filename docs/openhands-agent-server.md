@@ -105,6 +105,21 @@ That manifest records enough data for:
 The persisted OpenHands state directory is derived from the workflow-owned
 conversation persistence settings inside the issue workspace.
 
+In managed local mode, the OpenHands server's global conversation registry is
+also scoped per target repo. OpenSymphony sets `OH_CONVERSATIONS_PATH` to:
+
+```text
+<tool_dir>/workspace/conversations/repos/<repo-key>/active
+```
+
+Before managed server startup, current Linear candidate issues with existing
+workspace manifests are moved into that `active` store from `archived` or the
+legacy flat store. Archived issue conversations move to the sibling `archived`
+store. This prevents the managed server from eagerly resuming every historical
+conversation across all repos during normal orchestration. `opensymphony debug
+<issue-id>` locates the requested conversation in active or archived storage and
+starts the managed server against that store before attaching.
+
 ## 7. Runtime contract
 
 The internal `opensymphony_openhands` module owns:

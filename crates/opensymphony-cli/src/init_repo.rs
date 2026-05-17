@@ -34,7 +34,7 @@ const OPENHANDS_PR_REVIEW_DOCS_URL: &str =
 const OPENHANDS_PR_REVIEW_SETUP_GUIDE_URL: &str =
     "https://github.com/kumanday/OpenSymphony/blob/main/docs/ai-pr-review-human-setup.md";
 const AI_REVIEW_LABEL_NAME: &str = "review-this";
-const PRESERVED_AGENTS_MARKER: &str = "## Preserved Existing AGENTS.md";
+const AGENTS_EXAMPLE_PATH: &str = "AGENTS-example.md";
 const WORKFLOW_PROJECT_SLUG_PLACEHOLDER: &str = "\"YOUR-PROJECT-SLUG\"";
 const WORKFLOW_GIT_REMOTE_PLACEHOLDER: &str = "https://github.com/YOUR-ORG/YOUR-REPO.git";
 
@@ -192,7 +192,6 @@ enum PlannedAction {
     Overwrite,
     Skip,
     Unchanged,
-    MergeAgents,
     CustomizeWorkflow,
 }
 
@@ -206,7 +205,6 @@ enum AppliedChange {
     Created,
     Overwritten,
     Updated,
-    Merged,
     Skipped,
     Unchanged,
 }
@@ -421,14 +419,17 @@ where
     let mut created = Vec::new();
     let mut overwritten = Vec::new();
     let mut updated = Vec::new();
-    let mut merged = Vec::new();
     let mut skipped = Vec::new();
     let mut unchanged = Vec::new();
     let mut wrote_config = false;
+    let mut agents_example_available = false;
 
     for planned in planned_assets {
         let destination = target_repo.join(&planned.asset.path);
         let relative_path = planned.asset.path.clone();
+        if relative_path == AGENTS_EXAMPLE_PATH {
+            agents_example_available = true;
+        }
 
         let final_result = apply_asset(
             &destination,
@@ -456,7 +457,6 @@ where
                 }
                 updated.push(relative_path);
             }
-            AppliedChange::Merged => merged.push(relative_path),
             AppliedChange::Skipped => skipped.push(relative_path),
             AppliedChange::Unchanged => unchanged.push(relative_path),
         }
@@ -475,9 +475,15 @@ where
     print_group(ui, "Created", &created)?;
     print_group(ui, "Overwritten", &overwritten)?;
     print_group(ui, "Updated", &updated)?;
-    print_group(ui, "Merged", &merged)?;
     print_group(ui, "Skipped", &skipped)?;
     print_group(ui, "Unchanged", &unchanged)?;
+
+    if agents_example_available {
+        ui.blank_line()?;
+        ui.line(
+            "`AGENTS.md` already existed, so OpenSymphony left it untouched and wrote the starter guidance to `AGENTS-example.md`. Review or ask an agent to review the example, copy over any relevant guidance, then delete `AGENTS-example.md`.",
+        )?;
+    }
 
     if wrote_config {
         ui.blank_line()?;
@@ -661,6 +667,7 @@ fn plan_assets(
     assets: Vec<FetchedAsset>,
 ) -> Result<Vec<PlannedAsset>, InitCommandError> {
     let mut planned = Vec::with_capacity(assets.len());
+    let first_initialization = !target_repo.join("config.yaml").is_file();
 
     for asset in assets {
         let destination = target_repo.join(&asset.path);
@@ -668,12 +675,11 @@ fn plan_assets(
             Ok(existing) => {
                 let action = match asset.kind {
                     AssetKind::Agents => {
-                        if comparable_text(&existing) == comparable_text(&asset.contents)
-                            || agents_already_initialized(&existing, &asset.contents)
-                        {
-                            PlannedAction::Unchanged
+                        if first_initialization {
+                            planned.push(plan_agents_example_asset(target_repo, asset)?);
+                            continue;
                         } else {
-                            PlannedAction::MergeAgents
+                            PlannedAction::Unchanged
                         }
                     }
                     AssetKind::Workflow => {
@@ -715,6 +721,37 @@ fn plan_assets(
     }
 
     Ok(planned)
+}
+
+fn plan_agents_example_asset(
+    target_repo: &Path,
+    mut asset: FetchedAsset,
+) -> Result<PlannedAsset, InitCommandError> {
+    asset.path = AGENTS_EXAMPLE_PATH.to_string();
+    let destination = target_repo.join(&asset.path);
+    match fs::read_to_string(&destination) {
+        Ok(existing) => {
+            let action = if comparable_text(&existing) == comparable_text(&asset.contents) {
+                PlannedAction::Unchanged
+            } else {
+                PlannedAction::Overwrite
+            };
+            Ok(PlannedAsset {
+                asset,
+                existing: Some(existing),
+                action,
+            })
+        }
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(PlannedAsset {
+            asset,
+            existing: None,
+            action: PlannedAction::Create,
+        }),
+        Err(source) => Err(InitCommandError::ReadFile {
+            path: destination,
+            source,
+        }),
+    }
 }
 
 fn resolve_conflicts<R, W>(
@@ -768,7 +805,6 @@ fn apply_asset(
     let Some(final_contents) = build_final_contents(
         &planned.asset,
         &planned.action,
-        existing,
         git_remote_url,
         linear_project_slug,
     ) else {
@@ -777,7 +813,6 @@ fn apply_asset(
             PlannedAction::Unchanged => AppliedChange::Unchanged,
             PlannedAction::Create
             | PlannedAction::Overwrite
-            | PlannedAction::MergeAgents
             | PlannedAction::CustomizeWorkflow
             | PlannedAction::Prompt => AppliedChange::Unchanged,
         });
@@ -804,7 +839,6 @@ fn apply_asset(
         PlannedAction::Create => AppliedChange::Created,
         PlannedAction::Overwrite => AppliedChange::Overwritten,
         PlannedAction::CustomizeWorkflow => AppliedChange::Updated,
-        PlannedAction::MergeAgents => AppliedChange::Merged,
         PlannedAction::Skip => AppliedChange::Skipped,
         PlannedAction::Unchanged => AppliedChange::Unchanged,
         PlannedAction::Prompt => unreachable!("conflicts should be resolved before apply"),
@@ -814,7 +848,6 @@ fn apply_asset(
 fn build_final_contents(
     asset: &FetchedAsset,
     action: &PlannedAction,
-    existing: Option<&str>,
     git_remote_url: Option<&str>,
     linear_project_slug: Option<&str>,
 ) -> Option<String> {
@@ -830,12 +863,6 @@ fn build_final_contents(
             git_remote_url,
             linear_project_slug,
         )),
-        PlannedAction::MergeAgents => Some(match existing {
-            Some(existing) if !existing.trim().is_empty() => {
-                merge_agents(&asset.contents, existing)
-            }
-            _ => asset.contents.clone(),
-        }),
         PlannedAction::Skip | PlannedAction::Unchanged => None,
         PlannedAction::Prompt => None,
     }
@@ -1080,29 +1107,6 @@ fn git_remote_url(detection: &GitRemoteDetection) -> Option<&str> {
         GitRemoteDetection::Selected { url, .. } => Some(url.as_str()),
         GitRemoteDetection::None | GitRemoteDetection::Ambiguous(_) => None,
     }
-}
-
-fn agents_already_initialized(existing: &str, template: &str) -> bool {
-    comparable_text(existing).starts_with(&comparable_text(template))
-        || existing.contains(PRESERVED_AGENTS_MARKER)
-}
-
-fn merge_agents(template: &str, existing: &str) -> String {
-    let mut merged = template.trim_end().to_string();
-    if existing.trim().is_empty() {
-        merged.push('\n');
-        return merged;
-    }
-
-    merged.push_str("\n\n");
-    merged.push_str(PRESERVED_AGENTS_MARKER);
-    merged.push_str("\n\n");
-    merged.push_str(
-        "The following content was preserved from the repository's previous `AGENTS.md` during `opensymphony init`.\n\n",
-    );
-    merged.push_str(existing.trim());
-    merged.push('\n');
-    merged
 }
 
 fn customize_workflow(
@@ -1618,11 +1622,10 @@ mod tests {
 
     use super::{
         DEFAULT_LLM_BASE_URL, DEFAULT_LLM_MODEL, DEFAULT_TEMPLATE_FETCH_TIMEOUT_MS,
-        GitRemoteDetection, PRESERVED_AGENTS_MARKER, PromptUi, agents_already_initialized,
-        comparable_text, custom_codereview_guide_contents, customize_workflow, git_remote_url,
-        github_repo_slug_from_remote, merge_agents, normalize_github_repo_slug,
-        prompt_ai_review_config, prompt_for_missing_llm_env, prompt_yes_no, select_remote_name,
-        shell_single_quote, template_fetch_timeout_from_env,
+        GitRemoteDetection, PromptUi, comparable_text, custom_codereview_guide_contents,
+        customize_workflow, git_remote_url, github_repo_slug_from_remote,
+        normalize_github_repo_slug, prompt_ai_review_config, prompt_for_missing_llm_env,
+        prompt_yes_no, select_remote_name, shell_single_quote, template_fetch_timeout_from_env,
     };
 
     struct StubEnvironment {
@@ -1678,28 +1681,46 @@ hooks:
     }
 
     #[test]
-    fn merge_agents_appends_existing_content_under_marker() {
-        let template = "# AGENTS.md\n\nTemplate\n";
-        let existing = "# Existing\n\nRules";
-
-        let merged = merge_agents(template, existing);
-
-        assert!(merged.starts_with("# AGENTS.md"));
-        assert!(merged.contains(PRESERVED_AGENTS_MARKER));
-        assert!(merged.contains("# Existing\n\nRules"));
-    }
-
-    #[test]
-    fn agents_initialized_detection_handles_prefixed_template_content() {
-        let template = "# AGENTS.md\n\nTemplate\n";
-        let existing = format!("{template}\n\n## More Notes\n\nCustom");
-
-        assert!(agents_already_initialized(&existing, template));
-    }
-
-    #[test]
     fn comparable_text_ignores_crlf_and_trailing_newlines() {
         assert_eq!(comparable_text("a\r\nb\r\n"), comparable_text("a\nb\n\n"));
+    }
+
+    #[test]
+    fn existing_agents_gets_example_on_first_initialization_only() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("AGENTS.md"), "# Existing\n")
+            .expect("existing AGENTS should write");
+        let assets = vec![super::FetchedAsset {
+            path: "AGENTS.md".to_string(),
+            kind: super::AssetKind::Agents,
+            contents: "# Template\n".to_string(),
+        }];
+
+        let planned = super::plan_assets(repo.path(), assets).expect("plan should succeed");
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].asset.path, super::AGENTS_EXAMPLE_PATH);
+        assert!(matches!(planned[0].action, super::PlannedAction::Create));
+    }
+
+    #[test]
+    fn existing_agents_is_left_alone_after_config_exists() {
+        let repo = tempfile::tempdir().expect("temp repo");
+        std::fs::write(repo.path().join("AGENTS.md"), "# Existing\n")
+            .expect("existing AGENTS should write");
+        std::fs::write(repo.path().join("config.yaml"), "memory: {}\n")
+            .expect("config should write");
+        let assets = vec![super::FetchedAsset {
+            path: "AGENTS.md".to_string(),
+            kind: super::AssetKind::Agents,
+            contents: "# Template\n".to_string(),
+        }];
+
+        let planned = super::plan_assets(repo.path(), assets).expect("plan should succeed");
+
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].asset.path, "AGENTS.md");
+        assert!(matches!(planned[0].action, super::PlannedAction::Unchanged));
     }
 
     #[test]

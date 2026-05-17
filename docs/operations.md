@@ -37,7 +37,8 @@ If you already run an external OpenHands agent-server, you can skip
 Important `init` behavior:
 
 - fetches the current template payload
-- merges an existing `AGENTS.md`
+- leaves an existing `AGENTS.md` untouched and writes starter guidance to
+  `AGENTS-example.md` during first-time setup
 - prompts before overwriting repo-owned files
 - optionally scaffolds AI PR review assets
 - can configure GitHub Actions variables, the `review-this` label, and the
@@ -182,6 +183,14 @@ GitHub evidence before evaluating the guard. It blocks issues that have no
 capsule or unresolved capture warnings unless `--force` is supplied. Normal mode
 resolves Linear credentials from `WORKFLOW.md` and calls the Linear GraphQL
 archive mutation.
+
+If the repo uses managed local OpenHands, archive also moves the issue's
+persisted OpenHands conversation into the repo-scoped `archived/` store. Normal
+orchestrator runs use the sibling `active/` store, while `opensymphony debug
+COE-123` searches active and archived stores and starts the managed server
+against the store containing the requested conversation. If another OpenHands
+server is already bound to the configured port with a different store, stop it
+and retry the debug command.
 
 See [Project Memory](memory.md) for the full command surface, import YAML
 schema, and troubleshooting notes.

@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::opensymphony_memory::DEFAULT_PRIVATE_MEMORY_CONFIG_FILE;
+use crate::opensymphony_openhands::OpenHandsConversationStorePaths;
 use crate::opensymphony_workflow::{ResolvedWorkflow, WorkflowDefinition};
 use serde::Deserialize;
 use tokio::fs;
@@ -60,6 +61,7 @@ pub(super) struct RunRuntimeConfig {
     pub(super) workflow: ResolvedWorkflow,
     pub(super) bind: SocketAddr,
     pub(super) tool_dir: Option<PathBuf>,
+    pub(super) openhands_conversation_store: Option<OpenHandsConversationStorePaths>,
     pub(super) memory: RunMemoryConfig,
 }
 
@@ -117,6 +119,10 @@ pub(super) async fn resolve_runtime_config(
         .tool_dir
         .as_deref()
         .map(|path| super::super::resolve_path(config_root, path));
+    let openhands_conversation_store = tool_dir
+        .as_ref()
+        .map(|tool_dir| OpenHandsConversationStorePaths::for_tool_dir(tool_dir, &target_repo))
+        .transpose()?;
     let memory = RunMemoryConfig {
         auto_capture: config.memory.auto_capture.unwrap_or(true),
         auto_archive: config.memory.auto_archive.unwrap_or(false),
@@ -130,6 +136,7 @@ pub(super) async fn resolve_runtime_config(
         workflow,
         bind,
         tool_dir,
+        openhands_conversation_store,
         memory,
     })
 }

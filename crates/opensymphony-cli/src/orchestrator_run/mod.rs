@@ -31,7 +31,7 @@ use tracing::{info, warn};
 use self::{
     backends::{
         RuntimeWorkerBackend, RuntimeWorkspaceBackend, build_runtime_transport,
-        build_tracker_backend, build_workspace_manager_config,
+        build_tracker_backend, build_workspace_manager_config, prepare_active_conversation_store,
     },
     config::{RunRuntimeConfig, resolve_runtime_config},
     snapshot::{current_agent_server_status, map_snapshot, push_recent_event, terminal_state_set},
@@ -90,6 +90,8 @@ enum RunCommandError {
     WorkspaceManager(#[from] WorkspaceError),
     #[error("failed to prepare OpenHands transport: {0}")]
     Transport(#[from] OpenHandsError),
+    #[error("failed to prepare OpenHands conversation store: {0}")]
+    ConversationStore(#[from] crate::opensymphony_openhands::ConversationStoreError),
     #[error(
         "managed local OpenHands tooling at {tool_dir} is missing or invalid: {detail}. Run `opensymphony install openhands` or `opensymphony doctor --config <path>`."
     )]
@@ -136,11 +138,25 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         "starting OpenSymphony orchestrator"
     );
 
-    let tracker = build_tracker_backend(&runtime.workflow)?;
+    let mut tracker = build_tracker_backend(&runtime.workflow)?;
     let workspace_manager = Arc::new(crate::opensymphony_workspace::WorkspaceManager::new(
         build_workspace_manager_config(&runtime.workflow),
     )?);
     let workspace = RuntimeWorkspaceBackend::new(workspace_manager.clone(), &runtime.workflow);
+    let active_store_preparation =
+        prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())
+            .await?;
+    if active_store_preparation.moved > 0 {
+        info!(
+            moved = active_store_preparation.moved,
+            already_active = active_store_preparation.already_active,
+            missing = active_store_preparation.missing,
+            skipped_without_workspace = active_store_preparation.skipped_without_workspace,
+            skipped_without_manifest = active_store_preparation.skipped_without_manifest,
+            skipped_invalid_manifest = active_store_preparation.skipped_invalid_manifest,
+            "prepared repo-scoped active OpenHands conversations before server startup"
+        );
+    }
 
     let (transport, mut supervisor) = build_runtime_transport(&runtime).await?;
     let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
@@ -256,6 +272,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                                 &runtime.target_repo,
                                 &runtime.workflow_path,
                                 &auto_capture_candidates,
+                                runtime.openhands_conversation_store.as_ref(),
                                 runtime.memory.auto_archive,
                             )
                             .await;
