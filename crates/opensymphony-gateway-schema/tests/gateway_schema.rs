@@ -6,7 +6,10 @@ use opensymphony::opensymphony_gateway_schema::{
     cursor::{PageCursor, StreamCursor},
     envelope::{EntityKind, EntityRef, GatewayEnvelope},
     planning::{
-        PlanningArtifact, PlanningArtifactKind, PlanningSessionStatus, PlanningSessionSummary,
+        ArtifactDiff, ArtifactRevision, ConversationTurn, LinearPublishReceipt, PlanningArtifact,
+        PlanningArtifactKind, PlanningSession, PlanningSessionStatus, PlanningSessionSummary,
+        PlanningWave, PublishedMilestone, PublishedTask, ReviewComment, TaskEntry,
+        TaskPackageProjection, TurnRole,
     },
     run::{ReleaseReason, RunDetail, RunEvent, RunEventPage, RunStatus},
     snapshot::{
@@ -341,6 +344,8 @@ fn planning_session_summary_roundtrips() {
         project_id: "proj-1".into(),
         title: "Q3 Planning".into(),
         status: PlanningSessionStatus::Draft,
+        planning_wave: None,
+        turn_count: 0,
         artifact_count: 3,
         created_at: Utc::now(),
         updated_at: Utc::now(),
@@ -448,4 +453,611 @@ fn all_schema_modules_compile_and_export() {
     let _ = ReleaseReason::Completed;
     let _ = TerminalEncoding::Utf8;
     let _ = PlanningSessionStatus::Draft;
+}
+
+// ---------------------------------------------------------------------------
+// Planning artifact kind exhaustive roundtrip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn all_planning_artifact_kinds_roundtrip() {
+    let kinds = [
+        PlanningArtifactKind::Intake,
+        PlanningArtifactKind::ProjectContext,
+        PlanningArtifactKind::Requirements,
+        PlanningArtifactKind::ResearchBrief,
+        PlanningArtifactKind::CodebaseAnalysis,
+        PlanningArtifactKind::ArchitectureNotes,
+        PlanningArtifactKind::RiskRegister,
+        PlanningArtifactKind::MilestoneDraft,
+        PlanningArtifactKind::IssueDraft,
+        PlanningArtifactKind::SubIssueDraft,
+        PlanningArtifactKind::DependencyMap,
+        PlanningArtifactKind::VerificationPlan,
+        PlanningArtifactKind::AcceptanceCriteria,
+        PlanningArtifactKind::PlanValidation,
+        PlanningArtifactKind::LinearDraft,
+        PlanningArtifactKind::ReviewComments,
+        PlanningArtifactKind::PublishReceipt,
+        PlanningArtifactKind::PlanningWave,
+    ];
+
+    assert_eq!(kinds.len(), 18, "expected exactly 18 artifact kinds");
+
+    for kind in kinds {
+        let artifact = PlanningArtifact {
+            schema_version: SchemaVersion::v1(),
+            artifact_id: "art-kind-test".into(),
+            session_id: "sess-1".into(),
+            kind,
+            title: format!("{:?}", kind),
+            content: "test content".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            generated_by: Some("test".into()),
+            approved: false,
+            published_to_tracker: false,
+        };
+        let json = must_serialize(&artifact);
+        let back: PlanningArtifact = must_deserialize(&json);
+        assert_eq!(back.kind, kind, "kind {:?} did not roundtrip", kind);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Planning session full roundtrip
+// ---------------------------------------------------------------------------
+
+#[test]
+fn planning_session_full_roundtrip() {
+    let session = PlanningSession {
+        schema_version: SchemaVersion::v1(),
+        session_id: "sess-1".into(),
+        project_id: "proj-1".into(),
+        title: "Q4 Planning".into(),
+        status: PlanningSessionStatus::Draft,
+        planning_wave: Some("rich-client-hosted-mode".into()),
+        created_by: Some("alice".into()),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        turns: vec![ConversationTurn {
+            turn_id: "turn-1".into(),
+            session_id: "sess-1".into(),
+            turn_number: 1,
+            role: TurnRole::User,
+            content: "Let's plan the rich client.".into(),
+            created_at: Utc::now(),
+            artifacts_modified: vec!["art-1".into()],
+            metadata: None,
+        }],
+        artifacts: vec![PlanningArtifact {
+            schema_version: SchemaVersion::v1(),
+            artifact_id: "art-1".into(),
+            session_id: "sess-1".into(),
+            kind: PlanningArtifactKind::Intake,
+            title: "Intake".into(),
+            content: "Build a rich client.".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            generated_by: Some("agent".into()),
+            approved: false,
+            published_to_tracker: false,
+        }],
+        metadata: None,
+    };
+    let json = must_serialize(&session);
+    let back: PlanningSession = must_deserialize(&json);
+    assert_eq!(back.session_id, "sess-1");
+    assert_eq!(back.planning_wave, Some("rich-client-hosted-mode".into()));
+    assert_eq!(back.turns.len(), 1);
+    assert_eq!(back.artifacts.len(), 1);
+    assert_eq!(back.artifacts[0].kind, PlanningArtifactKind::Intake);
+}
+
+// ---------------------------------------------------------------------------
+// Planning session summary derivation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn planning_session_summary_is_derived_correctly() {
+    let session = PlanningSession {
+        schema_version: SchemaVersion::v1(),
+        session_id: "sess-1".into(),
+        project_id: "proj-1".into(),
+        title: "Planning".into(),
+        status: PlanningSessionStatus::InReview,
+        planning_wave: Some("wave-1".into()),
+        created_by: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        turns: vec![
+            ConversationTurn {
+                turn_id: "t1".into(),
+                session_id: "sess-1".into(),
+                turn_number: 1,
+                role: TurnRole::User,
+                content: "hi".into(),
+                created_at: Utc::now(),
+                artifacts_modified: vec![],
+                metadata: None,
+            },
+            ConversationTurn {
+                turn_id: "t2".into(),
+                session_id: "sess-1".into(),
+                turn_number: 2,
+                role: TurnRole::Agent,
+                content: "ok".into(),
+                created_at: Utc::now(),
+                artifacts_modified: vec![],
+                metadata: None,
+            },
+        ],
+        artifacts: vec![
+            PlanningArtifact {
+                schema_version: SchemaVersion::v1(),
+                artifact_id: "a1".into(),
+                session_id: "sess-1".into(),
+                kind: PlanningArtifactKind::Intake,
+                title: "Intake".into(),
+                content: "c".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                generated_by: None,
+                approved: false,
+                published_to_tracker: false,
+            },
+            PlanningArtifact {
+                schema_version: SchemaVersion::v1(),
+                artifact_id: "a2".into(),
+                session_id: "sess-1".into(),
+                kind: PlanningArtifactKind::Requirements,
+                title: "Requirements".into(),
+                content: "c".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                generated_by: None,
+                approved: false,
+                published_to_tracker: false,
+            },
+        ],
+        metadata: None,
+    };
+
+    let summary = session.summary();
+    assert_eq!(summary.turn_count, 2);
+    assert_eq!(summary.artifact_count, 2);
+    assert_eq!(summary.planning_wave, Some("wave-1".into()));
+    assert_eq!(summary.status, PlanningSessionStatus::InReview);
+}
+
+// ---------------------------------------------------------------------------
+// Artifact revision and diff roundtrips
+// ---------------------------------------------------------------------------
+
+#[test]
+fn artifact_revision_roundtrips() {
+    let rev = ArtifactRevision {
+        revision_id: "rev-1".into(),
+        artifact_id: "art-1".into(),
+        version: 3,
+        content_hash: "sha256-abc".into(),
+        content: "revised content".into(),
+        created_at: Utc::now(),
+        authored_by: Some("agent".into()),
+        change_summary: Some("Updated milestone timeline".into()),
+    };
+    let json = must_serialize(&rev);
+    let back: ArtifactRevision = must_deserialize(&json);
+    assert_eq!(back.version, 3);
+    assert_eq!(back.content_hash, "sha256-abc");
+    assert!(back.change_summary.is_some());
+}
+
+#[test]
+fn artifact_diff_roundtrips() {
+    let diff = ArtifactDiff {
+        diff_id: "diff-1".into(),
+        artifact_id: "art-1".into(),
+        from_version: 2,
+        to_version: 3,
+        unified_diff: "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n".into(),
+        lines_added: 1,
+        lines_removed: 1,
+        summary: Some("Updated milestone timeline".into()),
+        generated_at: Utc::now(),
+    };
+    let json = must_serialize(&diff);
+    let back: ArtifactDiff = must_deserialize(&json);
+    assert_eq!(back.from_version, 2);
+    assert_eq!(back.to_version, 3);
+    assert_eq!(back.lines_added, 1);
+}
+
+#[test]
+fn review_comment_roundtrips() {
+    let comment = ReviewComment {
+        comment_id: "rc-1".into(),
+        session_id: "sess-1".into(),
+        artifact_id: "art-1".into(),
+        revision_id: Some("rev-1".into()),
+        author: "reviewer-1".into(),
+        body: "Milestone timeline seems optimistic.".into(),
+        resolved: false,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let json = must_serialize(&comment);
+    let back: ReviewComment = must_deserialize(&json);
+    assert_eq!(back.author, "reviewer-1");
+    assert!(!back.resolved);
+}
+
+#[test]
+fn conversation_turn_roundtrips() {
+    let turn = ConversationTurn {
+        turn_id: "turn-5".into(),
+        session_id: "sess-1".into(),
+        turn_number: 5,
+        role: TurnRole::Agent,
+        content: "I've generated the intake artifact.".into(),
+        created_at: Utc::now(),
+        artifacts_modified: vec!["art-1".into(), "art-2".into()],
+        metadata: Some(json!({"tokens": 128})),
+    };
+    let json = must_serialize(&turn);
+    let back: ConversationTurn = must_deserialize(&json);
+    assert_eq!(back.role, TurnRole::Agent);
+    assert_eq!(back.artifacts_modified.len(), 2);
+}
+
+#[test]
+fn conversation_turn_empty_metadata_omitted() {
+    let turn = ConversationTurn {
+        turn_id: "turn-6".into(),
+        session_id: "sess-1".into(),
+        turn_number: 6,
+        role: TurnRole::System,
+        content: "Session created.".into(),
+        created_at: Utc::now(),
+        artifacts_modified: vec![],
+        metadata: None,
+    };
+    let json = must_serialize(&turn);
+    assert!(!json.contains("\"metadata\""));
+    assert!(!json.contains("\"artifacts_modified\""));
+}
+
+// ─── Planning Session ─────────────────────────────────────────────────────
+
+fn sample_planning_session() -> PlanningSession {
+    PlanningSession {
+        schema_version: SchemaVersion::v1(),
+        session_id: "sess-1".into(),
+        project_id: "proj-1".into(),
+        title: "Q3 Planning Session".into(),
+        status: PlanningSessionStatus::Draft,
+        planning_wave: Some("rich-client-hosted-mode".into()),
+        created_by: Some("agent-planner".into()),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        turns: vec![ConversationTurn {
+            turn_id: "turn-1".into(),
+            session_id: "sess-1".into(),
+            turn_number: 1,
+            role: TurnRole::Agent,
+            content: "Starting planning session.".into(),
+            created_at: Utc::now(),
+            artifacts_modified: vec![],
+            metadata: None,
+        }],
+        artifacts: vec![PlanningArtifact {
+            schema_version: SchemaVersion::v1(),
+            artifact_id: "art-1".into(),
+            session_id: "sess-1".into(),
+            kind: PlanningArtifactKind::MilestoneDraft,
+            title: "M1: Gateway Contract".into(),
+            content: "Draft gateway schemas.".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            generated_by: Some("planner".into()),
+            approved: false,
+            published_to_tracker: false,
+        }],
+        metadata: None,
+    }
+}
+
+#[test]
+fn planning_session_roundtrips() {
+    let session = sample_planning_session();
+    let json = must_serialize(&session);
+    let back: PlanningSession = must_deserialize(&json);
+    assert_eq!(back.session_id, "sess-1");
+    assert_eq!(back.status, PlanningSessionStatus::Draft);
+    assert_eq!(
+        back.planning_wave.as_deref(),
+        Some("rich-client-hosted-mode")
+    );
+    assert_eq!(back.turns.len(), 1);
+    assert_eq!(back.artifacts.len(), 1);
+}
+
+#[test]
+fn planning_session_render_review_markdown_contains_artifacts() {
+    let session = sample_planning_session();
+    let markdown = session.render_review_markdown();
+    assert!(markdown.contains("# Planning Review"));
+    assert!(markdown.contains("**Session:** Q3 Planning Session"));
+    assert!(markdown.contains("## Artifacts"));
+    assert!(markdown.contains("M1: Gateway Contract"));
+}
+
+#[test]
+fn planning_session_render_prompt_context_includes_wave() {
+    let session = sample_planning_session();
+    let ctx = session.render_prompt_context();
+    assert!(ctx.contains("[Session: Q3 Planning Session]"));
+    assert!(ctx.contains("[Wave: rich-client-hosted-mode]"));
+    assert!(ctx.contains("[Artifact: milestone_draft]"));
+}
+
+#[test]
+fn planning_session_render_audit_history_lists_turns() {
+    let session = sample_planning_session();
+    let audit = session.render_audit_history();
+    assert!(audit.contains("# Audit History"));
+    assert!(audit.contains("[agent] turn=1"));
+}
+
+#[test]
+fn planning_session_empty_render_is_valid() {
+    let session = PlanningSession {
+        schema_version: SchemaVersion::v1(),
+        session_id: "sess-empty".into(),
+        project_id: "proj-1".into(),
+        title: "Empty Session".into(),
+        status: PlanningSessionStatus::Draft,
+        planning_wave: None,
+        created_by: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        turns: vec![],
+        artifacts: vec![],
+        metadata: None,
+    };
+    let markdown = session.render_review_markdown();
+    assert!(markdown.contains("# Planning Review"));
+    assert!(!markdown.contains("## Artifacts"));
+    assert!(!markdown.contains("## Conversation"));
+
+    let ctx = session.render_prompt_context();
+    assert!(ctx.contains("[Session: Empty Session]"));
+    assert!(!ctx.contains("[Wave:"));
+}
+
+#[test]
+fn planning_session_status_roundtrips() {
+    for status in [
+        PlanningSessionStatus::Draft,
+        PlanningSessionStatus::InReview,
+        PlanningSessionStatus::Approved,
+        PlanningSessionStatus::Published,
+        PlanningSessionStatus::Archived,
+    ] {
+        let json = must_serialize(&status);
+        let back: PlanningSessionStatus = must_deserialize(&json);
+        assert_eq!(status, back);
+    }
+}
+
+// ─── Planning Wave & Task Package Projection ──────────────────────────────
+
+#[test]
+fn planning_wave_roundtrips() {
+    let wave = PlanningWave {
+        wave_id: "wave-1".into(),
+        wave_name: "rich-client-hosted-mode".into(),
+        tasks_dir: "docs/tasks".into(),
+        milestones: vec![
+            "M6: Gateway And Stream Contract".into(),
+            "M9: Collaborative Planning Alpha".into(),
+        ],
+        task_entries: vec![
+            TaskEntry {
+                id: "OSYM-700".into(),
+                file: "docs/tasks/osym-700-current-gateway-inventory-and-vocabulary.md".into(),
+            },
+            TaskEntry {
+                id: "OSYM-730".into(),
+                file: "docs/tasks/osym-730-planning-artifact-schema-and-session-service.md".into(),
+            },
+        ],
+    };
+    let json = must_serialize(&wave);
+    let back: PlanningWave = must_deserialize(&json);
+    assert_eq!(back.wave_name, "rich-client-hosted-mode");
+    assert_eq!(back.milestones.len(), 2);
+    assert_eq!(back.task_entries.len(), 2);
+}
+
+#[test]
+fn task_package_projection_is_derived_from_wave() {
+    let wave = PlanningWave {
+        wave_id: "wave-1".into(),
+        wave_name: "rich-client-hosted-mode".into(),
+        tasks_dir: "docs/tasks".into(),
+        milestones: vec!["M9: Collaborative Planning Alpha".into()],
+        task_entries: vec![TaskEntry {
+            id: "OSYM-730".into(),
+            file: "docs/tasks/osym-730-planning-artifact-schema-and-session-service.md".into(),
+        }],
+    };
+    let projection = wave.to_task_package_projection();
+    assert_eq!(projection.planning_wave, "rich-client-hosted-mode");
+    assert_eq!(projection.tasks_dir, "docs/tasks");
+    assert_eq!(projection.milestones.len(), 1);
+    assert_eq!(projection.tasks.len(), 1);
+    assert_eq!(projection.tasks[0].id, "OSYM-730");
+}
+
+#[test]
+fn task_package_projection_roundtrips() {
+    let proj = TaskPackageProjection {
+        planning_wave: "rich-client-hosted-mode".into(),
+        tasks_dir: "docs/tasks".into(),
+        milestones: vec!["M9".into()],
+        tasks: vec![TaskEntry {
+            id: "OSYM-730".into(),
+            file: "docs/tasks/osym-730.md".into(),
+        }],
+    };
+    let json = must_serialize(&proj);
+    let back: TaskPackageProjection = must_deserialize(&json);
+    assert_eq!(back.planning_wave, proj.planning_wave);
+    assert_eq!(back.tasks[0].id, "OSYM-730");
+}
+
+// ─── Linear Publish Receipt ───────────────────────────────────────────────
+
+#[test]
+fn linear_publish_receipt_roundtrips() {
+    let receipt = LinearPublishReceipt {
+        planning_wave: "rich-client-hosted-mode".into(),
+        linear_project: "e7b957855cb7".into(),
+        published_at: Utc::now(),
+        milestones: vec![PublishedMilestone {
+            name: "M9: Collaborative Planning Alpha".into(),
+            milestone_id: "806afecc-4a9f-4862-8330-6ce70d606058".into(),
+        }],
+        tasks: vec![PublishedTask {
+            task_id: "OSYM-730".into(),
+            issue: "COE-395".into(),
+            issue_id: "f95c6539-7582-44b8-a508-5822c2346033".into(),
+            url: "https://linear.app/trilogy-ai-coe/issue/COE-395/planning-artifact-schema-and-session-service"
+                .into(),
+            file: "docs/tasks/osym-730-planning-artifact-schema-and-session-service.md".into(),
+        }],
+    };
+    let json = must_serialize(&receipt);
+    let back: LinearPublishReceipt = must_deserialize(&json);
+    assert_eq!(back.planning_wave, "rich-client-hosted-mode");
+    assert_eq!(back.linear_project, "e7b957855cb7");
+    assert_eq!(back.milestones.len(), 1);
+    assert_eq!(back.tasks.len(), 1);
+    assert_eq!(back.tasks[0].issue, "COE-395");
+}
+
+#[test]
+fn linear_publish_receipt_render_yaml_contains_expected_fields() {
+    let receipt = LinearPublishReceipt {
+        planning_wave: "rich-client-hosted-mode".into(),
+        linear_project: "proj-123".into(),
+        published_at: Utc::now(),
+        milestones: vec![PublishedMilestone {
+            name: "M9: Collaborative Planning Alpha".into(),
+            milestone_id: "ms-1".into(),
+        }],
+        tasks: vec![PublishedTask {
+            task_id: "OSYM-730".into(),
+            issue: "COE-395".into(),
+            issue_id: "issue-1".into(),
+            url: "https://linear.app/trilogy-ai-coe/issue/COE-395".into(),
+            file: "docs/tasks/osym-730.md".into(),
+        }],
+    };
+    let yaml = receipt.render_yaml();
+    assert!(yaml.contains("planningWave: rich-client-hosted-mode"));
+    assert!(yaml.contains("linearProject: proj-123"));
+    assert!(yaml.contains("milestones:"));
+    assert!(yaml.contains("M9: Collaborative Planning Alpha"));
+    assert!(yaml.contains("tasks:"));
+    assert!(yaml.contains("OSYM-730"));
+    assert!(yaml.contains("issue: COE-395"));
+}
+
+#[test]
+fn linear_publish_receipt_render_yaml_is_valid_yaml() {
+    let receipt = LinearPublishReceipt {
+        planning_wave: "rich-client-hosted-mode".into(),
+        linear_project: "proj-123".into(),
+        published_at: Utc::now(),
+        milestones: vec![PublishedMilestone {
+            name: "M9: Collaborative Planning Alpha".into(),
+            milestone_id: "ms-1".into(),
+        }],
+        tasks: vec![PublishedTask {
+            task_id: "OSYM-730".into(),
+            issue: "COE-395".into(),
+            issue_id: "issue-1".into(),
+            url: "https://linear.app/trilogy-ai-coe/issue/COE-395".into(),
+            file: "docs/tasks/osym-730.md".into(),
+        }],
+    };
+    let yaml = receipt.render_yaml();
+    // Verify the output is actually valid parseable YAML
+    let parsed: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).expect("render_yaml must produce valid YAML");
+    assert_eq!(
+        parsed["planningWave"].as_str(),
+        Some("rich-client-hosted-mode")
+    );
+    assert_eq!(parsed["linearProject"].as_str(), Some("proj-123"));
+    assert_eq!(
+        parsed["milestones"][0]["name"].as_str(),
+        Some("M9: Collaborative Planning Alpha")
+    );
+    assert_eq!(
+        parsed["milestones"][0]["milestoneId"].as_str(),
+        Some("ms-1")
+    );
+    assert_eq!(parsed["tasks"][0]["taskId"].as_str(), Some("OSYM-730"));
+    assert_eq!(parsed["tasks"][0]["issue"].as_str(), Some("COE-395"));
+    // Assert publishedAt is present
+    assert!(
+        parsed["publishedAt"].as_str().is_some(),
+        "publishedAt must be present"
+    );
+    // Ensure no unexpected keys are present
+    let top_keys: std::collections::HashSet<&str> = parsed
+        .as_mapping()
+        .expect("top-level YAML must be a mapping")
+        .keys()
+        .filter_map(|k| k.as_str())
+        .collect();
+    let expected_keys: std::collections::HashSet<&str> = [
+        "planningWave",
+        "linearProject",
+        "publishedAt",
+        "milestones",
+        "tasks",
+    ]
+    .into();
+    assert_eq!(top_keys, expected_keys, "unexpected YAML keys");
+}
+
+// ─── Compile-time gate for all planning types ─────────────────────────────
+
+#[test]
+fn all_planning_types_compile_and_export() {
+    let _ = PlanningArtifactKind::Intake;
+    let _ = PlanningArtifactKind::ProjectContext;
+    let _ = PlanningArtifactKind::Requirements;
+    let _ = PlanningArtifactKind::ResearchBrief;
+    let _ = PlanningArtifactKind::CodebaseAnalysis;
+    let _ = PlanningArtifactKind::ArchitectureNotes;
+    let _ = PlanningArtifactKind::RiskRegister;
+    let _ = PlanningArtifactKind::MilestoneDraft;
+    let _ = PlanningArtifactKind::IssueDraft;
+    let _ = PlanningArtifactKind::SubIssueDraft;
+    let _ = PlanningArtifactKind::DependencyMap;
+    let _ = PlanningArtifactKind::VerificationPlan;
+    let _ = PlanningArtifactKind::AcceptanceCriteria;
+    let _ = PlanningArtifactKind::PlanValidation;
+    let _ = PlanningArtifactKind::LinearDraft;
+    let _ = PlanningArtifactKind::ReviewComments;
+    let _ = PlanningArtifactKind::PublishReceipt;
+    let _ = PlanningArtifactKind::PlanningWave;
+    let _ = TurnRole::User;
+    let _ = TurnRole::Agent;
+    let _ = TurnRole::System;
 }
