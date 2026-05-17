@@ -1,7 +1,7 @@
 ---
 id: OSYM-723
 title: OpenHands Event Normalization And Runtime Mirror
-milestone: "M3: Task Graph Operations And OpenHands Run UI"
+milestone: "M8: Task Graph Operations And OpenHands Run UI"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-703"]

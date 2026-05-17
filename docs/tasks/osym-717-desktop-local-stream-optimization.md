@@ -1,7 +1,7 @@
 ---
 id: OSYM-717
 title: Desktop Local Stream Optimization
-milestone: "M2: Shared Client And Desktop Alpha"
+milestone: "M7: Shared Client And Desktop Alpha"
 priority: 3
 estimate: 8
 blockedBy: ["OSYM-704", "OSYM-711", "OSYM-713", "OSYM-715"]

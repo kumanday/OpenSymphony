@@ -1,7 +1,7 @@
 ---
 id: OSYM-735
 title: Planning Workspace UI
-milestone: "M4: Collaborative Planning Alpha"
+milestone: "M9: Collaborative Planning Alpha"
 priority: 2
 estimate: 8
 blockedBy: ["OSYM-712", "OSYM-722", "OSYM-730", "OSYM-734"]

@@ -12,7 +12,6 @@ Parent issues:
 - OSYM-300 Tracker, Workspaces, and Orchestration
 - OSYM-400 Observability and FrankenTUI
 - OSYM-500 Validation and Local Operations
-- OSYM-600 Hosted Deployment Follow-on
 
 Rich client, hosted mode, collaborative planning, subscription-auth, and future harness task set:
 

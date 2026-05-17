@@ -1,7 +1,7 @@
 ---
 id: OSYM-761
 title: Model And Credential Settings
-milestone: "M7: Provider, Harness, And Model Readiness"
+milestone: "M12: Provider, Harness, And Model Readiness"
 priority: 2
 estimate: 8
 blockedBy: ["OSYM-716", "OSYM-751", "OSYM-760"]

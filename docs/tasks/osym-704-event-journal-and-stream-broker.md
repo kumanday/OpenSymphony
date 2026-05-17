@@ -1,7 +1,7 @@
 ---
 id: OSYM-704
 title: Event Journal And Stream Broker
-milestone: "M1: Gateway And Stream Contract"
+milestone: "M6: Gateway And Stream Contract"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-701", "OSYM-702"]

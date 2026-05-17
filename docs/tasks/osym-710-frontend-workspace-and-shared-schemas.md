@@ -1,7 +1,7 @@
 ---
 id: OSYM-710
 title: Frontend Workspace And Shared Schemas
-milestone: "M2: Shared Client And Desktop Alpha"
+milestone: "M7: Shared Client And Desktop Alpha"
 priority: 1
 estimate: 5
 blockedBy: ["OSYM-701", "OSYM-702"]

@@ -1,7 +1,7 @@
 ---
 id: OSYM-731
 title: Repository, Linear, And Research Analysis
-milestone: "M4: Collaborative Planning Alpha"
+milestone: "M9: Collaborative Planning Alpha"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-720", "OSYM-730"]

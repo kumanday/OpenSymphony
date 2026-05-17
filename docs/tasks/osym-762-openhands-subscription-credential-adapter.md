@@ -1,7 +1,7 @@
 ---
 id: OSYM-762
 title: OpenHands Subscription Credential Adapter
-milestone: "M7: Provider, Harness, And Model Readiness"
+milestone: "M12: Provider, Harness, And Model Readiness"
 priority: 2
 estimate: 8
 blockedBy: ["OSYM-761"]

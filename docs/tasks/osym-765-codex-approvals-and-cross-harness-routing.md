@@ -1,7 +1,7 @@
 ---
 id: OSYM-765
 title: Codex Approvals And Cross-Harness Routing
-milestone: "M7: Provider, Harness, And Model Readiness"
+milestone: "M12: Provider, Harness, And Model Readiness"
 priority: 3
 estimate: 8
 blockedBy: ["OSYM-763", "OSYM-764"]

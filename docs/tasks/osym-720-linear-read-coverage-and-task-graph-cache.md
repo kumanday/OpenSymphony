@@ -1,7 +1,7 @@
 ---
 id: OSYM-720
 title: Linear Read Coverage And Task Graph Cache
-milestone: "M3: Task Graph Operations And OpenHands Run UI"
+milestone: "M8: Task Graph Operations And OpenHands Run UI"
 priority: 1
 estimate: 5
 blockedBy: ["OSYM-703"]

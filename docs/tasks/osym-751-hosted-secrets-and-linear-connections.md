@@ -1,7 +1,7 @@
 ---
 id: OSYM-751
 title: Hosted Secrets And Linear Connections
-milestone: "M6: Hosted Alpha"
+milestone: "M11: Hosted Alpha"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-750"]

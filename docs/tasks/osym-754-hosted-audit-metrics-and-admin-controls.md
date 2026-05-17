@@ -1,7 +1,7 @@
 ---
 id: OSYM-754
 title: Hosted Audit, Metrics, And Admin Controls
-milestone: "M6: Hosted Alpha"
+milestone: "M11: Hosted Alpha"
 priority: 2
 estimate: 8
 blockedBy: ["OSYM-750", "OSYM-753"]

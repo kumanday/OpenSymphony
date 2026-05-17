@@ -11,8 +11,7 @@ depends_on:
   - OSYM-202
   - OSYM-203
   - OSYM-302
-blocks:
-  - OSYM-601
+blocks: []
 project_context:
   - AGENTS.md
   - README.md

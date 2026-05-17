@@ -1,7 +1,7 @@
 ---
 id: OSYM-713
 title: Terminal And Log Renderer Prototype
-milestone: "M2: Shared Client And Desktop Alpha"
+milestone: "M7: Shared Client And Desktop Alpha"
 priority: 2
 estimate: 5
 blockedBy: ["OSYM-701", "OSYM-711"]

@@ -1,7 +1,7 @@
 ---
 id: OSYM-730
 title: Planning Artifact Schema And Session Service
-milestone: "M4: Collaborative Planning Alpha"
+milestone: "M9: Collaborative Planning Alpha"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-701", "OSYM-702"]

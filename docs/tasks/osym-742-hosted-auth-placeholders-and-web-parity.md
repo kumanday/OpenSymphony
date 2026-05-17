@@ -1,7 +1,7 @@
 ---
 id: OSYM-742
 title: Hosted Auth Placeholders And Web Parity
-milestone: "M5: Web Client And External Gateway"
+milestone: "M10: Web Client And External Gateway"
 priority: 2
 estimate: 5
 blockedBy: ["OSYM-712", "OSYM-735", "OSYM-740", "OSYM-741"]

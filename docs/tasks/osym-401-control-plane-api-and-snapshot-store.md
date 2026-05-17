@@ -14,7 +14,6 @@ depends_on:
 blocks:
   - OSYM-402
   - OSYM-503
-  - OSYM-601
 project_context:
   - AGENTS.md
   - README.md

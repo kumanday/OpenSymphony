@@ -12,8 +12,7 @@ depends_on:
   - OSYM-402
   - OSYM-501
   - OSYM-502
-blocks:
-  - OSYM-602
+blocks: []
 project_context:
   - AGENTS.md
   - README.md

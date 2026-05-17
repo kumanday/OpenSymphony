@@ -1,7 +1,7 @@
 ---
 id: OSYM-700
 title: Current Gateway Inventory And Vocabulary
-milestone: "M1: Gateway And Stream Contract"
+milestone: "M6: Gateway And Stream Contract"
 priority: 1
 estimate: 3
 blockedBy: []

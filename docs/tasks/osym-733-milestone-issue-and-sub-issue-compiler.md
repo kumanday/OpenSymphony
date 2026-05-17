@@ -1,7 +1,7 @@
 ---
 id: OSYM-733
 title: Milestone, Issue, And Sub-Issue Compiler
-milestone: "M4: Collaborative Planning Alpha"
+milestone: "M9: Collaborative Planning Alpha"
 priority: 1
 estimate: 5
 blockedBy: ["OSYM-732"]

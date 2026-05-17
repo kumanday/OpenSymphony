@@ -1,7 +1,7 @@
 ---
 id: OSYM-770
 title: Contract And Local End-To-End Tests
-milestone: "M8: Hardening And Release Quality"
+milestone: "M13: Hardening And Release Quality"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-724", "OSYM-725", "OSYM-736", "OSYM-765"]

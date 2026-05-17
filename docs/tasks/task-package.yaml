@@ -1,14 +1,14 @@
 planningWave: rich-client-hosted-mode
 tasksDir: docs/tasks
 milestones:
-  - "M1: Gateway And Stream Contract"
-  - "M2: Shared Client And Desktop Alpha"
-  - "M3: Task Graph Operations And OpenHands Run UI"
-  - "M4: Collaborative Planning Alpha"
-  - "M5: Web Client And External Gateway"
-  - "M6: Hosted Alpha"
-  - "M7: Provider, Harness, And Model Readiness"
-  - "M8: Hardening And Release Quality"
+  - "M6: Gateway And Stream Contract"
+  - "M7: Shared Client And Desktop Alpha"
+  - "M8: Task Graph Operations And OpenHands Run UI"
+  - "M9: Collaborative Planning Alpha"
+  - "M10: Web Client And External Gateway"
+  - "M11: Hosted Alpha"
+  - "M12: Provider, Harness, And Model Readiness"
+  - "M13: Hardening And Release Quality"
 tasks:
   - id: OSYM-700
     file: docs/tasks/osym-700-current-gateway-inventory-and-vocabulary.md

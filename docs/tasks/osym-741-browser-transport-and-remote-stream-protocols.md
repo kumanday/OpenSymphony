@@ -1,7 +1,7 @@
 ---
 id: OSYM-741
 title: Browser Transport And Remote Stream Protocols
-milestone: "M5: Web Client And External Gateway"
+milestone: "M10: Web Client And External Gateway"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-704", "OSYM-711", "OSYM-740"]
@@ -21,6 +21,8 @@ Implement browser HTTP and streaming transport with reconnect, cursor replay, ac
 - Use WebSocket or SSE for event streams based on gateway capabilities.
 - Use binary WebSocket for terminal/log streams when enabled.
 - Evaluate JSON-RPC 2.0 over WebSocket for hosted bidirectional control and subscriptions.
+- Support explicit external gateway/base URL profiles with consistent HTTP and stream auth behavior.
+- Document remote daemon-to-server topology choices and transport configuration boundaries.
 - Require cursor replay, idempotency keys, action receipts, and monotonic event sequences for any selected remote transport.
 - Add reconnect and stale-state behavior.
 
@@ -34,6 +36,7 @@ Implement browser HTTP and streaming transport with reconnect, cursor replay, ac
 
 - Browser transport adapter.
 - Remote stream protocol decision notes.
+- Remote transport configuration notes for local orchestrator, external gateway, and hosted gateway profiles.
 - Reconnect tests.
 - Origin and CORS preparation notes for separate deployment.
 
@@ -42,6 +45,7 @@ Implement browser HTTP and streaming transport with reconnect, cursor replay, ac
 - [ ] Browser transport can fetch snapshots/details and apply streamed events with cursor replay.
 - [ ] Terminal/log streams can use binary WebSocket frames when the gateway advertises support.
 - [ ] JSON-RPC 2.0 over WebSocket evaluation records benefits, constraints, auth requirements, and replay semantics.
+- [ ] Remote gateway profiles work through configuration and advertised capabilities without client-side protocol forks.
 
 ## Test Plan
 

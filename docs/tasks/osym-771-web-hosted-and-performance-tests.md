@@ -1,7 +1,7 @@
 ---
 id: OSYM-771
 title: Web, Hosted, And Performance Tests
-milestone: "M8: Hardening And Release Quality"
+milestone: "M13: Hardening And Release Quality"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-717", "OSYM-741", "OSYM-753", "OSYM-765", "OSYM-770"]

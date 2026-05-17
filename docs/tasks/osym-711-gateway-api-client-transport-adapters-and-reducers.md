@@ -1,7 +1,7 @@
 ---
 id: OSYM-711
 title: Gateway API Client, Transport Adapters, And Reducers
-milestone: "M2: Shared Client And Desktop Alpha"
+milestone: "M7: Shared Client And Desktop Alpha"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-704", "OSYM-710"]

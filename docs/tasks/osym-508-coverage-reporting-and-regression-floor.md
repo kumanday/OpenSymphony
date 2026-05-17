@@ -10,8 +10,7 @@ parent: OSYM-500
 depends_on:
   - OSYM-501
   - OSYM-506
-blocks:
-  - OSYM-602
+blocks: []
 project_context:
   - AGENTS.md
   - docs/testing-and-operations.md

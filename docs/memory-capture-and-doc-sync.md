@@ -401,7 +401,7 @@ opensymphony memory capture --issues COE-123,COE-124
 opensymphony memory capture --issues-file completed-issues.csv
 opensymphony memory capture --issue-range COE-100..COE-199
 opensymphony memory capture --before-issue COE-300
-opensymphony memory capture --milestone "M4: Collaborative Planning Alpha"
+opensymphony memory capture --milestone "M9: Collaborative Planning Alpha"
 opensymphony memory capture --milestones-file milestones.csv
 opensymphony memory capture --state Done --before-date 2026-05-01
 ```
@@ -437,7 +437,7 @@ Example command shape:
 ```bash
 opensymphony linear archive --issues COE-123,COE-124
 opensymphony linear archive --issues-file completed-issues.csv
-opensymphony linear archive --milestone "M4: Collaborative Planning Alpha"
+opensymphony linear archive --milestone "M9: Collaborative Planning Alpha"
 opensymphony linear archive --captured-before 2026-05-01
 opensymphony linear archive --from-memory --state captured
 ```
@@ -465,7 +465,7 @@ Example command shape:
 opensymphony memory init
 opensymphony memory sync-docs --since-last-sync
 opensymphony memory sync-docs --issues COE-123,COE-124
-opensymphony memory sync-docs --milestone "M4: Collaborative Planning Alpha"
+opensymphony memory sync-docs --milestone "M9: Collaborative Planning Alpha"
 opensymphony memory sync-docs --area authentication
 opensymphony memory sync-docs --issues-file completed-issues.csv
 ```
@@ -665,7 +665,7 @@ Useful commands:
 
 ```bash
 opensymphony memory status
-opensymphony memory status --milestone "M4: Collaborative Planning Alpha"
+opensymphony memory status --milestone "M9: Collaborative Planning Alpha"
 opensymphony memory show COE-123
 opensymphony memory open COE-123
 opensymphony memory lint

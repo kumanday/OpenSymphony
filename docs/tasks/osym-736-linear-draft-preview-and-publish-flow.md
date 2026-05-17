@@ -1,7 +1,7 @@
 ---
 id: OSYM-736
 title: Linear Draft Preview And Publish Flow
-milestone: "M4: Collaborative Planning Alpha"
+milestone: "M9: Collaborative Planning Alpha"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-721", "OSYM-733", "OSYM-734", "OSYM-735"]

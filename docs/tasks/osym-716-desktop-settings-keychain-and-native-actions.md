@@ -1,7 +1,7 @@
 ---
 id: OSYM-716
 title: Desktop Settings, Keychain, And Native Actions
-milestone: "M2: Shared Client And Desktop Alpha"
+milestone: "M7: Shared Client And Desktop Alpha"
 priority: 3
 estimate: 5
 blockedBy: ["OSYM-714", "OSYM-715"]

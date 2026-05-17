@@ -1,7 +1,7 @@
 ---
 id: OSYM-714
 title: Tauri Shell And Security Capabilities
-milestone: "M2: Shared Client And Desktop Alpha"
+milestone: "M7: Shared Client And Desktop Alpha"
 priority: 2
 estimate: 5
 blockedBy: ["OSYM-710"]

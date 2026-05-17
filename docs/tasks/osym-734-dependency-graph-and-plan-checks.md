@@ -1,7 +1,7 @@
 ---
 id: OSYM-734
 title: Dependency Graph And Plan Checks
-milestone: "M4: Collaborative Planning Alpha"
+milestone: "M9: Collaborative Planning Alpha"
 priority: 1
 estimate: 5
 blockedBy: ["OSYM-733"]

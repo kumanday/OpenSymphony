@@ -1,7 +1,7 @@
 ---
 id: OSYM-712
 title: App Shell, Dashboard, Task Graph, And Run Views
-milestone: "M2: Shared Client And Desktop Alpha"
+milestone: "M7: Shared Client And Desktop Alpha"
 priority: 2
 estimate: 8
 blockedBy: ["OSYM-703", "OSYM-710", "OSYM-711"]

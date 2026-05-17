@@ -1,7 +1,7 @@
 ---
 id: OSYM-703
 title: Task Graph, Run Detail, File, And Diff Read APIs
-milestone: "M1: Gateway And Stream Contract"
+milestone: "M6: Gateway And Stream Contract"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-701", "OSYM-702"]

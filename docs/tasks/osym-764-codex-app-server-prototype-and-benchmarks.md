@@ -1,7 +1,7 @@
 ---
 id: OSYM-764
 title: Codex App-Server Prototype And Benchmarks
-milestone: "M7: Provider, Harness, And Model Readiness"
+milestone: "M12: Provider, Harness, And Model Readiness"
 priority: 3
 estimate: 8
 blockedBy: ["OSYM-760", "OSYM-761"]

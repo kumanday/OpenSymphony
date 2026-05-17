@@ -1,7 +1,7 @@
 ---
 id: OSYM-702
 title: Gateway Module, Capabilities, And Dashboard Snapshot
-milestone: "M1: Gateway And Stream Contract"
+milestone: "M6: Gateway And Stream Contract"
 priority: 1
 estimate: 5
 blockedBy: ["OSYM-700", "OSYM-701"]

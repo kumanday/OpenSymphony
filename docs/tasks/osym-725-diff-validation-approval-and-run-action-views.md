@@ -1,7 +1,7 @@
 ---
 id: OSYM-725
 title: Diff, Validation, Approval, And Run Action Views
-milestone: "M3: Task Graph Operations And OpenHands Run UI"
+milestone: "M8: Task Graph Operations And OpenHands Run UI"
 priority: 2
 estimate: 8
 blockedBy: ["OSYM-703", "OSYM-705", "OSYM-712", "OSYM-724"]

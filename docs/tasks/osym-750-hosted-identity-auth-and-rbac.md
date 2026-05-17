@@ -1,7 +1,7 @@
 ---
 id: OSYM-750
 title: Hosted Identity, Auth, And RBAC
-milestone: "M6: Hosted Alpha"
+milestone: "M11: Hosted Alpha"
 priority: 1
 estimate: 8
 blockedBy: ["OSYM-705", "OSYM-741", "OSYM-742"]
@@ -23,6 +23,7 @@ Add hosted user identity, organization/tenant membership, sessions, and role-bas
 - Add API, WebSocket, and JSON-RPC-over-WebSocket auth middleware when that remote protocol is selected.
 - Add trusted local development auth bypass for explicit dev mode.
 - Enforce permission checks for gateway actions and stream subscriptions.
+- Define success and failure coverage for hosted HTTP, WebSocket, and JSON-RPC-over-WebSocket auth paths.
 
 ### Out of scope
 
@@ -34,6 +35,7 @@ Add hosted user identity, organization/tenant membership, sessions, and role-bas
 
 - Hosted identity schema.
 - Auth middleware.
+- Auth hardening test matrix.
 - Web client login flow integration.
 - RBAC tests.
 

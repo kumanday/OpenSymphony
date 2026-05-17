@@ -10,8 +10,7 @@ depends_on:
   - OSYM-200
   - OSYM-300
   - OSYM-400
-blocks:
-  - OSYM-600
+blocks: []
 children:
   - OSYM-501
   - OSYM-502

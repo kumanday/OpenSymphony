@@ -1,7 +1,7 @@
 ---
 id: OSYM-740
 title: Web App Entry And Deployment Modes
-milestone: "M5: Web Client And External Gateway"
+milestone: "M10: Web Client And External Gateway"
 priority: 2
 estimate: 5
 blockedBy: ["OSYM-710"]

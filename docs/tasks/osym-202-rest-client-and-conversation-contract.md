@@ -14,7 +14,6 @@ blocks:
   - OSYM-203
   - OSYM-204
   - OSYM-501
-  - OSYM-601
 project_context:
   - AGENTS.md
   - README.md

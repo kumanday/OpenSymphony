@@ -1,7 +1,7 @@
 ---
 id: OSYM-760
 title: Harness Adapter And Capability Model
-milestone: "M7: Provider, Harness, And Model Readiness"
+milestone: "M12: Provider, Harness, And Model Readiness"
 priority: 2
 estimate: 5
 blockedBy: ["OSYM-701", "OSYM-723"]

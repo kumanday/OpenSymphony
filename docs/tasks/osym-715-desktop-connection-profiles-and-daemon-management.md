@@ -1,7 +1,7 @@
 ---
 id: OSYM-715
 title: Desktop Connection Profiles And Daemon Management
-milestone: "M2: Shared Client And Desktop Alpha"
+milestone: "M7: Shared Client And Desktop Alpha"
 priority: 2
 estimate: 5
 blockedBy: ["OSYM-702", "OSYM-711", "OSYM-714"]

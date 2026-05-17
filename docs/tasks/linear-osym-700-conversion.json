@@ -9,7 +9,7 @@
   },
   "milestones": {
     "M1 Gateway And Stream Contract": {
-      "name": "M1: Gateway And Stream Contract",
+      "name": "M6: Gateway And Stream Contract",
       "goal": "Establish the versioned OpenSymphony Gateway, public DTOs, replayable event streams, action receipts, and feasibility baselines for desktop, web, hosted, and high-throughput transports.",
       "id": "c32b5191-7349-4f30-bd46-6340af6da3e5",
       "tasks": [
@@ -22,7 +22,7 @@
       ]
     },
     "M2 Shared Client And Desktop Alpha": {
-      "name": "M2: Shared Client And Desktop Alpha",
+      "name": "M7: Shared Client And Desktop Alpha",
       "goal": "Build the shared TypeScript client foundation and Tauri desktop shell that can connect to local and hosted OpenSymphony profiles through a common frontend contract.",
       "id": "dce95c78-504e-42d0-823f-227e68fb395b",
       "tasks": [
@@ -37,7 +37,7 @@
       ]
     },
     "M3 Task Graph Operations And OpenHands Run UI": {
-      "name": "M3: Task Graph Operations And OpenHands Run UI",
+      "name": "M8: Task Graph Operations And OpenHands Run UI",
       "goal": "Provide Linear-native task graph operations and a rich OpenHands runtime interface with timelines, streams, diffs, validation evidence, approvals, and run actions.",
       "id": "1b243af1-5678-431b-a66e-acae0b1ac2f5",
       "tasks": [
@@ -50,7 +50,7 @@
       ]
     },
     "M4 Collaborative Planning Alpha": {
-      "name": "M4: Collaborative Planning Alpha",
+      "name": "M9: Collaborative Planning Alpha",
       "goal": "Implement the adapted GSD-2 task-creation workflow as a reviewable OpenSymphony planning workspace that produces Linear milestones, issues, sub-issues, dependencies, acceptance criteria, verification expectations, and publish payloads.",
       "id": "806afecc-4a9f-4862-8330-6ce70d606058",
       "tasks": [
@@ -64,7 +64,7 @@
       ]
     },
     "M5 Web Client And External Gateway": {
-      "name": "M5: Web Client And External Gateway",
+      "name": "M10: Web Client And External Gateway",
       "goal": "Deploy the shared frontend as a browser app that connects to local, external, and hosted gateways with reconnect-safe remote transport behavior.",
       "id": "58d8ef29-ea13-4cd2-b7a5-3768070e8a01",
       "tasks": [
@@ -74,7 +74,7 @@
       ]
     },
     "M6 Hosted Alpha": {
-      "name": "M6: Hosted Alpha",
+      "name": "M11: Hosted Alpha",
       "goal": "Add hosted multi-user execution where server-owned runs continue after clients disconnect and permissions, secrets, workspaces, audit, and administration are enforced centrally.",
       "id": "4a82a4eb-1782-47a1-8a47-7afb0210cb76",
       "tasks": [
@@ -86,7 +86,7 @@
       ]
     },
     "M7 Provider, Harness, And Model Readiness": {
-      "name": "M7: Provider, Harness, And Model Readiness",
+      "name": "M12: Provider, Harness, And Model Readiness",
       "goal": "Add the model, credential, and harness seams for OpenAI ChatGPT/Codex subscription-backed OpenHands use, feature-gated Codex app-server prototypes, and future cross-harness routing.",
       "id": "5f7c2983-86fb-4ea3-8c91-de017a8698a3",
       "tasks": [
@@ -99,7 +99,7 @@
       ]
     },
     "M8 Hardening And Release Quality": {
-      "name": "M8: Hardening And Release Quality",
+      "name": "M13: Hardening And Release Quality",
       "goal": "Prove the system through contract, end-to-end, performance, security, accessibility, and documentation work.",
       "id": "0b105fe4-91be-42c2-98b3-75895d4de095",
       "tasks": [
@@ -115,7 +115,7 @@
       "linearId": "COE-389",
       "linearUuid": "fb78e114-fcfa-4630-a8d6-6e37c9fb9e76",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-389/current-gateway-inventory-and-vocabulary",
-      "milestone": "M1: Gateway And Stream Contract",
+      "milestone": "M6: Gateway And Stream Contract",
       "priority": 1,
       "estimate": 3,
       "blockedBy": [
@@ -132,7 +132,7 @@
       "linearId": "COE-390",
       "linearUuid": "62d48ff7-0899-429b-be96-6961c8cf3d92",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-390/gateway-schemas-and-stream-feasibility",
-      "milestone": "M1: Gateway And Stream Contract",
+      "milestone": "M6: Gateway And Stream Contract",
       "priority": 1,
       "estimate": 5,
       "blockedBy": [
@@ -153,7 +153,7 @@
       "linearId": "COE-391",
       "linearUuid": "ac6db1c5-cfee-48bd-b025-6007a81b24b2",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-391/gateway-module-capabilities-and-dashboard-snapshot",
-      "milestone": "M1: Gateway And Stream Contract",
+      "milestone": "M6: Gateway And Stream Contract",
       "priority": 1,
       "estimate": 5,
       "blockedBy": [
@@ -172,7 +172,7 @@
       "linearId": "COE-392",
       "linearUuid": "d68519a7-73f5-4fe6-a683-1ee74240950f",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-392/task-graph-run-detail-file-and-diff-read-apis",
-      "milestone": "M1: Gateway And Stream Contract",
+      "milestone": "M6: Gateway And Stream Contract",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -191,7 +191,7 @@
       "linearId": "COE-393",
       "linearUuid": "a8fb930c-15ce-4fa3-910b-f29b7ad13f48",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-393/event-journal-and-stream-broker",
-      "milestone": "M1: Gateway And Stream Contract",
+      "milestone": "M6: Gateway And Stream Contract",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -211,7 +211,7 @@
       "linearId": "COE-396",
       "linearUuid": "4b0b2242-1290-4ec7-b121-e6f511c3cb35",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-396/action-receipts-and-initial-run-actions",
-      "milestone": "M1: Gateway And Stream Contract",
+      "milestone": "M6: Gateway And Stream Contract",
       "priority": 1,
       "estimate": 5,
       "blockedBy": [
@@ -230,7 +230,7 @@
       "linearId": "COE-394",
       "linearUuid": "2d58dc8d-066a-4bfc-80ed-03d520840efc",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-394/frontend-workspace-and-shared-schemas",
-      "milestone": "M2: Shared Client And Desktop Alpha",
+      "milestone": "M7: Shared Client And Desktop Alpha",
       "priority": 1,
       "estimate": 5,
       "blockedBy": [
@@ -250,7 +250,7 @@
       "linearId": "COE-397",
       "linearUuid": "db660982-4ee6-4add-86c7-835cc0e32a72",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-397/gateway-api-client-transport-adapters-and-reducers",
-      "milestone": "M2: Shared Client And Desktop Alpha",
+      "milestone": "M7: Shared Client And Desktop Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -269,7 +269,7 @@
       "linearId": "COE-402",
       "linearUuid": "406107c4-99f7-4993-ae54-5ba822fab6f8",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-402/app-shell-dashboard-task-graph-and-run-views",
-      "milestone": "M2: Shared Client And Desktop Alpha",
+      "milestone": "M7: Shared Client And Desktop Alpha",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -289,7 +289,7 @@
       "linearId": "COE-403",
       "linearUuid": "56889856-b8da-49a6-9a14-8ac557711a61",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-403/terminal-and-log-renderer-prototype",
-      "milestone": "M2: Shared Client And Desktop Alpha",
+      "milestone": "M7: Shared Client And Desktop Alpha",
       "priority": 2,
       "estimate": 5,
       "blockedBy": [
@@ -306,7 +306,7 @@
       "linearId": "COE-398",
       "linearUuid": "9db3e469-5e68-407b-87c5-100d98d6279d",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-398/tauri-shell-and-security-capabilities",
-      "milestone": "M2: Shared Client And Desktop Alpha",
+      "milestone": "M7: Shared Client And Desktop Alpha",
       "priority": 2,
       "estimate": 5,
       "blockedBy": [
@@ -323,7 +323,7 @@
       "linearId": "COE-404",
       "linearUuid": "fba05f8d-c097-4eb3-919f-a8e93a6a37ec",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-404/desktop-connection-profiles-and-daemon-management",
-      "milestone": "M2: Shared Client And Desktop Alpha",
+      "milestone": "M7: Shared Client And Desktop Alpha",
       "priority": 2,
       "estimate": 5,
       "blockedBy": [
@@ -341,7 +341,7 @@
       "linearId": "COE-409",
       "linearUuid": "4bc24384-e4d5-4fab-8619-de34cb160ae7",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-409/desktop-settings-keychain-and-native-actions",
-      "milestone": "M2: Shared Client And Desktop Alpha",
+      "milestone": "M7: Shared Client And Desktop Alpha",
       "priority": 3,
       "estimate": 5,
       "blockedBy": [
@@ -357,7 +357,7 @@
       "linearId": "COE-410",
       "linearUuid": "470d2975-0997-482e-9cc0-72fa4bbdeef8",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-410/desktop-local-stream-optimization",
-      "milestone": "M2: Shared Client And Desktop Alpha",
+      "milestone": "M7: Shared Client And Desktop Alpha",
       "priority": 3,
       "estimate": 8,
       "blockedBy": [
@@ -375,7 +375,7 @@
       "linearId": "COE-399",
       "linearUuid": "2670cf15-011b-4c1f-9c85-4fb100d1d164",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-399/linear-read-coverage-and-task-graph-cache",
-      "milestone": "M3: Task Graph Operations And OpenHands Run UI",
+      "milestone": "M8: Task Graph Operations And OpenHands Run UI",
       "priority": 1,
       "estimate": 5,
       "blockedBy": [
@@ -392,7 +392,7 @@
       "linearId": "COE-405",
       "linearUuid": "bce6603c-428a-48ad-b747-60d726d95159",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-405/linear-milestone-issue-and-sub-issue-mutations",
-      "milestone": "M3: Task Graph Operations And OpenHands Run UI",
+      "milestone": "M8: Task Graph Operations And OpenHands Run UI",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -409,7 +409,7 @@
       "linearId": "COE-411",
       "linearUuid": "88c47ea2-53b9-41e0-ba55-822a9686c27c",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-411/task-graph-editor-and-runtime-overlay-ui",
-      "milestone": "M3: Task Graph Operations And OpenHands Run UI",
+      "milestone": "M8: Task Graph Operations And OpenHands Run UI",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -426,7 +426,7 @@
       "linearId": "COE-400",
       "linearUuid": "d5d429dc-ea53-4e03-99d5-3ee9b8297246",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-400/openhands-event-normalization-and-runtime-mirror",
-      "milestone": "M3: Task Graph Operations And OpenHands Run UI",
+      "milestone": "M8: Task Graph Operations And OpenHands Run UI",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -443,7 +443,7 @@
       "linearId": "COE-412",
       "linearUuid": "e1447362-00ca-4bfb-9fea-b657090a11bc",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-412/runtime-timeline-and-terminallog-association",
-      "milestone": "M3: Task Graph Operations And OpenHands Run UI",
+      "milestone": "M8: Task Graph Operations And OpenHands Run UI",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -462,7 +462,7 @@
       "linearId": "COE-414",
       "linearUuid": "bb5c40bc-107a-4ad6-be12-897705be86b5",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-414/diff-validation-approval-and-run-action-views",
-      "milestone": "M3: Task Graph Operations And OpenHands Run UI",
+      "milestone": "M8: Task Graph Operations And OpenHands Run UI",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -481,7 +481,7 @@
       "linearId": "COE-395",
       "linearUuid": "f95c6539-7582-44b8-a508-5822c2346033",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-395/planning-artifact-schema-and-session-service",
-      "milestone": "M4: Collaborative Planning Alpha",
+      "milestone": "M9: Collaborative Planning Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -500,7 +500,7 @@
       "linearId": "COE-406",
       "linearUuid": "41de4696-4ceb-41a2-87f9-d9559dd9cf90",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-406/repository-linear-and-research-analysis",
-      "milestone": "M4: Collaborative Planning Alpha",
+      "milestone": "M9: Collaborative Planning Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -516,7 +516,7 @@
       "linearId": "COE-413",
       "linearUuid": "e4571c1c-3766-4c67-94fd-33811dbbbf87",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-413/implementation-plan-generator-stage",
-      "milestone": "M4: Collaborative Planning Alpha",
+      "milestone": "M9: Collaborative Planning Alpha",
       "priority": 1,
       "estimate": 5,
       "blockedBy": [
@@ -531,7 +531,7 @@
       "linearId": "COE-415",
       "linearUuid": "e3ae8518-c2f8-4a55-a59e-f83d94e37841",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-415/milestone-issue-and-sub-issue-compiler",
-      "milestone": "M4: Collaborative Planning Alpha",
+      "milestone": "M9: Collaborative Planning Alpha",
       "priority": 1,
       "estimate": 5,
       "blockedBy": [
@@ -547,7 +547,7 @@
       "linearId": "COE-416",
       "linearUuid": "0ca59c38-afcd-4130-ab1b-f8b075009c3a",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-416/dependency-graph-and-plan-checks",
-      "milestone": "M4: Collaborative Planning Alpha",
+      "milestone": "M9: Collaborative Planning Alpha",
       "priority": 1,
       "estimate": 5,
       "blockedBy": [
@@ -563,7 +563,7 @@
       "linearId": "COE-417",
       "linearUuid": "0539f50c-e861-435a-94de-94b0587bedb7",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-417/planning-workspace-ui",
-      "milestone": "M4: Collaborative Planning Alpha",
+      "milestone": "M9: Collaborative Planning Alpha",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -582,7 +582,7 @@
       "linearId": "COE-418",
       "linearUuid": "b360641b-ba85-407e-99ba-48e7b2caa795",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-418/linear-draft-preview-and-publish-flow",
-      "milestone": "M4: Collaborative Planning Alpha",
+      "milestone": "M9: Collaborative Planning Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -600,7 +600,7 @@
       "linearId": "COE-401",
       "linearUuid": "3882ea72-6fb3-47f8-b39c-391173a86c95",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-401/web-app-entry-and-deployment-modes",
-      "milestone": "M5: Web Client And External Gateway",
+      "milestone": "M10: Web Client And External Gateway",
       "priority": 2,
       "estimate": 5,
       "blockedBy": [
@@ -616,7 +616,7 @@
       "linearId": "COE-407",
       "linearUuid": "f37e5a12-e3bb-4f1d-89e4-8cc04eaaaa2a",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-407/browser-transport-and-remote-stream-protocols",
-      "milestone": "M5: Web Client And External Gateway",
+      "milestone": "M10: Web Client And External Gateway",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -634,7 +634,7 @@
       "linearId": "COE-419",
       "linearUuid": "d4170095-6d55-4c36-bdc6-2e3f9d434dbe",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-419/hosted-auth-placeholders-and-web-parity",
-      "milestone": "M5: Web Client And External Gateway",
+      "milestone": "M10: Web Client And External Gateway",
       "priority": 2,
       "estimate": 5,
       "blockedBy": [
@@ -653,7 +653,7 @@
       "linearId": "COE-420",
       "linearUuid": "862b20f6-df35-4721-9530-c242b028987d",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-420/hosted-identity-auth-and-rbac",
-      "milestone": "M6: Hosted Alpha",
+      "milestone": "M11: Hosted Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -673,7 +673,7 @@
       "linearId": "COE-421",
       "linearUuid": "43dc1741-824b-4ac1-af75-fc9b97428d97",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-421/hosted-secrets-and-linear-connections",
-      "milestone": "M6: Hosted Alpha",
+      "milestone": "M11: Hosted Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -689,7 +689,7 @@
       "linearId": "COE-422",
       "linearUuid": "31ea6749-c5cd-4828-aa45-8763f4cb01ac",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-422/hosted-workspace-isolation-and-runtime-pool",
-      "milestone": "M6: Hosted Alpha",
+      "milestone": "M11: Hosted Alpha",
       "priority": 1,
       "estimate": 13,
       "blockedBy": [
@@ -707,7 +707,7 @@
       "linearId": "COE-424",
       "linearUuid": "7db21ecd-dd54-4547-aec6-c490f91a597b",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-424/client-independent-run-persistence",
-      "milestone": "M6: Hosted Alpha",
+      "milestone": "M11: Hosted Alpha",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -725,7 +725,7 @@
       "linearId": "COE-427",
       "linearUuid": "2684469b-4ea6-465f-be81-11a2737c3d4f",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-427/hosted-audit-metrics-and-admin-controls",
-      "milestone": "M6: Hosted Alpha",
+      "milestone": "M11: Hosted Alpha",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -742,7 +742,7 @@
       "linearId": "COE-408",
       "linearUuid": "0be5de05-7f59-4217-a985-5a3787dde922",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-408/harness-adapter-and-capability-model",
-      "milestone": "M7: Provider, Harness, And Model Readiness",
+      "milestone": "M12: Provider, Harness, And Model Readiness",
       "priority": 2,
       "estimate": 5,
       "blockedBy": [
@@ -760,7 +760,7 @@
       "linearId": "COE-423",
       "linearUuid": "8e3d1abf-acef-4465-8fa2-08361b25bb6f",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-423/model-and-credential-settings",
-      "milestone": "M7: Provider, Harness, And Model Readiness",
+      "milestone": "M12: Provider, Harness, And Model Readiness",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -779,7 +779,7 @@
       "linearId": "COE-425",
       "linearUuid": "548c05c1-1b30-4d67-8f53-3c9a0074d2a4",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-425/openhands-subscription-credential-adapter",
-      "milestone": "M7: Provider, Harness, And Model Readiness",
+      "milestone": "M12: Provider, Harness, And Model Readiness",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -794,7 +794,7 @@
       "linearId": "COE-428",
       "linearUuid": "bf2051cd-29f4-426f-bc6b-f1f6e68304c1",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-428/model-configuration-ui-and-routing-metadata",
-      "milestone": "M7: Provider, Harness, And Model Readiness",
+      "milestone": "M12: Provider, Harness, And Model Readiness",
       "priority": 3,
       "estimate": 5,
       "blockedBy": [
@@ -809,7 +809,7 @@
       "linearId": "COE-426",
       "linearUuid": "d545f1dc-040a-4951-96e7-84f021740cb2",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-426/codex-app-server-prototype-and-benchmarks",
-      "milestone": "M7: Provider, Harness, And Model Readiness",
+      "milestone": "M12: Provider, Harness, And Model Readiness",
       "priority": 3,
       "estimate": 8,
       "blockedBy": [
@@ -825,7 +825,7 @@
       "linearId": "COE-429",
       "linearUuid": "58baa8e2-9915-404d-9cda-1164ac2190e0",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-429/codex-approvals-and-cross-harness-routing",
-      "milestone": "M7: Provider, Harness, And Model Readiness",
+      "milestone": "M12: Provider, Harness, And Model Readiness",
       "priority": 3,
       "estimate": 8,
       "blockedBy": [
@@ -842,7 +842,7 @@
       "linearId": "COE-430",
       "linearUuid": "73e4816c-758d-46b9-a598-3a9606961370",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-430/contract-and-local-end-to-end-tests",
-      "milestone": "M8: Hardening And Release Quality",
+      "milestone": "M13: Hardening And Release Quality",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -861,7 +861,7 @@
       "linearId": "COE-431",
       "linearUuid": "7f96a927-765f-44e0-81a0-ede032aa4b92",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-431/web-hosted-and-performance-tests",
-      "milestone": "M8: Hardening And Release Quality",
+      "milestone": "M13: Hardening And Release Quality",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [
@@ -880,7 +880,7 @@
       "linearId": "COE-432",
       "linearUuid": "6a83c438-df12-49b6-b87f-585f02cb879a",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-432/security-accessibility-documentation-and-developer-experience",
-      "milestone": "M8: Hardening And Release Quality",
+      "milestone": "M13: Hardening And Release Quality",
       "priority": 1,
       "estimate": 8,
       "blockedBy": [

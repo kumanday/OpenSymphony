@@ -9,8 +9,7 @@ milestone: M5 Validation and local packaging
 parent: OSYM-500
 depends_on:
   - OSYM-503
-blocks:
-  - OSYM-602
+blocks: []
 project_context:
   - AGENTS.md
   - README.md

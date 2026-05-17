@@ -1,7 +1,7 @@
 ---
 id: OSYM-705
 title: Action Receipts And Initial Run Actions
-milestone: "M1: Gateway And Stream Contract"
+milestone: "M6: Gateway And Stream Contract"
 priority: 1
 estimate: 5
 blockedBy: ["OSYM-702", "OSYM-704"]

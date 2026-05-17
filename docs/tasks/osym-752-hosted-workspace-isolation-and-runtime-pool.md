@@ -1,7 +1,7 @@
 ---
 id: OSYM-752
 title: Hosted Workspace Isolation And Runtime Pool
-milestone: "M6: Hosted Alpha"
+milestone: "M11: Hosted Alpha"
 priority: 1
 estimate: 13
 blockedBy: ["OSYM-723", "OSYM-725", "OSYM-750", "OSYM-751"]
@@ -19,6 +19,7 @@ Add hosted workspace isolation and a server-owned OpenHands runtime pool for ten
 
 - Select hosted isolation layer: containers, VMs, or managed sandbox.
 - Define hosted workspace lifecycle, network policy, filesystem policy, cleanup, and retention.
+- Document hosted security posture differences from trusted local mode.
 - Integrate workspace manager with logical workspace IDs.
 - Run OpenHands agent-server instances under platform control.
 - Route conversations to isolated workspaces.
