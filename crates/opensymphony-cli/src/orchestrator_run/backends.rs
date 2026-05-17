@@ -95,8 +95,19 @@ pub(super) struct ActiveConversationStorePreparation {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(super) struct LegacyConversationStoreMigration {
+    pub moved_to_archived: usize,
+    pub already_archived: usize,
+    pub missing: usize,
+    pub skipped_non_terminal: usize,
+    pub skipped_without_manifest: usize,
+    pub skipped_invalid_manifest: usize,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct ManagedLocalPreparation {
     pub active_conversations: ActiveConversationStorePreparation,
+    pub legacy_conversations: LegacyConversationStoreMigration,
     pub tooling: Option<LocalServerTooling>,
 }
 
@@ -232,6 +243,9 @@ pub(super) async fn prepare_active_conversation_store(
         .tool_dir
         .clone()
         .ok_or(RunCommandError::MissingToolDir)?;
+    // Validate tooling once before mutating conversation stores; the prepared
+    // handle is passed through to `build_runtime_transport` so startup does not
+    // touch the managed install twice on the normal path.
     let tooling = LocalServerTooling::load(tool_dir.clone()).map_err(|error| {
         RunCommandError::ToolingSetupRequired {
             tool_dir,
@@ -239,6 +253,12 @@ pub(super) async fn prepare_active_conversation_store(
         }
     })?;
     conversation_store.ensure_active_and_archived()?;
+    let legacy_conversations = migrate_legacy_workspace_conversations(
+        workspace_manager,
+        conversation_store,
+        &runtime.workflow,
+    )
+    .await?;
     let active_issues = tracker.client.candidate_issues().await?;
     let active_conversations = prepare_active_conversation_store_for_issues(
         workspace_manager,
@@ -248,8 +268,84 @@ pub(super) async fn prepare_active_conversation_store(
     .await?;
     Ok(ManagedLocalPreparation {
         active_conversations,
+        legacy_conversations,
         tooling: Some(tooling),
     })
+}
+
+// Temporary compatibility shim for pre repo-scoped OpenHands stores. Once the
+// legacy flat store has aged out for real users, this function can be removed
+// without touching normal active-store preparation or server startup.
+async fn migrate_legacy_workspace_conversations(
+    workspace_manager: &WorkspaceManager,
+    conversation_store: &OpenHandsConversationStorePaths,
+    workflow: &ResolvedWorkflow,
+) -> Result<LegacyConversationStoreMigration, RunCommandError> {
+    let mut report = LegacyConversationStoreMigration::default();
+    let terminal_states = workflow
+        .config
+        .tracker
+        .terminal_states
+        .iter()
+        .map(|state| state.trim().to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    for (workspace, issue_manifest) in workspace_manager.list_all_workspaces().await? {
+        if !terminal_states.contains(&issue_manifest.current_state.trim().to_ascii_lowercase()) {
+            report.skipped_non_terminal += 1;
+            continue;
+        }
+
+        let manifest_path = workspace.conversation_manifest_path();
+        let Some(raw_manifest) = workspace_manager
+            .read_text_artifact(&workspace, &manifest_path)
+            .await?
+        else {
+            report.skipped_without_manifest += 1;
+            continue;
+        };
+        let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                report.skipped_invalid_manifest += 1;
+                tracing::warn!(
+                    issue = %issue_manifest.identifier,
+                    manifest = %manifest_path.display(),
+                    %error,
+                    "skipping legacy OpenHands conversation migration for invalid manifest"
+                );
+                continue;
+            }
+        };
+
+        match conversation_store.move_conversation_to(
+            manifest.conversation_id.as_str(),
+            ConversationStoreKind::Archived,
+        )? {
+            ConversationMoveOutcome::Moved { from, .. } => {
+                report.moved_to_archived += 1;
+                tracing::info!(
+                    issue = %issue_manifest.identifier,
+                    conversation_id = %manifest.conversation_id,
+                    from = %from,
+                    "moved terminal OpenHands conversation into the repo archived store"
+                );
+            }
+            ConversationMoveOutcome::AlreadyInTarget { .. } => {
+                report.already_archived += 1;
+            }
+            ConversationMoveOutcome::Missing => {
+                report.missing += 1;
+                tracing::warn!(
+                    issue = %issue_manifest.identifier,
+                    conversation_id = %manifest.conversation_id,
+                    "terminal OpenHands conversation was not found in active, archived, or legacy stores"
+                );
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 async fn prepare_active_conversation_store_for_issues(
@@ -1087,6 +1183,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_store_migration_archives_terminal_workspace_conversations_only() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let tool_dir = tempdir.path().join("openhands-server");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+        fs::create_dir_all(&tool_dir).expect("tool dir should be created");
+
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let terminal_issue = sample_terminal_issue();
+        let terminal_workspace = workspace_manager
+            .ensure(&issue_descriptor(&terminal_issue))
+            .await
+            .expect("terminal workspace should be created");
+        let active_issue = sample_issue();
+        let active_workspace = workspace_manager
+            .ensure(&issue_descriptor(&active_issue))
+            .await
+            .expect("active workspace should be created");
+        let terminal_conversation_id =
+            Uuid::parse_str("dd258bb7-cc1b-415c-9892-e19af34a2e66").expect("uuid");
+        let active_conversation_id =
+            Uuid::parse_str("7fbd147f-3599-4bda-b6de-079c8f813e22").expect("uuid");
+        let store = OpenHandsConversationStorePaths::for_tool_dir(&tool_dir, tempdir.path())
+            .expect("conversation store paths should resolve");
+        let terminal_legacy_path = store
+            .legacy_root
+            .join(terminal_conversation_id.simple().to_string());
+        let active_legacy_path = store
+            .legacy_root
+            .join(active_conversation_id.simple().to_string());
+        fs::create_dir_all(&terminal_legacy_path)
+            .expect("terminal legacy conversation should be created");
+        fs::create_dir_all(&active_legacy_path)
+            .expect("active legacy conversation should be created");
+        workspace_manager
+            .write_json_artifact(
+                &terminal_workspace.handle,
+                &terminal_workspace.handle.conversation_manifest_path(),
+                &sample_issue_conversation_manifest(
+                    &terminal_issue,
+                    &terminal_workspace.handle,
+                    terminal_conversation_id,
+                ),
+            )
+            .await
+            .expect("terminal conversation manifest should be written");
+        workspace_manager
+            .write_json_artifact(
+                &active_workspace.handle,
+                &active_workspace.handle.conversation_manifest_path(),
+                &sample_issue_conversation_manifest(
+                    &active_issue,
+                    &active_workspace.handle,
+                    active_conversation_id,
+                ),
+            )
+            .await
+            .expect("active conversation manifest should be written");
+
+        let report = migrate_legacy_workspace_conversations(&workspace_manager, &store, &workflow)
+            .await
+            .expect("legacy conversations should migrate");
+
+        assert_eq!(report.moved_to_archived, 1);
+        assert_eq!(report.skipped_non_terminal, 1);
+        assert!(!terminal_legacy_path.exists());
+        assert!(
+            store
+                .archived
+                .join(terminal_conversation_id.simple().to_string())
+                .is_dir()
+        );
+        assert!(active_legacy_path.is_dir());
+    }
+
+    #[tokio::test]
     async fn build_runtime_transport_rejects_launcher_overrides_for_external_targets() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let workflow = WorkflowDefinition::parse(
@@ -1221,6 +1395,19 @@ Run the scheduler.
             created_at: None,
             updated_at: None,
         }
+    }
+
+    fn sample_terminal_issue() -> NormalizedIssue {
+        let mut issue = sample_issue();
+        issue.id = IssueId::new("issue-done").expect("issue id should be valid");
+        issue.identifier =
+            IssueIdentifier::new("COE-285").expect("issue identifier should be valid");
+        issue.state = IssueState {
+            id: None,
+            name: "Done".to_string(),
+            category: IssueStateCategory::Terminal,
+        };
+        issue
     }
 
     fn sample_issue_conversation_manifest(

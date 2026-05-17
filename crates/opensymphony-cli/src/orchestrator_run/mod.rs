@@ -147,6 +147,18 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         prepare_active_conversation_store(&runtime, &mut tracker, workspace_manager.as_ref())
             .await?;
     let active_store_preparation = &managed_local_preparation.active_conversations;
+    let legacy_store_migration = &managed_local_preparation.legacy_conversations;
+    if legacy_store_migration.moved_to_archived > 0 {
+        info!(
+            moved_to_archived = legacy_store_migration.moved_to_archived,
+            already_archived = legacy_store_migration.already_archived,
+            missing = legacy_store_migration.missing,
+            skipped_non_terminal = legacy_store_migration.skipped_non_terminal,
+            skipped_without_manifest = legacy_store_migration.skipped_without_manifest,
+            skipped_invalid_manifest = legacy_store_migration.skipped_invalid_manifest,
+            "migrated terminal OpenHands conversations into the repo archived store"
+        );
+    }
     if active_store_preparation.moved > 0 {
         info!(
             moved = active_store_preparation.moved,

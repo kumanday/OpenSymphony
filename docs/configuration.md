@@ -180,11 +180,13 @@ conversation store from `openhands.tool_dir` and the target repo path:
   archived/
 ```
 
-`opensymphony run` prepares that `active/` store from current Linear candidate
-issue manifests before launching the managed server with
-`OH_CONVERSATIONS_PATH` pointing at `active/`. This keeps completed or manually
-archived issue history out of normal server startup while preserving it for
-`opensymphony debug`.
+`opensymphony run` first moves known terminal issue conversations from existing
+workspace manifests into `archived/`, then prepares `active/` from current
+Linear candidate issue manifests before launching the managed server with
+`OH_CONVERSATIONS_PATH` pointing at `active/`. The terminal-workspace sweep is a
+temporary compatibility shim for older flat stores. This keeps completed or
+manually archived issue history out of normal server startup while preserving it
+for `opensymphony debug`.
 
 When your workflow points at an external OpenHands agent-server with
 `openhands.transport.session_api_key_env`, `config.yaml` can omit

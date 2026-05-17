@@ -325,11 +325,14 @@ Managed local OpenHands conversations are scoped by target repository under
 `<tool_dir>/workspace/conversations/repos/<repo-key>/`. The orchestrator starts
 OpenHands with `OH_CONVERSATIONS_PATH` pointing at that repo's `active/` store,
 so older archived work is not eagerly loaded during normal runs. Before startup,
-current Linear candidate issues with existing workspace manifests are moved into
-`active/` from the legacy flat store or `archived/`. Linear archive operations
-move matching issue conversations into `archived/`; `opensymphony debug
-<issue-id>` searches both stores and starts the managed server against the store
-that contains the requested conversation.
+known terminal issue conversations from existing workspace manifests are moved
+into `archived/`, and current Linear candidate issues are moved into `active/`
+from the legacy flat store or `archived/`. This legacy-store migration is a
+temporary compatibility shim for earlier OpenSymphony versions and can be
+removed after existing installs have aged out. Linear archive operations move
+matching issue conversations into `archived/`; `opensymphony debug <issue-id>`
+searches both stores and starts the managed server against the store that
+contains the requested conversation.
 
 ### Lifecycle Hooks
 
