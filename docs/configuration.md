@@ -16,7 +16,8 @@ opensymphony init
 
 - fetches the current starter files from the template repo's raw GitHub URLs
 - copies missing files into the target repo
-- merges an existing `AGENTS.md`
+- leaves an existing `AGENTS.md` untouched and writes starter guidance to
+  `AGENTS-example.md` during first-time setup
 - prompts before overwriting other conflicting files
 - fills the `WORKFLOW.md` clone hook from `git remote` when possible
 - offers to fill the Linear project slug/key in `WORKFLOW.md`
@@ -52,6 +53,7 @@ Core bootstrap payload:
 
 - `WORKFLOW.md`
 - `AGENTS.md`
+- `AGENTS-example.md` when `AGENTS.md` already existed before first-time setup
 - `config.yaml`
 - `.gitignore` created or updated to ignore OpenSymphony runtime state
 - `.agents/skills/` copied recursively, including skill-local `references/`, `scripts/`, and similar helper files
@@ -69,6 +71,7 @@ It does not:
 - rerun the interactive `init` prompts
 - modify `WORKFLOW.md`
 - merge or rewrite `AGENTS.md`
+- create `AGENTS-example.md` after `config.yaml` exists
 - copy `.github/*` bootstrap files
 - delete repo-local extra skills that are not in the template tree
 
@@ -168,6 +171,23 @@ Provision that app-managed directory with:
 opensymphony install openhands
 ```
 
+For managed local OpenHands, OpenSymphony derives a repository-scoped
+conversation store from `openhands.tool_dir` and the target repo path:
+
+```text
+<tool_dir>/workspace/conversations/repos/<repo-key>/
+  active/
+  archived/
+```
+
+`opensymphony run` first moves known terminal issue conversations from existing
+workspace manifests into `archived/`, then prepares `active/` from current
+Linear candidate issue manifests before launching the managed server with
+`OH_CONVERSATIONS_PATH` pointing at `active/`. The terminal-workspace sweep is a
+temporary compatibility shim for older flat stores. This keeps completed or
+manually archived issue history out of normal server startup while preserving it
+for `opensymphony debug`.
+
 When your workflow points at an external OpenHands agent-server with
 `openhands.transport.session_api_key_env`, `config.yaml` can omit
 `openhands.tool_dir`.
@@ -194,6 +214,9 @@ memory:
 `auto_capture` defaults to `true`. It captures terminal issue transitions
 observed by the run loop. `auto_archive` defaults to `false`; when enabled, it
 archives only after successful capture with no blocking warnings.
+When archive succeeds and the repo uses the managed local OpenHands server,
+OpenSymphony also moves the issue's persisted conversation from the repo-scoped
+`active/` store to `archived/`.
 
 Initialize the shared memory policy and learned ontology file with:
 

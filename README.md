@@ -100,6 +100,8 @@ opensymphony init
 
 `opensymphony init` guides the bootstrap flow, customizes `WORKFLOW.md`, and
 can optionally scaffold automated code review via the [OpenHands PR Review Plugin](https://github.com/OpenHands/extensions/tree/main/plugins/pr-review), including GitHub setup through `gh` when it is installed and authorized for the target repo. It also ensures `.gitignore` ignores local OpenSymphony runtime state.
+If `AGENTS.md` already exists during first-time setup, `init` leaves it alone
+and writes the starter guidance to `AGENTS-example.md` for review.
 It also initializes `.opensymphony/memory/memory.yaml`, the shared policy and
 learned structure file required for default-on memory auto-capture.
 
@@ -318,6 +320,19 @@ already listening there, the debug command reuses it; otherwise it starts a loca
 server for the session. For the most predictable behavior, prefer the
 orchestrator-managed server and avoid leaving unrelated standalone `openhands`
 CLI sessions bound to the same port.
+
+Managed local OpenHands conversations are scoped by target repository under
+`<tool_dir>/workspace/conversations/repos/<repo-key>/`. The orchestrator starts
+OpenHands with `OH_CONVERSATIONS_PATH` pointing at that repo's `active/` store,
+so older archived work is not eagerly loaded during normal runs. Before startup,
+known terminal issue conversations from existing workspace manifests are moved
+into `archived/`, and current Linear candidate issues are moved into `active/`
+from the legacy flat store or `archived/`. This legacy-store migration is a
+temporary compatibility shim for earlier OpenSymphony versions and can be
+removed after existing installs have aged out. Linear archive operations move
+matching issue conversations into `archived/`; `opensymphony debug <issue-id>`
+searches both stores and starts the managed server against the store that
+contains the requested conversation.
 
 ### Lifecycle Hooks
 

@@ -8,6 +8,14 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+#[cfg(unix)]
+use rustix::{
+    io::Errno,
+    process::{Pid, Signal, kill_process_group},
+};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use reqwest::{blocking::Client, redirect::Policy};
 use thiserror::Error;
 use url::Url;
@@ -219,6 +227,7 @@ impl LocalServerSupervisor {
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
                     .envs(&launch.env);
+                configure_server_command(&mut command);
 
                 let mut child = command.spawn().map_err(|source| SupervisorError::Spawn {
                     program: format!("{} {}", launch.program, launch.args.join(" "))
@@ -237,7 +246,7 @@ impl LocalServerSupervisor {
                             source,
                         })?
                     {
-                        join_output_reader(&mut stderr_reader);
+                        detach_output_reader(&mut stderr_reader);
                         return Err(SupervisorError::UnexpectedExit {
                             pid: child.id(),
                             code: status.code(),
@@ -443,6 +452,10 @@ fn join_output_reader(stderr_reader: &mut Option<JoinHandle<()>>) {
     }
 }
 
+fn detach_output_reader(stderr_reader: &mut Option<JoinHandle<()>>) {
+    let _ = stderr_reader.take();
+}
+
 #[derive(Default)]
 struct OpenHandsLogFilter {
     auto_title_suppression_remaining: usize,
@@ -565,15 +578,66 @@ fn kill_child(child: &mut Child) -> Result<(), SupervisorError> {
         .map_err(|source| SupervisorError::Wait { pid, source })?
         .is_none()
     {
-        child
-            .kill()
-            .map_err(|source| SupervisorError::Kill { pid, source })?;
+        terminate_child_process_tree(child, pid)?;
     }
 
     child
         .wait()
         .map_err(|source| SupervisorError::Wait { pid, source })?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn configure_server_command(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_server_command(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn terminate_child_process_tree(child: &mut Child, pid: u32) -> Result<(), SupervisorError> {
+    let process_id = i32::try_from(pid).map_err(|source| SupervisorError::Kill {
+        pid,
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("local OpenHands server pid {pid} does not fit in i32: {source}"),
+        ),
+    })?;
+    let process_group = Pid::from_raw(process_id).ok_or_else(|| SupervisorError::Kill {
+        pid,
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("local OpenHands server pid {pid} is not a valid Unix pid"),
+        ),
+    })?;
+
+    match kill_process_group(process_group, Signal::KILL) {
+        Ok(()) | Err(Errno::SRCH) => Ok(()),
+        Err(source) => Err(SupervisorError::Kill {
+            pid,
+            source: source.into(),
+        }),
+    }?;
+
+    if child
+        .try_wait()
+        .map_err(|source| SupervisorError::Wait { pid, source })?
+        .is_none()
+    {
+        child
+            .kill()
+            .map_err(|source| SupervisorError::Kill { pid, source })?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_child_process_tree(child: &mut Child, pid: u32) -> Result<(), SupervisorError> {
+    child
+        .kill()
+        .map_err(|source| SupervisorError::Kill { pid, source })
 }
 
 fn probe_local_ready(base_url: &str, probe: &ProbeConfig) -> Result<bool, SupervisorError> {

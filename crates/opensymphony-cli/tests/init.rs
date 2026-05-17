@@ -283,7 +283,7 @@ async fn init_can_scaffold_ai_pr_review_and_configure_github_with_gh() {
 }
 
 #[tokio::test]
-async fn init_merges_agents_and_skips_conflicting_file_when_requested() {
+async fn init_copies_agents_template_to_example_when_agents_already_exists() {
     let server = TemplateServer::start().await;
     let repo = TempDir::new().expect("temp repo should exist");
     init_git_repo(repo.path(), "https://github.com/example/demo.git");
@@ -316,13 +316,19 @@ async fn init_merges_agents_and_skips_conflicting_file_when_requested() {
     );
 
     let agents = fs::read_to_string(repo.path().join("AGENTS.md")).expect("AGENTS.md should exist");
+    assert_eq!(
+        agents, "# Existing Agents\n\nKeep me.\n",
+        "existing AGENTS content should be left untouched",
+    );
+    let agents_example = fs::read_to_string(repo.path().join("AGENTS-example.md"))
+        .expect("AGENTS-example.md should exist");
     assert!(
-        agents.contains("## Preserved Existing AGENTS.md"),
-        "existing AGENTS content should be preserved: {agents}",
+        agents_example.contains("Template agents."),
+        "template guidance should be copied to AGENTS-example.md: {agents_example}",
     );
     assert!(
-        agents.contains("# Existing Agents\n\nKeep me."),
-        "existing AGENTS text should be appended: {agents}",
+        stdout.contains("`AGENTS.md` already existed"),
+        "init should tell the user to review AGENTS-example.md: {stdout}",
     );
 
     let pr_template = fs::read_to_string(repo.path().join(".github/pull_request_template.md"))

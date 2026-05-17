@@ -425,7 +425,7 @@ async fn issue_states_by_ids_return_normalized_snapshots() {
 }
 
 #[tokio::test]
-async fn issue_states_by_ids_fail_when_linear_omits_requested_ids() {
+async fn issue_states_by_ids_omits_missing_ids_for_cross_project_recovery() {
     let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
         "fixtures/issue_states_missing_id.json"
     ))])
@@ -433,13 +433,13 @@ async fn issue_states_by_ids_fail_when_linear_omits_requested_ids() {
     let client = LinearClient::new(test_config(server.base_url()))
         .expect("client configuration should be valid");
 
-    let error = client
+    let snapshots = client
         .issue_states_by_ids(&["issue-260".to_string(), "issue-264".to_string()])
         .await
-        .expect_err("missing issue ids should fail reconciliation");
+        .expect("missing issue ids should be ignored during recovery reconciliation");
 
-    assert_eq!(error.category(), TrackerErrorCategory::NotFound);
-    assert!(error.to_string().contains("issue-264"));
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].identifier, "COE-260");
 }
 
 #[tokio::test]

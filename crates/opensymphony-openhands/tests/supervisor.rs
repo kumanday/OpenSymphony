@@ -4,6 +4,7 @@ use std::{
     net::TcpListener,
     path::Path,
     process::{Child, Command, Stdio},
+    sync::mpsc,
     thread,
     time::Duration,
 };
@@ -41,6 +42,39 @@ fn supervised_start_and_stop_report_owned_process_metadata() {
 
     let stopped = supervisor.stop().expect("stop should work");
     assert_eq!(stopped.state, ServerState::Stopped);
+}
+
+#[cfg(unix)]
+#[test]
+fn stop_kills_wrapped_server_process_tree() {
+    let fixture = FakeToolingFixture::new("ready");
+    let port = free_port();
+    let mut config = SupervisedServerConfig::new(
+        LocalServerTooling::load(fixture.tool_dir()).expect("tooling should load"),
+    );
+    config.port_override = Some(port);
+    config.startup_timeout = Duration::from_secs(3);
+    config
+        .extra_env
+        .insert("FAKE_SERVER_MODE".to_string(), "ready".to_string());
+    config
+        .extra_env
+        .insert("FAKE_SERVER_WRAP_CHILD".to_string(), "1".to_string());
+
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
+    supervisor.start().expect("server should start");
+
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let result = supervisor.stop().map(|status| status.state);
+        let _ = tx.send(result);
+    });
+
+    let state = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("stop should not block on inherited server stderr")
+        .expect("stop should succeed");
+    assert_eq!(state, ServerState::Stopped);
 }
 
 #[test]
@@ -343,7 +377,7 @@ impl FakeToolingFixture {
 
 fn write_tooling_fixture(tool_dir: &Path, python: &str, default_mode: &str) {
     let run_local = format!(
-        "#!/usr/bin/env bash\nset -euo pipefail\nport=\"${{OPENHANDS_SERVER_PORT:?OPENHANDS_SERVER_PORT is required}}\"\nmode=\"${{FAKE_SERVER_MODE:-{default_mode}}}\"\nexec {python} \"$(cd -- \"$(dirname -- \"${{BASH_SOURCE[0]}}\")\" && pwd)/fake_server.py\" \"$port\" \"$mode\"\n"
+        "#!/usr/bin/env bash\nset -euo pipefail\nport=\"${{OPENHANDS_SERVER_PORT:?OPENHANDS_SERVER_PORT is required}}\"\nmode=\"${{FAKE_SERVER_MODE:-{default_mode}}}\"\nserver=\"$(cd -- \"$(dirname -- \"${{BASH_SOURCE[0]}}\")\" && pwd)/fake_server.py\"\nif [ \"${{FAKE_SERVER_WRAP_CHILD:-0}}\" = \"1\" ]; then\n  {python} \"$server\" \"$port\" \"$mode\" &\n  child=\"$!\"\n  wait \"$child\"\nelse\n  exec {python} \"$server\" \"$port\" \"$mode\"\nfi\n"
     );
     let pyproject = r#"[project]
 name = "fixture"

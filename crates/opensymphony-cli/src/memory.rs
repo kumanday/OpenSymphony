@@ -6,6 +6,7 @@ use std::{
 
 use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand};
+use serde::Deserialize;
 
 use crate::{
     opensymphony_domain::{TrackerIssue, TrackerIssueRef},
@@ -19,7 +20,11 @@ use crate::{
         render_capture_dry_run, search, status, write_capture_plan, write_docs_sync_plan,
         write_memory_init_plan,
     },
+    opensymphony_openhands::{
+        ConversationMoveOutcome, IssueConversationManifest, OpenHandsConversationStorePaths,
+    },
     opensymphony_workflow::WorkflowDefinition,
+    opensymphony_workspace::{CleanupConfig, HookConfig, WorkspaceManager, WorkspaceManagerConfig},
 };
 
 #[derive(Debug, Args)]
@@ -279,6 +284,7 @@ pub(crate) async fn auto_capture_terminal(
     repo_root: &Path,
     workflow_path: &Path,
     identifiers: &[String],
+    conversation_store: Option<&OpenHandsConversationStorePaths>,
     auto_archive: bool,
 ) -> Result<AutoMemoryReport, MemoryError> {
     let mut identifiers = identifiers
@@ -391,6 +397,29 @@ pub(crate) async fn auto_capture_terminal(
                             archive_completed = false;
                             warnings
                                 .push(format!("failed to mark archived memory capsules: {error}"));
+                        }
+                        if !archive_report.archived.is_empty() {
+                            match archive_openhands_conversations_for_issues(
+                                repo_root,
+                                Some(workflow_path),
+                                conversation_store,
+                                &archive_report.archived,
+                            )
+                            .await
+                            {
+                                Ok(conversation_report) => {
+                                    archive_completed = archive_completed
+                                        && conversation_report.failures.is_empty();
+                                    warnings.extend(conversation_report.warnings);
+                                    warnings.extend(conversation_report.failures);
+                                }
+                                Err(error) => {
+                                    archive_completed = false;
+                                    warnings.push(format!(
+                                        "failed to archive OpenHands conversations: {error}"
+                                    ));
+                                }
+                            }
                         }
                         archived_issue_keys = archive_report.archived;
                         warnings.extend(archive_report.failures);
@@ -812,10 +841,17 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
     if !report.archived.is_empty() {
         mark_archived(&config, &report.archived)?;
     }
+    let conversation_report = archive_openhands_conversations_from_config(
+        &repo_root,
+        args.workflow.as_deref(),
+        &report.archived,
+    )
+    .await?;
     println!("Archived {} Linear issue(s).", report.archived.len());
     for issue_key in &report.archived {
         println!("- {issue_key}");
     }
+    print_conversation_archive_report(&conversation_report);
     if !report.failures.is_empty() {
         for failure in &report.failures {
             eprintln!("- {failure}");
@@ -824,6 +860,13 @@ async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
             "archived {} issue(s), failed to archive {} issue(s)",
             report.archived.len(),
             report.failures.len()
+        )));
+    }
+    if !conversation_report.failures.is_empty() {
+        return Err(MemoryError::InvalidInput(format!(
+            "archived {} Linear issue(s), failed to archive {} OpenHands conversation(s)",
+            report.archived.len(),
+            conversation_report.failures.len()
         )));
     }
     Ok(())
@@ -868,7 +911,7 @@ async fn run_archive_with_live_capture(
     }
 
     let report = archive_in_linear(repo_root, args.workflow.as_deref(), &archive_plan).await?;
-    finish_archive_write(config, report)
+    finish_archive_write(repo_root, args.workflow.as_deref(), config, report).await
 }
 
 fn archive_plan_after_capture(
@@ -934,17 +977,23 @@ fn archive_plan_after_capture(
     }
 }
 
-fn finish_archive_write(
+async fn finish_archive_write(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
     config: &MemoryConfig,
     report: LinearArchiveReport,
 ) -> Result<(), MemoryError> {
     if !report.archived.is_empty() {
         mark_archived(config, &report.archived)?;
     }
+    let conversation_report =
+        archive_openhands_conversations_from_config(repo_root, workflow_path, &report.archived)
+            .await?;
     println!("Archived {} Linear issue(s).", report.archived.len());
     for issue_key in &report.archived {
         println!("- {issue_key}");
     }
+    print_conversation_archive_report(&conversation_report);
     if !report.failures.is_empty() {
         for failure in &report.failures {
             eprintln!("- {failure}");
@@ -955,7 +1004,264 @@ fn finish_archive_write(
             report.failures.len()
         )));
     }
+    if !conversation_report.failures.is_empty() {
+        return Err(MemoryError::InvalidInput(format!(
+            "archived {} Linear issue(s), failed to archive {} OpenHands conversation(s)",
+            report.archived.len(),
+            conversation_report.failures.len()
+        )));
+    }
     Ok(())
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ConversationArchiveRuntimeConfig {
+    #[serde(default)]
+    target_repo: Option<String>,
+    #[serde(default)]
+    openhands: ConversationArchiveOpenHandsConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ConversationArchiveOpenHandsConfig {
+    #[serde(default)]
+    tool_dir: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ConversationArchiveReport {
+    moved: Vec<String>,
+    already_archived: Vec<String>,
+    warnings: Vec<String>,
+    failures: Vec<String>,
+}
+
+struct ConversationArchiveContext<'a> {
+    conversation_store: &'a OpenHandsConversationStorePaths,
+    manager: WorkspaceManager,
+}
+
+async fn archive_openhands_conversations_from_config(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+    issue_keys: &[String],
+) -> Result<ConversationArchiveReport, MemoryError> {
+    let store = conversation_store_from_run_config(repo_root, workflow_path)?;
+    let context = conversation_archive_context(repo_root, workflow_path, store.as_ref())?;
+    archive_openhands_conversations_for_issues_with_context(context.as_ref(), issue_keys).await
+}
+
+async fn archive_openhands_conversations_for_issues(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+    conversation_store: Option<&OpenHandsConversationStorePaths>,
+    issue_keys: &[String],
+) -> Result<ConversationArchiveReport, MemoryError> {
+    let context = conversation_archive_context(repo_root, workflow_path, conversation_store)?;
+    archive_openhands_conversations_for_issues_with_context(context.as_ref(), issue_keys).await
+}
+
+fn conversation_archive_context<'a>(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+    conversation_store: Option<&'a OpenHandsConversationStorePaths>,
+) -> Result<Option<ConversationArchiveContext<'a>>, MemoryError> {
+    let Some(conversation_store) = conversation_store else {
+        return Ok(None);
+    };
+    let workflow = load_resolved_workflow(repo_root, workflow_path)?;
+    let manager = WorkspaceManager::new(WorkspaceManagerConfig {
+        root: workflow.config.workspace.root.clone(),
+        hooks: HookConfig::default(),
+        cleanup: CleanupConfig {
+            remove_terminal_workspaces: false,
+        },
+    })
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!("failed to build workspace manager: {error}"))
+    })?;
+    Ok(Some(ConversationArchiveContext {
+        conversation_store,
+        manager,
+    }))
+}
+
+async fn archive_openhands_conversations_for_issues_with_context(
+    context: Option<&ConversationArchiveContext<'_>>,
+    issue_keys: &[String],
+) -> Result<ConversationArchiveReport, MemoryError> {
+    let mut report = ConversationArchiveReport::default();
+    if issue_keys.is_empty() {
+        return Ok(report);
+    }
+    let Some(context) = context else {
+        report.warnings.push(
+            "skipped OpenHands conversation archive: no managed tool_dir configured".to_string(),
+        );
+        return Ok(report);
+    };
+
+    for issue_key in issue_keys {
+        let Some(workspace) = context
+            .manager
+            .find_workspace_by_issue_reference(issue_key)
+            .await
+            .map_err(|error| {
+                MemoryError::InvalidInput(format!(
+                    "failed to find workspace for {issue_key}: {error}"
+                ))
+            })?
+        else {
+            report.warnings.push(format!(
+                "{issue_key}: skipped OpenHands conversation archive; no managed workspace found"
+            ));
+            continue;
+        };
+        let manifest_path = workspace.conversation_manifest_path();
+        let Some(raw_manifest) = context
+            .manager
+            .read_text_artifact(&workspace, &manifest_path)
+            .await
+            .map_err(|error| {
+                MemoryError::InvalidInput(format!(
+                    "failed to read conversation manifest for {issue_key}: {error}"
+                ))
+            })?
+        else {
+            report.warnings.push(format!(
+                "{issue_key}: skipped OpenHands conversation archive; no conversation manifest found"
+            ));
+            continue;
+        };
+        let manifest =
+            serde_json::from_str::<IssueConversationManifest>(&raw_manifest).map_err(|error| {
+                MemoryError::InvalidInput(format!(
+                    "failed to decode conversation manifest {} for {issue_key}: {error}",
+                    manifest_path.display()
+                ))
+            })?;
+
+        match context
+            .conversation_store
+            .move_conversation_to(
+                manifest.conversation_id.as_str(),
+                crate::opensymphony_openhands::ConversationStoreKind::Archived,
+            )
+            .map_err(|error| error.to_string())
+        {
+            Ok(ConversationMoveOutcome::Moved { .. }) => report.moved.push(issue_key.clone()),
+            Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {
+                report.already_archived.push(issue_key.clone());
+            }
+            Ok(ConversationMoveOutcome::Missing) => {
+                report.warnings.push(format!(
+                    "{issue_key}: OpenHands conversation {} was not found in the active, archived, or legacy stores",
+                    manifest.conversation_id
+                ));
+            }
+            Err(error) => {
+                report.failures.push(format!(
+                    "{issue_key}: failed to archive OpenHands conversation {}: {error}",
+                    manifest.conversation_id
+                ));
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+fn print_conversation_archive_report(report: &ConversationArchiveReport) {
+    if !report.moved.is_empty() {
+        println!("Archived {} OpenHands conversation(s).", report.moved.len());
+        for issue_key in &report.moved {
+            println!("- {issue_key}");
+        }
+    }
+    if !report.already_archived.is_empty() {
+        println!(
+            "{} OpenHands conversation(s) were already archived.",
+            report.already_archived.len()
+        );
+    }
+    for warning in &report.warnings {
+        eprintln!("- {warning}");
+    }
+    for failure in &report.failures {
+        eprintln!("- {failure}");
+    }
+}
+
+fn conversation_store_from_run_config(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+) -> Result<Option<OpenHandsConversationStorePaths>, MemoryError> {
+    let config_path = repo_root.join("config.yaml");
+    if !config_path.is_file() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&config_path).map_err(|source| MemoryError::ReadFile {
+        path: config_path.clone(),
+        source,
+    })?;
+    let config =
+        serde_yaml::from_str::<ConversationArchiveRuntimeConfig>(&raw).map_err(|source| {
+            MemoryError::ParseYaml {
+                path: config_path.clone(),
+                source,
+            }
+        })?;
+    let config_root = config_path.parent().unwrap_or(repo_root);
+    let target_repo = match workflow_path.and_then(Path::parent) {
+        Some(workflow_root) => workflow_root.to_path_buf(),
+        None => config
+            .target_repo
+            .as_deref()
+            .map(|value| expand_config_path(&config_path, config_root, value))
+            .transpose()?
+            .unwrap_or_else(|| repo_root.to_path_buf()),
+    };
+    let Some(tool_dir) = config
+        .openhands
+        .tool_dir
+        .as_deref()
+        .map(|value| expand_config_path(&config_path, config_root, value))
+        .transpose()?
+    else {
+        return Ok(None);
+    };
+    OpenHandsConversationStorePaths::for_tool_dir(tool_dir, target_repo)
+        .map(Some)
+        .map_err(|error| MemoryError::InvalidInput(error.to_string()))
+}
+
+fn expand_config_path(
+    config_path: &Path,
+    config_root: &Path,
+    raw: &str,
+) -> Result<PathBuf, MemoryError> {
+    let expanded = super::expand_env_tokens(raw).map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "failed to expand {}: {error}",
+            config_path.display()
+        ))
+    })?;
+    Ok(super::resolve_path(config_root, &expanded))
+}
+
+fn load_resolved_workflow(
+    repo_root: &Path,
+    workflow_path: Option<&Path>,
+) -> Result<crate::opensymphony_workflow::ResolvedWorkflow, MemoryError> {
+    let workflow_path = workflow_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| repo_root.join("WORKFLOW.md"));
+    let workflow = WorkflowDefinition::load_from_path(&workflow_path)
+        .map_err(|error| MemoryError::InvalidInput(format!("failed to load workflow: {error}")))?;
+    let workflow_root = workflow_path.parent().unwrap_or(repo_root);
+    workflow
+        .resolve_with_process_env(workflow_root)
+        .map_err(|error| MemoryError::InvalidInput(format!("failed to resolve workflow: {error}")))
 }
 
 const AUTO_MEMORY_STATUS_LOG_LIMIT: usize = 100;

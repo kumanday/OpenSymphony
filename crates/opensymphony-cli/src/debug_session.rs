@@ -8,15 +8,17 @@ use std::{
 };
 
 use crate::opensymphony_openhands::{
-    ConversationLaunchProfile, EventEnvelope, IssueConversationManifest, IssueSessionRunnerConfig,
-    KnownEvent, LocalServerSupervisor, LocalServerTooling, OpenHandsClient, OpenHandsError,
-    RuntimeEventStream, SendMessageRequest, SupervisedServerConfig, SupervisorConfig,
-    SupervisorError, TerminalExecutionStatus, TransportConfig,
+    ConversationLaunchProfile, ConversationMoveOutcome, ConversationStoreKind, EventEnvelope,
+    IssueConversationManifest, IssueSessionRunnerConfig, KnownEvent, LocalServerSupervisor,
+    LocalServerTooling, OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient,
+    OpenHandsConversationStorePaths, OpenHandsError, RuntimeEventStream, SendMessageRequest,
+    SupervisedServerConfig, SupervisorConfig, SupervisorError, TerminalExecutionStatus,
+    TransportConfig,
 };
 use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow, WorkflowDefinition};
 use crate::opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, WorkspaceError, WorkspaceHandle, WorkspaceManager,
-    WorkspaceManagerConfig,
+    CleanupConfig, HookConfig, HookDefinition, IssueManifest, WorkspaceError, WorkspaceHandle,
+    WorkspaceManager, WorkspaceManagerConfig,
 };
 use clap::Args;
 use serde::Deserialize;
@@ -54,6 +56,7 @@ struct DebugOpenHandsConfigFile {
 struct DebugRuntimeConfig {
     workflow: ResolvedWorkflow,
     tool_dir: Option<PathBuf>,
+    conversation_store: Option<OpenHandsConversationStorePaths>,
 }
 
 #[derive(Debug, Error)]
@@ -113,6 +116,8 @@ enum DebugCommandError {
     LaunchProfile { detail: String },
     #[error(transparent)]
     Transport(#[from] OpenHandsError),
+    #[error("failed to prepare OpenHands conversation store: {0}")]
+    ConversationStore(#[from] crate::opensymphony_openhands::ConversationStoreError),
     #[error(transparent)]
     Tooling(#[from] crate::opensymphony_openhands::LocalToolingError),
     #[error(transparent)]
@@ -133,6 +138,20 @@ enum DebugCommandError {
     RehydratedConversationMismatch { expected: Uuid, actual: Uuid },
     #[error("rehydrated conversation {conversation_id} did not expose persisted history")]
     PersistedHistoryMissing { conversation_id: Uuid },
+    #[error(
+        "archived conversation {conversation_id} was not found in managed OpenHands store {store_path}. The debug session launched OpenHands with this `OH_CONVERSATIONS_PATH`; verify the conversation directory exists in that store or rerun archive/migration for the issue."
+    )]
+    ArchivedConversationMissingFromManagedStore {
+        conversation_id: Uuid,
+        store_path: PathBuf,
+    },
+    #[error(
+        "archived conversation {conversation_id} could not be attached from expected store {store_path}. The conversation may be missing from that store, or the already-running/external OpenHands server may be using a different `OH_CONVERSATIONS_PATH`. Stop the existing server or free the port, then retry."
+    )]
+    ArchivedConversationUnavailable {
+        conversation_id: Uuid,
+        store_path: PathBuf,
+    },
     #[error(
         "conversation {conversation_id} remained active past the wait timeout ({timeout_ms} ms)"
     )]
@@ -185,6 +204,11 @@ struct TranscriptEntry {
     text: String,
 }
 
+struct ArchivedAttachContext<'a> {
+    selected_store_path: Option<&'a Path>,
+    launched_managed_server: bool,
+}
+
 pub async fn run_command(args: DebugArgs) -> ExitCode {
     match run_debug_session(args).await {
         Ok(()) => ExitCode::SUCCESS,
@@ -205,13 +229,46 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
             issue_reference: args.issue_id.clone(),
             workspace_root: runtime.workflow.config.workspace.root.clone(),
         })?;
+    let issue_manifest = manager.load_issue_manifest(&workspace).await?;
     let manifest = load_conversation_manifest(&manager, &workspace).await?;
-    let (client, mut supervisor, server_message) = build_debug_client(&runtime)?;
     let config = IssueSessionRunnerConfig::from_workflow(&runtime.workflow);
     let conversation_id = parse_conversation_id(&manifest)?;
-    let mut stream =
-        attach_or_rehydrate_stream(&client, &runtime.workflow, &workspace, &manifest, &config)
-            .await?;
+    let store_kind =
+        prepare_debug_conversation_store(&runtime, conversation_id, issue_manifest.as_ref())?;
+    let selected_store_path = store_kind
+        .and_then(|kind| {
+            runtime
+                .conversation_store
+                .as_ref()
+                .map(|paths| paths.path_for(kind))
+        })
+        .map(Path::to_path_buf);
+    let (client, mut supervisor, server_message) = build_debug_client(&runtime, store_kind)?;
+    let launched_managed_server = supervisor.is_some();
+    let mut stream = match attach_or_rehydrate_stream(
+        &client,
+        &runtime.workflow,
+        &workspace,
+        &manifest,
+        &config,
+        store_kind != Some(ConversationStoreKind::Archived),
+        ArchivedAttachContext {
+            selected_store_path: selected_store_path.as_deref(),
+            launched_managed_server,
+        },
+    )
+    .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            if let Some(supervisor) = supervisor.as_mut()
+                && let Err(stop_error) = supervisor.stop()
+            {
+                tracing::warn!(%stop_error, "failed to stop debug OpenHands supervisor after attach failure");
+            }
+            return Err(error);
+        }
+    };
 
     println!(
         "Resumed conversation {} for issue {} in {}",
@@ -302,9 +359,15 @@ async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, 
             source,
         })?;
 
+    let conversation_store = configured_tool_dir
+        .as_ref()
+        .map(|tool_dir| OpenHandsConversationStorePaths::for_tool_dir(tool_dir, &target_repo))
+        .transpose()?;
+
     Ok(DebugRuntimeConfig {
         workflow,
         tool_dir: configured_tool_dir,
+        conversation_store,
     })
 }
 
@@ -359,8 +422,54 @@ fn build_workspace_manager_config(workflow: &ResolvedWorkflow) -> WorkspaceManag
     }
 }
 
+fn prepare_debug_conversation_store(
+    runtime: &DebugRuntimeConfig,
+    conversation_id: Uuid,
+    issue_manifest: Option<&IssueManifest>,
+) -> Result<Option<ConversationStoreKind>, DebugCommandError> {
+    let Some(store) = runtime.conversation_store.as_ref() else {
+        return Ok(None);
+    };
+    store.ensure_active_and_archived()?;
+
+    match store.locate_conversation(&conversation_id.to_string())? {
+        Some(located) if located.kind != ConversationStoreKind::Legacy => Ok(Some(located.kind)),
+        Some(_) => {
+            let target = debug_store_target_for_issue(&runtime.workflow, issue_manifest);
+            match store.move_conversation_to(&conversation_id.to_string(), target)? {
+                ConversationMoveOutcome::Moved { to, .. }
+                | ConversationMoveOutcome::AlreadyInTarget { kind: to, .. } => Ok(Some(to)),
+                ConversationMoveOutcome::Missing => Ok(Some(target)),
+            }
+        }
+        None => Ok(Some(ConversationStoreKind::Active)),
+    }
+}
+
+fn debug_store_target_for_issue(
+    workflow: &ResolvedWorkflow,
+    issue_manifest: Option<&IssueManifest>,
+) -> ConversationStoreKind {
+    let Some(issue_manifest) = issue_manifest else {
+        return ConversationStoreKind::Active;
+    };
+    let current_state = issue_manifest.current_state.trim();
+    if workflow
+        .config
+        .tracker
+        .terminal_states
+        .iter()
+        .any(|state| state.trim().eq_ignore_ascii_case(current_state))
+    {
+        ConversationStoreKind::Archived
+    } else {
+        ConversationStoreKind::Active
+    }
+}
+
 fn build_debug_client(
     runtime: &DebugRuntimeConfig,
+    conversation_store_kind: Option<ConversationStoreKind>,
 ) -> Result<(OpenHandsClient, Option<LocalServerSupervisor>, String), DebugCommandError> {
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
     let Some(supervisor_base_url) = transport.managed_local_server_base_url()? else {
@@ -391,6 +500,18 @@ fn build_debug_client(
         .local_server
         .env
         .clone();
+    let conversation_store_path = conversation_store_kind.and_then(|kind| {
+        runtime
+            .conversation_store
+            .as_ref()
+            .map(|paths| paths.path_for(kind))
+    });
+    if let Some(path) = conversation_store_path {
+        config.extra_env.insert(
+            OPENHANDS_CONVERSATIONS_PATH_ENV.to_string(),
+            path.display().to_string(),
+        );
+    }
     config.startup_timeout = Duration::from_millis(
         runtime
             .workflow
@@ -413,18 +534,26 @@ fn build_debug_client(
         Ok(status) => {
             let base_url = status.base_url.clone();
             let transport = TransportConfig::new(&base_url).with_auth(transport.auth().clone());
+            let store_suffix = conversation_store_path
+                .map(|path| format!(" Conversation store: {}.", path.display()))
+                .unwrap_or_default();
             Ok((
                 OpenHandsClient::new(transport),
                 Some(supervisor),
-                format!("Started local OpenHands server at {base_url} for the debug session."),
+                format!(
+                    "Started local OpenHands server at {base_url} for the debug session.{store_suffix}"
+                ),
             ))
         }
         Err(SupervisorError::ExistingReadyServer { base_url, .. }) => {
             let transport = TransportConfig::new(&base_url).with_auth(transport.auth().clone());
+            let store_suffix = conversation_store_path
+                .map(|path| format!(" Expected conversation store: {}.", path.display()))
+                .unwrap_or_default();
             Ok((
                 OpenHandsClient::new(transport),
                 None,
-                format!("Using existing OpenHands server at {base_url}."),
+                format!("Using existing OpenHands server at {base_url}.{store_suffix}"),
             ))
         }
         Err(error) => Err(DebugCommandError::Supervisor(error)),
@@ -466,6 +595,8 @@ async fn attach_or_rehydrate_stream(
     workspace: &WorkspaceHandle,
     manifest: &IssueConversationManifest,
     config: &IssueSessionRunnerConfig,
+    rehydrate_on_missing: bool,
+    archived_context: ArchivedAttachContext<'_>,
 ) -> Result<RuntimeEventStream, DebugCommandError> {
     let conversation_id = parse_conversation_id(manifest)?;
     let stream_config = config.runtime_stream.clone();
@@ -474,6 +605,25 @@ async fn attach_or_rehydrate_stream(
         .await
     {
         Ok(stream) => Ok(stream),
+        Err(error) if should_rehydrate_after_attach_failure(&error) && !rehydrate_on_missing => {
+            let store_path = archived_context
+                .selected_store_path
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("<unknown>"));
+            if archived_context.launched_managed_server {
+                Err(
+                    DebugCommandError::ArchivedConversationMissingFromManagedStore {
+                        conversation_id,
+                        store_path,
+                    },
+                )
+            } else {
+                Err(DebugCommandError::ArchivedConversationUnavailable {
+                    conversation_id,
+                    store_path,
+                })
+            }
+        }
         Err(error) if should_rehydrate_after_attach_failure(&error) => {
             let launch_profile = resolve_launch_profile(manifest, workflow)
                 .map_err(|detail| DebugCommandError::LaunchProfile { detail })?;
@@ -878,13 +1028,18 @@ fn turn_has_stopped(status: &str) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::opensymphony_openhands::OpenHandsError;
+    use crate::opensymphony_openhands::{
+        ConversationStoreKind, OpenHandsConversationStorePaths, OpenHandsError,
+    };
     use crate::opensymphony_workflow::WorkflowDefinition;
+    use crate::opensymphony_workspace::IssueManifest;
+    use chrono::Utc;
     use tempfile::TempDir;
+    use uuid::Uuid;
 
     use super::{
         DebugCommandError, DebugRuntimeConfig, build_debug_client,
-        should_rehydrate_after_attach_failure,
+        prepare_debug_conversation_store, should_rehydrate_after_attach_failure,
     };
 
     #[test]
@@ -915,7 +1070,7 @@ mod tests {
     fn build_debug_client_requires_tool_dir_for_managed_local_transport() {
         let runtime = sample_debug_runtime(None);
 
-        let error = match build_debug_client(&runtime) {
+        let error = match build_debug_client(&runtime, None) {
             Err(error) => error,
             Ok(_) => panic!("managed-local debug should require tool_dir"),
         };
@@ -929,7 +1084,7 @@ mod tests {
         let tool_dir = temp_dir.path().join("missing/openhands-server");
         let runtime = sample_debug_runtime(Some(tool_dir.clone()));
 
-        let error = match build_debug_client(&runtime) {
+        let error = match build_debug_client(&runtime, None) {
             Err(error) => error,
             Ok(_) => panic!("invalid tooling should be reported"),
         };
@@ -946,6 +1101,72 @@ mod tests {
                 );
             }
             other => panic!("expected tooling setup guidance, got {other}"),
+        }
+    }
+
+    #[test]
+    fn debug_store_preparation_moves_legacy_terminal_issue_to_archive_store() {
+        let repo = TempDir::new().expect("repo should exist");
+        let tool_dir = TempDir::new().expect("tool dir should exist");
+        let store = OpenHandsConversationStorePaths::for_tool_dir(tool_dir.path(), repo.path())
+            .expect("store paths should resolve");
+        let conversation_id =
+            Uuid::parse_str("dd258bb7-cc1b-415c-9892-e19af34a2e66").expect("uuid");
+        let legacy_path = store.legacy_root.join(conversation_id.simple().to_string());
+        std::fs::create_dir_all(&legacy_path).expect("legacy conversation should exist");
+        let mut runtime = sample_debug_runtime(None);
+        runtime.conversation_store = Some(store.clone());
+        let issue_manifest = sample_issue_manifest("Done");
+
+        let kind =
+            prepare_debug_conversation_store(&runtime, conversation_id, Some(&issue_manifest))
+                .expect("store should prepare");
+
+        assert_eq!(kind, Some(ConversationStoreKind::Archived));
+        assert!(!legacy_path.exists());
+        assert!(
+            store
+                .archived
+                .join(conversation_id.simple().to_string())
+                .is_dir()
+        );
+    }
+
+    #[test]
+    fn debug_store_preparation_keeps_existing_archived_conversation_archived() {
+        let repo = TempDir::new().expect("repo should exist");
+        let tool_dir = TempDir::new().expect("tool dir should exist");
+        let store = OpenHandsConversationStorePaths::for_tool_dir(tool_dir.path(), repo.path())
+            .expect("store paths should resolve");
+        let conversation_id =
+            Uuid::parse_str("dd258bb7-cc1b-415c-9892-e19af34a2e66").expect("uuid");
+        let archived_path = store.archived.join(conversation_id.simple().to_string());
+        std::fs::create_dir_all(&archived_path).expect("archived conversation should exist");
+        let mut runtime = sample_debug_runtime(None);
+        runtime.conversation_store = Some(store);
+
+        let kind = prepare_debug_conversation_store(
+            &runtime,
+            conversation_id,
+            Some(&sample_issue_manifest("Todo")),
+        )
+        .expect("store should prepare");
+
+        assert_eq!(kind, Some(ConversationStoreKind::Archived));
+        assert!(archived_path.is_dir());
+    }
+
+    fn sample_issue_manifest(current_state: &str) -> IssueManifest {
+        IssueManifest {
+            issue_id: "issue-1".to_string(),
+            identifier: "COE-1".to_string(),
+            title: "Sample".to_string(),
+            current_state: current_state.to_string(),
+            sanitized_workspace_key: "COE-1".to_string(),
+            workspace_path: PathBuf::from("/tmp/COE-1"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_seen_tracker_refresh_at: None,
         }
     }
 
@@ -982,6 +1203,10 @@ openhands:
         )
         .expect("workflow should resolve");
 
-        DebugRuntimeConfig { workflow, tool_dir }
+        DebugRuntimeConfig {
+            workflow,
+            tool_dir,
+            conversation_store: None,
+        }
     }
 }

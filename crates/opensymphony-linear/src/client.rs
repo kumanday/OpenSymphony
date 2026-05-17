@@ -280,7 +280,7 @@ impl LinearClient {
             }
 
             if !page_info.has_next_page {
-                return ensure_complete_issue_states(&issue_ids, snapshots);
+                return Ok(snapshots);
             }
 
             after = Some(page_info.end_cursor.ok_or_else(|| {
@@ -783,26 +783,6 @@ fn normalize_required_string(field_name: &str, value: &str) -> Result<String, Li
 fn contains_workpad_marker(body: &str) -> bool {
     body.lines()
         .any(|line| line.trim_start().starts_with("## Agent Harness Workpad"))
-}
-
-fn ensure_complete_issue_states(
-    requested_issue_ids: &[String],
-    snapshots: Vec<TrackerIssueStateSnapshot>,
-) -> Result<Vec<TrackerIssueStateSnapshot>, LinearError> {
-    let mut missing_issue_ids = Vec::new();
-    for issue_id in requested_issue_ids {
-        if !snapshots.iter().any(|snapshot| snapshot.id == *issue_id) {
-            missing_issue_ids.push(issue_id.clone());
-        }
-    }
-
-    if missing_issue_ids.is_empty() {
-        Ok(snapshots)
-    } else {
-        Err(LinearError::MissingIssueIds {
-            issue_ids: missing_issue_ids,
-        })
-    }
 }
 
 fn parse_retry_after(header_value: Option<&reqwest::header::HeaderValue>) -> Option<Duration> {

@@ -1,4 +1,5 @@
 mod client;
+mod conversation_store;
 mod events;
 mod models;
 mod session;
@@ -9,6 +10,10 @@ pub use client::{
     ApiKeyAuth, AuthConfig, HttpAuth, OpenHandsClient, OpenHandsError, OpenHandsProbeResult,
     RuntimeEventStream, RuntimeStreamConfig, TransportAuthKind, TransportConfig,
     TransportDiagnostics, TransportTargetKind, WebSocketAuth,
+};
+pub use conversation_store::{
+    ConversationMoveOutcome, ConversationStoreError, ConversationStoreKind, LocatedConversation,
+    OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsConversationStorePaths,
 };
 pub use events::{
     ActionEventPayload, ActivityKind, ActivitySummary, ConversationErrorEvent,
