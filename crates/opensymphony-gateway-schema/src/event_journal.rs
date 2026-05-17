@@ -110,7 +110,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Serialize the event kind to a dotted string for the envelope.
-    pub fn to_string(&self) -> String {
+    pub fn kind_tag(&self) -> String {
         serde_json::to_value(self)
             .map(|v| v.as_str().unwrap_or("unknown").to_owned())
             .unwrap_or_else(|_| "unknown".to_owned())

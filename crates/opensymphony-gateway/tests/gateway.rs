@@ -382,3 +382,289 @@ async fn gateway_and_control_plane_are_reachable() {
     gateway_task.abort();
     control_task.abort();
 }
+
+/// Test that cursor-based event journal query works end-to-end via HTTP.
+#[tokio::test]
+async fn event_journal_cursor_returns_events_page() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::{
+        cursor::StreamCursor,
+        event_journal::{EventActor, EventKind, EventPage, EventRecord},
+    };
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+
+    // Seed some events into the journal.
+    for i in 0..5u64 {
+        let event = EventRecord::builder()
+            .event_id(format!("evt_{i}"))
+            .sequence(0)
+            .actor(EventActor::system("test"))
+            .kind(EventKind::RunStarted)
+            .summary(format!("Test event {i}"))
+            .build();
+        journal.append(event).await.expect("append");
+    }
+
+    let server = opensymphony::opensymphony_gateway::GatewayServer::with_journal(
+        store, journal, broker,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    // Query with cursor=0 (from beginning), limit=2.
+    let url = format!("http://{address}/api/v1/event-journal?cursor=0&limit=2");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 2);
+    assert!(page.has_more);
+    assert!(page.next_cursor.is_some());
+
+    // Follow the cursor to get the next page.
+    let next_seq = page.next_cursor.unwrap().sequence;
+    let url = format!("http://{address}/api/v1/event-journal?cursor={next_seq}&limit=2");
+    let page2: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch next page")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page2.events.len(), 2);
+    assert!(page2.has_more);
+
+    // Last page.
+    let next_seq2 = page2.next_cursor.unwrap().sequence;
+    let url = format!("http://{address}/api/v1/event-journal?cursor={next_seq2}&limit=2");
+    let page3: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch last page")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page3.events.len(), 1);
+    assert!(!page3.has_more);
+
+    server_task.abort();
+}
+
+/// Test that partition filtering works via the event journal API.
+#[tokio::test]
+async fn event_journal_partition_filtering() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::{
+        event_journal::{EventActor, EventKind, EventPage, EventRecord},
+    };
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+
+    // Add a control event.
+    let event = EventRecord::builder()
+        .event_id("evt_control")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::RunStarted)
+        .summary("Control event")
+        .build();
+    journal.append(event).await.expect("append");
+
+    // Add a terminal frame (high volume).
+    let terminal = EventRecord::builder()
+        .event_id("evt_term")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::TerminalFrame {
+            frame_id: "f1".into(),
+        })
+        .summary("Terminal frame")
+        .build();
+    journal.append(terminal).await.expect("append");
+
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+    let server = opensymphony::opensymphony_gateway::GatewayServer::with_journal(
+        store, journal, broker,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    // Query control events.
+    let url = format!("http://{address}/api/v1/event-journal?partition=events");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].event_id, "evt_control");
+
+    // Query terminal events.
+    let url = format!("http://{address}/api/v1/event-journal?partition=terminal_log");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].event_id, "evt_term");
+
+    server_task.abort();
+}
+
+/// Test that unknown harness events with raw payload refs are retained.
+#[tokio::test]
+async fn event_journal_raw_payload_ref_retained() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::{
+        event_journal::{EventActor, EventKind, EventPage, EventRecord},
+    };
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+
+    // Add an unknown harness event with raw payload ref.
+    let event = EventRecord::builder()
+        .event_id("evt_raw")
+        .sequence(0)
+        .actor(EventActor::harness("openhands-1"))
+        .kind(EventKind::Unknown {
+            raw_kind: "custom_harness_event".into(),
+        })
+        .summary("Unknown harness event")
+        .raw_payload_ref("raw_ref_123")
+        .build();
+    journal.append(event).await.expect("append");
+
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+    let server = opensymphony::opensymphony_gateway::GatewayServer::with_journal(
+        store, journal, broker,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    let url = format!("http://{address}/api/v1/event-journal");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 1);
+    assert!(page.events[0].has_raw_payload());
+    assert_eq!(page.events[0].raw_payload_ref, Some("raw_ref_123".into()));
+
+    server_task.abort();
+}
+
+/// Test that duplicate events are identifiable by stable event_id.
+#[tokio::test]
+async fn event_journal_duplicate_detection() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::{
+        event_journal::{EventActor, EventKind, EventPage, EventRecord},
+    };
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+
+    // Append two events with the same event_id (simulating duplicate detection).
+    let event = EventRecord::builder()
+        .event_id("evt_dup")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::RunStarted)
+        .summary("Duplicate event")
+        .build();
+    journal.append(event.clone()).await.expect("append");
+    journal.append(event).await.expect("append");
+
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+    let server = opensymphony::opensymphony_gateway::GatewayServer::with_journal(
+        store, journal, broker,
+    );
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    let url = format!("http://{address}/api/v1/event-journal");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 2);
+    // Both events share the same stable event_id.
+    assert_eq!(page.events[0].event_id, page.events[1].event_id);
+    // But they have different sequences.
+    assert_ne!(page.events[0].sequence, page.events[1].sequence);
+
+    server_task.abort();
+}

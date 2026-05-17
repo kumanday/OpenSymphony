@@ -1,4 +1,4 @@
-use std::{convert::Infallible, time::Duration};
+use std::{convert::Infallible, sync::Arc, time::Duration};
 
 use async_stream::stream;
 use axum::{
@@ -63,6 +63,19 @@ impl GatewayServer {
             journal: journal.clone(),
             broker: StreamBroker::new(journal),
             store,
+        }
+    }
+
+    /// Create a gateway server with a pre-configured journal and broker.
+    pub fn with_journal(
+        store: SnapshotStore,
+        journal: InMemoryEventJournal,
+        broker: StreamBroker,
+    ) -> Self {
+        Self {
+            store,
+            journal,
+            broker,
         }
     }
 
@@ -327,7 +340,7 @@ async fn event_journal_query(
         Ok(page) => Ok(Json(page)),
         Err(err) => {
             let status = match &err {
-                JournalError::InvalidCursor { .. } => axum::http::StatusCode::GONE,
+                JournalError::InvalidCursor { .. } => axum::http::StatusCode::BAD_REQUEST,
                 JournalError::PartitionNotFound { .. } => axum::http::StatusCode::NOT_FOUND,
                 _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             };
@@ -347,6 +360,10 @@ async fn event_stream_ws(
         let broker = state.broker.clone();
         async move {
             let mut socket = socket;
+
+            // Register the connection with the broker.
+            let connection_id: Arc<str> = Arc::from(format!("ws-{}", uuid::Uuid::new_v4()));
+            broker.register_connection(connection_id.clone()).await;
 
             // Read optional init message for cursor/partition.
             let (cursor, partition) = if let Some(Ok(init_msg)) = socket.recv().await {
@@ -379,6 +396,7 @@ async fn event_stream_ws(
                             .send(Message::Text(format!("__error__ {}", json).into()))
                             .await;
                     }
+                    broker.unregister_connection(&connection_id).await;
                     return;
                 }
             };
@@ -409,6 +427,9 @@ async fn event_stream_ws(
                     None => break,
                 }
             }
+
+            // Unregister the connection when the WebSocket closes.
+            broker.unregister_connection(&connection_id).await;
         }
     })
 }

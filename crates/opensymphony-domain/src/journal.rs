@@ -72,20 +72,19 @@ impl InMemoryEventJournal {
     }
 
     /// Get the configured capacity.
-    pub fn capacity(&self) -> usize {
-        self.inner.blocking_read().capacity
+    pub async fn capacity(&self) -> usize {
+        self.inner.read().await.capacity
     }
 
-    /// Append an event. The sequence number is assigned atomically.
+    /// Append an event. The journal always assigns the sequence number itself to
+    /// guarantee monotonic ordering regardless of caller-provided values.
     /// Returns `JournalError::Backpressure` if the journal is at capacity and eviction
     /// cannot make room (e.g., capacity is 0).
     pub async fn append(&self, mut event: EventRecord) -> Result<EventRecord, JournalError> {
         let mut state = self.inner.write().await;
 
-        // Assign the sequence number.
-        if event.sequence == 0 {
-            event.sequence = state.next_sequence;
-        }
+        // Always assign sequence to guarantee monotonic ordering.
+        event.sequence = state.next_sequence;
 
         // Check capacity and evict if needed.
         if state.events.len() >= state.capacity {
@@ -134,34 +133,17 @@ impl InMemoryEventJournal {
             }
         }
 
-        let events: Vec<EventRecord> = state
+        let mut iter = state
             .events
             .iter()
             .filter(|e| {
                 e.sequence > cursor.sequence
                     && e.kind.default_partition() == cursor.partition
-            })
-            .cloned()
-            .take(limit)
-            .collect();
-
-        // Check if there are more events beyond what was returned.
-        let returned_sequences: std::collections::HashSet<u64> =
-            events.iter().map(|e| e.sequence).collect();
-        let has_more = state
-            .events
-            .iter()
-            .any(|e| {
-                e.sequence > cursor.sequence
-                    && e.kind.default_partition() == cursor.partition
-                    && !returned_sequences.contains(&e.sequence)
             });
+        let events: Vec<EventRecord> = iter.by_ref().take(limit).cloned().collect();
+        let has_more = iter.next().is_some();
 
-        let next_cursor = if has_more {
-            events.last().map(|e| e.next_cursor(&cursor.partition))
-        } else {
-            None
-        };
+        let next_cursor = events.last().map(|e| e.next_cursor(&cursor.partition));
 
         use crate::opensymphony_gateway_schema::version::SchemaVersion;
 
@@ -216,7 +198,6 @@ impl InMemoryEventJournal {
 
     /// Helper to create an orchestrator event.
     pub fn orchestrator_event(
-        &self,
         kind: EventKind,
         summary: impl Into<String>,
         payload: Option<serde_json::Value>,
@@ -231,7 +212,6 @@ impl InMemoryEventJournal {
 
     /// Helper to create a gateway action event.
     pub fn gateway_action_event(
-        &self,
         kind: EventKind,
         correlation_id: Option<EventId>,
         summary: impl Into<String>,
@@ -248,7 +228,6 @@ impl InMemoryEventJournal {
 
     /// Helper to create a normalized harness event.
     pub fn harness_event(
-        &self,
         harness_id: impl Into<String>,
         kind: EventKind,
         summary: impl Into<String>,
@@ -696,7 +675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_cursor_returns_invalid_cursor_error() {
+    async fn cursor_zero_returns_all_events() {
         let journal = test_journal();
 
         // Add 3 events (sequences 1, 2, 3).
@@ -709,6 +688,33 @@ mod tests {
         let cursor = StreamCursor::new(0, "events");
         let page = journal.query_after(&cursor, 10).await.expect("query");
         assert_eq!(page.events.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn stale_cursor_returns_invalid_cursor_error() {
+        // Create a journal with small capacity to force eviction.
+        let journal = InMemoryEventJournal::new(5, 256);
+
+        // Fill to capacity and beyond so oldest sequence > 1.
+        for _ in 0..10 {
+            let event = sample_event(0, EventKind::RunStarted);
+            let _ = journal.append(event).await;
+        }
+
+        // oldest_sequence should be > 1 after evictions.
+        let oldest = journal.oldest_sequence().await.expect("should have events");
+        assert!(oldest > 1, "oldest should be > 1 after evictions, got {}", oldest);
+
+        // A cursor between 0 and oldest should fail (cursor > 0, cursor < oldest).
+        let stale_seq = oldest - 1;
+        let cursor = StreamCursor::new(stale_seq, "events");
+        match journal.query_after(&cursor, 10).await {
+            Err(JournalError::InvalidCursor { reason }) => {
+                assert!(reason.contains("older than oldest"));
+            }
+            Ok(_) => panic!("expected InvalidCursor for stale cursor"),
+            Err(e) => panic!("expected InvalidCursor, got {:?}", e),
+        }
     }
 
     #[tokio::test]
