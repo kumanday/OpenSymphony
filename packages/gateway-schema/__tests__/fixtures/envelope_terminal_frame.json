@@ -1,0 +1,9 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "cursor": {"sequence": 7, "partition": "terminal:run-1", "timestamp_anchor": 1700000000},
+  "entity_ref": {"kind": "terminal_session", "id": "term-1"},
+  "event_kind": "terminal_frame",
+  "payload": {"content": "hello"},
+  "raw_payload": {"content": "hello"},
+  "emitted_at": "2025-01-15T10:00:00Z"
+}

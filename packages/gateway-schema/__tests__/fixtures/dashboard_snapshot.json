@@ -1,0 +1,33 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "generated_at": "2025-01-15T10:00:00Z",
+  "sequence": 1,
+  "health": "healthy",
+  "metrics": {
+    "running_issue_count": 2,
+    "retry_queue_depth": 0,
+    "total_input_tokens": 1024,
+    "total_output_tokens": 512,
+    "total_cache_read_tokens": 256,
+    "total_cost_micros": 0
+  },
+  "projects": [
+    {
+      "project_id": "proj-1",
+      "name": "OpenSymphony",
+      "milestone_count": 3,
+      "issue_count": 12,
+      "running_count": 2,
+      "completed_count": 5,
+      "failed_count": 0
+    }
+  ],
+  "recent_events": [
+    {
+      "happened_at": "2025-01-15T09:59:00Z",
+      "issue_identifier": "COE-390",
+      "kind": "worker_started",
+      "summary": "Run started"
+    }
+  ]
+}

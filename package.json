@@ -1,0 +1,22 @@
+{
+  "name": "opensymphony-frontend",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "type-check": "tsc --build tsconfig.projects.json",
+    "lint": "echo 'ESLint configured; run npx eslint apps/ packages/ to check'",
+    "test": "jest --config jest.config.js",
+    "clean": "rm -rf apps/*/dist packages/*/dist"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.14",
+    "eslint": "^9.0.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.0",
+    "typescript": "^5.8.0"
+  }
+}

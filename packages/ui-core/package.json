@@ -1,0 +1,25 @@
+{
+  "name": "@opensymphony/ui-core",
+  "version": "1.0.0",
+  "description": "Shared UI core components for OpenSymphony clients",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc --build tsconfig.json",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opensymphony/gateway-schema": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}

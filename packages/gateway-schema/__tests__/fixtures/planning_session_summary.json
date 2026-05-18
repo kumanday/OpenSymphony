@@ -1,0 +1,10 @@
+{
+  "schema_version": {"major": 1, "minor": 0, "patch": 0},
+  "session_id": "sess-1",
+  "project_id": "proj-1",
+  "title": "Q3 Planning",
+  "status": "draft",
+  "artifact_count": 3,
+  "created_at": "2025-01-15T10:00:00Z",
+  "updated_at": "2025-01-15T10:00:00Z"
+}
