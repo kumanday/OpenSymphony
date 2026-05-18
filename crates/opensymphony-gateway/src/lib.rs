@@ -629,6 +629,7 @@ async fn event_stream_ws(
                         }
                     }
                     Some(Err(err)) => {
+                        // Send the error event to the client.
                         if let Ok(json) = serde_json::to_string(&err) {
                             let _ = socket
                                 .send(Message::Text(format!("__error__ {}", json).into()))
@@ -636,6 +637,67 @@ async fn event_stream_ws(
                         }
                         if !err.recoverable {
                             break;
+                        }
+                        // Lag recovery: query the journal backlog for any events
+                        // that were missed due to broadcast channel backpressure.
+                        let recovery_cursor = StreamCursor::new(
+                            event_stream.last_sequence(),
+                            &partition,
+                        );
+                        match journal
+                            .query_after(&recovery_cursor, GATEWAY_EVENT_PAGE_LIMIT)
+                            .await
+                        {
+                            Ok(page) => {
+                                for event in &page.events {
+                                    match serde_json::to_string(event) {
+                                        Ok(json) => {
+                                            if socket
+                                                .send(Message::Text(format!("__event__ {}", json).into()))
+                                                .await
+                                                .is_err()
+                                            {
+                                                broker.unregister_connection(&connection_id).await;
+                                                return;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let _ = socket
+                                                .send(Message::Text(
+                                                    format!(
+                                                        "__error__ {{\"error_type\":\"serialization\",\"message\":\"Failed to serialize lag recovery event {}\",\"recoverable\":true}}",
+                                                        event.event_id
+                                                    )
+                                                    .into(),
+                                                ))
+                                                .await;
+                                            tracing::warn!(
+                                                event_id = %event.event_id,
+                                                error = %e,
+                                                "Failed to serialize WS lag recovery event"
+                                            );
+                                        }
+                                    }
+                                    last_backlog_sequence = event.sequence.max(last_backlog_sequence);
+                                }
+                                event_stream.set_last_sequence(last_backlog_sequence);
+                            }
+                            Err(query_err) => {
+                                // Lag recovery failed (e.g., cursor evicted);
+                                // forward the error and close the connection.
+                                tracing::warn!(
+                                    error = ?query_err,
+                                    cursor = event_stream.last_sequence(),
+                                    "WebSocket lag recovery failed"
+                                );
+                                if let Ok(json) = serde_json::to_string(&query_err) {
+                                    let _ = socket
+                                        .send(Message::Text(format!("__error__ {}", json).into()))
+                                        .await;
+                                }
+                                broker.unregister_connection(&connection_id).await;
+                                return;
+                            }
                         }
                     }
                     None => break,
