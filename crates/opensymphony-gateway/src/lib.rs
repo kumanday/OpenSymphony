@@ -380,8 +380,22 @@ async fn events_sse(
                             for event in &page.events {
                                 if event.sequence > last_sequence {
                                     last_sequence = event.sequence;
-                                    if let Ok(json) = serde_json::to_string(event) {
-                                        yield Ok(Event::default().event("event").data(json));
+                                    match serde_json::to_string(event) {
+                                        Ok(json) => {
+                                            yield Ok(Event::default().event("event").data(json));
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                event_id = %event.event_id,
+                                                error = %e,
+                                                "Failed to serialize SSE lag recovery event"
+                                            );
+                                            yield Ok(Event::default()
+                                                .event("error")
+                                                .data(
+                                                    r#"{"error_type":"serialization","message":"Failed to serialize lag recovery event","recoverable":true}"#
+                                                ));
+                                        }
                                     }
                                 }
                             }
