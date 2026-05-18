@@ -863,7 +863,7 @@ async fn websocket_event_stream_delivers_events() {
 
     let (mut write, mut read) = ws_stream.split();
 
-    let init = serde_json::json!({ "sequence": 0, "partition": "events" });
+    let init = serde_json::json!({ "cursor": 0, "partition": "events" });
     let init_msg = serde_json::to_string(&init).expect("serialize init");
     write
         .send(WsMessage::Text(init_msg.into()))
