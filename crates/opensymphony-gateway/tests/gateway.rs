@@ -3,11 +3,14 @@ use futures_util::StreamExt;
 use opensymphony::opensymphony_control::{ControlPlaneServer, SnapshotStore};
 use opensymphony::opensymphony_domain::{
     ControlPlaneAgentServerStatus as AgentServerStatus,
+    ControlPlaneConversationEvent as ConversationEvent,
     ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
-    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneIssueRuntimeState as IssueRuntimeState,
-    ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
-    ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
-    ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
+    ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneFileChange as FileChange,
+    ControlPlaneFileChangeKind as FileChangeKind,
+    ControlPlaneIssueRuntimeState as IssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
+    ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
+    ControlPlaneRecentEventKind as RecentEventKind, ControlPlaneWorkerOutcome as WorkerOutcome,
+    SnapshotEnvelope,
 };
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, control_plane_to_dashboard_snapshot,
@@ -77,6 +80,185 @@ fn fixture_envelope(step: u64) -> SnapshotEnvelope {
         sequence: step + 1,
         published_at: snapshot.generated_at,
         snapshot,
+    }
+}
+
+/// Second fixture variant: one Idle issue, one Completed issue with events
+/// and modified files, and one Failed issue (first attempt, no retries).
+fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
+    let now = Utc::now();
+    DaemonSnapshot {
+        generated_at: now,
+        daemon: DaemonStatus {
+            state: DaemonState::Ready,
+            last_poll_at: now,
+            workspace_root: "/tmp/opensymphony".to_owned(),
+            status_line: "ready".to_owned(),
+        },
+        agent_server: AgentServerStatus {
+            reachable: true,
+            base_url: "http://127.0.0.1:3000".to_owned(),
+            conversation_count: 2,
+            status_line: "healthy".to_owned(),
+        },
+        metrics: MetricsSnapshot {
+            running_issues: 1,
+            retry_queue_depth: 0,
+            input_tokens: 2048,
+            output_tokens: 2048,
+            cache_read_tokens: 512,
+            total_tokens: 4096 + step,
+            total_cost_micros: 120_000,
+        },
+        issues: vec![
+            // Idle issue (eligible for execution)
+            IssueSnapshot {
+                identifier: "COE-300".to_owned(),
+                title: "Idle task".to_owned(),
+                tracker_state: "Todo".to_owned(),
+                runtime_state: IssueRuntimeState::Idle,
+                last_outcome: WorkerOutcome::Unknown,
+                last_event_at: now,
+                conversation_id_suffix: String::new(),
+                workspace_path_suffix: String::new(),
+                retry_count: 0,
+                blocked: false,
+                server_base_url: None,
+                transport_target: None,
+                http_auth_mode: None,
+                websocket_auth_mode: None,
+                websocket_query_param_name: None,
+                recent_events: Vec::new(),
+                modified_files: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+            },
+            // Completed issue with events and modified files
+            IssueSnapshot {
+                identifier: "COE-301".to_owned(),
+                title: "Completed task".to_owned(),
+                tracker_state: "Done".to_owned(),
+                runtime_state: IssueRuntimeState::Completed,
+                last_outcome: WorkerOutcome::Completed,
+                last_event_at: now,
+                conversation_id_suffix: "c0e301".to_owned(),
+                workspace_path_suffix: "COE-301".to_owned(),
+                retry_count: 0,
+                blocked: false,
+                server_base_url: Some("http://127.0.0.1:3001".to_owned()),
+                transport_target: Some("loopback".to_owned()),
+                http_auth_mode: Some("none".to_owned()),
+                websocket_auth_mode: Some("none".to_owned()),
+                websocket_query_param_name: None,
+                recent_events: vec![
+                    ConversationEvent {
+                        event_id: "evt-1".to_owned(),
+                        happened_at: now,
+                        kind: "worker_started".to_owned(),
+                        summary: "worker started".to_owned(),
+                    },
+                    ConversationEvent {
+                        event_id: "evt-2".to_owned(),
+                        happened_at: now,
+                        kind: "worker_completed".to_owned(),
+                        summary: "worker completed".to_owned(),
+                    },
+                ],
+                modified_files: vec![
+                    FileChange {
+                        path: "/tmp/opensymphony/COE-301/src/main.rs".to_owned(),
+                        change_kind: FileChangeKind::Modified,
+                        lines_added: 10,
+                        lines_removed: 3,
+                    },
+                    FileChange {
+                        path: "/tmp/opensymphony/COE-301/src/lib.rs".to_owned(),
+                        change_kind: FileChangeKind::Created,
+                        lines_added: 42,
+                        lines_removed: 0,
+                    },
+                ],
+                input_tokens: 2048,
+                output_tokens: 1024,
+                cache_read_tokens: 256,
+            },
+            // Failed issue, first attempt (no retries exhausted)
+            IssueSnapshot {
+                identifier: "COE-302".to_owned(),
+                title: "Failed task".to_owned(),
+                tracker_state: "In Progress".to_owned(),
+                runtime_state: IssueRuntimeState::Failed,
+                last_outcome: WorkerOutcome::Failed,
+                last_event_at: now,
+                conversation_id_suffix: "c0e302".to_owned(),
+                workspace_path_suffix: "COE-302".to_owned(),
+                retry_count: 0,
+                blocked: false,
+                server_base_url: Some("http://127.0.0.1:3002".to_owned()),
+                transport_target: Some("loopback".to_owned()),
+                http_auth_mode: Some("none".to_owned()),
+                websocket_auth_mode: Some("none".to_owned()),
+                websocket_query_param_name: None,
+                recent_events: Vec::new(),
+                modified_files: Vec::new(),
+                input_tokens: 512,
+                output_tokens: 128,
+                cache_read_tokens: 0,
+            },
+            // RetryQueued issue: queued but NOT eligible (not idle)
+            IssueSnapshot {
+                identifier: "COE-303".to_owned(),
+                title: "Retry queued task".to_owned(),
+                tracker_state: "In Progress".to_owned(),
+                runtime_state: IssueRuntimeState::RetryQueued,
+                last_outcome: WorkerOutcome::Failed,
+                last_event_at: now,
+                conversation_id_suffix: "c0e303".to_owned(),
+                workspace_path_suffix: "COE-303".to_owned(),
+                retry_count: 1,
+                blocked: false,
+                server_base_url: Some("http://127.0.0.1:3003".to_owned()),
+                transport_target: Some("loopback".to_owned()),
+                http_auth_mode: Some("none".to_owned()),
+                websocket_auth_mode: Some("none".to_owned()),
+                websocket_query_param_name: None,
+                recent_events: Vec::new(),
+                modified_files: Vec::new(),
+                input_tokens: 256,
+                output_tokens: 64,
+                cache_read_tokens: 0,
+            },
+            // Blocked Idle issue: NOT eligible AND NOT queued
+            IssueSnapshot {
+                identifier: "COE-304".to_owned(),
+                title: "Blocked idle task".to_owned(),
+                tracker_state: "Todo".to_owned(),
+                runtime_state: IssueRuntimeState::Idle,
+                last_outcome: WorkerOutcome::Unknown,
+                last_event_at: now,
+                conversation_id_suffix: String::new(),
+                workspace_path_suffix: String::new(),
+                retry_count: 0,
+                blocked: true,
+                server_base_url: None,
+                transport_target: None,
+                http_auth_mode: None,
+                websocket_auth_mode: None,
+                websocket_query_param_name: None,
+                recent_events: Vec::new(),
+                modified_files: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+            },
+        ],
+        recent_events: vec![RecentEvent {
+            happened_at: now,
+            issue_identifier: Some("COE-301".to_owned()),
+            kind: RecentEventKind::WorkerCompleted,
+            summary: format!("completed step {step}"),
+        }],
     }
 }
 
@@ -381,4 +563,830 @@ async fn gateway_and_control_plane_are_reachable() {
 
     gateway_task.abort();
     control_task.abort();
+}
+
+// ── Read API endpoint tests ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn gateway_serves_project_list() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/projects"))
+        .send()
+        .await
+        .expect("fetch projects")
+        .json::<opensymphony::opensymphony_gateway_schema::snapshot::ProjectList>()
+        .await
+        .expect("decode project list");
+
+    assert_eq!(response.schema_version.major, 1);
+    assert_eq!(response.projects.len(), 1);
+    assert_eq!(response.projects[0].project_id, "default");
+    assert_eq!(response.projects[0].name, "OpenSymphony");
+    assert_eq!(response.projects[0].issue_count, 1);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_project_detail() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/projects/default"))
+        .send()
+        .await
+        .expect("fetch project detail")
+        .json::<opensymphony::opensymphony_gateway_schema::snapshot::ProjectDetail>()
+        .await
+        .expect("decode project detail");
+
+    assert_eq!(response.project_id, "default");
+    assert_eq!(response.name, "OpenSymphony");
+    assert_eq!(response.issue_count, 1);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_task_graph() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    assert_eq!(response.schema_version.major, 1);
+    assert_eq!(response.project_id, "default");
+    assert_eq!(response.nodes.len(), 1);
+    assert_eq!(response.nodes[0].identifier, "COE-255");
+    // Verify runtime overlay is present
+    assert!(response.nodes[0].runtime_overlay.is_some());
+    let overlay = response.nodes[0]
+        .runtime_overlay
+        .as_ref()
+        .expect("task graph node should have runtime overlay");
+    // Running issues are NOT eligible (only Idle issues are eligible).
+    assert!(!overlay.eligible);
+    assert_eq!(overlay.active_run_id, Some("COE-255".into()));
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_detail() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("fetch run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    assert_eq!(response.run_id, "COE-255");
+    assert_eq!(response.issue_identifier, "COE-255");
+    assert_eq!(
+        response.status,
+        opensymphony::opensymphony_gateway_schema::run::RunStatus::Running
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_events() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-255/events"))
+        .send()
+        .await
+        .expect("fetch run events")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunEventPage>()
+        .await
+        .expect("decode run events");
+
+    assert_eq!(response.schema_version.major, 1);
+    assert_eq!(response.run_id, "COE-255");
+    // The fixture has no recent_events for the issue, so page is empty
+    assert!(response.events.is_empty());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_files() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-255/files"))
+        .send()
+        .await
+        .expect("fetch run files")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunFilesPage>()
+        .await
+        .expect("decode run files");
+
+    assert_eq!(response.schema_version.major, 1);
+    assert_eq!(response.run_id, "COE-255");
+    // The fixture has no modified_files, so page is empty
+    assert!(response.files.is_empty());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_diffs() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-255/diffs"))
+        .send()
+        .await
+        .expect("fetch run diffs")
+        .json::<opensymphony::opensymphony_gateway_schema::run::FileDiffPage>()
+        .await
+        .expect("decode run diffs");
+
+    assert_eq!(response.schema_version.major, 1);
+    assert_eq!(response.run_id, "COE-255");
+    assert!(response.hunks.is_empty());
+
+    server_task.abort();
+}
+
+#[test]
+fn sanitize_file_path_strips_workspace_root() {
+    let result = opensymphony::opensymphony_gateway::sanitize_file_path(
+        "/tmp/opensymphony",
+        "/tmp/opensymphony/COE-255/src/main.rs",
+    );
+    assert_eq!(result, "COE-255/src/main.rs");
+}
+
+#[test]
+fn sanitize_file_path_falls_back_to_basename_for_unsafe_path() {
+    let result =
+        opensymphony::opensymphony_gateway::sanitize_file_path("/tmp/opensymphony", "/etc/passwd");
+    assert_eq!(result, "passwd");
+}
+
+// ── Path traversal tests ─────────────────────────────────────────────────────
+
+#[test]
+fn sanitize_file_path_blocks_path_traversal_via_dotdot() {
+    let result = opensymphony::opensymphony_gateway::sanitize_file_path(
+        "/tmp/opensymphony",
+        "/tmp/opensymphony/../etc/passwd",
+    );
+    // The traversal escapes the workspace root, so the fallback basename
+    // (`passwd`) is returned instead of leaking `../etc/passwd`.
+    assert_eq!(result, "passwd");
+}
+
+#[test]
+fn sanitize_file_path_blocks_nested_path_traversal() {
+    let result = opensymphony::opensymphony_gateway::sanitize_file_path(
+        "/tmp/opensymphony",
+        "/tmp/opensymphony/COE-255/../../etc/passwd",
+    );
+    assert_eq!(result, "passwd");
+}
+
+// Workspace root normalization: a crafted root that tries to escape its own
+// boundary is normalized before the strip, so the file still resolves safely.
+#[test]
+fn sanitize_file_path_normalizes_workspace_root() {
+    let result = opensymphony::opensymphony_gateway::sanitize_file_path(
+        "/tmp/other/../opensymphony",
+        "/tmp/opensymphony/COE-255/src/main.rs",
+    );
+    assert_eq!(result, "COE-255/src/main.rs");
+}
+
+// When both root and file contain `..` components, normalization on both sides
+// prevents a crafted root from widening the accepted prefix.
+#[test]
+fn sanitize_file_path_normalizes_both_sides() {
+    let result = opensymphony::opensymphony_gateway::sanitize_file_path(
+        "/tmp/opensymphony/../opensymphony",
+        "/tmp/other/../opensymphony/../etc/passwd",
+    );
+    // Normalized: root=/tmp/opensymphony, file=/tmp/etc/passwd → escapes root
+    assert_eq!(result, "passwd");
+}
+
+// Empty string file name fallback: a raw path that is only a root dir yields
+// an empty string instead of leaking the workspace root.
+#[test]
+fn sanitize_file_path_empty_fallback_for_root_only_path() {
+    let result = opensymphony::opensymphony_gateway::sanitize_file_path("/tmp/opensymphony", "/");
+    assert_eq!(result, "");
+}
+
+// ── 404 negative-path tests ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn gateway_returns_404_for_unknown_project() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{address}/api/v1/projects/nonexistent"))
+        .send()
+        .await
+        .expect("fetch unknown project");
+
+    assert_eq!(resp.status(), 404);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_404_for_unknown_project_task_graph() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "http://{address}/api/v1/projects/nonexistent/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch unknown task graph");
+
+    assert_eq!(resp.status(), 404);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_404_for_unknown_run() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{address}/api/v1/runs/UNKNOWN-999"))
+        .send()
+        .await
+        .expect("fetch unknown run");
+
+    assert_eq!(resp.status(), 404);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_404_for_unknown_run_events() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{address}/api/v1/runs/UNKNOWN-999/events"))
+        .send()
+        .await
+        .expect("fetch unknown run events");
+
+    assert_eq!(resp.status(), 404);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_404_for_unknown_run_files() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{address}/api/v1/runs/UNKNOWN-999/files"))
+        .send()
+        .await
+        .expect("fetch unknown run files");
+
+    assert_eq!(resp.status(), 404);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_404_for_unknown_run_diffs() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://{address}/api/v1/runs/UNKNOWN-999/diffs"))
+        .send()
+        .await
+        .expect("fetch unknown run diffs");
+
+    assert_eq!(resp.status(), 404);
+
+    // Assert the 404 response body is well-formed
+    let body: opensymphony::opensymphony_gateway_schema::run::FileDiffPage =
+        resp.json().await.expect("decode 404 run diffs body");
+    assert_eq!(body.run_id, "UNKNOWN-999");
+    assert!(body.hunks.is_empty());
+
+    server_task.abort();
+}
+
+// ── Rich fixture tests (non-Running states, file/diff data) ────────────────────
+
+#[tokio::test]
+async fn gateway_serves_run_files_with_modified_files() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-301/files"))
+        .send()
+        .await
+        .expect("fetch run files with data")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunFilesPage>()
+        .await
+        .expect("decode run files");
+
+    assert_eq!(response.run_id, "COE-301");
+    assert_eq!(response.files.len(), 2);
+    // Files should have workspace root stripped
+    let paths: Vec<_> = response.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"COE-301/src/main.rs"));
+    assert!(paths.contains(&"COE-301/src/lib.rs"));
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_diffs_with_modified_files() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-301/diffs"))
+        .send()
+        .await
+        .expect("fetch run diffs with data")
+        .json::<opensymphony::opensymphony_gateway_schema::run::FileDiffPage>()
+        .await
+        .expect("decode run diffs");
+
+    assert_eq!(response.run_id, "COE-301");
+    // Multi-file diff should show count label instead of single path
+    assert_eq!(response.file_path, "[2 files]");
+    assert_eq!(response.hunks.len(), 2);
+    assert_eq!(response.total_lines_added, 52);
+    assert_eq!(response.total_lines_removed, 3);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_events_with_data() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-301/events"))
+        .send()
+        .await
+        .expect("fetch run events with data")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunEventPage>()
+        .await
+        .expect("decode run events");
+
+    assert_eq!(response.run_id, "COE-301");
+    assert_eq!(response.events.len(), 2);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_task_graph_eligible_for_idle_issue() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    // Find the idle issue overlay
+    let idle_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-300")
+        .expect("COE-300 node should exist");
+    let overlay = idle_node.runtime_overlay.as_ref().expect("overlay present");
+    // Idle + not blocked = eligible
+    assert!(overlay.eligible);
+    assert!(overlay.queued);
+
+    // Completed issue should NOT be eligible
+    let done_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-301")
+        .expect("COE-301 node should exist");
+    let done_overlay = done_node.runtime_overlay.as_ref().expect("overlay present");
+    assert!(!done_overlay.eligible);
+
+    // root_ids should be empty (no parent/child data available)
+    assert!(response.root_ids.is_empty());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_failed_without_retries() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-302"))
+        .send()
+        .await
+        .expect("fetch failed run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    assert_eq!(response.run_id, "COE-302");
+    // Failed with retry_count == 0 should map to TrackerTerminal, not RetryExhausted
+    assert_eq!(
+        response.release_reason,
+        Some(opensymphony::opensymphony_gateway_schema::run::ReleaseReason::TrackerTerminal)
+    );
+    // Finished at should be set for terminal states
+    assert!(response.finished_at.is_some());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_run_detail_completed_state() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-301"))
+        .send()
+        .await
+        .expect("fetch completed run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    assert_eq!(response.run_id, "COE-301");
+    assert_eq!(
+        response.release_reason,
+        Some(opensymphony::opensymphony_gateway_schema::run::ReleaseReason::Completed)
+    );
+    assert!(response.finished_at.is_some());
+
+    server_task.abort();
+}
+
+// ── Runtime overlay: queued vs eligible semantics ──────────────────────────────
+
+#[tokio::test]
+async fn gateway_task_graph_queued_vs_eligible() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph")
+        .json::<opensymphony::opensymphony_gateway_schema::task_graph::TaskGraphSnapshot>()
+        .await
+        .expect("decode task graph");
+
+    // Idle + not blocked → eligible AND queued
+    let idle_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-300")
+        .expect("COE-300 node should exist");
+    let idle_overlay = idle_node.runtime_overlay.as_ref().expect("overlay present");
+    assert!(
+        idle_overlay.eligible,
+        "Idle unblocked issue should be eligible"
+    );
+    assert!(idle_overlay.queued, "Idle unblocked issue should be queued");
+
+    // RetryQueued → queued BUT NOT eligible (not in Idle state)
+    let retry_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-303")
+        .expect("COE-303 node should exist");
+    let retry_overlay = retry_node
+        .runtime_overlay
+        .as_ref()
+        .expect("overlay present");
+    assert!(
+        !retry_overlay.eligible,
+        "RetryQueued issue must NOT be eligible (not idle)"
+    );
+    assert!(
+        retry_overlay.queued,
+        "RetryQueued issue must be queued (waiting for retry)"
+    );
+
+    // Completed → neither eligible nor queued
+    let done_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-301")
+        .expect("COE-301 node should exist");
+    let done_overlay = done_node.runtime_overlay.as_ref().expect("overlay present");
+    assert!(
+        !done_overlay.eligible,
+        "Completed issue must not be eligible"
+    );
+    assert!(!done_overlay.queued, "Completed issue must not be queued");
+
+    // Failed → neither eligible nor queued
+    let failed_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-302")
+        .expect("COE-302 node should exist");
+    let failed_overlay = failed_node
+        .runtime_overlay
+        .as_ref()
+        .expect("overlay present");
+    assert!(
+        !failed_overlay.eligible,
+        "Failed issue must not be eligible"
+    );
+    assert!(!failed_overlay.queued, "Failed issue must not be queued");
+
+    // Blocked Idle → NOT eligible AND NOT queued (blocked overrides Idle)
+    let blocked_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-304")
+        .expect("COE-304 node should exist");
+    let blocked_overlay = blocked_node
+        .runtime_overlay
+        .as_ref()
+        .expect("overlay present");
+    assert!(
+        !blocked_overlay.eligible,
+        "Blocked Idle issue must not be eligible"
+    );
+    assert!(
+        !blocked_overlay.queued,
+        "Blocked Idle issue must not be queued (blocked overrides)"
+    );
+
+    server_task.abort();
 }
