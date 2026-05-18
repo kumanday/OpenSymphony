@@ -419,8 +419,10 @@ mod tests {
     }
 
     fn sample_event(sequence: u64, kind: EventKind) -> EventRecord {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         EventRecord::builder()
-            .event_id(format!("evt_{sequence}"))
+            .event_id(format!("evt_{}_{}", sequence, unique))
             .sequence(sequence)
             .actor(EventActor::system("test"))
             .kind(kind)
@@ -575,7 +577,7 @@ mod tests {
             .expect("query");
 
         assert_eq!(control_page.events.len(), 1);
-        assert_eq!(control_page.events[0].event_id, "evt_0");
+        assert_eq!(control_page.events[0].kind, EventKind::RunStarted);
 
         // Query terminal events only.
         let terminal_cursor = StreamCursor::new(0, "terminal_log");
