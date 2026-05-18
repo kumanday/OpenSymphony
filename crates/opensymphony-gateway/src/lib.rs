@@ -506,13 +506,21 @@ async fn event_stream_ws(
                     return;
                 }
                 Err(_) => {
-                    // Timeout: client didn't send init message. Proceed with defaults
-                    // so that clients unaware of the init protocol still work.
-                    tracing::info!(
+                    // Timeout: client didn't send init message within the allowed window.
+                    // Send an error event and close so the client knows the connection
+                    // was not accepted.
+                    tracing::warn!(
                         connection_id = %connection_id,
-                        "Init message timed out; proceeding with defaults"
+                        "Init message timed out; closing WebSocket connection"
                     );
-                    (StreamCursor::new(0, "events"), "events".to_string())
+                    let _ = socket
+                        .send(Message::Text(
+                            r#"__error__ {"error_type":"init_timeout","message":"Init message not received within timeout; connection closed","recoverable":true}"#
+                                .into(),
+                        ))
+                        .await;
+                    broker.unregister_connection(&connection_id).await;
+                    return;
                 }
             };
 
