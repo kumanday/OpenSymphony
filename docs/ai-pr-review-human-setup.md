@@ -31,8 +31,19 @@ Verify or add the following **Secret**:
 |------|-------|
 | `AI_REVIEW_API_KEY` | Your AI review provider API key |
 
-The scaffolded workflow uses `AI_REVIEW_API_KEY` as the only review secret
-name.
+The scaffolded workflow uses `AI_REVIEW_API_KEY` as the only required review
+secret name.
+
+Optionally add a dedicated GitHub token so review comments use a stable
+repository-owned identity instead of the automatic `github-actions[bot]` token:
+
+| Name | Value |
+|------|-------|
+| `AI_REVIEW_GITHUB_TOKEN` | Fine-grained or classic PAT for the review account |
+
+The review token needs repository access with pull request write permission. The
+workflow checks token secrets in this order: `AI_REVIEW_GITHUB_TOKEN`,
+`GH_TOKEN`, then the automatic `GITHUB_TOKEN`.
 
 ### 2. Configure Repository Variables
 
@@ -193,7 +204,9 @@ The default implementation does **not** expose the LLM secret to fork PR workflo
 
 The workflow only receives:
 - `AI_REVIEW_API_KEY` for the review LLM
-- `GITHUB_TOKEN` (to post comments)
+- A GitHub review token to post comments. Prefer a dedicated token such as
+  `AI_REVIEW_GITHUB_TOKEN` for high-volume review automation; otherwise the
+  workflow falls back to the automatic `GITHUB_TOKEN`.
 
 No deployment credentials, cloud keys, package publishing tokens, or database secrets are exposed.
 
