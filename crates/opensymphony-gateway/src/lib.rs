@@ -384,13 +384,13 @@ async fn events(
                             let error_json = serde_json::to_string(&StreamError::server_error(
                                 "Failed to serialize journal event",
                             ))
-                            .unwrap();
+                            .expect("serialization of derived Serialize type should never fail");
                             yield Ok(Event::default().event("error").data(error_json));
                         }
                     }
                 }
                 Ok(Err(ref err)) => {
-                    let err_json = serde_json::to_string(err).unwrap();
+                    let err_json = serde_json::to_string(err).expect("serialization of derived Serialize type should never fail");
                     yield Ok(Event::default().event("error").data(err_json));
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -420,7 +420,7 @@ async fn events(
                                                 let error_json = serde_json::to_string(&StreamError::server_error(
                                                     "Failed to serialize lag recovery event",
                                                 ))
-                                                .unwrap();
+                                                .expect("serialization of derived Serialize type should never fail");
                                                 yield Ok(Event::default().event("error").data(error_json));
                                             }
                                         }
@@ -442,7 +442,7 @@ async fn events(
                                     "Lag recovery failed for SSE stream"
                                 );
                                 let error_json = serde_json::to_string(&StreamError::cursor_not_found(recovery_cursor.sequence))
-                                    .unwrap();
+                                    .expect("serialization of derived Serialize type should never fail");
                                 yield Ok(Event::default().event("error").data(error_json));
                                 break;
                             }
@@ -508,7 +508,7 @@ async fn event_stream_ws(
                         let error_frame = serde_json::to_string(&StreamError::server_error(
                             "Failed to parse init message",
                         ))
-                        .unwrap();
+                        .expect("serialization of derived Serialize type should never fail");
                         let _ = socket
                             .send(Message::Text(format!("__error__ {error_frame}").into()))
                             .await;
@@ -541,7 +541,7 @@ async fn event_stream_ws(
                     let error_frame = serde_json::to_string(&StreamError::server_error(
                         "Init message not received within timeout; connection closed",
                     ))
-                    .unwrap();
+                    .expect("serialization of derived Serialize type should never fail");
                     let _ = socket
                         .send(Message::Text(format!("__error__ {error_frame}").into()))
                         .await;
@@ -553,7 +553,7 @@ async fn event_stream_ws(
             let mut event_stream = match broker.create_stream(&cursor) {
                 Ok(stream) => stream,
                 Err(err) => {
-                    let error_frame = serde_json::to_string(&err).unwrap();
+                    let error_frame = serde_json::to_string(&err).expect("serialization of derived Serialize type should never fail");
                     let _ = socket
                         .send(Message::Text(format!("__error__ {error_frame}").into()))
                         .await;
@@ -587,7 +587,7 @@ async fn event_stream_ws(
                                         serde_json::to_string(&StreamError::server_error(
                                             "Failed to serialize backlog event",
                                         ))
-                                        .unwrap();
+                                        .expect("serialization of derived Serialize type should never fail");
                                     let _ = socket
                                         .send(Message::Text(
                                             format!("__error__ {error_frame}").into(),
@@ -612,7 +612,7 @@ async fn event_stream_ws(
                         }
                     }
                     Err(err) => {
-                        let error_frame = serde_json::to_string(&err).unwrap();
+                        let error_frame = serde_json::to_string(&err).expect("serialization of derived Serialize type should never fail");
                         let _ = socket
                             .send(Message::Text(format!("__error__ {error_frame}").into()))
                             .await;
@@ -640,7 +640,7 @@ async fn event_stream_ws(
                             let error_frame = serde_json::to_string(&StreamError::server_error(
                                 "Failed to serialize live event",
                             ))
-                            .unwrap();
+                            .expect("serialization of derived Serialize type should never fail");
                             let _ = socket
                                 .send(Message::Text(format!("__error__ {error_frame}").into()))
                                 .await;
@@ -652,7 +652,7 @@ async fn event_stream_ws(
                         }
                     },
                     Some(Err(err)) => {
-                        let error_frame = serde_json::to_string(&err).unwrap();
+                        let error_frame = serde_json::to_string(&err).expect("serialization of derived Serialize type should never fail");
                         let _ = socket
                             .send(Message::Text(format!("__error__ {error_frame}").into()))
                             .await;
@@ -691,7 +691,7 @@ async fn event_stream_ws(
                                                         "Failed to serialize lag recovery event",
                                                     ),
                                                 )
-                                                .unwrap();
+                                                .expect("serialization of derived Serialize type should never fail");
                                                 let _ = socket
                                                     .send(Message::Text(
                                                         format!("__error__ {error_frame}").into(),
@@ -723,7 +723,7 @@ async fn event_stream_ws(
                                         cursor = event_stream.last_sequence(),
                                         "WebSocket lag recovery failed"
                                     );
-                                    let error_frame = serde_json::to_string(&query_err).unwrap();
+                                    let error_frame = serde_json::to_string(&query_err).expect("serialization of derived Serialize type should never fail");
                                     let _ = socket
                                         .send(Message::Text(
                                             format!("__error__ {error_frame}").into(),
