@@ -1,6 +1,6 @@
 use std::{
     convert::Infallible,
-    path::{Path as StdPath, PathBuf},
+    path::{Path, Path as StdPath, PathBuf},
     time::Duration,
 };
 
@@ -10,10 +10,10 @@ use serde_json::json;
 use async_stream::stream;
 use axum::{
     Json, Router,
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Path as ExtractPath, State},
     http::StatusCode,
-    response::IntoResponse,
     response::sse::{Event, KeepAlive, Sse},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use tokio::{net::TcpListener, sync::broadcast};
@@ -44,20 +44,39 @@ pub use crate::opensymphony_gateway_schema::{
 
 const GATEWAY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
+/// Combined state for the gateway router.
+#[derive(Debug, Clone)]
+struct GatewayState {
+    store: SnapshotStore,
+    /// Optional path to the built web app static assets directory.
+    web_assets_dir: Option<String>,
+}
+
 /// V1 gateway server that exposes stable public DTO endpoints
 /// on top of the internal control-plane `SnapshotStore`.
 #[derive(Debug, Clone)]
 pub struct GatewayServer {
-    store: SnapshotStore,
+    state: GatewayState,
 }
 
 impl GatewayServer {
     pub fn new(store: SnapshotStore) -> Self {
-        Self { store }
+        Self {
+            state: GatewayState {
+                store,
+                web_assets_dir: None,
+            },
+        }
+    }
+
+    /// Enable serving of the built web client from the given directory.
+    pub fn with_web_assets(mut self, dir: impl Into<String>) -> Self {
+        self.state.web_assets_dir = Some(dir.into());
+        self
     }
 
     pub fn router(&self) -> Router {
-        Router::new()
+        let mut router = Router::new()
             .route("/api/v1/capabilities", get(capabilities))
             .route("/api/v1/dashboard/snapshot", get(dashboard_snapshot))
             .route("/api/v1/events", get(events))
@@ -70,8 +89,17 @@ impl GatewayServer {
             .route("/api/v1/runs/{run_id}", get(get_run_detail))
             .route("/api/v1/runs/{run_id}/events", get(get_run_events))
             .route("/api/v1/runs/{run_id}/files", get(get_run_files))
-            .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs))
-            .with_state(self.store.clone())
+            .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs));
+
+        // Attach static web asset routes if configured.
+        if self.state.web_assets_dir.is_some() {
+            router = router
+                .route("/app", get(web_asset_handler))
+                .route("/app/", get(web_asset_handler))
+                .route("/app/{*path}", get(web_asset_handler));
+        }
+
+        router.with_state(self.state.clone())
     }
 
     pub async fn serve(self, listener: TcpListener) -> std::io::Result<()> {
@@ -278,21 +306,21 @@ async fn capabilities() -> Json<GatewayCapabilities> {
     Json(build_capabilities())
 }
 
-async fn dashboard_snapshot(State(store): State<SnapshotStore>) -> Json<DashboardSnapshot> {
-    let envelope = store.current().await;
+async fn dashboard_snapshot(State(store): State<GatewayState>) -> Json<DashboardSnapshot> {
+    let envelope = store.store.current().await;
     Json(control_plane_to_dashboard_snapshot(&envelope))
 }
 
 async fn events(
-    State(store): State<SnapshotStore>,
+    State(store): State<GatewayState>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let mut receiver = store.subscribe();
-    let initial = store.current().await;
+    let mut receiver = store.store.subscribe();
+    let initial = store.store.current().await;
     let stream = stream! {
         let mut last_sent_sequence = initial.sequence;
         yield Ok(snapshot_event(&initial));
         while let Some(envelope) =
-            next_snapshot_envelope(&store, &mut receiver, &mut last_sent_sequence).await
+            next_snapshot_envelope(&store.store, &mut receiver, &mut last_sent_sequence).await
         {
             yield Ok(snapshot_event(&envelope));
         }
@@ -427,8 +455,8 @@ fn map_file_change_kind(kind: ControlPlaneFileChangeKind) -> FileChangeKind {
 
 // ── Project endpoints ─────────────────────────────────────────────────────────
 
-async fn list_projects(State(store): State<SnapshotStore>) -> Json<ProjectList> {
-    let envelope = store.current().await;
+async fn list_projects(State(store): State<GatewayState>) -> Json<ProjectList> {
+    let envelope = store.store.current().await;
     let snapshot = &envelope.snapshot;
     let projects = if snapshot.issues.is_empty() {
         Vec::new()
@@ -467,7 +495,7 @@ async fn list_projects(State(store): State<SnapshotStore>) -> Json<ProjectList> 
 }
 
 async fn get_project(
-    State(store): State<SnapshotStore>,
+    State(store): State<GatewayState>,
     AxumPath(project_id): AxumPath<String>,
 ) -> impl IntoResponse {
     // Only the "default" project is supported; reject unknown project IDs.
@@ -489,7 +517,7 @@ async fn get_project(
         );
     }
 
-    let envelope = store.current().await;
+    let envelope = store.store.current().await;
     let snapshot = &envelope.snapshot;
     let issue_count = snapshot.issues.len() as u32;
     let running = snapshot
@@ -528,7 +556,7 @@ async fn get_project(
 // ── Task Graph endpoint ───────────────────────────────────────────────────────
 
 async fn get_task_graph(
-    State(store): State<SnapshotStore>,
+    State(store): State<GatewayState>,
     AxumPath(project_id): AxumPath<String>,
 ) -> impl IntoResponse {
     // Only the "default" project is supported; reject unknown project IDs.
@@ -545,7 +573,7 @@ async fn get_task_graph(
         );
     }
 
-    let envelope = store.current().await;
+    let envelope = store.store.current().await;
     let snapshot = &envelope.snapshot;
     let generated_at = Utc::now();
 
@@ -694,10 +722,10 @@ fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeO
 // ── Run endpoints ─────────────────────────────────────────────────────────────
 
 async fn get_run_detail(
-    State(store): State<SnapshotStore>,
+    State(store): State<GatewayState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let envelope = store.current().await;
+    let envelope = store.store.current().await;
     let issue = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue,
         None => {
@@ -816,10 +844,10 @@ async fn get_run_detail(
 }
 
 async fn get_run_events(
-    State(store): State<SnapshotStore>,
+    State(store): State<GatewayState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let envelope = store.current().await;
+    let envelope = store.store.current().await;
     let events: Vec<RunEvent> = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue
             .recent_events
@@ -860,10 +888,10 @@ async fn get_run_events(
 }
 
 async fn get_run_files(
-    State(store): State<SnapshotStore>,
+    State(store): State<GatewayState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let envelope = store.current().await;
+    let envelope = store.store.current().await;
     let workspace_root = envelope.snapshot.daemon.workspace_root.clone();
     let files: Vec<ChangedFileEntry> = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue
@@ -902,10 +930,10 @@ async fn get_run_files(
 }
 
 async fn get_run_diffs(
-    State(store): State<SnapshotStore>,
+    State(store): State<GatewayState>,
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let envelope = store.current().await;
+    let envelope = store.store.current().await;
     let workspace_root = envelope.snapshot.daemon.workspace_root.clone();
     let files: Vec<&ControlPlaneFileChange> = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue.modified_files.iter().collect(),
@@ -975,4 +1003,169 @@ async fn get_run_diffs(
             total_lines_removed,
         }),
     )
+}
+
+// ---------------------------------------------------------------------------
+
+/// Resolve the requested path and verify it stays inside the assets directory.
+/// Returns the resolved absolute path if safe, or `None` if the request is
+/// outside the assets directory.
+fn resolve_safe_path(assets_dir: &str, rest: &str) -> Option<PathBuf> {
+    // Reject absolute paths early to avoid Path::new().join() discarding the base.
+    // is_absolute() is cross-platform: it catches Unix (/) and Windows (C:) paths.
+    if Path::new(rest).is_absolute() {
+        return None;
+    }
+
+    let base = Path::new(assets_dir);
+    let candidate = base.join(rest);
+    match (candidate.canonicalize(), base.canonicalize()) {
+        (Ok(resolved), Ok(base_resolved)) => {
+            if resolved == base_resolved || resolved.starts_with(&base_resolved) {
+                Some(resolved)
+            } else {
+                None
+            }
+        }
+        // If canonicalize fails (file doesn't exist), do a static check.
+        // Reject any path that contains ParentDir components (handles both
+        // forward-slash and backslash separators cross-platform).
+        _ => {
+            if candidate
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                None
+            } else {
+                Some(candidate)
+            }
+        }
+    }
+}
+
+/// Serve `index.html` from the given assets directory, returning `None` if not found.
+async fn serve_index_html(assets_dir: &str) -> Option<Response> {
+    let index_path = Path::new(assets_dir).join("index.html");
+    serve_file(&index_path).await.ok()
+}
+
+/// Serve a static file from the web assets directory, or fall back to
+/// `index.html` for SPA routes.
+async fn web_asset_handler(
+    State(state): State<GatewayState>,
+    path: Option<ExtractPath<String>>,
+) -> Response {
+    // If web assets are not configured, return 404.
+    let assets_dir = match &state.web_assets_dir {
+        Some(dir) => dir,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let rest = path.map(|p| p.0).unwrap_or_default();
+
+    // If the path is empty (root /app/), serve index.html directly.
+    if rest.is_empty() {
+        return serve_index_html(assets_dir)
+            .await
+            .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response());
+    }
+
+    // Resolve the joined path and verify it stays inside the assets directory.
+    let safe_path = match resolve_safe_path(assets_dir, &rest) {
+        Some(p) => p,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    // Try the exact file path first.
+    if safe_path.is_file() {
+        return match serve_file(&safe_path).await {
+            Ok(resp) => resp,
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    }
+
+    // SPA fallback: if the path does not look like a static asset request,
+    // serve index.html so client-side routing works.
+    if !path_has_known_extension(&rest) {
+        return serve_index_html(assets_dir)
+            .await
+            .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response());
+    }
+
+    StatusCode::NOT_FOUND.into_response()
+}
+
+/// Return true if the URL path segment looks like a request for a known static
+/// asset file.  Paths that do not match these extensions are treated as SPA
+/// routes and should fall back to `index.html`.
+fn path_has_known_extension(path: &str) -> bool {
+    if let Some(dot_pos) = path.rfind('.')
+        && let Some(ext) = path.get(dot_pos + 1..)
+    {
+        return matches!(
+            ext.to_lowercase().as_str(),
+            "html"
+                | "css"
+                | "js"
+                | "json"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "gif"
+                | "svg"
+                | "ico"
+                | "woff"
+                | "woff2"
+                | "ttf"
+                | "eot"
+                | "otf"
+                | "map"
+                | "txt"
+                | "xml"
+                | "webp"
+                | "mp4"
+                | "webm"
+                | "mp3"
+                | "wav"
+                | "flac"
+                | "pdf"
+                | "zip"
+                | "gz"
+                | "tar"
+                | "bz2"
+        );
+    }
+    false
+}
+
+/// Read a file from disk and return it as an HTTP response with the correct
+/// content type.
+async fn serve_file(path: &Path) -> Result<Response, std::io::Error> {
+    let bytes = tokio::fs::read(path).await?;
+    let content_type = mime_type(path);
+    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], bytes).into_response())
+}
+
+/// Return a conservative MIME type for the given file extension.
+fn mime_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("ttf") => "font/ttf",
+        Some("eot") => "application/vnd.ms-fontobject",
+        Some("otf") => "font/otf",
+        Some("map") => "application/json; charset=utf-8",
+        Some("txt") => "text/plain; charset=utf-8",
+        Some("xml") => "application/xml; charset=utf-8",
+        Some(_) | None => "application/octet-stream",
+    }
 }
