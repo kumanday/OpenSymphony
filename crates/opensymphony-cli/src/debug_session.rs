@@ -40,6 +40,7 @@ use uuid::Uuid;
 const DEFAULT_CONFIG_FILE: &str = "config.yaml";
 const RECENT_HISTORY_LIMIT: usize = 8;
 const RECENT_EVENT_SCAN_LIMIT: usize = 100;
+const DEBUG_ATTACH_READINESS_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Args, Clone)]
 pub struct DebugArgs {
@@ -388,7 +389,16 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
 
     if turn_is_in_progress(stream.state_mirror().execution_status().unwrap_or("idle")) {
         println!("Waiting for the current OpenHands turn to finish before accepting input...");
-        wait_for_turn_to_stop(&mut stream, conversation_id, config.terminal_wait_timeout).await?;
+        if let Err(error) =
+            wait_for_turn_to_stop(&mut stream, conversation_id, config.terminal_wait_timeout).await
+        {
+            if is_debug_wait_timeout(&error) {
+                println!("{error}");
+                println!("Continuing the debug session anyway; use /history to refresh context.");
+            } else {
+                return Err(error);
+            }
+        }
     }
 
     print_recent_history(stream.event_cache().items());
@@ -636,6 +646,7 @@ fn build_debug_client(
         .readiness_probe_path
         .clone();
     config.port_override = Some(transport_port_override(&url)?);
+    config.forward_stderr = false;
 
     let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
     println!("Checking local OpenHands server at {supervisor_base_url}...");
@@ -708,7 +719,11 @@ async fn attach_or_rehydrate_stream(
     archived_context: ArchivedAttachContext<'_>,
 ) -> Result<RuntimeEventStream, DebugCommandError> {
     let conversation_id = parse_conversation_id(manifest)?;
-    let stream_config = config.runtime_stream.clone();
+    let mut stream_config = config.runtime_stream.clone();
+    stream_config.readiness_timeout = stream_config
+        .readiness_timeout
+        .max(DEBUG_ATTACH_READINESS_TIMEOUT);
+    stream_config.replay_existing_events_on_attach = true;
     match client
         .attach_runtime_stream_with_recent_events(
             conversation_id,
@@ -773,6 +788,13 @@ async fn attach_or_rehydrate_stream(
     }
 }
 
+fn is_debug_wait_timeout(error: &DebugCommandError) -> bool {
+    matches!(
+        error,
+        DebugCommandError::ActiveTurnTimeout { .. } | DebugCommandError::DebugTurnTimeout { .. }
+    )
+}
+
 fn should_rehydrate_after_attach_failure(error: &OpenHandsError) -> bool {
     matches!(
         error,
@@ -821,7 +843,19 @@ async fn interactive_debug_loop(
                 print_full_history(stream).await?;
             }
             DebugInput::Prompt(prompt) => {
-                run_debug_turn(client, stream, conversation_id, &prompt, wait_timeout).await?;
+                if let Err(error) =
+                    run_debug_turn(client, stream, conversation_id, &prompt, wait_timeout).await
+                {
+                    if is_debug_wait_timeout(&error) {
+                        println!();
+                        println!("{error}");
+                        println!(
+                            "Still attached. Use /history to refresh context, enter another prompt, or /exit to quit."
+                        );
+                    } else {
+                        return Err(error);
+                    }
+                }
             }
         }
     }

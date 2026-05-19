@@ -122,6 +122,11 @@ repos during normal orchestration. `opensymphony debug <issue-id>` locates the
 requested conversation in active or archived storage and starts the managed
 server against that store before attaching.
 
+The default managed-local startup window is 180 seconds. Debug-launched managed
+servers suppress raw agent-server stderr during readiness so restored
+conversation state does not flood the operator terminal before the debug
+transcript renderer takes over.
+
 ## 7. Runtime contract
 
 The internal `opensymphony_openhands` module owns:

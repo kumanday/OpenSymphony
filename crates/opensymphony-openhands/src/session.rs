@@ -2884,6 +2884,7 @@ mod tests {
                     reconnect_initial_backoff: Duration::from_millis(25),
                     reconnect_max_backoff: Duration::from_millis(25),
                     max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
                 },
             )
             .await
@@ -2914,6 +2915,7 @@ mod tests {
                     reconnect_initial_backoff: Duration::from_millis(25),
                     reconnect_max_backoff: Duration::from_millis(25),
                     max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
                 },
                 terminal_wait_timeout: Duration::from_millis(25),
                 finished_drain_timeout: Duration::from_millis(25),

@@ -67,6 +67,7 @@ pub struct SupervisedServerConfig {
     pub extra_env: BTreeMap<String, String>,
     pub startup_timeout: Duration,
     pub probe: ProbeConfig,
+    pub forward_stderr: bool,
 }
 
 impl SupervisedServerConfig {
@@ -78,6 +79,7 @@ impl SupervisedServerConfig {
             extra_env: BTreeMap::new(),
             startup_timeout: Duration::from_secs(10),
             probe: ProbeConfig::default(),
+            forward_stderr: true,
         }
     }
 
@@ -253,7 +255,11 @@ impl LocalServerSupervisor {
                     .args(&launch.args)
                     .current_dir(&launch.working_dir)
                     .stdout(Stdio::null())
-                    .stderr(Stdio::piped())
+                    .stderr(if config.forward_stderr {
+                        Stdio::piped()
+                    } else {
+                        Stdio::null()
+                    })
                     .envs(&launch.env);
                 configure_server_command(&mut command);
 

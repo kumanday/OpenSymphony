@@ -703,6 +703,7 @@ async fn runtime_stream_reconnects_and_recovers_missed_events() {
                 reconnect_initial_backoff: Duration::from_millis(25),
                 reconnect_max_backoff: Duration::from_millis(100),
                 max_reconnect_attempts: 4,
+                replay_existing_events_on_attach: false,
             },
         )
         .await
@@ -831,6 +832,7 @@ async fn scripted_fake_server_yields_buffered_event_before_reconnect_exhaustion(
                 reconnect_initial_backoff: Duration::from_millis(25),
                 reconnect_max_backoff: Duration::from_millis(25),
                 max_reconnect_attempts: 1,
+                replay_existing_events_on_attach: false,
             },
         )
         .await
@@ -901,6 +903,7 @@ async fn scripted_fake_server_close_clears_pending_reconnect_and_replay_state() 
                 reconnect_initial_backoff: Duration::from_millis(25),
                 reconnect_max_backoff: Duration::from_millis(25),
                 max_reconnect_attempts: 1,
+                replay_existing_events_on_attach: false,
             },
         )
         .await
