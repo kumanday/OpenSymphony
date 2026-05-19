@@ -292,9 +292,7 @@ copy that guide into the target repository.
 
 ## Current model
 
-- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
-- COE-288 contributed: PR #51: Add configurable OpenHands context condenser support (merge `102a93c`)
-- COE-293 contributed: PR #56: fix: add OpenHands filesystem tools to coding agents (merge `2f34058`)
+- COE-401 contributed: PR #92: COE-401: Web app entry and deployment modes (merge `73b9067`)
 
 ## Important invariants
 
@@ -303,11 +301,7 @@ copy that guide into the target repository.
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Configuration"]
-  area --> docs["docs/configuration.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -315,14 +309,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
-- COE-288: Add context condenser support to prevent LLM context window overflow
-- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+- COE-401: Web App Entry And Deployment Modes
 
 ## Source refs
 
-- COE-286
-- COE-288
-- COE-293
+- COE-401
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

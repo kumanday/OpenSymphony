@@ -700,3 +700,32 @@ Candidate features:
 - The codebase has harness adapter interfaces that can support OpenHands and Codex app-server without changing task graph or run UI contracts.
 - The codebase has credential settings that can support subscription auth separately from API-compatible `LLM_API_KEY` configuration and from harness adapter implementations.
 - Model routing can use configured base URL, model string, and harness capabilities.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-406 contributed: PR #95: COE-406: Add planning-stage analysis module (merge `59240e2`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+- No generated diagram requested for this sync.
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-406: Repository, Linear, And Research Analysis
+
+## Source refs
+
+- COE-406
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

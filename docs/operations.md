@@ -233,8 +233,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
-- COE-293 contributed: PR #56: fix: add OpenHands filesystem tools to coding agents (merge `2f34058`)
+- COE-399 contributed: PR #94: COE-399: Linear read coverage, schema drift validation, and task graph cache (merge `db4e2e6`)
 
 ## Important invariants
 
@@ -243,11 +242,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Operations"]
-  area --> docs["docs/operations.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -255,12 +250,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
-- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+- COE-399: Linear Read Coverage And Task Graph Cache
 
 ## Source refs
 
-- COE-286
-- COE-293
+- COE-399
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

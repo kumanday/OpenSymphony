@@ -219,7 +219,7 @@ Key takeaways carried forward:
 
 ## Current model
 
-- COE-275 contributed: PR #1: COE-257: tighten hosted deployment guidance
+- COE-406 contributed: PR #95: COE-406: Add planning-stage analysis module (merge `59240e2`)
 
 ## Important invariants
 
@@ -228,11 +228,7 @@ Key takeaways carried forward:
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Sources and Trust Notes"]
-  area --> docs["docs/sources.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -240,10 +236,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-275: Remote agent-server mode and auth hardening
+- COE-406: Repository, Linear, And Research Analysis
 
 ## Source refs
 
-- COE-275
+- COE-406
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
