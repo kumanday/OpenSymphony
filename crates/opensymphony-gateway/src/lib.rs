@@ -22,7 +22,7 @@ use tokio::{net::TcpListener, sync::broadcast};
 use crate::opensymphony_domain::{EventJournalBackend, InMemoryEventJournal, StreamBroker};
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
-    event_journal::{EventPage, JournalError},
+    event_journal::{EventPage, JournalError, StreamError},
 };
 
 pub use crate::opensymphony_control::SnapshotStore;
@@ -352,8 +352,11 @@ async fn events(
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let journal = state.journal.clone();
     let stream = stream! {
-        let latest_cursor = journal.latest_cursor().await;
+        // Subscribe first to avoid a race window where events appended between
+        // latest_cursor() and subscribe() would be broadcast before the receiver
+        // exists and permanently lost.
         let mut receiver = journal.subscribe();
+        let latest_cursor = journal.latest_cursor().await;
         let mut last_sequence = latest_cursor.sequence;
         let partition = "events".to_string();
         loop {
@@ -378,70 +381,71 @@ async fn events(
                                 sequence = event.sequence,
                                 "Failed to serialize SSE journal event"
                             );
-                            yield Ok(Event::default()
-                                .event("error")
-                                .data(
-                                    r#"{"error_type":"serialization","message":"Failed to serialize journal event","recoverable":true}"#
-                                ));
+                            let error_json = serde_json::to_string(&StreamError::server_error(
+                                "Failed to serialize journal event",
+                            ))
+                            .unwrap();
+                            yield Ok(Event::default().event("error").data(error_json));
                         }
                     }
                 }
                 Ok(Err(ref err)) => {
-                    match serde_json::to_string(err) {
-                        Ok(json) => {
-                            yield Ok(Event::default().event("error").data(json));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to serialize SSE error event"
-                            );
-                        }
-                    }
+                    let err_json = serde_json::to_string(err).unwrap();
+                    yield Ok(Event::default().event("error").data(err_json));
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    match journal
-                        .query_after(
-                            &StreamCursor::new(last_sequence, &partition),
-                            GATEWAY_EVENT_PAGE_LIMIT,
-                        )
-                        .await
-                    {
-                        Ok(page) => {
-                            for event in &page.events {
-                                if event.sequence > last_sequence {
-                                    last_sequence = event.sequence;
-                                    match serde_json::to_string(event) {
-                                        Ok(json) => {
-                                            yield Ok(Event::default().event("event").data(json));
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                event_id = %event.event_id,
-                                                error = %e,
-                                                "Failed to serialize SSE lag recovery event"
-                                            );
-                                            yield Ok(Event::default()
-                                                .event("error")
-                                                .data(
-                                                    r#"{"error_type":"serialization","message":"Failed to serialize lag recovery event","recoverable":true}"#
-                                                ));
+                    // Paginate through all lagged events to avoid gaps when
+                    // the backlog exceeds a single page limit.
+                    let mut recovery_cursor =
+                        StreamCursor::new(last_sequence, &partition);
+                    loop {
+                        match journal
+                            .query_after(&recovery_cursor, GATEWAY_EVENT_PAGE_LIMIT)
+                            .await
+                        {
+                            Ok(page) => {
+                                for event in &page.events {
+                                    if event.sequence > last_sequence {
+                                        last_sequence = event.sequence;
+                                        match serde_json::to_string(event) {
+                                            Ok(json) => {
+                                                yield Ok(Event::default().event("event").data(json));
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    event_id = %event.event_id,
+                                                    error = %e,
+                                                    "Failed to serialize SSE lag recovery event"
+                                                );
+                                                let error_json = serde_json::to_string(&StreamError::server_error(
+                                                    "Failed to serialize lag recovery event",
+                                                ))
+                                                .unwrap();
+                                                yield Ok(Event::default().event("error").data(error_json));
+                                            }
                                         }
                                     }
                                 }
+                                if !page.has_more {
+                                    break;
+                                }
+                                if let Some(ref next) = page.next_cursor {
+                                    recovery_cursor = next.clone();
+                                } else {
+                                    break;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                error = ?e,
-                                cursor = last_sequence,
-                                "Lag recovery failed for SSE stream"
-                            );
-                            yield Ok(Event::default()
-                                .event("error")
-                                .data(
-                                    r#"{"error_type":"cursor_stale","message":"Lag recovery failed; cursor may be stale","recoverable":true}"#
-                                ));
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = ?e,
+                                    cursor = recovery_cursor.sequence,
+                                    "Lag recovery failed for SSE stream"
+                                );
+                                let error_json = serde_json::to_string(&StreamError::cursor_not_found(recovery_cursor.sequence))
+                                    .unwrap();
+                                yield Ok(Event::default().event("error").data(error_json));
+                                break;
+                            }
                         }
                     }
                 }
@@ -501,11 +505,12 @@ async fn event_stream_ws(
                             error = %e,
                             "Failed to parse init message, closing connection"
                         );
+                        let error_frame = serde_json::to_string(&StreamError::server_error(
+                            "Failed to parse init message",
+                        ))
+                        .unwrap();
                         let _ = socket
-                            .send(Message::Text(
-                                r#"__error__ {"error_type":"invalid_init_message","message":"Failed to parse init message","recoverable":false}"#
-                                    .into(),
-                            ))
+                            .send(Message::Text(format!("__error__ {error_frame}").into()))
                             .await;
                         broker.unregister_connection(&connection_id).await;
                         return;
@@ -533,11 +538,12 @@ async fn event_stream_ws(
                         connection_id = %connection_id,
                         "Init message timed out; closing WebSocket connection"
                     );
+                    let error_frame = serde_json::to_string(&StreamError::server_error(
+                        "Init message not received within timeout; connection closed",
+                    ))
+                    .unwrap();
                     let _ = socket
-                        .send(Message::Text(
-                            r#"__error__ {"error_type":"init_timeout","message":"Init message not received within timeout; connection closed","recoverable":true}"#
-                                .into(),
-                        ))
+                        .send(Message::Text(format!("__error__ {error_frame}").into()))
                         .await;
                     broker.unregister_connection(&connection_id).await;
                     return;
@@ -547,62 +553,72 @@ async fn event_stream_ws(
             let mut event_stream = match broker.create_stream(&cursor) {
                 Ok(stream) => stream,
                 Err(err) => {
-                    if let Ok(json) = serde_json::to_string(&err) {
-                        let _ = socket
-                            .send(Message::Text(format!("__error__ {json}").into()))
-                            .await;
-                    }
+                    let error_frame = serde_json::to_string(&err).unwrap();
+                    let _ = socket
+                        .send(Message::Text(format!("__error__ {error_frame}").into()))
+                        .await;
                     broker.unregister_connection(&connection_id).await;
                     return;
                 }
             };
 
-            let query_cursor = StreamCursor::new(cursor.sequence, &partition);
+            let mut recovery_cursor = StreamCursor::new(cursor.sequence, &partition);
             let mut last_backlog_sequence = cursor.sequence;
-            match journal
-                .query_after(&query_cursor, GATEWAY_EVENT_PAGE_LIMIT)
-                .await
-            {
-                Ok(page) => {
-                    for event in &page.events {
-                        match serde_json::to_string(event) {
-                            Ok(json) => {
-                                if socket
-                                    .send(Message::Text(format!("__event__ {json}").into()))
-                                    .await
-                                    .is_err()
-                                {
-                                    break;
+            loop {
+                match journal
+                    .query_after(&recovery_cursor, GATEWAY_EVENT_PAGE_LIMIT)
+                    .await
+                {
+                    Ok(page) => {
+                        for event in &page.events {
+                            match serde_json::to_string(event) {
+                                Ok(json) => {
+                                    if socket
+                                        .send(Message::Text(format!("__event__ {json}").into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        broker.unregister_connection(&connection_id).await;
+                                        return;
+                                    }
+                                }
+                                Err(e) => {
+                                    let error_frame =
+                                        serde_json::to_string(&StreamError::server_error(
+                                            "Failed to serialize backlog event",
+                                        ))
+                                        .unwrap();
+                                    let _ = socket
+                                        .send(Message::Text(
+                                            format!("__error__ {error_frame}").into(),
+                                        ))
+                                        .await;
+                                    tracing::warn!(
+                                        event_id = %event.event_id,
+                                        error = %e,
+                                        "Failed to serialize backlog event"
+                                    );
                                 }
                             }
-                            Err(e) => {
-                                let _ = socket
-                                    .send(Message::Text(
-                                        format!(
-                                            "__error__ {{\"error_type\":\"serialization\",\"message\":\"Failed to serialize event {}\",\"recoverable\":true}}",
-                                            event.event_id
-                                        )
-                                        .into(),
-                                    ))
-                                    .await;
-                                tracing::warn!(
-                                    event_id = %event.event_id,
-                                    error = %e,
-                                    "Failed to serialize backlog event"
-                                );
-                            }
+                            last_backlog_sequence = event.sequence.max(last_backlog_sequence);
                         }
-                        last_backlog_sequence = event.sequence.max(last_backlog_sequence);
+                        if !page.has_more {
+                            break;
+                        }
+                        if let Some(ref next) = page.next_cursor {
+                            recovery_cursor = next.clone();
+                        } else {
+                            break;
+                        }
                     }
-                }
-                Err(err) => {
-                    if let Ok(json) = serde_json::to_string(&err) {
+                    Err(err) => {
+                        let error_frame = serde_json::to_string(&err).unwrap();
                         let _ = socket
-                            .send(Message::Text(format!("__error__ {json}").into()))
+                            .send(Message::Text(format!("__error__ {error_frame}").into()))
                             .await;
+                        broker.unregister_connection(&connection_id).await;
+                        return;
                     }
-                    broker.unregister_connection(&connection_id).await;
-                    return;
                 }
             }
 
@@ -621,14 +637,12 @@ async fn event_stream_ws(
                             }
                         }
                         Err(e) => {
+                            let error_frame = serde_json::to_string(&StreamError::server_error(
+                                "Failed to serialize live event",
+                            ))
+                            .unwrap();
                             let _ = socket
-                                .send(Message::Text(
-                                    format!(
-                                        "__error__ {{\"error_type\":\"serialization\",\"message\":\"Failed to serialize event {}\",\"recoverable\":true}}",
-                                        event.event_id
-                                    )
-                                    .into(),
-                                ))
+                                .send(Message::Text(format!("__error__ {error_frame}").into()))
                                 .await;
                             tracing::warn!(
                                 event_id = %event.event_id,
@@ -638,71 +652,86 @@ async fn event_stream_ws(
                         }
                     },
                     Some(Err(err)) => {
-                        if let Ok(json) = serde_json::to_string(&err) {
-                            let _ = socket
-                                .send(Message::Text(format!("__error__ {json}").into()))
-                                .await;
-                        }
+                        let error_frame = serde_json::to_string(&err).unwrap();
+                        let _ = socket
+                            .send(Message::Text(format!("__error__ {error_frame}").into()))
+                            .await;
                         if !err.recoverable {
                             break;
                         }
 
-                        let recovery_cursor =
+                        // Paginate through all lagged events to avoid gaps
+                        let mut lag_cursor =
                             StreamCursor::new(event_stream.last_sequence(), &partition);
-                        match journal
-                            .query_after(&recovery_cursor, GATEWAY_EVENT_PAGE_LIMIT)
-                            .await
-                        {
-                            Ok(page) => {
-                                for event in &page.events {
-                                    match serde_json::to_string(event) {
-                                        Ok(json) => {
-                                            if socket
-                                                .send(Message::Text(
-                                                    format!("__event__ {json}").into(),
-                                                ))
-                                                .await
-                                                .is_err()
-                                            {
-                                                broker.unregister_connection(&connection_id).await;
-                                                return;
+                        loop {
+                            match journal
+                                .query_after(&lag_cursor, GATEWAY_EVENT_PAGE_LIMIT)
+                                .await
+                            {
+                                Ok(page) => {
+                                    for event in &page.events {
+                                        match serde_json::to_string(event) {
+                                            Ok(json) => {
+                                                if socket
+                                                    .send(Message::Text(
+                                                        format!("__event__ {json}").into(),
+                                                    ))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    broker
+                                                        .unregister_connection(&connection_id)
+                                                        .await;
+                                                    return;
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let error_frame = serde_json::to_string(
+                                                    &StreamError::server_error(
+                                                        "Failed to serialize lag recovery event",
+                                                    ),
+                                                )
+                                                .unwrap();
+                                                let _ = socket
+                                                    .send(Message::Text(
+                                                        format!("__error__ {error_frame}").into(),
+                                                    ))
+                                                    .await;
+                                                tracing::warn!(
+                                                    event_id = %event.event_id,
+                                                    error = %e,
+                                                    "Failed to serialize WS lag recovery event"
+                                                );
                                             }
                                         }
-                                        Err(e) => {
-                                            let _ = socket
-                                                .send(Message::Text(
-                                                    format!(
-                                                        "__error__ {{\"error_type\":\"serialization\",\"message\":\"Failed to serialize lag recovery event {}\",\"recoverable\":true}}",
-                                                        event.event_id
-                                                    )
-                                                    .into(),
-                                                ))
-                                                .await;
-                                            tracing::warn!(
-                                                event_id = %event.event_id,
-                                                error = %e,
-                                                "Failed to serialize WS lag recovery event"
-                                            );
-                                        }
+                                        last_backlog_sequence =
+                                            event.sequence.max(last_backlog_sequence);
                                     }
-                                    last_backlog_sequence =
-                                        event.sequence.max(last_backlog_sequence);
+                                    event_stream.set_last_sequence(last_backlog_sequence);
+                                    if !page.has_more {
+                                        break;
+                                    }
+                                    if let Some(ref next) = page.next_cursor {
+                                        lag_cursor = next.clone();
+                                    } else {
+                                        break;
+                                    }
                                 }
-                                event_stream.set_last_sequence(last_backlog_sequence);
-                            }
-                            Err(query_err) => {
-                                tracing::warn!(
-                                    error = ?query_err,
-                                    cursor = event_stream.last_sequence(),
-                                    "WebSocket lag recovery failed"
-                                );
-                                if let Ok(json) = serde_json::to_string(&query_err) {
+                                Err(query_err) => {
+                                    tracing::warn!(
+                                        error = ?query_err,
+                                        cursor = event_stream.last_sequence(),
+                                        "WebSocket lag recovery failed"
+                                    );
+                                    let error_frame = serde_json::to_string(&query_err).unwrap();
                                     let _ = socket
-                                        .send(Message::Text(format!("__error__ {json}").into()))
+                                        .send(Message::Text(
+                                            format!("__error__ {error_frame}").into(),
+                                        ))
                                         .await;
+                                    broker.unregister_connection(&connection_id).await;
+                                    return;
                                 }
-                                broker.unregister_connection(&connection_id).await;
-                                return;
                             }
                         }
                     }

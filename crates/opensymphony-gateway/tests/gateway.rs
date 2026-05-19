@@ -411,7 +411,7 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
 /// SSE endpoint now streams journal events (not snapshot updates).
 /// This test verifies the SSE transport works with journal events and
 /// delivers new events appended after the stream opens.
-async fn gateway_events_stream_yields_snapshot_updates() {
+async fn gateway_events_stream_yields_journal_events() {
     let store = SnapshotStore::new(fixture_snapshot(0));
     let server = GatewayServer::new(store.clone());
     let listener = TcpListener::bind("127.0.0.1:0")
