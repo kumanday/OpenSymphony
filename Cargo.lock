@@ -1965,6 +1965,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opensymphony-planning"
+version = "1.6.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

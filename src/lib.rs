@@ -16,6 +16,8 @@ pub mod opensymphony_memory;
 pub mod opensymphony_openhands;
 #[path = "../crates/opensymphony-orchestrator/src/lib.rs"]
 pub mod opensymphony_orchestrator;
+#[path = "../crates/opensymphony-planning/src/lib.rs"]
+pub mod opensymphony_planning;
 #[path = "../crates/opensymphony-testkit/src/lib.rs"]
 pub mod opensymphony_testkit;
 #[path = "../crates/opensymphony-tui/src/lib.rs"]

@@ -16,7 +16,7 @@ rust-version.workspace = true
 workspace = true
 
 [workspace]
-members = ["."]
+members = [".", "crates/opensymphony-planning"]
 resolver = "2"
 
 [dependencies]
