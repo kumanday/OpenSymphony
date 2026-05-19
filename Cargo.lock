@@ -1933,7 +1933,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "opensymphony"
-version = "1.6.1"
+version = "1.6.2"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1963,18 +1963,6 @@ dependencies = [
  "unicode-width",
  "url",
  "uuid",
-]
-
-[[package]]
-name = "opensymphony-planning"
-version = "1.6.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "toml",
 ]
 
 [[package]]
