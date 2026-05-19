@@ -489,6 +489,43 @@ async fn attach_runtime_stream_applies_readiness_snapshot_to_state_mirror() {
 }
 
 #[tokio::test]
+async fn attach_runtime_stream_with_recent_events_requests_bounded_descending_history() {
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(recent_history_attach_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let stream = client
+        .attach_runtime_stream_with_recent_events(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+            2,
+        )
+        .await
+        .expect("runtime stream attach should use bounded recent history");
+
+    let event_ids = stream
+        .event_cache()
+        .items()
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(event_ids, vec!["evt-recent-1", "evt-recent-2"]);
+}
+
+#[tokio::test]
 async fn attach_runtime_stream_applies_forward_compatible_readiness_snapshot_to_state_mirror() {
     let state = ReadinessMirrorState::default();
     let server = TestServer::start(forward_compatible_readiness_mirror_router(state)).await;
@@ -812,6 +849,27 @@ fn readiness_mirror_router(state: ReadinessMirrorState) -> Router {
         .with_state(state)
 }
 
+fn recent_history_attach_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}/events/search",
+            get(recent_history_search_events),
+        )
+        .route(
+            "/sockets/events/{conversation_id}",
+            get(readiness_mirror_events_socket),
+        )
+        .with_state(state)
+}
+
 fn forward_compatible_readiness_mirror_router(state: ReadinessMirrorState) -> Router {
     Router::new()
         .route(
@@ -973,6 +1031,53 @@ async fn readiness_mirror_search_events(
 ) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
     Ok(Json(SearchConversationEventsResponse {
         events: Vec::new(),
+        next_page_id: None,
+    }))
+}
+
+#[derive(serde::Deserialize)]
+struct RecentHistorySearchQuery {
+    limit: Option<usize>,
+    sort_order: Option<String>,
+}
+
+async fn recent_history_search_events(
+    Path(_conversation_id): Path<Uuid>,
+    Query(query): Query<RecentHistorySearchQuery>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    if query.limit != Some(2)
+        || !query
+            .sort_order
+            .as_deref()
+            .is_some_and(|sort_order| sort_order == "TIMESTAMP_DESC")
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let now = Utc::now();
+    Ok(Json(SearchConversationEventsResponse {
+        events: vec![
+            EventEnvelope::new(
+                "evt-recent-2",
+                now,
+                "assistant",
+                "MessageEvent",
+                json!({
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "newest" }],
+                }),
+            ),
+            EventEnvelope::new(
+                "evt-recent-1",
+                now - chrono::Duration::seconds(1),
+                "assistant",
+                "MessageEvent",
+                json!({
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "recent" }],
+                }),
+            ),
+        ],
         next_page_id: None,
     }))
 }

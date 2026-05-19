@@ -218,6 +218,9 @@ opensymphony doctor --config ./config.yaml --rehydrate
 - prefer loopback-only OpenHands targets for local development
 - treat target repos and prompts as trusted local input
 - do not keep unrelated OpenHands servers running on the same configured port
+- stop `opensymphony run` with Ctrl-C so the orchestrator can terminate its
+  managed OpenHands process tree; Ctrl-Z only suspends the orchestrator and can
+  leave the server bound to the configured port
 - do not store provider secrets in checked-in files
 
 ## 9. Migration note

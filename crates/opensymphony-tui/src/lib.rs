@@ -1,6 +1,7 @@
 use std::{
     cmp::{max, min},
     collections::{HashMap, HashSet, VecDeque},
+    env,
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
@@ -17,10 +18,12 @@ use crate::opensymphony_domain::{
     SnapshotEnvelope,
 };
 use chrono::{DateTime, Utc};
+use crossterm::terminal;
 use ftui::{
-    Style,
+    ProgramConfig, ResizeBehavior, RuntimeDiffConfig, Style,
     core::geometry::Rect,
-    prelude::{App, Cmd, Event, Frame, KeyCode, Model, ScreenMode},
+    prelude::{Cmd, Event, Frame, KeyCode, Model},
+    render::budget::{FrameBudgetConfig, PhaseBudgets},
     render::cell::PackedRgba,
     runtime::{Every, Subscription},
     text::text::{Line, Span, Text},
@@ -33,6 +36,12 @@ use url::Url;
 
 const MIN_TIMELINE_LINES: usize = 4;
 const MAX_TIMELINE_LINES: usize = 6;
+const MIN_TUI_WIDTH: u16 = 20;
+const MIN_TUI_HEIGHT: u16 = 8;
+const FALLBACK_TUI_WIDTH: u16 = 120;
+const FALLBACK_TUI_HEIGHT: u16 = 40;
+const TUI_SIZE_WAIT: Duration = Duration::from_millis(1_500);
+const TUI_CONVERSATION_TEXT_LIMIT: usize = 260;
 
 const RED: PackedRgba = PackedRgba::rgb(205, 0, 0);
 const GREEN: PackedRgba = PackedRgba::rgb(0, 205, 0);
@@ -2092,9 +2101,9 @@ pub fn run_operator(base_url: Url, exit_after: Option<Duration>) -> Result<(), T
         exit_after,
         Arc::clone(&outcome),
     );
-    let run_result = App::new(app)
-        .screen_mode(ScreenMode::AltScreen)
-        .run()
+    let config = tui_program_config();
+    let run_result = ftui::Program::with_config(app, config)
+        .and_then(|mut program| program.run())
         .map_err(TuiError::Runtime);
     let workspace_shutdown_result = workspace_status.shutdown();
     let shutdown_result = bridge.shutdown();
@@ -2887,6 +2896,61 @@ impl Model for OperatorApp {
     }
 }
 
+fn tui_program_config() -> ProgramConfig {
+    let mut config = ProgramConfig::fullscreen();
+    if cfg!(debug_assertions) {
+        config = config
+            .with_budget(debug_tui_frame_budget())
+            .with_diff_config(RuntimeDiffConfig::default().with_bayesian_enabled(false))
+            .with_resize_behavior(ResizeBehavior::Immediate);
+        if let Some((width, height)) = debug_initial_tui_size_override() {
+            config = config.with_forced_size(width, height);
+        }
+    }
+    config
+}
+
+fn debug_initial_tui_size_override() -> Option<(u16, u16)> {
+    let deadline = Instant::now() + TUI_SIZE_WAIT;
+    loop {
+        if current_terminal_size().is_some() {
+            return None;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    env_terminal_size().or(Some((FALLBACK_TUI_WIDTH, FALLBACK_TUI_HEIGHT)))
+}
+
+fn current_terminal_size() -> Option<(u16, u16)> {
+    terminal::size()
+        .ok()
+        .filter(|(width, height)| *width >= MIN_TUI_WIDTH && *height >= MIN_TUI_HEIGHT)
+}
+
+fn env_terminal_size() -> Option<(u16, u16)> {
+    let width = env::var("COLUMNS").ok()?.parse::<u16>().ok()?;
+    let height = env::var("LINES").ok()?.parse::<u16>().ok()?;
+    (width >= MIN_TUI_WIDTH && height >= MIN_TUI_HEIGHT).then_some((width, height))
+}
+
+fn debug_tui_frame_budget() -> FrameBudgetConfig {
+    FrameBudgetConfig {
+        total: Duration::from_millis(250),
+        phase_budgets: PhaseBudgets {
+            diff: Duration::from_millis(50),
+            present: Duration::from_millis(75),
+            render: Duration::from_millis(125),
+        },
+        allow_frame_skip: false,
+        degradation_cooldown: 10,
+        upgrade_threshold: 0.5,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum TuiError {
     #[error("failed to render FrankenTUI runtime: {0}")]
@@ -3306,37 +3370,115 @@ fn parse_summary_with_colors(summary: &str) -> Vec<Span<'_>> {
     spans
 }
 
-fn event_kind_style(kind: &str) -> Style {
-    match kind {
-        "tool" | "tool_call" | "tool_use" | "ActionEvent" => Style::new().fg(BLUE),
-        "message" | "MessageEvent" => Style::new().fg(CYAN),
-        "error" | "ConversationErrorEvent" => Style::new().fg(RED),
-        "assistant" => Style::new().fg(GREEN),
-        "user" => Style::new().fg(YELLOW),
-        "state" | "ConversationStateUpdateEvent" => Style::new().dim(),
-        _ => Style::new(),
+#[derive(Clone, Copy)]
+enum ConversationDisplayRole {
+    User,
+    Assistant,
+    Action,
+    Observation,
+    State,
+    Error,
+    Event,
+}
+
+impl ConversationDisplayRole {
+    fn label(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Assistant => "assistant",
+            Self::Action => "action",
+            Self::Observation => "observation",
+            Self::State => "state",
+            Self::Error => "error",
+            Self::Event => "event",
+        }
     }
+
+    fn style(self) -> Style {
+        match self {
+            Self::User => Style::new().fg(BRIGHT_GREEN).bold(),
+            Self::Assistant => Style::new().fg(MAGENTA).bold(),
+            Self::Action => Style::new().fg(BLUE).bold(),
+            Self::Observation => Style::new().fg(BRIGHT_BLACK),
+            Self::State => Style::new().fg(BRIGHT_BLACK),
+            Self::Error => Style::new().fg(RED).bold(),
+            Self::Event => Style::new().fg(CYAN),
+        }
+    }
+}
+
+struct ConversationEventDisplay {
+    role: ConversationDisplayRole,
+    text: String,
+}
+
+fn conversation_event_display(
+    event: &crate::opensymphony_domain::ControlPlaneConversationEvent,
+) -> ConversationEventDisplay {
+    let (role, text) = classify_conversation_event(event);
+    ConversationEventDisplay {
+        role,
+        text: summarize_conversation_text(&normalize_conversation_text(text)),
+    }
+}
+
+fn classify_conversation_event(
+    event: &crate::opensymphony_domain::ControlPlaneConversationEvent,
+) -> (ConversationDisplayRole, &str) {
+    if let Some((role, text)) = strip_message_role(&event.summary) {
+        return (role, text);
+    }
+
+    match event.kind.as_str() {
+        "ActionEvent" | "tool" | "tool_call" | "tool_use" => {
+            (ConversationDisplayRole::Action, event.summary.as_str())
+        }
+        "ObservationEvent" => (ConversationDisplayRole::Observation, event.summary.as_str()),
+        "ConversationErrorEvent" | "error" => {
+            (ConversationDisplayRole::Error, event.summary.as_str())
+        }
+        "ConversationStateUpdateEvent" | "state" => {
+            (ConversationDisplayRole::State, event.summary.as_str())
+        }
+        "MessageEvent" | "message" => (ConversationDisplayRole::Assistant, event.summary.as_str()),
+        "assistant" => (ConversationDisplayRole::Assistant, event.summary.as_str()),
+        "user" => (ConversationDisplayRole::User, event.summary.as_str()),
+        _ => (ConversationDisplayRole::Event, event.summary.as_str()),
+    }
+}
+
+fn strip_message_role(summary: &str) -> Option<(ConversationDisplayRole, &str)> {
+    let trimmed = summary.trim_start();
+    let (role, prefix) = if trimmed.starts_with("assistant:") {
+        (ConversationDisplayRole::Assistant, "assistant:")
+    } else if trimmed.starts_with("user:") {
+        (ConversationDisplayRole::User, "user:")
+    } else {
+        return None;
+    };
+    Some((role, trimmed[prefix.len()..].trim_start()))
 }
 
 fn wrap_conversation_event_styled(
     event: &crate::opensymphony_domain::ControlPlaneConversationEvent,
     width: usize,
 ) -> Vec<Line> {
+    let display = conversation_event_display(event);
     let timestamp_text = format!("{} ", format_timestamp(event.happened_at));
     let continuation_prefix = "  ";
-    let prefix_width = display_width(&timestamp_text) + display_width(&event.kind) + 1;
+    let label_text = format!("{}>", display.role.label());
+    let prefix_width = display_width(&timestamp_text) + display_width(&label_text) + 1;
     let chunks = wrap_text_by_widths(
-        &event.summary,
+        &display.text,
         width.saturating_sub(prefix_width),
         width.saturating_sub(display_width(continuation_prefix)),
     );
-    let kind_style = event_kind_style(&event.kind);
     let mut lines = Vec::new();
 
     if let Some(first_chunk) = chunks.first() {
         lines.push(Line::from_spans(vec![
             Span::styled(timestamp_text, Style::new().dim()),
-            Span::styled(&event.kind, kind_style),
+            Span::styled(label_text, display.role.style()),
             Span::raw(" "),
             Span::raw(first_chunk.clone()),
         ]));
@@ -3356,18 +3498,20 @@ fn wrap_conversation_event_text(
     event: &crate::opensymphony_domain::ControlPlaneConversationEvent,
     width: usize,
 ) -> Vec<String> {
+    let display = conversation_event_display(event);
     let timestamp_text = format!("{} ", format_timestamp(event.happened_at));
     let continuation_prefix = "  ";
-    let prefix_width = display_width(&timestamp_text) + display_width(&event.kind) + 1;
+    let label_text = format!("{}>", display.role.label());
+    let prefix_width = display_width(&timestamp_text) + display_width(&label_text) + 1;
     let chunks = wrap_text_by_widths(
-        &event.summary,
+        &display.text,
         width.saturating_sub(prefix_width),
         width.saturating_sub(display_width(continuation_prefix)),
     );
     let mut lines = Vec::new();
 
     if let Some(first_chunk) = chunks.first() {
-        lines.push(format!("{timestamp_text}{} {}", event.kind, first_chunk));
+        lines.push(format!("{timestamp_text}{label_text} {first_chunk}"));
     }
 
     for chunk in chunks.into_iter().skip(1) {
@@ -3375,6 +3519,27 @@ fn wrap_conversation_event_text(
     }
 
     lines
+}
+
+fn normalize_conversation_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
+fn summarize_conversation_text(text: &str) -> String {
+    if text.chars().count() <= TUI_CONVERSATION_TEXT_LIMIT {
+        return text.to_owned();
+    }
+
+    let shortened = text
+        .chars()
+        .take(TUI_CONVERSATION_TEXT_LIMIT.saturating_sub(3))
+        .collect::<String>();
+    format!("{shortened}...")
 }
 
 fn wrap_text_by_widths(value: &str, first_width: usize, continuation_width: usize) -> Vec<String> {
@@ -4375,7 +4540,7 @@ mod tests {
         let lines = state.conversation_activity_lines(48, 6);
 
         assert!(lines.len() >= 3);
-        assert!(lines[1].to_plain_text().contains("ObservationEvent"));
+        assert!(lines[1].to_plain_text().contains("observation>"));
         assert!(!lines[2].to_plain_text().trim().is_empty());
     }
 

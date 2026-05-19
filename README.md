@@ -316,10 +316,12 @@ rehydrated without losing continuity.
 
 When the workflow uses the local supervised OpenHands server, `opensymphony debug`
 targets the same configured base URL as the orchestrator. If a ready server is
-already listening there, the debug command reuses it; otherwise it starts a local
-server for the session. For the most predictable behavior, prefer the
-orchestrator-managed server and avoid leaving unrelated standalone `openhands`
-CLI sessions bound to the same port.
+already listening there, the debug command reuses it; otherwise it waits through
+the configured startup window before starting a local server for the session. For
+the most predictable behavior, prefer the orchestrator-managed server and avoid
+leaving unrelated standalone `openhands` CLI sessions bound to the same port.
+Stop `opensymphony run` with Ctrl-C so the managed OpenHands process tree can be
+cleaned up; Ctrl-Z only suspends the orchestrator and can leave the port bound.
 
 Managed local OpenHands conversations are scoped by target repository under
 `<tool_dir>/workspace/conversations/repos/<repo-key>/`. The orchestrator starts

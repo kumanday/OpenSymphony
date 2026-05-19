@@ -212,7 +212,29 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let server = ControlPlaneServer::new(store.clone());
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
 
-    let bootstrap_snapshot = scheduler.bootstrap(now_timestamp()).await?;
+    let bootstrap_snapshot = tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("received shutdown signal");
+            server_task.abort();
+            if let Some(mut supervisor) = supervisor {
+                let _ = supervisor.stop();
+            }
+            return Ok(());
+        }
+        result = &mut server_task => {
+            match result {
+                Ok(Ok(())) => {
+                    if let Some(mut supervisor) = supervisor {
+                        let _ = supervisor.stop();
+                    }
+                    return Ok(());
+                }
+                Ok(Err(error)) => return Err(RunCommandError::Serve(error)),
+                Err(error) => return Err(RunCommandError::Serve(std::io::Error::other(error.to_string()))),
+            }
+        }
+        result = scheduler.bootstrap(now_timestamp()) => result?,
+    };
     let mut auto_capture_completed_issues = terminal_issue_identifiers(&bootstrap_snapshot);
     push_recent_event(
         &mut recent_events,
@@ -253,9 +275,13 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                     Err(error) => return Err(RunCommandError::Serve(std::io::Error::other(error.to_string()))),
                 }
             }
-            _ = ticker.tick() => {
+            result = async {
+                ticker.tick().await;
                 let observed_at = now_timestamp();
-                match scheduler.tick(observed_at).await {
+                (observed_at, scheduler.tick(observed_at).await)
+            } => {
+                let (observed_at, result) = result;
+                match result {
                     Ok(snapshot) => {
                         let current_terminal_issues = terminal_issue_identifiers(&snapshot);
                         let auto_capture_candidates = auto_capture_candidates(
@@ -329,6 +355,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         }
     }
 
+    server_task.abort();
     if let Some(mut supervisor) = supervisor {
         let _ = supervisor.stop();
     }

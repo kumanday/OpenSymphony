@@ -214,11 +214,39 @@ impl LocalServerSupervisor {
                     &config.extra_env,
                     config.command.as_deref(),
                 )?;
-                if probe_local_ready(&launch.base_url, &config.probe)? {
-                    return Err(SupervisorError::ExistingReadyServer {
-                        base_url: launch.base_url,
-                        path: config.probe.path.clone(),
-                    });
+                match probe_local_status(&launch.base_url, &config.probe)? {
+                    ProbeStatus::Ready => {
+                        return Err(SupervisorError::ExistingReadyServer {
+                            base_url: launch.base_url,
+                            path: config.probe.path.clone(),
+                        });
+                    }
+                    ProbeStatus::Occupied { status_line } => {
+                        match wait_for_occupied_local_server(
+                            &launch.base_url,
+                            &config.probe,
+                            config.startup_timeout,
+                            status_line,
+                        )? {
+                            OccupiedProbeOutcome::Ready => {
+                                return Err(SupervisorError::ExistingReadyServer {
+                                    base_url: launch.base_url,
+                                    path: config.probe.path.clone(),
+                                });
+                            }
+                            OccupiedProbeOutcome::StillOccupied { status_line } => {
+                                return Err(SupervisorError::ExistingUnreadyServer {
+                                    base_url: launch.base_url,
+                                    path: config.probe.path.clone(),
+                                    timeout: config.startup_timeout,
+                                    status_line: status_line
+                                        .unwrap_or_else(|| "no HTTP status line".to_string()),
+                                });
+                            }
+                            OccupiedProbeOutcome::Unreachable => {}
+                        }
+                    }
+                    ProbeStatus::Unreachable => {}
                 }
                 let mut command = Command::new(&launch.program);
                 command
@@ -543,6 +571,15 @@ pub enum SupervisorError {
         "refusing to launch supervised OpenHands server because another ready server is already responding at {base_url}{path}"
     )]
     ExistingReadyServer { base_url: String, path: String },
+    #[error(
+        "refusing to launch supervised OpenHands server because another server is already bound at {base_url}{path} but did not become ready within {timeout:?} (last probe: {status_line})"
+    )]
+    ExistingUnreadyServer {
+        base_url: String,
+        path: String,
+        timeout: Duration,
+        status_line: String,
+    },
     #[error("failed to wait for local OpenHands server pid {pid}: {source}")]
     Wait {
         pid: u32,
@@ -641,6 +678,44 @@ fn terminate_child_process_tree(child: &mut Child, pid: u32) -> Result<(), Super
 }
 
 fn probe_local_ready(base_url: &str, probe: &ProbeConfig) -> Result<bool, SupervisorError> {
+    Ok(matches!(
+        probe_local_status(base_url, probe)?,
+        ProbeStatus::Ready
+    ))
+}
+
+fn wait_for_occupied_local_server(
+    base_url: &str,
+    probe: &ProbeConfig,
+    timeout: Duration,
+    initial_status_line: Option<String>,
+) -> Result<OccupiedProbeOutcome, SupervisorError> {
+    let deadline = Instant::now() + timeout;
+    let mut last_status_line = initial_status_line;
+
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(OccupiedProbeOutcome::StillOccupied {
+                status_line: last_status_line,
+            });
+        }
+
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        thread::sleep(probe.poll_interval.min(remaining));
+
+        match probe_local_status(base_url, probe)? {
+            ProbeStatus::Ready => return Ok(OccupiedProbeOutcome::Ready),
+            ProbeStatus::Unreachable => return Ok(OccupiedProbeOutcome::Unreachable),
+            ProbeStatus::Occupied { status_line } => {
+                if status_line.is_some() {
+                    last_status_line = status_line;
+                }
+            }
+        }
+    }
+}
+
+fn probe_local_status(base_url: &str, probe: &ProbeConfig) -> Result<ProbeStatus, SupervisorError> {
     let endpoint = HttpEndpoint::parse(base_url)?;
     let addresses = endpoint.socket_addresses(base_url)?;
     probe_resolved_addresses(
@@ -719,13 +794,17 @@ fn probe_resolved_addresses(
     path: &str,
     addresses: &[std::net::SocketAddr],
     timeout: Duration,
-) -> Result<bool, SupervisorError> {
+) -> Result<ProbeStatus, SupervisorError> {
     let mut first_fatal = None;
+    let mut first_occupied = None;
 
     for address in addresses {
         match probe_address(base_url, host, path, *address, timeout) {
-            Ok(true) => return Ok(true),
-            Ok(false) => continue,
+            Ok(ProbeStatus::Ready) => return Ok(ProbeStatus::Ready),
+            Ok(ProbeStatus::Occupied { status_line }) if first_occupied.is_none() => {
+                first_occupied = Some(status_line);
+            }
+            Ok(ProbeStatus::Occupied { .. }) | Ok(ProbeStatus::Unreachable) => continue,
             Err(ProbeAttempt::Transient) => continue,
             Err(ProbeAttempt::Fatal(error)) if first_fatal.is_none() => {
                 first_fatal = Some(error);
@@ -734,10 +813,12 @@ fn probe_resolved_addresses(
         }
     }
 
-    if let Some(error) = first_fatal {
+    if let Some(status_line) = first_occupied {
+        Ok(ProbeStatus::Occupied { status_line })
+    } else if let Some(error) = first_fatal {
         Err(error)
     } else {
-        Ok(false)
+        Ok(ProbeStatus::Unreachable)
     }
 }
 
@@ -747,7 +828,7 @@ fn probe_address(
     path: &str,
     address: std::net::SocketAddr,
     timeout: Duration,
-) -> Result<bool, ProbeAttempt> {
+) -> Result<ProbeStatus, ProbeAttempt> {
     let stream = match TcpStream::connect_timeout(&address, timeout) {
         Ok(stream) => stream,
         Err(source) if is_transient_connection_error(&source) => {
@@ -778,20 +859,43 @@ fn probe_address(
     })?;
 
     let mut stream = stream;
-    write!(
+    if write!(
         stream,
         "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
         path, host
     )
-    .map_err(|source| transient_probe_error(base_url, path, source))?;
+    .is_err()
+    {
+        return Ok(ProbeStatus::Occupied { status_line: None });
+    }
 
     let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|source| transient_probe_error(base_url, path, source))?;
+    if stream.read_to_string(&mut response).is_err() {
+        return Ok(ProbeStatus::Occupied { status_line: None });
+    }
 
     let status_line = response.lines().next().unwrap_or_default();
-    Ok(status_line.contains(" 200 "))
+    if status_line.contains(" 200 ") {
+        Ok(ProbeStatus::Ready)
+    } else {
+        Ok(ProbeStatus::Occupied {
+            status_line: (!status_line.is_empty()).then(|| status_line.to_string()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProbeStatus {
+    Ready,
+    Occupied { status_line: Option<String> },
+    Unreachable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OccupiedProbeOutcome {
+    Ready,
+    Unreachable,
+    StillOccupied { status_line: Option<String> },
 }
 
 enum ProbeAttempt {
@@ -819,18 +923,6 @@ fn is_transient_connection_error(error: &std::io::Error) -> bool {
             | std::io::ErrorKind::BrokenPipe
             | std::io::ErrorKind::WouldBlock
     )
-}
-
-fn transient_probe_error(base_url: &str, path: &str, source: std::io::Error) -> ProbeAttempt {
-    if is_transient_connection_error(&source) {
-        ProbeAttempt::Transient
-    } else {
-        ProbeAttempt::Fatal(SupervisorError::ProbeIo {
-            base_url: base_url.to_string(),
-            path: path.to_string(),
-            source,
-        })
-    }
 }
 
 struct HttpEndpoint {
@@ -901,7 +993,9 @@ mod tests {
         time::Duration,
     };
 
-    use super::{OpenHandsLogFilter, is_successful_openapi_access_log, probe_resolved_addresses};
+    use super::{
+        OpenHandsLogFilter, ProbeStatus, is_successful_openapi_access_log, probe_resolved_addresses,
+    };
 
     #[test]
     fn probe_resolved_addresses_tries_later_candidates_after_transient_failure() {
@@ -934,7 +1028,7 @@ mod tests {
 
         let unreachable = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port));
         let reachable = SocketAddr::from(([127, 0, 0, 1], port));
-        let ready = probe_resolved_addresses(
+        let status = probe_resolved_addresses(
             &format!("http://localhost:{port}"),
             "localhost",
             "/openapi.json",
@@ -943,7 +1037,55 @@ mod tests {
         )
         .expect("probe should succeed");
 
-        assert!(ready);
+        assert_eq!(status, ProbeStatus::Ready);
+        server.join().expect("server thread should finish");
+    }
+
+    #[test]
+    fn probe_resolved_addresses_reports_bound_but_unready_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let port = listener
+            .local_addr()
+            .expect("listener address should resolve")
+            .port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("request should connect");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 256];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let bytes_read = stream.read(&mut chunk).expect("request should read");
+                if bytes_read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..bytes_read]);
+            }
+            write!(
+                stream,
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .expect("response should write");
+            stream.flush().expect("response should flush");
+            stream
+                .shutdown(Shutdown::Both)
+                .expect("stream should shut down");
+        });
+
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let status = probe_resolved_addresses(
+            &format!("http://127.0.0.1:{port}"),
+            "127.0.0.1",
+            "/openapi.json",
+            &[address],
+            Duration::from_millis(250),
+        )
+        .expect("probe should succeed");
+
+        assert_eq!(
+            status,
+            ProbeStatus::Occupied {
+                status_line: Some("HTTP/1.1 503 Service Unavailable".to_string())
+            }
+        );
         server.join().expect("server thread should finish");
     }
 

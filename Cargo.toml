@@ -25,6 +25,7 @@ async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
+crossterm.workspace = true
 duckdb.workspace = true
 ftui.workspace = true
 futures-util.workspace = true
@@ -55,7 +56,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/kumanday/OpenSymphony"
 rust-version = "1.93"
-version = "1.6.0"
+version = "1.6.1"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }
@@ -77,6 +78,7 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["macros", "ws"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+crossterm = "0.29"
 duckdb = { version = "1.10502.0", features = ["bundled"] }
 ftui = { version = "0.2.1", features = ["crossterm"] }
 futures-util = "0.3"

@@ -1,7 +1,8 @@
 use std::{
+    cmp::Ordering,
     collections::HashSet,
     env, io,
-    io::Write,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
     process::ExitCode,
     time::Duration,
@@ -21,6 +22,15 @@ use crate::opensymphony_workspace::{
     WorkspaceManager, WorkspaceManagerConfig,
 };
 use clap::Args;
+use crossterm::{
+    cursor::{self, MoveTo},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
+        KeyModifiers,
+    },
+    execute,
+    terminal::{self, Clear, ClearType},
+};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::{fs, time::timeout_at};
@@ -29,6 +39,7 @@ use uuid::Uuid;
 
 const DEFAULT_CONFIG_FILE: &str = "config.yaml";
 const RECENT_HISTORY_LIMIT: usize = 8;
+const RECENT_EVENT_SCAN_LIMIT: usize = 100;
 
 #[derive(Debug, Args, Clone)]
 pub struct DebugArgs {
@@ -196,12 +207,104 @@ impl TranscriptRole {
             Self::Observation => "observation",
         }
     }
+
+    fn ansi_prefix(self) -> &'static str {
+        match self {
+            Self::User => "\x1b[1;32m",
+            Self::Assistant => "\x1b[1;35m",
+            Self::Action => "\x1b[1;36m",
+            Self::Observation => "\x1b[90m",
+        }
+    }
 }
 
 struct TranscriptEntry {
     event_id: String,
     role: TranscriptRole,
     text: String,
+}
+
+enum DebugInput {
+    Exit,
+    RecentHistory,
+    FullHistory,
+    Prompt(String),
+}
+
+struct EventBaseline {
+    ids: HashSet<String>,
+    latest: Option<EventPosition>,
+}
+
+struct DebugEventPrinter<'a> {
+    baseline: &'a EventBaseline,
+    printed_event_ids: HashSet<String>,
+}
+
+struct EventPosition {
+    timestamp: chrono::DateTime<chrono::Utc>,
+    id: String,
+}
+
+impl EventBaseline {
+    fn capture(events: &[EventEnvelope]) -> Self {
+        let ids = events
+            .iter()
+            .map(|event| event.id.clone())
+            .collect::<HashSet<_>>();
+        let latest = events
+            .iter()
+            .max_by(|left, right| compare_event_position(left, right))
+            .map(|event| EventPosition {
+                timestamp: event.timestamp,
+                id: event.id.clone(),
+            });
+        Self { ids, latest }
+    }
+
+    fn is_current_turn_event(&self, event: &EventEnvelope) -> bool {
+        if self.ids.contains(&event.id) {
+            return false;
+        }
+
+        self.latest.as_ref().is_none_or(|latest| {
+            event
+                .timestamp
+                .cmp(&latest.timestamp)
+                .then_with(|| event.id.cmp(&latest.id))
+                == Ordering::Greater
+        })
+    }
+}
+
+impl<'a> DebugEventPrinter<'a> {
+    fn new(baseline: &'a EventBaseline) -> Self {
+        Self {
+            baseline,
+            printed_event_ids: HashSet::new(),
+        }
+    }
+
+    fn print_event(&mut self, event: &EventEnvelope) {
+        if !self.baseline.is_current_turn_event(event)
+            || !self.printed_event_ids.insert(event.id.clone())
+        {
+            return;
+        }
+
+        let Some(entry) = extract_transcript_entry(event) else {
+            return;
+        };
+        if matches!(entry.role, TranscriptRole::User) {
+            return;
+        }
+
+        print_transcript_entry(&entry, true, true);
+    }
+
+    fn into_printed_event_ids(self) -> HashSet<String> {
+        self.printed_event_ids
+    }
 }
 
 struct ArchivedAttachContext<'a> {
@@ -244,6 +347,12 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         })
         .map(Path::to_path_buf);
     let (client, mut supervisor, server_message) = build_debug_client(&runtime, store_kind)?;
+    println!("{server_message}");
+    println!(
+        "Attaching to conversation {} for issue {}...",
+        manifest.conversation_id,
+        workspace.identifier()
+    );
     let launched_managed_server = supervisor.is_some();
     let mut stream = match attach_or_rehydrate_stream(
         &client,
@@ -276,7 +385,6 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
         workspace.identifier(),
         workspace.workspace_path().display()
     );
-    println!("{server_message}");
 
     if turn_is_in_progress(stream.state_mirror().execution_status().unwrap_or("idle")) {
         println!("Waiting for the current OpenHands turn to finish before accepting input...");
@@ -530,6 +638,7 @@ fn build_debug_client(
     config.port_override = Some(transport_port_override(&url)?);
 
     let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
+    println!("Checking local OpenHands server at {supervisor_base_url}...");
     match supervisor.start() {
         Ok(status) => {
             let base_url = status.base_url.clone();
@@ -601,7 +710,11 @@ async fn attach_or_rehydrate_stream(
     let conversation_id = parse_conversation_id(manifest)?;
     let stream_config = config.runtime_stream.clone();
     match client
-        .attach_runtime_stream(conversation_id, stream_config.clone())
+        .attach_runtime_stream_with_recent_events(
+            conversation_id,
+            stream_config.clone(),
+            RECENT_EVENT_SCAN_LIMIT,
+        )
         .await
     {
         Ok(stream) => Ok(stream),
@@ -644,7 +757,11 @@ async fn attach_or_rehydrate_stream(
             }
 
             let stream = client
-                .attach_runtime_stream(conversation_id, stream_config)
+                .attach_runtime_stream_with_recent_events(
+                    conversation_id,
+                    stream_config,
+                    RECENT_EVENT_SCAN_LIMIT,
+                )
                 .await?;
             if stream.event_cache().items().len() <= 1 {
                 return Err(DebugCommandError::PersistedHistoryMissing { conversation_id });
@@ -688,29 +805,177 @@ async fn interactive_debug_loop(
     let mut line = String::new();
 
     loop {
-        print!("debug> ");
-        stdout.flush().map_err(DebugCommandError::TerminalIo)?;
-        line.clear();
-        let read = stdin
-            .read_line(&mut line)
-            .map_err(DebugCommandError::TerminalIo)?;
-        if read == 0 {
+        let Some(input) = read_debug_prompt(&stdin, &mut stdout, &mut line)? else {
             return Ok(());
-        }
-
-        let input = line.trim();
+        };
+        let input = input.trim();
         if input.is_empty() {
             continue;
         }
-        if matches!(input, "/exit" | "exit" | "quit") {
-            return Ok(());
+        match parse_debug_input(input) {
+            DebugInput::Exit => return Ok(()),
+            DebugInput::RecentHistory => {
+                print_recent_history(stream.event_cache().items());
+            }
+            DebugInput::FullHistory => {
+                print_full_history(stream).await?;
+            }
+            DebugInput::Prompt(prompt) => {
+                run_debug_turn(client, stream, conversation_id, &prompt, wait_timeout).await?;
+            }
         }
-        if input == "/history" {
-            print_recent_history(stream.event_cache().items());
-            continue;
-        }
+    }
+}
 
-        run_debug_turn(client, stream, conversation_id, input, wait_timeout).await?;
+fn read_debug_prompt(
+    stdin: &io::Stdin,
+    stdout: &mut io::Stdout,
+    line: &mut String,
+) -> Result<Option<String>, DebugCommandError> {
+    if stdin.is_terminal() && stdout.is_terminal() {
+        read_raw_debug_prompt(stdout)
+    } else {
+        read_line_debug_prompt(stdin, stdout, line)
+    }
+}
+
+fn read_line_debug_prompt(
+    stdin: &io::Stdin,
+    stdout: &mut io::Stdout,
+    line: &mut String,
+) -> Result<Option<String>, DebugCommandError> {
+    write!(stdout, "debug> ").map_err(DebugCommandError::TerminalIo)?;
+    stdout.flush().map_err(DebugCommandError::TerminalIo)?;
+    line.clear();
+    let read = stdin
+        .read_line(line)
+        .map_err(DebugCommandError::TerminalIo)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    Ok(Some(line.trim_end_matches(['\r', '\n']).to_string()))
+}
+
+fn read_raw_debug_prompt(stdout: &mut io::Stdout) -> Result<Option<String>, DebugCommandError> {
+    let _guard = RawDebugPromptGuard::enter(stdout)?;
+    let prompt_origin = cursor::position().unwrap_or((0, 0));
+    write!(stdout, "debug> ").map_err(DebugCommandError::TerminalIo)?;
+    stdout.flush().map_err(DebugCommandError::TerminalIo)?;
+
+    let mut input = String::new();
+    loop {
+        match event::read().map_err(DebugCommandError::TerminalIo)? {
+            Event::Paste(text) => {
+                append_debug_input(stdout, &mut input, &text)?;
+            }
+            Event::Resize(_, _) => {
+                redraw_debug_prompt(stdout, prompt_origin, &input)?;
+            }
+            Event::Key(key) if key.kind == KeyEventKind::Release => {}
+            Event::Key(key) => match key.code {
+                KeyCode::Enter
+                    if key
+                        .modifiers
+                        .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+                {
+                    append_debug_input(stdout, &mut input, "\n")?;
+                }
+                KeyCode::Enter => {
+                    write!(stdout, "\r\n").map_err(DebugCommandError::TerminalIo)?;
+                    stdout.flush().map_err(DebugCommandError::TerminalIo)?;
+                    return Ok(Some(input));
+                }
+                KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    append_debug_input(stdout, &mut input, "\n")?;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    write!(stdout, "^C\r\n").map_err(DebugCommandError::TerminalIo)?;
+                    stdout.flush().map_err(DebugCommandError::TerminalIo)?;
+                    return Ok(None);
+                }
+                KeyCode::Char('d')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && input.is_empty() =>
+                {
+                    write!(stdout, "\r\n").map_err(DebugCommandError::TerminalIo)?;
+                    stdout.flush().map_err(DebugCommandError::TerminalIo)?;
+                    return Ok(None);
+                }
+                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    append_debug_input(stdout, &mut input, &character.to_string())?;
+                }
+                KeyCode::Tab => {
+                    append_debug_input(stdout, &mut input, "\t")?;
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                    redraw_debug_prompt(stdout, prompt_origin, &input)?;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+}
+
+fn append_debug_input(
+    stdout: &mut io::Stdout,
+    input: &mut String,
+    text: &str,
+) -> Result<(), DebugCommandError> {
+    let normalized = normalize_debug_input_fragment(text);
+    input.push_str(&normalized);
+    echo_debug_input(stdout, &normalized)
+}
+
+fn normalize_debug_input_fragment(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn redraw_debug_prompt(
+    stdout: &mut io::Stdout,
+    prompt_origin: (u16, u16),
+    input: &str,
+) -> Result<(), DebugCommandError> {
+    execute!(
+        stdout,
+        MoveTo(prompt_origin.0, prompt_origin.1),
+        Clear(ClearType::FromCursorDown)
+    )
+    .map_err(DebugCommandError::TerminalIo)?;
+    write!(stdout, "debug> ").map_err(DebugCommandError::TerminalIo)?;
+    echo_debug_input(stdout, input)
+}
+
+fn echo_debug_input(stdout: &mut io::Stdout, text: &str) -> Result<(), DebugCommandError> {
+    for character in text.chars() {
+        match character {
+            '\n' => write!(stdout, "\r\n...> ").map_err(DebugCommandError::TerminalIo)?,
+            '\t' => write!(stdout, "\t").map_err(DebugCommandError::TerminalIo)?,
+            character if character.is_control() => {}
+            character => write!(stdout, "{character}").map_err(DebugCommandError::TerminalIo)?,
+        }
+    }
+    stdout.flush().map_err(DebugCommandError::TerminalIo)
+}
+
+struct RawDebugPromptGuard;
+
+impl RawDebugPromptGuard {
+    fn enter(stdout: &mut io::Stdout) -> Result<Self, DebugCommandError> {
+        terminal::enable_raw_mode().map_err(DebugCommandError::TerminalIo)?;
+        if let Err(error) = execute!(stdout, EnableBracketedPaste) {
+            let _ = terminal::disable_raw_mode();
+            return Err(DebugCommandError::TerminalIo(error));
+        }
+        Ok(Self)
+    }
+}
+
+impl Drop for RawDebugPromptGuard {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        let mut stdout = io::stdout();
+        let _ = execute!(stdout, DisableBracketedPaste);
     }
 }
 
@@ -725,12 +990,16 @@ async fn run_debug_turn(
         wait_for_turn_to_stop(stream, conversation_id, wait_timeout).await?;
     }
 
-    let baseline_event_ids = stream
-        .event_cache()
-        .items()
-        .iter()
-        .map(|event| event.id.clone())
-        .collect::<HashSet<_>>();
+    let baseline = EventBaseline::capture(stream.event_cache().items());
+    print_transcript_entry(
+        &TranscriptEntry {
+            event_id: "debug-user-input".to_string(),
+            role: TranscriptRole::User,
+            text: prompt.to_string(),
+        },
+        true,
+        false,
+    );
 
     client
         .send_message(conversation_id, &SendMessageRequest::user_text(prompt))
@@ -748,18 +1017,31 @@ async fn run_debug_turn(
         }
     }
 
-    wait_for_turn_terminal(stream, &baseline_event_ids, conversation_id, wait_timeout).await?;
+    let printed_event_ids =
+        wait_for_turn_terminal(stream, &baseline, conversation_id, wait_timeout).await?;
+    let current_turn_event_ids = stream
+        .event_cache()
+        .items()
+        .iter()
+        .filter(|event| baseline.is_current_turn_event(event))
+        .map(|event| event.id.clone())
+        .collect::<HashSet<_>>();
     let new_entries = transcript_entries(stream.event_cache().items())
         .into_iter()
-        .filter(|entry| !baseline_event_ids.contains(&entry.event_id))
+        .filter(|entry| current_turn_event_ids.contains(&entry.event_id))
+        .filter(|entry| !printed_event_ids.contains(&entry.event_id))
         .filter(|entry| !matches!(entry.role, TranscriptRole::User))
         .collect::<Vec<_>>();
 
     if new_entries.is_empty() {
-        println!("assistant> (no printable assistant text was emitted for this turn)");
+        println!();
+        println!(
+            "{} (no printable assistant text was emitted for this turn)",
+            formatted_role_label(TranscriptRole::Assistant)
+        );
     } else {
         for entry in new_entries {
-            println!("{}> {}", entry.role.label(), entry.text);
+            print_transcript_entry(&entry, true, false);
         }
     }
 
@@ -779,6 +1061,8 @@ async fn wait_for_turn_to_stop(
         return Ok(());
     }
 
+    let baseline = EventBaseline::capture(stream.event_cache().items());
+    let mut printer = DebugEventPrinter::new(&baseline);
     let deadline = tokio::time::Instant::now() + wait_timeout;
     loop {
         if stream
@@ -796,9 +1080,11 @@ async fn wait_for_turn_to_stop(
                     timeout_ms: wait_timeout.as_millis(),
                 });
             }
-            Ok(Ok(Some(_))) => {}
+            Ok(Ok(Some(event))) => {
+                printer.print_event(&event);
+            }
             Ok(Ok(None)) => {
-                if let Ok(inserted) = stream.reconcile_events().await
+                if let Ok(inserted) = reconcile_debug_events(stream).await
                     && inserted > 0
                 {
                     continue;
@@ -820,44 +1106,43 @@ async fn wait_for_turn_to_stop(
 
 async fn wait_for_turn_terminal(
     stream: &mut RuntimeEventStream,
-    baseline_event_ids: &HashSet<String>,
+    baseline: &EventBaseline,
     conversation_id: Uuid,
     wait_timeout: Duration,
-) -> Result<(), DebugCommandError> {
+) -> Result<HashSet<String>, DebugCommandError> {
+    let mut printer = DebugEventPrinter::new(baseline);
     let deadline = tokio::time::Instant::now() + wait_timeout;
     loop {
-        if let Some(result) = current_turn_outcome(stream, baseline_event_ids, conversation_id) {
-            return result;
+        if let Some(result) = current_turn_outcome(stream, baseline, conversation_id) {
+            return result.map(|_| printer.into_printed_event_ids());
         }
 
         match timeout_at(deadline, stream.next_event()).await {
             Err(_) => {
-                if let Ok(inserted) = stream.reconcile_events().await
+                if let Ok(inserted) = reconcile_debug_events(stream).await
                     && inserted > 0
                 {
                     continue;
                 }
                 return Err(DebugCommandError::DebugTurnTimeout { conversation_id });
             }
-            Ok(Ok(Some(_))) => {}
+            Ok(Ok(Some(event))) => {
+                printer.print_event(&event);
+            }
             Ok(Ok(None)) => {
-                if let Ok(inserted) = stream.reconcile_events().await
+                if let Ok(inserted) = reconcile_debug_events(stream).await
                     && inserted > 0
                 {
                     continue;
                 }
-                if let Some(result) =
-                    current_turn_outcome(stream, baseline_event_ids, conversation_id)
-                {
-                    return result;
+                if let Some(result) = current_turn_outcome(stream, baseline, conversation_id) {
+                    return result.map(|_| printer.into_printed_event_ids());
                 }
                 return Err(DebugCommandError::StreamEnded { conversation_id });
             }
             Ok(Err(error)) => {
-                if let Some(result) =
-                    current_turn_outcome(stream, baseline_event_ids, conversation_id)
-                {
-                    return result;
+                if let Some(result) = current_turn_outcome(stream, baseline, conversation_id) {
+                    return result.map(|_| printer.into_printed_event_ids());
                 }
                 return Err(DebugCommandError::Transport(error));
             }
@@ -867,14 +1152,14 @@ async fn wait_for_turn_terminal(
 
 fn current_turn_outcome(
     stream: &RuntimeEventStream,
-    baseline_event_ids: &HashSet<String>,
+    baseline: &EventBaseline,
     conversation_id: Uuid,
 ) -> Option<Result<(), DebugCommandError>> {
     let current_turn_events = stream
         .event_cache()
         .items()
         .iter()
-        .filter(|event| !baseline_event_ids.contains(&event.id))
+        .filter(|event| baseline.is_current_turn_event(event))
         .collect::<Vec<_>>();
     if current_turn_events.is_empty() {
         return None;
@@ -918,11 +1203,43 @@ fn print_recent_history(events: &[EventEnvelope]) {
     println!("Recent conversation history:");
     let start = entries.len().saturating_sub(RECENT_HISTORY_LIMIT);
     for entry in &entries[start..] {
-        println!(
-            "{}> {}",
-            entry.role.label(),
-            summarize_history_text(&entry.text)
-        );
+        print_transcript_entry(entry, true, true);
+    }
+}
+
+async fn print_full_history(stream: &mut RuntimeEventStream) -> Result<(), DebugCommandError> {
+    println!("Loading full conversation history...");
+    stream.reconcile_events().await?;
+    let events = stream.event_cache().items();
+    let entries = transcript_entries(events);
+    if entries.is_empty() {
+        println!("No printable transcript entries were found in the resumed conversation.");
+        return Ok(());
+    }
+
+    println!(
+        "Full conversation history ({} printable entries from {} events):",
+        entries.len(),
+        events.len()
+    );
+    for entry in &entries {
+        print_transcript_entry(entry, true, true);
+    }
+    Ok(())
+}
+
+async fn reconcile_debug_events(stream: &mut RuntimeEventStream) -> Result<usize, OpenHandsError> {
+    stream
+        .reconcile_recent_events(RECENT_EVENT_SCAN_LIMIT)
+        .await
+}
+
+fn parse_debug_input(input: &str) -> DebugInput {
+    match input.split_whitespace().collect::<Vec<_>>().as_slice() {
+        ["/exit"] | ["exit"] | ["quit"] => DebugInput::Exit,
+        ["/history"] => DebugInput::RecentHistory,
+        ["/history", "all"] => DebugInput::FullHistory,
+        _ => DebugInput::Prompt(input.to_string()),
     }
 }
 
@@ -930,19 +1247,36 @@ fn transcript_entries(events: &[EventEnvelope]) -> Vec<TranscriptEntry> {
     events.iter().filter_map(extract_transcript_entry).collect()
 }
 
+fn print_transcript_entry(entry: &TranscriptEntry, blank_before: bool, summarize: bool) {
+    if blank_before {
+        println!();
+    }
+    let text = if summarize {
+        summarize_history_text(&entry.text)
+    } else {
+        entry.text.clone()
+    };
+    println!("{} {}", formatted_role_label(entry.role), text);
+}
+
+fn formatted_role_label(role: TranscriptRole) -> String {
+    let label = format!("{}>", role.label());
+    if terminal_colors_enabled() {
+        format!("{}{}\x1b[0m", role.ansi_prefix(), label)
+    } else {
+        label
+    }
+}
+
+fn terminal_colors_enabled() -> bool {
+    io::stdout().is_terminal() && env::var_os("NO_COLOR").is_none()
+}
+
 fn extract_transcript_entry(event: &EventEnvelope) -> Option<TranscriptEntry> {
     match event.kind.as_str() {
         "MessageEvent" => {
             let (role, content) = if let Some(message) = event.payload.get("llm_message") {
-                (
-                    TranscriptRole::Assistant,
-                    message
-                        .get("content")?
-                        .as_array()?
-                        .first()?
-                        .get("text")?
-                        .as_str()?,
-                )
+                (TranscriptRole::Assistant, first_content_text(message)?)
             } else {
                 let role = match event
                     .payload
@@ -952,48 +1286,69 @@ fn extract_transcript_entry(event: &EventEnvelope) -> Option<TranscriptEntry> {
                     Some("user") => TranscriptRole::User,
                     _ => TranscriptRole::Assistant,
                 };
-                (
-                    role,
-                    event
-                        .payload
-                        .get("content")?
-                        .as_array()?
-                        .first()?
-                        .get("text")?
-                        .as_str()?,
-                )
+                (role, first_content_text(&event.payload)?)
             };
-            Some(TranscriptEntry {
-                event_id: event.id.clone(),
-                role,
-                text: normalize_text(content),
-            })
+            transcript_entry(event, role, content)
         }
-        "ActionEvent" => Some(TranscriptEntry {
-            event_id: event.id.clone(),
-            role: TranscriptRole::Action,
-            text: normalize_text(
-                event
-                    .payload
-                    .get("action")
-                    .and_then(|action| action.get("message"))?
-                    .as_str()?,
-            ),
-        }),
-        "ObservationEvent" => Some(TranscriptEntry {
-            event_id: event.id.clone(),
-            role: TranscriptRole::Observation,
-            text: normalize_text(
+        "ActionEvent" => action_text(&event.payload)
+            .as_deref()
+            .and_then(|text| transcript_entry(event, TranscriptRole::Action, text)),
+        "ObservationEvent" => first_content_text(&event.payload)
+            .or_else(|| {
                 event
                     .payload
                     .get("observation")
-                    .and_then(|observation| observation.get("content"))?
-                    .as_array()?
-                    .first()?
-                    .get("text")?
-                    .as_str()?,
-            ),
-        }),
+                    .and_then(first_content_text)
+            })
+            .and_then(|text| transcript_entry(event, TranscriptRole::Observation, text)),
+        _ => None,
+    }
+}
+
+fn transcript_entry(
+    event: &EventEnvelope,
+    role: TranscriptRole,
+    text: &str,
+) -> Option<TranscriptEntry> {
+    let text = normalize_text(text);
+    (!text.is_empty()).then(|| TranscriptEntry {
+        event_id: event.id.clone(),
+        role,
+        text,
+    })
+}
+
+fn first_content_text(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("content")?
+        .as_array()?
+        .first()?
+        .get("text")?
+        .as_str()
+}
+
+fn action_text(payload: &serde_json::Value) -> Option<String> {
+    let summary = payload
+        .get("summary")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let detail = payload
+        .get("action")
+        .and_then(|action| {
+            action
+                .get("message")
+                .or_else(|| action.get("command"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| payload.get("command").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match (summary, detail) {
+        (Some(summary), Some(detail)) if summary != detail => Some(format!("{summary}: {detail}")),
+        (Some(summary), _) => Some(summary.to_string()),
+        (_, Some(detail)) => Some(detail.to_string()),
         _ => None,
     }
 }
@@ -1014,6 +1369,12 @@ fn summarize_history_text(text: &str) -> String {
         let shortened = text.chars().take(LIMIT - 3).collect::<String>();
         format!("{shortened}...")
     }
+}
+
+fn compare_event_position(left: &EventEnvelope, right: &EventEnvelope) -> Ordering {
+    left.timestamp
+        .cmp(&right.timestamp)
+        .then_with(|| left.id.cmp(&right.id))
 }
 
 fn turn_is_in_progress(status: &str) -> bool {
@@ -1038,9 +1399,45 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        DebugCommandError, DebugRuntimeConfig, build_debug_client,
-        prepare_debug_conversation_store, should_rehydrate_after_attach_failure,
+        DebugCommandError, DebugInput, DebugRuntimeConfig, build_debug_client,
+        normalize_debug_input_fragment, parse_debug_input, prepare_debug_conversation_store,
+        should_rehydrate_after_attach_failure,
     };
+
+    #[test]
+    fn debug_slash_commands_are_parsed_locally() {
+        assert!(matches!(
+            parse_debug_input("/history"),
+            DebugInput::RecentHistory
+        ));
+        assert!(matches!(
+            parse_debug_input("/history all"),
+            DebugInput::FullHistory
+        ));
+        assert!(matches!(parse_debug_input("/exit"), DebugInput::Exit));
+        assert!(matches!(parse_debug_input("quit"), DebugInput::Exit));
+
+        match parse_debug_input("/history now please") {
+            DebugInput::Prompt(prompt) => assert_eq!(prompt, "/history now please"),
+            _ => panic!("unsupported slash forms should remain ordinary prompts"),
+        }
+    }
+
+    #[test]
+    fn debug_prompt_preserves_multiline_prompt_text() {
+        match parse_debug_input("first line\nsecond line") {
+            DebugInput::Prompt(prompt) => assert_eq!(prompt, "first line\nsecond line"),
+            _ => panic!("multiline input should be sent as a prompt"),
+        }
+    }
+
+    #[test]
+    fn debug_prompt_normalizes_pasted_newlines() {
+        assert_eq!(
+            normalize_debug_input_fragment("one\r\ntwo\rthree\nfour"),
+            "one\ntwo\nthree\nfour"
+        );
+    }
 
     #[test]
     fn rehydrate_only_when_conversation_is_missing() {
