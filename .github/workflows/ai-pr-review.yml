@@ -98,7 +98,7 @@ jobs:
         if: steps.llm.outputs.enabled == 'true'
         uses: OpenHands/extensions/plugins/pr-review@75e39288f6c2366b75cf290441da06e187395f63
         with:
-          github-token: ${{ secrets.AI_REVIEW_GITHUB_TOKEN || secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           llm-api-key: ${{ secrets.AI_REVIEW_API_KEY }}
           llm-model: ${{ steps.llm.outputs.model }}
           llm-base-url: ${{ steps.llm.outputs.base_url }}
