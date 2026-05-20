@@ -104,6 +104,9 @@ If `AGENTS.md` already exists during first-time setup, `init` leaves it alone
 and writes the starter guidance to `AGENTS-example.md` for review.
 It also initializes `.opensymphony/memory/memory.yaml`, the shared policy and
 learned structure file required for default-on memory auto-capture.
+At the end of a successful bootstrap, `init` prompts whether to commit and push
+the generated OpenSymphony files so shared skills and, when selected, AI PR
+Review setup are in the remote repository before story work begins.
 
 For an existing target repo, `opensymphony update` is the lighter-weight
 maintenance path: it refreshes changed or new template-owned skill files under

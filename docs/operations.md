@@ -44,6 +44,9 @@ Important `init` behavior:
 - can configure GitHub Actions variables, the `review-this` label, and the
   optional AI review secret automatically when `gh` is installed and can access
   the target repository
+- prompts whether to commit and push the generated OpenSymphony files; when
+  accepted, it stages only files it wrote, commits `chore: bootstrap
+  OpenSymphony`, and pushes `HEAD` to the detected remote
 - copies `.agents/skills/` recursively so helper scripts, query files, and
   reference docs all arrive together
 - keeps bootstrap guidance in CLI output and the central OpenSymphony docs

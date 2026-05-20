@@ -1105,10 +1105,10 @@ async fn recent_history_search_events(
     Query(query): Query<RecentHistorySearchQuery>,
 ) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
     if query.limit != Some(2)
-        || !query
+        || query
             .sort_order
             .as_deref()
-            .is_some_and(|sort_order| sort_order == "TIMESTAMP_DESC")
+            .is_none_or(|sort_order| sort_order != "TIMESTAMP_DESC")
     {
         return Err(StatusCode::BAD_REQUEST);
     }

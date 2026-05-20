@@ -25,6 +25,9 @@ opensymphony init
 - can optionally scaffold OpenHands AI PR review
 - can configure the GitHub Actions variables, label, and optional review secret
   automatically when `gh` is installed and can access the repository
+- prompts whether to commit and push the generated OpenSymphony files so shared
+  skills and, when selected, AI PR Review setup are present in the remote
+  repository before story work starts
 
 For repositories that are already initialized, `opensymphony update` is the
 maintenance path for template-owned skills:
@@ -93,6 +96,12 @@ gh label create "review-this" --description "Trigger AI PR review" --color "d73a
 ## Review The Generated Workflow
 
 After `init`, review `WORKFLOW.md` and `config.yaml`.
+
+If you accept the final commit/push prompt, `init` stages only the files it
+created or updated, commits them as `chore: bootstrap OpenSymphony`, and pushes
+`HEAD` to the detected git remote. If the repository already has staged changes
+or no single remote can be detected, `init` leaves git alone and prints a
+reminder to commit and push manually.
 
 Important fields:
 
