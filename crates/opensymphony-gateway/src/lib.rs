@@ -514,10 +514,9 @@ async fn event_stream_ws(
                     return;
                 }
 
-                let recv_fut = socket.recv();
-                tokio::pin!(recv_fut);
-                match tokio::time::timeout(remaining, recv_fut).await {
-                    Ok(Some(Ok(msg))) => match &msg {
+                let msg_result = tokio::time::timeout(remaining, socket.recv()).await;
+                match msg_result {
+                    Ok(Some(Ok(msg))) => match msg {
                         Message::Text(_) => {
                             match parse_init_message(&msg) {
                                 Ok((c, p)) => break (c, p),
@@ -539,12 +538,10 @@ async fn event_stream_ws(
                                 }
                             }
                         }
-                        Message::Ping(_) => {
+                        Message::Ping(payload) => {
                             // Respond to Ping with Pong to keep the connection alive
                             // while waiting for the init message.
-                            if let Message::Ping(payload) = msg {
-                                let _ = socket.send(Message::Pong(payload.clone())).await;
-                            }
+                            let _ = socket.send(Message::Pong(payload)).await;
                         }
                         Message::Pong(_) => {
                             // Ignore unsolicited Pong frames during init.
