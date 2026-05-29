@@ -1,3 +1,4 @@
+enabled: true
 memory_root: .opensymphony/memory
 visibility: private
 index_path: .opensymphony/memory/memory.duckdb
@@ -16,7 +17,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - OpenHands PR Review - Human Setup Guide
+    - openhands pr review - human setup guide
     source_refs:
       docs:
       - docs/ai-pr-review-human-setup.md
@@ -27,7 +28,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Provider-agnostic AI PR review system for GitHub using OpenHands
+    - provider-agnostic ai pr review system for github using openhands
     source_refs:
       docs:
       - docs/ai-pr-review-system-spec.md
@@ -38,10 +39,14 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Architecture
+    - architecture
     source_refs:
       docs:
       - docs/architecture.md
+      linear_milestones:
+      - 'M6: Gateway And Stream Contract'
+      - 'M7: Shared Client And Desktop Alpha'
+      - 'M9: Collaborative Planning Alpha'
   cli:
     title: Cli
     docs_target: docs/cli.md
@@ -49,7 +54,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Cli
+    - cli
     source_refs:
       docs:
       - docs/cli.md
@@ -60,10 +65,13 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Configuration
+    - configuration
     source_refs:
       docs:
       - docs/configuration.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
+      - 'M7: Shared Client And Desktop Alpha'
   deployment-modes:
     title: Deployment Modes
     docs_target: docs/deployment-modes.md
@@ -71,10 +79,14 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Deployment Modes
+    - deployment modes
+    - deployment-modes
     source_refs:
       docs:
       - docs/deployment-modes.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
+      - 'M7: Shared Client And Desktop Alpha'
   development:
     title: Development Guide
     docs_target: docs/DEVELOPMENT.md
@@ -82,10 +94,13 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Development Guide
+    - development
+    - development guide
     source_refs:
       docs:
       - docs/DEVELOPMENT.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
   devex:
     title: Devex
     docs_target: docs/devex.md
@@ -93,7 +108,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Devex
+    - devex
     source_refs:
       docs:
       - docs/devex.md
@@ -104,7 +119,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
+    - changes needed in upstream elixir implementation for hierarchy-aware task selection
     source_refs:
       docs:
       - docs/elixir-hierarchy-changes.md
@@ -115,10 +130,15 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - OpenSymphony Host-Client Architecture
+    - host-client-architecture
+    - opensymphony host-client architecture
     source_refs:
       docs:
       - docs/host-client-architecture.md
+      linear_milestones:
+      - 'M6: Gateway And Stream Contract'
+      - 'M7: Shared Client And Desktop Alpha'
+      - 'M9: Collaborative Planning Alpha'
   host-client-implementation-plan:
     title: OpenSymphony Rich Client, Hosted Mode, and Planning Implementation Plan
     docs_target: docs/host-client-implementation_plan.md
@@ -126,10 +146,16 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - OpenSymphony Rich Client, Hosted Mode, and Planning Implementation Plan
+    - host-client-implementation-plan
+    - opensymphony rich client, hosted mode, and planning implementation plan
     source_refs:
       docs:
       - docs/host-client-implementation_plan.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
+      - 'M6: Gateway And Stream Contract'
+      - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9: Collaborative Planning Alpha'
   hosted-client-prd:
     title: OpenSymphony Rich Client, Hosted Mode, and Collaborative Planning PRD
     docs_target: docs/hosted-client-PRD.md
@@ -137,10 +163,16 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - OpenSymphony Rich Client, Hosted Mode, and Collaborative Planning PRD
+    - hosted-client-prd
+    - opensymphony rich client, hosted mode, and collaborative planning prd
     source_refs:
       docs:
       - docs/hosted-client-PRD.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
+      - 'M6: Gateway And Stream Contract'
+      - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9: Collaborative Planning Alpha'
   implementation-plan:
     title: Implementation Plan
     docs_target: docs/implementation-plan.md
@@ -148,10 +180,16 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Implementation Plan
+    - implementation plan
+    - implementation-plan
     source_refs:
       docs:
       - docs/implementation-plan.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
+      - 'M6: Gateway And Stream Contract'
+      - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9: Collaborative Planning Alpha'
   linear-and-tools:
     title: Linear and Tools
     docs_target: docs/linear-and-tools.md
@@ -159,7 +197,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Linear and Tools
+    - linear and tools
     source_refs:
       docs:
       - docs/linear-and-tools.md
@@ -170,10 +208,13 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Project Memory
+    - memory
+    - project memory
     source_refs:
       docs:
       - docs/memory.md
+      linear_milestones:
+      - 'M8: Task Graph Operations And OpenHands Run UI'
   memory-capture-and-doc-sync:
     title: OpenSymphony Memory Capture and Documentation Sync
     docs_target: docs/memory-capture-and-doc-sync.md
@@ -181,7 +222,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - OpenSymphony Memory Capture and Documentation Sync
+    - opensymphony memory capture and documentation sync
     source_refs:
       docs:
       - docs/memory-capture-and-doc-sync.md
@@ -192,7 +233,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - OpenSymphony 1.0.0 Migration Guide
+    - opensymphony 1.0.0 migration guide
     source_refs:
       docs:
       - docs/migration-1.0.0.md
@@ -203,7 +244,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - OpenHands Agent-Server Integration
+    - openhands agent-server integration
     source_refs:
       docs:
       - docs/openhands-agent-server.md
@@ -214,7 +255,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Subscription-Based OpenAI ChatGPT/Codex Authentication with `openhands agent-server`
+    - subscription-based openai chatgpt/codex authentication with `openhands agent-server`
     source_refs:
       docs:
       - docs/openhands_agent_server_subscription_auth_analysis.md
@@ -225,10 +266,12 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Operations
+    - operations
     source_refs:
       docs:
       - docs/operations.md
+      linear_milestones:
+      - 'M8: Task Graph Operations And OpenHands Run UI'
   prerequisites:
     title: Prerequisites
     docs_target: docs/prerequisites.md
@@ -236,7 +279,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Prerequisites
+    - prerequisites
     source_refs:
       docs:
       - docs/prerequisites.md
@@ -247,7 +290,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Repository Layout
+    - repository layout
     source_refs:
       docs:
       - docs/repository-layout.md
@@ -258,10 +301,14 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Sources and Trust Notes
+    - sources
+    - sources and trust notes
     source_refs:
       docs:
       - docs/sources.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
+      - 'M9: Collaborative Planning Alpha'
   symphony-spec-alignment:
     title: Symphony Spec Alignment
     docs_target: docs/symphony-spec-alignment.md
@@ -269,7 +316,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Symphony Spec Alignment
+    - symphony spec alignment
     source_refs:
       docs:
       - docs/symphony-spec-alignment.md
@@ -280,10 +327,15 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Testing
+    - testing
+    - testing-and-operations
     source_refs:
       docs:
       - docs/testing-and-operations.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
+      - 'M6: Gateway And Stream Contract'
+      - 'M9: Collaborative Planning Alpha'
   ui-frankentui:
     title: FrankenTUI Operator UI
     docs_target: docs/ui-frankentui.md
@@ -291,7 +343,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - FrankenTUI Operator UI
+    - frankentui operator ui
     source_refs:
       docs:
       - docs/ui-frankentui.md
@@ -302,7 +354,7 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - WebSocket Runtime Contract
+    - websocket runtime contract
     source_refs:
       docs:
       - docs/websocket-runtime.md
@@ -313,7 +365,9 @@ areas:
     status: stable
     confidence: 85
     aliases:
-    - Workspace and Lifecycle
+    - workspace and lifecycle
     source_refs:
       docs:
       - docs/workspace-and-lifecycle.md
+redaction:
+  deny_patterns: []

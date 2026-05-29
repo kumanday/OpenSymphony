@@ -362,7 +362,7 @@ That document covers:
 
 ## Current model
 
-- COE-279 contributed: No merged PR source was matched during capture.
+- COE-406 contributed: PR #95: COE-406: Add planning-stage analysis module (merge `59240e2`)
 
 ## Important invariants
 
@@ -371,11 +371,7 @@ That document covers:
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Testing"]
-  area --> docs["docs/testing-and-operations.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -383,10 +379,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-279: Reject or propagate unsupported OpenHands agent option passthrough
+- COE-406: Repository, Linear, And Research Analysis
 
 ## Source refs
 
-- COE-279
+- COE-406
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

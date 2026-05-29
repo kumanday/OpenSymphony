@@ -667,6 +667,8 @@ async fn run_conversation(
 #[derive(Deserialize)]
 struct SearchQuery {
     page_id: Option<String>,
+    limit: Option<usize>,
+    sort_order: Option<String>,
 }
 
 async fn search_events(
@@ -689,15 +691,23 @@ async fn search_events(
     if let Some(response) = conversation.scripted_search_responses.pop_front() {
         return Ok(Json(response));
     }
-    let page = conversation
-        .events
+    let limit = query.limit.unwrap_or(page_size).max(1);
+    let mut events = conversation.events.clone();
+    if query
+        .sort_order
+        .as_deref()
+        .is_some_and(|sort_order| sort_order.eq_ignore_ascii_case("TIMESTAMP_DESC"))
+    {
+        events.sort_by(|left, right| compare_events(right, left));
+    }
+    let page = events
         .iter()
         .skip(offset)
-        .take(page_size)
+        .take(limit)
         .cloned()
         .collect::<Vec<_>>();
     let next_offset = offset + page.len();
-    let next_page_id = (next_offset < conversation.events.len()).then(|| next_offset.to_string());
+    let next_page_id = (next_offset < events.len()).then(|| next_offset.to_string());
 
     Ok(Json(SearchConversationEventsResponse {
         events: page,

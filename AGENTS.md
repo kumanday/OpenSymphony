@@ -85,6 +85,13 @@ Preferred crate and trait boundaries:
 
 Add new crates only when there is a clear ownership boundary.
 
+OpenSymphony publishes as a single `opensymphony` crate. The `crates/opensymphony-*`
+directories are internal source-module boundaries, not independently packaged
+Cargo crates. They should be included from the root crate with `#[path = ...]`
+module declarations and should not have their own `Cargo.toml` files or appear
+as `[workspace].members` unless the user explicitly approves splitting the
+project into multiple published packages.
+
 ### Prefer actor ownership over shared locks
 
 The orchestrator should own mutable runtime state in one async task.

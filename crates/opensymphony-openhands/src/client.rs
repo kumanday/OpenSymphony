@@ -330,6 +330,7 @@ impl TransportConfig {
     fn websocket_request(
         &self,
         conversation_id: Uuid,
+        resend_all: bool,
     ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, OpenHandsError> {
         let mut url = self.parsed_base_url()?;
         let scheme = match url.scheme() {
@@ -355,6 +356,9 @@ impl TransportConfig {
         };
         url.set_path(&path);
         self.auth.apply_websocket_query(&mut url);
+        if resend_all {
+            url.query_pairs_mut().append_pair("resend_all", "true");
+        }
 
         let mut request = url.as_str().into_client_request().map_err(|error| {
             OpenHandsError::invalid_configuration(format!(
@@ -489,6 +493,7 @@ pub struct RuntimeStreamConfig {
     pub reconnect_initial_backoff: Duration,
     pub reconnect_max_backoff: Duration,
     pub max_reconnect_attempts: usize,
+    pub replay_existing_events_on_attach: bool,
 }
 
 impl Default for RuntimeStreamConfig {
@@ -498,6 +503,7 @@ impl Default for RuntimeStreamConfig {
             reconnect_initial_backoff: Duration::from_secs(1),
             reconnect_max_backoff: Duration::from_secs(30),
             max_reconnect_attempts: 8,
+            replay_existing_events_on_attach: false,
         }
     }
 }
@@ -559,6 +565,14 @@ impl RuntimeEventStream {
 
     pub async fn reconcile_events(&mut self) -> Result<usize, OpenHandsError> {
         let reconciled = self.client.search_all_events(self.conversation_id).await?;
+        Ok(self.push_new_events(reconciled.items().iter().cloned(), true))
+    }
+
+    pub async fn reconcile_recent_events(&mut self, limit: usize) -> Result<usize, OpenHandsError> {
+        let reconciled = self
+            .client
+            .search_recent_events(self.conversation_id, limit)
+            .await?;
         Ok(self.push_new_events(reconciled.items().iter().cloned(), true))
     }
 
@@ -733,6 +747,12 @@ impl RuntimeEventStream {
         Ok(self)
     }
 
+    async fn attach_with_recent_events(mut self, limit: usize) -> Result<Self, OpenHandsError> {
+        self.refresh_conversation().await?;
+        self.connect_ready_and_reconcile_recent(limit).await?;
+        Ok(self)
+    }
+
     async fn refresh_conversation(&mut self) -> Result<(), OpenHandsError> {
         self.conversation = self.client.get_conversation(self.conversation_id).await?;
         self.rebuild_state_mirror();
@@ -771,13 +791,44 @@ impl RuntimeEventStream {
     }
 
     async fn connect_ready_and_reconcile(&mut self) -> Result<(), OpenHandsError> {
-        let mut socket = self.client.connect_websocket(self.conversation_id).await?;
+        let mut socket = self
+            .client
+            .connect_websocket(
+                self.conversation_id,
+                self.config.replay_existing_events_on_attach,
+            )
+            .await?;
         let ready_event =
             wait_for_readiness_on_stream(&mut socket, self.config.readiness_timeout).await?;
         self.ready_event = ready_event.clone();
         self.socket = Some(socket);
 
         let reconciled = self.client.search_all_events(self.conversation_id).await?;
+        self.push_new_events(reconciled.items().iter().cloned(), true);
+        self.rebuild_state_mirror();
+        Ok(())
+    }
+
+    async fn connect_ready_and_reconcile_recent(
+        &mut self,
+        limit: usize,
+    ) -> Result<(), OpenHandsError> {
+        let mut socket = self
+            .client
+            .connect_websocket(
+                self.conversation_id,
+                self.config.replay_existing_events_on_attach,
+            )
+            .await?;
+        let ready_event =
+            wait_for_readiness_on_stream(&mut socket, self.config.readiness_timeout).await?;
+        self.ready_event = ready_event.clone();
+        self.socket = Some(socket);
+
+        let reconciled = self
+            .client
+            .search_recent_events(self.conversation_id, limit)
+            .await?;
         self.push_new_events(reconciled.items().iter().cloned(), true);
         self.rebuild_state_mirror();
         Ok(())
@@ -1020,11 +1071,29 @@ impl OpenHandsClient {
         conversation_id: Uuid,
         page_id: Option<&str>,
     ) -> Result<SearchConversationEventsResponse, OpenHandsError> {
+        self.search_events_page_with_options(conversation_id, page_id, None, None)
+            .await
+    }
+
+    async fn search_events_page_with_options(
+        &self,
+        conversation_id: Uuid,
+        page_id: Option<&str>,
+        limit: Option<usize>,
+        sort_order: Option<&str>,
+    ) -> Result<SearchConversationEventsResponse, OpenHandsError> {
         let mut url = self.transport.endpoint(&format!(
             "/api/conversations/{conversation_id}/events/search"
         ))?;
         if let Some(page_id) = page_id {
             url.query_pairs_mut().append_pair("page_id", page_id);
+        }
+        if let Some(limit) = limit {
+            url.query_pairs_mut()
+                .append_pair("limit", &limit.max(1).to_string());
+        }
+        if let Some(sort_order) = sort_order {
+            url.query_pairs_mut().append_pair("sort_order", sort_order);
         }
 
         let response = send(
@@ -1053,6 +1122,24 @@ impl OpenHandsClient {
         }
     }
 
+    pub async fn search_recent_events(
+        &self,
+        conversation_id: Uuid,
+        limit: usize,
+    ) -> Result<EventCache, OpenHandsError> {
+        let page = self
+            .search_events_page_with_options(
+                conversation_id,
+                None,
+                Some(limit),
+                Some("TIMESTAMP_DESC"),
+            )
+            .await?;
+        let mut cache = EventCache::new();
+        cache.extend(page.events);
+        Ok(cache)
+    }
+
     pub async fn attach_runtime_stream(
         &self,
         conversation_id: Uuid,
@@ -1064,12 +1151,24 @@ impl OpenHandsClient {
             .await
     }
 
+    pub async fn attach_runtime_stream_with_recent_events(
+        &self,
+        conversation_id: Uuid,
+        config: RuntimeStreamConfig,
+        recent_limit: usize,
+    ) -> Result<RuntimeEventStream, OpenHandsError> {
+        let conversation = self.get_conversation(conversation_id).await?;
+        RuntimeEventStream::new(self.clone(), conversation_id, config, conversation)
+            .attach_with_recent_events(recent_limit)
+            .await
+    }
+
     pub async fn wait_for_readiness(
         &self,
         conversation_id: Uuid,
         wait_timeout: Duration,
     ) -> Result<EventEnvelope, OpenHandsError> {
-        let mut stream = self.connect_websocket(conversation_id).await?;
+        let mut stream = self.connect_websocket(conversation_id, false).await?;
         wait_for_readiness_on_stream(&mut stream, wait_timeout).await
     }
 
@@ -1101,6 +1200,7 @@ impl OpenHandsClient {
                     reconnect_initial_backoff: Duration::from_millis(100),
                     reconnect_max_backoff: Duration::from_secs(1),
                     max_reconnect_attempts: 4,
+                    replay_existing_events_on_attach: false,
                 },
             )
             .await?;
@@ -1160,8 +1260,11 @@ impl OpenHandsClient {
     async fn connect_websocket(
         &self,
         conversation_id: Uuid,
+        resend_all: bool,
     ) -> Result<RuntimeSocket, OpenHandsError> {
-        let ws_request = self.transport.websocket_request(conversation_id)?;
+        let ws_request = self
+            .transport
+            .websocket_request(conversation_id, resend_all)?;
         let (stream, _) = connect_async(ws_request).await.map_err(|error| {
             OpenHandsError::websocket_transport("connect runtime stream", error)
         })?;

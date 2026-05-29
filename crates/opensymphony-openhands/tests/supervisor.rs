@@ -268,6 +268,67 @@ fn supervised_mode_rejects_a_foreign_ready_server_on_its_target_port() {
 }
 
 #[test]
+fn supervised_mode_rejects_a_foreign_unready_server_on_its_target_port() {
+    let fixture = FakeToolingFixture::new("ready");
+    let port = free_port();
+    let mut foreign = fixture.spawn_external_server(port, "unready");
+
+    wait_for_ready(port);
+
+    let mut config = SupervisedServerConfig::new(
+        LocalServerTooling::load(fixture.tool_dir()).expect("tooling should load"),
+    );
+    config.port_override = Some(port);
+    config.startup_timeout = Duration::from_millis(150);
+    config.probe.poll_interval = Duration::from_millis(25);
+
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
+    let error = supervisor
+        .start()
+        .expect_err("supervised mode should reject occupied unready ports");
+
+    assert!(matches!(
+        error,
+        SupervisorError::ExistingUnreadyServer { .. }
+    ));
+    assert!(foreign.try_wait().expect("poll foreign child").is_none());
+
+    foreign.kill().expect("kill child");
+    foreign.wait().expect("wait child");
+}
+
+#[test]
+fn supervised_mode_waits_for_occupied_server_to_become_ready() {
+    let fixture = FakeToolingFixture::new("ready");
+    let port = free_port();
+    let mut foreign = fixture.spawn_external_server_with_env(
+        port,
+        "warming",
+        &[("FAKE_READY_DELAY_SECS", "0.2")],
+    );
+
+    wait_for_ready(port);
+
+    let mut config = SupervisedServerConfig::new(
+        LocalServerTooling::load(fixture.tool_dir()).expect("tooling should load"),
+    );
+    config.port_override = Some(port);
+    config.startup_timeout = Duration::from_secs(2);
+    config.probe.poll_interval = Duration::from_millis(25);
+
+    let mut supervisor = LocalServerSupervisor::new(SupervisorConfig::Supervised(Box::new(config)));
+    let error = supervisor
+        .start()
+        .expect_err("supervised mode should reuse a server once it becomes ready");
+
+    assert!(matches!(error, SupervisorError::ExistingReadyServer { .. }));
+    assert!(foreign.try_wait().expect("poll foreign child").is_none());
+
+    foreign.kill().expect("kill child");
+    foreign.wait().expect("wait child");
+}
+
+#[test]
 fn supervised_start_supports_relative_tool_dir_paths() {
     let current_dir = std::env::current_dir().expect("cwd should resolve");
     let temp_dir = tempfile::tempdir_in(&current_dir).expect("temp dir");
@@ -364,10 +425,15 @@ impl FakeToolingFixture {
     }
 
     fn spawn_external_server(&self, port: u16, mode: &str) -> Child {
+        self.spawn_external_server_with_env(port, mode, &[])
+    }
+
+    fn spawn_external_server_with_env(&self, port: u16, mode: &str, env: &[(&str, &str)]) -> Child {
         Command::new(&self.python)
             .arg(self.tool_dir().join("fake_server.py"))
             .arg(port.to_string())
             .env("FAKE_SERVER_MODE", mode)
+            .envs(env.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -409,12 +475,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 port = int(sys.argv[1])
 mode = sys.argv[2] if len(sys.argv) > 2 else os.environ.get("FAKE_SERVER_MODE", "ready")
+ready_at = None
 
 if mode == "exit":
     sys.exit(int(os.environ.get("FAKE_EXIT_CODE", "41")))
 
 if mode == "slow":
     time.sleep(float(os.environ.get("FAKE_READY_DELAY_SECS", "2.0")))
+
+if mode == "warming":
+    ready_at = time.time() + float(os.environ.get("FAKE_READY_DELAY_SECS", "0.2"))
 
 if mode == "crash":
     def crash_later():
@@ -426,6 +496,10 @@ if mode == "crash":
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/openapi.json":
+            if mode == "unready" or (ready_at is not None and time.time() < ready_at):
+                self.send_response(503)
+                self.end_headers()
+                return
             body = json.dumps({"ok": True}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")

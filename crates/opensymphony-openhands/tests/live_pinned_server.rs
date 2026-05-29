@@ -62,6 +62,7 @@ async fn live_pinned_server_authenticates_external_http_and_websocket_paths() {
                 reconnect_initial_backoff: Duration::from_millis(100),
                 reconnect_max_backoff: Duration::from_millis(250),
                 max_reconnect_attempts: 1,
+                replay_existing_events_on_attach: false,
             },
         )
         .await
@@ -134,6 +135,7 @@ async fn live_pinned_server_rejects_missing_http_auth_and_wrong_websocket_auth()
                 reconnect_initial_backoff: Duration::from_millis(100),
                 reconnect_max_backoff: Duration::from_millis(250),
                 max_reconnect_attempts: 1,
+                replay_existing_events_on_attach: false,
             },
         )
         .await

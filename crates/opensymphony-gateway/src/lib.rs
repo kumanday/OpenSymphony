@@ -495,45 +495,10 @@ async fn event_stream_ws(
             let connection_id: Arc<str> = Arc::from(format!("ws-{}", uuid::Uuid::new_v4()));
             broker.register_connection(connection_id.clone()).await;
 
-            let init_timeout = tokio::time::timeout(Duration::from_secs(10), socket.recv());
-            let (cursor, partition) = match init_timeout.await {
-                Ok(Some(Ok(init_msg))) => match parse_init_message(&init_msg) {
-                    Ok((cursor, partition)) => (cursor, partition),
-                    Err(e) => {
-                        tracing::warn!(
-                            connection_id = %connection_id,
-                            error = %e,
-                            "Failed to parse init message, closing connection"
-                        );
-                        let error_frame = serde_json::to_string(&StreamError::server_error(
-                            "Failed to parse init message",
-                        ))
-                        .expect("serialization of derived Serialize type should never fail");
-                        let _ = socket
-                            .send(Message::Text(format!("__error__ {error_frame}").into()))
-                            .await;
-                        broker.unregister_connection(&connection_id).await;
-                        return;
-                    }
-                },
-                Ok(Some(Err(e))) => {
-                    tracing::warn!(
-                        connection_id = %connection_id,
-                        error = %e,
-                        "WebSocket error during init read, closing connection"
-                    );
-                    broker.unregister_connection(&connection_id).await;
-                    return;
-                }
-                Ok(None) => {
-                    tracing::info!(
-                        connection_id = %connection_id,
-                        "Client closed connection before sending init message"
-                    );
-                    broker.unregister_connection(&connection_id).await;
-                    return;
-                }
-                Err(_) => {
+            let init_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let (cursor, partition) = loop {
+                let remaining = init_deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
                     tracing::warn!(
                         connection_id = %connection_id,
                         "Init message timed out; closing WebSocket connection"
@@ -547,6 +512,88 @@ async fn event_stream_ws(
                         .await;
                     broker.unregister_connection(&connection_id).await;
                     return;
+                }
+
+                let recv_fut = socket.recv();
+                tokio::pin!(recv_fut);
+                match tokio::time::timeout(remaining, recv_fut).await {
+                    Ok(Some(Ok(msg))) => match &msg {
+                        Message::Text(_) => {
+                            match parse_init_message(&msg) {
+                                Ok((c, p)) => break (c, p),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        connection_id = %connection_id,
+                                        error = %e,
+                                        "Failed to parse init message, closing connection"
+                                    );
+                                    let error_frame = serde_json::to_string(&StreamError::server_error(
+                                        "Failed to parse init message",
+                                    ))
+                                    .expect("serialization of derived Serialize type should never fail");
+                                    let _ = socket
+                                        .send(Message::Text(format!("__error__ {error_frame}").into()))
+                                        .await;
+                                    broker.unregister_connection(&connection_id).await;
+                                    return;
+                                }
+                            }
+                        }
+                        Message::Ping(_) => {
+                            // Respond to Ping with Pong to keep the connection alive
+                            // while waiting for the init message.
+                            if let Message::Ping(payload) = msg {
+                                let _ = socket.send(Message::Pong(payload.clone())).await;
+                            }
+                        }
+                        Message::Pong(_) => {
+                            // Ignore unsolicited Pong frames during init.
+                        }
+                        Message::Binary(_) => {
+                            // Binary frames are not expected during init; ignore.
+                        }
+                        Message::Close(_) => {
+                            tracing::info!(
+                                connection_id = %connection_id,
+                                "Client closed connection before sending init message"
+                            );
+                            broker.unregister_connection(&connection_id).await;
+                            return;
+                        }
+                    },
+                    Ok(Some(Err(e))) => {
+                        tracing::warn!(
+                            connection_id = %connection_id,
+                            error = %e,
+                            "WebSocket error during init read, closing connection"
+                        );
+                        broker.unregister_connection(&connection_id).await;
+                        return;
+                    }
+                    Ok(None) => {
+                        tracing::info!(
+                            connection_id = %connection_id,
+                            "Client closed connection before sending init message"
+                        );
+                        broker.unregister_connection(&connection_id).await;
+                        return;
+                    }
+                    Err(_) => {
+                        // Timeout expired waiting for init message
+                        tracing::warn!(
+                            connection_id = %connection_id,
+                            "Init message timed out; closing WebSocket connection"
+                        );
+                        let error_frame = serde_json::to_string(&StreamError::server_error(
+                            "Init message not received within timeout; connection closed",
+                        ))
+                        .expect("serialization of derived Serialize type should never fail");
+                        let _ = socket
+                            .send(Message::Text(format!("__error__ {error_frame}").into()))
+                            .await;
+                        broker.unregister_connection(&connection_id).await;
+                        return;
+                    }
                 }
             };
 

@@ -25,6 +25,9 @@ opensymphony init
 - can optionally scaffold OpenHands AI PR review
 - can configure the GitHub Actions variables, label, and optional review secret
   automatically when `gh` is installed and can access the repository
+- prompts whether to commit and push the generated OpenSymphony files so shared
+  skills and, when selected, AI PR Review setup are present in the remote
+  repository before story work starts
 
 For repositories that are already initialized, `opensymphony update` is the
 maintenance path for template-owned skills:
@@ -93,6 +96,12 @@ gh label create "review-this" --description "Trigger AI PR review" --color "d73a
 ## Review The Generated Workflow
 
 After `init`, review `WORKFLOW.md` and `config.yaml`.
+
+If you accept the final commit/push prompt, `init` stages only the files it
+created or updated, commits them as `chore: bootstrap OpenSymphony`, and pushes
+`HEAD` to the detected git remote. If the repository already has staged changes
+or no single remote can be detected, `init` leaves git alone and prints a
+reminder to commit and push manually.
 
 Important fields:
 
@@ -292,9 +301,7 @@ copy that guide into the target repository.
 
 ## Current model
 
-- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
-- COE-288 contributed: PR #51: Add configurable OpenHands context condenser support (merge `102a93c`)
-- COE-293 contributed: PR #56: fix: add OpenHands filesystem tools to coding agents (merge `2f34058`)
+- COE-401 contributed: PR #92: COE-401: Web app entry and deployment modes (merge `73b9067`)
 
 ## Important invariants
 
@@ -303,11 +310,7 @@ copy that guide into the target repository.
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Configuration"]
-  area --> docs["docs/configuration.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -315,14 +318,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
-- COE-288: Add context condenser support to prevent LLM context window overflow
-- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+- COE-401: Web App Entry And Deployment Modes
 
 ## Source refs
 
-- COE-286
-- COE-288
-- COE-293
+- COE-401
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

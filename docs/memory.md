@@ -239,11 +239,7 @@ recovery. To archive from already captured memory without recapturing, use
 
 ## Current model
 
-- COE-280 contributed: PR #54: Support workflow-owned OpenHands runtime overrides (merge `5663898`)
-- COE-281 contributed: PR #55: COE-281: support path-prefixed OpenHands URLs and MCP config (merge `a50e435`)
-- COE-282 contributed: PR #52: Support workflow-owned OpenHands conversation reuse policy at runtime (merge `ad111a3`)
-- COE-287 contributed: PR #48: Add opensymphony debug command for issue conversations (merge `021f5ad`)
-- COE-294 contributed: PR #58: COE-294: detect LLM config drift and rehydrate conversations (merge `5ab7015`)
+- COE-399 contributed: PR #94: COE-399: Linear read coverage, schema drift validation, and task graph cache (merge `db4e2e6`)
 
 ## Important invariants
 
@@ -252,11 +248,7 @@ recovery. To archive from already captured memory without recapturing, use
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Project Memory"]
-  area --> docs["docs/memory.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -264,18 +256,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
-- COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
-- COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
-- COE-287: Add opensymphony debug command for conversational session debugging
-- COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
+- COE-399: Linear Read Coverage And Task Graph Cache
 
 ## Source refs
 
-- COE-280
-- COE-281
-- COE-282
-- COE-287
-- COE-294
+- COE-399
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

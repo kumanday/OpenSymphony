@@ -903,3 +903,32 @@ Generated project plans can be over-broad, under-specified, or poorly decomposed
 6. Add mutation APIs only after read APIs and event streams are stable.
 7. Introduce hosted auth and tenancy only after local/external gateway contracts are stable.
 8. Add subscription credential support for OpenHands agent-server, starting with OpenAI ChatGPT/Codex, and add Codex app-server later through the harness abstraction after both seams have been tested with local and hosted flows.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-406 contributed: PR #95: COE-406: Add planning-stage analysis module (merge `59240e2`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+- No generated diagram requested for this sync.
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-406: Repository, Linear, And Research Analysis
+
+## Source refs
+
+- COE-406
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -44,6 +44,9 @@ Important `init` behavior:
 - can configure GitHub Actions variables, the `review-this` label, and the
   optional AI review secret automatically when `gh` is installed and can access
   the target repository
+- prompts whether to commit and push the generated OpenSymphony files; when
+  accepted, it stages only files it wrote, commits `chore: bootstrap
+  OpenSymphony`, and pushes `HEAD` to the detected remote
 - copies `.agents/skills/` recursively so helper scripts, query files, and
   reference docs all arrive together
 - keeps bootstrap guidance in CLI output and the central OpenSymphony docs
@@ -218,6 +221,9 @@ opensymphony doctor --config ./config.yaml --rehydrate
 - prefer loopback-only OpenHands targets for local development
 - treat target repos and prompts as trusted local input
 - do not keep unrelated OpenHands servers running on the same configured port
+- stop `opensymphony run` with Ctrl-C so the orchestrator can terminate its
+  managed OpenHands process tree; Ctrl-Z only suspends the orchestrator and can
+  leave the server bound to the configured port
 - do not store provider secrets in checked-in files
 
 ## 9. Migration note
@@ -230,8 +236,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
-- COE-293 contributed: PR #56: fix: add OpenHands filesystem tools to coding agents (merge `2f34058`)
+- COE-399 contributed: PR #94: COE-399: Linear read coverage, schema drift validation, and task graph cache (merge `db4e2e6`)
 
 ## Important invariants
 
@@ -240,11 +245,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Operations"]
-  area --> docs["docs/operations.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -252,12 +253,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
-- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+- COE-399: Linear Read Coverage And Task Graph Cache
 
 ## Source refs
 
-- COE-286
-- COE-293
+- COE-399
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

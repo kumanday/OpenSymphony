@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     io::{self, BufRead, Write},
     path::{Path, PathBuf},
@@ -498,6 +499,9 @@ where
 
     prompt_for_missing_llm_env(env_lookup, ui)?;
 
+    let changed_paths = changed_paths_for_commit(&created, &overwritten, &updated);
+    prompt_to_commit_and_push(ui, &target_repo, &git_remote, &changed_paths)?;
+
     ui.blank_line()?;
     ui.line("OpenSymphony init complete.")?;
     Ok(())
@@ -924,6 +928,172 @@ where
     Ok(())
 }
 
+fn changed_paths_for_commit(
+    created: &[String],
+    overwritten: &[String],
+    updated: &[String],
+) -> Vec<String> {
+    created
+        .iter()
+        .chain(overwritten)
+        .chain(updated)
+        .filter(|path| !path.trim().is_empty())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn prompt_to_commit_and_push<R, W>(
+    ui: &mut PromptUi<R, W>,
+    target_repo: &Path,
+    git_remote: &GitRemoteDetection,
+    changed_paths: &[String],
+) -> Result<(), InitCommandError>
+where
+    R: BufRead,
+    W: Write,
+{
+    if changed_paths.is_empty() {
+        return Ok(());
+    }
+
+    ui.blank_line()?;
+    ui.line(
+        "OpenSymphony wrote bootstrap files that should be committed and pushed before story work so shared agent skills and any AI PR Review setup are available.",
+    )?;
+
+    let Some(remote_name) = git_remote_name(git_remote) else {
+        ui.line(
+            "Skipping automatic commit/push because no single git remote was detected. Commit and push the generated OpenSymphony files before starting story work.",
+        )?;
+        return Ok(());
+    };
+
+    let branch_name = match current_git_branch(target_repo) {
+        Ok(Some(branch_name)) => branch_name,
+        Ok(None) => {
+            ui.line(
+                "Skipping automatic commit/push because the repository is not on a named branch. Commit and push the generated OpenSymphony files before starting story work.",
+            )?;
+            return Ok(());
+        }
+        Err(error) => {
+            ui.line(format!(
+                "Skipping automatic commit/push because git branch detection failed: {error}"
+            ))?;
+            return Ok(());
+        }
+    };
+
+    match git_has_staged_changes(target_repo) {
+        Ok(false) => {}
+        Ok(true) => {
+            ui.line(
+                "Skipping automatic commit/push because there are already staged git changes. Commit or unstage those first, then commit and push the generated OpenSymphony files.",
+            )?;
+            return Ok(());
+        }
+        Err(error) => {
+            ui.line(format!(
+                "Skipping automatic commit/push because git status failed: {error}"
+            ))?;
+            return Ok(());
+        }
+    }
+
+    if !prompt_yes_no(
+        ui,
+        &format!(
+            "Commit and push these OpenSymphony bootstrap changes to `{remote_name}/{branch_name}` now? [y/N]: "
+        ),
+        false,
+    )? {
+        ui.line(
+            "Skipped commit/push for now. Before starting story work, commit and push the generated OpenSymphony files.",
+        )?;
+        return Ok(());
+    }
+
+    match commit_and_push_bootstrap_changes(target_repo, remote_name, changed_paths) {
+        Ok(()) => {
+            ui.line(format!(
+                "Committed and pushed OpenSymphony bootstrap changes to `{remote_name}/{branch_name}`."
+            ))?;
+        }
+        Err(error) => {
+            ui.line(format!(
+                "Git commit/push could not finish automatically: {error}"
+            ))?;
+            ui.line(
+                "Review `git status`, then commit and push the generated OpenSymphony files before starting story work.",
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn current_git_branch(target_repo: &Path) -> Result<Option<String>, String> {
+    let output = run_git_command(target_repo, &["branch", "--show-current"])
+        .map_err(|source| format!("failed to run `git branch --show-current`: {source}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`git branch --show-current` failed: {}",
+            summarize_command_output(&output)
+        ));
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!branch.is_empty()).then_some(branch))
+}
+
+fn git_has_staged_changes(target_repo: &Path) -> Result<bool, String> {
+    let output = run_git_command(target_repo, &["diff", "--cached", "--quiet"])
+        .map_err(|source| format!("failed to run `git diff --cached --quiet`: {source}"))?;
+    if output.status.success() {
+        return Ok(false);
+    }
+
+    match output.status.code() {
+        Some(1) => Ok(true),
+        _ => Err(format!(
+            "`git diff --cached --quiet` failed: {}",
+            summarize_command_output(&output)
+        )),
+    }
+}
+
+fn commit_and_push_bootstrap_changes(
+    target_repo: &Path,
+    remote_name: &str,
+    changed_paths: &[String],
+) -> Result<(), String> {
+    let mut add_args = vec!["add".to_string(), "--".to_string()];
+    add_args.extend(changed_paths.iter().cloned());
+    run_git_command_checked(target_repo, &add_args)?;
+
+    run_git_command_checked(
+        target_repo,
+        &[
+            "commit".to_string(),
+            "-m".to_string(),
+            "chore: bootstrap OpenSymphony".to_string(),
+        ],
+    )?;
+    run_git_command_checked(
+        target_repo,
+        &[
+            "push".to_string(),
+            "-u".to_string(),
+            remote_name.to_string(),
+            "HEAD".to_string(),
+        ],
+    )?;
+
+    Ok(())
+}
+
 fn prompt_yes_no<R, W>(
     ui: &mut PromptUi<R, W>,
     prompt: &str,
@@ -1105,6 +1275,13 @@ fn select_remote_name(remotes: &[String]) -> Option<String> {
 fn git_remote_url(detection: &GitRemoteDetection) -> Option<&str> {
     match detection {
         GitRemoteDetection::Selected { url, .. } => Some(url.as_str()),
+        GitRemoteDetection::None | GitRemoteDetection::Ambiguous(_) => None,
+    }
+}
+
+fn git_remote_name(detection: &GitRemoteDetection) -> Option<&str> {
+    match detection {
+        GitRemoteDetection::Selected { remote_name, .. } => Some(remote_name.as_str()),
         GitRemoteDetection::None | GitRemoteDetection::Ambiguous(_) => None,
     }
 }
@@ -1517,6 +1694,30 @@ fn run_gh_command(target_repo: &Path, args: &[&str]) -> io::Result<Output> {
         .args(args)
         .current_dir(target_repo)
         .output()
+}
+
+fn run_git_command(target_repo: &Path, args: &[&str]) -> io::Result<Output> {
+    std::process::Command::new("git")
+        .args(args)
+        .current_dir(target_repo)
+        .output()
+}
+
+fn run_git_command_checked(target_repo: &Path, args: &[String]) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(target_repo)
+        .output()
+        .map_err(|source| format!("failed to run `git {}`: {source}", args.join(" ")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "`git {}` failed: {}",
+            args.join(" "),
+            summarize_command_output(&output)
+        ))
+    }
 }
 
 fn run_gh_command_checked(target_repo: &Path, args: &[&str]) -> Result<(), String> {

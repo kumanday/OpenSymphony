@@ -238,7 +238,7 @@ This sequencing gives the project the fastest path to a working developer-focuse
 
 ## Current model
 
-- COE-275 contributed: PR #1: COE-257: tighten hosted deployment guidance
+- COE-401 contributed: PR #92: COE-401: Web app entry and deployment modes (merge `73b9067`)
 
 ## Important invariants
 
@@ -247,11 +247,7 @@ This sequencing gives the project the fastest path to a working developer-focuse
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Deployment Modes"]
-  area --> docs["docs/deployment-modes.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -259,10 +255,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-275: Remote agent-server mode and auth hardening
+- COE-401: Web App Entry And Deployment Modes
 
 ## Source refs
 
-- COE-275
+- COE-401
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

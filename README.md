@@ -104,6 +104,9 @@ If `AGENTS.md` already exists during first-time setup, `init` leaves it alone
 and writes the starter guidance to `AGENTS-example.md` for review.
 It also initializes `.opensymphony/memory/memory.yaml`, the shared policy and
 learned structure file required for default-on memory auto-capture.
+At the end of a successful bootstrap, `init` prompts whether to commit and push
+the generated OpenSymphony files so shared skills and, when selected, AI PR
+Review setup are in the remote repository before story work begins.
 
 For an existing target repo, `opensymphony update` is the lighter-weight
 maintenance path: it refreshes changed or new template-owned skill files under
@@ -316,10 +319,15 @@ rehydrated without losing continuity.
 
 When the workflow uses the local supervised OpenHands server, `opensymphony debug`
 targets the same configured base URL as the orchestrator. If a ready server is
-already listening there, the debug command reuses it; otherwise it starts a local
-server for the session. For the most predictable behavior, prefer the
+already listening there, the debug command reuses it; otherwise it waits through
+the configured startup window before starting a local server for the session. The
+default managed-local startup window is 180 seconds so agent-server has enough
+time to import the pinned environment and scan its active persistence store on
+slower local machines. For the most predictable behavior, prefer the
 orchestrator-managed server and avoid leaving unrelated standalone `openhands`
-CLI sessions bound to the same port.
+CLI sessions bound to the same port. Stop `opensymphony run` with Ctrl-C so the
+managed OpenHands process tree can be cleaned up; Ctrl-Z only suspends the
+orchestrator and can leave the port bound.
 
 Managed local OpenHands conversations are scoped by target repository under
 `<tool_dir>/workspace/conversations/repos/<repo-key>/`. The orchestrator starts

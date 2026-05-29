@@ -5,6 +5,8 @@ workflow.
 
 `opensymphony init` now tries to configure the GitHub Actions variables and
 label automatically when `gh` is installed and can access the target repository.
+It also prompts you to commit and push the generated OpenSymphony files so this
+workflow is present in GitHub before agents start opening story PRs.
 Use this guide to verify that setup, finish anything you skipped, or complete
 the fallback path when GitHub automation was unavailable.
 

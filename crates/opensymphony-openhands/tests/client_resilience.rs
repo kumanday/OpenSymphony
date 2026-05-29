@@ -441,6 +441,7 @@ async fn runtime_stream_does_not_replay_reconnect_readiness_barriers_without_new
                 reconnect_initial_backoff: Duration::from_millis(25),
                 reconnect_max_backoff: Duration::from_millis(100),
                 max_reconnect_attempts: 4,
+                replay_existing_events_on_attach: false,
             },
         )
         .await
@@ -486,6 +487,75 @@ async fn attach_runtime_stream_applies_readiness_snapshot_to_state_mirror() {
         Some("running"),
         "the ready-state barrier should refresh the mirror even when REST state and reconcile lag behind it"
     );
+}
+
+#[tokio::test]
+async fn attach_runtime_stream_with_recent_events_requests_bounded_descending_history() {
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(recent_history_attach_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let stream = client
+        .attach_runtime_stream_with_recent_events(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                ..RuntimeStreamConfig::default()
+            },
+            2,
+        )
+        .await
+        .expect("runtime stream attach should use bounded recent history");
+
+    let event_ids = stream
+        .event_cache()
+        .items()
+        .iter()
+        .map(|event| event.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(event_ids, vec!["evt-recent-1", "evt-recent-2"]);
+}
+
+#[tokio::test]
+async fn attach_runtime_stream_can_replay_persisted_events_for_idle_restored_conversation() {
+    let state = ReadinessMirrorState::default();
+    let server = TestServer::start(replay_on_attach_router(state)).await;
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let request = ConversationCreateRequest::doctor_probe(
+        "/tmp/workspace",
+        "/tmp/workspace/.opensymphony/openhands",
+        None,
+        None,
+    );
+    let conversation = client
+        .create_conversation(&request)
+        .await
+        .expect("conversation create should succeed");
+
+    let stream = client
+        .attach_runtime_stream_with_recent_events(
+            conversation.conversation_id,
+            RuntimeStreamConfig {
+                readiness_timeout: Duration::from_secs(2),
+                replay_existing_events_on_attach: true,
+                ..RuntimeStreamConfig::default()
+            },
+            2,
+        )
+        .await
+        .expect("runtime stream attach should use websocket replay for readiness");
+
+    assert_eq!(stream.ready_event().id, "evt-replayed-ready");
 }
 
 #[tokio::test]
@@ -812,6 +882,48 @@ fn readiness_mirror_router(state: ReadinessMirrorState) -> Router {
         .with_state(state)
 }
 
+fn recent_history_attach_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}/events/search",
+            get(recent_history_search_events),
+        )
+        .route(
+            "/sockets/events/{conversation_id}",
+            get(readiness_mirror_events_socket),
+        )
+        .with_state(state)
+}
+
+fn replay_on_attach_router(state: ReadinessMirrorState) -> Router {
+    Router::new()
+        .route(
+            "/api/conversations",
+            post(reused_conversation_readiness_mirror_create_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}",
+            get(readiness_mirror_get_conversation),
+        )
+        .route(
+            "/api/conversations/{conversation_id}/events/search",
+            get(recent_history_search_events),
+        )
+        .route(
+            "/sockets/events/{conversation_id}",
+            get(replay_on_attach_events_socket),
+        )
+        .with_state(state)
+}
+
 fn forward_compatible_readiness_mirror_router(state: ReadinessMirrorState) -> Router {
     Router::new()
         .route(
@@ -975,6 +1087,79 @@ async fn readiness_mirror_search_events(
         events: Vec::new(),
         next_page_id: None,
     }))
+}
+
+#[derive(serde::Deserialize)]
+struct RecentHistorySearchQuery {
+    limit: Option<usize>,
+    sort_order: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct ReplayAttachQuery {
+    resend_all: Option<bool>,
+}
+
+async fn recent_history_search_events(
+    Path(_conversation_id): Path<Uuid>,
+    Query(query): Query<RecentHistorySearchQuery>,
+) -> Result<Json<SearchConversationEventsResponse>, StatusCode> {
+    if query.limit != Some(2)
+        || query
+            .sort_order
+            .as_deref()
+            .is_none_or(|sort_order| sort_order != "TIMESTAMP_DESC")
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let now = Utc::now();
+    Ok(Json(SearchConversationEventsResponse {
+        events: vec![
+            EventEnvelope::new(
+                "evt-recent-2",
+                now,
+                "assistant",
+                "MessageEvent",
+                json!({
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "newest" }],
+                }),
+            ),
+            EventEnvelope::new(
+                "evt-recent-1",
+                now - chrono::Duration::seconds(1),
+                "assistant",
+                "MessageEvent",
+                json!({
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "recent" }],
+                }),
+            ),
+        ],
+        next_page_id: None,
+    }))
+}
+
+async fn replay_on_attach_events_socket(
+    Query(query): Query<ReplayAttachQuery>,
+    websocket: WebSocketUpgrade,
+) -> impl IntoResponse {
+    websocket.on_upgrade(async move |mut socket| {
+        if query.resend_all == Some(true) {
+            socket
+                .send(text_message(
+                    serde_json::to_string(&EventEnvelope::state_update(
+                        "evt-replayed-ready",
+                        "idle",
+                    ))
+                    .expect("ready event should serialize"),
+                ))
+                .await
+                .expect("replayed ready event should send");
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    })
 }
 
 async fn undecodable_newer_state_readiness_mirror_search_events(

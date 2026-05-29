@@ -198,8 +198,7 @@ Notable removals:
 
 ## Current model
 
-- COE-283 contributed: PR #50: Cache per-state running counts in the orchestrator scheduler (merge `0378518`)
-- COE-286 contributed: PR #49: Abort active CLI worker tasks on graceful shutdown (merge `2c839fd`)
+- COE-406 contributed: PR #95: COE-406: Add planning-stage analysis module (merge `59240e2`)
 
 ## Important invariants
 
@@ -208,11 +207,7 @@ Notable removals:
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Architecture"]
-  area --> docs["docs/architecture.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -220,12 +215,10 @@ flowchart TD
 
 ## Recent changes
 
-- COE-283: Cache per-state running counts in the orchestrator scheduler
-- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
+- COE-406: Repository, Linear, And Research Analysis
 
 ## Source refs
 
-- COE-283
-- COE-286
+- COE-406
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

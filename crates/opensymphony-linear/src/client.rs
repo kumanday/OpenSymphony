@@ -492,7 +492,7 @@ impl LinearClient {
         Ok(connection)
     }
 
-    async fn execute_graphql<T>(
+    pub(super) async fn execute_graphql<T>(
         &self,
         query: &'static str,
         variables: Value,
