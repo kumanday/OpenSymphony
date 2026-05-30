@@ -4,7 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
 
-permissions: {}
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
 
 concurrency:
   group: ai-pr-review-${{ github.event.pull_request.number }}
