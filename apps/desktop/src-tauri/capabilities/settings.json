@@ -1,0 +1,9 @@
+{
+  "identifier": "settings",
+  "description": "Scoped permission for local non-secret settings storage. Only read-text and write-text are granted — no directory listing, copy, or binary access. Secrets are out of scope (COE-409).",
+  "windows": ["main"],
+  "permissions": [
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file"
+  ]
+}

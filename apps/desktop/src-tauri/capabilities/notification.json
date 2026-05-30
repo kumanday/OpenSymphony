@@ -1,0 +1,11 @@
+{
+  "identifier": "notification",
+  "description": "Scoped permission for OS-level notifications. Used for long-running work status alerts.",
+  "windows": ["main"],
+  "permissions": [
+    "notification:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
+    "notification:allow-show"
+  ]
+}

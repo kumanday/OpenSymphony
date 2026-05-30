@@ -1,0 +1,51 @@
+{
+  "productName": "OpenSymphony",
+  "version": "1.6.0",
+  "identifier": "dev.opensymphony.app",
+  "build": {
+    "beforeDevCommand": "cd .. && npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "cd .. && npm run build || (echo 'Frontend build failed; see above for errors' && exit 1)",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "OpenSymphony",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' http://localhost:* ws://localhost:* wss://api.opensymphony.dev wss://api.opensymphony.app; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ],
+    "copyright": "OpenSymphony",
+    "category": "DeveloperTool",
+    "shortDescription": "OpenSymphony Desktop"
+  },
+  "plugins": {
+    "fs": {
+      "scope": [
+        "$HOME/.config/opensymphony/**"
+      ]
+    },
+    "shell": {
+      "open": true
+    }
+  }
+}

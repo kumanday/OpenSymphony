@@ -1,0 +1,32 @@
+[package]
+name = "opensymphony-desktop"
+version = "1.6.0"
+description = "OpenSymphony Tauri desktop application shell"
+license = "MIT"
+homepage = "https://opensymphony.dev"
+repository = "https://github.com/kumanday/OpenSymphony"
+authors = ["OpenSymphony Contributors"]
+edition = "2024"
+rust-version = "1.93"
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tauri = { version = "2" }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2"
+
+[workspace]
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

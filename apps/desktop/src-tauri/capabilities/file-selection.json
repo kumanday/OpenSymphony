@@ -1,0 +1,10 @@
+{
+  "identifier": "file-selection",
+  "description": "Scoped permission for native file and folder picker dialogs. Used by the repository connection flow.",
+  "windows": ["main"],
+  "permissions": [
+    "dialog:default",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
+}

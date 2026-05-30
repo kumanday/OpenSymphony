@@ -1,0 +1,8 @@
+{
+  "identifier": "process-supervision",
+  "description": "Scoped permission for local daemon process supervision stubs. shell:default grants only the minimal shell plugin baseline (open URLs). No execute/kill permissions are active. COE-404 will implement whitelisted executables, PID tracking, and input sanitization before any execute/kill permissions are added.",
+  "windows": ["main"],
+  "permissions": [
+    "shell:default"
+  ]
+}
