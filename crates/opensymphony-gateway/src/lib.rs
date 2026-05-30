@@ -19,7 +19,7 @@ use axum::{
 };
 use tokio::{net::TcpListener, sync::broadcast};
 
-use crate::opensymphony_domain::{EventJournalBackend, InMemoryEventJournal, StreamBroker};
+use crate::opensymphony_domain::{InMemoryEventJournal, StreamBroker};
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
     event_journal::{EventPage, JournalError, StreamError},
@@ -70,10 +70,35 @@ fn stream_error_from_journal_error(err: &JournalError, cursor_sequence: u64) -> 
 }
 
 fn serialize_stream_error(err: &StreamError) -> String {
-    serde_json::to_string(err).unwrap_or_else(|_| {
-        r#"{"error_type":"server_error","message":"Failed to serialize error","recoverable":false}"#
-            .to_string()
-    })
+    serde_json::to_string(err).expect("serialization of derived Serialize type should never fail")
+}
+
+#[derive(Debug)]
+struct BrokerConnectionGuard {
+    broker: StreamBroker,
+    connection_id: Arc<str>,
+}
+
+impl BrokerConnectionGuard {
+    fn new(broker: StreamBroker, connection_id: Arc<str>) -> Self {
+        Self {
+            broker,
+            connection_id,
+        }
+    }
+}
+
+impl Drop for BrokerConnectionGuard {
+    fn drop(&mut self) {
+        let broker = self.broker.clone();
+        let connection_id = self.connection_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let join = handle.spawn(async move {
+                broker.unregister_connection(&connection_id).await;
+            });
+            drop(join);
+        }
+    }
 }
 
 /// Shared state for the gateway server.
@@ -376,8 +401,7 @@ async fn events(
         // latest_cursor() and subscribe() would be broadcast before the receiver
         // exists and permanently lost.
         let mut receiver = journal.subscribe();
-        let latest_cursor = journal.latest_cursor().await;
-        let mut last_sequence = latest_cursor.sequence;
+        let mut last_sequence = 0;
         let partition = "events".to_string();
 
         // Deliver historical events from the backlog before entering the live loop.
@@ -582,6 +606,8 @@ async fn event_stream_ws(
             let mut socket = socket;
             let connection_id: Arc<str> = Arc::from(format!("ws-{}", uuid::Uuid::new_v4()));
             broker.register_connection(connection_id.clone()).await;
+            let _connection_guard =
+                BrokerConnectionGuard::new(broker.clone(), connection_id.clone());
 
             let init_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             let (cursor, partition) = loop {
@@ -1571,5 +1597,15 @@ mod tests {
 
         assert_eq!(stream_err.error_type, StreamErrorType::Backpressure);
         assert!(stream_err.recoverable);
+    }
+
+    #[test]
+    fn serialize_stream_error_matches_flat_error_type_contract() {
+        let json = serialize_stream_error(&StreamError::server_error("boom"));
+        let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+
+        assert_eq!(value["error_type"], "server_error");
+        assert_eq!(value["message"], "boom");
+        assert_eq!(value["recoverable"], false);
     }
 }
