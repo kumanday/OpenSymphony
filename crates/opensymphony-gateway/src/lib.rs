@@ -837,12 +837,23 @@ async fn event_stream_ws(
                                     }
                                 }
                                 Err(query_err) => {
-                                    tracing::warn!(
-                                        error = ?query_err,
-                                        cursor = event_stream.last_sequence(),
-                                        "WebSocket lag recovery failed"
-                                    );
-                                    let error_frame = serde_json::to_string(&query_err).expect("serialization of derived Serialize type should never fail");
+                                    // Convert JournalError to StreamError for the WebSocket contract.
+                                    let stream_err = match &query_err {
+                                        JournalError::InvalidCursor { .. } => {
+                                            StreamError::cursor_not_found(0)
+                                        }
+                                        JournalError::PartitionNotFound { partition } => {
+                                            StreamError::disconnected(format!("Partition not found: {partition}"))
+                                        }
+                                        JournalError::Backpressure { .. } => {
+                                            StreamError::backpressure()
+                                        }
+                                        JournalError::NotFound { event_id } => {
+                                            StreamError::disconnected(format!("Event not found: {event_id}"))
+                                        }
+                                    };
+                                    let error_frame = serde_json::to_string(&stream_err)
+                                        .unwrap_or_else(|_| r#"{"error_type":"server_error","message":"Failed to serialize error","recoverable":false}"#.to_string());
                                     let _ = socket
                                         .send(Message::Text(
                                             format!("__error__ {error_frame}").into(),
