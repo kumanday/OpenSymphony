@@ -408,6 +408,171 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
 }
 
 #[tokio::test]
+async fn gateway_serves_configured_web_assets() {
+    let assets = tempfile::tempdir().expect("create assets tempdir");
+    std::fs::write(
+        assets.path().join("index.html"),
+        "<main>OpenSymphony</main>",
+    )
+    .expect("write index.html");
+    std::fs::write(assets.path().join("app.js"), "console.log('opensymphony');")
+        .expect("write app.js");
+    std::fs::write(assets.path().join("demo.mp4"), b"fake mp4").expect("write demo.mp4");
+    std::fs::write(assets.path().join("report.pdf"), b"%PDF-1.7").expect("write report.pdf");
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server =
+        GatewayServer::new(store).with_web_assets(assets.path().to_string_lossy().to_string());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    let app_root = client
+        .get(format!("http://{address}/app"))
+        .send()
+        .await
+        .expect("fetch app root");
+    assert_eq!(app_root.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        app_root
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(
+        app_root
+            .text()
+            .await
+            .expect("read app root body")
+            .contains("OpenSymphony")
+    );
+
+    let app_js = client
+        .get(format!("http://{address}/app/app.js"))
+        .send()
+        .await
+        .expect("fetch app js");
+    assert_eq!(app_js.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        app_js
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/javascript; charset=utf-8")
+    );
+    assert!(
+        app_js
+            .text()
+            .await
+            .expect("read app js body")
+            .contains("opensymphony")
+    );
+
+    let app_video = client
+        .get(format!("http://{address}/app/demo.mp4"))
+        .send()
+        .await
+        .expect("fetch app video");
+    assert_eq!(app_video.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        app_video
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("video/mp4")
+    );
+
+    let app_pdf = client
+        .get(format!("http://{address}/app/report.pdf"))
+        .send()
+        .await
+        .expect("fetch app pdf");
+    assert_eq!(app_pdf.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        app_pdf
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/pdf")
+    );
+
+    let spa_route = client
+        .get(format!("http://{address}/app/projects/COE-393"))
+        .send()
+        .await
+        .expect("fetch spa route");
+    assert_eq!(spa_route.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        spa_route
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
+    assert!(
+        spa_route
+            .text()
+            .await
+            .expect("read spa route body")
+            .contains("OpenSymphony")
+    );
+
+    let missing_asset = client
+        .get(format!("http://{address}/app/missing.js"))
+        .send()
+        .await
+        .expect("fetch missing asset");
+    assert_eq!(missing_asset.status(), reqwest::StatusCode::NOT_FOUND);
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_web_assets_reject_path_traversal() {
+    let root = tempfile::tempdir().expect("create tempdir");
+    let assets_dir = root.path().join("assets");
+    std::fs::create_dir(&assets_dir).expect("create assets dir");
+    std::fs::write(assets_dir.join("index.html"), "<main>OpenSymphony</main>")
+        .expect("write index.html");
+    std::fs::write(root.path().join("secret.txt"), "secret").expect("write secret");
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server =
+        GatewayServer::new(store).with_web_assets(assets_dir.to_string_lossy().to_string());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/app/%2e%2e/secret.txt"))
+        .send()
+        .await
+        .expect("fetch traversal attempt");
+
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_ne!(response.text().await.expect("read response body"), "secret");
+
+    server_task.abort();
+}
+
+#[tokio::test]
 /// SSE endpoint now streams journal events (not snapshot updates).
 /// This test verifies the SSE transport works with journal events and
 /// delivers new events appended after the stream opens.

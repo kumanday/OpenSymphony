@@ -11,16 +11,18 @@ use serde_json::json;
 use async_stream::stream;
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
         Path as AxumPath, State,
         ws::{Message, WebSocket},
     },
     http::StatusCode,
-    response::IntoResponse,
     response::sse::{Event, KeepAlive, Sse},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use tokio::{net::TcpListener, sync::broadcast};
+use tokio_util::io::ReaderStream;
 
 use crate::opensymphony_domain::{EventStream, InMemoryEventJournal, StreamBroker};
 use crate::opensymphony_gateway_schema::{
@@ -183,6 +185,7 @@ pub struct GatewayState {
     pub store: SnapshotStore,
     pub journal: InMemoryEventJournal,
     pub broker: StreamBroker,
+    pub web_assets_dir: Option<String>,
 }
 
 impl axum::extract::FromRef<GatewayState> for SnapshotStore {
@@ -198,6 +201,7 @@ pub struct GatewayServer {
     store: SnapshotStore,
     journal: InMemoryEventJournal,
     broker: StreamBroker,
+    web_assets_dir: Option<String>,
 }
 
 impl GatewayServer {
@@ -208,6 +212,7 @@ impl GatewayServer {
             journal: journal.clone(),
             broker: StreamBroker::new(journal),
             store,
+            web_assets_dir: None,
         }
     }
 
@@ -221,7 +226,14 @@ impl GatewayServer {
             store,
             journal,
             broker,
+            web_assets_dir: None,
         }
+    }
+
+    /// Enable serving of the built web client from the given directory.
+    pub fn with_web_assets(mut self, dir: impl Into<String>) -> Self {
+        self.web_assets_dir = Some(dir.into());
+        self
     }
 
     /// Extract the journal and broker so the caller can keep clones for testing.
@@ -234,8 +246,9 @@ impl GatewayServer {
             store: self.store.clone(),
             journal: self.journal.clone(),
             broker: self.broker.clone(),
+            web_assets_dir: self.web_assets_dir.clone(),
         };
-        Router::new()
+        let mut router = Router::new()
             .route("/api/v1/capabilities", get(capabilities))
             .route("/api/v1/dashboard/snapshot", get(dashboard_snapshot))
             .route("/api/v1/events", get(events))
@@ -250,8 +263,16 @@ impl GatewayServer {
             .route("/api/v1/runs/{run_id}", get(get_run_detail))
             .route("/api/v1/runs/{run_id}/events", get(get_run_events))
             .route("/api/v1/runs/{run_id}/files", get(get_run_files))
-            .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs))
-            .with_state(state)
+            .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs));
+
+        if self.web_assets_dir.is_some() {
+            router = router
+                .route("/app", get(web_asset_handler))
+                .route("/app/", get(web_asset_handler))
+                .route("/app/{*path}", get(web_asset_handler));
+        }
+
+        router.with_state(state)
     }
 
     pub async fn serve(self, listener: TcpListener) -> std::io::Result<()> {
@@ -994,6 +1015,134 @@ pub fn sanitize_file_path(workspace_root: &str, raw_path: &str) -> String {
         })
 }
 
+/// Resolve the requested path and verify it stays inside the assets directory.
+fn resolve_safe_asset_path(assets_dir: &str, rest: &str) -> Option<PathBuf> {
+    if StdPath::new(rest).is_absolute() {
+        return None;
+    }
+
+    let base = StdPath::new(assets_dir);
+    let candidate = base.join(rest);
+    match (candidate.canonicalize(), base.canonicalize()) {
+        (Ok(resolved), Ok(base_resolved)) => {
+            if resolved == base_resolved || resolved.starts_with(&base_resolved) {
+                Some(resolved)
+            } else {
+                None
+            }
+        }
+        _ => {
+            if candidate
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                None
+            } else {
+                Some(candidate)
+            }
+        }
+    }
+}
+
+async fn serve_index_html(assets_dir: &str) -> Option<Response> {
+    let index_path = StdPath::new(assets_dir).join("index.html");
+    serve_file(&index_path).await.ok()
+}
+
+async fn web_asset_handler(
+    State(state): State<GatewayState>,
+    path: Option<AxumPath<String>>,
+) -> Response {
+    let Some(assets_dir) = state.web_assets_dir.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let rest = path.map(|p| p.0).unwrap_or_default();
+    if rest.is_empty() {
+        return serve_index_html(assets_dir)
+            .await
+            .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response());
+    }
+
+    let Some(safe_path) = resolve_safe_asset_path(assets_dir, &rest) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    if safe_path.is_file() {
+        return match serve_file(&safe_path).await {
+            Ok(resp) => resp,
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    }
+
+    if !path_has_known_extension(&rest) {
+        return serve_index_html(assets_dir)
+            .await
+            .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response());
+    }
+
+    StatusCode::NOT_FOUND.into_response()
+}
+
+const KNOWN_ASSET_MIME_TYPES: &[(&str, &str)] = &[
+    ("html", "text/html; charset=utf-8"),
+    ("css", "text/css; charset=utf-8"),
+    ("js", "application/javascript; charset=utf-8"),
+    ("json", "application/json"),
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("svg", "image/svg+xml"),
+    ("ico", "image/x-icon"),
+    ("woff", "font/woff"),
+    ("woff2", "font/woff2"),
+    ("ttf", "font/ttf"),
+    ("eot", "application/vnd.ms-fontobject"),
+    ("otf", "font/otf"),
+    ("map", "application/json"),
+    ("txt", "text/plain; charset=utf-8"),
+    ("xml", "application/xml"),
+    ("webp", "image/webp"),
+    ("mp4", "video/mp4"),
+    ("webm", "video/webm"),
+    ("mp3", "audio/mpeg"),
+    ("wav", "audio/wav"),
+    ("flac", "audio/flac"),
+    ("pdf", "application/pdf"),
+    ("zip", "application/zip"),
+    ("gz", "application/gzip"),
+    ("tar", "application/x-tar"),
+    ("bz2", "application/x-bzip2"),
+];
+
+fn path_has_known_extension(path: &str) -> bool {
+    path.rsplit_once('.')
+        .and_then(|(_, ext)| mime_type_for_extension(ext))
+        .is_some()
+}
+
+async fn serve_file(path: &StdPath) -> Result<Response, std::io::Error> {
+    let file = tokio::fs::File::open(path).await?;
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+    let content_type = mime_type(path);
+    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response())
+}
+
+fn mime_type(path: &StdPath) -> &'static str {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .and_then(mime_type_for_extension)
+        .unwrap_or("application/octet-stream")
+}
+
+fn mime_type_for_extension(extension: &str) -> Option<&'static str> {
+    KNOWN_ASSET_MIME_TYPES
+        .iter()
+        .find_map(|(known, mime)| known.eq_ignore_ascii_case(extension).then_some(*mime))
+}
+
 fn map_file_change_kind(kind: ControlPlaneFileChangeKind) -> FileChangeKind {
     match kind {
         ControlPlaneFileChangeKind::Created => FileChangeKind::Created,
@@ -1624,5 +1773,30 @@ mod tests {
 
         assert_eq!(value["event_id"], "evt_ws_frame");
         assert_eq!(value["sequence"], 7);
+    }
+
+    #[test]
+    fn web_asset_mime_table_is_the_extension_source_of_truth() {
+        let mut seen = std::collections::BTreeSet::new();
+
+        for (extension, mime) in KNOWN_ASSET_MIME_TYPES {
+            assert!(!extension.is_empty(), "extension should not be empty");
+            assert_ne!(*mime, "application/octet-stream");
+            assert!(seen.insert(*extension), "duplicate extension: {extension}");
+            assert!(path_has_known_extension(&format!("asset.{extension}")));
+            assert_eq!(
+                mime_type(StdPath::new(&format!("asset.{extension}"))),
+                *mime
+            );
+        }
+
+        assert!(path_has_known_extension("asset.MP4"));
+        assert_eq!(mime_type(StdPath::new("asset.MP4")), "video/mp4");
+        assert!(!path_has_known_extension("route/without-extension"));
+        assert!(!path_has_known_extension("asset.unknown"));
+        assert_eq!(
+            mime_type(StdPath::new("asset.unknown")),
+            "application/octet-stream"
+        );
     }
 }
