@@ -3,6 +3,7 @@ pub mod approval;
 pub mod capability;
 pub mod cursor;
 pub mod envelope;
+pub mod event_journal;
 pub mod planning;
 pub mod run;
 pub mod snapshot;

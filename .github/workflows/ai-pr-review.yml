@@ -94,6 +94,44 @@ jobs:
           echo "style=$review_style" >> "$GITHUB_OUTPUT"
           echo "require_evidence=$require_evidence" >> "$GITHUB_OUTPUT"
 
+      - name: Clean up stale pending bot reviews
+        if: steps.llm.outputs.enabled == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          reviews_json="$(
+            gh api \
+              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" \
+              --paginate
+          )"
+          pending_json="$(
+            jq '[.[] | select(.state == "PENDING" and .user.login == "github-actions[bot]") | {id, user: .user.login, body: (.body // "")}]' \
+              <<<"$reviews_json"
+          )"
+          pending_count="$(jq 'length' <<<"$pending_json")"
+          echo "Bot-visible pending reviews before cleanup: ${pending_count}"
+          jq -r '.[] | "pending review id=\(.id) user=\(.user) body=\(.body[0:120])"' <<<"$pending_json"
+
+          if [[ "$pending_count" -gt 0 ]]; then
+            jq -r '.[].id' <<<"$pending_json" | while read -r review_id; do
+              echo "Deleting stale pending review ${review_id}"
+              gh api \
+                -X DELETE \
+                "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews/${review_id}"
+            done
+          fi
+
+          remaining_count="$(
+            gh api \
+              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" \
+              --paginate |
+              jq '[.[] | select(.state == "PENDING" and .user.login == "github-actions[bot]")] | length'
+          )"
+          echo "Bot-visible pending reviews after cleanup: ${remaining_count}"
+
       - name: Run OpenHands PR Review
         if: steps.llm.outputs.enabled == 'true'
         uses: OpenHands/extensions/plugins/pr-review@75e39288f6c2366b75cf290441da06e187395f63

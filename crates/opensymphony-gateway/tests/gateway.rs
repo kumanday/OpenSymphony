@@ -408,13 +408,20 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
 }
 
 #[tokio::test]
-async fn gateway_events_stream_yields_snapshot_updates() {
+/// SSE endpoint now streams journal events (not snapshot updates).
+/// This test verifies the SSE transport works with journal events and
+/// delivers new events appended after the stream opens.
+async fn gateway_events_stream_yields_journal_events() {
     let store = SnapshotStore::new(fixture_snapshot(0));
     let server = GatewayServer::new(store.clone());
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
     let address = listener.local_addr().expect("test listener address");
+
+    // Keep a clone of the journal so we can append events after the stream opens.
+    let (journal, broker) = server.journal_and_broker();
+    let server = GatewayServer::with_journal(store.clone(), journal.clone(), broker);
     let server_task = tokio::spawn(async move {
         server
             .serve(listener)
@@ -443,10 +450,18 @@ async fn gateway_events_stream_yields_snapshot_updates() {
     );
 
     let mut stream = response.bytes_stream();
-
-    // Read the initial snapshot event into a buffer.
-    let mut first_buf = Vec::new();
     let timeout_dur = std::time::Duration::from_secs(2);
+
+    // Append an event after the stream opens and expect it to arrive via SSE.
+    let event = opensymphony::opensymphony_domain::InMemoryEventJournal::orchestrator_event(
+        opensymphony::opensymphony_gateway_schema::event_journal::EventKind::RunStarted,
+        "test run started",
+        None,
+    );
+    let _ = journal.append(event).await;
+
+    // Read the journal event into a buffer.
+    let mut first_buf = Vec::new();
     #[allow(clippy::while_let_loop)]
     loop {
         match tokio::time::timeout(timeout_dur, stream.next()).await {
@@ -462,44 +477,19 @@ async fn gateway_events_stream_yields_snapshot_updates() {
     let first_text =
         String::from_utf8(first_buf).expect("SSE event is valid UTF-8 when fully assembled");
     assert!(
-        !first_text.is_empty() && first_text.contains("event: snapshot"),
-        "first SSE event should be a snapshot"
+        !first_text.is_empty() && first_text.contains("event: event"),
+        "SSE event should be a journal event, got: {first_text}"
     );
 
-    // Publish a new snapshot through the store and expect a second event.
-    let new_snapshot = fixture_snapshot(1);
-    store.publish(new_snapshot).await;
-
-    // Read the second event into a buffer.
-    let mut second_buf = Vec::new();
-    #[allow(clippy::while_let_loop)]
-    loop {
-        match tokio::time::timeout(timeout_dur, stream.next()).await {
-            Ok(Some(Ok(chunk))) => {
-                second_buf.extend_from_slice(&chunk);
-                if second_buf.ends_with(b"\n\n") || second_buf.ends_with(b"\r\n\r\n") {
-                    break;
-                }
-            }
-            Ok(Some(Err(_))) | Ok(None) | Err(_) => break,
-        }
-    }
-    let second_text =
-        String::from_utf8(second_buf).expect("SSE event is valid UTF-8 when fully assembled");
-    assert!(
-        !second_text.is_empty() && second_text.contains("event: snapshot"),
-        "second SSE event should be a snapshot"
-    );
-
-    // Verify the payload in the second event is a valid DashboardSnapshot.
-    let data_line = second_text
+    // Verify the payload is a valid EventRecord.
+    let data_line = first_text
         .lines()
         .find(|l| l.starts_with("data:"))
-        .expect("second event contains data line");
+        .expect("SSE event contains data line");
     let json_payload = data_line.trim_start_matches("data:").trim();
-    let dashboard: opensymphony::opensymphony_gateway_schema::snapshot::DashboardSnapshot =
-        serde_json::from_str(json_payload).expect("deserialize SSE payload as DashboardSnapshot");
-    assert_eq!(dashboard.sequence, 2);
+    let record: opensymphony::opensymphony_gateway_schema::event_journal::EventRecord =
+        serde_json::from_str(json_payload).expect("deserialize SSE payload as EventRecord");
+    assert_eq!(record.kind.kind_tag(), "run.started");
 
     server_task.abort();
 }
@@ -563,6 +553,363 @@ async fn gateway_and_control_plane_are_reachable() {
 
     gateway_task.abort();
     control_task.abort();
+}
+
+/// Test that cursor-based event journal query works end-to-end via HTTP.
+#[tokio::test]
+async fn event_journal_cursor_returns_events_page() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventPage, EventRecord,
+    };
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+
+    for i in 0..5u64 {
+        let event = EventRecord::builder()
+            .event_id(format!("evt_{i}"))
+            .sequence(0)
+            .actor(EventActor::system("test"))
+            .kind(EventKind::RunStarted)
+            .summary(format!("Test event {i}"))
+            .build();
+        journal.append(event).await.expect("append");
+    }
+
+    let server = GatewayServer::with_journal(store, journal, broker);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    let url = format!("http://{address}/api/v1/event-journal?cursor=0&limit=2");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 2);
+    assert!(page.has_more);
+    assert!(page.next_cursor.is_some());
+
+    let next_seq = page.next_cursor.expect("next cursor must exist").sequence;
+    let url = format!("http://{address}/api/v1/event-journal?cursor={next_seq}&limit=2");
+    let page2: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch next page")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page2.events.len(), 2);
+    assert!(page2.has_more);
+
+    let next_seq2 = page2.next_cursor.expect("next cursor must exist").sequence;
+    let url = format!("http://{address}/api/v1/event-journal?cursor={next_seq2}&limit=2");
+    let page3: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch last page")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page3.events.len(), 1);
+    assert!(!page3.has_more);
+
+    server_task.abort();
+}
+
+/// Test that partition filtering works via the event journal API.
+#[tokio::test]
+async fn event_journal_partition_filtering() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventPage, EventRecord,
+    };
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+
+    let event = EventRecord::builder()
+        .event_id("evt_control")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::RunStarted)
+        .summary("Control event")
+        .build();
+    journal.append(event).await.expect("append");
+
+    let terminal = EventRecord::builder()
+        .event_id("evt_term")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::TerminalFrame {
+            frame_id: "f1".into(),
+        })
+        .summary("Terminal frame")
+        .build();
+    journal.append(terminal).await.expect("append");
+
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+    let server = GatewayServer::with_journal(store, journal, broker);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    let url = format!("http://{address}/api/v1/event-journal?partition=events");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].event_id, "evt_control");
+
+    let url = format!("http://{address}/api/v1/event-journal?partition=terminal_log");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 1);
+    assert_eq!(page.events[0].event_id, "evt_term");
+
+    server_task.abort();
+}
+
+/// Test that unknown harness events with raw payload refs are retained.
+#[tokio::test]
+async fn event_journal_raw_payload_ref_retained() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventPage, EventRecord,
+    };
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+
+    let event = EventRecord::builder()
+        .event_id("evt_raw")
+        .sequence(0)
+        .actor(EventActor::harness("openhands-1"))
+        .kind(EventKind::Unknown {
+            raw_kind: "custom_harness_event".into(),
+        })
+        .summary("Unknown harness event")
+        .raw_payload_ref("raw_ref_123")
+        .build();
+    journal.append(event).await.expect("append");
+
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+    let server = GatewayServer::with_journal(store, journal, broker);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    let url = format!("http://{address}/api/v1/event-journal");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 1);
+    assert!(page.events[0].has_raw_payload());
+    assert_eq!(page.events[0].raw_payload_ref, Some("raw_ref_123".into()));
+
+    server_task.abort();
+}
+
+/// Test that duplicate events are identifiable by stable event_id.
+#[tokio::test]
+async fn event_journal_duplicate_detection() {
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventPage, EventRecord,
+    };
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+
+    let event = EventRecord::builder()
+        .event_id("evt_dup")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::RunStarted)
+        .summary("Duplicate event")
+        .build();
+    journal.append(event.clone()).await.expect("append");
+    journal.append(event).await.expect("append");
+
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+    let server = GatewayServer::with_journal(store, journal, broker);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+
+    let url = format!("http://{address}/api/v1/event-journal");
+    let page: EventPage = client
+        .get(&url)
+        .send()
+        .await
+        .expect("fetch events")
+        .json::<EventPage>()
+        .await
+        .expect("decode events page");
+
+    assert_eq!(page.events.len(), 2);
+    assert_eq!(page.events[0].event_id, page.events[1].event_id);
+    assert_ne!(page.events[0].sequence, page.events[1].sequence);
+
+    server_task.abort();
+}
+
+/// Test that the WebSocket event stream endpoint works end-to-end.
+/// Connects, sends an init message, receives backlog events, then a live event.
+#[tokio::test]
+async fn websocket_event_stream_delivers_events() {
+    use futures_util::SinkExt;
+    use opensymphony::opensymphony_domain::InMemoryEventJournal as DomainJournal;
+    use opensymphony::opensymphony_gateway_schema::event_journal::{
+        EventActor, EventKind, EventRecord,
+    };
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let journal = DomainJournal::new(100, 64);
+    let broker = opensymphony::opensymphony_domain::StreamBroker::new(journal.clone());
+
+    let backlog_event = EventRecord::builder()
+        .event_id("ws_test_1")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::RunStarted)
+        .summary("Backlog event")
+        .build();
+    journal.append(backlog_event).await.expect("append");
+
+    let server = GatewayServer::with_journal(store, journal.clone(), broker);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let ws_url = format!("ws://{address}/api/v1/streams/events");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
+        .await
+        .expect("connect to WS endpoint");
+
+    let (mut write, mut read) = ws_stream.split();
+
+    let init = serde_json::json!({ "cursor": 0, "partition": "events" });
+    let init_msg = serde_json::to_string(&init).expect("serialize init");
+    write
+        .send(WsMessage::Text(init_msg.into()))
+        .await
+        .expect("send init");
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .expect("timed out waiting for backlog event")
+        .expect("should receive a message")
+        .expect("no WS error");
+    let text = msg.to_text().expect("text message");
+    assert!(
+        text.starts_with("__event__"),
+        "Expected __event__ prefix, got: {text}"
+    );
+    assert!(
+        text.contains("ws_test_1"),
+        "Backlog event should contain event_id ws_test_1, got: {text}"
+    );
+
+    let live_event = EventRecord::builder()
+        .event_id("ws_test_2")
+        .sequence(0)
+        .actor(EventActor::system("test"))
+        .kind(EventKind::RunCompleted)
+        .summary("Live event")
+        .build();
+    journal.append(live_event).await.expect("append live");
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), read.next())
+        .await
+        .expect("timed out waiting for live event")
+        .expect("should receive a message")
+        .expect("no WS error");
+    let text = msg.to_text().expect("text message");
+    assert!(
+        text.starts_with("__event__"),
+        "Expected __event__ prefix, got: {text}"
+    );
+    assert!(
+        text.contains("ws_test_2"),
+        "Live event should contain event_id ws_test_2, got: {text}"
+    );
+
+    server_task.abort();
 }
 
 // ── Read API endpoint tests ────────────────────────────────────────────────────
