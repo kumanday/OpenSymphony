@@ -11,6 +11,7 @@ use serde_json::json;
 use async_stream::stream;
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
         Path as AxumPath, State,
         ws::{Message, WebSocket},
@@ -21,6 +22,7 @@ use axum::{
     routing::get,
 };
 use tokio::{net::TcpListener, sync::broadcast};
+use tokio_util::io::ReaderStream;
 
 use crate::opensymphony_domain::{EventStream, InMemoryEventJournal, StreamBroker};
 use crate::opensymphony_gateway_schema::{
@@ -1123,9 +1125,11 @@ fn path_has_known_extension(path: &str) -> bool {
 }
 
 async fn serve_file(path: &StdPath) -> Result<Response, std::io::Error> {
-    let bytes = tokio::fs::read(path).await?;
+    let file = tokio::fs::File::open(path).await?;
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
     let content_type = mime_type(path);
-    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], bytes).into_response())
+    Ok(([(axum::http::header::CONTENT_TYPE, content_type)], body).into_response())
 }
 
 fn mime_type(path: &StdPath) -> &'static str {

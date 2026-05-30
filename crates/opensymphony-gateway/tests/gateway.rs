@@ -482,6 +482,13 @@ async fn gateway_serves_configured_web_assets() {
         .await
         .expect("fetch spa route");
     assert_eq!(spa_route.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        spa_route
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/html; charset=utf-8")
+    );
     assert!(
         spa_route
             .text()
