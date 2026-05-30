@@ -369,7 +369,7 @@ async fn events(
                 Ok(page) => {
                     for event in &page.events {
                         // Only deliver events that weren't already seen via broadcast.
-                        if backlog_max_sequence.map_or(true, |max| event.sequence > max) {
+                        if backlog_max_sequence.is_none_or(|max| event.sequence > max) {
                             match serde_json::to_string(event) {
                                 Ok(json) => {
                                     yield Ok(Event::default().event("event").data(json));
