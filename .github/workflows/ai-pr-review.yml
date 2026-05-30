@@ -132,41 +132,6 @@ jobs:
           )"
           echo "Bot-visible pending reviews after cleanup: ${remaining_count}"
 
-      - name: Diagnose OpenHands review preflight
-        if: steps.llm.outputs.enabled == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          set +e
-          response="$(
-            gh api \
-              -X POST \
-              "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews" \
-              -f body='OpenSymphony diagnostic preflight review. This pending review will be deleted immediately.' \
-              2>&1
-          )"
-          status=$?
-          set -e
-
-          if [[ "$status" -ne 0 ]]; then
-            echo "Diagnostic pending-review creation failed with status ${status}:"
-            printf '%s\n' "$response"
-            exit "$status"
-          fi
-
-          review_id="$(jq -r '.id' <<<"$response")"
-          review_state="$(jq -r '.state' <<<"$response")"
-          review_user="$(jq -r '.user.login' <<<"$response")"
-          echo "Diagnostic pending review created: id=${review_id} state=${review_state} user=${review_user}"
-
-          gh api \
-            -X DELETE \
-            "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/reviews/${review_id}"
-          echo "Diagnostic pending review deleted: id=${review_id}"
-
       - name: Run OpenHands PR Review
         if: steps.llm.outputs.enabled == 'true'
         uses: OpenHands/extensions/plugins/pr-review@75e39288f6c2366b75cf290441da06e187395f63

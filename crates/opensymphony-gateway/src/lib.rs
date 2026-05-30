@@ -56,6 +56,26 @@ const GATEWAY_JOURNAL_CAPACITY: usize = 10_000;
 const GATEWAY_SUBSCRIBER_CAPACITY: usize = 256;
 const GATEWAY_EVENT_PAGE_LIMIT: usize = 100;
 
+fn stream_error_from_journal_error(err: &JournalError, cursor_sequence: u64) -> StreamError {
+    match err {
+        JournalError::InvalidCursor { .. } => StreamError::cursor_not_found(cursor_sequence),
+        JournalError::PartitionNotFound { partition } => {
+            StreamError::disconnected(format!("Partition not found: {partition}"))
+        }
+        JournalError::Backpressure { .. } => StreamError::backpressure(),
+        JournalError::NotFound { event_id } => {
+            StreamError::disconnected(format!("Event not found: {event_id}"))
+        }
+    }
+}
+
+fn serialize_stream_error(err: &StreamError) -> String {
+    serde_json::to_string(err).unwrap_or_else(|_| {
+        r#"{"error_type":"server_error","message":"Failed to serialize error","recoverable":false}"#
+            .to_string()
+    })
+}
+
 /// Shared state for the gateway server.
 #[derive(Debug, Clone)]
 pub struct GatewayState {
@@ -380,6 +400,12 @@ async fn events(
                                         error = %e,
                                         "Failed to serialize SSE backlog event"
                                     );
+                                    let error_json = serialize_stream_error(
+                                        &StreamError::server_error(
+                                            "Failed to serialize SSE backlog event",
+                                        ),
+                                    );
+                                    yield Ok(Event::default().event("error").data(error_json));
                                 }
                             }
                         }
@@ -402,6 +428,11 @@ async fn events(
                         cursor = backlog_cursor.sequence,
                         "Backlog query failed for SSE stream"
                     );
+                    let error_json = serialize_stream_error(&stream_error_from_journal_error(
+                        &e,
+                        backlog_cursor.sequence,
+                    ));
+                    yield Ok(Event::default().event("error").data(error_json));
                     break;
                 }
             }
@@ -496,8 +527,10 @@ async fn events(
                                     cursor = recovery_cursor.sequence,
                                     "Lag recovery failed for SSE stream"
                                 );
-                                let error_json = serde_json::to_string(&StreamError::cursor_not_found(recovery_cursor.sequence))
-                                    .expect("serialization of derived Serialize type should never fail");
+                                let error_json = serialize_stream_error(&stream_error_from_journal_error(
+                                    &e,
+                                    recovery_cursor.sequence,
+                                ));
                                 yield Ok(Event::default().event("error").data(error_json));
                                 break;
                             }
@@ -711,23 +744,9 @@ async fn event_stream_ws(
                         }
                     }
                     Err(journal_err) => {
-                        // Convert JournalError to StreamError for the WebSocket contract.
-                        let stream_err = match &journal_err {
-                            JournalError::InvalidCursor { .. } => {
-                                StreamError::cursor_not_found(0)
-                            }
-                            JournalError::PartitionNotFound { partition } => {
-                                StreamError::disconnected(format!("Partition not found: {partition}"))
-                            }
-                            JournalError::Backpressure { .. } => {
-                                StreamError::backpressure()
-                            }
-                            JournalError::NotFound { event_id } => {
-                                StreamError::disconnected(format!("Event not found: {event_id}"))
-                            }
-                        };
-                        let error_frame = serde_json::to_string(&stream_err)
-                            .unwrap_or_else(|_| r#"{"error_type":"server_error","message":"Failed to serialize error","recoverable":false}"#.to_string());
+                        let stream_err =
+                            stream_error_from_journal_error(&journal_err, recovery_cursor.sequence);
+                        let error_frame = serialize_stream_error(&stream_err);
                         let _ = socket
                             .send(Message::Text(format!("__error__ {error_frame}").into()))
                             .await;
@@ -837,23 +856,9 @@ async fn event_stream_ws(
                                     }
                                 }
                                 Err(query_err) => {
-                                    // Convert JournalError to StreamError for the WebSocket contract.
-                                    let stream_err = match &query_err {
-                                        JournalError::InvalidCursor { .. } => {
-                                            StreamError::cursor_not_found(0)
-                                        }
-                                        JournalError::PartitionNotFound { partition } => {
-                                            StreamError::disconnected(format!("Partition not found: {partition}"))
-                                        }
-                                        JournalError::Backpressure { .. } => {
-                                            StreamError::backpressure()
-                                        }
-                                        JournalError::NotFound { event_id } => {
-                                            StreamError::disconnected(format!("Event not found: {event_id}"))
-                                        }
-                                    };
-                                    let error_frame = serde_json::to_string(&stream_err)
-                                        .unwrap_or_else(|_| r#"{"error_type":"server_error","message":"Failed to serialize error","recoverable":false}"#.to_string());
+                                    let stream_err =
+                                        stream_error_from_journal_error(&query_err, lag_cursor.sequence);
+                                    let error_frame = serialize_stream_error(&stream_err);
                                     let _ = socket
                                         .send(Message::Text(
                                             format!("__error__ {error_frame}").into(),
@@ -1538,4 +1543,33 @@ async fn get_run_diffs(
             total_lines_removed,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::opensymphony_gateway_schema::event_journal::StreamErrorType;
+
+    #[test]
+    fn journal_error_mapping_preserves_invalid_cursor_sequence() {
+        let err = JournalError::InvalidCursor {
+            reason: "cursor is older than retained events".into(),
+        };
+
+        let stream_err = stream_error_from_journal_error(&err, 37);
+
+        assert_eq!(stream_err.error_type, StreamErrorType::CursorNotFound);
+        assert!(stream_err.message.contains("37"));
+        assert!(stream_err.recoverable);
+    }
+
+    #[test]
+    fn journal_error_mapping_keeps_backpressure_recoverable() {
+        let err = JournalError::Backpressure { capacity: 100 };
+
+        let stream_err = stream_error_from_journal_error(&err, 12);
+
+        assert_eq!(stream_err.error_type, StreamErrorType::Backpressure);
+        assert!(stream_err.recoverable);
+    }
 }
