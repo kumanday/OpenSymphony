@@ -359,6 +359,61 @@ async fn events(
         let latest_cursor = journal.latest_cursor().await;
         let mut last_sequence = latest_cursor.sequence;
         let partition = "events".to_string();
+
+        // Deliver historical events from the backlog before entering the live loop.
+        // Query from cursor 0 to get all available events in the journal.
+        let mut backlog_cursor = StreamCursor::new(0, &partition);
+        let mut backlog_max_sequence: Option<u64> = None;
+        loop {
+            match journal.query_after(&backlog_cursor, GATEWAY_EVENT_PAGE_LIMIT).await {
+                Ok(page) => {
+                    for event in &page.events {
+                        // Only deliver events that weren't already seen via broadcast.
+                        if backlog_max_sequence.map_or(true, |max| event.sequence > max) {
+                            match serde_json::to_string(event) {
+                                Ok(json) => {
+                                    yield Ok(Event::default().event("event").data(json));
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        event_id = %event.event_id,
+                                        error = %e,
+                                        "Failed to serialize SSE backlog event"
+                                    );
+                                }
+                            }
+                        }
+                        backlog_max_sequence = Some(
+                            backlog_max_sequence.map_or(event.sequence, |max| max.max(event.sequence))
+                        );
+                    }
+                    if !page.has_more {
+                        break;
+                    }
+                    if let Some(ref next) = page.next_cursor {
+                        backlog_cursor = next.clone();
+                    } else {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = ?e,
+                        cursor = backlog_cursor.sequence,
+                        "Backlog query failed for SSE stream"
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Update last_sequence to the highest backlog sequence delivered,
+        // so the live loop skips events we already sent from the backlog.
+        if let Some(max_seq) = backlog_max_sequence {
+            last_sequence = last_sequence.max(max_seq);
+        }
+
+        // Now listen for live events, skipping anything already delivered from backlog.
         loop {
             match receiver.recv().await {
                 Ok(Ok(event)) => {
@@ -655,11 +710,31 @@ async fn event_stream_ws(
                             break;
                         }
                     }
-                    Err(err) => {
-                        let error_frame = serde_json::to_string(&err).expect("serialization of derived Serialize type should never fail");
+                    Err(journal_err) => {
+                        // Convert JournalError to StreamError for the WebSocket contract.
+                        let stream_err = match &journal_err {
+                            JournalError::InvalidCursor { .. } => {
+                                StreamError::cursor_not_found(0)
+                            }
+                            JournalError::PartitionNotFound { partition } => {
+                                StreamError::disconnected(format!("Partition not found: {partition}"))
+                            }
+                            JournalError::Backpressure { .. } => {
+                                StreamError::backpressure()
+                            }
+                            JournalError::NotFound { event_id } => {
+                                StreamError::disconnected(format!("Event not found: {event_id}"))
+                            }
+                        };
+                        let error_frame = serde_json::to_string(&stream_err)
+                            .unwrap_or_else(|_| r#"{"error_type":"server_error","message":"Failed to serialize error","recoverable":false}"#.to_string());
                         let _ = socket
                             .send(Message::Text(format!("__error__ {error_frame}").into()))
                             .await;
+                        tracing::warn!(
+                            error = ?journal_err,
+                            "Journal query failed in WebSocket backlog recovery"
+                        );
                         broker.unregister_connection(&connection_id).await;
                         return;
                     }
