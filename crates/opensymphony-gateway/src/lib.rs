@@ -1084,44 +1084,42 @@ async fn web_asset_handler(
     StatusCode::NOT_FOUND.into_response()
 }
 
+const KNOWN_ASSET_MIME_TYPES: &[(&str, &str)] = &[
+    ("html", "text/html; charset=utf-8"),
+    ("css", "text/css; charset=utf-8"),
+    ("js", "application/javascript; charset=utf-8"),
+    ("json", "application/json"),
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("svg", "image/svg+xml"),
+    ("ico", "image/x-icon"),
+    ("woff", "font/woff"),
+    ("woff2", "font/woff2"),
+    ("ttf", "font/ttf"),
+    ("eot", "application/vnd.ms-fontobject"),
+    ("otf", "font/otf"),
+    ("map", "application/json"),
+    ("txt", "text/plain; charset=utf-8"),
+    ("xml", "application/xml"),
+    ("webp", "image/webp"),
+    ("mp4", "video/mp4"),
+    ("webm", "video/webm"),
+    ("mp3", "audio/mpeg"),
+    ("wav", "audio/wav"),
+    ("flac", "audio/flac"),
+    ("pdf", "application/pdf"),
+    ("zip", "application/zip"),
+    ("gz", "application/gzip"),
+    ("tar", "application/x-tar"),
+    ("bz2", "application/x-bzip2"),
+];
+
 fn path_has_known_extension(path: &str) -> bool {
-    if let Some(dot_pos) = path.rfind('.')
-        && let Some(ext) = path.get(dot_pos + 1..)
-    {
-        return matches!(
-            ext.to_lowercase().as_str(),
-            "html"
-                | "css"
-                | "js"
-                | "json"
-                | "png"
-                | "jpg"
-                | "jpeg"
-                | "gif"
-                | "svg"
-                | "ico"
-                | "woff"
-                | "woff2"
-                | "ttf"
-                | "eot"
-                | "otf"
-                | "map"
-                | "txt"
-                | "xml"
-                | "webp"
-                | "mp4"
-                | "webm"
-                | "mp3"
-                | "wav"
-                | "flac"
-                | "pdf"
-                | "zip"
-                | "gz"
-                | "tar"
-                | "bz2"
-        );
-    }
-    false
+    path.rsplit_once('.')
+        .and_then(|(_, ext)| mime_type_for_extension(ext))
+        .is_some()
 }
 
 async fn serve_file(path: &StdPath) -> Result<Response, std::io::Error> {
@@ -1133,25 +1131,16 @@ async fn serve_file(path: &StdPath) -> Result<Response, std::io::Error> {
 }
 
 fn mime_type(path: &StdPath) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("html") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") => "application/javascript; charset=utf-8",
-        Some("json") => "application/json; charset=utf-8",
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("svg") => "image/svg+xml",
-        Some("ico") => "image/x-icon",
-        Some("woff") => "font/woff",
-        Some("woff2") => "font/woff2",
-        Some("ttf") => "font/ttf",
-        Some("eot") => "application/vnd.ms-fontobject",
-        Some("otf") => "font/otf",
-        Some("map") => "application/json; charset=utf-8",
-        Some("txt") => "text/plain; charset=utf-8",
-        _ => "application/octet-stream",
-    }
+    path.extension()
+        .and_then(|e| e.to_str())
+        .and_then(mime_type_for_extension)
+        .unwrap_or("application/octet-stream")
+}
+
+fn mime_type_for_extension(extension: &str) -> Option<&'static str> {
+    KNOWN_ASSET_MIME_TYPES
+        .iter()
+        .find_map(|(known, mime)| known.eq_ignore_ascii_case(extension).then_some(*mime))
 }
 
 fn map_file_change_kind(kind: ControlPlaneFileChangeKind) -> FileChangeKind {
@@ -1784,5 +1773,30 @@ mod tests {
 
         assert_eq!(value["event_id"], "evt_ws_frame");
         assert_eq!(value["sequence"], 7);
+    }
+
+    #[test]
+    fn web_asset_mime_table_is_the_extension_source_of_truth() {
+        let mut seen = std::collections::BTreeSet::new();
+
+        for (extension, mime) in KNOWN_ASSET_MIME_TYPES {
+            assert!(!extension.is_empty(), "extension should not be empty");
+            assert_ne!(*mime, "application/octet-stream");
+            assert!(seen.insert(*extension), "duplicate extension: {extension}");
+            assert!(path_has_known_extension(&format!("asset.{extension}")));
+            assert_eq!(
+                mime_type(StdPath::new(&format!("asset.{extension}"))),
+                *mime
+            );
+        }
+
+        assert!(path_has_known_extension("asset.MP4"));
+        assert_eq!(mime_type(StdPath::new("asset.MP4")), "video/mp4");
+        assert!(!path_has_known_extension("route/without-extension"));
+        assert!(!path_has_known_extension("asset.unknown"));
+        assert_eq!(
+            mime_type(StdPath::new("asset.unknown")),
+            "application/octet-stream"
+        );
     }
 }

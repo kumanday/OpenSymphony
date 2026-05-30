@@ -417,6 +417,8 @@ async fn gateway_serves_configured_web_assets() {
     .expect("write index.html");
     std::fs::write(assets.path().join("app.js"), "console.log('opensymphony');")
         .expect("write app.js");
+    std::fs::write(assets.path().join("demo.mp4"), b"fake mp4").expect("write demo.mp4");
+    std::fs::write(assets.path().join("report.pdf"), b"%PDF-1.7").expect("write report.pdf");
 
     let store = SnapshotStore::new(fixture_snapshot(0));
     let server =
@@ -474,6 +476,34 @@ async fn gateway_serves_configured_web_assets() {
             .await
             .expect("read app js body")
             .contains("opensymphony")
+    );
+
+    let app_video = client
+        .get(format!("http://{address}/app/demo.mp4"))
+        .send()
+        .await
+        .expect("fetch app video");
+    assert_eq!(app_video.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        app_video
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("video/mp4")
+    );
+
+    let app_pdf = client
+        .get(format!("http://{address}/app/report.pdf"))
+        .send()
+        .await
+        .expect("fetch app pdf");
+    assert_eq!(app_pdf.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        app_pdf
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/pdf")
     );
 
     let spa_route = client
