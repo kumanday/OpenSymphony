@@ -7,6 +7,189 @@ use super::{
     ConversationId, DurationMs, IssueId, IssueIdentifier, TimestampMs, WorkerId, WorkspaceKey,
 };
 
+/// Normalized liveness phase for a long-running OpenSymphony execution turn.
+///
+/// These phases are OpenSymphony-normalized and do not leak OpenHands wire details
+/// into the orchestrator core.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeLivenessPhase {
+    /// Waiting for a prior turn (e.g., in a reused conversation) to complete
+    /// before a new message can be sent.
+    WaitingOnPriorTurn,
+    /// A turn is actively executing; the harness monitors for progress.
+    RunningTurn,
+    /// Stream disconnected; attempting REST reconcile to find progress.
+    Reconciling,
+    /// Scheduler has declared a stall and is cancelling the underlying run.
+    Cancelling,
+    /// No progress was observed within the idle timeout; run is considered stalled.
+    Stalled,
+    /// The underlying run could not be stopped; execution is detached from this
+    /// OpenSymphony worker. Subsequent retries must not duplicate in-flight work.
+    Detached,
+}
+
+impl fmt::Display for RuntimeLivenessPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::WaitingOnPriorTurn => write!(f, "waiting_on_prior_turn"),
+            Self::RunningTurn => write!(f, "running_turn"),
+            Self::Reconciling => write!(f, "reconciling"),
+            Self::Cancelling => write!(f, "cancelling"),
+            Self::Stalled => write!(f, "stalled"),
+            Self::Detached => write!(f, "detached"),
+        }
+    }
+}
+
+/// Structured snapshot of runtime progress emitted by the session runner.
+///
+/// Feeds the gateway and event journal so operators can see liveness
+/// signals during long-running turns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeProgressSnapshot {
+    /// Current liveness phase.
+    pub phase: RuntimeLivenessPhase,
+    /// Monotonic count of events observed since the session was created.
+    pub event_count: u64,
+    /// Delta of new events since the last snapshot (zero if unchanged).
+    pub event_delta: u64,
+    /// Total input tokens consumed so far.
+    pub input_tokens: u64,
+    /// Delta of input tokens since the last snapshot.
+    pub input_token_delta: u64,
+    /// Total output tokens produced so far.
+    pub output_tokens: u64,
+    /// Delta of output tokens since the last snapshot.
+    pub output_token_delta: u64,
+    /// Current execution status reported by the runtime, if available.
+    pub execution_status: Option<String>,
+    /// Timestamp of the most recent liveness signal (event, token bump, status change).
+    pub last_activity_at: Option<TimestampMs>,
+    /// Sliding deadline after which the run is considered stalled without new progress.
+    pub stall_deadline_at: Option<TimestampMs>,
+}
+
+impl RuntimeProgressSnapshot {
+    /// Create an initial snapshot with zero counters.
+    pub fn initial(phase: RuntimeLivenessPhase) -> Self {
+        Self {
+            phase,
+            event_count: 0,
+            event_delta: 0,
+            input_tokens: 0,
+            input_token_delta: 0,
+            output_tokens: 0,
+            output_token_delta: 0,
+            execution_status: None,
+            last_activity_at: None,
+            stall_deadline_at: None,
+        }
+    }
+
+    /// Start building an updated snapshot from this snapshot's baseline.
+    pub fn update_with(&self, phase: RuntimeLivenessPhase) -> RuntimeProgressSnapshotBuilder<'_> {
+        RuntimeProgressSnapshotBuilder {
+            previous: self,
+            phase,
+            event_count: self.event_count,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            execution_status: self.execution_status.clone(),
+            last_activity_at: self.last_activity_at,
+            stall_deadline_at: self.stall_deadline_at,
+        }
+    }
+}
+
+/// Builder for updating a [`RuntimeProgressSnapshot`] with delta computation.
+///
+/// Provides a fluent interface instead of a 7-argument `update` method,
+/// satisfying clippy's argument-count lint without sacrificing ergonomics.
+pub struct RuntimeProgressSnapshotBuilder<'a> {
+    previous: &'a RuntimeProgressSnapshot,
+    phase: RuntimeLivenessPhase,
+    event_count: u64,
+    input_tokens: u64,
+    output_tokens: u64,
+    execution_status: Option<String>,
+    last_activity_at: Option<TimestampMs>,
+    stall_deadline_at: Option<TimestampMs>,
+}
+
+impl RuntimeProgressSnapshotBuilder<'_> {
+    pub fn with_event_count(mut self, count: u64) -> Self {
+        self.event_count = count;
+        self
+    }
+    pub fn with_input_tokens(mut self, count: u64) -> Self {
+        self.input_tokens = count;
+        self
+    }
+    pub fn with_output_tokens(mut self, count: u64) -> Self {
+        self.output_tokens = count;
+        self
+    }
+    pub fn with_execution_status(mut self, status: Option<String>) -> Self {
+        self.execution_status = status;
+        self
+    }
+    pub fn with_last_activity_at(mut self, ts: Option<TimestampMs>) -> Self {
+        self.last_activity_at = ts;
+        self
+    }
+    pub fn with_stall_deadline_at(mut self, ts: Option<TimestampMs>) -> Self {
+        self.stall_deadline_at = ts;
+        self
+    }
+
+    /// Produce the new snapshot with computed deltas.
+    pub fn build(self) -> RuntimeProgressSnapshot {
+        RuntimeProgressSnapshot {
+            event_delta: self.event_count.saturating_sub(self.previous.event_count),
+            input_token_delta: self.input_tokens.saturating_sub(self.previous.input_tokens),
+            output_token_delta: self
+                .output_tokens
+                .saturating_sub(self.previous.output_tokens),
+            phase: self.phase,
+            event_count: self.event_count,
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            execution_status: self.execution_status,
+            last_activity_at: self.last_activity_at,
+            stall_deadline_at: self.stall_deadline_at,
+        }
+    }
+}
+
+/// Metadata recorded when a run is detached because the underlying OpenHands
+/// execution could not be stopped or is no longer reachable by this worker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetachMetadata {
+    /// Reason the run was detached.
+    pub reason: DetachReason,
+    /// Timestamp when detachment was recorded.
+    pub detached_at: TimestampMs,
+    /// Last known execution status of the underlying runtime.
+    pub last_execution_status: Option<String>,
+    /// Summary explaining the detachment.
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetachReason {
+    /// Stop/cancel was attempted but failed.
+    CancelFailed,
+    /// Stop/cancel is not supported by the runtime.
+    CancelUnsupported,
+    /// The runtime became unreachable (connection lost, server gone).
+    Unreachable,
+    /// The worker was shut down while the run was still active.
+    WorkerShutdown,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRecord {
     pub path: PathBuf,
@@ -318,29 +501,92 @@ impl RunAttempt {
     }
 }
 
+/// Tracks progress-based stall detection with sliding deadlines.
+///
+/// Splits the semantics of:
+/// - **Idle/progress timeout** (`idle_timeout_ms`): No liveness signal for this
+///   duration triggers a stall. Slides forward on each new signal.
+/// - **Total runtime cap** (`total_runtime_cap_ms`): Absolute wall-clock limit
+///   regardless of progress, anchored to `started_at`. Only enforced when `Some`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StallMetadata {
+    /// Timestamp when the run started (used to anchor the hard runtime cap).
+    pub started_at: TimestampMs,
+    /// Timestamp of the most recent liveness signal.
     pub last_activity_at: TimestampMs,
-    pub stall_timeout_ms: DurationMs,
+    /// Idle timeout in milliseconds. Slides forward on each progress signal.
+    #[serde(alias = "stall_timeout_ms")]
+    pub idle_timeout_ms: DurationMs,
+    /// Absolute wall-clock cap on total runtime, if configured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_runtime_cap_ms: Option<DurationMs>,
+    /// Timestamp when the run becomes stalled (idle deadline or runtime cap, whichever is sooner).
     pub stalled_at: TimestampMs,
 }
 
 impl StallMetadata {
-    pub fn new(last_activity_at: TimestampMs, stall_timeout_ms: DurationMs) -> Self {
+    /// Create with an idle timeout and no total runtime cap.
+    pub fn new(started_at: TimestampMs, idle_timeout_ms: DurationMs) -> Self {
+        Self::with_runtime_cap(started_at, idle_timeout_ms, None)
+    }
+
+    /// Create with both an idle timeout and a total runtime cap.
+    pub fn with_runtime_cap(
+        started_at: TimestampMs,
+        idle_timeout_ms: DurationMs,
+        total_runtime_cap_ms: Option<DurationMs>,
+    ) -> Self {
+        let idle_deadline = started_at.saturating_add(idle_timeout_ms);
+        let stalled_at = match total_runtime_cap_ms {
+            Some(cap) => {
+                let hard_cap = started_at.saturating_add(cap);
+                // Whichever deadline is sooner
+                idle_deadline.min(hard_cap)
+            }
+            None => idle_deadline,
+        };
         Self {
-            last_activity_at,
-            stall_timeout_ms,
-            stalled_at: last_activity_at.saturating_add(stall_timeout_ms),
+            started_at,
+            last_activity_at: started_at,
+            idle_timeout_ms,
+            total_runtime_cap_ms,
+            stalled_at,
         }
     }
 
-    pub fn observe_activity(&mut self, activity_at: TimestampMs) {
+    /// Record a new progress signal and slide the idle deadline forward.
+    ///
+    /// The total runtime cap (if configured) remains anchored to `started_at`
+    /// and does NOT slide with activity signals.
+    ///
+    /// Returns `true` if the activity timestamp advanced the stall deadline.
+    pub fn observe_activity(&mut self, activity_at: TimestampMs) -> bool {
         if activity_at < self.last_activity_at {
-            return;
+            return false;
         }
 
         self.last_activity_at = activity_at;
-        self.stalled_at = activity_at.saturating_add(self.stall_timeout_ms);
+
+        // Idle deadline slides with each activity signal
+        let idle_deadline = activity_at.saturating_add(self.idle_timeout_ms);
+        // Hard cap remains anchored to the original start time
+        let new_stalled_at = match self.total_runtime_cap_ms {
+            Some(cap) => {
+                let hard_cap = self.started_at.saturating_add(cap);
+                idle_deadline.min(hard_cap)
+            }
+            None => idle_deadline,
+        };
+
+        // Only count as progress if the deadline actually moved forward
+        let advanced = new_stalled_at > self.stalled_at;
+        self.stalled_at = new_stalled_at;
+        advanced
+    }
+
+    /// Check whether the current time has passed the stall deadline.
+    pub fn is_stalled_at(&self, now: TimestampMs) -> bool {
+        now >= self.stalled_at
     }
 }
 
@@ -352,6 +598,12 @@ pub enum WorkerOutcomeKind {
     TimedOut,
     Stalled,
     Cancelled,
+    /// The underlying runtime could not be stopped; execution is detached
+    /// from this OpenSymphony worker.
+    Detached,
+    /// An explicit cancel/stop was attempted but the runtime refused or
+    /// the cancellation mechanism itself failed.
+    CancelFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

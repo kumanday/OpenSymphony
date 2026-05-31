@@ -206,7 +206,9 @@ fn map_worker_outcome(
             Some(
                 WorkerOutcomeKind::Failed
                 | WorkerOutcomeKind::TimedOut
-                | WorkerOutcomeKind::Stalled,
+                | WorkerOutcomeKind::Stalled
+                | WorkerOutcomeKind::Detached
+                | WorkerOutcomeKind::CancelFailed,
             ) => WorkerOutcome::Failed,
             None => WorkerOutcome::Continued,
         },
@@ -219,7 +221,9 @@ fn map_worker_outcome(
             Some(
                 WorkerOutcomeKind::Failed
                 | WorkerOutcomeKind::TimedOut
-                | WorkerOutcomeKind::Stalled,
+                | WorkerOutcomeKind::Stalled
+                | WorkerOutcomeKind::Detached
+                | WorkerOutcomeKind::CancelFailed,
             ) => WorkerOutcome::Failed,
             _ => WorkerOutcome::Completed,
         },

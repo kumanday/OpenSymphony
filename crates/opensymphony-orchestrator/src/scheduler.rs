@@ -862,13 +862,25 @@ where
         recovered_workspace: Option<WorkspaceRecord>,
     ) -> Result<(), SchedulerError> {
         let issue_id = issue.id.clone();
-        let mut execution = match self.remove_execution(&issue_id) {
+        let execution = match self.remove_execution(&issue_id) {
             Some(existing) => existing,
             None => IssueExecution::new(issue.clone(), observed_at),
         };
-        if execution.status() == SchedulerStatus::Released {
-            execution = execution.reopen(observed_at)?;
-        }
+
+        // Do not reopen executions that were released due to terminal worker outcomes
+        // (Detached/CancelFailed). These represent runs that could not be safely stopped
+        // and reopening them would duplicate still-active work.
+        let was_terminal_outcome = matches!(
+            execution.last_worker_outcome().map(|o| o.outcome),
+            Some(WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed)
+        );
+        let mut execution =
+            if execution.status() == SchedulerStatus::Released && !was_terminal_outcome {
+                execution.reopen(observed_at)?
+            } else {
+                execution
+            };
+
         execution.refresh_issue(issue.clone())?;
         if let Some(workspace) = recovered_workspace {
             execution.attach_workspace(workspace)?;
@@ -933,6 +945,20 @@ where
     ) -> Result<IssueExecution, SchedulerError> {
         if let Some(reason) = non_active_release_reason(execution.issue().state.category.clone()) {
             return Ok(execution.release(observed_at, reason, Some(outcome))?);
+        }
+
+        // Detached and CancelFailed are terminal outcomes: release the execution instead of
+        // queuing a retry. The underlying OpenHands run may still be active and retrying
+        // would duplicate work.
+        if matches!(
+            outcome.outcome,
+            WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed
+        ) {
+            return Ok(execution.release(
+                observed_at,
+                ReleaseReason::TrackerInactive,
+                Some(outcome),
+            )?);
         }
 
         self.queue_retry_for_outcome(execution, outcome, observed_at)
@@ -1163,6 +1189,9 @@ fn retry_reason_for_outcome(outcome: WorkerOutcomeKind) -> Option<RetryReason> {
         WorkerOutcomeKind::Failed | WorkerOutcomeKind::TimedOut => Some(RetryReason::Failure),
         WorkerOutcomeKind::Stalled => Some(RetryReason::Stalled),
         WorkerOutcomeKind::Cancelled => Some(RetryReason::Cancelled),
+        // Detached and CancelFailed are terminal: do not retry automatically because
+        // the underlying OpenHands run may still be active and retrying would duplicate work.
+        WorkerOutcomeKind::Detached | WorkerOutcomeKind::CancelFailed => None,
     }
 }
 

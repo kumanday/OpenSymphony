@@ -863,3 +863,124 @@ async fn per_state_capacity_limits_dispatches_even_when_multiple_issues_are_read
     assert_eq!(running, 1);
     assert_eq!(unclaimed, 1);
 }
+
+#[tokio::test]
+async fn detached_outcome_does_not_schedule_retry() {
+    // When a worker reports a Detached outcome (stop/cancel failed or unsupported),
+    // the scheduler should NOT schedule a retry to avoid duplicating still-active work.
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-300", "COE-300", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None; // Disable stall timeout to isolate the test
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("first tick should dispatch");
+
+    let issue_id = IssueId::new("lin-300").expect("issue id should be valid");
+    assert_eq!(
+        scheduler.worker().launches.len(),
+        1,
+        "should have one launch"
+    );
+
+    let running = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: running.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &running,
+                WorkerOutcomeKind::Detached,
+                ts(200),
+                Some("underlying run could not be stopped".to_string()),
+                None,
+            ),
+        });
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("detached outcome tick should succeed");
+
+    let execution = scheduler
+        .execution(&issue_id)
+        .expect("execution should still exist");
+
+    // Should be Released, not RetryQueued or Running
+    assert_eq!(
+        execution.status(),
+        SchedulerStatus::Released,
+        "detached outcome should release the execution"
+    );
+    match execution.state() {
+        crate::opensymphony_orchestrator::SchedulerState::Released { reason, .. } => {
+            assert_eq!(*reason, ReleaseReason::TrackerInactive);
+        }
+        other => panic!("expected released state, got {other:?}"),
+    }
+
+    // No retry should be scheduled
+    assert!(execution.retry().is_none());
+    // No new launches should have occurred
+    assert_eq!(scheduler.worker().launches.len(), 1);
+}
+
+#[tokio::test]
+async fn cancel_failed_outcome_does_not_schedule_retry() {
+    // When a worker reports a CancelFailed outcome (cancel/stop was attempted but refused),
+    // the scheduler should NOT schedule a retry to avoid duplicating still-active work.
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-301", "COE-301", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None; // Disable stall timeout to isolate the test
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("first tick should dispatch");
+
+    let issue_id = IssueId::new("lin-301").expect("issue id should be valid");
+    let running = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::Finished {
+            worker_id: running.worker_id.clone(),
+            outcome: WorkerOutcomeRecord::from_run(
+                &running,
+                WorkerOutcomeKind::CancelFailed,
+                ts(200),
+                Some("cancel/stop was refused by runtime".to_string()),
+                None,
+            ),
+        });
+
+    scheduler
+        .tick(ts(200))
+        .await
+        .expect("cancel-failed outcome tick should succeed");
+
+    let execution = scheduler
+        .execution(&issue_id)
+        .expect("execution should still exist");
+
+    // Should be Released, not RetryQueued
+    assert_eq!(execution.status(), SchedulerStatus::Released);
+    // No retry should be scheduled
+    assert!(execution.retry().is_none());
+    // No new launches should have occurred
+    assert_eq!(scheduler.worker().launches.len(), 1);
+}

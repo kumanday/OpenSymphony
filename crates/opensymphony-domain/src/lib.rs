@@ -24,9 +24,10 @@ pub use identifiers::{
 pub use issue::{BlockerRef, IssueRef, IssueState, IssueStateCategory, NormalizedIssue};
 pub use journal::{EventJournalBackend, EventStream, InMemoryEventJournal, StreamBroker};
 pub use runtime::{
-    ConversationActivityEvent, ConversationMetadata, ReleaseReason, RetryAttempt,
-    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeStreamState,
-    StallMetadata, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
+    ConversationActivityEvent, ConversationMetadata, DetachMetadata, DetachReason, ReleaseReason,
+    RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt,
+    RuntimeLivenessPhase, RuntimeProgressSnapshot, RuntimeStreamState, StallMetadata,
+    WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
 pub use snapshot::{
     ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, IssueSnapshot, OrchestratorSnapshot,
