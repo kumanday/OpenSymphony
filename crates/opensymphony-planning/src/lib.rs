@@ -1,6 +1,7 @@
-//! Planning-stage analysis for repository structure, Linear graph context, and research artifacts.
+//! Planning-stage analysis and generation for repository structure, Linear graph context,
+//! research artifacts, and implementation plans.
 //!
-//! This module provides the analysis pass used during collaborative planning sessions:
+//! This module provides the full planning pipeline used during collaborative planning sessions:
 //!
 //! - **Codebase Analysis** (`codebase`): Scans a repository for structure, conventions,
 //!   integration points, ownership boundaries, and risks.
@@ -8,15 +9,23 @@
 //!   project state including milestones, blocker chains, and issue distributions.
 //! - **Research Briefs** (`research`): Captures targeted research findings with citations
 //!   for review before plan generation.
+//! - **Implementation Plan Generator** (`generator`): Transforms planning session context
+//!   into structured milestones, issues, sub-issues, task packages, and dependency graphs.
 
 pub mod codebase;
 pub mod domain;
+pub mod generator;
 pub mod linear_graph;
 pub mod research;
 
 pub use codebase::{
     AnalysisRisk, CodebaseAnalysis, CodebaseAnalysisError, CodebaseAnalyzer, Convention,
     IntegrationPoint, LanguageSignature, OwnershipSignal, PackageInfo, PackageKind,
+};
+pub use generator::{
+    AcceptanceCriterion, GenerationError, IntakeContext, ManifestTask, PlanArtifacts,
+    PlanGenerator, PlannedIssue, PlannedMilestone, PlannedSubIssue, PlanningSession,
+    RegenerationScope, TaskId, TaskPackageManifest, TaskPriority, validate_dependency_graph,
 };
 pub use linear_graph::{
     BlockerChain, BlockerSnapshot, ChildRef, IssueSnapshot, LinearGraphAnalysis,
