@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +197,7 @@ impl CodeIntelIndex for CodebaseAnalyzer {
             .map(|path| path.to_string_lossy().trim_matches('/').to_string())
             .filter(|path| !path.is_empty())
             .collect::<Vec<_>>();
+        let commit_sha = git_commit_sha(&self.root);
         let mut artifacts = Vec::new();
 
         for package in &analysis.packages {
@@ -211,9 +213,13 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                 provider: "codebase-analyzer".to_string(),
                 kind: "package".to_string(),
                 scope_refs: scope_refs.to_vec(),
-                source_refs: Vec::new(),
+                source_refs: vec![MemorySourceRef {
+                    kind: "path".to_string(),
+                    id: package.relative_path.clone(),
+                    url: None,
+                }],
                 path: Some(PathBuf::from(&package.relative_path)),
-                commit_sha: None,
+                commit_sha: commit_sha.clone(),
                 title: package.name.clone(),
                 summary: format!(
                     "{:?} package with {} declared dependency signal(s)",
@@ -236,9 +242,13 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                 provider: "codebase-analyzer".to_string(),
                 kind: "convention".to_string(),
                 scope_refs: scope_refs.to_vec(),
-                source_refs: Vec::new(),
+                source_refs: vec![MemorySourceRef {
+                    kind: "path".to_string(),
+                    id: convention.evidence_path.clone(),
+                    url: None,
+                }],
                 path: Some(PathBuf::from(&convention.evidence_path)),
-                commit_sha: None,
+                commit_sha: commit_sha.clone(),
                 title: convention.area.clone(),
                 summary: convention.description.clone(),
             });
@@ -255,7 +265,7 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                     url: None,
                 }],
                 path: None,
-                commit_sha: None,
+                commit_sha: commit_sha.clone(),
                 title: "Repository summary".to_string(),
                 summary: format!(
                     "{} files, {} Rust files, {} TypeScript files, build systems: {}",
@@ -270,6 +280,19 @@ impl CodeIntelIndex for CodebaseAnalyzer {
         artifacts.truncate(limit.max(1));
         Ok(artifacts)
     }
+}
+
+fn git_commit_sha(root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
 }
 
 /// Walks a directory tree and returns relative paths for each file.

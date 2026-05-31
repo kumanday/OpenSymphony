@@ -28,6 +28,7 @@ pub use crate::opensymphony_domain::{
     ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneFileChange as FileChange,
     ControlPlaneFileChangeKind as FileChangeKind,
     ControlPlaneIssueRuntimeState as IssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
+    ControlPlaneMemoryServerStatus as MemoryServerStatus,
     ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
     ControlPlaneRecentEventKind as RecentEventKind, ControlPlaneWorkerOutcome as WorkerOutcome,
 };
@@ -425,6 +426,7 @@ mod tests {
                 conversation_count: 2,
                 status_line: "healthy".to_owned(),
             },
+            memory_server: Default::default(),
             metrics: MetricsSnapshot {
                 running_issues: 1,
                 retry_queue_depth: 0,

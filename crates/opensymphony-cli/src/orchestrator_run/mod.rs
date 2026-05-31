@@ -34,7 +34,10 @@ use self::{
         build_tracker_backend, build_workspace_manager_config, prepare_active_conversation_store,
     },
     config::{RunRuntimeConfig, resolve_runtime_config},
-    snapshot::{current_agent_server_status, map_snapshot, push_recent_event, terminal_state_set},
+    snapshot::{
+        current_agent_server_status, current_memory_server_status, map_snapshot, push_recent_event,
+        terminal_state_set,
+    },
 };
 
 #[derive(Debug, Args, Clone)]
@@ -98,6 +101,8 @@ enum RunCommandError {
     ToolingSetupRequired { tool_dir: PathBuf, detail: String },
     #[error("failed to start local OpenHands supervisor: {0}")]
     Supervisor(#[from] crate::opensymphony_openhands::SupervisorError),
+    #[error("failed to start memory server: {0}")]
+    MemoryServer(#[from] crate::opensymphony_memory::MemoryError),
     #[error("failed to build scheduler configuration: {0}")]
     SchedulerConfig(#[from] SchedulerError),
     #[error("failed to bind control-plane listener: {0}")]
@@ -171,8 +176,27 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         );
     }
 
-    let (transport, mut supervisor) =
-        build_runtime_transport(&runtime, managed_local_preparation.tooling).await?;
+    let memory_server = start_runtime_memory_server(&runtime).await?;
+    let memory_env = memory_server.as_ref().map(|server| RuntimeMemoryEnv {
+        endpoint: server.endpoint().to_string(),
+        token: runtime
+            .memory
+            .server
+            .as_ref()
+            .and_then(|server| server.token.clone()),
+        project: runtime.workflow.config.tracker.project_slug.clone(),
+        execution_repo: runtime.target_repo.display().to_string(),
+    });
+    if let Some(env) = &memory_env {
+        info!(endpoint = %env.endpoint, "started OpenSymphony memory server");
+    }
+
+    let (transport, mut supervisor) = build_runtime_transport(
+        &runtime,
+        managed_local_preparation.tooling,
+        memory_env.as_ref(),
+    )
+    .await?;
     let client = crate::opensymphony_openhands::OpenHandsClient::new(transport);
     client.openapi_probe().await?;
 
@@ -180,6 +204,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         client.clone(),
         Arc::new(runtime.workflow.clone()),
         workspace_manager,
+        memory_env.clone(),
     );
     let mut scheduler = Scheduler::new(
         tracker,
@@ -196,12 +221,22 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         format!("loaded {}", runtime.workflow_path.display()),
         Utc::now(),
     );
+    if let Some(env) = &memory_env {
+        push_recent_event(
+            &mut recent_events,
+            RecentEventKind::SnapshotPublished,
+            None,
+            format!("memory server listening at {}", env.endpoint),
+            Utc::now(),
+        );
+    }
 
     let initial_snapshot = map_snapshot(
         &scheduler.snapshot(now_timestamp()),
         runtime.workflow.config.workspace.root.as_path(),
         &terminal_state_set(&runtime.workflow),
         current_agent_server_status(&mut supervisor, client.base_url()),
+        current_memory_server_status(memory_server.as_ref()),
         &recent_events,
     );
 
@@ -216,6 +251,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
         _ = tokio::signal::ctrl_c() => {
             info!("received shutdown signal");
             server_task.abort();
+            if let Some(server) = &memory_server {
+                server.abort();
+            }
             if let Some(mut supervisor) = supervisor {
                 let _ = supervisor.stop();
             }
@@ -226,6 +264,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                 Ok(Ok(())) => {
                     if let Some(mut supervisor) = supervisor {
                         let _ = supervisor.stop();
+                    }
+                    if let Some(server) = &memory_server {
+                        server.abort();
                     }
                     return Ok(());
                 }
@@ -253,6 +294,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
             runtime.workflow.config.workspace.root.as_path(),
             &terminal_state_set(&runtime.workflow),
             current_agent_server_status(&mut supervisor, client.base_url()),
+            current_memory_server_status(memory_server.as_ref()),
             &recent_events,
         ))
         .await;
@@ -305,6 +347,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             runtime.workflow.config.workspace.root.as_path(),
                             &terminal_state_set(&runtime.workflow),
                             current_agent_server_status(&mut supervisor, client.base_url()),
+                            current_memory_server_status(memory_server.as_ref()),
                             &recent_events,
                         )).await;
                         if !auto_capture_candidates.is_empty() {
@@ -324,11 +367,14 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             publish_auto_capture_event(
                                 auto_capture_result,
                                 &snapshot,
-                                &runtime,
-                                &mut supervisor,
-                                client.base_url(),
-                                &mut recent_events,
-                                &store,
+                                SnapshotPublishContext {
+                                    runtime: &runtime,
+                                    supervisor: &mut supervisor,
+                                    agent_server_base_url: client.base_url(),
+                                    memory_server: memory_server.as_ref(),
+                                    recent_events: &mut recent_events,
+                                    store: &store,
+                                },
                             ).await;
                         }
                     }
@@ -347,6 +393,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
                             runtime.workflow.config.workspace.root.as_path(),
                             &terminal_state_set(&runtime.workflow),
                             current_agent_server_status(&mut supervisor, client.base_url()),
+                            current_memory_server_status(memory_server.as_ref()),
                             &recent_events,
                         )).await;
                     }
@@ -356,6 +403,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     }
 
     server_task.abort();
+    if let Some(server) = &memory_server {
+        server.abort();
+    }
     if let Some(mut supervisor) = supervisor {
         let _ = supervisor.stop();
     }
@@ -363,26 +413,54 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RuntimeMemoryEnv {
+    pub(super) endpoint: String,
+    pub(super) token: Option<String>,
+    pub(super) project: String,
+    pub(super) execution_repo: String,
+}
+
+async fn start_runtime_memory_server(
+    runtime: &RunRuntimeConfig,
+) -> Result<Option<super::memory::MemoryServerHandle>, RunCommandError> {
+    let Some(server) = runtime.memory.server.as_ref() else {
+        return Ok(None);
+    };
+    let config = crate::opensymphony_memory::MemoryConfig::load(&runtime.target_repo, None)?;
+    super::memory::start_memory_server(config, server.bind, server.token.clone())
+        .await
+        .map(Some)
+        .map_err(RunCommandError::MemoryServer)
+}
+
 async fn publish_auto_capture_event(
     result: Result<super::memory::AutoMemoryReport, crate::opensymphony_memory::MemoryError>,
     snapshot: &OrchestratorSnapshot,
-    runtime: &RunRuntimeConfig,
-    supervisor: &mut Option<crate::opensymphony_openhands::LocalServerSupervisor>,
-    agent_server_base_url: &str,
-    recent_events: &mut VecDeque<RecentEvent>,
-    store: &SnapshotStore,
+    context: SnapshotPublishContext<'_>,
 ) {
-    if record_auto_capture_recent_event(recent_events, result) {
-        store
+    if record_auto_capture_recent_event(context.recent_events, result) {
+        context
+            .store
             .publish(map_snapshot(
                 snapshot,
-                runtime.workflow.config.workspace.root.as_path(),
-                &terminal_state_set(&runtime.workflow),
-                current_agent_server_status(supervisor, agent_server_base_url),
-                recent_events,
+                context.runtime.workflow.config.workspace.root.as_path(),
+                &terminal_state_set(&context.runtime.workflow),
+                current_agent_server_status(context.supervisor, context.agent_server_base_url),
+                current_memory_server_status(context.memory_server),
+                context.recent_events,
             ))
             .await;
     }
+}
+
+struct SnapshotPublishContext<'a> {
+    runtime: &'a RunRuntimeConfig,
+    supervisor: &'a mut Option<crate::opensymphony_openhands::LocalServerSupervisor>,
+    agent_server_base_url: &'a str,
+    memory_server: Option<&'a super::memory::MemoryServerHandle>,
+    recent_events: &'a mut VecDeque<RecentEvent>,
+    store: &'a SnapshotStore,
 }
 
 fn record_auto_capture_recent_event(

@@ -24,7 +24,7 @@ use crate::opensymphony_workspace::{
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 use tokio::time::{Instant, timeout_at};
 use tracing::debug;
@@ -78,6 +78,15 @@ pub struct IssueSessionRunnerConfig {
     /// independent of progress-based idle detection.
     pub total_runtime_cap_ms: Option<Duration>,
     pub finished_drain_timeout: Duration,
+    pub memory: Option<MemoryWorkerAccess>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryWorkerAccess {
+    pub endpoint: String,
+    pub token: Option<String>,
+    pub project: Option<String>,
+    pub execution_repo: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +296,7 @@ impl Default for IssueSessionRunnerConfig {
             terminal_wait_timeout: Duration::from_secs(300),
             total_runtime_cap_ms: None,
             finished_drain_timeout: Duration::from_millis(100),
+            memory: None,
         }
     }
 }
@@ -310,7 +320,13 @@ impl IssueSessionRunnerConfig {
             // Future hook: not yet exposed in workflow agent config.
             total_runtime_cap_ms: None,
             finished_drain_timeout: Duration::from_millis(100),
+            memory: None,
         }
+    }
+
+    pub fn with_memory(mut self, memory: Option<MemoryWorkerAccess>) -> Self {
+        self.memory = memory;
+        self
     }
 }
 
@@ -1466,7 +1482,13 @@ impl IssueSessionRunner {
                 .apply_runtime_snapshot(&active_session.stream);
         }
 
-        if let Err(error) = write_memory_context_artifact(workspace_manager, workspace, issue).await
+        if let Err(error) = write_memory_context_artifact(
+            workspace_manager,
+            workspace,
+            issue,
+            self.config.memory.as_ref(),
+        )
+        .await
         {
             debug!(
                 %error,
@@ -2821,7 +2843,16 @@ async fn write_memory_context_artifact(
     workspace_manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
     issue: &NormalizedIssue,
+    memory: Option<&MemoryWorkerAccess>,
 ) -> Result<(), String> {
+    if let Some(memory) = memory {
+        let context = fetch_memory_context_from_server(memory, issue).await?;
+        return workspace_manager
+            .write_text_artifact(workspace, &workspace.memory_context_path(), &context)
+            .await
+            .map_err(|error| format!("failed to write memory context artifact: {error}"));
+    }
+
     let config = MemoryConfig::load(workspace.workspace_path(), None).map_err(|error| {
         format!(
             "failed to load memory config from {}: {error}",
@@ -2876,6 +2907,83 @@ async fn write_memory_context_artifact(
         .write_text_artifact(workspace, &workspace.memory_context_path(), &context)
         .await
         .map_err(|error| format!("failed to write memory context artifact: {error}"))
+}
+
+async fn fetch_memory_context_from_server(
+    memory: &MemoryWorkerAccess,
+    issue: &NormalizedIssue,
+) -> Result<String, String> {
+    let mut arguments = json!({
+        "issue": issue.identifier.to_string(),
+        "limit": 20,
+        "currentIssue": {
+            "id": issue.id.to_string(),
+            "identifier": issue.identifier.to_string(),
+            "title": issue.title.clone(),
+            "description": issue.description.clone(),
+            "state": issue.state.name.clone(),
+            "labels": issue.labels.clone(),
+            "children": issue.sub_issues.iter().map(|child| json!({
+                "id": child.id.to_string(),
+                "identifier": child.identifier.to_string(),
+                "state": child.state.clone(),
+            })).collect::<Vec<_>>(),
+            "blockedBy": issue.blocked_by.iter().filter_map(|blocker| {
+                blocker.identifier.as_ref().map(|identifier| json!({
+                    "id": blocker.id.as_ref().map(ToString::to_string),
+                    "identifier": identifier.to_string(),
+                    "state": blocker.state.clone(),
+                }))
+            }).collect::<Vec<_>>(),
+        },
+    });
+    if let Value::Object(map) = &mut arguments {
+        if let Some(project) = &memory.project {
+            map.insert("project".to_string(), json!(project));
+            map.insert("projectSet".to_string(), json!(project));
+        }
+        if let Some(repo) = &memory.execution_repo {
+            map.insert("repo".to_string(), json!(repo));
+        }
+    }
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": "opensymphony-worker-context",
+        "method": "tools/call",
+        "params": {
+            "name": "memory.context",
+            "arguments": arguments
+        }
+    });
+    let client = reqwest::Client::new();
+    let mut builder = client.post(&memory.endpoint).json(&request);
+    if let Some(token) = &memory.token {
+        builder = builder.bearer_auth(token);
+    }
+    let response = builder
+        .send()
+        .await
+        .map_err(|error| format!("failed to call memory server: {error}"))?;
+    let status = response.status();
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("memory server response was not valid JSON: {error}"))?;
+    if !status.is_success() {
+        return Err(format!("memory server returned HTTP {status}: {payload}"));
+    }
+    if let Some(error) = payload.get("error") {
+        return Err(format!("memory server returned an MCP error: {error}"));
+    }
+    payload
+        .get("result")
+        .and_then(|result| result.get("content"))
+        .and_then(Value::as_array)
+        .and_then(|content| content.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| "memory server response omitted text content".to_string())
 }
 
 fn build_session_context(
@@ -3247,10 +3355,14 @@ fn finished_stream_error_is_tolerable(error: &OpenHandsError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{collections::HashSet, sync::Arc};
 
-    use crate::opensymphony_domain::WorkerOutcomeKind;
+    use crate::opensymphony_domain::{
+        BlockerRef, IssueRef, IssueState, IssueStateCategory, WorkerOutcomeKind,
+    };
     use crate::opensymphony_testkit::FakeOpenHandsServer;
+    use axum::{Json, Router, extract::State, routing::post};
+    use tokio::{net::TcpListener, sync::Mutex};
 
     use super::super::TransportConfig;
     use super::*;
@@ -3260,6 +3372,109 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_memory_context_from_server_calls_mcp_context_with_worker_scope() {
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("memory test listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("memory test listener should expose an address");
+        let app = Router::new()
+            .route("/mcp", post(memory_test_mcp))
+            .with_state(requests.clone());
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("memory test server should run");
+        });
+        let access = MemoryWorkerAccess {
+            endpoint: format!("http://{address}/mcp"),
+            token: Some("read-token".to_string()),
+            project: Some("project-alpha".to_string()),
+            execution_repo: Some("/tmp/repo-alpha".to_string()),
+        };
+
+        let issue = NormalizedIssue {
+            id: must(IssueId::new("issue-999")),
+            identifier: must(IssueIdentifier::new("COE-999")),
+            title: "Memory server context".to_string(),
+            description: Some("Use deterministic worker issue facts.".to_string()),
+            priority: None,
+            state: IssueState {
+                id: None,
+                name: "In Progress".to_string(),
+                category: IssueStateCategory::Active,
+            },
+            branch_name: None,
+            url: None,
+            labels: vec!["area:memory".to_string()],
+            parent_id: None,
+            blocked_by: vec![BlockerRef {
+                id: Some(must(IssueId::new("issue-100"))),
+                identifier: Some(must(IssueIdentifier::new("COE-100"))),
+                state: Some("Done".to_string()),
+                created_at: None,
+                updated_at: None,
+            }],
+            sub_issues: vec![IssueRef {
+                id: must(IssueId::new("issue-101")),
+                identifier: must(IssueIdentifier::new("COE-101")),
+                state: "Done".to_string(),
+            }],
+            created_at: None,
+            updated_at: None,
+        };
+
+        let context = fetch_memory_context_from_server(&access, &issue)
+            .await
+            .expect("memory server context should load");
+
+        assert_eq!(context, "# Memory Context: COE-999\n");
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(request["method"], "tools/call");
+        assert_eq!(request["params"]["name"], "memory.context");
+        assert_eq!(request["params"]["arguments"]["issue"], "COE-999");
+        assert_eq!(
+            request["params"]["arguments"]["currentIssue"]["labels"][0],
+            "area:memory"
+        );
+        assert_eq!(
+            request["params"]["arguments"]["currentIssue"]["children"][0]["identifier"],
+            "COE-101"
+        );
+        assert_eq!(
+            request["params"]["arguments"]["currentIssue"]["blockedBy"][0]["identifier"],
+            "COE-100"
+        );
+        assert_eq!(request["params"]["arguments"]["project"], "project-alpha");
+        assert_eq!(
+            request["params"]["arguments"]["projectSet"],
+            "project-alpha"
+        );
+        assert_eq!(request["params"]["arguments"]["repo"], "/tmp/repo-alpha");
+        task.abort();
+    }
+
+    async fn memory_test_mcp(
+        State(requests): State<Arc<Mutex<Vec<Value>>>>,
+        Json(request): Json<Value>,
+    ) -> Json<Value> {
+        requests.lock().await.push(request.clone());
+        Json(json!({
+            "jsonrpc": "2.0",
+            "id": request.get("id").cloned().unwrap_or(Value::Null),
+            "result": {
+                "content": [
+                    { "type": "text", "text": "# Memory Context: COE-999\n" }
+                ]
+            }
+        }))
     }
 
     #[tokio::test]
@@ -3321,6 +3536,7 @@ mod tests {
                 terminal_wait_timeout: Duration::from_millis(25),
                 total_runtime_cap_ms: None,
                 finished_drain_timeout: Duration::from_millis(25),
+                memory: None,
             },
         );
 

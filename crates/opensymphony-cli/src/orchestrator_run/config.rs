@@ -16,6 +16,8 @@ use super::{RunArgs, RunCommandError};
 
 const DEFAULT_CONFIG_FILE: &str = "config.yaml";
 const DEFAULT_CONTROL_PLANE_BIND: &str = "127.0.0.1:2468";
+const DEFAULT_MEMORY_SERVER_BIND: &str = "127.0.0.1:0";
+const DEFAULT_MEMORY_TOKEN_ENV: &str = "OPENSYMPHONY_MEMORY_TOKEN";
 
 #[derive(Debug, Default, Deserialize)]
 struct RunConfigFile {
@@ -47,11 +49,24 @@ struct RunMemoryConfigFile {
     auto_capture: Option<bool>,
     #[serde(default)]
     auto_archive: Option<bool>,
+    #[serde(default)]
+    serve: Option<bool>,
+    #[serde(default)]
+    bind: Option<String>,
+    #[serde(default)]
+    token_env: Option<String>,
 }
 
 pub(super) struct RunMemoryConfig {
     pub(super) auto_capture: bool,
     pub(super) auto_archive: bool,
+    pub(super) server: Option<RunMemoryServerConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RunMemoryServerConfig {
+    pub(super) bind: SocketAddr,
+    pub(super) token: Option<String>,
 }
 
 pub(super) struct RunRuntimeConfig {
@@ -123,9 +138,43 @@ pub(super) async fn resolve_runtime_config(
         .as_ref()
         .map(|tool_dir| OpenHandsConversationStorePaths::for_tool_dir(tool_dir, &target_repo))
         .transpose()?;
+    let memory_config_exists = target_repo
+        .join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE)
+        .is_file();
+    let auto_capture = config.memory.auto_capture.unwrap_or(true);
+    let serve_memory = config.memory.serve.unwrap_or(memory_config_exists);
+    let memory_server = if serve_memory {
+        let memory_bind_value = config
+            .memory
+            .bind
+            .as_deref()
+            .unwrap_or(DEFAULT_MEMORY_SERVER_BIND);
+        let memory_bind =
+            memory_bind_value
+                .parse()
+                .map_err(|source| RunCommandError::InvalidBind {
+                    value: memory_bind_value.to_string(),
+                    source,
+                })?;
+        let memory_token_env = config
+            .memory
+            .token_env
+            .as_deref()
+            .unwrap_or(DEFAULT_MEMORY_TOKEN_ENV);
+        let memory_token = env::var(memory_token_env)
+            .ok()
+            .and_then(|value| non_empty(&value));
+        Some(RunMemoryServerConfig {
+            bind: memory_bind,
+            token: memory_token,
+        })
+    } else {
+        None
+    };
     let memory = RunMemoryConfig {
-        auto_capture: config.memory.auto_capture.unwrap_or(true),
+        auto_capture,
         auto_archive: config.memory.auto_archive.unwrap_or(false),
+        server: memory_server,
     };
     validate_memory_bootstrap(&target_repo, &memory)?;
 
@@ -145,7 +194,7 @@ fn validate_memory_bootstrap(
     target_repo: &Path,
     memory: &RunMemoryConfig,
 ) -> Result<(), RunCommandError> {
-    if !memory.auto_capture {
+    if !memory.auto_capture && memory.server.is_none() {
         return Ok(());
     }
     let path = target_repo.join(DEFAULT_PRIVATE_MEMORY_CONFIG_FILE);
@@ -192,6 +241,18 @@ fn resolve_run_config(
         .take()
         .map(|value| expand_run_value(path, value))
         .transpose()?;
+    config.memory.bind = config
+        .memory
+        .bind
+        .take()
+        .map(|value| expand_run_value(path, value))
+        .transpose()?;
+    config.memory.token_env = config
+        .memory
+        .token_env
+        .take()
+        .map(|value| expand_run_value(path, value))
+        .transpose()?;
     Ok(config)
 }
 
@@ -210,6 +271,11 @@ fn resolve_relative_to(base: &Path, path: &Path) -> PathBuf {
     }
 }
 
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +286,7 @@ mod tests {
         let memory = RunMemoryConfig {
             auto_capture: true,
             auto_archive: false,
+            server: None,
         };
 
         let result = validate_memory_bootstrap(repo.path(), &memory);
@@ -236,6 +303,7 @@ mod tests {
         let memory = RunMemoryConfig {
             auto_capture: false,
             auto_archive: false,
+            server: None,
         };
 
         validate_memory_bootstrap(repo.path(), &memory).expect("disabled auto-capture should pass");
@@ -252,8 +320,29 @@ mod tests {
         let memory = RunMemoryConfig {
             auto_capture: true,
             auto_archive: false,
+            server: None,
         };
 
         validate_memory_bootstrap(repo.path(), &memory).expect("memory config should satisfy run");
+    }
+
+    #[test]
+    fn memory_bootstrap_is_required_when_memory_server_is_enabled() {
+        let repo = tempfile::tempdir().expect("temp repo should exist");
+        let memory = RunMemoryConfig {
+            auto_capture: false,
+            auto_archive: false,
+            server: Some(RunMemoryServerConfig {
+                bind: "127.0.0.1:0".parse().expect("valid bind"),
+                token: None,
+            }),
+        };
+
+        let result = validate_memory_bootstrap(repo.path(), &memory);
+
+        assert!(matches!(
+            result,
+            Err(RunCommandError::MissingMemoryConfig { .. })
+        ));
     }
 }

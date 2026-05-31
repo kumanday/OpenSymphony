@@ -347,6 +347,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 source_hash: row.get(7)?,
                 warning_count: row.get::<_, i64>(8)? as usize,
                 docs_sync_status: row.get(9)?,
+                changed_files: Vec::new(),
                 body: row.get(10)?,
             })
         })
@@ -371,6 +372,13 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 source,
             }
         })?;
+        issue.changed_files =
+            load_issue_changed_files(&connection, &issue.issue_key).map_err(|source| {
+                MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                }
+            })?;
     }
     Ok(issues)
 }
@@ -387,6 +395,22 @@ fn load_issue_areas(
         areas.push(row?);
     }
     Ok(areas)
+}
+
+fn load_issue_changed_files(
+    connection: &Connection,
+    issue_key: &str,
+) -> Result<Vec<PathBuf>, duckdb::Error> {
+    let mut statement = connection
+        .prepare("SELECT file_path FROM changed_files WHERE issue_key = ? ORDER BY file_path")?;
+    let rows = statement.query_map(params![issue_key], |row| {
+        Ok(PathBuf::from(row.get::<_, String>(0)?))
+    })?;
+    let mut paths = Vec::new();
+    for row in rows {
+        paths.push(row?);
+    }
+    Ok(paths)
 }
 
 fn find_indexed_issue(
@@ -429,6 +453,23 @@ fn write_markdown_indexes(config: &MemoryConfig) -> Result<Vec<PathBuf>, MemoryE
     write_file(&log_path, &log)?;
 
     Ok(vec![index_path, log_path])
+}
+
+pub fn refresh_memory_index(config: &MemoryConfig) -> Result<MemoryReindexReport, MemoryError> {
+    let connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    drop(connection);
+
+    let issue_count = load_indexed_issues(config)?.len();
+    let markdown_indexes = write_markdown_indexes(config)?;
+    Ok(MemoryReindexReport {
+        issue_count,
+        index_path: config.index_path.clone(),
+        markdown_indexes,
+    })
 }
 
 fn write_milestone_nodes(

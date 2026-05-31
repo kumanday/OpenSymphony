@@ -43,6 +43,7 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                 conversation_count: identifiers.len() as u32,
                 status_line: "healthy".to_owned(),
             },
+            memory_server: Default::default(),
             metrics: MetricsSnapshot {
                 running_issues: 1,
                 retry_queue_depth: 0,
