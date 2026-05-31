@@ -236,7 +236,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-- COE-399 contributed: PR #94: COE-399: Linear read coverage, schema drift validation, and task graph cache (merge `db4e2e6`)
+- COE-434 contributed: PR #98: COE-434: Long-running harness liveness and scheduler/runtime ownership contract (merge `c448eaf`)
 
 ## Important invariants
 
@@ -253,10 +253,10 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Recent changes
 
-- COE-399: Linear Read Coverage And Task Graph Cache
+- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 
 ## Source refs
 
-- COE-399
+- COE-434
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

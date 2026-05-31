@@ -184,7 +184,8 @@ If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk
 
 ## Current model
 
-- COE-406 contributed: PR #95: COE-406: Add planning-stage analysis module (merge `59240e2`)
+- COE-413 contributed: PR #96: COE-413: Implementation plan generator stage (merge `ba49e18`)
+- COE-434 contributed: PR #98: COE-434: Long-running harness liveness and scheduler/runtime ownership contract (merge `c448eaf`)
 
 ## Important invariants
 
@@ -201,10 +202,12 @@ If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk
 
 ## Recent changes
 
-- COE-406: Repository, Linear, And Research Analysis
+- COE-413: Implementation Plan Generator Stage
+- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 
 ## Source refs
 
-- COE-406
+- COE-413
+- COE-434
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -239,7 +239,8 @@ recovery. To archive from already captured memory without recapturing, use
 
 ## Current model
 
-- COE-399 contributed: PR #94: COE-399: Linear read coverage, schema drift validation, and task graph cache (merge `db4e2e6`)
+- COE-413 contributed: PR #96: COE-413: Implementation plan generator stage (merge `ba49e18`)
+- COE-434 contributed: PR #98: COE-434: Long-running harness liveness and scheduler/runtime ownership contract (merge `c448eaf`)
 
 ## Important invariants
 
@@ -256,10 +257,12 @@ recovery. To archive from already captured memory without recapturing, use
 
 ## Recent changes
 
-- COE-399: Linear Read Coverage And Task Graph Cache
+- COE-413: Implementation Plan Generator Stage
+- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 
 ## Source refs
 
-- COE-399
+- COE-413
+- COE-434
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

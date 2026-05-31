@@ -101,6 +101,7 @@ areas:
       - docs/DEVELOPMENT.md
       linear_milestones:
       - 'M10: Web Client And External Gateway'
+      - 'M7: Shared Client And Desktop Alpha'
   devex:
     title: Devex
     docs_target: docs/devex.md
@@ -154,6 +155,7 @@ areas:
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
+      - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
   hosted-client-prd:
@@ -171,6 +173,7 @@ areas:
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
+      - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
   implementation-plan:
@@ -188,6 +191,7 @@ areas:
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
+      - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
   linear-and-tools:
@@ -214,7 +218,9 @@ areas:
       docs:
       - docs/memory.md
       linear_milestones:
+      - 'M6: Gateway And Stream Contract'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9: Collaborative Planning Alpha'
   memory-capture-and-doc-sync:
     title: OpenSymphony Memory Capture and Documentation Sync
     docs_target: docs/memory-capture-and-doc-sync.md

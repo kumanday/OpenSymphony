@@ -157,7 +157,7 @@ Breaking changes in this line include:
 
 ## Current model
 
-- COE-401 contributed: PR #92: COE-401: Web app entry and deployment modes (merge `73b9067`)
+- COE-398 contributed: PR #93: feat: add Tauri desktop shell and security capabilities (COE-398) (merge `6641d8d`)
 
 ## Important invariants
 
@@ -174,10 +174,10 @@ Breaking changes in this line include:
 
 ## Recent changes
 
-- COE-401: Web App Entry And Deployment Modes
+- COE-398: Tauri Shell And Security Capabilities
 
 ## Source refs
 
-- COE-401
+- COE-398
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
