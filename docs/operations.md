@@ -175,6 +175,16 @@ time and a larger binary. Treat that native dependency as part of the hosted
 deployment threat model before enabling memory in a multi-tenant service. It
 does not archive Linear issues.
 
+Read commands such as `memory status`, `memory brief`, `memory related`, and
+`memory context` open the DuckDB index in read-only mode and do not run schema
+migrations. Run capture, import, docs sync, or reindex-style admin operations
+serially if a local DuckDB writer is active.
+
+For worker or tool access, `opensymphony memory serve --addr 127.0.0.1:8765`
+starts a read-only local HTTP endpoint with MCP-style `initialize`,
+`tools/list`, and `tools/call` JSON-RPC methods. Set
+`OPENSYMPHONY_MEMORY_TOKEN` or pass `--token` to require bearer-token access.
+
 Linear archival is a separate command and is guarded by captured memory:
 
 ```bash

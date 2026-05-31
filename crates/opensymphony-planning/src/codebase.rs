@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::opensymphony_memory::{
+    CodeIntelArtifact, CodeIntelIndex, KnowledgeScope, MemoryError, MemorySourceRef,
+};
+
 /// Result of scanning a repository for structural analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodebaseAnalysis {
@@ -174,6 +178,97 @@ impl CodebaseAnalyzer {
             total_rust_files: total_rust,
             total_typescript_files: total_ts,
         })
+    }
+}
+
+impl CodeIntelIndex for CodebaseAnalyzer {
+    fn code_context(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+        let analysis = self.analyze().map_err(|error| {
+            MemoryError::InvalidInput(format!("codebase analysis failed: {error}"))
+        })?;
+        let requested_paths = paths
+            .iter()
+            .map(|path| path.to_string_lossy().trim_matches('/').to_string())
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>();
+        let mut artifacts = Vec::new();
+
+        for package in &analysis.packages {
+            if !requested_paths.is_empty()
+                && !requested_paths.iter().any(|path| {
+                    package.relative_path.starts_with(path)
+                        || path.starts_with(&package.relative_path)
+                })
+            {
+                continue;
+            }
+            artifacts.push(CodeIntelArtifact {
+                provider: "codebase-analyzer".to_string(),
+                kind: "package".to_string(),
+                scope_refs: scope_refs.to_vec(),
+                source_refs: Vec::new(),
+                path: Some(PathBuf::from(&package.relative_path)),
+                commit_sha: None,
+                title: package.name.clone(),
+                summary: format!(
+                    "{:?} package with {} declared dependency signal(s)",
+                    package.kind,
+                    package.dependencies.len()
+                ),
+            });
+        }
+
+        for convention in &analysis.conventions {
+            if !requested_paths.is_empty()
+                && !requested_paths.iter().any(|path| {
+                    convention.evidence_path.starts_with(path)
+                        || path.starts_with(&convention.evidence_path)
+                })
+            {
+                continue;
+            }
+            artifacts.push(CodeIntelArtifact {
+                provider: "codebase-analyzer".to_string(),
+                kind: "convention".to_string(),
+                scope_refs: scope_refs.to_vec(),
+                source_refs: Vec::new(),
+                path: Some(PathBuf::from(&convention.evidence_path)),
+                commit_sha: None,
+                title: convention.area.clone(),
+                summary: convention.description.clone(),
+            });
+        }
+
+        if artifacts.is_empty() {
+            artifacts.push(CodeIntelArtifact {
+                provider: "codebase-analyzer".to_string(),
+                kind: "repository-summary".to_string(),
+                scope_refs: scope_refs.to_vec(),
+                source_refs: vec![MemorySourceRef {
+                    kind: "codebase-analysis".to_string(),
+                    id: analysis.root_path.clone(),
+                    url: None,
+                }],
+                path: None,
+                commit_sha: None,
+                title: "Repository summary".to_string(),
+                summary: format!(
+                    "{} files, {} Rust files, {} TypeScript files, build systems: {}",
+                    analysis.total_files,
+                    analysis.total_rust_files,
+                    analysis.total_typescript_files,
+                    analysis.build_systems.join(", ")
+                ),
+            });
+        }
+
+        artifacts.truncate(limit.max(1));
+        Ok(artifacts)
     }
 }
 

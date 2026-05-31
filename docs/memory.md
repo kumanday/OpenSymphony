@@ -14,9 +14,11 @@ operator actions:
 ```bash
 opensymphony memory init
 opensymphony memory capture COE-123
+opensymphony memory context --issue COE-456
 opensymphony memory brief COE-123
 opensymphony memory related --area openhands-runtime
 opensymphony memory sync-docs --since-last-sync
+opensymphony memory serve --addr 127.0.0.1:8765
 opensymphony linear archive --issues COE-123
 ```
 
@@ -93,11 +95,13 @@ discovery by default through `gh`. For each issue, OpenSymphony reads:
 - GitHub PR title, body, branch, checks, review discussion summaries, commits,
   merge SHA, and changed files
 
-Area inference uses narrative evidence from Linear and GitHub. Merge SHA is not
-used for inference or search; it is stored only under `source_refs` as the
-immutable audit pointer to the exact merged code state. GitHub changed files are
-indexed for later lookup such as "which issues touched this file?", but they are
-not rendered into capsules or docs and do not infer areas.
+Area inference treats Linear labels named `area:<slug>` as canonical. Existing
+label aliases and narrative evidence from Linear and GitHub still work as
+fallbacks. Merge SHA is not used for inference or search; it is stored only
+under `source_refs` as the immutable audit pointer to the exact merged code
+state. GitHub changed files are indexed for later lookup such as "which issues
+touched this file?", but they are not rendered into capsules or docs and do not
+infer areas.
 
 Selecting a parent issue also captures its child issue closure. Capsules link
 parents, children, and milestones so the Obsidian graph shows the work
@@ -186,12 +190,31 @@ Useful read commands:
 
 ```bash
 opensymphony memory status
+opensymphony memory context --issue COE-456
 opensymphony memory brief COE-123
 opensymphony memory related --area openhands-runtime
 opensymphony memory related --paths crates/opensymphony-openhands
 opensymphony memory search "reconnect recovery"
 opensymphony memory docs --area openhands-runtime
 ```
+
+`memory context` is a pre-implementation context compiler, not a capture
+command. It fetches live Linear facts when available, excludes the current issue
+capsule, and selects captured memory from deterministic buckets: explicit
+includes, blocking predecessors, completed children, completed siblings, path
+matches, and canonical area matches. It strips each selected brief's
+`Documentation impact` section and appends one deduplicated section at the end.
+When `opensymphony run` starts a worker, it writes the same style of kickoff
+bundle to `.opensymphony/generated/memory-context.md` inside the issue
+workspace.
+
+Read commands open the DuckDB index in read-only mode and do not run migrations.
+Startup and write paths own schema creation or migration.
+
+`memory serve` exposes the read-only command set through a local MCP-style
+Streamable HTTP JSON-RPC endpoint at `/mcp`. V1 is intentionally read-only and
+supports `memory.context`, `memory.search`, `memory.related`, `memory.brief`,
+`memory.docs`, and `memory.status`; admin tools remain CLI-only write paths.
 
 Docs sync writes stable topic docs by default and prints stat-style output with
 file paths, line counts, and changed-line totals:

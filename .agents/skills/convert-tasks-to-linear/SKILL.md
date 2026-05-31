@@ -58,8 +58,14 @@ priority: 3
 estimate: 3
 blockedBy: []
 blocks: []
+areas:
+  - gateway
 parent: null
 ```
+
+`areas` is optional for older task packages, but new packages should include
+stable lowercase area slugs. The converter applies them to Linear as canonical
+`area:<slug>` labels.
 
 ## Preferred Script Workflow
 
@@ -133,6 +139,7 @@ Before reporting success:
 - Every task is assigned to the expected milestone.
 - Every `parent` task is represented as a Linear parent/sub-issue relationship.
 - Every `blockedBy` edge is represented as a Linear blocker relation.
+- Every declared area is represented as a Linear `area:<slug>` label.
 - No issue is blocked by itself.
 - Local task IDs remain only in provenance comments or explicit source-context sections.
 - `linear-publish.yaml` contains every converted task.

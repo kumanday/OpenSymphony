@@ -30,7 +30,7 @@ pub fn plan_capture(
     }
 
     let mut plans = Vec::new();
-    let indexed = load_indexed_issues(config).unwrap_or_default();
+    let indexed = load_indexed_issues(config)?;
     for issue in selected {
         let issue_key = normalize_issue_key(&issue.identifier);
         let mut issue_warnings = Vec::new();

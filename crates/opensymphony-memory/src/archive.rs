@@ -6,7 +6,7 @@ pub fn plan_archive(
     write: bool,
     force: bool,
 ) -> Result<ArchivePlan, MemoryError> {
-    let issues = load_indexed_issues(config).unwrap_or_default();
+    let issues = load_indexed_issues(config)?;
     let mut selected_keys = identifiers
         .iter()
         .map(|identifier| normalize_issue_key(identifier))

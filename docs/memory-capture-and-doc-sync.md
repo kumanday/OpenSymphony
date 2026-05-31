@@ -599,7 +599,8 @@ The skill should be named clearly, for example `opensymphony-memory`.
 
 The skill should instruct agents to consult memory at specific moments:
 
-1. At kickoff for any nontrivial issue.
+1. At kickoff for any nontrivial issue, first read
+   `.opensymphony/generated/memory-context.md` when present.
 2. After reading the issue body and before making a plan.
 3. After discovering the likely files or areas to touch.
 4. During rework when review feedback resembles prior issues.
@@ -628,7 +629,9 @@ opensymphony memory brief COE-123
 The command names can change during implementation, but the agent-facing
 capabilities should exist:
 
-- `context`: return a compact implementation brief for a new issue.
+- `context`: return a deterministic pre-implementation brief for a new issue.
+  It excludes the current issue capsule, because current-issue memory is written
+  only after completion.
 - `related`: find prior issue capsules and docs related to an issue, path, area,
   label, or query.
 - `search`: search issue capsules, topic docs, and indexed source summaries.

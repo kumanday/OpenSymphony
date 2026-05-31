@@ -68,6 +68,7 @@ class Task:
     estimate: int
     blocked_by: list[str]
     blocks: list[str]
+    areas: list[str]
     parent: str | None
     body: str
 
@@ -317,6 +318,7 @@ def load_task(
     estimate = frontmatter.get("estimate")
     blocked_by = frontmatter.get("blockedBy")
     blocks = frontmatter.get("blocks")
+    areas = normalize_area_slugs(frontmatter.get("areas", []), manifest_task.id, errors)
     parent = frontmatter.get("parent")
 
     if task_id != manifest_task.id:
@@ -354,6 +356,7 @@ def load_task(
         estimate=estimate if isinstance(estimate, int) else 0,
         blocked_by=list(blocked_by) if is_string_list(blocked_by) else [],
         blocks=list(blocks) if is_string_list(blocks) else [],
+        areas=areas,
         parent=parent.strip() if isinstance(parent, str) else None,
         body=body,
     )
@@ -443,6 +446,34 @@ def dependency_waves(tasks: dict[str, Task]) -> list[list[str]]:
 
 def is_string_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value)
+
+
+def normalize_area_slugs(value: Any, task_id: str, errors: list[str]) -> list[str]:
+    if value is None:
+        return []
+    if not is_string_list(value):
+        errors.append(f"task {task_id} areas must be a list of strings")
+        return []
+    areas: list[str] = []
+    for raw in value:
+        area = area_slug(raw)
+        if not area:
+            errors.append(f"task {task_id} has an empty area value")
+            continue
+        areas.append(area)
+    return sorted(set(areas))
+
+
+def area_slug(value: str) -> str:
+    normalized = value.strip()
+    if normalized.lower().startswith("area:"):
+        normalized = normalized.split(":", 1)[1]
+    normalized = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")
+    return normalized
+
+
+def area_label_name(area: str) -> str:
+    return f"area:{area}"
 
 
 def counts(values: list[str]) -> dict[str, int]:
@@ -646,6 +677,7 @@ def ensure_issues(
     existing_by_provenance = issues_by_provenance(project, package.planning_wave)
     publish_tasks = publish.get("tasks", {}) if isinstance(publish.get("tasks"), dict) else {}
     issue_map: dict[str, dict[str, Any]] = {}
+    area_label_ids = ensure_area_labels(client, package, team)
 
     for wave in package.waves:
         for task_id in wave:
@@ -669,6 +701,9 @@ def ensure_issues(
             }
             if task.parent:
                 input_data["parentId"] = issue_map[task.parent]["id"]
+            label_ids = [area_label_ids[area] for area in task.areas if area in area_label_ids]
+            if label_ids:
+                input_data["labelIds"] = label_ids
 
             if existing:
                 issue = update_issue(client, existing["id"], input_data)
@@ -678,6 +713,49 @@ def ensure_issues(
                 print(f"created issue: {issue['identifier']} {task.title}")
             issue_map[task_id] = issue
     return issue_map
+
+
+def ensure_area_labels(client: LinearClient, package: Package, team: dict[str, Any]) -> dict[str, str]:
+    areas = sorted({area for task in package.tasks.values() for area in task.areas})
+    if not areas:
+        return {}
+    label_ids: dict[str, str] = {}
+    for area in areas:
+        name = area_label_name(area)
+        existing = find_issue_label(client, name, team["id"])
+        if existing:
+            label_ids[area] = existing["id"]
+            continue
+        data = client.call(
+            "issue_label_create.graphql",
+            {"input": {"name": name, "teamId": team["id"]}},
+            allow_errors=True,
+        )
+        if data.get("errors"):
+            existing = find_issue_label(client, name, team["id"])
+            if existing:
+                label_ids[area] = existing["id"]
+                continue
+            raise LinearError(f"failed to create label {name}: {json.dumps(data['errors'], indent=2)}")
+        label = data["data"]["issueLabelCreate"]["issueLabel"]
+        label_ids[area] = label["id"]
+        print(f"created area label: {name}")
+    return label_ids
+
+
+def find_issue_label(client: LinearClient, name: str, team_id: str) -> dict[str, Any] | None:
+    data = client.call(
+        "issue_label_by_name.graphql",
+        {"name": name, "teamId": team_id, "first": 10},
+        allow_errors=True,
+    )
+    if data.get("errors"):
+        return None
+    nodes = data.get("data", {}).get("issueLabels", {}).get("nodes", [])
+    for label in nodes:
+        if label.get("name") == name:
+            return label
+    return None
 
 
 def issues_by_provenance(project: dict[str, Any], planning_wave: str) -> dict[str, dict[str, Any]]:
@@ -789,6 +867,7 @@ def issue_body(package: Package, task: Task, issue_map: dict[str, dict[str, Any]
             "## Linear Metadata\n\n"
             f"- Planning wave: {package.planning_wave}\n"
             f"- Milestone: {task.milestone}\n"
+            f"- Areas: {', '.join(area_label_name(area) for area in task.areas) if task.areas else 'None'}\n"
             f"- Priority: {PRIORITY_NAMES.get(task.priority, task.priority)}\n"
             f"- Estimate: {task.estimate}",
             "## Definition of Done\n\n"

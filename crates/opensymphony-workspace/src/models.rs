@@ -196,6 +196,10 @@ impl WorkspaceHandle {
         self.generated_dir().join("issue-context.md")
     }
 
+    pub fn memory_context_path(&self) -> PathBuf {
+        self.generated_dir().join("memory-context.md")
+    }
+
     pub fn session_context_path(&self) -> PathBuf {
         self.generated_dir().join("session-context.json")
     }
@@ -590,6 +594,11 @@ impl IssueContextArtifact {
             output,
             "- session context: {}",
             workspace.session_context_path().display()
+        );
+        let _ = writeln!(
+            output,
+            "- memory context: {}",
+            workspace.memory_context_path().display()
         );
         if !self.important_constraints.is_empty() {
             let _ = writeln!(output);

@@ -124,6 +124,8 @@ priority: 3
 estimate: 3
 blockedBy: []
 blocks: []
+areas:
+  - gateway
 parent: null
 ---
 ```
@@ -135,6 +137,9 @@ Field rules:
 - `priority` uses Linear-compatible numeric priority: `1=Urgent`, `2=High`, `3=Normal`, `4=Low`.
 - `estimate` is a numeric story-point estimate.
 - `blockedBy` and `blocks` contain task IDs from the same manifest.
+- `areas` contains planning-time area slugs chosen with LLM judgment, such as
+  `memory`, `openhands-runtime`, or `gateway`. The converter publishes them as
+  canonical Linear labels named `area:<slug>`.
 - `parent` is `null` for top-level issues or a task ID for a Linear sub-issue.
 
 Use this body structure:
@@ -217,6 +222,7 @@ Before finishing, check that:
 - Every task ID is unique.
 - Every dependency and parent reference points to a manifest task.
 - `blockedBy`, `blocks`, and `parent` references point to manifest tasks.
+- Area slugs are stable, lowercase, and useful for deterministic memory lookup.
 - The dependency graph has no cycles.
 - Each task is independently implementable.
 - Acceptance criteria and test plans are measurable.

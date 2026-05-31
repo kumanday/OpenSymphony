@@ -2,6 +2,10 @@ pub fn brief(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryErr
     let issue_key = normalize_issue_key(issue_key);
     let indexed = find_indexed_issue(config, &issue_key)?
         .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
+    Ok(render_indexed_brief(config, &indexed))
+}
+
+fn render_indexed_brief(config: &MemoryConfig, indexed: &IndexedIssue) -> String {
     let mut output = String::new();
     output.push_str(&format!("# {}: {}\n\n", indexed.issue_key, indexed.title));
     output.push_str(&format!(
@@ -14,7 +18,7 @@ pub fn brief(config: &MemoryConfig, issue_key: &str) -> Result<String, MemoryErr
     }
     output.push('\n');
     output.push_str(&compact_capsule_body(&indexed.body));
-    Ok(output)
+    output
 }
 
 pub fn search(
@@ -167,60 +171,433 @@ pub fn docs_for_area(config: &MemoryConfig, area: &str) -> Result<String, Memory
     read_to_string(&area.docs_target)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryContextOptions {
+    pub issue: String,
+    pub explicit_includes: Vec<String>,
+    pub paths: Vec<PathBuf>,
+    pub limit: usize,
+}
+
+impl MemoryContextOptions {
+    pub fn for_issue(issue: impl Into<String>, limit: usize) -> Self {
+        Self {
+            issue: issue.into(),
+            explicit_includes: Vec::new(),
+            paths: Vec::new(),
+            limit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ContextBucket {
+    ExplicitIncludes,
+    BlockingPredecessors,
+    CompletedChildren,
+    CompletedSiblings,
+    PathMatches,
+    AreaMatches,
+}
+
+impl ContextBucket {
+    fn title(self) -> &'static str {
+        match self {
+            Self::ExplicitIncludes => "Explicit Includes",
+            Self::BlockingPredecessors => "Blocking Predecessors",
+            Self::CompletedChildren => "Completed Children",
+            Self::CompletedSiblings => "Completed Siblings",
+            Self::PathMatches => "Path Matches",
+            Self::AreaMatches => "Area Matches",
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::ExplicitIncludes => "explicit include",
+            Self::BlockingPredecessors => "blocking predecessor",
+            Self::CompletedChildren => "completed child",
+            Self::CompletedSiblings => "completed sibling",
+            Self::PathMatches => "path match",
+            Self::AreaMatches => "area match",
+        }
+    }
+
+    fn cap(self) -> usize {
+        match self {
+            Self::ExplicitIncludes => 12,
+            Self::BlockingPredecessors => 12,
+            Self::CompletedChildren => 12,
+            Self::CompletedSiblings => 6,
+            Self::PathMatches => 8,
+            Self::AreaMatches => 8,
+        }
+    }
+
+    fn ordered() -> [Self; 6] {
+        [
+            Self::ExplicitIncludes,
+            Self::BlockingPredecessors,
+            Self::CompletedChildren,
+            Self::CompletedSiblings,
+            Self::PathMatches,
+            Self::AreaMatches,
+        ]
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ContextCandidate {
+    issue_key: String,
+    reasons: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedContextBrief {
+    bucket: ContextBucket,
+    issue_key: String,
+    title: String,
+    reasons: Vec<String>,
+    body: String,
+}
+
 pub fn context_for_issue(
     config: &MemoryConfig,
     source: &SourceFile,
     issue_key: &str,
     limit: usize,
 ) -> Result<String, MemoryError> {
-    let issue_key = normalize_issue_key(issue_key);
-    let mut output = String::new();
-    output.push_str(&format!("# Memory Context: {issue_key}\n\n"));
-    if let Some(issue) = source
+    let options = MemoryContextOptions::for_issue(issue_key, limit);
+    context_for_issue_with_options(config, source, &options)
+}
+
+pub fn context_for_issue_with_options(
+    config: &MemoryConfig,
+    source: &SourceFile,
+    options: &MemoryContextOptions,
+) -> Result<String, MemoryError> {
+    let issue_key = normalize_issue_key(&options.issue);
+    let max_total = options.limit.clamp(1, 20);
+    let indexed_issues = load_indexed_issues(config)?;
+    let indexed_by_key = indexed_issues
+        .iter()
+        .map(|issue| (issue.issue_key.clone(), issue))
+        .collect::<BTreeMap<_, _>>();
+    let source_by_key = source
         .issues
         .iter()
-        .find(|issue| normalize_issue_key(&issue.identifier) == issue_key)
+        .map(|issue| (normalize_issue_key(&issue.identifier), issue))
+        .collect::<BTreeMap<_, _>>();
+    let current_issue = source_by_key.get(&issue_key).copied();
+    let mut candidates = BTreeMap::<ContextBucket, Vec<ContextCandidate>>::new();
+    let mut missing_capsules = Vec::<String>::new();
+
+    for include in &options.explicit_includes {
+        add_context_candidate(
+            &mut candidates,
+            ContextBucket::ExplicitIncludes,
+            include,
+            &issue_key,
+            ContextBucket::ExplicitIncludes.reason(),
+        );
+    }
+
+    if let Some(issue) = current_issue {
+        for blocker in &issue.blocked_by {
+            let blocker_key = normalize_issue_key(&blocker.identifier);
+            add_context_candidate(
+                &mut candidates,
+                ContextBucket::BlockingPredecessors,
+                &blocker_key,
+                &issue_key,
+                ContextBucket::BlockingPredecessors.reason(),
+            );
+            if !indexed_by_key.contains_key(&blocker_key) {
+                missing_capsules.push(format!(
+                    "- Blocking predecessor {blocker_key}: captured memory is missing."
+                ));
+            }
+        }
+
+        for child in &issue.children {
+            let child_key = normalize_issue_key(&child.identifier);
+            if link_is_completed(child) || indexed_by_key.contains_key(&child_key) {
+                add_context_candidate(
+                    &mut candidates,
+                    ContextBucket::CompletedChildren,
+                    &child_key,
+                    &issue_key,
+                    ContextBucket::CompletedChildren.reason(),
+                );
+            }
+            if link_is_completed(child) && !indexed_by_key.contains_key(&child_key) {
+                missing_capsules.push(format!(
+                    "- Completed child {child_key}: captured memory is missing."
+                ));
+            }
+        }
+
+        if let Some(parent_key) = issue
+            .parent
+            .as_ref()
+            .map(|parent| normalize_issue_key(&parent.identifier))
+            && let Some(parent) = source_by_key.get(&parent_key).copied()
+        {
+            for sibling in &parent.children {
+                let sibling_key = normalize_issue_key(&sibling.identifier);
+                if sibling_key == issue_key {
+                    continue;
+                }
+                if link_is_completed(sibling) || indexed_by_key.contains_key(&sibling_key) {
+                    add_context_candidate(
+                        &mut candidates,
+                        ContextBucket::CompletedSiblings,
+                        &sibling_key,
+                        &issue_key,
+                        ContextBucket::CompletedSiblings.reason(),
+                    );
+                }
+            }
+        }
+
+        let current_areas = canonical_issue_area_slugs(config, issue);
+        for indexed in &indexed_issues {
+            if indexed.issue_key == issue_key {
+                continue;
+            }
+            if indexed
+                .areas()
+                .iter()
+                .any(|area| current_areas.contains(area))
+            {
+                add_context_candidate(
+                    &mut candidates,
+                    ContextBucket::AreaMatches,
+                    &indexed.issue_key,
+                    &issue_key,
+                    ContextBucket::AreaMatches.reason(),
+                );
+            }
+        }
+    }
+
+    if !options.paths.is_empty() {
+        for result in related_by_paths(config, &options.paths, ContextBucket::PathMatches.cap())? {
+            add_context_candidate(
+                &mut candidates,
+                ContextBucket::PathMatches,
+                &result.issue_key,
+                &issue_key,
+                ContextBucket::PathMatches.reason(),
+            );
+        }
+    }
+
+    let mut selected = Vec::<SelectedContextBrief>::new();
+    let mut emitted = BTreeSet::<String>::new();
+    let mut documentation_paths = BTreeSet::<String>::new();
+    for bucket in ContextBucket::ordered() {
+        let Some(bucket_candidates) = candidates.get(&bucket) else {
+            continue;
+        };
+        let mut bucket_count = 0;
+        for candidate in bucket_candidates {
+            if selected.len() >= max_total || bucket_count >= bucket.cap() {
+                break;
+            }
+            if !emitted.insert(candidate.issue_key.clone()) {
+                continue;
+            }
+            let Some(indexed) = indexed_by_key.get(&candidate.issue_key) else {
+                continue;
+            };
+            let (body, docs) = strip_documentation_impact_section(&render_indexed_brief(config, indexed));
+            documentation_paths.extend(docs);
+            selected.push(SelectedContextBrief {
+                bucket,
+                issue_key: indexed.issue_key.clone(),
+                title: indexed.title.clone(),
+                reasons: context_reasons(&candidates, &candidate.issue_key),
+                body,
+            });
+            bucket_count += 1;
+        }
+    }
+
+    Ok(render_memory_context(
+        &issue_key,
+        current_issue,
+        &selected,
+        &missing_capsules,
+        &documentation_paths,
+    ))
+}
+
+fn context_reasons(
+    candidates: &BTreeMap<ContextBucket, Vec<ContextCandidate>>,
+    issue_key: &str,
+) -> Vec<String> {
+    let mut reasons = BTreeSet::new();
+    for bucket_candidates in candidates.values() {
+        for candidate in bucket_candidates {
+            if candidate.issue_key == issue_key {
+                reasons.extend(candidate.reasons.iter().cloned());
+            }
+        }
+    }
+    reasons.into_iter().collect()
+}
+
+fn add_context_candidate(
+    candidates: &mut BTreeMap<ContextBucket, Vec<ContextCandidate>>,
+    bucket: ContextBucket,
+    issue_key: &str,
+    current_issue_key: &str,
+    reason: &str,
+) {
+    let issue_key = normalize_issue_key(issue_key);
+    if issue_key.is_empty() || issue_key == current_issue_key {
+        return;
+    }
+    let bucket_candidates = candidates.entry(bucket).or_default();
+    if let Some(candidate) = bucket_candidates
+        .iter_mut()
+        .find(|candidate| candidate.issue_key == issue_key)
     {
+        candidate.reasons.insert(reason.to_string());
+        return;
+    }
+    bucket_candidates.push(ContextCandidate {
+        issue_key,
+        reasons: BTreeSet::from([reason.to_string()]),
+    });
+}
+
+fn canonical_issue_area_slugs(config: &MemoryConfig, issue: &IssueEvidence) -> BTreeSet<String> {
+    let labels = normalize_list(issue.labels.clone());
+    let mut areas = BTreeSet::new();
+    for label in &labels {
+        if let Some(area) = canonical_area_label_slug(label) {
+            areas.insert(area);
+        }
+    }
+    for (slug, area) in &config.areas {
+        if labels.iter().any(|label| area_alias_matches(area, label)) {
+            areas.insert(slug.clone());
+        }
+    }
+    areas
+}
+
+fn link_is_completed(link: &IssueLinkEvidence) -> bool {
+    link.state
+        .as_deref()
+        .and_then(normalize_optional)
+        .is_some_and(|state| {
+            matches!(
+                state.to_ascii_lowercase().as_str(),
+                "done" | "completed" | "closed" | "cancelled" | "canceled" | "duplicate"
+            )
+        })
+}
+
+fn strip_documentation_impact_section(markdown: &str) -> (String, Vec<String>) {
+    let mut output = String::new();
+    let mut docs = Vec::new();
+    let mut in_documentation = false;
+
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if trimmed.eq_ignore_ascii_case("## Documentation impact") {
+            in_documentation = true;
+            continue;
+        }
+        if in_documentation && trimmed.starts_with("## ") {
+            in_documentation = false;
+        }
+        if in_documentation {
+            if let Some(path) = trimmed
+                .strip_prefix("- ")
+                .and_then(normalize_optional)
+            {
+                docs.push(path);
+            }
+            continue;
+        }
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    (output.trim_end().to_string() + "\n", docs)
+}
+
+fn render_memory_context(
+    issue_key: &str,
+    current_issue: Option<&IssueEvidence>,
+    selected: &[SelectedContextBrief],
+    missing_capsules: &[String],
+    documentation_paths: &BTreeSet<String>,
+) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("# Memory Context: {issue_key}\n\n"));
+    output.push_str(
+        "This is pre-implementation guidance assembled from completed captured memory. It intentionally excludes any capsule for the current issue.\n\n",
+    );
+    if let Some(issue) = current_issue {
         output.push_str(&format!("## Current Issue\n\n{}\n\n", issue_title(issue)));
         if let Some(description) = issue.description.as_deref().and_then(normalize_optional) {
             output.push_str(&format!("{}\n\n", summarize_text(&description, 600)));
         }
     }
 
-    let query = source
-        .issues
-        .iter()
-        .find(|issue| normalize_issue_key(&issue.identifier) == issue_key)
-        .map(|issue| {
-            format!(
-                "{} {} {}",
-                issue.title,
-                issue.labels.join(" "),
-                issue.description.clone().unwrap_or_default()
-            )
-        })
-        .unwrap_or_else(|| issue_key.clone());
-    let results = search(config, &query, limit).unwrap_or_default();
-    output.push_str("## Related Memory\n\n");
-    if results.is_empty() {
-        output.push_str("- No related captured memory found.\n");
+    if selected.is_empty() {
+        output.push_str("## Selected Memory\n\n- No deterministic captured memory found.\n\n");
     } else {
-        for result in results {
-            output.push_str(&format!(
-                "- {}: {} ({})\n",
-                result.issue_key,
-                result.title,
-                result.areas.join(", ")
-            ));
+        for bucket in ContextBucket::ordered() {
+            let bucket_briefs = selected
+                .iter()
+                .filter(|brief| brief.bucket == bucket)
+                .collect::<Vec<_>>();
+            if bucket_briefs.is_empty() {
+                continue;
+            }
+            output.push_str(&format!("## {}\n\n", bucket.title()));
+            for brief in bucket_briefs {
+                output.push_str(&format!("### {}: {}\n\n", brief.issue_key, brief.title));
+                output.push_str(&format!("- Reasons: {}\n\n", brief.reasons.join(", ")));
+                output.push_str(&brief.body);
+                if !brief.body.ends_with("\n\n") {
+                    output.push('\n');
+                }
+            }
         }
     }
-    output.push_str("\n## Guidance\n\n");
+
+    if !missing_capsules.is_empty() {
+        output.push_str("## Missing Captures\n\n");
+        for line in missing_capsules {
+            output.push_str(line);
+            output.push('\n');
+        }
+        output.push('\n');
+    }
+
+    output.push_str("## Guidance\n\n");
     output.push_str("- Treat memory as context, not as authority over current code.\n");
-    output.push_str("- Inspect the referenced docs and current files before editing.\n");
+    output.push_str("- Inspect referenced docs and current files before editing.\n");
+    output.push_str("- Run path-specific memory/code-context queries after file discovery.\n");
     output.push_str("- Use `opensymphony debug ");
-    output.push_str(&issue_key);
+    output.push_str(issue_key);
     output.push_str("` only when the original agent conversation is needed.\n");
-    Ok(output)
+
+    if !documentation_paths.is_empty() {
+        output.push_str("\n## Documentation impact\n\n");
+        for path in documentation_paths {
+            output.push_str(&format!("- {path}\n"));
+        }
+    }
+
+    output
 }
 
 pub fn status(
@@ -272,7 +649,7 @@ pub fn status(
 
 pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, MemoryError> {
     let mut findings = Vec::new();
-    let issues = load_indexed_issues(config).unwrap_or_default();
+    let issues = load_indexed_issues(config)?;
     for issue in &issues {
         if issue.warning_count > 0 {
             findings.push(LintFinding {

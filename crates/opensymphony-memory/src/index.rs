@@ -218,6 +218,21 @@ fn open_index(config: &MemoryConfig) -> Result<Connection, MemoryError> {
     })
 }
 
+fn open_index_read_only(config: &MemoryConfig) -> Result<Connection, MemoryError> {
+    let read_only_config = Config::default()
+        .access_mode(AccessMode::ReadOnly)
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    Connection::open_with_flags(&config.index_path, read_only_config).map_err(|source| {
+        MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        }
+    })
+}
+
 fn migrate_index(connection: &Connection) -> Result<(), duckdb::Error> {
     connection.execute_batch(&format!(
         r#"
@@ -304,11 +319,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
     if !config.index_path.exists() {
         return Ok(Vec::new());
     }
-    let connection = open_index(config)?;
-    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
-        path: config.index_path.clone(),
-        source,
-    })?;
+    let connection = open_index_read_only(config)?;
 
     let mut statement = connection
         .prepare(

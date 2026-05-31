@@ -11,6 +11,10 @@ use crate::opensymphony_domain::{
 };
 #[cfg(test)]
 use crate::opensymphony_domain::{RuntimeLivenessPhase, RuntimeProgressSnapshot};
+use crate::opensymphony_memory::{
+    IssueEvidence, IssueLinkEvidence, MemoryConfig, MemoryContextOptions, SourceFile,
+    context_for_issue_with_options,
+};
 use crate::opensymphony_workflow::{
     Environment, OpenHandsConversationToolConfig, ProcessEnvironment, ResolvedWorkflow,
 };
@@ -1462,6 +1466,15 @@ impl IssueSessionRunner {
                 .apply_runtime_snapshot(&active_session.stream);
         }
 
+        if let Err(error) = write_memory_context_artifact(workspace_manager, workspace, issue).await
+        {
+            debug!(
+                %error,
+                issue = %issue.identifier,
+                "memory context artifact generation failed; continuing without it"
+            );
+        }
+
         let prompt = match self.render_prompt(workflow, issue, run, active_session.prompt_kind) {
             Ok(prompt) => prompt,
             Err(detail) => {
@@ -2802,6 +2815,67 @@ fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) -> Str
         "Continue working on issue {}: {}.\nThe original workflow prompt is already present in this conversation, so do not resend or restate it.\nResume from the current workspace and conversation context, inspect the latest progress, and continue from where the previous worker left off.\nCurrent issue state: {}\n{}\n",
         issue.identifier, issue.title, issue.state.name, attempt,
     )
+}
+
+async fn write_memory_context_artifact(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    issue: &NormalizedIssue,
+) -> Result<(), String> {
+    let config = MemoryConfig::load(workspace.workspace_path(), None).map_err(|error| {
+        format!(
+            "failed to load memory config from {}: {error}",
+            workspace.workspace_path().display()
+        )
+    })?;
+    if !config.enabled || (!config.config_path.exists() && !config.index_path.exists()) {
+        return Ok(());
+    }
+    let source = SourceFile {
+        issues: vec![IssueEvidence {
+            id: Some(issue.id.as_str().to_string()),
+            identifier: issue.identifier.as_str().to_string(),
+            title: issue.title.clone(),
+            url: issue.url.clone(),
+            description: issue.description.clone(),
+            state: Some(issue.state.name.clone()),
+            labels: issue.labels.clone(),
+            children: issue
+                .sub_issues
+                .iter()
+                .map(|child| IssueLinkEvidence {
+                    id: Some(child.id.as_str().to_string()),
+                    identifier: child.identifier.as_str().to_string(),
+                    state: Some(child.state.clone()),
+                    ..IssueLinkEvidence::default()
+                })
+                .collect(),
+            blocked_by: issue
+                .blocked_by
+                .iter()
+                .filter_map(|blocker| {
+                    blocker
+                        .identifier
+                        .as_ref()
+                        .map(|identifier| IssueLinkEvidence {
+                            id: blocker.id.as_ref().map(|id| id.as_str().to_string()),
+                            identifier: identifier.as_str().to_string(),
+                            state: blocker.state.clone(),
+                            ..IssueLinkEvidence::default()
+                        })
+                })
+                .collect(),
+            ..IssueEvidence::default()
+        }],
+        ..SourceFile::default()
+    };
+    let options = MemoryContextOptions::for_issue(issue.identifier.as_str(), 20);
+    let context = context_for_issue_with_options(&config, &source, &options)
+        .map_err(|error| format!("failed to build memory context: {error}"))?;
+    workspace_manager
+        .write_text_artifact(workspace, &workspace.memory_context_path(), &context)
+        .await
+        .map_err(|error| format!("failed to write memory context artifact: {error}"))
 }
 
 fn build_session_context(

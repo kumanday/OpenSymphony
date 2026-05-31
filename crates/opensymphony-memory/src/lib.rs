@@ -7,7 +7,7 @@ use std::{
 };
 
 use chrono::{DateTime, NaiveDate, Utc};
-use duckdb::{Connection, params};
+use duckdb::{AccessMode, Config, Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -92,6 +92,161 @@ impl MemoryVisibility {
 impl fmt::Display for MemoryVisibility {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeScopeKind {
+    LocalInstance,
+    Organization,
+    ProjectSet,
+    Project,
+    Milestone,
+    WorkItem,
+    Repository,
+    CodePath,
+    Area,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KnowledgeScope {
+    pub kind: KnowledgeScopeKind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryRecordKind {
+    IssueCapsule,
+    TopicDoc,
+    CodeContext,
+    RunSummary,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryFreshness {
+    Current,
+    Stale,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemorySourceRef {
+    pub kind: String,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRecord {
+    pub kind: MemoryRecordKind,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_refs: Vec<KnowledgeScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<MemorySourceRef>,
+    pub visibility: MemoryVisibility,
+    pub body_ref: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_at: Option<DateTime<Utc>>,
+    pub freshness: MemoryFreshness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderStatus {
+    pub provider: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodeIntelArtifact {
+    pub provider: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope_refs: Vec<KnowledgeScope>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_refs: Vec<MemorySourceRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_sha: Option<String>,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+}
+
+pub trait MemoryCatalog {
+    fn provider_status(&self) -> ProviderStatus;
+}
+
+pub trait DocumentStore {
+    fn read_document(&self, body_ref: &Path) -> Result<String, MemoryError>;
+}
+
+pub trait LexicalIndex {
+    fn search_text(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, MemoryError>;
+}
+
+pub trait VectorIndex {
+    fn search_vectors(
+        &self,
+        query: &str,
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, MemoryError>;
+}
+
+pub trait CodeIntelIndex {
+    fn code_context(
+        &self,
+        paths: &[PathBuf],
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError>;
+}
+
+pub trait FusionRetriever {
+    fn retrieve(
+        &self,
+        query: &str,
+        scope_refs: &[KnowledgeScope],
+        limit: usize,
+    ) -> Result<Vec<SearchResult>, MemoryError>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopVectorIndex;
+
+impl VectorIndex for NoopVectorIndex {
+    fn search_vectors(
+        &self,
+        _query: &str,
+        _scope_refs: &[KnowledgeScope],
+        _limit: usize,
+    ) -> Result<Vec<SearchResult>, MemoryError> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopCodeIntelIndex;
+
+impl CodeIntelIndex for NoopCodeIntelIndex {
+    fn code_context(
+        &self,
+        _paths: &[PathBuf],
+        _scope_refs: &[KnowledgeScope],
+        _limit: usize,
+    ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+        Ok(Vec::new())
     }
 }
 
@@ -299,6 +454,8 @@ pub struct IssueEvidence {
     #[serde(default)]
     pub children: Vec<IssueLinkEvidence>,
     #[serde(default)]
+    pub blocked_by: Vec<IssueLinkEvidence>,
+    #[serde(default)]
     pub labels: Vec<String>,
     #[serde(default)]
     pub comments: Vec<CommentEvidence>,
@@ -321,6 +478,8 @@ pub struct IssueLinkEvidence {
     pub title: Option<String>,
     #[serde(default)]
     pub url: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -756,6 +915,106 @@ Reviews are triggered when you open a pull request for review.
         assert_eq!(report.written_capsules.len(), 1);
         assert!(config.index_path.exists());
         assert_eq!(results[0].issue_key, "COE-123");
+    }
+
+    #[test]
+    fn canonical_area_label_is_authoritative_without_prefix_leakage() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let mut source = sample_source();
+        source.issues[0].labels = vec!["area:openhands-runtime".to_string()];
+
+        let plan = plan_capture(
+            &config,
+            &source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string()],
+                ..IssueSelection::default()
+            },
+            false,
+            false,
+        )
+        .expect("plan");
+
+        assert_eq!(
+            plan.selected[0].areas,
+            vec!["openhands-runtime".to_string()]
+        );
+    }
+
+    #[test]
+    fn deterministic_context_excludes_current_and_merges_documentation_impact() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let mut captured_source = sample_source();
+        captured_source.issues.push(IssueEvidence {
+            identifier: "COE-124".to_string(),
+            title: "Memory server context compiler".to_string(),
+            url: Some("https://linear.app/example/issue/COE-124".to_string()),
+            description: Some("Build deterministic memory context.".to_string()),
+            state: Some("Done".to_string()),
+            labels: vec!["area:memory".to_string()],
+            comments: vec![CommentEvidence {
+                body: "Decision: precompute context before worker launch.".to_string(),
+                ..CommentEvidence::default()
+            }],
+            ..IssueEvidence::default()
+        });
+        let capture = plan_capture(
+            &config,
+            &captured_source,
+            &IssueSelection {
+                identifiers: vec!["COE-123".to_string(), "COE-124".to_string()],
+                ..IssueSelection::default()
+            },
+            true,
+            false,
+        )
+        .expect("capture plan");
+        write_capture_plan(&config, &capture, false).expect("write capture");
+
+        let context_source = SourceFile {
+            issues: vec![IssueEvidence {
+                identifier: "COE-200".to_string(),
+                title: "Use deterministic pre-implementation memory".to_string(),
+                description: Some("Bootstrap the worker with relevant prior work.".to_string()),
+                state: Some("In Progress".to_string()),
+                labels: vec!["area:memory".to_string()],
+                children: vec![IssueLinkEvidence {
+                    identifier: "COE-124".to_string(),
+                    title: Some("Memory server context compiler".to_string()),
+                    state: Some("Done".to_string()),
+                    ..IssueLinkEvidence::default()
+                }],
+                blocked_by: vec![IssueLinkEvidence {
+                    identifier: "COE-123".to_string(),
+                    title: Some("WebSocket reconnect recovery".to_string()),
+                    state: Some("Done".to_string()),
+                    ..IssueLinkEvidence::default()
+                }],
+                ..IssueEvidence::default()
+            }],
+            ..SourceFile::default()
+        };
+        let options = MemoryContextOptions {
+            issue: "COE-200".to_string(),
+            explicit_includes: Vec::new(),
+            paths: Vec::new(),
+            limit: 20,
+        };
+
+        let context =
+            context_for_issue_with_options(&config, &context_source, &options).expect("context");
+
+        assert!(context.contains("## Blocking Predecessors"));
+        assert!(context.contains("## Completed Children"));
+        assert!(context.contains("COE-123: WebSocket reconnect recovery"));
+        assert!(context.contains("COE-124: Memory server context compiler"));
+        assert!(context.contains("Reasons: area match, completed child"));
+        assert!(!context.contains("### COE-200"));
+        assert_eq!(context.matches("## Documentation impact").count(), 1);
+        assert!(context.contains("- docs/memory.md"));
+        assert!(context.contains("- docs/openhands-runtime.md"));
     }
 
     #[test]

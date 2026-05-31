@@ -1,0 +1,11 @@
+query IssueLabelByName($name: String!, $teamId: ID!, $first: Int!) {
+  issueLabels(
+    filter: { name: { eq: $name }, team: { id: { eq: $teamId } } }
+    first: $first
+  ) {
+    nodes {
+      id
+      name
+    }
+  }
+}

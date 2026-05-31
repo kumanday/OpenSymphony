@@ -76,6 +76,7 @@ Recommended layout inside each issue workspace:
       last-conversation-state.json
     generated/
       issue-context.md
+      memory-context.md
       session-context.json
 ```
 
@@ -88,6 +89,7 @@ Notes:
 - `conversation.json` is the issue-to-session registry: it stores the issue reference, stable `conversation_id`, active reuse policy, timestamps, transport diagnostics, the launch profile needed to resume the same OpenHands thread later through `opensymphony debug`, and an `llm_config_fingerprint` that tracks the model name for observability (no longer used for drift detection).
 - `prompts/` holds the latest prompt of each kind plus JSON metadata that points back to the per-run archive.
 - `runs/attempt-####/` holds immutable per-run prompt captures for auditability without mutating repository-owned policy files.
+- `generated/memory-context.md` is a deterministic pre-implementation bundle from captured memory when project memory is enabled.
 - The repository working tree remains otherwise untouched except by normal agent work.
 - OpenSymphony must never overwrite repository-owned `AGENTS.md`.
 
@@ -302,6 +304,14 @@ Human-readable summary for the agent and operator:
 - important constraints
 - known blockers
 - location of OpenSymphony metadata files
+
+### `memory-context.md`
+
+Pre-implementation guidance compiled from already captured memory. The runtime
+generates it before worker launch when project memory is enabled. It excludes
+the current issue capsule because capture happens after completion, and uses
+deterministic Linear graph facts plus captured memory buckets instead of
+free-form same-milestone search.
 
 ### `session-context.json`
 

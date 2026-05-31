@@ -160,6 +160,11 @@ fn infer_areas(
 
     let mut areas = BTreeSet::new();
     let labels = normalize_list(issue.labels.clone());
+    for label in &labels {
+        if let Some(area) = canonical_area_label_slug(label) {
+            areas.insert(area);
+        }
+    }
     for (slug, area) in &config.areas {
         if labels.iter().any(|label| area_alias_matches(area, label))
             || area_matches_evidence(area, issue, prs)
@@ -169,7 +174,7 @@ fn infer_areas(
     }
     for label in labels {
         if !is_generic_label(&label) {
-            let label_slug = slugify(&label);
+            let label_slug = canonical_area_label_slug(&label).unwrap_or_else(|| slugify(&label));
             if !areas.contains(&label_slug) {
                 areas.insert(label_slug);
             }
@@ -196,7 +201,9 @@ fn infer_areas(
 
 fn area_alias_matches(area: &AreaConfig, value: &str) -> bool {
     let value_slug = slugify(value);
-    value_slug == area.slug
+    let canonical_area = canonical_area_label_slug(value);
+    canonical_area.as_deref() == Some(area.slug.as_str())
+        || value_slug == area.slug
         || area.aliases.iter().any(|alias| {
             let alias_slug = slugify(alias);
             value_slug == alias_slug || value == alias
@@ -205,7 +212,19 @@ fn area_alias_matches(area: &AreaConfig, value: &str) -> bool {
             .source_refs
             .linear_labels
             .iter()
-            .any(|label| value_slug == slugify(label))
+            .any(|label| {
+                canonical_area_label_slug(label).as_deref() == Some(area.slug.as_str())
+                    || value_slug == slugify(label)
+            })
+}
+
+fn canonical_area_label_slug(value: &str) -> Option<String> {
+    let (prefix, suffix) = value.trim().split_once(':')?;
+    if !prefix.eq_ignore_ascii_case("area") {
+        return None;
+    }
+    let slug = slugify(suffix);
+    if slug.is_empty() { None } else { Some(slug) }
 }
 
 fn area_matches_evidence(
@@ -430,9 +449,15 @@ fn merge_area_evidence(
         push_unique(&mut area.source_refs.linear_milestones, milestone);
     }
     for label in normalize_list(issue_plan.issue.labels.clone()) {
-        if slugify(&label) == area.slug || area_alias_matches(area, &label) {
+        let label_area = canonical_area_label_slug(&label);
+        if label_area.as_deref() == Some(area.slug.as_str())
+            || slugify(&label) == area.slug
+            || area_alias_matches(area, &label)
+        {
             push_unique(&mut area.source_refs.linear_labels, label.clone());
-            push_unique(&mut area.aliases, label);
+            if label_area.is_none() {
+                push_unique(&mut area.aliases, label);
+            }
         }
     }
     push_unique(&mut area.aliases, area.slug.clone());
@@ -447,7 +472,10 @@ fn merge_area_evidence(
 fn inferred_area_confidence(area: &AreaConfig, issue_plan: &CaptureIssuePlan) -> u8 {
     let base: u8 = if normalize_list(issue_plan.issue.labels.clone())
         .iter()
-        .any(|label| slugify(label) == area.slug && !is_generic_label(label))
+        .any(|label| {
+            canonical_area_label_slug(label).as_deref() == Some(area.slug.as_str())
+                || (slugify(label) == area.slug && !is_generic_label(label))
+        })
     {
         90
     } else if issue_plan
@@ -505,6 +533,12 @@ fn render_issue_capsule(
             .iter()
             .map(CapsuleIssueLink::from)
             .collect(),
+        blocked_by: plan
+            .issue
+            .blocked_by
+            .iter()
+            .map(CapsuleIssueLink::from)
+            .collect(),
         prs: plan
             .prs
             .iter()
@@ -531,6 +565,12 @@ fn render_issue_capsule(
                 .children
                 .iter()
                 .map(|child| format!("linear:{}", normalize_issue_key(&child.identifier)))
+                .collect(),
+            linear_blockers: plan
+                .issue
+                .blocked_by
+                .iter()
+                .map(|blocker| format!("linear:{}", normalize_issue_key(&blocker.identifier)))
                 .collect(),
             linear_milestone: plan
                 .issue
@@ -647,6 +687,8 @@ struct IssueCapsuleFrontmatter {
     parent: Option<CapsuleIssueLink>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     children: Vec<CapsuleIssueLink>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    blocked_by: Vec<CapsuleIssueLink>,
     prs: Vec<CapsulePr>,
     areas: Vec<String>,
     source_refs: SourceRefs,
@@ -670,6 +712,8 @@ struct CapsuleIssueLink {
     title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<String>,
 }
 
 impl From<&IssueLinkEvidence> for CapsuleIssueLink {
@@ -678,6 +722,7 @@ impl From<&IssueLinkEvidence> for CapsuleIssueLink {
             issue: normalize_issue_key(&link.identifier),
             title: link.title.clone(),
             url: link.url.clone(),
+            state: link.state.clone(),
         }
     }
 }
@@ -690,6 +735,8 @@ struct SourceRefs {
     linear_parent: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     linear_children: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    linear_blockers: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     linear_milestone: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -720,6 +767,12 @@ fn render_relationships(issue: &IssueEvidence) -> Option<String> {
         lines.push("- Children:".to_string());
         for child in &issue.children {
             lines.push(format!("  - {}", issue_link(child)));
+        }
+    }
+    if !issue.blocked_by.is_empty() {
+        lines.push("- Blocked by:".to_string());
+        for blocker in &issue.blocked_by {
+            lines.push(format!("  - {}", issue_link(blocker)));
         }
     }
     if let Some(milestone) = issue.milestone.as_deref().and_then(normalize_optional) {

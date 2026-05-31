@@ -116,6 +116,7 @@ workflow.
 ## Default posture
 
 - Start by determining the ticket's current status, then follow the matching flow for that status.
+- Read `.opensymphony/generated/memory-context.md` before implementation when present. Treat it as advisory context from completed captured memory, not as authority over current code.
 - Start every task by opening the tracking workpad comment and bringing it up to date before doing new implementation work.
 - Spend extra effort up front on planning and verification design before implementation.
 - Reproduce first: always confirm the current behavior/issue signal before changing code so the fix target is explicit.
@@ -199,12 +200,13 @@ workflow.
     - If the ticket description/comment context includes `Validation`, `Test Plan`, or `Testing` sections, copy those requirements into the workpad `Acceptance Criteria` and `Validation` sections as required checkboxes (no optional downgrade).
 7.  Run a principal-style self-review of the plan and refine it in the comment.
 8.  Before implementing, capture a concrete reproduction signal and record it in the workpad `Notes` section (command/output, screenshot, or deterministic UI behavior).
-9.  Run the `pull` skill to sync with latest `origin/main` before any code edits, then record the pull/sync result in the workpad `Notes`.
+9.  After initial file discovery, run read-only memory lookups such as `opensymphony memory related --paths <path1>,<path2>` for touched areas when memory is configured, and record useful references in the workpad.
+10. Run the `pull` skill to sync with latest `origin/main` before any code edits, then record the pull/sync result in the workpad `Notes`.
     - Include a `pull skill evidence` note with:
       - merge source(s),
       - result (`clean` or `conflicts resolved`),
       - resulting `HEAD` short SHA.
-10. Compact context and proceed to execution.
+11. Compact context and proceed to execution.
 
 ## PR feedback sweep protocol (required)
 
