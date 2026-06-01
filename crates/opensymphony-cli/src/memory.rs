@@ -16,15 +16,16 @@ use crate::{
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
-        ArchivePlan, CodeIntelIndex, CommentEvidence, DocsSyncPlan, IssueEvidence,
-        IssueLinkEvidence, IssueSelection, KnowledgeScope, KnowledgeScopeKind, LintSeverity,
-        MemoryConfig, MemoryContextOptions, MemoryError, MemoryReindexReport, MemoryScopeFilter,
-        SourceFile, archive_blocking_warning_count, brief, context_for_issue_with_options,
-        docs_for_area_with_scope, expand_issue_range, lint, load_source_file, mark_archived,
-        plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
-        related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
-        render_archive_plan, render_capture_dry_run, search_with_scope, status_with_scope,
-        write_capture_plan, write_docs_sync_plan, write_memory_init_plan,
+        ArchivePlan, CodeIntelArtifact, CodeIntelIndex, CommentEvidence, DocsSyncPlan,
+        IssueEvidence, IssueLinkEvidence, IssueSelection, KnowledgeScope, KnowledgeScopeKind,
+        LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError, MemoryReindexReport,
+        MemoryScopeFilter, SourceFile, archive_blocking_warning_count, brief,
+        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range, lint,
+        load_source_file, mark_archived, plan_archive, plan_capture, plan_docs_sync,
+        plan_memory_init, refresh_memory_index, related_by_area_with_scope,
+        related_by_issue_with_scope, related_by_paths_with_scope, render_archive_plan,
+        render_capture_dry_run, search_with_scope, status_with_scope, write_capture_plan,
+        write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, IssueConversationManifest, OpenHandsConversationStorePaths,
@@ -1058,26 +1059,53 @@ async fn run_remote_memory_tool(
         MemoryError::InvalidInput(format!("failed to call memory server {endpoint}: {error}"))
     })?;
     let status = response.status();
-    let payload = response.json::<Value>().await.map_err(|error| {
+    let body = response.text().await.map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "failed to read memory server response body: {error}"
+        ))
+    })?;
+    let result = parse_remote_memory_response(status, &body, tool_name)?;
+    print_remote_memory_result(result)?;
+    Ok(())
+}
+
+fn parse_remote_memory_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    tool_name: &str,
+) -> Result<Value, MemoryError> {
+    if !status.is_success() {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory server returned HTTP {status}: {}",
+            remote_response_error_detail(body)
+        )));
+    }
+    let payload = serde_json::from_str::<Value>(body).map_err(|error| {
         MemoryError::InvalidInput(format!(
             "memory server response was not valid JSON: {error}"
         ))
     })?;
-    if !status.is_success() {
-        return Err(MemoryError::InvalidInput(format!(
-            "memory server returned HTTP {status}: {payload}"
-        )));
-    }
     if let Some(error) = payload.get("error") {
         return Err(MemoryError::InvalidInput(format!(
             "memory server tool {tool_name} failed: {error}"
         )));
     }
-    let result = payload.get("result").cloned().ok_or_else(|| {
+    payload.get("result").cloned().ok_or_else(|| {
         MemoryError::InvalidInput("memory server response omitted result".to_string())
-    })?;
-    print_remote_memory_result(result)?;
-    Ok(())
+    })
+}
+
+fn remote_response_error_detail(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| {
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                "<empty body>".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
 }
 
 fn remote_memory_tool_token_from_env(tool_name: &str) -> Result<Option<String>, MemoryError> {
@@ -1310,12 +1338,17 @@ async fn start_memory_server_with_auth(
 async fn memory_server_health(
     axum::extract::State(state): axum::extract::State<MemoryServerState>,
 ) -> axum::Json<Value> {
-    axum::Json(json!({
+    axum::Json(memory_server_health_payload(&state.auth))
+}
+
+fn memory_server_health_payload(auth: &MemoryServerAuth) -> Value {
+    let admin_tools = non_empty_str(auth.admin_token.as_deref()).is_some();
+    json!({
         "status": "ok",
         "protocol": "mcp-streamable-http-2025-06-18",
-        "mode": if state.auth.admin_token.is_some() { "read_write" } else { "read_only" },
-        "adminTools": state.auth.admin_token.is_some()
-    }))
+        "mode": if admin_tools { "read_write" } else { "read_only" },
+        "adminTools": admin_tools
+    })
 }
 
 async fn memory_server_mcp(
@@ -1519,13 +1552,14 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
             if bool_arg(&arguments, "includeCodeIntel")
                 || bool_arg(&arguments, "include_code_intel")
             {
-                append_code_intel_context(
-                    config,
-                    &mut text,
-                    &scope_filter_from_mcp(&arguments, true),
-                    &options.paths,
+                text = append_code_intel_context_blocking(
+                    config.clone(),
+                    text,
+                    scope_filter_from_mcp(&arguments, true),
+                    options.paths.clone(),
                     options.limit,
-                )?;
+                )
+                .await?;
             }
             Ok(mcp_text(text))
         }
@@ -1600,7 +1634,7 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
         "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
         "memory.lint" => call_memory_lint_tool(config, &arguments),
         "memory.reindex" => call_memory_reindex_tool(config),
-        "memory.ingest_code_intel" => call_memory_ingest_code_intel_tool(config, &arguments),
+        "memory.ingest_code_intel" => call_memory_ingest_code_intel_tool(config, &arguments).await,
         other => Err(MemoryError::InvalidInput(format!(
             "unsupported memory tool `{other}`"
         ))),
@@ -1712,7 +1746,7 @@ fn call_memory_reindex_tool(config: &MemoryConfig) -> Result<Value, MemoryError>
     ))
 }
 
-fn call_memory_ingest_code_intel_tool(
+async fn call_memory_ingest_code_intel_tool(
     config: &MemoryConfig,
     arguments: &Value,
 ) -> Result<Value, MemoryError> {
@@ -1724,7 +1758,7 @@ fn call_memory_ingest_code_intel_tool(
     let limit = usize_arg(arguments, "limit", 10);
     let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let scope_refs = scope_refs_for_context(&scope, &paths);
-    let artifacts = CodebaseAnalyzer::new(repo_root).code_context(&paths, &scope_refs, limit)?;
+    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
     Ok(json!({
         "persisted": false,
         "artifactCount": artifacts.len(),
@@ -1940,10 +1974,48 @@ fn append_code_intel_context(
     let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
     let scope_refs = scope_refs_for_context(scope, paths);
     let artifacts = CodebaseAnalyzer::new(repo_root).code_context(paths, &scope_refs, limit)?;
+    append_code_intel_artifacts(config, output, artifacts);
+    Ok(())
+}
+
+async fn append_code_intel_context_blocking(
+    config: MemoryConfig,
+    mut output: String,
+    scope: MemoryScopeFilter,
+    paths: Vec<PathBuf>,
+    limit: usize,
+) -> Result<String, MemoryError> {
+    let repo_root = resolve_code_intel_repo(&config, scope.repo.as_deref())?;
+    let scope_refs = scope_refs_for_context(&scope, &paths);
+    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+    append_code_intel_artifacts(&config, &mut output, artifacts);
+    Ok(output)
+}
+
+async fn code_intel_artifacts_blocking(
+    repo_root: PathBuf,
+    paths: Vec<PathBuf>,
+    scope_refs: Vec<KnowledgeScope>,
+    limit: usize,
+) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    tokio::task::spawn_blocking(move || {
+        CodebaseAnalyzer::new(repo_root).code_context(&paths, &scope_refs, limit)
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!("code-intelligence analysis task failed: {error}"))
+    })?
+}
+
+fn append_code_intel_artifacts(
+    config: &MemoryConfig,
+    output: &mut String,
+    artifacts: Vec<CodeIntelArtifact>,
+) {
     output.push_str("\n## Code Intelligence\n\n");
     if artifacts.is_empty() {
         output.push_str("- No code-intelligence artifacts found.\n");
-        return Ok(());
+        return;
     }
     for artifact in artifacts {
         output.push_str(&format!("### {}: {}\n\n", artifact.kind, artifact.title));
@@ -1967,7 +2039,6 @@ fn append_code_intel_context(
         output.push_str(&artifact.summary);
         output.push_str("\n\n");
     }
-    Ok(())
 }
 
 fn resolve_code_intel_repo(
@@ -3123,9 +3194,9 @@ mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
         MemoryServerAuth, authorize_memory_request, context_source_from_mcp,
-        memory_tool_descriptors, origin_is_localhost, remote_memory_tool_token,
-        replace_or_append_managed_section, required_access_for_request, resolve_code_intel_repo,
-        trim_auto_memory_status_log,
+        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
+        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_intel_repo, trim_auto_memory_status_log,
     };
     use crate::opensymphony_memory::{MemoryConfig, MemoryError};
     use axum::http::{HeaderMap, HeaderValue, header};
@@ -3219,6 +3290,25 @@ mod tests {
     }
 
     #[test]
+    fn health_reports_admin_tools_only_for_non_empty_admin_token() {
+        let empty_admin = MemoryServerAuth {
+            read_token: Some("read-token".to_string()),
+            admin_token: Some("   ".to_string()),
+        };
+        let empty_payload = memory_server_health_payload(&empty_admin);
+        assert_eq!(empty_payload["mode"], "read_only");
+        assert_eq!(empty_payload["adminTools"], false);
+
+        let configured_admin = MemoryServerAuth {
+            read_token: Some("read-token".to_string()),
+            admin_token: Some("admin-token".to_string()),
+        };
+        let configured_payload = memory_server_health_payload(&configured_admin);
+        assert_eq!(configured_payload["mode"], "read_write");
+        assert_eq!(configured_payload["adminTools"], true);
+    }
+
+    #[test]
     fn localhost_origin_check_rejects_prefix_spoofing() {
         assert!(origin_is_localhost("http://localhost:3333"));
         assert!(origin_is_localhost("https://127.0.0.1"));
@@ -3268,6 +3358,21 @@ mod tests {
     #[test]
     fn remote_client_timeout_outlasts_server_tool_timeout() {
         assert!(super::REMOTE_MEMORY_TOOL_TIMEOUT > super::MEMORY_MCP_TOOL_TIMEOUT);
+    }
+
+    #[test]
+    fn remote_response_reports_http_status_before_json_parse_errors() {
+        let error = parse_remote_memory_response(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "upstream unavailable",
+            "memory.context",
+        )
+        .expect_err("HTTP failure should report status");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+                if message.contains("HTTP 502 Bad Gateway")
+                    && message.contains("upstream unavailable")
+                    && !message.contains("not valid JSON")));
     }
 
     #[test]
