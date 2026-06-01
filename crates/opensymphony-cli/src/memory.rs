@@ -34,8 +34,8 @@ use crate::{
     opensymphony_workspace::{CleanupConfig, HookConfig, WorkspaceManager, WorkspaceManagerConfig},
 };
 
-const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(330);
 
 #[derive(Debug, Args)]
 pub struct MemoryArgs {
@@ -3263,6 +3263,11 @@ mod tests {
         })
         .expect("read tool can use admin token when no read token exists");
         assert_eq!(token, Some("admin-token".to_string()));
+    }
+
+    #[test]
+    fn remote_client_timeout_outlasts_server_tool_timeout() {
+        assert!(super::REMOTE_MEMORY_TOOL_TIMEOUT > super::MEMORY_MCP_TOOL_TIMEOUT);
     }
 
     #[test]
