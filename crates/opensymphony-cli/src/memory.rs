@@ -3,6 +3,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
+    time::Duration,
 };
 
 use chrono::{NaiveDate, Utc};
@@ -32,6 +33,9 @@ use crate::{
     opensymphony_workflow::WorkflowDefinition,
     opensymphony_workspace::{CleanupConfig, HookConfig, WorkspaceManager, WorkspaceManagerConfig},
 };
+
+const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Args)]
 pub struct MemoryArgs {
@@ -1028,7 +1032,14 @@ async fn run_remote_memory_tool(
     tool_name: &str,
     arguments: Value,
 ) -> Result<(), MemoryError> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(REMOTE_MEMORY_TOOL_TIMEOUT)
+        .build()
+        .map_err(|error| {
+            MemoryError::InvalidInput(format!(
+                "failed to configure memory server client timeout: {error}"
+            ))
+        })?;
     let request = json!({
         "jsonrpc": "2.0",
         "id": "opensymphony-cli",
@@ -1039,20 +1050,7 @@ async fn run_remote_memory_tool(
         }
     });
     let mut builder = client.post(endpoint).json(&request);
-    let token = if is_admin_memory_tool(tool_name) {
-        env::var("OPENSYMPHONY_MEMORY_ADMIN_TOKEN")
-            .ok()
-            .and_then(|value| non_empty(&value))
-            .or_else(|| {
-                env::var("OPENSYMPHONY_MEMORY_TOKEN")
-                    .ok()
-                    .and_then(|value| non_empty(&value))
-            })
-    } else {
-        env::var("OPENSYMPHONY_MEMORY_TOKEN")
-            .ok()
-            .and_then(|value| non_empty(&value))
-    };
+    let token = remote_memory_tool_token_from_env(tool_name)?;
     if let Some(token) = token {
         builder = builder.bearer_auth(token);
     }
@@ -1080,6 +1078,35 @@ async fn run_remote_memory_tool(
     })?;
     print_remote_memory_result(result)?;
     Ok(())
+}
+
+fn remote_memory_tool_token_from_env(tool_name: &str) -> Result<Option<String>, MemoryError> {
+    remote_memory_tool_token(tool_name, |name| env::var(name).ok())
+}
+
+fn remote_memory_tool_token<F>(
+    tool_name: &str,
+    mut read_env: F,
+) -> Result<Option<String>, MemoryError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if is_admin_memory_tool(tool_name) {
+        return read_env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN")
+            .and_then(|value| non_empty(&value))
+            .map(Some)
+            .ok_or_else(|| {
+                MemoryError::InvalidInput(format!(
+                    "OPENSYMPHONY_MEMORY_ADMIN_TOKEN is required for remote admin memory tool `{tool_name}`"
+                ))
+            });
+    }
+
+    Ok(read_env("OPENSYMPHONY_MEMORY_TOKEN")
+        .and_then(|value| non_empty(&value))
+        .or_else(|| {
+            read_env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN").and_then(|value| non_empty(&value))
+        }))
 }
 
 fn print_remote_memory_result(result: Value) -> Result<(), MemoryError> {
@@ -1311,7 +1338,18 @@ async fn memory_server_mcp(
         "tools/list" => Ok(json!({
             "tools": memory_tool_descriptors()
         })),
-        "tools/call" => call_memory_tool(&state.config, request.params).await,
+        "tools/call" => match tokio::time::timeout(
+            MEMORY_MCP_TOOL_TIMEOUT,
+            call_memory_tool(&state.config, request.params),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(MemoryError::InvalidInput(format!(
+                "memory tool call exceeded {} second timeout",
+                MEMORY_MCP_TOOL_TIMEOUT.as_secs()
+            ))),
+        },
         other => Err(MemoryError::InvalidInput(format!(
             "unsupported MCP method `{other}`"
         ))),
@@ -1399,14 +1437,18 @@ fn authorize_memory_request(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
     let authorized = match required_access {
-        MemoryServerAccess::Read => match non_empty_str(auth.read_token.as_deref()) {
-            Some(read_token) => {
-                bearer == Some(read_token)
-                    || non_empty_str(auth.admin_token.as_deref())
-                        .is_some_and(|admin_token| bearer == Some(admin_token))
+        MemoryServerAccess::Read => {
+            let read_token = non_empty_str(auth.read_token.as_deref());
+            let admin_token = non_empty_str(auth.admin_token.as_deref());
+            match (read_token, admin_token) {
+                (Some(read_token), Some(admin_token)) => {
+                    bearer == Some(read_token) || bearer == Some(admin_token)
+                }
+                (Some(read_token), None) => bearer == Some(read_token),
+                (None, Some(admin_token)) => bearer == Some(admin_token),
+                (None, None) => true,
             }
-            None => true,
-        },
+        }
         MemoryServerAccess::Admin => {
             let Some(admin_token) = non_empty_str(auth.admin_token.as_deref()) else {
                 return Err((
@@ -1442,13 +1484,16 @@ fn non_empty_str(value: Option<&str>) -> Option<&str> {
 }
 
 fn origin_is_localhost(origin: &str) -> bool {
-    let origin = origin.trim().to_ascii_lowercase();
-    origin.starts_with("http://127.0.0.1")
-        || origin.starts_with("http://localhost")
-        || origin.starts_with("http://[::1]")
-        || origin.starts_with("https://127.0.0.1")
-        || origin.starts_with("https://localhost")
-        || origin.starts_with("https://[::1]")
+    let Ok(origin) = url::Url::parse(origin.trim()) else {
+        return false;
+    };
+    if !matches!(origin.scheme(), "http" | "https") {
+        return false;
+    }
+    matches!(
+        origin.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    )
 }
 
 async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
@@ -1928,19 +1973,14 @@ fn resolve_code_intel_repo(
     let Some(repo) = repo.and_then(non_empty) else {
         return Ok(config.repo_root.clone());
     };
-    let path = PathBuf::from(&repo);
-    let candidate = if path.is_absolute() {
-        path
-    } else {
-        config.repo_root.join(path)
-    };
-    if !candidate.is_dir() {
+    let resolved = repo_existing_path(config, &repo)?;
+    if !resolved.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
             "context repo `{repo}` did not resolve to a directory at {}",
-            candidate.display()
+            resolved.display()
         )));
     }
-    Ok(candidate)
+    Ok(resolved)
 }
 
 fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<KnowledgeScope> {
@@ -3079,11 +3119,14 @@ mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
         MemoryServerAuth, authorize_memory_request, context_source_from_mcp,
-        memory_tool_descriptors, replace_or_append_managed_section, required_access_for_request,
+        memory_tool_descriptors, origin_is_localhost, remote_memory_tool_token,
+        replace_or_append_managed_section, required_access_for_request, resolve_code_intel_repo,
         trim_auto_memory_status_log,
     };
+    use crate::opensymphony_memory::{MemoryConfig, MemoryError};
     use axum::http::{HeaderMap, HeaderValue, header};
     use serde_json::json;
+    use tempfile::TempDir;
 
     #[test]
     fn mcp_tool_list_exposes_context_and_admin_tools_without_code_context() {
@@ -3149,6 +3192,73 @@ mod tests {
             HeaderValue::from_static("Bearer admin-token"),
         );
         assert!(authorize_memory_request(&headers, &auth, MemoryServerAccess::Admin).is_ok());
+    }
+
+    #[test]
+    fn read_authorization_requires_admin_token_when_only_admin_auth_is_configured() {
+        let auth = MemoryServerAuth {
+            read_token: None,
+            admin_token: Some("admin-token".to_string()),
+        };
+        let headers = HeaderMap::new();
+
+        let blocked = authorize_memory_request(&headers, &auth, MemoryServerAccess::Read)
+            .expect_err("admin-only auth should protect read tools too");
+        assert_eq!(blocked.0, axum::http::StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer admin-token"),
+        );
+        assert!(authorize_memory_request(&headers, &auth, MemoryServerAccess::Read).is_ok());
+    }
+
+    #[test]
+    fn localhost_origin_check_rejects_prefix_spoofing() {
+        assert!(origin_is_localhost("http://localhost:3333"));
+        assert!(origin_is_localhost("https://127.0.0.1"));
+        assert!(origin_is_localhost("http://[::1]:3333"));
+
+        assert!(!origin_is_localhost("http://localhost.evil.com"));
+        assert!(!origin_is_localhost("https://127.0.0.1.evil.com"));
+        assert!(!origin_is_localhost("ftp://localhost"));
+    }
+
+    #[test]
+    fn code_intel_repo_resolution_stays_inside_repo_root() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("config");
+        std::fs::create_dir(repo.path().join("service")).expect("service dir");
+        let resolved = resolve_code_intel_repo(&config, Some("service")).expect("inside repo");
+        assert!(resolved.starts_with(repo.path().canonicalize().expect("canonical repo")));
+
+        let outside = TempDir::new().expect("outside repo");
+        let error = resolve_code_intel_repo(
+            &config,
+            Some(outside.path().to_str().expect("outside path")),
+        )
+        .expect_err("outside repo must be rejected");
+        assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[test]
+    fn remote_admin_tool_requires_admin_token_without_read_fallback() {
+        let error = remote_memory_tool_token("memory.capture", |name| match name {
+            "OPENSYMPHONY_MEMORY_TOKEN" => Some("read-token".to_string()),
+            _ => None,
+        })
+        .expect_err("admin tool should fail before sending read token");
+        assert!(
+            matches!(error, MemoryError::InvalidInput(message) if message.contains("OPENSYMPHONY_MEMORY_ADMIN_TOKEN"))
+        );
+
+        let token = remote_memory_tool_token("memory.context", |name| match name {
+            "OPENSYMPHONY_MEMORY_ADMIN_TOKEN" => Some("admin-token".to_string()),
+            _ => None,
+        })
+        .expect("read tool can use admin token when no read token exists");
+        assert_eq!(token, Some("admin-token".to_string()));
     }
 
     #[test]

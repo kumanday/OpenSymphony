@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -332,16 +333,30 @@ impl RepoWalker {
         dir: &Path,
         inventory: &mut BTreeMap<PathBuf, usize>,
     ) -> Result<(), CodebaseAnalysisError> {
-        let entries = fs::read_dir(dir).map_err(|e| CodebaseAnalysisError::Io {
-            path: dir.display().to_string(),
-            source: e,
-        })?;
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && dir != self.root => {
+                return Ok(());
+            }
+            Err(source) => {
+                return Err(CodebaseAnalysisError::Io {
+                    path: dir.display().to_string(),
+                    source,
+                });
+            }
+        };
 
         for entry in entries {
-            let entry = entry.map_err(|e| CodebaseAnalysisError::Io {
-                path: dir.display().to_string(),
-                source: e,
-            })?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => continue,
+                Err(source) => {
+                    return Err(CodebaseAnalysisError::Io {
+                        path: dir.display().to_string(),
+                        source,
+                    });
+                }
+            };
             let path = entry.path();
 
             // Use entry.file_type() to avoid following symlinks, preventing infinite loops.
@@ -900,7 +915,7 @@ pub enum CodebaseAnalysisError {
     Io {
         path: String,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
     #[error("TOML parse error in {path}: {source}")]
     Toml {
@@ -1180,5 +1195,34 @@ serde = {{ workspace = true }}"#
             }
             other => panic!("expected NotADirectory, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn analyze_skips_unreadable_subdirectories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let root = create_test_repo(&tmp);
+        let unreadable = root
+            .join("tools")
+            .join("openhands-server")
+            .join("workspace");
+        fs::create_dir_all(&unreadable).unwrap();
+        let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&unreadable, permissions).unwrap();
+
+        let analyzer = CodebaseAnalyzer::new(&root);
+        let result = analyzer.analyze();
+
+        let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&unreadable, permissions).unwrap();
+
+        assert!(
+            result.is_ok(),
+            "codebase analysis should ignore unreadable generated workspaces"
+        );
     }
 }

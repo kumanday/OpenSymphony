@@ -225,9 +225,10 @@ mode. Read tools are `memory.context`, `memory.search`, `memory.related`,
 `memory.brief`, `memory.docs`, and `memory.status`. Admin tools are
 `memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`, and
 `memory.ingest_code_intel`; these require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or
-`--admin-token` on `opensymphony memory serve`. `memory.context` remains the
-agent-facing context command; code intelligence is included through
-`--include-code-intel`, not a separate CLI command.
+`--admin-token` on `opensymphony memory serve`. If an admin token is configured
+without a separate read token, the admin token also protects read tools.
+`memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
+to include available codebase-analysis artifacts alongside selected memory.
 
 Docs sync writes stable topic docs by default and prints stat-style output with
 file paths, line counts, and changed-line totals:

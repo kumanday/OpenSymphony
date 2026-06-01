@@ -191,7 +191,8 @@ operation is also available with `opensymphony memory serve --addr
 pass `--token` to require bearer-token access for read tools. Admin tools
 (`memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`, and
 `memory.ingest_code_intel`) require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or
-`--admin-token`; do not inject that token into ordinary worker environments.
+`--admin-token`. When only the admin token is configured, it also gates read
+tools; do not inject that token into ordinary worker environments.
 
 Linear archival is a separate command and is guarded by captured memory:
 
