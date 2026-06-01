@@ -22,6 +22,7 @@ Run the smallest command that answers the question:
 
 ```bash
 opensymphony memory context --issue COE-456
+opensymphony memory context --issue COE-456 --paths crates/opensymphony-openhands --include-code-intel
 opensymphony memory related --issue COE-456
 opensymphony memory related --paths crates/opensymphony-openhands
 opensymphony memory related --area openhands-runtime

@@ -180,10 +180,19 @@ Read commands such as `memory status`, `memory brief`, `memory related`, and
 migrations. Run capture, import, docs sync, or reindex-style admin operations
 serially if a local DuckDB writer is active.
 
-For worker or tool access, `opensymphony memory serve --addr 127.0.0.1:8765`
-starts a read-only local HTTP endpoint with MCP-style `initialize`,
-`tools/list`, and `tools/call` JSON-RPC methods. Set
-`OPENSYMPHONY_MEMORY_TOKEN` or pass `--token` to require bearer-token access.
+For worker or tool access, `opensymphony run` starts the read-only memory server
+when memory is initialized and `memory.serve` is not disabled. The supervised
+server binds to loopback on an ephemeral port by default, reports the endpoint
+through the control-plane recent events, and passes
+`OPENSYMPHONY_MEMORY_ENDPOINT` into managed local OpenHands workers. Manual
+operation is also available with `opensymphony memory serve --addr
+127.0.0.1:8765`, which exposes MCP-style `initialize`, `tools/list`, and
+`tools/call` JSON-RPC methods at `/mcp`. Set `OPENSYMPHONY_MEMORY_TOKEN` or
+pass `--token` to require bearer-token access for read tools. Admin tools
+(`memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`, and
+`memory.ingest_code_intel`) require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or
+`--admin-token`. When only the admin token is configured, it also gates read
+tools; do not inject that token into ordinary worker environments.
 
 Linear archival is a separate command and is guarded by captured memory:
 

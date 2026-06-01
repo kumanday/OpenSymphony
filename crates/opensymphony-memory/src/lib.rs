@@ -617,12 +617,37 @@ pub struct SearchResult {
     pub snippet: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryScopeFilter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_set: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub area: Option<String>,
+    #[serde(default)]
+    pub all_accessible: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusReport {
     pub issue_count: usize,
     pub warning_count: usize,
     pub docs_pending_count: usize,
     pub issues: Vec<StatusIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryReindexReport {
+    pub issue_count: usize,
+    pub index_path: PathBuf,
+    pub markdown_indexes: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -707,6 +732,7 @@ struct IndexedIssue {
     source_hash: String,
     warning_count: usize,
     docs_sync_status: String,
+    changed_files: Vec<PathBuf>,
     body: String,
 }
 

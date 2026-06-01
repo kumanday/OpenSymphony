@@ -14,8 +14,8 @@ pub use control_plane::{
     ControlPlaneAgentServerStatus, ControlPlaneConversationEvent, ControlPlaneDaemonSnapshot,
     ControlPlaneDaemonState, ControlPlaneDaemonStatus, ControlPlaneFileChange,
     ControlPlaneFileChangeKind, ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot,
-    ControlPlaneMetricsSnapshot, ControlPlaneRecentEvent, ControlPlaneRecentEventKind,
-    ControlPlaneWorkerOutcome, SnapshotEnvelope,
+    ControlPlaneMemoryServerStatus, ControlPlaneMetricsSnapshot, ControlPlaneRecentEvent,
+    ControlPlaneRecentEventKind, ControlPlaneWorkerOutcome, SnapshotEnvelope,
 };
 pub use identifiers::{
     ConversationId, IdentifierError, IssueId, IssueIdentifier, TrackerStateId, WorkerId,

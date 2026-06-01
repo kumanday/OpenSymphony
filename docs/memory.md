@@ -32,11 +32,17 @@ Use `--dry-run` on write commands when you want a non-writing preview.
 memory:
   auto_capture: true
   auto_archive: false
+  serve: true
+  bind: 127.0.0.1:0
 ```
 
 `auto_capture` defaults to `true`. `auto_archive` defaults to `false`; when it
 is enabled, OpenSymphony archives only after fresh capture succeeds with no
-blocking warnings.
+blocking warnings. `serve` starts the local memory server during
+`opensymphony run` when memory is initialized. The default bind address uses an
+ephemeral loopback port, and workers receive the resulting MCP endpoint through
+`OPENSYMPHONY_MEMORY_ENDPOINT`. Workers receive only the normal read token;
+admin tools require a separate `OPENSYMPHONY_MEMORY_ADMIN_TOKEN`.
 
 Initialize the shared memory policy and learned ontology file once:
 
@@ -204,17 +210,25 @@ capsule, and selects captured memory from deterministic buckets: explicit
 includes, blocking predecessors, completed children, completed siblings, path
 matches, and canonical area matches. It strips each selected brief's
 `Documentation impact` section and appends one deduplicated section at the end.
-When `opensymphony run` starts a worker, it writes the same style of kickoff
-bundle to `.opensymphony/generated/memory-context.md` inside the issue
-workspace.
+When `opensymphony run` starts a worker, it asks the supervised memory server
+for the same style of kickoff bundle and writes it to
+`.opensymphony/generated/memory-context.md` inside the issue workspace. If the
+server is disabled, the runner falls back to direct local memory reads.
 
 Read commands open the DuckDB index in read-only mode and do not run migrations.
 Startup and write paths own schema creation or migration.
 
-`memory serve` exposes the read-only command set through a local MCP-style
-Streamable HTTP JSON-RPC endpoint at `/mcp`. V1 is intentionally read-only and
-supports `memory.context`, `memory.search`, `memory.related`, `memory.brief`,
-`memory.docs`, and `memory.status`; admin tools remain CLI-only write paths.
+`memory serve` exposes the memory command set through a local MCP-style
+Streamable HTTP JSON-RPC endpoint at `/mcp`. CLI commands call that endpoint
+when `OPENSYMPHONY_MEMORY_ENDPOINT` is set; otherwise they use offline direct
+mode. Read tools are `memory.context`, `memory.search`, `memory.related`,
+`memory.brief`, `memory.docs`, and `memory.status`. Admin tools are
+`memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`, and
+`memory.ingest_code_intel`; these require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or
+`--admin-token` on `opensymphony memory serve`. If an admin token is configured
+without a separate read token, the admin token also protects read tools.
+`memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
+to include available codebase-analysis artifacts alongside selected memory.
 
 Docs sync writes stable topic docs by default and prints stat-style output with
 file paths, line counts, and changed-line totals:

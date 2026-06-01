@@ -342,6 +342,9 @@ impl TuiState {
             .map(agent_server_status_summary)
             .unwrap_or_else(|| "agent=--".to_owned());
         let mut header = vec!["OpenSymphony".to_owned(), daemon, agent];
+        if let Some(memory) = snapshot.and_then(memory_server_visible_status_summary) {
+            header.push(memory);
+        }
         header.push(connection_status_summary(self));
         header.push(format!("seq={sequence}"));
         header.push(format!("focus={}", self.focus.label()));
@@ -579,6 +582,16 @@ impl TuiState {
                 agent_style,
             ));
             spans.push(Span::raw(" | "));
+
+            if let Some(memory) = memory_server_visible_status_summary(snap) {
+                let memory_style = if snap.snapshot.memory_server.reachable {
+                    Style::new().fg(GREEN)
+                } else {
+                    Style::new().fg(RED)
+                };
+                spans.push(Span::styled(memory, memory_style));
+                spans.push(Span::raw(" | "));
+            }
         } else {
             spans.push(Span::styled("daemon=--", Style::new().dim()));
             spans.push(Span::raw(" | "));
@@ -3039,6 +3052,29 @@ fn agent_server_status_summary(snapshot: &SnapshotEnvelope) -> String {
     )
 }
 
+fn memory_server_status_summary(snapshot: &SnapshotEnvelope) -> String {
+    let memory_server = &snapshot.snapshot.memory_server;
+    let base = if !memory_server.enabled {
+        "memory=off".to_owned()
+    } else if memory_server.reachable {
+        "memory=up".to_owned()
+    } else {
+        "memory=down".to_owned()
+    };
+    status_segment(
+        base,
+        informative_status(&memory_server.status_line, &["disabled", "listening"]),
+    )
+}
+
+fn memory_server_visible_status_summary(snapshot: &SnapshotEnvelope) -> Option<String> {
+    snapshot
+        .snapshot
+        .memory_server
+        .enabled
+        .then(|| memory_server_status_summary(snapshot))
+}
+
 fn status_segment(base: String, detail: Option<&str>) -> String {
     match detail {
         Some(detail) => format!("{base} ({detail})"),
@@ -3865,9 +3901,11 @@ mod tests {
         ControlPlaneDaemonSnapshot as DaemonSnapshot, ControlPlaneDaemonState as DaemonState,
         ControlPlaneDaemonStatus as DaemonStatus, ControlPlaneFileChange,
         ControlPlaneFileChangeKind, ControlPlaneIssueRuntimeState as IssueRuntimeState,
-        ControlPlaneIssueSnapshot as IssueSnapshot, ControlPlaneMetricsSnapshot as MetricsSnapshot,
-        ControlPlaneRecentEvent as RecentEvent, ControlPlaneRecentEventKind as RecentEventKind,
-        ControlPlaneWorkerOutcome as WorkerOutcome, SnapshotEnvelope,
+        ControlPlaneIssueSnapshot as IssueSnapshot,
+        ControlPlaneMemoryServerStatus as MemoryServerStatus,
+        ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
+        ControlPlaneRecentEventKind as RecentEventKind, ControlPlaneWorkerOutcome as WorkerOutcome,
+        SnapshotEnvelope,
     };
     use chrono::{TimeZone, Utc};
     use ftui::{
@@ -3943,6 +3981,7 @@ mod tests {
                     conversation_count: issue_count as u32,
                     status_line: "healthy".to_owned(),
                 },
+                memory_server: Default::default(),
                 metrics: MetricsSnapshot {
                     running_issues: 1,
                     retry_queue_depth: 0,
@@ -4266,6 +4305,23 @@ mod tests {
         let header = rendered.lines().next().expect("header row");
         assert!(header.contains("daemon=degraded"));
         assert!(header.contains("agent=down"));
+    }
+
+    #[test]
+    fn header_surfaces_enabled_memory_server_health() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 3);
+        snapshot.snapshot.memory_server = MemoryServerStatus {
+            enabled: true,
+            reachable: true,
+            endpoint: Some("http://127.0.0.1:8765/mcp".to_owned()),
+            status_line: "listening".to_owned(),
+        };
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.render_text(140, 22);
+        let header = rendered.lines().next().expect("header row");
+        assert!(header.contains("memory=up"));
     }
 
     #[test]

@@ -16,9 +16,10 @@ use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, Workpa
 use crate::opensymphony_openhands::{
     ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest, IssueSessionError,
     IssueSessionObserver, IssueSessionResult, IssueSessionRunner, IssueSessionRunnerConfig,
-    LocalServerSupervisor, LocalServerTooling, OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient,
-    OpenHandsConversationStorePaths, OpenHandsError, SupervisedServerConfig, SupervisorConfig,
-    TransportConfig, WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
+    LocalServerSupervisor, LocalServerTooling, MemoryWorkerAccess,
+    OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsClient, OpenHandsConversationStorePaths,
+    OpenHandsError, SupervisedServerConfig, SupervisorConfig, TransportConfig,
+    WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
 use crate::opensymphony_orchestrator::{
     RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerLaunch,
@@ -40,8 +41,8 @@ use tokio::{
 use url::Url;
 
 use super::{
-    RunCommandError, config::RunRuntimeConfig, datetime_to_timestamp_ms, now_timestamp,
-    timestamp_to_datetime,
+    RunCommandError, RuntimeMemoryEnv, config::RunRuntimeConfig, datetime_to_timestamp_ms,
+    now_timestamp, timestamp_to_datetime,
 };
 
 const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -438,6 +439,7 @@ pub(super) fn build_workspace_manager_config(
 pub(super) async fn build_runtime_transport(
     runtime: &RunRuntimeConfig,
     prepared_tooling: Option<LocalServerTooling>,
+    memory_env: Option<&RuntimeMemoryEnv>,
 ) -> Result<(TransportConfig, Option<LocalServerSupervisor>), RunCommandError> {
     let transport = TransportConfig::from_workflow(&runtime.workflow, &ProcessEnvironment)?;
     let local_server = &runtime.workflow.extensions.openhands.local_server;
@@ -483,6 +485,9 @@ pub(super) async fn build_runtime_transport(
             OPENHANDS_CONVERSATIONS_PATH_ENV.to_string(),
             conversation_store.active.display().to_string(),
         );
+    }
+    if let Some(memory_env) = memory_env {
+        inject_memory_env(&mut config.extra_env, memory_env);
     }
     config.startup_timeout = Duration::from_millis(local_server.startup_timeout_ms);
     config.probe.path = local_server.readiness_probe_path.clone();
@@ -616,6 +621,7 @@ impl RuntimeWorkerBackend {
         client: OpenHandsClient,
         workflow: Arc<ResolvedWorkflow>,
         workspace_manager: Arc<WorkspaceManager>,
+        memory_env: Option<RuntimeMemoryEnv>,
     ) -> Self {
         let (updates_tx, updates_rx) = mpsc::unbounded_channel();
         let workpad_comment_source = match build_linear_client(&workflow) {
@@ -635,7 +641,8 @@ impl RuntimeWorkerBackend {
             client,
             workflow: workflow.clone(),
             workspace_manager,
-            runner_config: IssueSessionRunnerConfig::from_workflow(&workflow),
+            runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
+                .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
             workpad_comment_source,
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
@@ -792,6 +799,40 @@ impl RuntimeWorkerBackend {
                 Err(CliWorkerError::LaunchTimeout(self.launch_timeout))
             }
         }
+    }
+}
+
+fn inject_memory_env(
+    env: &mut std::collections::BTreeMap<String, String>,
+    memory: &RuntimeMemoryEnv,
+) {
+    env.insert(
+        "OPENSYMPHONY_MEMORY_ENDPOINT".to_string(),
+        memory.endpoint.clone(),
+    );
+    env.insert(
+        "OPENSYMPHONY_MEMORY_PROJECT".to_string(),
+        memory.project.clone(),
+    );
+    env.insert(
+        "OPENSYMPHONY_MEMORY_PROJECT_SET".to_string(),
+        memory.project.clone(),
+    );
+    env.insert(
+        "OPENSYMPHONY_MEMORY_EXECUTION_REPO".to_string(),
+        memory.execution_repo.clone(),
+    );
+    if let Some(token) = &memory.token {
+        env.insert("OPENSYMPHONY_MEMORY_TOKEN".to_string(), token.clone());
+    }
+}
+
+fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
+    MemoryWorkerAccess {
+        endpoint: memory.endpoint.clone(),
+        token: memory.token.clone(),
+        project: Some(memory.project.clone()),
+        execution_repo: Some(memory.execution_repo.clone()),
     }
 }
 
@@ -1012,7 +1053,7 @@ fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, future::pending, path::Path};
+    use std::{collections::BTreeMap, fs, future::pending, path::Path};
 
     use crate::opensymphony_domain::{
         ConversationId, IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt,
@@ -1037,6 +1078,42 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn memory_env_injection_sets_worker_cli_scope() {
+        let memory = RuntimeMemoryEnv {
+            endpoint: "http://127.0.0.1:8765/mcp".to_string(),
+            token: Some("read-token".to_string()),
+            project: "project-alpha".to_string(),
+            execution_repo: "/tmp/project-alpha/services/api".to_string(),
+        };
+        let mut env = BTreeMap::new();
+
+        inject_memory_env(&mut env, &memory);
+
+        assert_eq!(
+            env.get("OPENSYMPHONY_MEMORY_ENDPOINT").map(String::as_str),
+            Some("http://127.0.0.1:8765/mcp")
+        );
+        assert_eq!(
+            env.get("OPENSYMPHONY_MEMORY_TOKEN").map(String::as_str),
+            Some("read-token")
+        );
+        assert_eq!(
+            env.get("OPENSYMPHONY_MEMORY_PROJECT").map(String::as_str),
+            Some("project-alpha")
+        );
+        assert_eq!(
+            env.get("OPENSYMPHONY_MEMORY_PROJECT_SET")
+                .map(String::as_str),
+            Some("project-alpha")
+        );
+        assert_eq!(
+            env.get("OPENSYMPHONY_MEMORY_EXECUTION_REPO")
+                .map(String::as_str),
+            Some("/tmp/project-alpha/services/api")
+        );
+    }
+
     #[tokio::test]
     async fn start_worker_reports_workspace_setup_failures_before_launch() {
         let tempdir = TempDir::new().expect("tempdir should exist");
@@ -1052,6 +1129,7 @@ mod tests {
             OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
             workflow,
             workspace_manager,
+            None,
         );
 
         let issue = sample_issue();
@@ -1304,10 +1382,11 @@ Run the scheduler.
             memory: super::super::config::RunMemoryConfig {
                 auto_capture: true,
                 auto_archive: false,
+                server: None,
             },
         };
 
-        let error = match build_runtime_transport(&runtime, None).await {
+        let error = match build_runtime_transport(&runtime, None, None).await {
             Ok(_) => panic!("external targets should reject launcher overrides"),
             Err(error) => error,
         };
@@ -1334,6 +1413,7 @@ Run the scheduler.
             OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
             workflow,
             workspace_manager,
+            None,
         );
 
         let workspace = sample_workspace(&workspace_root);

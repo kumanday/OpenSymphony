@@ -13,6 +13,8 @@ pub struct ControlPlaneDaemonSnapshot {
     pub generated_at: DateTime<Utc>,
     pub daemon: ControlPlaneDaemonStatus,
     pub agent_server: ControlPlaneAgentServerStatus,
+    #[serde(default)]
+    pub memory_server: ControlPlaneMemoryServerStatus,
     pub metrics: ControlPlaneMetricsSnapshot,
     pub issues: Vec<ControlPlaneIssueSnapshot>,
     pub recent_events: Vec<ControlPlaneRecentEvent>,
@@ -47,6 +49,26 @@ pub struct ControlPlaneAgentServerStatus {
     pub base_url: String,
     pub conversation_count: u32,
     pub status_line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlPlaneMemoryServerStatus {
+    pub enabled: bool,
+    pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    pub status_line: String,
+}
+
+impl Default for ControlPlaneMemoryServerStatus {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            reachable: false,
+            endpoint: None,
+            status_line: "disabled".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

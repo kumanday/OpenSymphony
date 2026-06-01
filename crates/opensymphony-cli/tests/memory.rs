@@ -155,6 +155,211 @@ fn memory_init_dry_run_does_not_write_files() {
 }
 
 #[test]
+fn memory_context_can_include_code_intelligence_without_a_separate_cli_command() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::create_dir_all(repo.path().join("src")).expect("src dir should write");
+    fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .expect("source file should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "context",
+            "--issue",
+            "COE-999",
+            "--paths",
+            "src/lib.rs",
+            "--include-code-intel",
+        ],
+    );
+
+    assert_success(&output, "context with code intelligence");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("# Memory Context: COE-999"));
+    assert!(stdout.contains("## Code Intelligence"));
+    assert!(stdout.contains("Repository summary"));
+
+    let help = run(repo.path(), ["memory", "--help"]);
+    assert_success(&help, "memory help");
+    assert!(
+        !String::from_utf8_lossy(&help.stdout).contains("code-context"),
+        "memory help should keep context as the agent-facing command"
+    );
+}
+
+#[test]
+fn memory_read_commands_use_mcp_endpoint_when_configured() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    let server = TinyGraphqlServer::start([
+        r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"content":[{"type":"text","text":"remote brief"}]}}"#,
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["memory", "brief", "COE-123"])
+        .current_dir(repo.path())
+        .env("OPENSYMPHONY_MEMORY_ENDPOINT", &server.base_url)
+        .output()
+        .expect("command should run");
+
+    assert_success(&output, "remote memory brief");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("remote brief"));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("\"method\":\"tools/call\""));
+    assert!(requests[0].contains("\"name\":\"memory.brief\""));
+    assert!(requests[0].contains("\"issue\":\"COE-123\""));
+}
+
+#[test]
+fn memory_read_commands_forward_worker_scope_to_mcp_endpoint() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    let server = TinyGraphqlServer::start([
+        r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"results":[]}}"#,
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["memory", "search", "shared"])
+        .current_dir(repo.path())
+        .env("OPENSYMPHONY_MEMORY_ENDPOINT", &server.base_url)
+        .env("OPENSYMPHONY_MEMORY_PROJECT", "project-alpha")
+        .env("OPENSYMPHONY_MEMORY_EXECUTION_REPO", "services/api")
+        .output()
+        .expect("command should run");
+
+    assert_success(&output, "remote memory search");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("\"name\":\"memory.search\""));
+    assert!(requests[0].contains("\"query\":\"shared\""));
+    assert!(requests[0].contains("\"project\":\"project-alpha\""));
+    assert!(requests[0].contains("\"repo\":\"services/api\""));
+}
+
+#[test]
+fn memory_admin_commands_can_use_mcp_endpoint() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    let server = TinyGraphqlServer::start([
+        r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"findingCount":0,"findings":[]}}"#,
+    ]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["memory", "lint", "--public-docs"])
+        .current_dir(repo.path())
+        .env("OPENSYMPHONY_MEMORY_ENDPOINT", &server.base_url)
+        .env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN", "admin-token")
+        .output()
+        .expect("command should run");
+
+    assert_success(&output, "remote memory lint");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("\"name\":\"memory.lint\""));
+    assert!(requests[0].contains("\"publicDocs\":true"));
+}
+
+#[test]
+fn memory_search_defaults_cross_repo_and_repo_filters_by_changed_paths() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    fs::write(repo.path().join("source.yaml"), multi_repo_source())
+        .expect("source evidence should write");
+
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "--issues",
+                "COE-201,COE-202",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture multi-repo fixture",
+    );
+
+    let cross_repo = run(repo.path(), ["memory", "search", "shared"]);
+    assert_success(&cross_repo, "cross-repo search");
+    let stdout = String::from_utf8_lossy(&cross_repo.stdout);
+    assert!(stdout.contains("COE-201"));
+    assert!(stdout.contains("COE-202"));
+
+    let api_only = run(
+        repo.path(),
+        ["memory", "search", "--repo", "services/api", "shared"],
+    );
+    assert_success(&api_only, "repo-scoped search");
+    let stdout = String::from_utf8_lossy(&api_only.stdout);
+    assert!(stdout.contains("COE-201"));
+    assert!(!stdout.contains("COE-202"));
+}
+
+#[test]
+fn memory_docs_applies_repo_scope_before_returning_area_doc() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    fs::write(repo.path().join("source.yaml"), multi_repo_source())
+        .expect("source evidence should write");
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "--issues",
+                "COE-201,COE-202",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture multi-repo fixture",
+    );
+    assert_success(
+        &run(
+            repo.path(),
+            ["memory", "sync-docs", "--area", "openhands-runtime"],
+        ),
+        "sync scoped docs",
+    );
+
+    let api_docs = run(
+        repo.path(),
+        [
+            "memory",
+            "docs",
+            "--area",
+            "openhands-runtime",
+            "--repo",
+            "services/api",
+        ],
+    );
+    assert_success(&api_docs, "docs with matching repo scope");
+    assert!(String::from_utf8_lossy(&api_docs.stdout).contains("# OpenHands Runtime"));
+
+    let mobile_docs = run(
+        repo.path(),
+        [
+            "memory",
+            "docs",
+            "--area",
+            "openhands-runtime",
+            "--repo",
+            "services/mobile",
+        ],
+    );
+    assert_failure(&mobile_docs, "docs with non-matching repo scope");
+    assert!(
+        String::from_utf8_lossy(&mobile_docs.stderr)
+            .contains("no captured memory for area `openhands-runtime`")
+    );
+}
+
+#[test]
 fn sync_docs_requires_configured_area_mapping() {
     let repo = TempDir::new().expect("temp repo should exist");
     fs::write(repo.path().join("source.yaml"), candidate_only_source())
@@ -1159,6 +1364,43 @@ prs:
     merge_sha: abcdef1234567890
     changed_files:
       - path: README.md
+        change_kind: modified
+"#
+}
+
+fn multi_repo_source() -> &'static str {
+    r#"
+issues:
+  - identifier: COE-201
+    title: Shared broker API work
+    url: https://linear.app/example/issue/COE-201
+    description: Shared broker update in the API service.
+    state: Done
+    labels:
+      - runtime
+    linked_prs:
+      - 201
+  - identifier: COE-202
+    title: Shared broker web work
+    url: https://linear.app/example/issue/COE-202
+    description: Shared broker update in the web service.
+    state: Done
+    labels:
+      - runtime
+    linked_prs:
+      - 202
+prs:
+  - number: 201
+    title: COE-201 shared broker api
+    url: https://github.com/example/repo/pull/201
+    changed_files:
+      - path: services/api/src/broker.rs
+        change_kind: modified
+  - number: 202
+    title: COE-202 shared broker web
+    url: https://github.com/example/repo/pull/202
+    changed_files:
+      - path: services/web/src/broker.ts
         change_kind: modified
 "#
 }

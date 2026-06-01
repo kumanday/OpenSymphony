@@ -30,6 +30,7 @@ fn fixture() -> SnapshotEnvelope {
                 conversation_count: 2,
                 status_line: "healthy".to_owned(),
             },
+            memory_server: Default::default(),
             metrics: MetricsSnapshot {
                 running_issues: 1,
                 retry_queue_depth: 0,
@@ -77,6 +78,10 @@ fn snapshot_envelope_round_trips_through_json() {
 
     let encoded = serde_json::to_value(&envelope).expect("serialize snapshot envelope to json");
     assert_eq!(encoded["snapshot"]["daemon"]["state"], "ready");
+    assert_eq!(
+        encoded["snapshot"]["memory_server"]["status_line"],
+        "disabled"
+    );
     assert_eq!(
         encoded["snapshot"]["issues"][0]["runtime_state"],
         "retry_queued"

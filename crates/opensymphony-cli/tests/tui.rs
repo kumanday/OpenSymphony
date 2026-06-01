@@ -30,6 +30,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             conversation_count: 1,
             status_line: "healthy".to_owned(),
         },
+        memory_server: Default::default(),
         metrics: MetricsSnapshot {
             running_issues: 1,
             retry_queue_depth: 0,

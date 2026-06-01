@@ -1937,6 +1937,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             conversation_count: 3,
             status_line: "local agent-server healthy".to_owned(),
         },
+        memory_server: Default::default(),
         metrics: MetricsSnapshot {
             running_issues,
             retry_queue_depth,

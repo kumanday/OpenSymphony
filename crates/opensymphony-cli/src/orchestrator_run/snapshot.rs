@@ -7,7 +7,8 @@ use std::{
 
 use crate::opensymphony_control::{
     AgentServerStatus, ConversationEvent, DaemonSnapshot, DaemonState, DaemonStatus,
-    IssueRuntimeState, IssueSnapshot, MetricsSnapshot, RecentEvent, RecentEventKind, WorkerOutcome,
+    IssueRuntimeState, IssueSnapshot, MemoryServerStatus, MetricsSnapshot, RecentEvent,
+    RecentEventKind, WorkerOutcome,
 };
 use crate::opensymphony_domain::{
     HealthStatus, IssueIdentifier, OrchestratorSnapshot, SchedulerStatus, WorkerOutcomeKind,
@@ -25,6 +26,7 @@ pub(super) fn map_snapshot(
     workspace_root: &Path,
     terminal_states: &HashSet<String>,
     agent_server: AgentServerStatus,
+    memory_server: MemoryServerStatus,
     recent_events: &VecDeque<RecentEvent>,
 ) -> DaemonSnapshot {
     let generated_at = timestamp_to_datetime(snapshot.generated_at);
@@ -47,6 +49,7 @@ pub(super) fn map_snapshot(
             ),
         },
         agent_server,
+        memory_server,
         metrics: MetricsSnapshot {
             running_issues: snapshot.daemon.running_issue_count as u32,
             retry_queue_depth: snapshot.daemon.retry_queue_count as u32,
@@ -62,6 +65,25 @@ pub(super) fn map_snapshot(
             .map(|issue| map_issue(issue, terminal_states, generated_at))
             .collect(),
         recent_events: recent_events.iter().cloned().collect(),
+    }
+}
+
+pub(super) fn current_memory_server_status(
+    memory_server: Option<&super::super::memory::MemoryServerHandle>,
+) -> MemoryServerStatus {
+    let Some(memory_server) = memory_server else {
+        return MemoryServerStatus::default();
+    };
+    let reachable = !memory_server.is_finished();
+    MemoryServerStatus {
+        enabled: true,
+        reachable,
+        endpoint: Some(memory_server.endpoint().to_string()),
+        status_line: if reachable {
+            "listening".to_string()
+        } else {
+            "stopped".to_string()
+        },
     }
 }
 
@@ -461,6 +483,7 @@ tracker:
                 conversation_count: 1,
                 status_line: "healthy".to_owned(),
             },
+            crate::opensymphony_control::MemoryServerStatus::default(),
             &std::collections::VecDeque::new(),
         );
 

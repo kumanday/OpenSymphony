@@ -26,6 +26,15 @@ pub fn search(
     query: &str,
     limit: usize,
 ) -> Result<Vec<SearchResult>, MemoryError> {
+    search_with_scope(config, query, limit, &MemoryScopeFilter::default())
+}
+
+pub fn search_with_scope(
+    config: &MemoryConfig,
+    query: &str,
+    limit: usize,
+    scope: &MemoryScopeFilter,
+) -> Result<Vec<SearchResult>, MemoryError> {
     let terms = normalize_query_terms(query);
     if terms.is_empty() {
         return Err(MemoryError::InvalidInput(
@@ -34,7 +43,10 @@ pub fn search(
     }
 
     let mut scored = Vec::new();
-    for indexed in load_indexed_issues(config)? {
+    for indexed in load_indexed_issues(config)?
+        .into_iter()
+        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+    {
         let haystack = format!(
             "{} {} {} {}",
             indexed.issue_key,
@@ -78,12 +90,24 @@ pub fn related_by_issue(
     issue_key: &str,
     limit: usize,
 ) -> Result<Vec<SearchResult>, MemoryError> {
+    related_by_issue_with_scope(config, issue_key, limit, &MemoryScopeFilter::default())
+}
+
+pub fn related_by_issue_with_scope(
+    config: &MemoryConfig,
+    issue_key: &str,
+    limit: usize,
+    scope: &MemoryScopeFilter,
+) -> Result<Vec<SearchResult>, MemoryError> {
     let issue_key = normalize_issue_key(issue_key);
     let indexed = find_indexed_issue(config, &issue_key)?
         .ok_or_else(|| MemoryError::InvalidInput(format!("no capsule found for {issue_key}")))?;
     let mut related = Vec::new();
     let indexed_areas = indexed.areas();
-    for candidate in load_indexed_issues(config)? {
+    for candidate in load_indexed_issues(config)?
+        .into_iter()
+        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+    {
         if candidate.issue_key == issue_key {
             continue;
         }
@@ -123,9 +147,21 @@ pub fn related_by_area(
     area: &str,
     limit: usize,
 ) -> Result<Vec<SearchResult>, MemoryError> {
+    related_by_area_with_scope(config, area, limit, &MemoryScopeFilter::default())
+}
+
+pub fn related_by_area_with_scope(
+    config: &MemoryConfig,
+    area: &str,
+    limit: usize,
+    scope: &MemoryScopeFilter,
+) -> Result<Vec<SearchResult>, MemoryError> {
     let area = slugify(area);
     let mut results = Vec::new();
-    for candidate in load_indexed_issues(config)? {
+    for candidate in load_indexed_issues(config)?
+        .into_iter()
+        .filter(|issue| indexed_issue_matches_scope(config, issue, scope))
+    {
         let areas = candidate.areas();
         if areas.iter().any(|candidate_area| candidate_area == &area) {
             results.push(SearchResult {
@@ -147,6 +183,15 @@ pub fn related_by_paths(
     paths: &[PathBuf],
     limit: usize,
 ) -> Result<Vec<SearchResult>, MemoryError> {
+    related_by_paths_with_scope(config, paths, limit, &MemoryScopeFilter::default())
+}
+
+pub fn related_by_paths_with_scope(
+    config: &MemoryConfig,
+    paths: &[PathBuf],
+    limit: usize,
+    scope: &MemoryScopeFilter,
+) -> Result<Vec<SearchResult>, MemoryError> {
     let terms = paths
         .iter()
         .flat_map(|path| {
@@ -156,10 +201,18 @@ pub fn related_by_paths(
         })
         .filter_map(|value| normalize_optional(&value))
         .collect::<Vec<_>>();
-    search(config, &terms.join(" "), limit)
+    search_with_scope(config, &terms.join(" "), limit, scope)
 }
 
 pub fn docs_for_area(config: &MemoryConfig, area: &str) -> Result<String, MemoryError> {
+    docs_for_area_with_scope(config, area, &MemoryScopeFilter::default())
+}
+
+pub fn docs_for_area_with_scope(
+    config: &MemoryConfig,
+    area: &str,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
     let area = config.area_or_default(area);
     if !area.docs_target.exists() {
         return Err(MemoryError::InvalidInput(format!(
@@ -168,7 +221,25 @@ pub fn docs_for_area(config: &MemoryConfig, area: &str) -> Result<String, Memory
             area.docs_target.display()
         )));
     }
+    if docs_scope_requires_index_check(scope) {
+        let mut scoped = scope.clone();
+        scoped.area = Some(area.slug.clone());
+        let issues = load_indexed_issues(config)?;
+        if !issues
+            .iter()
+            .any(|issue| indexed_issue_matches_scope(config, issue, &scoped))
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "no captured memory for area `{}` in the requested docs scope",
+                area.slug
+            )));
+        }
+    }
     read_to_string(&area.docs_target)
+}
+
+fn docs_scope_requires_index_check(scope: &MemoryScopeFilter) -> bool {
+    scope.issue.is_some() || scope.milestone.is_some() || scope.repo.is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -585,7 +656,9 @@ fn render_memory_context(
     output.push_str("## Guidance\n\n");
     output.push_str("- Treat memory as context, not as authority over current code.\n");
     output.push_str("- Inspect referenced docs and current files before editing.\n");
-    output.push_str("- Run path-specific memory/code-context queries after file discovery.\n");
+    output.push_str(
+        "- Re-run `opensymphony memory context --paths ... --include-code-intel` after file discovery.\n",
+    );
     output.push_str("- Use `opensymphony debug ");
     output.push_str(issue_key);
     output.push_str("` only when the original agent conversation is needed.\n");
@@ -604,7 +677,16 @@ pub fn status(
     config: &MemoryConfig,
     selection: &IssueSelection,
 ) -> Result<StatusReport, MemoryError> {
+    status_with_scope(config, selection, &MemoryScopeFilter::default())
+}
+
+pub fn status_with_scope(
+    config: &MemoryConfig,
+    selection: &IssueSelection,
+    scope: &MemoryScopeFilter,
+) -> Result<StatusReport, MemoryError> {
     let mut issues = load_indexed_issues(config)?;
+    issues.retain(|issue| indexed_issue_matches_scope(config, issue, scope));
     if let Some(area) = selection.area.as_ref().map(|area| slugify(area)) {
         issues.retain(|issue| issue.areas().contains(&area));
     }
@@ -645,6 +727,62 @@ pub fn status(
         docs_pending_count,
         issues: status_issues,
     })
+}
+
+fn indexed_issue_matches_scope(
+    config: &MemoryConfig,
+    issue: &IndexedIssue,
+    scope: &MemoryScopeFilter,
+) -> bool {
+    if let Some(issue_key) = scope.issue.as_ref().map(|issue| normalize_issue_key(issue))
+        && issue.issue_key != issue_key
+    {
+        return false;
+    }
+    if let Some(milestone) = scope.milestone.as_ref().and_then(|value| normalize_optional(value))
+        && issue.milestone.as_deref() != Some(milestone.as_str())
+    {
+        return false;
+    }
+    if let Some(area) = scope.area.as_ref().map(|area| slugify(area))
+        && !issue.areas().contains(&area)
+    {
+        return false;
+    }
+    if let Some(repo) = scope.repo.as_ref().and_then(|value| normalize_optional(value))
+        && !indexed_issue_matches_repo(config, issue, &repo)
+    {
+        return false;
+    }
+    true
+}
+
+fn indexed_issue_matches_repo(config: &MemoryConfig, issue: &IndexedIssue, repo: &str) -> bool {
+    let repo = repo_scope_prefix(config, repo);
+    if repo.is_empty() || repo == "." {
+        return true;
+    }
+    issue.changed_files.iter().any(|path| {
+        let path = path.to_string_lossy();
+        path == repo || path.starts_with(&format!("{repo}/"))
+    })
+}
+
+fn repo_scope_prefix(config: &MemoryConfig, repo: &str) -> String {
+    let path = PathBuf::from(repo);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(&config.repo_root)
+            .map(Path::to_path_buf)
+            .unwrap_or(path)
+    } else {
+        path
+    };
+    relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .filter(|component| component != ".")
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, MemoryError> {

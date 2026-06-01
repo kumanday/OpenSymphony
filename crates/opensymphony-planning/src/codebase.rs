@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
@@ -196,6 +198,7 @@ impl CodeIntelIndex for CodebaseAnalyzer {
             .map(|path| path.to_string_lossy().trim_matches('/').to_string())
             .filter(|path| !path.is_empty())
             .collect::<Vec<_>>();
+        let commit_sha = git_commit_sha(&self.root);
         let mut artifacts = Vec::new();
 
         for package in &analysis.packages {
@@ -211,9 +214,13 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                 provider: "codebase-analyzer".to_string(),
                 kind: "package".to_string(),
                 scope_refs: scope_refs.to_vec(),
-                source_refs: Vec::new(),
+                source_refs: vec![MemorySourceRef {
+                    kind: "path".to_string(),
+                    id: package.relative_path.clone(),
+                    url: None,
+                }],
                 path: Some(PathBuf::from(&package.relative_path)),
-                commit_sha: None,
+                commit_sha: commit_sha.clone(),
                 title: package.name.clone(),
                 summary: format!(
                     "{:?} package with {} declared dependency signal(s)",
@@ -236,9 +243,13 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                 provider: "codebase-analyzer".to_string(),
                 kind: "convention".to_string(),
                 scope_refs: scope_refs.to_vec(),
-                source_refs: Vec::new(),
+                source_refs: vec![MemorySourceRef {
+                    kind: "path".to_string(),
+                    id: convention.evidence_path.clone(),
+                    url: None,
+                }],
                 path: Some(PathBuf::from(&convention.evidence_path)),
-                commit_sha: None,
+                commit_sha: commit_sha.clone(),
                 title: convention.area.clone(),
                 summary: convention.description.clone(),
             });
@@ -255,7 +266,7 @@ impl CodeIntelIndex for CodebaseAnalyzer {
                     url: None,
                 }],
                 path: None,
-                commit_sha: None,
+                commit_sha: commit_sha.clone(),
                 title: "Repository summary".to_string(),
                 summary: format!(
                     "{} files, {} Rust files, {} TypeScript files, build systems: {}",
@@ -270,6 +281,19 @@ impl CodeIntelIndex for CodebaseAnalyzer {
         artifacts.truncate(limit.max(1));
         Ok(artifacts)
     }
+}
+
+fn git_commit_sha(root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
 }
 
 /// Walks a directory tree and returns relative paths for each file.
@@ -309,16 +333,30 @@ impl RepoWalker {
         dir: &Path,
         inventory: &mut BTreeMap<PathBuf, usize>,
     ) -> Result<(), CodebaseAnalysisError> {
-        let entries = fs::read_dir(dir).map_err(|e| CodebaseAnalysisError::Io {
-            path: dir.display().to_string(),
-            source: e,
-        })?;
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && dir != self.root => {
+                return Ok(());
+            }
+            Err(source) => {
+                return Err(CodebaseAnalysisError::Io {
+                    path: dir.display().to_string(),
+                    source,
+                });
+            }
+        };
 
         for entry in entries {
-            let entry = entry.map_err(|e| CodebaseAnalysisError::Io {
-                path: dir.display().to_string(),
-                source: e,
-            })?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == io::ErrorKind::PermissionDenied => continue,
+                Err(source) => {
+                    return Err(CodebaseAnalysisError::Io {
+                        path: dir.display().to_string(),
+                        source,
+                    });
+                }
+            };
             let path = entry.path();
 
             // Use entry.file_type() to avoid following symlinks, preventing infinite loops.
@@ -877,7 +915,7 @@ pub enum CodebaseAnalysisError {
     Io {
         path: String,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
     #[error("TOML parse error in {path}: {source}")]
     Toml {
@@ -1157,5 +1195,34 @@ serde = {{ workspace = true }}"#
             }
             other => panic!("expected NotADirectory, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn analyze_skips_unreadable_subdirectories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let root = create_test_repo(&tmp);
+        let unreadable = root
+            .join("tools")
+            .join("openhands-server")
+            .join("workspace");
+        fs::create_dir_all(&unreadable).unwrap();
+        let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&unreadable, permissions).unwrap();
+
+        let analyzer = CodebaseAnalyzer::new(&root);
+        let result = analyzer.analyze();
+
+        let mut permissions = fs::metadata(&unreadable).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&unreadable, permissions).unwrap();
+
+        assert!(
+            result.is_ok(),
+            "codebase analysis should ignore unreadable generated workspaces"
+        );
     }
 }

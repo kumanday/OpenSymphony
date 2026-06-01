@@ -1,32 +1,42 @@
 use std::{
-    fs,
+    env, fs,
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::{self, ExitCode},
+    time::Duration,
 };
 
 use chrono::{NaiveDate, Utc};
 use clap::{Args, Subcommand};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::task::JoinHandle;
 
 use crate::{
     opensymphony_domain::{TrackerIssue, TrackerIssueBlocker, TrackerIssueRef},
     opensymphony_linear::{LinearClient, LinearConfig},
     opensymphony_memory::{
-        ArchivePlan, CommentEvidence, DocsSyncPlan, IssueEvidence, IssueSelection, LintSeverity,
-        MemoryConfig, MemoryContextOptions, MemoryError, SourceFile,
-        archive_blocking_warning_count, brief, context_for_issue_with_options, docs_for_area,
-        expand_issue_range, lint, load_source_file, mark_archived, plan_archive, plan_capture,
-        plan_docs_sync, plan_memory_init, related_by_area, related_by_issue, related_by_paths,
-        render_archive_plan, render_capture_dry_run, search, status, write_capture_plan,
+        ArchivePlan, CodeIntelArtifact, CodeIntelIndex, CommentEvidence, DocsSyncPlan,
+        IssueEvidence, IssueLinkEvidence, IssueSelection, KnowledgeScope, KnowledgeScopeKind,
+        LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError, MemoryReindexReport,
+        MemoryScopeFilter, SourceFile, archive_blocking_warning_count, brief,
+        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range, lint,
+        load_source_file, mark_archived, plan_archive, plan_capture, plan_docs_sync,
+        plan_memory_init, refresh_memory_index, related_by_area_with_scope,
+        related_by_issue_with_scope, related_by_paths_with_scope, render_archive_plan,
+        render_capture_dry_run, search_with_scope, status_with_scope, write_capture_plan,
         write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, IssueConversationManifest, OpenHandsConversationStorePaths,
     },
+    opensymphony_planning::CodebaseAnalyzer,
     opensymphony_workflow::WorkflowDefinition,
     opensymphony_workspace::{CleanupConfig, HookConfig, WorkspaceManager, WorkspaceManagerConfig},
 };
+
+const MEMORY_MCP_TOOL_TIMEOUT: Duration = Duration::from_secs(300);
+const REMOTE_MEMORY_TOOL_TIMEOUT: Duration = Duration::from_secs(330);
 
 #[derive(Debug, Args)]
 pub struct MemoryArgs {
@@ -151,6 +161,10 @@ struct SyncDocsArgs {
 
 #[derive(Debug, Args)]
 struct StatusArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
+    #[arg(long, help = "Filter by issue/work item")]
+    issue: Option<String>,
     #[arg(long, help = "Filter by milestone")]
     milestone: Option<String>,
     #[arg(long, help = "Filter by area")]
@@ -165,6 +179,14 @@ struct ShowArgs {
 
 #[derive(Debug, Args)]
 struct SearchArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
+    #[arg(long, help = "Filter by issue/work item")]
+    issue: Option<String>,
+    #[arg(long, help = "Filter by milestone")]
+    milestone: Option<String>,
+    #[arg(long, help = "Filter by area")]
+    area: Option<String>,
     #[arg(help = "Search query")]
     query: String,
     #[arg(long, default_value = "10", help = "Maximum results")]
@@ -173,8 +195,12 @@ struct SearchArgs {
 
 #[derive(Debug, Args)]
 struct RelatedArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
     #[arg(long, help = "Find memory related to this issue")]
     issue: Option<String>,
+    #[arg(long, help = "Filter related memory by milestone")]
+    milestone: Option<String>,
     #[arg(long, help = "Find memory related to this area")]
     area: Option<String>,
     #[arg(long, value_delimiter = ',', help = "Find memory related to paths")]
@@ -185,14 +211,26 @@ struct RelatedArgs {
 
 #[derive(Debug, Args)]
 struct DocsArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
+    #[arg(long, help = "Issue/work item scope identifier")]
+    issue: Option<String>,
+    #[arg(long, help = "Milestone scope identifier")]
+    milestone: Option<String>,
     #[arg(long, help = "Area slug")]
     area: String,
 }
 
 #[derive(Debug, Args)]
 struct ContextArgs {
+    #[command(flatten)]
+    scope: ScopeArgs,
     #[arg(long, help = "Issue identifier")]
     issue: String,
+    #[arg(long, help = "Milestone scope identifier")]
+    milestone: Option<String>,
+    #[arg(long, help = "Area scope slug")]
+    area: Option<String>,
     #[arg(
         long,
         value_delimiter = ',',
@@ -205,20 +243,43 @@ struct ContextArgs {
         help = "Code paths to use for path-matched memory"
     )]
     paths: Vec<PathBuf>,
+    #[arg(long, help = "Append code-intelligence context for --paths")]
+    include_code_intel: bool,
     #[arg(long, default_value = "20", help = "Maximum selected memory briefs")]
     limit: usize,
+}
+
+#[derive(Debug, Args, Default, Clone)]
+struct ScopeArgs {
+    #[arg(long, help = "Project set scope identifier")]
+    project_set: Option<String>,
+    #[arg(long, help = "Project scope identifier")]
+    project: Option<String>,
+    #[arg(long, help = "Repository scope identifier or path")]
+    repo: Option<String>,
+    #[arg(
+        long,
+        help = "Allow queries outside the default current project set scope"
+    )]
+    all_accessible: bool,
 }
 
 #[derive(Debug, Args)]
 struct ServeArgs {
     #[arg(long, default_value = "127.0.0.1:8765", help = "Bind address")]
-    addr: String,
+    addr: SocketAddr,
     #[arg(
         long,
         env = "OPENSYMPHONY_MEMORY_TOKEN",
-        help = "Optional bearer token"
+        help = "Optional read-only bearer token"
     )]
     token: Option<String>,
+    #[arg(
+        long,
+        env = "OPENSYMPHONY_MEMORY_ADMIN_TOKEN",
+        help = "Optional admin bearer token for capture, sync, lint, and reindex tools"
+    )]
+    admin_token: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -497,7 +558,7 @@ pub(crate) async fn auto_capture_terminal(
 }
 
 async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
-    let repo_root = std::env::current_dir().map_err(|source| MemoryError::ReadFile {
+    let repo_root = env::current_dir().map_err(|source| MemoryError::ReadFile {
         path: PathBuf::from("."),
         source,
     })?;
@@ -505,6 +566,13 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         config: config_path,
         command,
     } = args;
+    if let Some(endpoint) = env::var("OPENSYMPHONY_MEMORY_ENDPOINT")
+        .ok()
+        .and_then(|value| non_empty(&value))
+        && let Some((tool_name, arguments)) = remote_memory_tool_request(&command)
+    {
+        return run_remote_memory_tool(&endpoint, tool_name, arguments).await;
+    }
     match command {
         MemoryCommand::Init(args) => run_init(&repo_root, config_path.as_deref(), args),
         MemoryCommand::Capture(args) => {
@@ -708,13 +776,20 @@ fn run_sync_docs(config: &MemoryConfig, args: SyncDocsArgs) -> Result<(), Memory
 }
 
 fn run_status(config: &MemoryConfig, args: StatusArgs) -> Result<(), MemoryError> {
-    let report = status(
+    let scope = scope_filter(
+        &args.scope,
+        args.issue.as_deref(),
+        args.milestone.as_deref(),
+        args.area.as_deref(),
+    );
+    let report = status_with_scope(
         config,
         &IssueSelection {
-            milestone: args.milestone,
-            area: args.area,
+            milestone: args.milestone.clone(),
+            area: args.area.clone(),
             ..IssueSelection::default()
         },
+        &scope,
     )?;
     println!("# Memory Status\n");
     println!("Issues captured: {}", report.issue_count);
@@ -757,18 +832,30 @@ fn run_show(config: &MemoryConfig, args: ShowArgs, mode: ShowMode) -> Result<(),
 }
 
 fn run_search(config: &MemoryConfig, args: SearchArgs) -> Result<(), MemoryError> {
-    let results = search(config, &args.query, args.limit)?;
+    let scope = scope_filter(
+        &args.scope,
+        args.issue.as_deref(),
+        args.milestone.as_deref(),
+        args.area.as_deref(),
+    );
+    let results = search_with_scope(config, &args.query, args.limit, &scope)?;
     print_search_results(config, &results);
     Ok(())
 }
 
 fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryError> {
+    let scope = scope_filter(
+        &args.scope,
+        None,
+        args.milestone.as_deref(),
+        args.area.as_deref(),
+    );
     let results = if let Some(issue) = args.issue {
-        related_by_issue(config, &issue, args.limit)?
+        related_by_issue_with_scope(config, &issue, args.limit, &scope)?
     } else if let Some(area) = args.area {
-        related_by_area(config, &area, args.limit)?
+        related_by_area_with_scope(config, &area, args.limit, &scope)?
     } else if !args.paths.is_empty() {
-        related_by_paths(config, &args.paths, args.limit)?
+        related_by_paths_with_scope(config, &args.paths, args.limit, &scope)?
     } else {
         return Err(MemoryError::InvalidInput(
             "provide one of --issue, --area, or --paths".to_string(),
@@ -779,7 +866,13 @@ fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryErr
 }
 
 fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
-    println!("{}", docs_for_area(config, &args.area)?);
+    let scope = scope_filter(
+        &args.scope,
+        args.issue.as_deref(),
+        args.milestone.as_deref(),
+        Some(args.area.as_str()),
+    );
+    println!("{}", docs_for_area_with_scope(config, &args.area, &scope)?);
     Ok(())
 }
 
@@ -804,14 +897,301 @@ async fn run_context(
         paths: args.paths,
         limit: args.limit,
     };
+    let scope = scope_filter(
+        &args.scope,
+        Some(options.issue.as_str()),
+        args.milestone.as_deref(),
+        args.area.as_deref(),
+    );
     for warning in warnings {
         println!("> Warning: {warning}\n");
     }
-    println!(
-        "{}",
-        context_for_issue_with_options(config, &source, &options)?
-    );
+    let mut context = context_for_issue_with_options(config, &source, &options)?;
+    if args.include_code_intel {
+        append_code_intel_context(config, &mut context, &scope, &options.paths, options.limit)?;
+    }
+    println!("{context}");
     Ok(())
+}
+
+fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, Value)> {
+    match command {
+        MemoryCommand::Capture(args) => Some((
+            "memory.capture",
+            json!({
+                "issue": args.issue.clone(),
+                "issues": args.issues.clone(),
+                "issuesFile": args.issues_file.as_ref().map(|path| path.display().to_string()),
+                "issueRange": args.issue_range.clone(),
+                "noGithub": args.no_github,
+                "dryRun": args.dry_run,
+                "force": args.force
+            }),
+        )),
+        MemoryCommand::Import(args) => Some((
+            "memory.capture",
+            json!({
+                "issue": args.issue.clone(),
+                "issues": args.issues.clone(),
+                "issuesFile": args.issues_file.as_ref().map(|path| path.display().to_string()),
+                "issueRange": args.issue_range.clone(),
+                "beforeIssue": args.before_issue.clone(),
+                "milestone": args.milestone.clone(),
+                "state": args.state.clone(),
+                "beforeDate": args.before_date.map(|date| date.to_string()),
+                "sourceFile": args.source_file.display().to_string(),
+                "dryRun": args.dry_run,
+                "force": args.force
+            }),
+        )),
+        MemoryCommand::SyncDocs(args) => Some((
+            "memory.sync_docs",
+            json!({
+                "issues": args.issues.clone(),
+                "issuesFile": args.issues_file.as_ref().map(|path| path.display().to_string()),
+                "sinceLastSync": args.since_last_sync,
+                "area": args.area.clone(),
+                "dryRun": args.dry_run,
+                "withDiagrams": args.with_diagrams
+            }),
+        )),
+        MemoryCommand::Lint(args) => {
+            Some(("memory.lint", json!({ "publicDocs": args.public_docs })))
+        }
+        MemoryCommand::Brief(args) => {
+            Some(("memory.brief", json!({ "issue": args.issue.clone() })))
+        }
+        MemoryCommand::Search(args) => Some((
+            "memory.search",
+            with_scope_json(
+                &args.scope,
+                json!({
+                    "issue": args.issue.clone(),
+                    "milestone": args.milestone.clone(),
+                    "area": args.area.clone(),
+                    "query": args.query.clone(),
+                    "limit": args.limit
+                }),
+            ),
+        )),
+        MemoryCommand::Related(args) => Some((
+            "memory.related",
+            with_scope_json(
+                &args.scope,
+                json!({
+                    "issue": args.issue.clone(),
+                    "milestone": args.milestone.clone(),
+                    "area": args.area.clone(),
+                    "paths": path_strings(&args.paths),
+                    "limit": args.limit
+                }),
+            ),
+        )),
+        MemoryCommand::Docs(args) => Some((
+            "memory.docs",
+            with_scope_json(
+                &args.scope,
+                json!({
+                    "issue": args.issue.clone(),
+                    "milestone": args.milestone.clone(),
+                    "area": args.area.clone()
+                }),
+            ),
+        )),
+        MemoryCommand::Status(args) => Some((
+            "memory.status",
+            with_scope_json(
+                &args.scope,
+                json!({
+                    "issue": args.issue.clone(),
+                    "area": args.area.clone(),
+                    "milestone": args.milestone.clone()
+                }),
+            ),
+        )),
+        MemoryCommand::Context(args) => Some((
+            "memory.context",
+            with_scope_json(
+                &args.scope,
+                json!({
+                    "issue": args.issue.clone(),
+                    "milestone": args.milestone.clone(),
+                    "area": args.area.clone(),
+                    "include": args.include.clone(),
+                    "paths": path_strings(&args.paths),
+                    "includeCodeIntel": args.include_code_intel,
+                    "limit": args.limit
+                }),
+            ),
+        )),
+        _ => None,
+    }
+}
+
+async fn run_remote_memory_tool(
+    endpoint: &str,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<(), MemoryError> {
+    let client = reqwest::Client::builder()
+        .timeout(REMOTE_MEMORY_TOOL_TIMEOUT)
+        .build()
+        .map_err(|error| {
+            MemoryError::InvalidInput(format!(
+                "failed to configure memory server client timeout: {error}"
+            ))
+        })?;
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": "opensymphony-cli",
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    });
+    let mut builder = client.post(endpoint).json(&request);
+    let token = remote_memory_tool_token_from_env(tool_name)?;
+    if let Some(token) = token {
+        builder = builder.bearer_auth(token);
+    }
+    let response = builder.send().await.map_err(|error| {
+        MemoryError::InvalidInput(format!("failed to call memory server {endpoint}: {error}"))
+    })?;
+    let status = response.status();
+    let body = response.text().await.map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "failed to read memory server response body: {error}"
+        ))
+    })?;
+    let result = parse_remote_memory_response(status, &body, tool_name)?;
+    print_remote_memory_result(result)?;
+    Ok(())
+}
+
+fn parse_remote_memory_response(
+    status: reqwest::StatusCode,
+    body: &str,
+    tool_name: &str,
+) -> Result<Value, MemoryError> {
+    if !status.is_success() {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory server returned HTTP {status}: {}",
+            remote_response_error_detail(body)
+        )));
+    }
+    let payload = serde_json::from_str::<Value>(body).map_err(|error| {
+        MemoryError::InvalidInput(format!(
+            "memory server response was not valid JSON: {error}"
+        ))
+    })?;
+    if let Some(error) = payload.get("error") {
+        return Err(MemoryError::InvalidInput(format!(
+            "memory server tool {tool_name} failed: {error}"
+        )));
+    }
+    payload.get("result").cloned().ok_or_else(|| {
+        MemoryError::InvalidInput("memory server response omitted result".to_string())
+    })
+}
+
+fn remote_response_error_detail(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| {
+            let trimmed = body.trim();
+            if trimmed.is_empty() {
+                "<empty body>".to_string()
+            } else {
+                trimmed.to_string()
+            }
+        })
+}
+
+fn remote_memory_tool_token_from_env(tool_name: &str) -> Result<Option<String>, MemoryError> {
+    remote_memory_tool_token(tool_name, |name| env::var(name).ok())
+}
+
+fn remote_memory_tool_token<F>(
+    tool_name: &str,
+    mut read_env: F,
+) -> Result<Option<String>, MemoryError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    if is_admin_memory_tool(tool_name) {
+        return read_env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN")
+            .and_then(|value| non_empty(&value))
+            .map(Some)
+            .ok_or_else(|| {
+                MemoryError::InvalidInput(format!(
+                    "OPENSYMPHONY_MEMORY_ADMIN_TOKEN is required for remote admin memory tool `{tool_name}`"
+                ))
+            });
+    }
+
+    Ok(read_env("OPENSYMPHONY_MEMORY_TOKEN")
+        .and_then(|value| non_empty(&value))
+        .or_else(|| {
+            read_env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN").and_then(|value| non_empty(&value))
+        }))
+}
+
+fn print_remote_memory_result(result: Value) -> Result<(), MemoryError> {
+    if let Some(text) = result
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|content| content.first())
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+    {
+        println!("{text}");
+        return Ok(());
+    }
+    let pretty = serde_json::to_string_pretty(&result)?;
+    println!("{pretty}");
+    Ok(())
+}
+
+fn path_strings(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect()
+}
+
+fn with_scope_json(scope: &ScopeArgs, mut arguments: Value) -> Value {
+    if let Value::Object(map) = &mut arguments {
+        map.insert(
+            "projectSet".to_string(),
+            json!(
+                scope
+                    .project_set
+                    .clone()
+                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET"))
+            ),
+        );
+        map.insert(
+            "project".to_string(),
+            json!(
+                scope
+                    .project
+                    .clone()
+                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT"))
+            ),
+        );
+        map.insert(
+            "repo".to_string(),
+            json!(
+                scope
+                    .repo
+                    .clone()
+                    .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO"))
+            ),
+        );
+        map.insert("allAccessible".to_string(), json!(scope.all_accessible));
+    }
+    arguments
 }
 
 fn run_lint(config: &MemoryConfig, args: LintArgs) -> Result<(), MemoryError> {
@@ -841,7 +1221,19 @@ fn run_lint(config: &MemoryConfig, args: LintArgs) -> Result<(), MemoryError> {
 #[derive(Clone)]
 struct MemoryServerState {
     config: MemoryConfig,
-    token: Option<String>,
+    auth: MemoryServerAuth,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct MemoryServerAuth {
+    read_token: Option<String>,
+    admin_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoryServerAccess {
+    Read,
+    Admin,
 }
 
 #[derive(Debug, Deserialize)]
@@ -854,37 +1246,109 @@ struct MemoryMcpRequest {
 }
 
 async fn run_serve(config: MemoryConfig, args: ServeArgs) -> Result<(), MemoryError> {
-    let listener = tokio::net::TcpListener::bind(&args.addr)
-        .await
-        .map_err(|error| {
-            MemoryError::InvalidInput(format!(
-                "failed to bind memory server {}: {error}",
-                args.addr
-            ))
-        })?;
-    let state = MemoryServerState {
+    let handle = start_memory_server_with_auth(
         config,
-        token: args.token,
-    };
+        args.addr,
+        MemoryServerAuth {
+            read_token: args.token,
+            admin_token: args.admin_token,
+        },
+    )
+    .await?;
+    println!(
+        "OpenSymphony memory server listening on {}",
+        handle.endpoint()
+    );
+    handle.wait().await
+}
+
+pub(crate) struct MemoryServerHandle {
+    endpoint: String,
+    task: JoinHandle<Result<(), String>>,
+}
+
+impl MemoryServerHandle {
+    pub(crate) fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    pub(crate) fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    pub(crate) fn abort(&self) {
+        self.task.abort();
+    }
+
+    pub(crate) async fn wait(self) -> Result<(), MemoryError> {
+        match self.task.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(MemoryError::InvalidInput(error)),
+            Err(error) if error.is_cancelled() => Ok(()),
+            Err(error) => Err(MemoryError::InvalidInput(format!(
+                "memory server task failed: {error}"
+            ))),
+        }
+    }
+}
+
+pub(crate) async fn start_memory_server(
+    config: MemoryConfig,
+    addr: SocketAddr,
+    token: Option<String>,
+) -> Result<MemoryServerHandle, MemoryError> {
+    start_memory_server_with_auth(
+        config,
+        addr,
+        MemoryServerAuth {
+            read_token: token,
+            admin_token: None,
+        },
+    )
+    .await
+}
+
+async fn start_memory_server_with_auth(
+    config: MemoryConfig,
+    addr: SocketAddr,
+    auth: MemoryServerAuth,
+) -> Result<MemoryServerHandle, MemoryError> {
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
+        MemoryError::InvalidInput(format!("failed to bind memory server {addr}: {error}"))
+    })?;
+    let local_addr = listener.local_addr().map_err(|error| {
+        MemoryError::InvalidInput(format!("failed to read memory server address: {error}"))
+    })?;
+    let state = MemoryServerState { config, auth };
     let app = axum::Router::new()
         .route("/health", axum::routing::get(memory_server_health))
         .route("/mcp", axum::routing::post(memory_server_mcp))
         .with_state(state);
-    println!(
-        "OpenSymphony memory server listening on http://{}",
-        args.addr
-    );
-    axum::serve(listener, app)
-        .await
-        .map_err(|error| MemoryError::InvalidInput(format!("memory server failed: {error}")))
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .map_err(|error| format!("memory server failed: {error}"))
+    });
+    Ok(MemoryServerHandle {
+        endpoint: format!("http://{local_addr}/mcp"),
+        task,
+    })
 }
 
-async fn memory_server_health() -> axum::Json<Value> {
-    axum::Json(json!({
+async fn memory_server_health(
+    axum::extract::State(state): axum::extract::State<MemoryServerState>,
+) -> axum::Json<Value> {
+    axum::Json(memory_server_health_payload(&state.auth))
+}
+
+fn memory_server_health_payload(auth: &MemoryServerAuth) -> Value {
+    let admin_tools = non_empty_str(auth.admin_token.as_deref()).is_some();
+    json!({
         "status": "ok",
         "protocol": "mcp-streamable-http-2025-06-18",
-        "mode": "read_only"
-    }))
+        "mode": if admin_tools { "read_write" } else { "read_only" },
+        "adminTools": admin_tools
+    })
 }
 
 async fn memory_server_mcp(
@@ -892,7 +1356,9 @@ async fn memory_server_mcp(
     headers: axum::http::HeaderMap,
     axum::Json(request): axum::Json<MemoryMcpRequest>,
 ) -> (axum::http::StatusCode, axum::Json<Value>) {
-    if let Err(response) = authorize_memory_request(&headers, state.token.as_deref()) {
+    if let Err(response) =
+        authorize_memory_request(&headers, &state.auth, required_access_for_request(&request))
+    {
         return response;
     }
     let id = request.id.clone();
@@ -903,16 +1369,20 @@ async fn memory_server_mcp(
             "capabilities": { "tools": {} }
         })),
         "tools/list" => Ok(json!({
-            "tools": [
-                { "name": "memory.context", "description": "Build a pre-implementation memory context bundle" },
-                { "name": "memory.search", "description": "Search captured issue memory" },
-                { "name": "memory.related", "description": "Find related issue memory by issue, area, or paths" },
-                { "name": "memory.brief", "description": "Return a compact issue memory brief" },
-                { "name": "memory.docs", "description": "Return topic documentation for an area" },
-                { "name": "memory.status", "description": "Return capture and docs-sync status" }
-            ]
+            "tools": memory_tool_descriptors()
         })),
-        "tools/call" => call_memory_tool(&state.config, request.params),
+        "tools/call" => match tokio::time::timeout(
+            MEMORY_MCP_TOOL_TIMEOUT,
+            call_memory_tool(&state.config, request.params),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(MemoryError::InvalidInput(format!(
+                "memory tool call exceeded {} second timeout",
+                MEMORY_MCP_TOOL_TIMEOUT.as_secs()
+            ))),
+        },
         other => Err(MemoryError::InvalidInput(format!(
             "unsupported MCP method `{other}`"
         ))),
@@ -934,9 +1404,51 @@ async fn memory_server_mcp(
     }
 }
 
+fn required_access_for_request(request: &MemoryMcpRequest) -> MemoryServerAccess {
+    if request.method == "tools/call"
+        && request
+            .params
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(is_admin_memory_tool)
+    {
+        MemoryServerAccess::Admin
+    } else {
+        MemoryServerAccess::Read
+    }
+}
+
+fn memory_tool_descriptors() -> Vec<Value> {
+    vec![
+        json!({ "name": "memory.context", "description": "Build a pre-implementation memory context bundle", "access": "read" }),
+        json!({ "name": "memory.search", "description": "Search captured issue memory", "access": "read" }),
+        json!({ "name": "memory.related", "description": "Find related issue memory by issue, area, or paths", "access": "read" }),
+        json!({ "name": "memory.brief", "description": "Return a compact issue memory brief", "access": "read" }),
+        json!({ "name": "memory.docs", "description": "Return topic documentation for an area", "access": "read" }),
+        json!({ "name": "memory.status", "description": "Return capture and docs-sync status", "access": "read" }),
+        json!({ "name": "memory.capture", "description": "Capture completed issue evidence into memory", "access": "admin" }),
+        json!({ "name": "memory.sync_docs", "description": "Sync captured memory into topic docs", "access": "admin" }),
+        json!({ "name": "memory.lint", "description": "Lint memory and docs", "access": "admin" }),
+        json!({ "name": "memory.reindex", "description": "Refresh memory catalog schema and generated indexes", "access": "admin" }),
+        json!({ "name": "memory.ingest_code_intel", "description": "Generate code-intelligence artifacts for future ingestion", "access": "admin" }),
+    ]
+}
+
+fn is_admin_memory_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "memory.capture"
+            | "memory.sync_docs"
+            | "memory.lint"
+            | "memory.reindex"
+            | "memory.ingest_code_intel"
+    )
+}
+
 fn authorize_memory_request(
     headers: &axum::http::HeaderMap,
-    token: Option<&str>,
+    auth: &MemoryServerAuth,
+    required_access: MemoryServerAccess,
 ) -> Result<(), (axum::http::StatusCode, axum::Json<Value>)> {
     if let Some(origin) = headers
         .get(axum::http::header::ORIGIN)
@@ -953,14 +1465,38 @@ fn authorize_memory_request(
             })),
         ));
     }
-    let Some(expected) = token.and_then(non_empty) else {
-        return Ok(());
-    };
-    let authorized = headers
+    let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|value| value == expected);
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let authorized = match required_access {
+        MemoryServerAccess::Read => {
+            let read_token = non_empty_str(auth.read_token.as_deref());
+            let admin_token = non_empty_str(auth.admin_token.as_deref());
+            match (read_token, admin_token) {
+                (Some(read_token), Some(admin_token)) => {
+                    bearer == Some(read_token) || bearer == Some(admin_token)
+                }
+                (Some(read_token), None) => bearer == Some(read_token),
+                (None, Some(admin_token)) => bearer == Some(admin_token),
+                (None, None) => true,
+            }
+        }
+        MemoryServerAccess::Admin => {
+            let Some(admin_token) = non_empty_str(auth.admin_token.as_deref()) else {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    axum::Json(json!({
+                        "error": {
+                            "code": "admin_token_required",
+                            "message": "memory server admin token is required for admin tools"
+                        }
+                    })),
+                ));
+            };
+            bearer == Some(admin_token)
+        }
+    };
     if authorized {
         Ok(())
     } else {
@@ -969,24 +1505,31 @@ fn authorize_memory_request(
             axum::Json(json!({
                 "error": {
                     "code": "unauthorized",
-                    "message": "memory server token is required"
+                    "message": "memory server token is required for this tool"
                 }
             })),
         ))
     }
 }
 
-fn origin_is_localhost(origin: &str) -> bool {
-    let origin = origin.trim().to_ascii_lowercase();
-    origin.starts_with("http://127.0.0.1")
-        || origin.starts_with("http://localhost")
-        || origin.starts_with("http://[::1]")
-        || origin.starts_with("https://127.0.0.1")
-        || origin.starts_with("https://localhost")
-        || origin.starts_with("https://[::1]")
+fn non_empty_str(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
+fn origin_is_localhost(origin: &str) -> bool {
+    let Ok(origin) = url::Url::parse(origin.trim()) else {
+        return false;
+    };
+    if !matches!(origin.scheme(), "http" | "https") {
+        return false;
+    }
+    matches!(
+        origin.host_str(),
+        Some("localhost" | "127.0.0.1" | "::1" | "[::1]")
+    )
+}
+
+async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, MemoryError> {
     let name = params
         .get("name")
         .and_then(Value::as_str)
@@ -996,7 +1539,7 @@ fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, Memor
         "memory.context" => {
             let issue = required_string_arg(&arguments, "issue")?;
             let options = MemoryContextOptions {
-                issue,
+                issue: issue.clone(),
                 explicit_includes: string_list_arg(&arguments, "include"),
                 paths: string_list_arg(&arguments, "paths")
                     .into_iter()
@@ -1004,20 +1547,36 @@ fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, Memor
                     .collect(),
                 limit: usize_arg(&arguments, "limit", 20),
             };
-            let text = context_for_issue_with_options(config, &SourceFile::default(), &options)?;
+            let source = context_source_from_mcp(&arguments);
+            let mut text = context_for_issue_with_options(config, &source, &options)?;
+            if bool_arg(&arguments, "includeCodeIntel")
+                || bool_arg(&arguments, "include_code_intel")
+            {
+                text = append_code_intel_context_blocking(
+                    config.clone(),
+                    text,
+                    scope_filter_from_mcp(&arguments, true),
+                    options.paths.clone(),
+                    options.limit,
+                )
+                .await?;
+            }
             Ok(mcp_text(text))
         }
         "memory.search" => {
             let query = required_string_arg(&arguments, "query")?;
-            let results = search(config, &query, usize_arg(&arguments, "limit", 10))?;
+            let scope = scope_filter_from_mcp(&arguments, true);
+            let results =
+                search_with_scope(config, &query, usize_arg(&arguments, "limit", 10), &scope)?;
             Ok(json!({ "results": search_results_json(config, &results) }))
         }
         "memory.related" => {
             let limit = usize_arg(&arguments, "limit", 10);
+            let scope = scope_filter_from_mcp(&arguments, false);
             let results = if let Some(issue) = optional_string_arg(&arguments, "issue") {
-                related_by_issue(config, &issue, limit)?
+                related_by_issue_with_scope(config, &issue, limit, &scope)?
             } else if let Some(area) = optional_string_arg(&arguments, "area") {
-                related_by_area(config, &area, limit)?
+                related_by_area_with_scope(config, &area, limit, &scope)?
             } else {
                 let paths = string_list_arg(&arguments, "paths")
                     .into_iter()
@@ -1028,7 +1587,7 @@ fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, Memor
                         "memory.related requires issue, area, or paths".to_string(),
                     ));
                 }
-                related_by_paths(config, &paths, limit)?
+                related_by_paths_with_scope(config, &paths, limit, &scope)?
             };
             Ok(json!({ "results": search_results_json(config, &results) }))
         }
@@ -1038,16 +1597,22 @@ fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, Memor
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
-            Ok(mcp_text(docs_for_area(config, &area)?))
+            Ok(mcp_text(docs_for_area_with_scope(
+                config,
+                &area,
+                &scope_filter_from_mcp(&arguments, false),
+            )?))
         }
         "memory.status" => {
-            let report = status(
+            let scope = scope_filter_from_mcp(&arguments, true);
+            let report = status_with_scope(
                 config,
                 &IssueSelection {
                     area: optional_string_arg(&arguments, "area"),
                     milestone: optional_string_arg(&arguments, "milestone"),
                     ..IssueSelection::default()
                 },
+                &scope,
             )?;
             Ok(json!({
                 "issueCount": report.issue_count,
@@ -1065,10 +1630,151 @@ fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value, Memor
                 })).collect::<Vec<_>>()
             }))
         }
+        "memory.capture" => call_memory_capture_tool(config, &arguments).await,
+        "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
+        "memory.lint" => call_memory_lint_tool(config, &arguments),
+        "memory.reindex" => call_memory_reindex_tool(config),
+        "memory.ingest_code_intel" => call_memory_ingest_code_intel_tool(config, &arguments).await,
         other => Err(MemoryError::InvalidInput(format!(
             "unsupported memory tool `{other}`"
         ))),
     }
+}
+
+async fn call_memory_capture_tool(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Value, MemoryError> {
+    let identifiers = issue_ids_from_mcp(config, arguments)?;
+    if identifiers.is_empty() {
+        return Err(MemoryError::InvalidInput(
+            "memory.capture requires issue, issues, issuesFile, or issueRange".to_string(),
+        ));
+    }
+    let source = if let Some(source_file) = optional_string_arg(arguments, "sourceFile")
+        .or_else(|| optional_string_arg(arguments, "source_file"))
+    {
+        load_source_file(&repo_existing_path(config, &source_file)?)?
+    } else {
+        load_linear_source(&config.repo_root, None, &identifiers).await?
+    };
+    let selection = IssueSelection {
+        identifiers,
+        milestone: optional_string_arg(arguments, "milestone"),
+        state: optional_string_arg(arguments, "state"),
+        before_date: optional_string_arg(arguments, "beforeDate")
+            .or_else(|| optional_string_arg(arguments, "before_date"))
+            .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
+            .transpose()
+            .map_err(|error| MemoryError::InvalidInput(format!("invalid beforeDate: {error}")))?,
+        before_issue: optional_string_arg(arguments, "beforeIssue")
+            .or_else(|| optional_string_arg(arguments, "before_issue")),
+        area: optional_string_arg(arguments, "area"),
+        since_last_sync: false,
+    };
+    let write = !bool_arg(arguments, "dryRun") && !bool_arg(arguments, "dry_run");
+    let discover_github = !bool_arg(arguments, "noGithub") && !bool_arg(arguments, "no_github");
+    let plan = plan_capture(config, &source, &selection, write, discover_github)?;
+    if !write {
+        return Ok(json!({
+            "dryRun": true,
+            "plan": capture_plan_json(config, &plan)
+        }));
+    }
+    let report = write_capture_plan(config, &plan, bool_arg(arguments, "force"))?;
+    Ok(json!({
+        "dryRun": false,
+        "plan": capture_plan_json(config, &plan),
+        "write": capture_write_report_json(config, report)
+    }))
+}
+
+fn call_memory_sync_docs_tool(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Value, MemoryError> {
+    let selection = IssueSelection {
+        identifiers: issue_ids_from_mcp(config, arguments)?,
+        area: optional_string_arg(arguments, "area"),
+        since_last_sync: bool_arg(arguments, "sinceLastSync")
+            || bool_arg(arguments, "since_last_sync"),
+        ..IssueSelection::default()
+    };
+    let write = !bool_arg(arguments, "dryRun") && !bool_arg(arguments, "dry_run");
+    let with_diagrams = bool_arg(arguments, "withDiagrams") || bool_arg(arguments, "with_diagrams");
+    let plan = plan_docs_sync(config, &selection, write, with_diagrams)?;
+    if !write {
+        return Ok(json!({
+            "dryRun": true,
+            "plan": docs_sync_plan_json(config, &plan),
+            "written": []
+        }));
+    }
+    let written = write_docs_sync_plan(config, &plan)?;
+    Ok(json!({
+        "dryRun": false,
+        "plan": docs_sync_plan_json(config, &plan),
+        "written": paths_for_json(config, &written)
+    }))
+}
+
+fn call_memory_lint_tool(config: &MemoryConfig, arguments: &Value) -> Result<Value, MemoryError> {
+    let report = lint(
+        config,
+        bool_arg(arguments, "publicDocs") || bool_arg(arguments, "public_docs"),
+    )?;
+    Ok(json!({
+        "findingCount": report.findings.len(),
+        "findings": report.findings.into_iter().map(|finding| {
+            json!({
+                "severity": match finding.severity {
+                    LintSeverity::Warn => "warn",
+                    LintSeverity::Error => "error",
+                },
+                "path": finding.path.as_ref().map(|path| path_for_json(config, path)),
+                "message": finding.message,
+                "nextCommand": finding.next_command
+            })
+        }).collect::<Vec<_>>()
+    }))
+}
+
+fn call_memory_reindex_tool(config: &MemoryConfig) -> Result<Value, MemoryError> {
+    Ok(memory_reindex_report_json(
+        config,
+        refresh_memory_index(config)?,
+    ))
+}
+
+async fn call_memory_ingest_code_intel_tool(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Value, MemoryError> {
+    let scope = scope_filter_from_mcp(arguments, false);
+    let paths = string_list_arg(arguments, "paths")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let limit = usize_arg(arguments, "limit", 10);
+    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let scope_refs = scope_refs_for_context(&scope, &paths);
+    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+    Ok(json!({
+        "persisted": false,
+        "artifactCount": artifacts.len(),
+        "artifacts": artifacts.into_iter().map(|artifact| json!({
+            "provider": artifact.provider,
+            "kind": artifact.kind,
+            "title": artifact.title,
+            "path": artifact.path.as_ref().map(|path| path_for_json(config, path)),
+            "commitSha": artifact.commit_sha,
+            "summary": artifact.summary,
+            "sourceRefs": artifact.source_refs.into_iter().map(|source| json!({
+                "kind": source.kind,
+                "id": source.id
+            })).collect::<Vec<_>>()
+        })).collect::<Vec<_>>()
+    }))
 }
 
 fn mcp_text(text: String) -> Value {
@@ -1091,6 +1797,361 @@ fn search_results_json(
             })
         })
         .collect()
+}
+
+fn capture_plan_json(
+    config: &MemoryConfig,
+    plan: &crate::opensymphony_memory::CapturePlan,
+) -> Value {
+    json!({
+        "write": plan.write,
+        "selected": plan.selected.iter().map(|issue| json!({
+            "issueKey": issue.issue.identifier.clone(),
+            "title": issue.issue.title.clone(),
+            "capsulePath": path_for_json(config, &issue.capsule_path),
+            "areas": issue.areas.clone(),
+            "docsTargets": paths_for_json(config, &issue.docs_targets),
+            "alreadyCaptured": issue.already_captured,
+            "stale": issue.stale,
+            "warningCount": issue.warnings.len(),
+            "warnings": issue.warnings.clone()
+        })).collect::<Vec<_>>(),
+        "warnings": plan.warnings.clone()
+    })
+}
+
+fn capture_write_report_json(
+    config: &MemoryConfig,
+    report: crate::opensymphony_memory::CaptureWriteReport,
+) -> Value {
+    json!({
+        "writtenCapsules": paths_for_json(config, &report.written_capsules),
+        "indexPath": path_for_json(config, &report.index_path),
+        "markdownIndexes": paths_for_json(config, &report.markdown_indexes),
+        "milestoneNodes": paths_for_json(config, &report.milestone_nodes),
+        "warnings": report.warnings
+    })
+}
+
+fn docs_sync_plan_json(config: &MemoryConfig, plan: &DocsSyncPlan) -> Value {
+    json!({
+        "write": plan.write,
+        "selectedIssueKeys": plan.selected_issue_keys.clone(),
+        "warnings": plan.warnings.clone(),
+        "targets": plan.targets.iter().map(|target| json!({
+            "area": target.area.clone(),
+            "title": target.title.clone(),
+            "path": path_for_json(config, &target.path),
+            "visibility": target.visibility.as_str(),
+            "create": target.create,
+            "issueKeys": target.issue_keys.clone(),
+            "diff": target.diff.clone()
+        })).collect::<Vec<_>>()
+    })
+}
+
+fn memory_reindex_report_json(config: &MemoryConfig, report: MemoryReindexReport) -> Value {
+    json!({
+        "issueCount": report.issue_count,
+        "indexPath": path_for_json(config, &report.index_path),
+        "markdownIndexes": paths_for_json(config, &report.markdown_indexes)
+    })
+}
+
+fn issue_ids_from_mcp(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Vec<String>, MemoryError> {
+    let issue = optional_string_arg(arguments, "issue")
+        .or_else(|| optional_string_arg(arguments, "workItem"))
+        .or_else(|| optional_string_arg(arguments, "work_item"));
+    let issues = arguments.get("issues").and_then(|value| match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Array(_) => Some(string_list_arg(arguments, "issues").join(",")),
+        _ => None,
+    });
+    let issues_file = optional_string_arg(arguments, "issuesFile")
+        .or_else(|| optional_string_arg(arguments, "issues_file"))
+        .map(|path| repo_existing_path(config, &path))
+        .transpose()?;
+    let issue_range = optional_string_arg(arguments, "issueRange")
+        .or_else(|| optional_string_arg(arguments, "issue_range"));
+    collect_issue_ids(
+        issue.as_deref(),
+        issues.as_deref(),
+        issues_file.as_deref(),
+        issue_range.as_deref(),
+    )
+}
+
+fn paths_for_json(config: &MemoryConfig, paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| path_for_json(config, path))
+        .collect()
+}
+
+fn repo_existing_path(config: &MemoryConfig, value: &str) -> Result<PathBuf, MemoryError> {
+    let path = PathBuf::from(value);
+    let candidate = if path.is_absolute() {
+        path
+    } else {
+        config.repo_root.join(path)
+    };
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|source| MemoryError::ResolvePath {
+            path: candidate.clone(),
+            source,
+        })?;
+    let repo_root = config
+        .repo_root
+        .canonicalize()
+        .map_err(|source| MemoryError::ResolvePath {
+            path: config.repo_root.clone(),
+            source,
+        })?;
+    if !resolved.starts_with(&repo_root) {
+        return Err(MemoryError::PathOutsideRepo {
+            path: resolved,
+            repo_root,
+        });
+    }
+    Ok(resolved)
+}
+
+fn context_source_from_mcp(arguments: &Value) -> SourceFile {
+    let Some(current_issue) = arguments.get("currentIssue") else {
+        return SourceFile::default();
+    };
+    let identifier = optional_string_arg(current_issue, "identifier")
+        .or_else(|| optional_string_arg(arguments, "issue"))
+        .unwrap_or_default();
+    if identifier.is_empty() {
+        return SourceFile::default();
+    }
+    SourceFile {
+        issues: vec![IssueEvidence {
+            id: optional_string_arg(current_issue, "id"),
+            identifier,
+            title: optional_string_arg(current_issue, "title").unwrap_or_default(),
+            description: optional_string_arg(current_issue, "description"),
+            state: optional_string_arg(current_issue, "state"),
+            labels: string_list_arg(current_issue, "labels"),
+            children: issue_links_arg(current_issue, "children"),
+            blocked_by: issue_links_arg(current_issue, "blockedBy"),
+            ..IssueEvidence::default()
+        }],
+        ..SourceFile::default()
+    }
+}
+
+fn issue_links_arg(arguments: &Value, key: &str) -> Vec<IssueLinkEvidence> {
+    arguments
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let identifier = optional_string_arg(value, "identifier")?;
+            Some(IssueLinkEvidence {
+                id: optional_string_arg(value, "id"),
+                identifier,
+                state: optional_string_arg(value, "state"),
+                ..IssueLinkEvidence::default()
+            })
+        })
+        .collect()
+}
+
+fn append_code_intel_context(
+    config: &MemoryConfig,
+    output: &mut String,
+    scope: &MemoryScopeFilter,
+    paths: &[PathBuf],
+    limit: usize,
+) -> Result<(), MemoryError> {
+    let repo_root = resolve_code_intel_repo(config, scope.repo.as_deref())?;
+    let scope_refs = scope_refs_for_context(scope, paths);
+    let artifacts = CodebaseAnalyzer::new(repo_root).code_context(paths, &scope_refs, limit)?;
+    append_code_intel_artifacts(config, output, artifacts);
+    Ok(())
+}
+
+async fn append_code_intel_context_blocking(
+    config: MemoryConfig,
+    mut output: String,
+    scope: MemoryScopeFilter,
+    paths: Vec<PathBuf>,
+    limit: usize,
+) -> Result<String, MemoryError> {
+    let repo_root = resolve_code_intel_repo(&config, scope.repo.as_deref())?;
+    let scope_refs = scope_refs_for_context(&scope, &paths);
+    let artifacts = code_intel_artifacts_blocking(repo_root, paths, scope_refs, limit).await?;
+    append_code_intel_artifacts(&config, &mut output, artifacts);
+    Ok(output)
+}
+
+async fn code_intel_artifacts_blocking(
+    repo_root: PathBuf,
+    paths: Vec<PathBuf>,
+    scope_refs: Vec<KnowledgeScope>,
+    limit: usize,
+) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
+    tokio::task::spawn_blocking(move || {
+        CodebaseAnalyzer::new(repo_root).code_context(&paths, &scope_refs, limit)
+    })
+    .await
+    .map_err(|error| {
+        MemoryError::InvalidInput(format!("code-intelligence analysis task failed: {error}"))
+    })?
+}
+
+fn append_code_intel_artifacts(
+    config: &MemoryConfig,
+    output: &mut String,
+    artifacts: Vec<CodeIntelArtifact>,
+) {
+    output.push_str("\n## Code Intelligence\n\n");
+    if artifacts.is_empty() {
+        output.push_str("- No code-intelligence artifacts found.\n");
+        return;
+    }
+    for artifact in artifacts {
+        output.push_str(&format!("### {}: {}\n\n", artifact.kind, artifact.title));
+        output.push_str(&format!("- Provider: {}\n", artifact.provider));
+        if let Some(path) = &artifact.path {
+            output.push_str(&format!("- Path: {}\n", path_for_json(config, path)));
+        }
+        if let Some(commit_sha) = &artifact.commit_sha {
+            output.push_str(&format!("- Commit: {commit_sha}\n"));
+        }
+        if !artifact.source_refs.is_empty() {
+            let sources = artifact
+                .source_refs
+                .iter()
+                .map(|source| format!("{}:{}", source.kind, source.id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            output.push_str(&format!("- Sources: {sources}\n"));
+        }
+        output.push('\n');
+        output.push_str(&artifact.summary);
+        output.push_str("\n\n");
+    }
+}
+
+fn resolve_code_intel_repo(
+    config: &MemoryConfig,
+    repo: Option<&str>,
+) -> Result<PathBuf, MemoryError> {
+    let Some(repo) = repo.and_then(non_empty) else {
+        return Ok(config.repo_root.clone());
+    };
+    let resolved = repo_existing_path(config, &repo)?;
+    if !resolved.is_dir() {
+        return Err(MemoryError::InvalidInput(format!(
+            "context repo `{repo}` did not resolve to a directory at {}",
+            resolved.display()
+        )));
+    }
+    Ok(resolved)
+}
+
+fn scope_refs_for_context(scope: &MemoryScopeFilter, paths: &[PathBuf]) -> Vec<KnowledgeScope> {
+    let mut refs = Vec::new();
+    push_scope_ref(
+        &mut refs,
+        KnowledgeScopeKind::ProjectSet,
+        scope.project_set.as_deref(),
+    );
+    push_scope_ref(
+        &mut refs,
+        KnowledgeScopeKind::Project,
+        scope.project.as_deref(),
+    );
+    push_scope_ref(
+        &mut refs,
+        KnowledgeScopeKind::Milestone,
+        scope.milestone.as_deref(),
+    );
+    push_scope_ref(
+        &mut refs,
+        KnowledgeScopeKind::WorkItem,
+        scope.issue.as_deref(),
+    );
+    push_scope_ref(
+        &mut refs,
+        KnowledgeScopeKind::Repository,
+        scope.repo.as_deref(),
+    );
+    push_scope_ref(&mut refs, KnowledgeScopeKind::Area, scope.area.as_deref());
+    for path in paths {
+        refs.push(KnowledgeScope {
+            kind: KnowledgeScopeKind::CodePath,
+            id: path.display().to_string(),
+            label: None,
+        });
+    }
+    refs
+}
+
+fn push_scope_ref(refs: &mut Vec<KnowledgeScope>, kind: KnowledgeScopeKind, id: Option<&str>) {
+    if let Some(id) = id.and_then(non_empty) {
+        refs.push(KnowledgeScope {
+            kind,
+            id,
+            label: None,
+        });
+    }
+}
+
+fn scope_filter(
+    scope: &ScopeArgs,
+    issue: Option<&str>,
+    milestone: Option<&str>,
+    area: Option<&str>,
+) -> MemoryScopeFilter {
+    MemoryScopeFilter {
+        project_set: scope
+            .project_set
+            .as_deref()
+            .and_then(non_empty)
+            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT_SET")),
+        project: scope
+            .project
+            .as_deref()
+            .and_then(non_empty)
+            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_PROJECT")),
+        milestone: milestone.and_then(non_empty),
+        issue: issue.and_then(non_empty),
+        repo: scope
+            .repo
+            .as_deref()
+            .and_then(non_empty)
+            .or_else(|| env_scope_value("OPENSYMPHONY_MEMORY_EXECUTION_REPO")),
+        area: area.and_then(non_empty),
+        all_accessible: scope.all_accessible,
+    }
+}
+
+fn env_scope_value(name: &str) -> Option<String> {
+    env::var(name).ok().and_then(|value| non_empty(&value))
+}
+
+fn scope_filter_from_mcp(arguments: &Value, include_issue: bool) -> MemoryScopeFilter {
+    MemoryScopeFilter {
+        project_set: optional_string_arg(arguments, "projectSet"),
+        project: optional_string_arg(arguments, "project"),
+        milestone: optional_string_arg(arguments, "milestone"),
+        issue: include_issue
+            .then(|| optional_string_arg(arguments, "issue"))
+            .flatten(),
+        repo: optional_string_arg(arguments, "repo"),
+        area: optional_string_arg(arguments, "area"),
+        all_accessible: bool_arg(arguments, "allAccessible")
+            || bool_arg(arguments, "all_accessible"),
+    }
 }
 
 fn path_for_json(config: &MemoryConfig, path: &Path) -> String {
@@ -1133,8 +2194,12 @@ fn usize_arg(arguments: &Value, key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn bool_arg(arguments: &Value, key: &str) -> bool {
+    arguments.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
 async fn run_archive(args: ArchiveArgs) -> Result<(), MemoryError> {
-    let repo_root = std::env::current_dir().map_err(|source| MemoryError::ReadFile {
+    let repo_root = env::current_dir().map_err(|source| MemoryError::ReadFile {
         path: PathBuf::from("."),
         source,
     })?;
@@ -2015,10 +3080,8 @@ fn issue_evidence_from_tracker(
     }
 }
 
-fn issue_link_from_tracker_ref(
-    issue: &TrackerIssueRef,
-) -> crate::opensymphony_memory::IssueLinkEvidence {
-    crate::opensymphony_memory::IssueLinkEvidence {
+fn issue_link_from_tracker_ref(issue: &TrackerIssueRef) -> IssueLinkEvidence {
+    IssueLinkEvidence {
         id: Some(issue.id.clone()),
         identifier: issue.identifier.clone(),
         title: issue.title.clone(),
@@ -2027,10 +3090,8 @@ fn issue_link_from_tracker_ref(
     }
 }
 
-fn issue_link_from_tracker_blocker(
-    issue: &TrackerIssueBlocker,
-) -> crate::opensymphony_memory::IssueLinkEvidence {
-    crate::opensymphony_memory::IssueLinkEvidence {
+fn issue_link_from_tracker_blocker(issue: &TrackerIssueBlocker) -> IssueLinkEvidence {
+    IssueLinkEvidence {
         id: Some(issue.id.clone()),
         identifier: issue.identifier.clone(),
         title: Some(issue.title.clone()),
@@ -2131,9 +3192,215 @@ fn print_search_results(
 #[cfg(test)]
 mod tests {
     use super::{
-        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, replace_or_append_managed_section,
-        trim_auto_memory_status_log,
+        LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
+        MemoryServerAuth, authorize_memory_request, context_source_from_mcp,
+        memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
+        parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
+        required_access_for_request, resolve_code_intel_repo, trim_auto_memory_status_log,
     };
+    use crate::opensymphony_memory::{MemoryConfig, MemoryError};
+    use axum::http::{HeaderMap, HeaderValue, header};
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    #[test]
+    fn mcp_tool_list_exposes_context_and_admin_tools_without_code_context() {
+        let names = memory_tool_descriptors()
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("name")
+                    .and_then(|name| name.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"memory.context".to_string()));
+        assert!(names.contains(&"memory.capture".to_string()));
+        assert!(names.contains(&"memory.sync_docs".to_string()));
+        assert!(names.contains(&"memory.reindex".to_string()));
+        assert!(!names.iter().any(|name| name.contains("code_context")));
+        assert!(!names.iter().any(|name| name.contains("code-context")));
+    }
+
+    #[test]
+    fn mcp_admin_tools_require_admin_access() {
+        let read_request = MemoryMcpRequest {
+            id: json!("test"),
+            method: "tools/call".to_string(),
+            params: json!({ "name": "memory.context" }),
+        };
+        let admin_request = MemoryMcpRequest {
+            id: json!("test"),
+            method: "tools/call".to_string(),
+            params: json!({ "name": "memory.capture" }),
+        };
+
+        assert_eq!(
+            required_access_for_request(&read_request),
+            MemoryServerAccess::Read
+        );
+        assert_eq!(
+            required_access_for_request(&admin_request),
+            MemoryServerAccess::Admin
+        );
+    }
+
+    #[test]
+    fn admin_authorization_does_not_accept_worker_read_token() {
+        let auth = MemoryServerAuth {
+            read_token: Some("read-token".to_string()),
+            admin_token: Some("admin-token".to_string()),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer read-token"),
+        );
+
+        assert!(authorize_memory_request(&headers, &auth, MemoryServerAccess::Read).is_ok());
+        let blocked = authorize_memory_request(&headers, &auth, MemoryServerAccess::Admin)
+            .expect_err("admin tools need admin token");
+        assert_eq!(blocked.0, axum::http::StatusCode::UNAUTHORIZED);
+
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer admin-token"),
+        );
+        assert!(authorize_memory_request(&headers, &auth, MemoryServerAccess::Admin).is_ok());
+    }
+
+    #[test]
+    fn read_authorization_requires_admin_token_when_only_admin_auth_is_configured() {
+        let auth = MemoryServerAuth {
+            read_token: None,
+            admin_token: Some("admin-token".to_string()),
+        };
+        let headers = HeaderMap::new();
+
+        let blocked = authorize_memory_request(&headers, &auth, MemoryServerAccess::Read)
+            .expect_err("admin-only auth should protect read tools too");
+        assert_eq!(blocked.0, axum::http::StatusCode::UNAUTHORIZED);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer admin-token"),
+        );
+        assert!(authorize_memory_request(&headers, &auth, MemoryServerAccess::Read).is_ok());
+    }
+
+    #[test]
+    fn health_reports_admin_tools_only_for_non_empty_admin_token() {
+        let empty_admin = MemoryServerAuth {
+            read_token: Some("read-token".to_string()),
+            admin_token: Some("   ".to_string()),
+        };
+        let empty_payload = memory_server_health_payload(&empty_admin);
+        assert_eq!(empty_payload["mode"], "read_only");
+        assert_eq!(empty_payload["adminTools"], false);
+
+        let configured_admin = MemoryServerAuth {
+            read_token: Some("read-token".to_string()),
+            admin_token: Some("admin-token".to_string()),
+        };
+        let configured_payload = memory_server_health_payload(&configured_admin);
+        assert_eq!(configured_payload["mode"], "read_write");
+        assert_eq!(configured_payload["adminTools"], true);
+    }
+
+    #[test]
+    fn localhost_origin_check_rejects_prefix_spoofing() {
+        assert!(origin_is_localhost("http://localhost:3333"));
+        assert!(origin_is_localhost("https://127.0.0.1"));
+        assert!(origin_is_localhost("http://[::1]:3333"));
+
+        assert!(!origin_is_localhost("http://localhost.evil.com"));
+        assert!(!origin_is_localhost("https://127.0.0.1.evil.com"));
+        assert!(!origin_is_localhost("ftp://localhost"));
+    }
+
+    #[test]
+    fn code_intel_repo_resolution_stays_inside_repo_root() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = MemoryConfig::load(repo.path(), None).expect("config");
+        std::fs::create_dir(repo.path().join("service")).expect("service dir");
+        let resolved = resolve_code_intel_repo(&config, Some("service")).expect("inside repo");
+        assert!(resolved.starts_with(repo.path().canonicalize().expect("canonical repo")));
+
+        let outside = TempDir::new().expect("outside repo");
+        let error = resolve_code_intel_repo(
+            &config,
+            Some(outside.path().to_str().expect("outside path")),
+        )
+        .expect_err("outside repo must be rejected");
+        assert!(matches!(error, MemoryError::PathOutsideRepo { .. }));
+    }
+
+    #[test]
+    fn remote_admin_tool_requires_admin_token_without_read_fallback() {
+        let error = remote_memory_tool_token("memory.capture", |name| match name {
+            "OPENSYMPHONY_MEMORY_TOKEN" => Some("read-token".to_string()),
+            _ => None,
+        })
+        .expect_err("admin tool should fail before sending read token");
+        assert!(
+            matches!(error, MemoryError::InvalidInput(message) if message.contains("OPENSYMPHONY_MEMORY_ADMIN_TOKEN"))
+        );
+
+        let token = remote_memory_tool_token("memory.context", |name| match name {
+            "OPENSYMPHONY_MEMORY_ADMIN_TOKEN" => Some("admin-token".to_string()),
+            _ => None,
+        })
+        .expect("read tool can use admin token when no read token exists");
+        assert_eq!(token, Some("admin-token".to_string()));
+    }
+
+    #[test]
+    fn remote_client_timeout_outlasts_server_tool_timeout() {
+        assert!(super::REMOTE_MEMORY_TOOL_TIMEOUT > super::MEMORY_MCP_TOOL_TIMEOUT);
+    }
+
+    #[test]
+    fn remote_response_reports_http_status_before_json_parse_errors() {
+        let error = parse_remote_memory_response(
+            reqwest::StatusCode::BAD_GATEWAY,
+            "upstream unavailable",
+            "memory.context",
+        )
+        .expect_err("HTTP failure should report status");
+
+        assert!(matches!(error, MemoryError::InvalidInput(message)
+                if message.contains("HTTP 502 Bad Gateway")
+                    && message.contains("upstream unavailable")
+                    && !message.contains("not valid JSON")));
+    }
+
+    #[test]
+    fn mcp_context_source_preserves_worker_issue_graph() {
+        let source = context_source_from_mcp(&json!({
+            "issue": "COE-999",
+            "currentIssue": {
+                "id": "issue-999",
+                "identifier": "COE-999",
+                "title": "Memory context",
+                "description": "Use deterministic facts.",
+                "state": "In Progress",
+                "labels": ["area:memory"],
+                "children": [
+                    { "id": "issue-101", "identifier": "COE-101", "state": "Done" }
+                ],
+                "blockedBy": [
+                    { "id": "issue-100", "identifier": "COE-100", "state": "Done" }
+                ]
+            }
+        }));
+
+        assert_eq!(source.issues.len(), 1);
+        assert_eq!(source.issues[0].identifier, "COE-999");
+        assert_eq!(source.issues[0].labels, vec!["area:memory"]);
+        assert_eq!(source.issues[0].children[0].identifier, "COE-101");
+        assert_eq!(source.issues[0].blocked_by[0].identifier, "COE-100");
+    }
 
     #[test]
     fn managed_linear_memory_status_replaces_existing_section() {
