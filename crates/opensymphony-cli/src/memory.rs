@@ -20,8 +20,8 @@ use crate::{
         IssueLinkEvidence, IssueSelection, KnowledgeScope, KnowledgeScopeKind, LintSeverity,
         MemoryConfig, MemoryContextOptions, MemoryError, MemoryReindexReport, MemoryScopeFilter,
         SourceFile, archive_blocking_warning_count, brief, context_for_issue_with_options,
-        docs_for_area, expand_issue_range, lint, load_source_file, mark_archived, plan_archive,
-        plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
+        docs_for_area_with_scope, expand_issue_range, lint, load_source_file, mark_archived,
+        plan_archive, plan_capture, plan_docs_sync, plan_memory_init, refresh_memory_index,
         related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
         render_archive_plan, render_capture_dry_run, search_with_scope, status_with_scope,
         write_capture_plan, write_docs_sync_plan, write_memory_init_plan,
@@ -865,13 +865,13 @@ fn run_related(config: &MemoryConfig, args: RelatedArgs) -> Result<(), MemoryErr
 }
 
 fn run_docs(config: &MemoryConfig, args: DocsArgs) -> Result<(), MemoryError> {
-    let _scope = scope_filter(
+    let scope = scope_filter(
         &args.scope,
         args.issue.as_deref(),
         args.milestone.as_deref(),
         Some(args.area.as_str()),
     );
-    println!("{}", docs_for_area(config, &args.area)?);
+    println!("{}", docs_for_area_with_scope(config, &args.area, &scope)?);
     Ok(())
 }
 
@@ -1563,7 +1563,11 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
         }
         "memory.docs" => {
             let area = required_string_arg(&arguments, "area")?;
-            Ok(mcp_text(docs_for_area(config, &area)?))
+            Ok(mcp_text(docs_for_area_with_scope(
+                config,
+                &area,
+                &scope_filter_from_mcp(&arguments, false),
+            )?))
         }
         "memory.status" => {
             let scope = scope_filter_from_mcp(&arguments, true);

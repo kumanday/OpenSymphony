@@ -205,6 +205,14 @@ pub fn related_by_paths_with_scope(
 }
 
 pub fn docs_for_area(config: &MemoryConfig, area: &str) -> Result<String, MemoryError> {
+    docs_for_area_with_scope(config, area, &MemoryScopeFilter::default())
+}
+
+pub fn docs_for_area_with_scope(
+    config: &MemoryConfig,
+    area: &str,
+    scope: &MemoryScopeFilter,
+) -> Result<String, MemoryError> {
     let area = config.area_or_default(area);
     if !area.docs_target.exists() {
         return Err(MemoryError::InvalidInput(format!(
@@ -213,7 +221,25 @@ pub fn docs_for_area(config: &MemoryConfig, area: &str) -> Result<String, Memory
             area.docs_target.display()
         )));
     }
+    if docs_scope_requires_index_check(scope) {
+        let mut scoped = scope.clone();
+        scoped.area = Some(area.slug.clone());
+        let issues = load_indexed_issues(config)?;
+        if !issues
+            .iter()
+            .any(|issue| indexed_issue_matches_scope(config, issue, &scoped))
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "no captured memory for area `{}` in the requested docs scope",
+                area.slug
+            )));
+        }
+    }
     read_to_string(&area.docs_target)
+}
+
+fn docs_scope_requires_index_check(scope: &MemoryScopeFilter) -> bool {
+    scope.issue.is_some() || scope.milestone.is_some() || scope.repo.is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

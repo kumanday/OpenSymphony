@@ -300,6 +300,66 @@ fn memory_search_defaults_cross_repo_and_repo_filters_by_changed_paths() {
 }
 
 #[test]
+fn memory_docs_applies_repo_scope_before_returning_area_doc() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    fs::write(repo.path().join("source.yaml"), multi_repo_source())
+        .expect("source evidence should write");
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "--issues",
+                "COE-201,COE-202",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture multi-repo fixture",
+    );
+    assert_success(
+        &run(
+            repo.path(),
+            ["memory", "sync-docs", "--area", "openhands-runtime"],
+        ),
+        "sync scoped docs",
+    );
+
+    let api_docs = run(
+        repo.path(),
+        [
+            "memory",
+            "docs",
+            "--area",
+            "openhands-runtime",
+            "--repo",
+            "services/api",
+        ],
+    );
+    assert_success(&api_docs, "docs with matching repo scope");
+    assert!(String::from_utf8_lossy(&api_docs.stdout).contains("# OpenHands Runtime"));
+
+    let mobile_docs = run(
+        repo.path(),
+        [
+            "memory",
+            "docs",
+            "--area",
+            "openhands-runtime",
+            "--repo",
+            "services/mobile",
+        ],
+    );
+    assert_failure(&mobile_docs, "docs with non-matching repo scope");
+    assert!(
+        String::from_utf8_lossy(&mobile_docs.stderr)
+            .contains("no captured memory for area `openhands-runtime`")
+    );
+}
+
+#[test]
 fn sync_docs_requires_configured_area_mapping() {
     let repo = TempDir::new().expect("temp repo should exist");
     fs::write(repo.path().join("source.yaml"), candidate_only_source())
