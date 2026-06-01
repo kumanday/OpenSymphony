@@ -184,8 +184,7 @@ If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk
 
 ## Current model
 
-- COE-413 contributed: PR #96: COE-413: Implementation plan generator stage (merge `ba49e18`)
-- COE-434 contributed: PR #98: COE-434: Long-running harness liveness and scheduler/runtime ownership contract (merge `c448eaf`)
+- COE-448 contributed: PR #100: COE-448: Add scoped memory server context (merge `fa22559`)
 
 ## Important invariants
 
@@ -202,12 +201,10 @@ If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk
 
 ## Recent changes
 
-- COE-413: Implementation Plan Generator Stage
-- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
+- COE-448: Multi-repo memory server and deterministic context
 
 ## Source refs
 
-- COE-413
-- COE-434
+- COE-448
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

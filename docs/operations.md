@@ -255,7 +255,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-- COE-434 contributed: PR #98: COE-434: Long-running harness liveness and scheduler/runtime ownership contract (merge `c448eaf`)
+- COE-448 contributed: PR #100: COE-448: Add scoped memory server context (merge `fa22559`)
 
 ## Important invariants
 
@@ -272,10 +272,10 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Recent changes
 
-- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
+- COE-448: Multi-repo memory server and deterministic context
 
 ## Source refs
 
-- COE-434
+- COE-448
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

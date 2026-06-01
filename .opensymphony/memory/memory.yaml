@@ -101,6 +101,7 @@ areas:
       - docs/DEVELOPMENT.md
       linear_milestones:
       - 'M10: Web Client And External Gateway'
+      - 'M6.5: Memory Server'
       - 'M7: Shared Client And Desktop Alpha'
   devex:
     title: Devex
@@ -190,6 +191,7 @@ areas:
       - docs/implementation-plan.md
       linear_milestones:
       - 'M10: Web Client And External Gateway'
+      - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -210,14 +212,17 @@ areas:
     docs_target: docs/memory.md
     visibility: public
     status: stable
-    confidence: 85
+    confidence: 95
     aliases:
     - memory
     - project memory
     source_refs:
       docs:
       - docs/memory.md
+      linear_labels:
+      - area:memory
       linear_milestones:
+      - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
@@ -277,6 +282,7 @@ areas:
       docs:
       - docs/operations.md
       linear_milestones:
+      - 'M6.5: Memory Server'
       - 'M8: Task Graph Operations And OpenHands Run UI'
   prerequisites:
     title: Prerequisites

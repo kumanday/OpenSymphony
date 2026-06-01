@@ -157,7 +157,7 @@ Breaking changes in this line include:
 
 ## Current model
 
-- COE-398 contributed: PR #93: feat: add Tauri desktop shell and security capabilities (COE-398) (merge `6641d8d`)
+- COE-448 contributed: PR #100: COE-448: Add scoped memory server context (merge `fa22559`)
 
 ## Important invariants
 
@@ -174,10 +174,10 @@ Breaking changes in this line include:
 
 ## Recent changes
 
-- COE-398: Tauri Shell And Security Capabilities
+- COE-448: Multi-repo memory server and deterministic context
 
 ## Source refs
 
-- COE-398
+- COE-448
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
