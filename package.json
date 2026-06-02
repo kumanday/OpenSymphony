@@ -9,7 +9,7 @@
   "scripts": {
     "type-check": "tsc --build tsconfig.projects.json",
     "lint": "echo 'ESLint configured; run npx eslint apps/ packages/ to check'",
-    "test": "jest --config jest.config.js",
+    "test": "npm run build --workspace=@opensymphony/web && jest --config jest.config.js",
     "clean": "rm -rf apps/*/dist packages/*/dist"
   },
   "devDependencies": {

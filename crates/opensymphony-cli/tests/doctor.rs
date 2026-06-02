@@ -469,7 +469,7 @@ fn doctor_bootstraps_missing_managed_local_tooling_into_explicit_configured_dir(
         "doctor should bootstrap missing managed-local tooling: stdout={stdout}, stderr={stderr}",
     );
     assert!(
-        stdout.contains("[PASS] openhands-install: installed pinned OpenHands tooling 1.14.0"),
+        stdout.contains("[PASS] openhands-install: installed pinned OpenHands tooling 1.24.0"),
         "doctor should report the bootstrap install explicitly: stdout={stdout}",
     );
     assert!(

@@ -30,10 +30,10 @@ Use these for:
 
 Pinned for the current local-MVP implementation branch:
 
-- SDK release: `v1.14.0`
-- Release date: `2026-03-13`
+- SDK release: `v1.24.0`
+- Release date: `2026-05-27`
 - Release notes:
-  `https://github.com/OpenHands/software-agent-sdk/releases/tag/v1.14.0`
+  `https://github.com/OpenHands/software-agent-sdk/releases/tag/v1.24.0`
 - Local tooling pin location:
   `tools/openhands-server/`
   Published `opensymphony` embeds this bundle for
@@ -85,7 +85,7 @@ Use this source only for details that are underspecified or absent in the docs, 
 
 Pinned implementation source:
 
-- release: `v1.14.0`
+- release: `v1.24.0`
 - server entrypoint: `openhands-agent-server/openhands/agent_server/__main__.py`
 - API router: `openhands-agent-server/openhands/agent_server/api.py`
 - WebSocket router: `openhands-agent-server/openhands/agent_server/sockets.py`
@@ -107,21 +107,21 @@ Use release notes to track:
 
 ### Pinned OpenHands version notes
 
-As of 2026-03-22, this repository pins:
+As of 2026-06-02, this repository pins:
 
-- `openhands-agent-server==1.14.0`
-- `openhands-sdk==1.14.0`
-- `openhands-tools==1.14.0`
-- `openhands-workspace==1.14.0`
-- release tag `v1.14.0`
-- Python `3.12.x` for the repo-local server environment
+- `openhands-agent-server==1.24.0`
+- `openhands-sdk==1.24.0`
+- `openhands-tools==1.24.0`
+- `openhands-workspace==1.24.0`
+- release tag `v1.24.0`
+- Python `3.13.12` for the repo-local server environment
 
 Validation sources for this pin:
 
 - PyPI project:
-  `https://pypi.org/project/openhands-agent-server/1.14.0/`
+  `https://pypi.org/project/openhands-agent-server/1.24.0/`
 - GitHub release:
-  `https://github.com/OpenHands/software-agent-sdk/releases/tag/v1.14.0`
+  `https://github.com/OpenHands/software-agent-sdk/releases/tag/v1.24.0`
 
 The current local supervisor assumptions validated against this pin are:
 

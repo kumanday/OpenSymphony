@@ -37,7 +37,7 @@ not separately published crates.
 ### Prerequisites
 
 - Rust toolchain (stable)
-- Python 3.12+ with `uv` for OpenHands server
+- Python 3.13.12 with `uv` for OpenHands server
 - Linear API key (for tracker integration)
 - LLM API key (any LiteLLM-compatible provider: OpenAI, Anthropic, Fireworks, etc.)
 
@@ -392,8 +392,9 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 
 OpenSymphony pins exact versions for reproducibility:
 
-- `openhands-agent-server==1.14.0`
-- `openhands-sdk==1.14.0`
+- `openhands-agent-server==1.24.0`
+- `openhands-sdk==1.24.0`
+- Python `3.13.12`
 - Rust stable toolchain
 
 The managed local OpenHands bundle is sourced from `tools/openhands-server/`

@@ -16,5 +16,7 @@ export default {
     "^@opensymphony/(.+)$": "<rootDir>/packages/$1/src/index.ts",
   },
   testMatch: ["**/__tests__/**/*.test.ts"],
+  testPathIgnorePatterns: ["<rootDir>/target/", "/\\.venv/"],
+  modulePathIgnorePatterns: ["<rootDir>/target/", "/\\.venv/"],
   transformIgnorePatterns: ["/node_modules/"],
 };

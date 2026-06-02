@@ -4,13 +4,14 @@ This directory owns the pinned local trusted-machine OpenHands runtime used by t
 
 Current pin:
 
-- `version.txt` records the expected OpenHands SDK bundle version: `1.14.0`
+- `version.txt` records the expected OpenHands SDK bundle version: `1.24.0`
 - `pyproject.toml` records the pinned `agent-server` extra:
-  - `openhands-agent-server==1.14.0`
-  - `openhands-sdk==1.14.0`
-  - `openhands-tools==1.14.0`
-  - `openhands-workspace==1.14.0`
+  - `openhands-agent-server==1.24.0`
+  - `openhands-sdk==1.24.0`
+  - `openhands-tools==1.24.0`
+  - `openhands-workspace==1.24.0`
 - `uv.lock` records the resolved Python dependency graph for that exact pin
+- `.python-version` records the expected CPython patch version: `3.13.12`
 - `run-local.sh` launches the pinned server via `RUNTIME=process uv run --directory . --locked --extra agent-server --module openhands.agent_server --host 127.0.0.1 --port 8000`
 
 Requirements:
@@ -19,7 +20,7 @@ Requirements:
 - `git`
 - `curl`
 - Rust stable toolchain
-- Python `3.12.x`
+- Python `3.13.12`
 
 ## Install the pinned environment
 

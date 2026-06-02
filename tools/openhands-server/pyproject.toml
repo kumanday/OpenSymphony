@@ -2,15 +2,15 @@
 name = "opensymphony-openhands-server"
 version = "0.1.0"
 description = "Pinned local OpenHands agent-server environment for OpenSymphony."
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.13.12,<3.14"
 dependencies = []
 
 [project.optional-dependencies]
 agent-server = [
-  "openhands-agent-server==1.14.0",
-  "openhands-sdk==1.14.0",
-  "openhands-tools==1.14.0",
-  "openhands-workspace==1.14.0",
+  "openhands-agent-server==1.24.0",
+  "openhands-sdk==1.24.0",
+  "openhands-tools==1.24.0",
+  "openhands-workspace==1.24.0",
 ]
 
 [tool.opensymphony.openhands_server]
