@@ -229,8 +229,8 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/websocket-runtime.md`: wire contract and recovery behavior
 - `docs/workspace-and-lifecycle.md`: workspace ownership and hooks
 - `docs/linear-and-tools.md`: Linear integration and GraphQL helper assets
-- `docs/memory-capture-and-doc-sync.md`: issue memory capture, DuckDB indexing,
-  documentation sync, and archive guard design
+- `docs/memory.md`: project memory capture, DuckDB indexing, documentation sync,
+  and archive guard design
 - `docs/ui-frankentui.md`: operator UI design
 - `docs/repository-layout.md`: crate ownership
 - `docs/deployment-modes.md`: local MVP and hosted follow-on

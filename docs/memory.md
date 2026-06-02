@@ -8,6 +8,44 @@ descriptions, reviews, checks, and source refs. It writes private issue capsules
 under `.opensymphony/memory/`, updates a DuckDB index, evolves
 `.opensymphony/memory/memory.yaml`, and syncs stable topics into public docs.
 
+## Rationale and Model
+
+Linear remains OpenSymphony's short-term planning and coordination surface, but
+completed issues still carry implementation knowledge that should survive queue
+cleanup and archival. GitHub PRs preserve code review history, and Workpad
+comments preserve useful audit details, but neither is a convenient
+component-oriented project memory on its own.
+
+OpenSymphony memory is the completed-work distillation of what mattered: the
+intent, shipped outcome, decisions, validation evidence, relevant review
+feedback, follow-ups, risks, and documentation impact. Implementation agents
+should keep their focus on code, validation, PRs, and Workpad accuracy; long-term
+memory is produced by capture and docs sync rather than by ad hoc edits during
+ordinary feature work.
+
+The memory system has two different outputs:
+
+- Issue capsules record what happened for one completed Linear issue. They are
+  compact source-referenced closeout documents, not run transcripts.
+- Topic docs describe what is now true about a subsystem. They capture the
+  current model, invariants, gotchas, and recent changes without requiring
+  readers to know which issue introduced the knowledge.
+
+The default visibility posture is private memory with optional public docs.
+Private capsules may include Linear comments, review context, and source
+snapshots, while public docs should contain public source refs such as issue
+identifiers, PR URLs, and commit SHAs. Public docs must not link directly to
+private capsule paths. Public memory is supported only by explicit
+configuration, and generated indexes such as DuckDB should remain local unless a
+project deliberately publishes them.
+
+Areas bridge issue memory and topic docs. Area inference uses Linear narrative,
+labels, milestones, active Workpad content, PR narrative, review summaries, and
+existing learned aliases in `.opensymphony/memory/memory.yaml`. GitHub changed
+files are indexed for path-based lookup, but they do not create areas or appear
+in capsule or docs prose. Merge SHAs are immutable audit refs, not inference
+signals.
+
 The CLI remains useful for setup, historical backfill, inspection, and manual
 operator actions:
 

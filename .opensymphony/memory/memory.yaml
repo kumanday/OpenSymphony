@@ -216,9 +216,12 @@ areas:
     aliases:
     - memory
     - project memory
+    - memory-capture-and-doc-sync
+    - opensymphony memory capture and documentation sync
     source_refs:
       docs:
       - docs/memory.md
+      - docs/memory-capture-and-doc-sync.md
       linear_labels:
       - area:memory
       linear_milestones:
@@ -226,17 +229,6 @@ areas:
       - 'M6: Gateway And Stream Contract'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
-  memory-capture-and-doc-sync:
-    title: OpenSymphony Memory Capture and Documentation Sync
-    docs_target: docs/memory-capture-and-doc-sync.md
-    visibility: public
-    status: stable
-    confidence: 85
-    aliases:
-    - opensymphony memory capture and documentation sync
-    source_refs:
-      docs:
-      - docs/memory-capture-and-doc-sync.md
   migration-1-0-0:
     title: OpenSymphony 1.0.0 Migration Guide
     docs_target: docs/migration-1.0.0.md
