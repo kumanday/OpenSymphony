@@ -1,0 +1,51 @@
+name: notify-web-changelog
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Dispatch web changelog sync
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch OpenSymphony-web workflow
+        env:
+          DISPATCH_TOKEN: ${{ secrets.OPENSYMPHONY_WEB_DISPATCH_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${DISPATCH_TOKEN}" ]]; then
+            echo "::error::Missing OPENSYMPHONY_WEB_DISPATCH_TOKEN. Add a fine-grained token that can dispatch kumanday/OpenSymphony-web workflows."
+            exit 1
+          fi
+
+          payload="$(
+            jq -n \
+              --arg tag "${TAG_NAME}" \
+              --arg sha "${TAG_SHA}" \
+              --arg source_repo "${GITHUB_REPOSITORY}" \
+              '{
+                event_type: "opensymphony_release",
+                client_payload: {
+                  tag: $tag,
+                  sha: $sha,
+                  source_repo: $source_repo
+                }
+              }'
+          )"
+
+          curl -fsSL \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${DISPATCH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            https://api.github.com/repos/kumanday/OpenSymphony-web/dispatches \
+            -d "${payload}"
