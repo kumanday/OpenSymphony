@@ -21,7 +21,7 @@ describe("web build output", () => {
       path.join(DIST_DIR, "index.html"),
       "utf-8",
     );
-    expect(content).toMatch(/src="\/app\/assets\/main-[a-zA-Z0-9]+.js"/);
+    expect(content).toMatch(/src="\/app\/assets\/main-[a-zA-Z0-9_-]+.js"/);
   });
 
   it("should contain an assets directory with a JS bundle", () => {

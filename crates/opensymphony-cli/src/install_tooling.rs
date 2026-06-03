@@ -15,7 +15,7 @@ use tokio::process::Command;
 
 pub(crate) const DEFAULT_MANAGED_OPENHANDS_TOOL_DIR: &str = "~/.opensymphony/openhands-server";
 
-const OPENHANDS_VERSION: &str = include_str!("../assets/openhands-server/version.txt");
+const OPENHANDS_VERSION: &str = include_str!("../../../tools/openhands-server/version.txt");
 
 struct EmbeddedToolingFile {
     relative_path: &'static str,
@@ -25,33 +25,38 @@ struct EmbeddedToolingFile {
 
 const EMBEDDED_OPENHANDS_FILES: &[EmbeddedToolingFile] = &[
     EmbeddedToolingFile {
+        relative_path: ".python-version",
+        contents: include_bytes!("../../../tools/openhands-server/.python-version"),
+        executable: false,
+    },
+    EmbeddedToolingFile {
         relative_path: "README.md",
-        contents: include_bytes!("../assets/openhands-server/README.md"),
+        contents: include_bytes!("../../../tools/openhands-server/README.md"),
         executable: false,
     },
     EmbeddedToolingFile {
         relative_path: "install.sh",
-        contents: include_bytes!("../assets/openhands-server/install.sh"),
+        contents: include_bytes!("../../../tools/openhands-server/install.sh"),
         executable: true,
     },
     EmbeddedToolingFile {
         relative_path: "pyproject.toml",
-        contents: include_bytes!("../assets/openhands-server/pyproject.toml"),
+        contents: include_bytes!("../../../tools/openhands-server/pyproject.toml"),
         executable: false,
     },
     EmbeddedToolingFile {
         relative_path: "run-local.sh",
-        contents: include_bytes!("../assets/openhands-server/run-local.sh"),
+        contents: include_bytes!("../../../tools/openhands-server/run-local.sh"),
         executable: true,
     },
     EmbeddedToolingFile {
         relative_path: "uv.lock",
-        contents: include_bytes!("../assets/openhands-server/uv.lock"),
+        contents: include_bytes!("../../../tools/openhands-server/uv.lock"),
         executable: false,
     },
     EmbeddedToolingFile {
         relative_path: "version.txt",
-        contents: include_bytes!("../assets/openhands-server/version.txt"),
+        contents: include_bytes!("../../../tools/openhands-server/version.txt"),
         executable: false,
     },
 ];
@@ -378,6 +383,6 @@ mod tests {
             );
         }
 
-        assert_eq!(embedded_openhands_version(), "1.14.0");
+        assert_eq!(embedded_openhands_version(), "1.24.0");
     }
 }

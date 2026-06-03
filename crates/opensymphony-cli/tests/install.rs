@@ -35,7 +35,7 @@ fn install_openhands_materializes_the_default_managed_tool_dir() {
         "install should succeed: stdout={stdout}, stderr={stderr}",
     );
     assert!(
-        stdout.contains("installed pinned OpenHands tooling 1.14.0"),
+        stdout.contains("installed pinned OpenHands tooling 1.24.0"),
         "install should report the fresh managed-local bootstrap: stdout={stdout}",
     );
     assert!(
@@ -138,7 +138,7 @@ fn install_openhands_repairs_missing_files_in_the_managed_tool_dir() {
         "repair install should succeed: stdout={stdout}, stderr={stderr}",
     );
     assert!(
-        stdout.contains("repaired pinned OpenHands tooling 1.14.0"),
+        stdout.contains("repaired pinned OpenHands tooling 1.24.0"),
         "repair install should report the repaired state: stdout={stdout}",
     );
     assert!(
@@ -170,10 +170,10 @@ fn install_openhands_updates_a_stale_but_self_consistent_pin() {
         String::from_utf8_lossy(&first.stderr),
     );
 
-    rewrite_openhands_pin(&tool_dir, "1.14.0", "1.13.0");
+    rewrite_openhands_pin(&tool_dir, "1.24.0", "1.23.0");
     let stale_tooling =
         LocalServerTooling::load(&tool_dir).expect("stale tooling should still parse");
-    assert_eq!(stale_tooling.version, "1.13.0");
+    assert_eq!(stale_tooling.version, "1.23.0");
     assert!(
         stale_tooling.pin_status.is_ready(),
         "stale tooling fixture should remain internally self-consistent",
@@ -188,7 +188,7 @@ fn install_openhands_updates_a_stale_but_self_consistent_pin() {
         "stale install should update cleanly: stdout={stdout}, stderr={stderr}",
     );
     assert!(
-        stdout.contains("updated pinned OpenHands tooling 1.14.0"),
+        stdout.contains("updated pinned OpenHands tooling 1.24.0"),
         "stale install should report an update, not a ready no-op: stdout={stdout}",
     );
     assert_eq!(
@@ -197,7 +197,7 @@ fn install_openhands_updates_a_stale_but_self_consistent_pin() {
         "updating a stale embedded pin should rerun uv",
     );
     let refreshed = LocalServerTooling::load(&tool_dir).expect("updated tooling should parse");
-    assert_eq!(refreshed.version, "1.14.0");
+    assert_eq!(refreshed.version, "1.24.0");
     assert!(refreshed.pin_status.is_ready());
 }
 

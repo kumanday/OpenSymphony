@@ -45,3 +45,14 @@
   - Input sanitization on any shell command arguments.
 - `settings` capability grants only `fs:allow-read-text-file` and `fs:allow-write-text-file` — no `fs:default` baseline, no directory listing, copy, or binary access. File-system scope is `$HOME/.config/opensymphony/**`. Settings must not accept paths that escape this scope.
 - `connect-src` CSP restricts WebSocket connections to pinned hosts `wss://api.opensymphony.dev` and `wss://api.opensymphony.app`. Local daemon traffic uses `ws://localhost:*`.
+- Current Tauri `2.11.2` pulls the Linux GTK3 Rust bindings through
+  `tauri -> wry/webkit2gtk/gtk`. RustSec `RUSTSEC-2024-0429` fixes the
+  `glib::VariantStrIter` advisory in `glib >=0.20.0`, but the current GTK3
+  crate requires `glib ^0.18`. Do not force a direct `glib` override; it would
+  mix incompatible GTK binding generations.
+- `cargo audit --file apps/desktop/src-tauri/Cargo.lock --json` reports
+  `vulnerabilities.found = false`, while `cargo audit --deny warnings` still
+  fails on all-target informational warnings from the Linux GTK3 stack and
+  Tauri `urlpattern`'s transitive `unic-*` crates. Track an upstream
+  Tauri/wry/GTK migration before treating the Linux desktop dependency audit as
+  warning-clean.

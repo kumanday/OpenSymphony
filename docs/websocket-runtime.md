@@ -46,7 +46,7 @@ Support these workflow-controlled modes in the Rust client:
 
 - `auto`
   - no auth when `openhands.transport.session_api_key_env` is unset
-  - otherwise use the pinned 1.14.0 shape: HTTP header `x-session-api-key`
+  - otherwise use the pinned 1.24.0 shape: HTTP header `x-session-api-key`
     plus WebSocket query param `session_api_key`
 - `header`
   - keep the same HTTP header and send `X-Session-API-Key` on the WebSocket
@@ -128,7 +128,7 @@ This is why the Rust runtime should intentionally copy the high-level behavior o
 
 ## 5. Readiness barrier
 
-The current SDK client treats the first `ConversationStateUpdateEvent` received after subscription as proof that the subscription is ready. On the pinned `v1.14.0` server this is a full-state snapshot with `key == "full_state"`.
+The current SDK client treats the first `ConversationStateUpdateEvent` received after subscription as proof that the subscription is ready. On the pinned `v1.24.0` server this is expected to be a full-state snapshot with `key == "full_state"`; keep the live pinned-server tests green before relying on that assumption.
 
 Implement the same rule.
 
