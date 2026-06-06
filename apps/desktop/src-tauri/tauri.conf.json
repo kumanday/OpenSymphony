@@ -44,8 +44,9 @@
         "$HOME/.config/opensymphony/**"
       ]
     },
-    "shell": {
-      "open": true
+    "opener": {
+      "https": true,
+      "http": true
     }
   }
 }

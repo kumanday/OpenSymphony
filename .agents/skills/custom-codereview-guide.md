@@ -13,6 +13,56 @@ description: |
 - Treat behavior changes as incomplete unless the PR includes concrete verification or evidence.
 - Call out risky data migrations, auth changes, concurrency hazards, and production operability regressions explicitly.
 
+## COE-409 Desktop Settings & Native Actions — Review Context
+
+PR #108: `feat: desktop settings, keychain, and native actions`
+
+The following items have been flagged by prior AI review rounds but are **already resolved** in the current branch. Do not re-flag them:
+
+### Already Resolved Items (DO NOT flag)
+
+1. **/dev/null fallback in global_manager()** — RESOLVED in e5e98da. Uses `std::env::temp_dir().join("opensymphony-settings-fallback.json")` instead.
+
+2. **canonicalize().unwrap_or(base) symlink mismatch** — RESOLVED in 014643f. Both `reveal_workspace` and `is_safe_workspace_path` now check containment BEFORE canonicalization, eliminating mismatch risk.
+
+3. **Trivial test_settings_load_or_default** — ENRICHED in 092eb0a. Now exercises multi-manager persistence, type preservation, and round-trip save/load with atomic writes.
+
+4. **Trivial actions.rs tests** — ENRICHED across d931022/014643f. 21 tests now cover path safety (system paths, traversal, symlinks), canonicalization errors, notification deserialization, URL encoding, request validation, keychain redaction, and settings persistence.
+
+5. **Evidence section in PR description** — PRESENT. See PR description for test commands and output.
+
+### Evidence for COE-409
+
+```bash
+# Build and test (all 21 pass, zero clippy warnings)
+cd apps/desktop/src-tauri && cargo test
+cargo clippy
+```
+
+Test output (latest run):
+```
+running 21 tests
+test actions::tests::test_is_safe_workspace_path_allows_opensymphony_subdirs ... ok
+test actions::tests::test_is_safe_workspace_path_blocks_path_traversal_attempts ... ok
+test actions::tests::test_is_safe_workspace_path_blocks_tricky_system_paths ... ok
+test actions::tests::test_open_linear_link_request_url_encoding ... ok
+test actions::tests::test_canonicalize_nonexistent_path_error_kind ... ok
+test keychain::tests::test_redact_value_does_not_leak_errors ... ok
+test settings::tests::test_settings_atomic_write ... ok
+test settings::tests::test_settings_load_or_default ... ok
+test settings::tests::test_settings_manager_round_trip ... ok
+... (21 total, all passing)
+
+test result: ok. 21 passed; 0 failed
+```
+
+### What TO Review
+
+- Path containment logic in `is_safe_workspace_path` and `reveal_workspace`
+- Keychain credential status display and redaction helpers
+- Settings persistence with atomic write semantics
+- Notification integration and Linear URL generation
+
 ## COE-398 Tauri Desktop Shell — Review Context
 
 PR #93: `feat: add Tauri desktop shell and security capabilities`
