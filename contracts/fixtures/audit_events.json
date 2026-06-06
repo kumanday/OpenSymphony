@@ -1,0 +1,43 @@
+[
+  {
+    "event_id": "audit_001_consent_recorded",
+    "tenant_id": "tenant_001_demo",
+    "event_type": "CONSENT_RECORDED",
+    "actor": "conversation-lambda",
+    "session_id": "sess_001_happy_path",
+    "campaign_id": "camp_001_swe_q2_2025",
+    "correlation_id": "11111111-1111-4111-8111-111111111111",
+    "payload": {
+      "consent_id": "consent_001_happy_path"
+    },
+    "timestamp": "2025-05-20T14:02:05Z"
+  },
+  {
+    "event_id": "audit_002_score_computed",
+    "tenant_id": "tenant_001_demo",
+    "event_type": "SCORE_COMPUTED",
+    "actor": "evaluation-lambda",
+    "session_id": "sess_001_happy_path",
+    "campaign_id": "camp_001_swe_q2_2025",
+    "correlation_id": "22222222-2222-4222-8222-222222222222",
+    "payload": {
+      "evaluation_id": "eval_001_happy_path",
+      "overall_score": 4.25
+    },
+    "timestamp": "2025-05-20T14:31:00Z"
+  },
+  {
+    "event_id": "audit_003_human_decision",
+    "tenant_id": "tenant_001_demo",
+    "event_type": "HUMAN_DECISION",
+    "actor": "op_001_recruiter_jane",
+    "session_id": "sess_001_happy_path",
+    "campaign_id": "camp_001_swe_q2_2025",
+    "correlation_id": "33333333-3333-4333-8333-333333333333",
+    "payload": {
+      "evaluation_id": "eval_001_happy_path",
+      "decision": "APPROVED"
+    },
+    "timestamp": "2025-05-20T16:00:00Z"
+  }
+]

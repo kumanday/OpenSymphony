@@ -1,0 +1,11 @@
+{
+  "operator_id": "op_001_recruiter_jane",
+  "tenant_id": "tenant_001_demo",
+  "email": "jane.recruiter@demo-agency.com",
+  "password_hash": "$argon2id$v=19$m=65536,t=3,p=4$...<hashed_password>...",
+  "display_name": "Jane Recruiter",
+  "roles": ["recruiter", "campaign_manager"],
+  "created_at": "2025-01-15T09:30:00Z",
+  "last_login": "2025-05-25T08:00:00Z",
+  "status": "active"
+}

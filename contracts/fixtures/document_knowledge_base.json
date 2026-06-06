@@ -1,0 +1,15 @@
+{
+  "document_id": "doc_001_swe_role_brief",
+  "tenant_id": "tenant_001_demo",
+  "campaign_id": "camp_001_swe_q2_2025",
+  "filename": "software-engineer-role-brief.pdf",
+  "content_type": "application/pdf",
+  "s3_uri": "s3://entrevista-demo-documents/tenant_001_demo/camp_001_swe_q2_2025/software-engineer-role-brief.pdf",
+  "status": "INDEXED",
+  "chunk_count": 12,
+  "embedding_model": "text-embedding-3-large",
+  "pinecone_namespace": "tenant_001_demo/camp_001_swe_q2_2025",
+  "uploaded_by": "op_001_recruiter_jane",
+  "uploaded_at": "2025-02-02T11:00:00Z",
+  "indexed_at": "2025-02-02T11:05:00Z"
+}

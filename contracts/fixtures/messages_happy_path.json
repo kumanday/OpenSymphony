@@ -1,0 +1,101 @@
+[
+  {
+    "message_id": "msg_001",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "system",
+    "content": "¡Hola! Soy EntreVista AI, tu asistente de entrevista. Antes de comenzar, necesito tu consentimiento para procesar tus datos.",
+    "timestamp": "2025-05-20T14:00:00Z",
+    "metadata": {"type": "consent_disclosure"}
+  },
+  {
+    "message_id": "msg_002",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "candidate",
+    "content": "Sí, acepto",
+    "timestamp": "2025-05-20T14:02:00Z",
+    "metadata": {"type": "consent_response"}
+  },
+  {
+    "message_id": "msg_003",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "system",
+    "content": "Gracias. Vamos a comenzar con algunas preguntas sobre tu experiencia laboral. ¿Puedes contarme sobre tu experiencia más reciente en desarrollo de software?",
+    "timestamp": "2025-05-20T14:05:00Z",
+    "metadata": {"type": "screening_question", "competency": "comp_001_communication"}
+  },
+  {
+    "message_id": "msg_004",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "candidate",
+    "content": "Claro, actualmente trabajo como ingeniero de software senior en una fintech. Mi rol principal es diseñar APIs REST y liderar un equipo de 4 desarrolladores.",
+    "timestamp": "2025-05-20T14:07:00Z",
+    "metadata": {"type": "candidate_response"}
+  },
+  {
+    "message_id": "msg_005",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "system",
+    "content": "¿Puedes darme un ejemplo específico de un desafío técnico que hayas resuelto recientemente?",
+    "timestamp": "2025-05-20T14:08:00Z",
+    "metadata": {"type": "follow_up_question", "competency": "comp_002_problem_solving"}
+  },
+  {
+    "message_id": "msg_006",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "candidate",
+    "content": "Recientemente optimizamos el pipeline de CI/CD que estaba tardando 45 minutos. Implementé caching de dependencias y parallelización de tests, reduciendo el tiempo a 12 minutos.",
+    "timestamp": "2025-05-20T14:10:00Z",
+    "metadata": {"type": "candidate_response"}
+  },
+  {
+    "message_id": "msg_007",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "system",
+    "content": "¿Cómo te aseguras de que el código de tu equipo mantenga altos estándares de calidad?",
+    "timestamp": "2025-05-20T14:15:00Z",
+    "metadata": {"type": "screening_question", "competency": "comp_003_technical_depth"}
+  },
+  {
+    "message_id": "msg_008",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "candidate",
+    "content": "Implementamos code reviews obligatorios, análisis estático con SonarQube, y pruebas unitarias con cobertura mínima del 80%. También hacemos pair programming para tareas complejas.",
+    "timestamp": "2025-05-20T14:18:00Z",
+    "metadata": {"type": "candidate_response"}
+  },
+  {
+    "message_id": "msg_009",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "system",
+    "content": "¿Qué tipo de ambiente de trabajo te motiva más?",
+    "timestamp": "2025-05-20T14:22:00Z",
+    "metadata": {"type": "screening_question", "competency": "comp_004_cultural_fit"}
+  },
+  {
+    "message_id": "msg_010",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "candidate",
+    "content": "Me motiva trabajar en equipos colaborativos donde hay aprendizaje continuo. Valoro la autonomía pero también la retroalimentación constante.",
+    "timestamp": "2025-05-20T14:25:00Z",
+    "metadata": {"type": "candidate_response"}
+  },
+  {
+    "message_id": "msg_011",
+    "session_id": "sess_001_happy_path",
+    "tenant_id": "tenant_001_demo",
+    "sender": "system",
+    "content": "Gracias por tu tiempo. Tu entrevista ha sido completada. Recibirás una actualización pronto sobre el siguiente paso. ¿Te gustaría calificarnos del 0 al 10?",
+    "timestamp": "2025-05-20T14:28:00Z",
+    "metadata": {"type": "nps_request"}
+  }
+]

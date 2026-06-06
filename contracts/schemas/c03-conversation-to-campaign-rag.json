@@ -1,0 +1,118 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://entrevisata.ai/contracts/c03-conversation-to-campaign-rag",
+  "title": "C-03: Conversation Lambda \u2192 Campaign Lambda (RAG Search)",
+  "description": "Knowledge base semantic search for candidate questions",
+  "metadata": {
+    "contractId": "C-03",
+    "from": "SVC-02 (conversation-lambda)",
+    "to": "SVC-04 (campaign-lambda)",
+    "method": "POST",
+    "path": "/api/v1/knowledge-base/search",
+    "auth": "X-Internal-Secret",
+    "timeout": "5s",
+    "pattern": "Synchronous Request-Response"
+  },
+  "request": {
+    "headers": {
+      "X-Internal-Secret": {
+        "type": "string",
+        "required": true
+      },
+      "X-Correlation-ID": {
+        "type": "string",
+        "format": "uuid",
+        "required": true
+      },
+      "Content-Type": {
+        "type": "string",
+        "enum": [
+          "application/json"
+        ],
+        "required": true
+      }
+    },
+    "body": {
+      "type": "object",
+      "required": [
+        "query",
+        "campaign_id",
+        "tenant_id"
+      ],
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query text"
+        },
+        "campaign_id": {
+          "type": "string",
+          "description": "Campaign scope for search"
+        },
+        "tenant_id": {
+          "type": "string",
+          "description": "Tenant scope identifier"
+        }
+      }
+    }
+  },
+  "response": {
+    "200": {
+      "body": {
+        "type": "object",
+        "required": [
+          "chunks"
+        ],
+        "properties": {
+          "chunks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "text",
+                "score",
+                "document_id",
+                "chunk_index"
+              ],
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "description": "Retrieved document chunk text"
+                },
+                "score": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "Relevance score"
+                },
+                "document_id": {
+                  "type": "string",
+                  "description": "Source document identifier"
+                },
+                "chunk_index": {
+                  "type": "integer",
+                  "description": "Chunk position within document"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "401": {
+      "error": {
+        "code": "UNAUTHORIZED",
+        "message": "Invalid X-Internal-Secret"
+      }
+    },
+    "404": {
+      "error": {
+        "code": "NOT_FOUND",
+        "message": "Campaign not found"
+      }
+    }
+  },
+  "error_handling": {
+    "rag_failure": "Return empty chunks; conversation-lambda falls back to guardrail scripted response",
+    "pinecone_error": "Log error; return empty chunks array"
+  }
+}

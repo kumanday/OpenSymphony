@@ -1,0 +1,135 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://entrevisata.ai/contracts/c09-dashboard-evaluation-decisions",
+  "title": "C-09: Dashboard \u2192 Evaluation Lambda (Human Decisions)",
+  "description": "Human-in-the-loop evaluation review and disagreement tracking",
+  "metadata": {
+    "contractId": "C-09",
+    "from": "SVC-07 (dashboard)",
+    "to": "SVC-03 (evaluation-lambda)",
+    "method": "POST/GET",
+    "path": "/api/v1/evaluate/{id}/decision, /api/v1/evaluate/{id}/disagree, /api/v1/evaluate/{id}",
+    "auth": "Authorization: Bearer <JWT>",
+    "timeout": "10s",
+    "pattern": "Synchronous Request-Response"
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/evaluate/{evaluation_id}",
+      "description": "Get evaluation details with scores and citations"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/evaluate/{evaluation_id}/decision",
+      "description": "Record human decision on evaluation",
+      "body": {
+        "type": "object",
+        "required": [
+          "evaluation_id",
+          "decision",
+          "operator_id",
+          "tenant_id"
+        ],
+        "properties": {
+          "evaluation_id": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "APPROVED",
+              "REJECTED"
+            ]
+          },
+          "operator_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/evaluate/{evaluation_id}/disagree",
+      "description": "Record human-AI score disagreement",
+      "body": {
+        "type": "object",
+        "required": [
+          "evaluation_id",
+          "operator_id",
+          "tenant_id",
+          "disagreement"
+        ],
+        "properties": {
+          "evaluation_id": {
+            "type": "string"
+          },
+          "operator_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "disagreement": {
+            "type": "object",
+            "properties": {
+              "competency_id": {
+                "type": "string"
+              },
+              "ai_score": {
+                "type": "number"
+              },
+              "human_score": {
+                "type": "number"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "response": {
+    "200": {
+      "description": "Success"
+    },
+    "201": {
+      "description": "Decision/disagreement recorded"
+    },
+    "401": {
+      "error": {
+        "code": "UNAUTHORIZED",
+        "message": "Invalid or expired JWT"
+      }
+    },
+    "403": {
+      "error": {
+        "code": "FORBIDDEN",
+        "message": "Insufficient permissions"
+      }
+    },
+    "404": {
+      "error": {
+        "code": "NOT_FOUND",
+        "message": "Evaluation not found"
+      }
+    }
+  },
+  "error_handling": {
+    "disagreement_tracking": "All disagreements persisted for calibration analysis",
+    "audit_logging": "All decisions trigger audit event to compliance-lambda"
+  },
+  "request": {
+    "description": "Multiple endpoints with different request shapes; see endpoints array for details",
+    "auth_header": "Authorization: Bearer <JWT>",
+    "correlation_id_required": true
+  }
+}

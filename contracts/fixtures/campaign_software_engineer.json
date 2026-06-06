@@ -1,0 +1,23 @@
+{
+  "campaign_id": "camp_001_swe_q2_2025",
+  "tenant_id": "tenant_001_demo",
+  "name": "Software Engineer Q2 2025",
+  "description": "Technical screening for senior software engineering positions",
+  "status": "active",
+  "deep_link_code": "swe-q2-2025",
+  "rubric_id": "rubric_001_swe",
+  "settings": {
+    "max_screening_duration_minutes": 30,
+    "auto_escalate_after_minutes": 5,
+    "require_consent": true,
+    "consent_disclosure_text": "Esta entrevista es asistida por inteligencia artificial. Sus respuestas serán evaluadas y almacenadas de acuerdo con nuestra política de privacidad."
+  },
+  "created_at": "2025-02-01T10:00:00Z",
+  "created_by": "op_001_recruiter_jane",
+  "stats": {
+    "total_sessions": 47,
+    "completed_sessions": 32,
+    "escalated_sessions": 3,
+    "abandoned_sessions": 12
+  }
+}

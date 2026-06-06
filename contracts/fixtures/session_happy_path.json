@@ -1,0 +1,23 @@
+{
+  "session_id": "sess_001_happy_path",
+  "tenant_id": "tenant_001_demo",
+  "campaign_id": "camp_001_swe_q2_2025",
+  "candidate": {
+    "telegram_user_id_hash": "hash_abc123def456",
+    "alias": "Candidato_42",
+    "first_message_at": "2025-05-20T14:00:00Z"
+  },
+  "state": "COMPLETED",
+  "state_transitions": [
+    {"from": null, "to": "AWAITING_CONSENT", "at": "2025-05-20T14:00:00Z"},
+    {"from": "AWAITING_CONSENT", "to": "REQUIREMENTS_CHECK", "at": "2025-05-20T14:02:00Z"},
+    {"from": "REQUIREMENTS_CHECK", "to": "SCREENING", "at": "2025-05-20T14:05:00Z"},
+    {"from": "SCREENING", "to": "COMPLETED", "at": "2025-05-20T14:28:00Z"}
+  ],
+  "consent_recorded": true,
+  "consent_recorded_at": "2025-05-20T14:02:00Z",
+  "evaluation_id": "eval_001_happy_path",
+  "completed_at": "2025-05-20T14:28:00Z",
+  "duration_minutes": 28,
+  "message_count": 23
+}

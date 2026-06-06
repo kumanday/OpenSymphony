@@ -1,0 +1,14 @@
+{
+  "alert_id": "alert_001_escalation",
+  "tenant_id": "tenant_001_demo",
+  "session_id": "sess_002_escalation_path",
+  "campaign_id": "camp_001_swe_q2_2025",
+  "candidate_alias": "Candidato_43",
+  "escalation_type": "HUMAN_REQUESTED",
+  "status": "OPEN",
+  "context": "Candidate explicitly requested to speak with a human recruiter.",
+  "created_at": "2025-05-20T15:12:00Z",
+  "assigned_to": "op_001_recruiter_jane",
+  "resolved_at": null,
+  "resolution_notes": null
+}

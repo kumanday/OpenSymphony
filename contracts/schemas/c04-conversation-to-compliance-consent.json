@@ -1,0 +1,118 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://entrevisata.ai/contracts/c04-conversation-to-compliance-consent",
+  "title": "C-04: Conversation Lambda \u2192 Compliance Lambda (Consent Recording)",
+  "description": "Write-once consent recording for candidate interviews",
+  "metadata": {
+    "contractId": "C-04",
+    "from": "SVC-02 (conversation-lambda)",
+    "to": "SVC-05 (compliance-lambda)",
+    "method": "POST",
+    "path": "/api/v1/consent",
+    "auth": "X-Internal-Secret",
+    "timeout": "5s",
+    "pattern": "Synchronous (fire-and-verify)"
+  },
+  "request": {
+    "headers": {
+      "X-Internal-Secret": {
+        "type": "string",
+        "required": true
+      },
+      "X-Correlation-ID": {
+        "type": "string",
+        "format": "uuid",
+        "required": true
+      },
+      "Content-Type": {
+        "type": "string",
+        "enum": [
+          "application/json"
+        ],
+        "required": true
+      }
+    },
+    "body": {
+      "type": "object",
+      "required": [
+        "session_id",
+        "telegram_user_id_hash",
+        "campaign_id",
+        "tenant_id",
+        "consent_given",
+        "timestamp"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "description": "Unique session identifier"
+        },
+        "telegram_user_id_hash": {
+          "type": "string",
+          "description": "Hashed Telegram user ID"
+        },
+        "campaign_id": {
+          "type": "string",
+          "description": "Campaign scope"
+        },
+        "tenant_id": {
+          "type": "string",
+          "description": "Tenant scope identifier"
+        },
+        "consent_given": {
+          "type": "boolean",
+          "description": "Whether candidate consented"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 consent timestamp"
+        }
+      }
+    }
+  },
+  "response": {
+    "201": {
+      "body": {
+        "type": "object",
+        "required": [
+          "consent_id",
+          "recorded_at"
+        ],
+        "properties": {
+          "consent_id": {
+            "type": "string",
+            "description": "Unique consent record identifier"
+          },
+          "recorded_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 recording timestamp"
+          }
+        }
+      }
+    },
+    "400": {
+      "error": {
+        "code": "VALIDATION_ERROR",
+        "message": "Invalid consent payload"
+      }
+    },
+    "401": {
+      "error": {
+        "code": "UNAUTHORIZED",
+        "message": "Invalid X-Internal-Secret"
+      }
+    },
+    "409": {
+      "error": {
+        "code": "CONFLICT",
+        "message": "Consent already recorded for this session"
+      }
+    }
+  },
+  "error_handling": {
+    "write_failure": "Log to CloudWatch with full event payload; never silently drop consent events",
+    "duplicate_consent": "Return 409 Conflict; do not overwrite existing consent"
+  }
+}

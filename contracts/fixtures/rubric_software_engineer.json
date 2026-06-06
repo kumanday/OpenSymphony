@@ -1,0 +1,78 @@
+{
+  "rubric_id": "rubric_001_swe",
+  "tenant_id": "tenant_001_demo",
+  "name": "Software Engineer Competency Rubric",
+  "version": "1.0",
+  "competencies": [
+    {
+      "competency_id": "comp_001_communication",
+      "name": "Communication Skills",
+      "description": "Clarity of expression, active listening, and structured thinking",
+      "weight": 0.2,
+      "scoring_scale": {
+        "min": 1,
+        "max": 5,
+        "labels": {
+          "1": "Below expectations",
+          "2": "Approaching expectations",
+          "3": "Meets expectations",
+          "4": "Exceeds expectations",
+          "5": "Outstanding"
+        }
+      }
+    },
+    {
+      "competency_id": "comp_002_problem_solving",
+      "name": "Problem Solving",
+      "description": "Analytical thinking, solution design, and debugging approach",
+      "weight": 0.3,
+      "scoring_scale": {
+        "min": 1,
+        "max": 5,
+        "labels": {
+          "1": "Below expectations",
+          "2": "Approaching expectations",
+          "3": "Meets expectations",
+          "4": "Exceeds expectations",
+          "5": "Outstanding"
+        }
+      }
+    },
+    {
+      "competency_id": "comp_003_technical_depth",
+      "name": "Technical Depth",
+      "description": "Domain knowledge, architecture understanding, and code quality awareness",
+      "weight": 0.3,
+      "scoring_scale": {
+        "min": 1,
+        "max": 5,
+        "labels": {
+          "1": "Below expectations",
+          "2": "Approaching expectations",
+          "3": "Meets expectations",
+          "4": "Exceeds expectations",
+          "5": "Outstanding"
+        }
+      }
+    },
+    {
+      "competency_id": "comp_004_cultural_fit",
+      "name": "Cultural Alignment",
+      "description": "Values alignment, collaboration mindset, and growth orientation",
+      "weight": 0.2,
+      "scoring_scale": {
+        "min": 1,
+        "max": 5,
+        "labels": {
+          "1": "Below expectations",
+          "2": "Approaching expectations",
+          "3": "Meets expectations",
+          "4": "Exceeds expectations",
+          "5": "Outstanding"
+        }
+      }
+    }
+  ],
+  "created_at": "2025-02-01T09:00:00Z",
+  "created_by": "op_001_recruiter_jane"
+}

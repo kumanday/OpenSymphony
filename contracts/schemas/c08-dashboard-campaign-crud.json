@@ -1,0 +1,180 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://entrevisata.ai/contracts/c08-dashboard-campaign-crud",
+  "title": "C-08: Dashboard \u2192 Campaign Lambda (Campaigns, Rubrics, KB)",
+  "description": "Campaign and knowledge base management via REST CRUD",
+  "metadata": {
+    "contractId": "C-08",
+    "from": "SVC-07 (dashboard)",
+    "to": "SVC-04 (campaign-lambda)",
+    "method": "REST (GET/POST/PUT/DELETE)",
+    "path": "/api/v1/campaigns, /api/v1/rubrics, /api/v1/knowledge-base",
+    "auth": "Authorization: Bearer <JWT>",
+    "timeout": "30s",
+    "pattern": "Synchronous CRUD"
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/campaigns",
+      "description": "List all campaigns for authenticated operator's tenant",
+      "query_params": {
+        "tenant_id": {
+          "type": "string",
+          "required": true
+        },
+        "page": {
+          "type": "integer",
+          "default": 1
+        },
+        "limit": {
+          "type": "integer",
+          "default": 20
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/campaigns",
+      "description": "Create new campaign",
+      "body": {
+        "type": "object",
+        "required": [
+          "name",
+          "tenant_id",
+          "rubric_id"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "rubric_id": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "settings": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/campaigns/{campaign_id}",
+      "description": "Get campaign details"
+    },
+    {
+      "method": "PUT",
+      "path": "/api/v1/campaigns/{campaign_id}",
+      "description": "Update campaign"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/campaigns/{campaign_id}",
+      "description": "Deactivate campaign"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/rubrics",
+      "description": "List rubrics for tenant"
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/rubrics",
+      "description": "Create rubric",
+      "body": {
+        "type": "object",
+        "required": [
+          "name",
+          "tenant_id",
+          "competencies"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "competencies": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "scoring_scale": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/knowledge-base/documents",
+      "description": "Upload document for embedding",
+      "body": {
+        "type": "multipart/form-data"
+      },
+      "max_size": "10MB"
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/knowledge-base/documents",
+      "description": "List documents for campaign"
+    },
+    {
+      "method": "DELETE",
+      "path": "/api/v1/knowledge-base/documents/{document_id}",
+      "description": "Remove document from knowledge base"
+    }
+  ],
+  "response": {
+    "200": {
+      "description": "Success (GET/list operations)"
+    },
+    "201": {
+      "description": "Created (POST operations)"
+    },
+    "204": {
+      "description": "No Content (DELETE operations)"
+    },
+    "401": {
+      "error": {
+        "code": "UNAUTHORIZED",
+        "message": "Invalid or expired JWT"
+      }
+    },
+    "403": {
+      "error": {
+        "code": "FORBIDDEN",
+        "message": "Insufficient permissions for tenant"
+      }
+    },
+    "404": {
+      "error": {
+        "code": "NOT_FOUND",
+        "message": "Resource not found"
+      }
+    },
+    "500": {
+      "error": {
+        "code": "INTERNAL_ERROR",
+        "message": "Processing failure"
+      }
+    }
+  },
+  "error_handling": {
+    "document_processing_failure": "Mark document FAILED; log; notify operator via dashboard status",
+    "jwt_validation": "Each lambda independently validates JWT using shared RS256 public key"
+  },
+  "request": {
+    "description": "Multiple endpoints with different request shapes; see endpoints array for details",
+    "auth_header": "Authorization: Bearer <JWT>",
+    "correlation_id_required": true
+  }
+}

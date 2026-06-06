@@ -1,0 +1,43 @@
+{
+  "evaluation_id": "eval_001_happy_path",
+  "tenant_id": "tenant_001_demo",
+  "session_id": "sess_001_happy_path",
+  "campaign_id": "camp_001_swe_q2_2025",
+  "rubric_id": "rubric_001_swe",
+  "status": "COMPLETED",
+  "summary": "Senior engineer candidate with strong API design, delivery discipline, and collaborative habits.",
+  "overall_score": 4.25,
+  "scores": [
+    {
+      "competency_id": "comp_001_communication",
+      "score": 4,
+      "citation_message_ids": ["msg_004", "msg_010"],
+      "rationale": "Answers are clear and structured."
+    },
+    {
+      "competency_id": "comp_002_problem_solving",
+      "score": 5,
+      "citation_message_ids": ["msg_006"],
+      "rationale": "Gave a concrete CI/CD optimization example with measurable impact."
+    },
+    {
+      "competency_id": "comp_003_technical_depth",
+      "score": 4,
+      "citation_message_ids": ["msg_008"],
+      "rationale": "Described code review, static analysis, and testing practices."
+    },
+    {
+      "competency_id": "comp_004_cultural_fit",
+      "score": 4,
+      "citation_message_ids": ["msg_010"],
+      "rationale": "Values collaboration, autonomy, and feedback."
+    }
+  ],
+  "human_decision": {
+    "decision": "APPROVED",
+    "operator_id": "op_001_recruiter_jane",
+    "decided_at": "2025-05-20T16:00:00Z",
+    "notes": "Move to technical interview."
+  },
+  "created_at": "2025-05-20T14:30:00Z"
+}

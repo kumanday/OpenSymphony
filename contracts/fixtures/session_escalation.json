@@ -1,0 +1,28 @@
+{
+  "session_id": "sess_002_escalation_path",
+  "tenant_id": "tenant_001_demo",
+  "campaign_id": "camp_001_swe_q2_2025",
+  "candidate": {
+    "telegram_user_id_hash": "hash_xyz789ghi012",
+    "alias": "Candidato_43",
+    "first_message_at": "2025-05-20T15:00:00Z"
+  },
+  "state": "ESCALATED",
+  "state_transitions": [
+    {"from": null, "to": "AWAITING_CONSENT", "at": "2025-05-20T15:00:00Z"},
+    {"from": "AWAITING_CONSENT", "to": "REQUIREMENTS_CHECK", "at": "2025-05-20T15:02:00Z"},
+    {"from": "REQUIREMENTS_CHECK", "to": "SCREENING", "at": "2025-05-20T15:05:00Z"},
+    {"from": "SCREENING", "to": "ESCALATED", "at": "2025-05-20T15:12:00Z"}
+  ],
+  "consent_recorded": true,
+  "consent_recorded_at": "2025-05-20T15:02:00Z",
+  "escalation": {
+    "escalation_type": "HUMAN_REQUESTED",
+    "triggered_at": "2025-05-20T15:12:00Z",
+    "reason": "Candidate explicitly requested to speak with a human recruiter",
+    "alert_id": "alert_001_escalation"
+  },
+  "completed_at": null,
+  "duration_minutes": 12,
+  "message_count": 8
+}

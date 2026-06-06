@@ -1,0 +1,195 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://entrevisata.ai/contracts/c10-dashboard-compliance-query",
+  "title": "C-10: Dashboard \u2192 Compliance Lambda (Audit Query, Escalations, NPS)",
+  "description": "Compliance data retrieval for dashboard analytics",
+  "metadata": {
+    "contractId": "C-10",
+    "from": "SVC-07 (dashboard)",
+    "to": "SVC-05 (compliance-lambda)",
+    "method": "GET",
+    "path": "/api/v1/audit, /api/v1/escalations, /api/v1/nps",
+    "auth": "Authorization: Bearer <JWT>",
+    "timeout": "10s",
+    "pattern": "Synchronous Request-Response (read-only)"
+  },
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/api/v1/audit/events",
+      "description": "Query audit events",
+      "query_params": {
+        "tenant_id": {
+          "type": "string",
+          "required": true
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "campaign_id": {
+          "type": "string"
+        },
+        "event_type": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "to": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "page": {
+          "type": "integer",
+          "default": 1
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/escalations",
+      "description": "List escalation alerts",
+      "query_params": {
+        "tenant_id": {
+          "type": "string",
+          "required": true
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "OPEN",
+            "RESOLVED",
+            "ALL"
+          ],
+          "default": "OPEN"
+        },
+        "page": {
+          "type": "integer",
+          "default": 1
+        },
+        "limit": {
+          "type": "integer",
+          "default": 20
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/escalations/{alert_id}/resolve",
+      "description": "Resolve escalation alert",
+      "body": {
+        "type": "object",
+        "required": [
+          "alert_id",
+          "operator_id",
+          "tenant_id"
+        ],
+        "properties": {
+          "alert_id": {
+            "type": "string"
+          },
+          "operator_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "resolution_notes": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/nps",
+      "description": "Get NPS metrics",
+      "query_params": {
+        "tenant_id": {
+          "type": "string",
+          "required": true
+        },
+        "campaign_id": {
+          "type": "string"
+        },
+        "from": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "to": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/nps",
+      "description": "Submit NPS rating (from Telegram flow)",
+      "body": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "tenant_id",
+          "score"
+        ],
+        "properties": {
+          "session_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10
+          },
+          "comment": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ],
+  "response": {
+    "200": {
+      "description": "Success (read operations)"
+    },
+    "201": {
+      "description": "Created (NPS submission)"
+    },
+    "401": {
+      "error": {
+        "code": "UNAUTHORIZED",
+        "message": "Invalid or expired JWT"
+      }
+    },
+    "403": {
+      "error": {
+        "code": "FORBIDDEN",
+        "message": "Insufficient permissions for tenant"
+      }
+    },
+    "404": {
+      "error": {
+        "code": "NOT_FOUND",
+        "message": "Resource not found"
+      }
+    }
+  },
+  "error_handling": {
+    "read_only": "All GET operations are read-only; no side effects",
+    "nps_submission": "NPS submissions trigger audit event recording"
+  },
+  "request": {
+    "description": "Multiple endpoints with different request shapes; see endpoints array for details",
+    "auth_header": "Authorization: Bearer <JWT>",
+    "correlation_id_required": true
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "consent_id": "consent_001_happy_path",
+  "tenant_id": "tenant_001_demo",
+  "session_id": "sess_001_happy_path",
+  "campaign_id": "camp_001_swe_q2_2025",
+  "telegram_user_id_hash": "hash_abc123def456",
+  "consent_given": true,
+  "disclosure_version": "privacy_notice_v1",
+  "recorded_at": "2025-05-20T14:02:05Z",
+  "source": "telegram",
+  "write_once": true
+}

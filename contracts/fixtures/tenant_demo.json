@@ -1,0 +1,16 @@
+{
+  "tenant_id": "tenant_001_demo",
+  "name": "Demo Recruitment Agency",
+  "created_at": "2025-01-15T09:00:00Z",
+  "settings": {
+    "default_retention_days": 90,
+    "timezone": "America/Mexico_City",
+    "language": "es-MX",
+    "nps_enabled": true
+  },
+  "subscription": {
+    "plan": "mvp_trial",
+    "max_sessions_per_month": 1000,
+    "max_campaigns": 5
+  }
+}
