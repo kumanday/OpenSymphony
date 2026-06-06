@@ -21,3 +21,18 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: install
+        run: npm install
+      - name: build-schema
+        run: npm run build --workspace=@opensymphony/gateway-schema
+      - name: typecheck
+        run: npm run type-check
+      - name: jest
+        run: npx jest --config jest.config.js --testPathIgnorePatterns="apps"

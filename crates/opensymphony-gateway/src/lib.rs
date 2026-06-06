@@ -45,7 +45,8 @@ pub use crate::opensymphony_gateway_schema::{
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
     run::{
         ChangedFileEntry, DiffHunk, DiffLine, FileChangeKind, FileDiffPage, ReleaseReason,
-        RunAction, RunDetail, RunEvent, RunEventPage, RunFilesPage, RunLifecycleState, RunStatus,
+        RunAction, RunDetail, RunEvent, RunEventPage, RunFilesPage, RunLifecycleState, RunPhase,
+        RunStatus, SafeActions,
     },
     snapshot::{
         DashboardSnapshot, GatewayHealth, GatewayMetrics, ProjectDetail, ProjectIssueSummary,
@@ -1456,6 +1457,9 @@ async fn get_run_detail(
                     blocker: None,
                     error: Some("Run not found".into()),
                     allowed_actions: Vec::new(),
+                    liveness: None,
+                    diagnostics: None,
+                    safe_actions: SafeActions::default(),
                 }),
             );
         }
@@ -1537,6 +1541,9 @@ async fn get_run_detail(
             blocker: issue.blocked.then(|| "Blocked by dependency".into()),
             error: None,
             allowed_actions: Vec::new(),
+            liveness: None,
+            diagnostics: None,
+            safe_actions: SafeActions::default(),
         }),
     )
 }

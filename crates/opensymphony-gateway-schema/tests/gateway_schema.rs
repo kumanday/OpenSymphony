@@ -11,7 +11,11 @@ use opensymphony::opensymphony_gateway_schema::{
         PlanningWave, PublishedMilestone, PublishedTask, ReviewComment, TaskEntry,
         TaskPackageProjection, TurnRole,
     },
-    run::{ReleaseReason, RunDetail, RunEvent, RunEventPage, RunLifecycleState, RunStatus},
+    run::{
+        HarnessSchedulerDisagreement, ReleaseReason, RunDetail, RunEvent, RunEventPage,
+        RunLifecycleState, RunLivenessEnvelope, RunPhase, RunProgress, RunStatus,
+        RunStreamLiveness, SafeActions,
+    },
     snapshot::{
         DashboardSnapshot, GatewayHealth, GatewayMetrics, ProjectSummary, SnapshotEventKind,
         SnapshotEventSummary,
@@ -209,6 +213,9 @@ fn run_detail_roundtrips() {
         blocker: None,
         error: None,
         allowed_actions: vec![],
+        liveness: None,
+        diagnostics: None,
+        safe_actions: SafeActions::default(),
     };
     let json = must_serialize(&run);
     let back: RunDetail = must_deserialize(&json);
@@ -1067,4 +1074,104 @@ fn all_planning_types_compile_and_export() {
     let _ = TurnRole::User;
     let _ = TurnRole::Agent;
     let _ = TurnRole::System;
+}
+
+// ─── Long-running run liveness fixtures ────────────────────────────────────
+
+#[test]
+fn run_phase_roundtrips() {
+    let phases = [
+        RunPhase::Active,
+        RunPhase::Quiet,
+        RunPhase::Degraded,
+        RunPhase::Stalled,
+        RunPhase::RetryQueued,
+        RunPhase::Cancelled,
+        RunPhase::Detached,
+        RunPhase::Completed,
+    ];
+    for phase in phases {
+        let json = must_serialize(&phase);
+        let back: RunPhase = must_deserialize(&json);
+        assert_eq!(phase, back);
+    }
+}
+
+#[test]
+fn run_stream_liveness_roundtrips() {
+    let statuses = [
+        RunStreamLiveness::Healthy,
+        RunStreamLiveness::Stale,
+        RunStreamLiveness::Dead,
+    ];
+    for status in statuses {
+        let json = must_serialize(&status);
+        let back: RunStreamLiveness = must_deserialize(&json);
+        assert_eq!(status, back);
+    }
+}
+
+#[test]
+fn run_progress_roundtrips() {
+    let progress = RunProgress {
+        sequence: 42,
+        event_id: "evt-progress-42".into(),
+        happened_at: Utc::now(),
+        kind: "ConversationStateUpdateEvent".into(),
+        summary: "Turn 3 completing".into(),
+    };
+    let json = must_serialize(&progress);
+    let back: RunProgress = must_deserialize(&json);
+    assert_eq!(progress.sequence, back.sequence);
+    assert_eq!(progress.event_id, back.event_id);
+    assert_eq!(progress.kind, back.kind);
+}
+
+#[test]
+fn run_liveness_envelope_roundtrips() {
+    let envelope = RunLivenessEnvelope {
+        phase: RunPhase::Active,
+        stream: RunStreamLiveness::Healthy,
+        latest_progress: None,
+    };
+    let json = must_serialize(&envelope);
+    let back: RunLivenessEnvelope = must_deserialize(&json);
+    assert_eq!(envelope.phase, back.phase);
+    assert_eq!(envelope.stream, back.stream);
+}
+
+#[test]
+fn safe_actions_roundtrips() {
+    let actions = SafeActions {
+        retry: true,
+        cancel: false,
+        rehydrate: true,
+        detach: false,
+    };
+    let json = must_serialize(&actions);
+    let back: SafeActions = must_deserialize(&json);
+    assert_eq!(actions, back);
+}
+
+#[test]
+fn safe_actions_defaults_to_all_false() {
+    let actions = SafeActions::default();
+    assert!(!actions.retry);
+    assert!(!actions.cancel);
+    assert!(!actions.rehydrate);
+    assert!(!actions.detach);
+}
+
+#[test]
+fn harness_scheduler_disagreement_roundtrips() {
+    let diag = HarnessSchedulerDisagreement {
+        scheduler_status: RunStatus::RetryQueued,
+        harness_status: "running".into(),
+        detected_at: Utc::now(),
+        resolution_path: "cancel harness session, then retry".into(),
+    };
+    let json = must_serialize(&diag);
+    let back: HarnessSchedulerDisagreement = must_deserialize(&json);
+    assert_eq!(diag.scheduler_status, back.scheduler_status);
+    assert_eq!(diag.harness_status, back.harness_status);
 }

@@ -255,6 +255,87 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
+## Long-Running Run Operations
+
+### Harness/Scheduler Disagreement Diagnostics
+
+When the scheduler reports `retry_queued` but the harness session is still
+active, the gateway surfaces a `RunDiagnostics` block with a
+`HarnessSchedulerDisagreement` entry on the `RunDetail` payload. This section
+explains how operators should diagnose and recover from this state.
+
+#### Symptoms
+
+- **Dashboard shows**: run phase `stalled` or `active` with `stream: "stale"`,
+  while the scheduler simultaneously reports `status: "retry_queued"`.
+- **Safe actions**: `retry: true`, `cancel: true`, `rehydrate: true` — the
+  client presents all three as actionable controls.
+- **`RunLivenessState`** (client reducer): phase is `stalled` but
+  `reconnectAttempts` is non-zero and `lastProgressAt` is older than the
+  stall-probe deadline.
+
+#### Diagnosis Steps
+
+1. **Check the `RunDiagnostics.harness_scheduler_disagreement` field** on the
+   `RunDetail` payload. It contains:
+   - `scheduler_status`: the status the scheduler believes the run is in
+   - `harness_status`: the status reported by the harness adapter
+   - `detected_at`: when the disagreement was first detected
+   - `resolution_path`: the recommended recovery action
+
+2. **Verify the harness session is still active**:
+   ```bash
+   opensymphony run --status 2>&1 | grep -A5 "active\|running"
+   ```
+   Look for an active session with the same `issue_id` as the retry-queued run.
+
+3. **Check the orchestrator logs** for the specific issue ID:
+   ```bash
+   # If using managed local OpenHands:
+   tail -f /path/to/.opensymphony/logs/orchestrator.log | grep "COE-XXX"
+   ```
+   Look for `waiting_on_prior_turn` events or retry enqueue messages.
+
+4. **Confirm no duplicate harness sessions** exist for the same issue:
+   ```bash
+   opensymphony run --list 2>&1
+   ```
+   Multiple active sessions for one issue indicate a scheduling race.
+
+#### Resolution Paths
+
+| Scenario | Recommended Action | Effect |
+|:---------|:-------------------|:-------|
+| Harness active, scheduler retry_queued | **Cancel** the retry-queued scheduler entry via `opensymphony run --cancel <issue-id>` | Scheduler drops its retry; harness continues normally |
+| Harness stalled, scheduler retry_queued | **Rehydrate** the harness session via `opensymphony rehydrate <issue-id> --reason "stall recovery"` | New harness session picks up from last progress; scheduler retry is consumed |
+| Both harness and scheduler active with different turns | **Wait** — this is a transient state during turn handoff | Scheduler will reconcile once the harness reports terminal |
+| Harness dead, scheduler retry_queued | **Retry** via `safe_actions.retry` in client UI | Scheduler restarts the harness from the last snapshot |
+
+#### Client Behavior Expectations
+
+The rich client should render this disagreement as a **normal operational
+state**, not as an error by default. The `RunDiagnostics` block informs the
+UI's safe-action set but does not block user interaction.
+
+- **Phase display**: show the harness-reported phase (`stalled`, `active`,
+  `degraded`) with a visual indicator when diagnostics are present.
+- **Safe actions**: enable `retry`, `cancel`, and `rehydrate` based on the
+  `computeSafeActions` matrix (see `packages/state/src/index.ts`).
+- **Progress events**: the client's `RunProgress` journal continues to accept
+  replay events even during disagreement states.
+
+#### Prevention
+
+- Ensure the orchestrator's `retry_backoff` setting is configured to allow
+  sufficient time for the harness to complete its current turn before queuing
+  a retry.
+- Use `opensymphony run --watch <issue-id>` to monitor liveness probes during
+  long-running sessions.
+- Keep the harness adapter and scheduler in the same process group when
+  possible to reduce inter-process communication latency.
+
+## 10. Memory sync marker
+
 - COE-448 contributed: PR #100: COE-448: Add scoped memory server context (merge `fa22559`)
 
 ## Important invariants

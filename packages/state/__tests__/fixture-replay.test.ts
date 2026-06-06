@@ -697,7 +697,7 @@ describe("reconnect behavior", () => {
 // -- Degraded stream handling --
 
 describe("degraded stream handling", () => {
-  it("degraded health check transitions run to degraded phase", () => {
+  it("degraded health check transitions run to degraded phase with stale stream", () => {
     const baseTime = 1_700_000_000_000;
     let state = gatewayReducer(initialState, {
       type: "RUN_UPDATED",
@@ -720,7 +720,7 @@ describe("degraded stream handling", () => {
     });
 
     expect(state.run.liveness.get("run-1")?.phaseState).toBe("degraded");
-    expect(state.run.liveness.get("run-1")?.streamHealth).toBe("degraded");
+    expect(state.run.liveness.get("run-1")?.streamHealth).toBe("stale");
   });
 
   it("mock transport supports stream health diagnostics", async () => {

@@ -5,6 +5,7 @@ import {
   initialState,
   deriveRunPhaseState,
   computeLivenessState,
+  computeSafeActions,
   LIVENESS_THRESHOLDS,
 } from "@opensymphony/state";
 import type {
@@ -17,6 +18,9 @@ import type {
   GatewayEnvelope,
   ActionReceipt,
   RunEvent,
+  SafeActions,
+  RunPhase,
+  RunStreamLiveness,
 } from "@opensymphony/gateway-schema";
 
 /** Deterministic timestamp used by all test actions. */
@@ -899,5 +903,79 @@ describe("stream staleness vs failed run", () => {
     expect(liveness?.phaseState).toBe("completed");
     expect(liveness?.isStreamStale).toBe(false);
     expect(liveness?.streamHealth).toBe("healthy");
+  });
+});
+
+// -- computeSafeActions tests --
+
+describe("computeSafeActions", () => {
+  it("allows cancel only for active, healthy runs", () => {
+    const actions = computeSafeActions("active", "healthy");
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: true, rehydrate: false, detach: false });
+  });
+
+  it("allows cancel and rehydrate for active, stale runs", () => {
+    const actions = computeSafeActions("active", "stale");
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: true, rehydrate: true, detach: false });
+  });
+
+  it("allows detach only for active, dead runs", () => {
+    const actions = computeSafeActions("active", "dead");
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: false, rehydrate: false, detach: true });
+  });
+
+  it("allows retry, cancel, rehydrate for stalled, stale runs", () => {
+    const actions = computeSafeActions("stalled", "stale");
+    expect(actions).toEqual<SafeActions>({ retry: true, cancel: true, rehydrate: true, detach: false });
+  });
+
+  it("allows retry only for retry_queued runs", () => {
+    const actions = computeSafeActions("retry_queued", "healthy");
+    expect(actions).toEqual<SafeActions>({ retry: true, cancel: false, rehydrate: false, detach: false });
+  });
+
+  it("allows retry only for cancelled runs", () => {
+    const actions = computeSafeActions("cancelled", "dead");
+    expect(actions).toEqual<SafeActions>({ retry: true, cancel: false, rehydrate: false, detach: false });
+  });
+
+  it("allows cancel and rehydrate for degraded, stale runs", () => {
+    const actions = computeSafeActions("degraded", "stale");
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: true, rehydrate: true, detach: false });
+  });
+
+  it("allows cancel only for quiet, healthy runs", () => {
+    const actions = computeSafeActions("quiet", "healthy");
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: true, rehydrate: false, detach: false });
+  });
+
+  it("allows rehydrate only for detached, stale runs", () => {
+    const actions = computeSafeActions("detached", "stale");
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: false, rehydrate: true, detach: false });
+  });
+
+  it("allows retry and rehydrate for detached, dead runs", () => {
+    const actions = computeSafeActions("detached", "dead");
+    expect(actions).toEqual<SafeActions>({ retry: true, cancel: false, rehydrate: true, detach: false });
+  });
+
+  it("allows detach only for quiet, dead runs", () => {
+    const actions = computeSafeActions("quiet", "dead");
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: false, rehydrate: false, detach: true });
+  });
+
+  it("allows retry for stalled, healthy runs", () => {
+    const actions = computeSafeActions("stalled", "healthy");
+    expect(actions).toEqual<SafeActions>({ retry: true, cancel: true, rehydrate: false, detach: false });
+  });
+
+  it("returns safe defaults for unknown phase states", () => {
+    const actions = computeSafeActions("unknown" as RunPhase, "healthy");
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: false, rehydrate: false, detach: false });
+  });
+
+  it("returns safe defaults for unknown stream health", () => {
+    const actions = computeSafeActions("active", "unknown" as RunStreamLiveness);
+    expect(actions).toEqual<SafeActions>({ retry: false, cancel: false, rehydrate: false, detach: false });
   });
 });

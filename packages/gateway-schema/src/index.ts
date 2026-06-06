@@ -17,7 +17,7 @@ export type { GatewayHealth, GatewayMetrics, ProjectSummary, SnapshotEventKind, 
 export type { TaskGraphNodeKind, TaskGraphStateCategory, TaskGraphNode, TaskGraphSnapshot } from "./task_graph.js";
 
 // run
-export type { RunStatus, ReleaseReason, RunDetail, RunEventPage, RunEvent } from "./run.js";
+export type { RunStatus, ReleaseReason, RunPhase, RunStreamLiveness, RunProgress, RunLivenessEnvelope, HarnessSchedulerDisagreement, RunDiagnostics, SafeActions, RunDetail, RunEventPage, RunEvent } from "./run.js";
 
 // terminal
 export type { TerminalFrameKind, TerminalEncoding, TerminalFrame, TerminalSnapshot } from "./terminal.js";

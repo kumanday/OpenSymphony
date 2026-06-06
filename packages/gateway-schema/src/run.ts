@@ -15,6 +15,57 @@ export type ReleaseReason =
   | "cancelled"
   | "retry_exhausted";
 
+/** Operational phase observed by the client for a long-running run. */
+export type RunPhase =
+  | "active"
+  | "quiet"
+  | "degraded"
+  | "stalled"
+  | "retry_queued"
+  | "cancelled"
+  | "detached"
+  | "completed";
+
+/** Stream-level liveness classification. */
+export type RunStreamLiveness = "healthy" | "stale" | "dead";
+
+/** Progress event emitted during a long-running run. */
+export interface RunProgress {
+  sequence: number;
+  event_id: string;
+  happened_at: string;
+  kind: string;
+  summary: string;
+}
+
+/** Compact snapshot of the current run liveness surface. */
+export interface RunLivenessEnvelope {
+  phase: RunPhase;
+  stream: RunStreamLiveness;
+  latest_progress?: RunProgress | null;
+}
+
+/** Details of a harness/scheduler disagreement. */
+export interface HarnessSchedulerDisagreement {
+  scheduler_status: RunStatus;
+  harness_status: string;
+  detected_at: string;
+  resolution_path: string;
+}
+
+/** Diagnostic hints surfaced when multiple subsystems disagree. */
+export interface RunDiagnostics {
+  harness_scheduler_disagreement?: HarnessSchedulerDisagreement | null;
+}
+
+/** Actions the client may safely invoke in the current run state. */
+export interface SafeActions {
+  retry: boolean;
+  cancel: boolean;
+  rehydrate: boolean;
+  detach: boolean;
+}
+
 /** Run detail exposed by the gateway. */
 export interface RunDetail {
   schema_version: SchemaVersion;
@@ -37,6 +88,12 @@ export interface RunDetail {
   conversation_id?: string;
   workspace_path?: string;
   error?: string;
+  /** Liveness envelope describing the phase, stream health, and latest progress. */
+  liveness?: RunLivenessEnvelope | null;
+  /** Diagnostic hints surfaced when multiple subsystems disagree. */
+  diagnostics?: RunDiagnostics | null;
+  /** Actions the client may safely invoke in the current state. */
+  safe_actions?: SafeActions | null;
 }
 
 /** Paged run events. */

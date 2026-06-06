@@ -59,6 +59,15 @@ pub struct RunDetail {
     /// Actions the client may perform on this run.
     #[serde(default)]
     pub allowed_actions: Vec<RunAction>,
+    /// Liveness envelope describing the phase, stream health, and latest progress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<RunLivenessEnvelope>,
+    /// Diagnostic hints surfaced when multiple subsystems disagree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<RunDiagnostics>,
+    /// Actions the client may safely invoke in the current state.
+    #[serde(default)]
+    pub safe_actions: SafeActions,
 }
 
 /// Action a client may dispatch on a run.
@@ -70,6 +79,79 @@ pub enum RunAction {
     Pause,
     Resume,
     Rehydrate,
+    Detach,
+}
+
+/// Operational phase observed by the client for a long-running run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunPhase {
+    Active,
+    Quiet,
+    Degraded,
+    Stalled,
+    RetryQueued,
+    Cancelled,
+    Detached,
+    Completed,
+}
+
+/// Stream-level liveness classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStreamLiveness {
+    Healthy,
+    Stale,
+    Dead,
+}
+
+/// Compact snapshot of the current run liveness surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunLivenessEnvelope {
+    pub phase: RunPhase,
+    pub stream: RunStreamLiveness,
+    pub latest_progress: Option<RunProgress>,
+}
+
+/// Progress event emitted during a long-running run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunProgress {
+    pub sequence: u64,
+    pub event_id: String,
+    pub happened_at: DateTime<Utc>,
+    pub kind: String,
+    pub summary: String,
+}
+
+/// Diagnostic hints for operator-facing tooling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunDiagnostics {
+    /// True when the scheduler reports retry queued but the harness session
+    /// still appears active for the same issue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_scheduler_disagreement: Option<HarnessSchedulerDisagreement>,
+}
+
+/// Details of a harness/scheduler disagreement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessSchedulerDisagreement {
+    pub scheduler_status: RunStatus,
+    pub harness_status: String,
+    pub detected_at: DateTime<Utc>,
+    pub resolution_path: String,
+}
+
+/// Actions the client may safely invoke in the current run state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafeActions {
+    #[serde(default)]
+    pub retry: bool,
+    #[serde(default)]
+    pub cancel: bool,
+    #[serde(default)]
+    pub rehydrate: bool,
+    #[serde(default)]
+    pub detach: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
