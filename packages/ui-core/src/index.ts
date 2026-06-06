@@ -1,10 +1,8 @@
 /**
  * Shared UI core module.
  *
- * This package is a placeholder for shared UI utilities and type
- * definitions that both desktop and web shells will consume. The
- * actual component framework (React, Svelte, etc.) will be added
- * in a future ticket.
+ * Provides terminal rendering utilities, scrollback buffer management,
+ * and benchmark harness for high-throughput terminal/log output.
  */
 
 import type {
@@ -13,6 +11,9 @@ import type {
   RunDetail,
   TerminalFrame,
 } from "@opensymphony/gateway-schema";
+
+// Terminal renderer module
+export * from "./terminal-renderer/index.js";
 
 export interface UiTheme {
   mode: "light" | "dark";
