@@ -4,3 +4,4 @@
 //! Each command uses narrow request and response types to limit attack surface.
 
 pub mod commands;
+pub mod daemon;

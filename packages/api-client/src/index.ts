@@ -20,6 +20,16 @@ import type {
 
 export { HttpGatewayTransport } from "./transports.js";
 export { MockGatewayTransport } from "./mock.js";
+export {
+  discoverGateway,
+  discoverGatewayWithFallback,
+  probeHealth,
+  probeCapabilities,
+  validateGateway,
+  DEFAULT_GATEWAY_URL,
+  MIN_COMPATIBLE_API_VERSION,
+} from "./discovery.js";
+export type { DiscoveryResult } from "./discovery.js";
 
 /** Transport adapter interface for all gateway communication. */
 export interface GatewayTransport {

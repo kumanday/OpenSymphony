@@ -70,10 +70,12 @@ function makeTaskGraphSnapshot(seq: number): TaskGraphSnapshot {
     generated_at: "2025-01-01T00:00:00Z",
     nodes: [
       {
+        schema_version: { major: 1, minor: 0, patch: 0 },
         node_id: "COE-390",
         identifier: "COE-390",
         kind: "issue" as const,
         title: "Gateway schemas",
+        state: "Done",
         state_category: "done" as const,
         children: [],
         blocked_by: [],

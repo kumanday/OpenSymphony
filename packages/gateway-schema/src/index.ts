@@ -37,6 +37,22 @@ export type { ActionKind, ActionTarget, ActionDispatch } from "./action.js";
 // transport
 export type { TransportProfile, TransportRecommendation } from "./transport.js";
 
+// profile
+export type {
+  ConnectionProfile,
+  ConnectionProfileBase,
+  ConnectionProfileKind,
+  LocalDaemonProfile,
+  SupervisedLocalDaemonProfile,
+  EmbeddedHostProfile,
+  ExternalGatewayProfile,
+  HostedGatewayProfile,
+} from "./profile.js";
+export {
+  defaultProfiles,
+  createProfile,
+} from "./profile.js";
+
 // validation
 export {
   isValidSchemaVersion,
