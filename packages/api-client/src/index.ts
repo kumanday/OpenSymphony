@@ -18,7 +18,13 @@ import type {
   PageCursor,
 } from "@opensymphony/gateway-schema";
 
-export { HttpGatewayTransport } from "./transports.js";
+export {
+  HttpGatewayTransport,
+  WebSocketTransport,
+  TauriChannelTransport,
+  TransportFactory,
+} from "./transports.js";
+export type { TauriChannel, TauriRuntime } from "./transports.js";
 export { MockGatewayTransport } from "./mock.js";
 export {
   discoverGateway,

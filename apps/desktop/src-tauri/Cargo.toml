@@ -13,8 +13,10 @@ rust-version = "1.93"
 tauri-build = { version = "2" }
 
 [dependencies]
+chrono = { version = "0.4", features = ["clock", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
 thiserror = "2"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
@@ -23,7 +25,6 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-clipboard-manager = "2"
 directories = "5"
-url = "2"
 urlencoding = "2"
 dirs = "6"
 keyring = "3"

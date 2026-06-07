@@ -24,7 +24,7 @@ export interface DiscoveryResult {
 }
 
 /** Default gateway URL to probe for local discovery. */
-export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:8080";
+export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:8000";
 
 /** Minimum compatible API version. */
 export const MIN_COMPATIBLE_API_VERSION = "v1";
@@ -147,7 +147,7 @@ export async function validateGateway(baseUrl: string): Promise<boolean> {
  * Tries each URL in order until one responds with a healthy, compatible gateway.
  */
 export async function discoverGatewayWithFallback(
-  urls: string[] = [DEFAULT_GATEWAY_URL, "http://localhost:8080"],
+  urls: string[] = [DEFAULT_GATEWAY_URL, "http://localhost:8000"],
 ): Promise<DiscoveryResult> {
   for (const url of urls) {
     const result = await discoverGateway(url);

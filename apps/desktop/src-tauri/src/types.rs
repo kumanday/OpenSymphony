@@ -16,6 +16,9 @@ pub enum DesktopError {
     /// Daemon executable path validation failed with a specific reason.
     #[error("daemon path error ({kind}): {detail}")]
     DaemonPath { kind: String, detail: String },
+    /// Gateway command failed.
+    #[error("gateway error: {message}")]
+    Gateway { message: String },
     /// Generic internal error with a human-readable message.
     #[error("internal error: {message}")]
     Internal { message: String },

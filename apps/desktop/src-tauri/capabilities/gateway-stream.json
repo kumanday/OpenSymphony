@@ -1,0 +1,11 @@
+{
+  "identifier": "gateway-stream",
+  "description": "Permissions for the gateway local stream transport (COE-410)",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:webview:allow-create-webview-window",
+    "core:window:default"
+  ]
+}

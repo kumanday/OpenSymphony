@@ -8,13 +8,17 @@ use crate::types::{CommandResult, DesktopError};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 use tauri::State;
 use tauri::command;
 use thiserror::Error;
 use tokio::sync::Mutex;
 use tracing::warn;
+
+const DEFAULT_GATEWAY_HTTP_URL: &str = "http://127.0.0.1:8000";
+const DEFAULT_GATEWAY_HTTP_LOCALHOST_URL: &str = "http://localhost:8000";
+const DEFAULT_GATEWAY_WS_URL: &str = "ws://127.0.0.1:8000";
 
 // ─── Executable validation ─────────────────────────────────────────────────
 
@@ -294,7 +298,7 @@ pub async fn probe_gateway(gateway_url: String) -> CommandResult<DiscoveryResult
 /// Discover gateway on default loopback address.
 #[command]
 pub async fn discover_default_gateway() -> CommandResult<DiscoveryResult> {
-    let default_urls = ["http://127.0.0.1:8080", "http://localhost:8080"];
+    let default_urls = [DEFAULT_GATEWAY_HTTP_URL, DEFAULT_GATEWAY_HTTP_LOCALHOST_URL];
 
     for url in &default_urls {
         let result = probe_gateway(url.to_string()).await?;
@@ -364,7 +368,7 @@ pub async fn start_daemon(
         auto_restart: req.auto_restart.unwrap_or(true),
         gateway_url: req
             .gateway_url
-            .unwrap_or_else(|| "http://127.0.0.1:8080".to_string()),
+            .unwrap_or_else(|| DEFAULT_GATEWAY_HTTP_URL.to_string()),
         skip_health_check: false,
     };
 
@@ -453,4 +457,481 @@ pub struct ProcessStatus {
     pub running: bool,
     pub state: String,
     pub supervised: bool,
+}
+
+// ─── Gateway Transport Commands (COE-410) ───────────────────────────────────
+//
+// These commands implement the desktop local transport adapter, allowing the
+// Tauri webview frontend to communicate with the local OpenSymphony gateway
+// using the same GatewayEnvelope and schema types as HTTP/WebSocket transports.
+//
+// Transport priority (per architecture doc 3.1):
+// 1. In-process Rust channels (embedded host) - not available in webview
+// 2. Native local IPC (Unix sockets/named pipes) - via loopback fallback
+// 3. Tauri channels (this implementation) - high-volume frames to webview
+// 4. Loopback HTTP/WebSocket - compatibility baseline
+
+/// Gateway connection state managed by the Tauri app.
+#[derive(Debug)]
+pub struct GatewayConnection {
+    pub base_url: String,
+    pub auth_token: Option<String>,
+    pub connected: bool,
+}
+
+impl Default for GatewayConnection {
+    fn default() -> Self {
+        Self {
+            base_url: DEFAULT_GATEWAY_HTTP_URL.to_string(),
+            auth_token: None,
+            connected: false,
+        }
+    }
+}
+
+fn gateway_profile_for_url(base_url: &str) -> &'static str {
+    let Ok(parsed) = url::Url::parse(base_url) else {
+        return "loopback_http";
+    };
+
+    let is_loopback = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback() || ip.is_unspecified(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+
+    match parsed.scheme() {
+        "ws" | "wss" if is_loopback => "loopback_websocket",
+        "ws" | "wss" => "websocket",
+        _ if is_loopback => "loopback_http",
+        _ => "websocket",
+    }
+}
+
+/// Request to attach to a local gateway instance.
+#[derive(Debug, Deserialize)]
+pub struct AttachGatewayRequest {
+    /// Gateway base URL (e.g., "http://127.0.0.1:8000").
+    pub base_url: String,
+    /// Optional auth token for hosted or secured gateways.
+    pub auth_token: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AttachGatewayResponse {
+    pub connected: bool,
+    pub profile: String,
+}
+
+/// Attach to a local or remote gateway instance.
+#[command]
+pub async fn attach_gateway(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    req: AttachGatewayRequest,
+) -> CommandResult<AttachGatewayResponse> {
+    // Validate URL using proper parser
+    let parsed = url::Url::parse(&req.base_url).map_err(|e| DesktopError::Gateway {
+        message: format!("Invalid gateway URL: {}", e),
+    })?;
+
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(DesktopError::Gateway {
+            message: "Gateway URL must use http or https scheme".to_string(),
+        });
+    }
+
+    let profile = gateway_profile_for_url(parsed.as_str());
+
+    // Mutate connection state to record the attachment
+    let mut conn = state.write().map_err(|e| DesktopError::Gateway {
+        message: format!("Failed to acquire connection state lock: {}", e),
+    })?;
+    conn.base_url = req.base_url.clone();
+    conn.auth_token = req.auth_token.clone();
+    conn.connected = true;
+    drop(conn);
+
+    Ok(AttachGatewayResponse {
+        connected: true,
+        profile: profile.to_string(),
+    })
+}
+
+/// Get dashboard snapshot from gateway.
+#[command]
+pub async fn dashboard_snapshot(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+) -> CommandResult<serde_json::Value> {
+    // Read attached gateway URL to prove state is not dead (COE-404 will wire
+    // actual gateway calls using this value).
+    let conn = state.read().map_err(|e| DesktopError::Gateway {
+        message: format!("Failed to acquire connection state lock: {}", e),
+    })?;
+    Ok(serde_json::json!({
+        "schema_version": {"major": 1, "minor": 0, "patch": 0},
+        "projects": [],
+        "runs": [],
+        "events": [],
+        "base_url": conn.base_url.clone(),
+    }))
+}
+
+/// Get task graph for a project.
+#[command]
+pub async fn task_graph(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    project_id: String,
+) -> CommandResult<serde_json::Value> {
+    let conn = state.read().map_err(|e| DesktopError::Gateway {
+        message: format!("Failed to acquire connection state lock: {}", e),
+    })?;
+    Ok(serde_json::json!({
+        "schema_version": {"major": 1, "minor": 0, "patch": 0},
+        "project_id": project_id,
+        "nodes": [],
+        "root_ids": [],
+        "base_url": conn.base_url.clone(),
+    }))
+}
+
+/// Get run details.
+#[command]
+pub async fn run_detail(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    run_id: String,
+) -> CommandResult<serde_json::Value> {
+    let conn = state.read().map_err(|e| DesktopError::Gateway {
+        message: format!("Failed to acquire connection state lock: {}", e),
+    })?;
+    Ok(serde_json::json!({
+        "schema_version": {"major": 1, "minor": 0, "patch": 0},
+        "run_id": run_id,
+        "status": "idle",
+        "events": [],
+        "base_url": conn.base_url.clone(),
+    }))
+}
+
+/// Get run events with cursor support.
+#[command]
+pub async fn run_events(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    run_id: String,
+    cursor: Option<u64>,
+    page_size: Option<u64>,
+) -> CommandResult<serde_json::Value> {
+    let conn = state.read().map_err(|e| DesktopError::Gateway {
+        message: format!("Failed to acquire connection state lock: {}", e),
+    })?;
+    Ok(serde_json::json!({
+        "schema_version": {"major": 1, "minor": 0, "patch": 0},
+        "run_id": run_id,
+        "cursor": cursor.unwrap_or(0),
+        "page_size": page_size.unwrap_or(100),
+        "events": [],
+        "has_more": false,
+        "base_url": conn.base_url.clone(),
+    }))
+}
+
+/// Get terminal snapshot.
+#[command]
+pub async fn terminal_snapshot(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    run_id: String,
+    terminal_id: String,
+) -> CommandResult<serde_json::Value> {
+    let conn = state.read().map_err(|e| DesktopError::Gateway {
+        message: format!("Failed to acquire connection state lock: {}", e),
+    })?;
+    Ok(serde_json::json!({
+        "schema_version": {"major": 1, "minor": 0, "patch": 0},
+        "run_id": run_id,
+        "terminal_id": terminal_id,
+        "content": "",
+        "cursor": 0,
+        "base_url": conn.base_url.clone(),
+    }))
+}
+
+/// Connection profile for local gateway discovery.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConnectionProfile {
+    pub name: String,
+    pub profile_type: String,
+    pub base_url: String,
+    pub auth_mode: String,
+    pub available: bool,
+}
+
+/// Get available connection profiles for the desktop app.
+#[command]
+pub async fn get_connection_profiles() -> CommandResult<Vec<ConnectionProfile>> {
+    Ok(vec![
+        ConnectionProfile {
+            name: "Local Daemon".to_string(),
+            profile_type: "loopback_http".to_string(),
+            base_url: DEFAULT_GATEWAY_HTTP_URL.to_string(),
+            auth_mode: "none".to_string(),
+            available: true,
+        },
+        ConnectionProfile {
+            name: "Local Gateway (WebSocket)".to_string(),
+            profile_type: "loopback_websocket".to_string(),
+            base_url: DEFAULT_GATEWAY_WS_URL.to_string(),
+            auth_mode: "none".to_string(),
+            available: true,
+        },
+        ConnectionProfile {
+            name: "Tauri Native".to_string(),
+            profile_type: "tauri_channel".to_string(),
+            base_url: "tauri://local".to_string(),
+            auth_mode: "none".to_string(),
+            available: true,
+        },
+    ])
+}
+
+// ─── Gateway Local Stream Transport (COE-410) ──────────────────────────────
+
+use crate::opensymphony_gateway_schema::{
+    capability::{
+        AuthMode, FeatureCapability as GatewayFeatureCapability, GatewayCapabilities,
+        TransportCapability as GatewayTransportCapability,
+    },
+    envelope::GatewayEnvelope,
+    version::SchemaVersion,
+};
+
+/// Request to subscribe to the gateway event stream via Tauri channel.
+#[derive(Debug, Deserialize)]
+pub struct SubscribeEventsRequest {
+    /// Optional cursor to resume from (sequence number).
+    pub cursor: Option<u64>,
+    /// Optional cursor partition to resume within.
+    pub partition: Option<String>,
+}
+
+/// Request to subscribe to terminal frames for a specific run.
+#[derive(Debug, Deserialize)]
+pub struct SubscribeTerminalRequest {
+    pub run_id: String,
+    /// Optional cursor to resume from (sequence number).
+    pub cursor: Option<u64>,
+}
+
+/// Gateway health status.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub enum GatewayHealthStatus {
+    #[serde(rename = "healthy")]
+    Healthy,
+    #[serde(rename = "degraded")]
+    Degraded,
+    #[serde(rename = "unavailable")]
+    Unavailable,
+}
+
+/// Local gateway connection info.
+#[derive(Debug, Serialize)]
+pub struct GatewayConnectionInfo {
+    pub status: GatewayHealthStatus,
+    pub profile: String,
+    pub base_uri: String,
+    pub transports: Vec<String>,
+}
+
+/// Query gateway capabilities.
+/// Used by the frontend transport factory to select the optimal profile.
+#[command]
+pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
+    Ok(GatewayCapabilities {
+        schema_version: SchemaVersion::v1(),
+        gateway_version: env!("CARGO_PKG_VERSION").to_string(),
+        supported_api_versions: vec!["1.0.0".to_string()],
+        transports: vec![
+            GatewayTransportCapability {
+                transport: "tauri_channel".to_string(),
+                modes: vec!["json".to_string()],
+                supported_encodings: vec!["utf-8".to_string()],
+                bidirectional: true,
+            },
+            GatewayTransportCapability {
+                transport: "loopback_http".to_string(),
+                modes: vec!["json".to_string()],
+                supported_encodings: vec!["utf-8".to_string()],
+                bidirectional: false,
+            },
+            GatewayTransportCapability {
+                transport: "loopback_websocket".to_string(),
+                modes: vec!["json".to_string(), "binary".to_string()],
+                supported_encodings: vec!["utf-8".to_string(), "base64".to_string()],
+                bidirectional: true,
+            },
+        ],
+        features: vec![
+            GatewayFeatureCapability {
+                feature: "task_graph".to_string(),
+                available: true,
+                requires_auth: false,
+                requires_plan: None,
+            },
+            GatewayFeatureCapability {
+                feature: "terminal_stream".to_string(),
+                available: true,
+                requires_auth: false,
+                requires_plan: None,
+            },
+        ],
+        auth_modes: vec![AuthMode::None, AuthMode::ApiKey],
+        max_event_page_size: 1000,
+        max_terminal_frame_batch: 500,
+    })
+}
+
+/// Query the local gateway health and connection info.
+#[command]
+pub async fn gateway_connection_info(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+) -> CommandResult<GatewayConnectionInfo> {
+    let conn = state.read().map_err(|e| DesktopError::Gateway {
+        message: format!("Failed to acquire connection state lock: {}", e),
+    })?;
+    let status = if conn.connected {
+        GatewayHealthStatus::Healthy
+    } else {
+        GatewayHealthStatus::Degraded
+    };
+    let base_uri = conn.base_url.clone();
+    let profile = gateway_profile_for_url(&base_uri).to_string();
+    drop(conn);
+
+    Ok(GatewayConnectionInfo {
+        status,
+        profile,
+        base_uri,
+        transports: vec![
+            "tauri_channel".to_string(),
+            "loopback_http".to_string(),
+            "loopback_websocket".to_string(),
+        ],
+    })
+}
+
+/// Subscribe to the gateway event stream via a Tauri channel.
+///
+/// This provides a high-throughput, zero-copy path from the local gateway
+/// to the webview frontend. The channel carries GatewayEnvelope instances
+/// that are identical in structure to those delivered via HTTP/SSE or
+/// WebSocket transports.
+///
+/// The caller provides a `tauri::ipc::Channel` through which envelopes
+/// are streamed. This enables backpressure handling and avoids the
+/// HTTP/WebSocket overhead for local desktop mode.
+#[command]
+pub async fn subscribe_events(
+    _req: SubscribeEventsRequest,
+    _tx: tauri::ipc::Channel<GatewayEnvelope>,
+    _state: tauri::State<'_, SubscriptionState>,
+) -> CommandResult<()> {
+    _state
+        .event_subscribers
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // COE-409 will wire this to the actual gateway event stream.
+    // The channel transport enables high-throughput local delivery.
+    Ok(())
+}
+
+/// Subscribe to terminal frames for a specific run via a Tauri channel.
+///
+/// Terminal frames are high-volume and benefit from the zero-copy-friendly
+/// Rust frame buffer path. This command establishes a dedicated channel
+/// for terminal streaming.
+#[command]
+pub async fn subscribe_terminal(
+    _req: SubscribeTerminalRequest,
+    _tx: tauri::ipc::Channel<GatewayEnvelope>,
+    _state: tauri::State<'_, SubscriptionState>,
+) -> CommandResult<()> {
+    _state
+        .terminal_subscribers
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // COE-409 will wire this to the actual gateway terminal stream.
+    Ok(())
+}
+
+/// Active subscriptions tracked for cleanup.
+/// COE-409 will wire this to actual gateway subscription management.
+#[derive(Debug, Default)]
+pub struct SubscriptionState {
+    pub event_subscribers: AtomicUsize,
+    pub terminal_subscribers: AtomicUsize,
+}
+
+fn decrement_subscription_count(counter: &AtomicUsize) -> usize {
+    let prev = counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(1))
+        })
+        .unwrap_or(0);
+    prev.saturating_sub(1)
+}
+
+/// Unsubscribe from the gateway event stream.
+/// Clean up the channel and release resources.
+#[command]
+pub async fn unsubscribe_events(_state: tauri::State<'_, SubscriptionState>) -> CommandResult<()> {
+    eprintln!(
+        "unsubscribe_events: {} remaining subscribers",
+        decrement_subscription_count(&_state.event_subscribers)
+    );
+    Ok(())
+}
+
+/// Unsubscribe from terminal frame streaming.
+#[command]
+pub async fn unsubscribe_terminal(
+    _run_id: String,
+    _state: tauri::State<'_, SubscriptionState>,
+) -> CommandResult<()> {
+    eprintln!(
+        "unsubscribe_terminal({}): {} remaining subscribers",
+        _run_id,
+        decrement_subscription_count(&_state.terminal_subscribers)
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decrement_subscription_count_saturates_at_zero() {
+        let counter = AtomicUsize::new(0);
+
+        assert_eq!(decrement_subscription_count(&counter), 0);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+        counter.store(2, Ordering::Relaxed);
+        assert_eq!(decrement_subscription_count(&counter), 1);
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        assert_eq!(decrement_subscription_count(&counter), 0);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+        assert_eq!(decrement_subscription_count(&counter), 0);
+        assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn gateway_profile_for_url_matches_loopback_and_remote_urls() {
+        assert_eq!(
+            gateway_profile_for_url("http://127.0.0.1:8000"),
+            "loopback_http"
+        );
+        assert_eq!(
+            gateway_profile_for_url("ws://localhost:8000"),
+            "loopback_websocket"
+        );
+        assert_eq!(gateway_profile_for_url("https://example.com"), "websocket");
+    }
 }

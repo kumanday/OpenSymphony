@@ -19,4 +19,5 @@ export default {
   testPathIgnorePatterns: ["<rootDir>/target/", "/\\.venv/"],
   modulePathIgnorePatterns: ["<rootDir>/target/", "/\\.venv/"],
   transformIgnorePatterns: ["/node_modules/"],
+  setupFiles: ["<rootDir>/jest.setup.cjs"],
 };
