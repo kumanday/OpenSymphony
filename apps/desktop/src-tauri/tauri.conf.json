@@ -37,16 +37,5 @@
     "copyright": "OpenSymphony",
     "category": "DeveloperTool",
     "shortDescription": "OpenSymphony Desktop"
-  },
-  "plugins": {
-    "fs": {
-      "scope": [
-        "$HOME/.config/opensymphony/**"
-      ]
-    },
-    "opener": {
-      "https": true,
-      "http": true
-    }
   }
 }
