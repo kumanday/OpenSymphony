@@ -264,6 +264,7 @@ Notable removals:
 - COE-393: Event Journal And Stream Broker
 - COE-394: Frontend Workspace And Shared Schemas
 - COE-395: Planning Artifact Schema And Session Service
+- COE-396: Action Receipts And Initial Run Actions
 - COE-397: Gateway API Client, Transport Adapters, And Reducers
 - COE-398: Tauri Shell And Security Capabilities
 - COE-402: App Shell, Dashboard, Task Graph, And Run Views
@@ -320,6 +321,7 @@ Notable removals:
 - COE-393
 - COE-394
 - COE-395
+- COE-396
 - COE-397
 - COE-398
 - COE-402

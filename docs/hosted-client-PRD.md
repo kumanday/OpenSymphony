@@ -733,6 +733,7 @@ Candidate features:
 - COE-392: Task Graph, Run Detail, File, And Diff Read APIs
 - COE-393: Event Journal And Stream Broker
 - COE-395: Planning Artifact Schema And Session Service
+- COE-396: Action Receipts And Initial Run Actions
 - COE-397: Gateway API Client, Transport Adapters, And Reducers
 - COE-398: Tauri Shell And Security Capabilities
 - COE-399: Linear Read Coverage And Task Graph Cache
@@ -754,6 +755,7 @@ Candidate features:
 - COE-392
 - COE-393
 - COE-395
+- COE-396
 - COE-397
 - COE-398
 - COE-399

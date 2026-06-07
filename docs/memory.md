@@ -372,6 +372,7 @@ recovery. To archive from already captured memory without recapturing, use
 - COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
 - COE-387: Audit tracing spans and diagnostics for secret leakage
 - COE-393: Event Journal And Stream Broker
+- COE-396: Action Receipts And Initial Run Actions
 - COE-399: Linear Read Coverage And Task Graph Cache
 - COE-403: Terminal And Log Renderer Prototype
 - COE-410: Desktop Local Stream Optimization
@@ -417,6 +418,7 @@ recovery. To archive from already captured memory without recapturing, use
 - COE-386
 - COE-387
 - COE-393
+- COE-396
 - COE-399
 - COE-403
 - COE-410
