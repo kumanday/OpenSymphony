@@ -12,6 +12,7 @@ pub enum RunLifecycleState {
     Queued,
     Claimed,
     Running,
+    Paused,
     Releasing,
     Completed,
     Failed,
@@ -160,6 +161,7 @@ pub enum RunStatus {
     Unclaimed,
     Claimed,
     Running,
+    Paused,
     RetryQueued,
     Released,
 }

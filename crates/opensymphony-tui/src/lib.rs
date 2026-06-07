@@ -3333,6 +3333,7 @@ fn pad_to_width(mut value: String, width: usize) -> String {
 fn runtime_state_color(state: &ControlPlaneIssueRuntimeState) -> PackedRgba {
     match state {
         ControlPlaneIssueRuntimeState::Running => GREEN,
+        ControlPlaneIssueRuntimeState::Paused => BRIGHT_YELLOW,
         ControlPlaneIssueRuntimeState::Failed => RED,
         ControlPlaneIssueRuntimeState::Idle => YELLOW,
         ControlPlaneIssueRuntimeState::Completed => CYAN,
@@ -3846,6 +3847,7 @@ impl RuntimeStateLabel for ControlPlaneIssueRuntimeState {
         match self {
             ControlPlaneIssueRuntimeState::Idle => "idle",
             ControlPlaneIssueRuntimeState::Running => "running",
+            ControlPlaneIssueRuntimeState::Paused => "paused",
             ControlPlaneIssueRuntimeState::RetryQueued => "retry_queued",
             ControlPlaneIssueRuntimeState::Releasing => "releasing",
             ControlPlaneIssueRuntimeState::Completed => "completed",

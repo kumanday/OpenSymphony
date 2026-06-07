@@ -145,6 +145,7 @@ pub enum ControlPlaneFileChangeKind {
 pub enum ControlPlaneIssueRuntimeState {
     Idle,
     Running,
+    Paused,
     RetryQueued,
     Releasing,
     Completed,

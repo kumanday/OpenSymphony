@@ -26,6 +26,7 @@ axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 crossterm.workspace = true
+lru.workspace = true
 duckdb.workspace = true
 ftui.workspace = true
 futures-util.workspace = true
@@ -82,6 +83,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 crossterm = "0.29"
 duckdb = { version = "1.10502.0", features = ["bundled"] }
 ftui = { version = "0.2.1", features = ["crossterm"] }
+lru = "0.16"
 futures-util = "0.3"
 libc = "0.2"
 liquid = "0.26"

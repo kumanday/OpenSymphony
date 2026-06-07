@@ -15,6 +15,10 @@ use opensymphony::opensymphony_domain::{
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, control_plane_to_dashboard_snapshot,
 };
+use opensymphony::opensymphony_gateway_schema::action::{
+    ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
+};
+use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -1901,6 +1905,128 @@ async fn gateway_task_graph_queued_vs_eligible() {
         !blocked_overlay.queued,
         "Blocked Idle issue must not be queued (blocked overrides)"
     );
+
+    server_task.abort();
+}
+
+/// E2E evidence: POST /api/v1/actions/dispatch returns a receipt for a valid action
+/// and a 400 for a rejected one.
+#[tokio::test]
+async fn gateway_dispatches_action_and_returns_receipt() {
+    let store = SnapshotStore::new(fixture_snapshot(1));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/api/v1/actions/dispatch");
+
+    // Valid cancel action → accepted receipt
+    let dispatch = ActionDispatch {
+        schema_version: Default::default(),
+        correlation_id: "corr_001".to_string(),
+        action_kind: ActionKind::Cancel,
+        target_entity: ActionTarget {
+            entity_kind: EntityKind::Issue,
+            entity_id: "COE-255".to_string(),
+        },
+        payload: None,
+        idempotency_key: Some("idempotency_001".to_string()),
+    };
+    let response = client
+        .post(&url)
+        .json(&dispatch)
+        .send()
+        .await
+        .expect("POST /api/v1/actions/dispatch should respond");
+    assert_eq!(response.status(), 200);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Accepted);
+    assert_eq!(body.correlation_id, "corr_001");
+    assert!(
+        !body.action_id.is_empty(),
+        "action_id should be non-empty: {:?}",
+        body.action_id
+    );
+
+    // Duplicate idempotency key → rejected receipt
+    let response = client
+        .post(&url)
+        .json(&dispatch)
+        .send()
+        .await
+        .expect("POST /api/v1/actions/dispatch should respond");
+    assert_eq!(response.status(), 409);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Rejected);
+    assert!(
+        body.reason
+            .as_ref()
+            .expect("should not be None")
+            .contains("duplicate idempotency key"),
+        "rejected reason should mention duplicate idempotency key: {:?}",
+        body.reason
+    );
+
+    // Invalid retry action (already active) → rejected receipt
+    let dispatch_retry = ActionDispatch {
+        schema_version: Default::default(),
+        correlation_id: "corr_002".to_string(),
+        action_kind: ActionKind::Retry,
+        target_entity: ActionTarget {
+            entity_kind: EntityKind::Issue,
+            entity_id: "COE-255".to_string(),
+        },
+        payload: None,
+        idempotency_key: None,
+    };
+    let response = client
+        .post(&url)
+        .json(&dispatch_retry)
+        .send()
+        .await
+        .expect("POST /api/v1/actions/dispatch should respond");
+    assert_eq!(response.status(), 422);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Rejected);
+    assert!(
+        body.reason
+            .as_ref()
+            .expect("should not be None")
+            .contains("already active"),
+        "rejected reason should mention already active: {:?}",
+        body.reason
+    );
+
+    // Unknown issue → rejected receipt
+    let dispatch_unknown = ActionDispatch {
+        schema_version: Default::default(),
+        correlation_id: "corr_003".to_string(),
+        action_kind: ActionKind::Comment,
+        target_entity: ActionTarget {
+            entity_kind: EntityKind::Issue,
+            entity_id: "COE-999".to_string(),
+        },
+        payload: None,
+        idempotency_key: None,
+    };
+    let response = client
+        .post(&url)
+        .json(&dispatch_unknown)
+        .send()
+        .await
+        .expect("POST /api/v1/actions/dispatch should respond");
+    assert_eq!(response.status(), 404);
+    let body: ActionReceipt = response.json().await.expect("should not be None");
+    assert_eq!(body.status, ActionStatus::Rejected);
 
     server_task.abort();
 }

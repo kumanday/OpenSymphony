@@ -1,7 +1,7 @@
 use chrono::Utc;
 use opensymphony::opensymphony_gateway_schema::{
-    action::{ActionDispatch, ActionKind, ActionTarget},
-    approval::{ActionReceipt, ActionReceiptStatus, ApprovalKind, ApprovalRequest, ApprovalStatus},
+    action::{ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget},
+    approval::{ApprovalKind, ApprovalRequest, ApprovalStatus},
     capability::{AuthMode, FeatureCapability, GatewayCapabilities, TransportCapability},
     cursor::{PageCursor, StreamCursor},
     envelope::{EntityKind, EntityRef, GatewayEnvelope},
@@ -313,20 +313,13 @@ fn approval_request_roundtrips() {
 
 #[test]
 fn action_receipt_roundtrips() {
-    let receipt = ActionReceipt {
-        schema_version: SchemaVersion::v1(),
-        action_id: "act-1".into(),
-        correlation_id: "corr-1".into(),
-        status: ActionReceiptStatus::Accepted,
-        reason: None,
-        expected_events: vec!["snapshot_updated".into(), "run_started".into()],
-        result: Some(json!({"run_id": "run-1"})),
-        issued_at: Utc::now(),
-    };
+    let receipt =
+        ActionReceipt::accepted("act-1".to_string(), "corr-1".to_string(), ActionKind::Retry);
     let json = must_serialize(&receipt);
     let back: ActionReceipt = must_deserialize(&json);
-    assert_eq!(back.status, ActionReceiptStatus::Accepted);
-    assert_eq!(back.expected_events.len(), 2);
+    assert_eq!(back.status, ActionStatus::Accepted);
+    assert_eq!(back.correlation_id, "corr-1");
+    assert_eq!(back.action_id, "act-1");
 }
 
 #[test]
@@ -461,7 +454,7 @@ fn all_schema_modules_compile_and_export() {
     let _ = PlanningArtifactKind::MilestoneDraft;
     let _ = TransportProfile::WebSocket;
     let _ = AuthMode::BearerToken;
-    let _ = ActionReceiptStatus::Accepted;
+    let _ = ActionStatus::Accepted;
     let _ = SnapshotEventKind::WorkerStarted;
     let _ = TaskGraphStateCategory::InProgress;
     let _ = ReleaseReason::Completed;

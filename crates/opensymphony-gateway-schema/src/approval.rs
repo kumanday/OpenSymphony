@@ -40,24 +40,5 @@ pub enum ApprovalStatus {
     Cancelled,
 }
 
-/// Action receipt returned after a mutation is accepted or rejected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ActionReceipt {
-    pub schema_version: SchemaVersion,
-    pub action_id: String,
-    pub correlation_id: String,
-    pub status: ActionReceiptStatus,
-    pub reason: Option<String>,
-    pub expected_events: Vec<String>,
-    pub result: Option<serde_json::Value>,
-    pub issued_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionReceiptStatus {
-    Accepted,
-    Rejected,
-    Queued,
-    Completed,
-}
+// NOTE: ActionReceipt and ActionStatus are defined in the action module.
+// Use `opensymphony_gateway_schema::action::{ActionReceipt, ActionStatus}`.

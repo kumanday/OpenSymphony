@@ -218,6 +218,7 @@ fn map_worker_outcome(
 ) -> WorkerOutcome {
     match runtime_state {
         IssueRuntimeState::Running => WorkerOutcome::Running,
+        IssueRuntimeState::Paused => WorkerOutcome::Unknown,
         IssueRuntimeState::RetryQueued => match issue
             .last_worker_outcome
             .as_ref()

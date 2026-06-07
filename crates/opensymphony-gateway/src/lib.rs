@@ -19,7 +19,7 @@ use axum::{
     http::StatusCode,
     response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use tokio::{net::TcpListener, sync::broadcast};
 use tokio_util::io::ReaderStream;
@@ -29,6 +29,9 @@ use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
     event_journal::{EventPage, EventRecord, JournalError, StreamError},
 };
+
+pub mod action_handler;
+use action_handler::ActionHandler;
 
 pub use crate::opensymphony_control::SnapshotStore;
 pub use crate::opensymphony_domain::{
@@ -40,6 +43,10 @@ pub use crate::opensymphony_domain::{
     StreamBroker as DomainStreamBroker,
 };
 pub use crate::opensymphony_gateway_schema::{
+    action::{
+        ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget, ExpectedFollowup,
+        PermissionResult,
+    },
     capability::{AuthMode, FeatureCapability, GatewayCapabilities, TransportCapability},
     cursor::PageCursor,
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
@@ -187,6 +194,7 @@ pub struct GatewayState {
     pub journal: InMemoryEventJournal,
     pub broker: StreamBroker,
     pub web_assets_dir: Option<String>,
+    pub action_handler: ActionHandler,
 }
 
 impl axum::extract::FromRef<GatewayState> for SnapshotStore {
@@ -211,7 +219,7 @@ impl GatewayServer {
             InMemoryEventJournal::new(GATEWAY_JOURNAL_CAPACITY, GATEWAY_SUBSCRIBER_CAPACITY);
         Self {
             journal: journal.clone(),
-            broker: StreamBroker::new(journal),
+            broker: StreamBroker::new(journal.clone()),
             store,
             web_assets_dir: None,
         }
@@ -248,6 +256,7 @@ impl GatewayServer {
             journal: self.journal.clone(),
             broker: self.broker.clone(),
             web_assets_dir: self.web_assets_dir.clone(),
+            action_handler: ActionHandler::new(self.journal.clone()),
         };
         let mut router = Router::new()
             .route("/api/v1/capabilities", get(capabilities))
@@ -264,7 +273,8 @@ impl GatewayServer {
             .route("/api/v1/runs/{run_id}", get(get_run_detail))
             .route("/api/v1/runs/{run_id}/events", get(get_run_events))
             .route("/api/v1/runs/{run_id}/files", get(get_run_files))
-            .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs));
+            .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs))
+            .route("/api/v1/actions/dispatch", post(dispatch_action));
 
         if self.web_assets_dir.is_some() {
             router = router
@@ -404,6 +414,18 @@ fn build_capabilities() -> GatewayCapabilities {
                 requires_plan: None,
             },
             FeatureCapability {
+                feature: "action_dispatch".into(),
+                available: true,
+                requires_auth: false,
+                requires_plan: None,
+            },
+            FeatureCapability {
+                feature: "action_receipts".into(),
+                available: true,
+                requires_auth: false,
+                requires_plan: None,
+            },
+            FeatureCapability {
                 feature: "run_detail".into(),
                 available: true,
                 requires_auth: false,
@@ -483,6 +505,50 @@ async fn capabilities() -> Json<GatewayCapabilities> {
 async fn dashboard_snapshot(State(state): State<GatewayState>) -> Json<DashboardSnapshot> {
     let envelope = state.store.current().await;
     Json(control_plane_to_dashboard_snapshot(&envelope))
+}
+
+/// POST /api/v1/actions/dispatch
+///
+/// Validates the action against the current snapshot state, publishes an audit
+/// event to the journal, and returns a receipt so callers can correlate with
+/// follow-up events via the event stream.
+async fn dispatch_action(
+    State(state): State<GatewayState>,
+    Json(action): Json<ActionDispatch>,
+) -> impl IntoResponse {
+    let envelope = state.store.current().await;
+    let receipt = state.action_handler.dispatch(action, &envelope).await;
+
+    match receipt.status {
+        ActionStatus::Accepted => (StatusCode::OK, Json(receipt)),
+        ActionStatus::Rejected => {
+            let status = dispatch_rejection_status(&receipt);
+            (status, Json(receipt))
+        }
+    }
+}
+
+/// Map rejection reasons to granular HTTP status codes so API consumers can
+/// distinguish retryable vs. non-retryable failures without parsing the receipt.
+fn dispatch_rejection_status(receipt: &ActionReceipt) -> StatusCode {
+    let Some(ref reason) = receipt.reason else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let lower = reason.to_lowercase();
+    if lower.contains("permission denied") {
+        StatusCode::FORBIDDEN
+    } else if lower.contains("duplicate idempotency key") {
+        StatusCode::CONFLICT
+    } else if lower.contains("not found") {
+        StatusCode::NOT_FOUND
+    } else if lower.contains("already active")
+        || lower.contains("unsafe in state")
+        || lower.contains("only valid on")
+    {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else {
+        StatusCode::BAD_REQUEST
+    }
 }
 
 /// SSE journal event stream: `GET /api/v1/events`
@@ -1331,6 +1397,7 @@ fn map_runtime_state_to_graph_category(
     match state {
         ControlPlaneIssueRuntimeState::Idle => TaskGraphStateCategory::Todo,
         ControlPlaneIssueRuntimeState::Running => TaskGraphStateCategory::InProgress,
+        ControlPlaneIssueRuntimeState::Paused => TaskGraphStateCategory::InProgress,
         ControlPlaneIssueRuntimeState::RetryQueued => TaskGraphStateCategory::InProgress,
         ControlPlaneIssueRuntimeState::Releasing => TaskGraphStateCategory::InProgress,
         ControlPlaneIssueRuntimeState::Completed => TaskGraphStateCategory::Done,
@@ -1468,6 +1535,7 @@ async fn get_run_detail(
     let (status, lifecycle_state) = match issue.runtime_state {
         ControlPlaneIssueRuntimeState::Idle => (RunStatus::Unclaimed, RunLifecycleState::Eligible),
         ControlPlaneIssueRuntimeState::Running => (RunStatus::Running, RunLifecycleState::Running),
+        ControlPlaneIssueRuntimeState::Paused => (RunStatus::Paused, RunLifecycleState::Paused),
         ControlPlaneIssueRuntimeState::RetryQueued => {
             (RunStatus::RetryQueued, RunLifecycleState::Queued)
         }

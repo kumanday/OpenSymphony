@@ -1945,6 +1945,7 @@ dependencies = [
  "ftui",
  "futures-util",
  "liquid",
+ "lru",
  "reqwest",
  "reqwest-eventsource",
  "rustix 1.1.4",
