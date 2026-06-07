@@ -191,14 +191,14 @@ pub async fn store_profile(
         let _guard = profile_store_lock().lock().await;
         let path = profile_store_path()?;
         let mut store = load_profile_store_async(path.clone()).await?;
-        normalize_profile_store(&mut store);
+        normalize_profile_store_without_default(&mut store);
 
         let profile_id = req.id.clone().unwrap_or_else(new_profile_id);
         let was_active = store
             .active_profile_id
             .as_ref()
             .is_some_and(|active_id| active_id == &profile_id);
-        let make_active = was_active || store.active_profile_id.is_none();
+        let make_active = was_active || store.active_profile_id.is_none() || store.profiles.is_empty();
         let response = profile_response_from_request(req, profile_id.clone(), make_active);
 
         store.profiles.retain(|profile| profile.id != profile_id);
@@ -206,7 +206,7 @@ pub async fn store_profile(
         if make_active {
             store.active_profile_id = Some(profile_id);
         }
-        normalize_profile_store(&mut store);
+        normalize_profile_store_without_default(&mut store);
         let active_id = store.active_profile_id.clone();
         let stored_response = store
             .profiles
@@ -406,6 +406,10 @@ fn normalize_profile_store(store: &mut ProfileStore) {
     if store.profiles.is_empty() {
         store.profiles.push(default_profile());
     }
+    normalize_profile_store_without_default(store);
+}
+
+fn normalize_profile_store_without_default(store: &mut ProfileStore) {
     let active_exists = store.active_profile_id.as_ref().is_some_and(|active_id| {
         store
             .profiles
@@ -976,16 +980,26 @@ pub struct ConnectionProfile {
 
 /// Get available connection profiles for the desktop app.
 #[command]
-pub async fn get_connection_profiles() -> CommandResult<Vec<ConnectionProfile>> {
+pub async fn get_connection_profiles(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+) -> CommandResult<Vec<ConnectionProfile>> {
     let profiles = list_profiles().await?;
+    let (active_base_url, gateway_connected) = {
+        let conn = state.read().await;
+        (conn.base_url.clone(), conn.connected)
+    };
     let mut available_profiles: Vec<ConnectionProfile> = profiles
         .into_iter()
-        .map(|profile| ConnectionProfile {
-            name: profile.label,
-            profile_type: profile.transport,
-            base_url: profile.gateway_url,
-            auth_mode: "none".to_string(),
-            available: true,
+        .map(|profile| {
+            let available =
+                profile_is_current_gateway_available(&profile, &active_base_url, gateway_connected);
+            ConnectionProfile {
+                name: profile.label,
+                profile_type: profile.transport,
+                base_url: profile.gateway_url,
+                auth_mode: "none".to_string(),
+                available,
+            }
         })
         .collect();
     available_profiles.push(ConnectionProfile {
@@ -996,6 +1010,16 @@ pub async fn get_connection_profiles() -> CommandResult<Vec<ConnectionProfile>> 
         available: false,
     });
     Ok(available_profiles)
+}
+
+fn profile_is_current_gateway_available(
+    profile: &ProfileResponse,
+    active_base_url: &str,
+    gateway_connected: bool,
+) -> bool {
+    gateway_connected
+        && profile.active
+        && profile.gateway_url.trim_end_matches('/') == active_base_url.trim_end_matches('/')
 }
 
 // ─── Gateway Local Stream Transport (COE-410) ──────────────────────────────
@@ -1244,6 +1268,44 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].id, "local-daemon");
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn normalize_profile_store_without_default_keeps_empty_store_empty() {
+        let mut store = ProfileStore::default();
+
+        normalize_profile_store_without_default(&mut store);
+
+        assert!(store.profiles.is_empty());
+        assert!(store.active_profile_id.is_none());
+    }
+
+    #[test]
+    fn profile_availability_requires_active_connected_matching_gateway() {
+        let active = default_profile();
+        let mut inactive = active.clone();
+        inactive.active = false;
+
+        assert!(profile_is_current_gateway_available(
+            &active,
+            DEFAULT_GATEWAY_HTTP_URL,
+            true
+        ));
+        assert!(!profile_is_current_gateway_available(
+            &inactive,
+            DEFAULT_GATEWAY_HTTP_URL,
+            true
+        ));
+        assert!(!profile_is_current_gateway_available(
+            &active,
+            DEFAULT_GATEWAY_HTTP_LOCALHOST_URL,
+            true
+        ));
+        assert!(!profile_is_current_gateway_available(
+            &active,
+            DEFAULT_GATEWAY_HTTP_URL,
+            false
+        ));
     }
 
     #[test]

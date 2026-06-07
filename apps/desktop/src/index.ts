@@ -212,7 +212,12 @@ function toConnectionProfile(profile: NativeProfileResponse): ConnectionProfile 
         managed: false,
       };
     default:
-      throw new Error(`Unsupported connection profile kind: ${profile.kind}`);
+      return {
+        ...base,
+        kind: "external_gateway",
+        managed: false,
+        probeOnConnect: true,
+      };
   }
 }
 

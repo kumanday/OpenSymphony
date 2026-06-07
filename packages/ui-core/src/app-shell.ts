@@ -232,8 +232,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     const gatewayInput = this.options.root.querySelector<HTMLInputElement>("[data-profile-gateway]");
     const labelInput = this.options.root.querySelector<HTMLInputElement>("[data-profile-label]");
+    const kindInput = this.options.root.querySelector<HTMLSelectElement>("[data-profile-kind]");
     const gatewayUrl = (gatewayInput?.value ?? "").trim();
     const label = (labelInput?.value ?? "Local Gateway").trim() || "Local Gateway";
+    const kind = editableProfileKindFromValue(kindInput?.value, this.options.mode);
     if (!gatewayUrl) {
       this.state.connectionMessage = "Profile URL is required";
       this.render();
@@ -243,7 +245,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       const saved = await controller.storeProfile({
         label,
-        kind: this.options.mode === "desktop" ? "local_daemon" : "external_gateway",
+        kind,
         gatewayUrl,
       });
       await controller.setActiveProfile(saved.id);
@@ -299,6 +301,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         return `<option value="${escapeAttr(profile.id)}" ${selected}>${escapeHtml(profile.label)}</option>`;
       })
       .join("");
+    const activeProfile = profiles.find((profile) => profile.id === this.state.activeProfileId)
+      ?? profiles[0];
+    const selectedKind = activeProfile?.kind ?? defaultProfileKindForMode(this.options.mode);
+    const kindOptions = editableProfileKindOptions
+      .map((option) => {
+        const selected = option.value === selectedKind ? "selected" : "";
+        return `<option value="${option.value}" ${selected}>${option.label}</option>`;
+      })
+      .join("");
     const capabilities = this.state.capabilities?.transports
       .map((transport) => transport.transport)
       .join(", ") ?? "unknown";
@@ -316,6 +327,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <label class="os-field">
             <span>Label</span>
             <input data-profile-label value="Local Gateway" />
+          </label>
+          <label class="os-field">
+            <span>Kind</span>
+            <select data-profile-kind>${kindOptions}</select>
           </label>
           <label class="os-field">
             <span>Gateway URL</span>
@@ -469,6 +484,35 @@ function panel(title: string, body: string): string {
       ${body}
     </section>
   `;
+}
+
+const editableProfileKindOptions: Array<{
+  value: ConnectionProfile["kind"];
+  label: string;
+}> = [
+  { value: "local_daemon", label: "Local daemon" },
+  { value: "external_gateway", label: "External gateway" },
+  { value: "hosted_gateway", label: "Hosted gateway" },
+];
+
+function defaultProfileKindForMode(
+  mode: OpenSymphonyAppOptions["mode"],
+): ConnectionProfile["kind"] {
+  return mode === "desktop" ? "local_daemon" : "external_gateway";
+}
+
+function editableProfileKindFromValue(
+  value: string | undefined,
+  mode: OpenSymphonyAppOptions["mode"],
+): ConnectionProfile["kind"] {
+  switch (value) {
+    case "local_daemon":
+    case "external_gateway":
+    case "hosted_gateway":
+      return value;
+    default:
+      return defaultProfileKindForMode(mode);
+  }
 }
 
 function defaultUiProfiles(gatewayUrl: string): ConnectionProfile[] {
@@ -694,7 +738,7 @@ function appShellStyles(): string {
     .os-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .os-section-head h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
     .os-section-head span, .os-meta { color: #667788; font-size: 12px; }
-    .os-inline-fields { display: grid; grid-template-columns: minmax(160px, 0.75fr) minmax(220px, 1.2fr) auto; gap: 10px; align-items: end; }
+    .os-inline-fields { display: grid; grid-template-columns: minmax(150px, 0.75fr) minmax(140px, 0.65fr) minmax(220px, 1.2fr) auto; gap: 10px; align-items: end; }
     .os-field { display: grid; gap: 5px; font-size: 12px; color: #536170; }
     .os-field input, .os-field select { min-height: 34px; border: 1px solid #cbd5df; border-radius: 6px; padding: 6px 8px; background: #ffffff; color: #17202a; font: inherit; }
     button { min-height: 34px; border: 1px solid #afbac5; border-radius: 6px; background: #eef3f8; color: #17202a; font: inherit; cursor: pointer; }
