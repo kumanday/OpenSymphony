@@ -521,7 +521,7 @@ describe("HttpGatewayTransport", () => {
         body = FIXTURE_SNAPSHOT;
       } else if (url.endsWith("/api/v1/projects/default/taskgraph")) {
         body = FIXTURE_TASK_GRAPH;
-      } else if (url.endsWith("/api/v1/runs/COE-449")) {
+      } else if (url.endsWith("/api/v1/runs/fixture-run-1")) {
         body = FIXTURE_RUN_DETAIL;
       }
       return {
@@ -540,13 +540,13 @@ describe("HttpGatewayTransport", () => {
     await transport.health();
     await transport.snapshot();
     await transport.taskGraph("default");
-    await transport.runDetail("COE-449");
+    await transport.runDetail("fixture-run-1");
 
     expect(urls).toEqual([
       "http://localhost:8080/api/v1/capabilities",
       "http://localhost:8080/api/v1/dashboard/snapshot",
       "http://localhost:8080/api/v1/projects/default/taskgraph",
-      "http://localhost:8080/api/v1/runs/COE-449",
+      "http://localhost:8080/api/v1/runs/fixture-run-1",
     ]);
   });
 });

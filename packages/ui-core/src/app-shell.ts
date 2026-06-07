@@ -243,7 +243,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       const saved = await controller.storeProfile({
         label,
-        kind: "external_gateway",
+        kind: this.options.mode === "desktop" ? "local_daemon" : "external_gateway",
         gatewayUrl,
       });
       await controller.setActiveProfile(saved.id);

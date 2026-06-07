@@ -230,11 +230,8 @@ pub async fn store_profile(
 pub async fn list_profiles() -> CommandResult<Vec<ProfileResponse>> {
     let _guard = profile_store_lock().lock().await;
     let path = profile_store_path()?;
-    let mut store = load_profile_store_async(path.clone()).await?;
-    normalize_profile_store(&mut store);
-    let profiles = profiles_with_active(&store);
-    save_profile_store_async(path, store).await?;
-    Ok(profiles)
+    let store = load_profile_store_async(path).await?;
+    Ok(normalized_profiles_for_read(store))
 }
 
 /// Set the active connection profile.
@@ -423,6 +420,11 @@ fn normalize_profile_store(store: &mut ProfileStore) {
         profile.active = active_id.is_some_and(|id| id == profile.id.as_str());
         profile.transport = profile_transport_for_response(profile);
     }
+}
+
+fn normalized_profiles_for_read(mut store: ProfileStore) -> Vec<ProfileResponse> {
+    normalize_profile_store(&mut store);
+    profiles_with_active(&store)
 }
 
 fn profile_transport_for_response(profile: &ProfileResponse) -> String {
@@ -734,7 +736,18 @@ async fn update_gateway_connection(
     let mut conn = state.write().await;
     conn.base_url = base_url;
     conn.auth_token = auth_token;
-    conn.connected = true;
+    conn.connected = false;
+}
+
+async fn set_gateway_connected_for_url(
+    state: &tauri::State<'_, RwLock<GatewayConnection>>,
+    base_url: &str,
+    connected: bool,
+) {
+    let mut conn = state.write().await;
+    if conn.base_url == base_url {
+        conn.connected = connected;
+    }
 }
 
 fn gateway_http_client() -> reqwest::Client {
@@ -761,11 +774,10 @@ fn gateway_profile_for_url(base_url: &str) -> &'static str {
         None => false,
     };
 
-    match parsed.scheme() {
-        "ws" | "wss" if is_loopback => "loopback_websocket",
-        "ws" | "wss" => "websocket",
-        _ if is_loopback => "loopback_http",
-        _ => "websocket",
+    match (parsed.scheme(), is_loopback) {
+        ("http" | "https", true) => "loopback_http",
+        ("http" | "https", false) => "websocket",
+        _ => "loopback_http",
     }
 }
 
@@ -782,10 +794,17 @@ async fn gateway_get_json(
         )
     };
 
-    let parsed = url::Url::parse(&base_url).map_err(|e| DesktopError::Gateway {
-        message: format!("Invalid gateway URL: {e}"),
-    })?;
+    let parsed = match url::Url::parse(&base_url) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            set_gateway_connected_for_url(&state, &base_url, false).await;
+            return Err(DesktopError::Gateway {
+                message: format!("Invalid gateway URL: {e}"),
+            });
+        }
+    };
     if !matches!(parsed.scheme(), "http" | "https") {
+        set_gateway_connected_for_url(&state, &base_url, false).await;
         return Err(DesktopError::Gateway {
             message: "Gateway URL must use http or https scheme".to_string(),
         });
@@ -795,22 +814,34 @@ async fn gateway_get_json(
     if let Some(token) = auth_token {
         request = request.bearer_auth(token);
     }
-    let response = request.send().await.map_err(|e| DesktopError::Gateway {
-        message: format!("Gateway request failed for {path}: {e}"),
-    })?;
+    let response = match request.send().await {
+        Ok(response) => response,
+        Err(e) => {
+            set_gateway_connected_for_url(&state, &base_url, false).await;
+            return Err(DesktopError::Gateway {
+                message: format!("Gateway request failed for {path}: {e}"),
+            });
+        }
+    };
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
+        set_gateway_connected_for_url(&state, &base_url, false).await;
         return Err(DesktopError::Gateway {
             message: format!("Gateway returned {status} for {path}: {body}"),
         });
     }
-    response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| DesktopError::Gateway {
-            message: format!("Gateway returned invalid JSON for {path}: {e}"),
-        })
+    let value = match response.json::<serde_json::Value>().await {
+        Ok(value) => value,
+        Err(e) => {
+            set_gateway_connected_for_url(&state, &base_url, false).await;
+            return Err(DesktopError::Gateway {
+                message: format!("Gateway returned invalid JSON for {path}: {e}"),
+            });
+        }
+    };
+    set_gateway_connected_for_url(&state, &base_url, true).await;
+    Ok(value)
 }
 
 /// Request to attach to a local gateway instance.
@@ -850,7 +881,7 @@ pub async fn attach_gateway(
     update_gateway_connection(&state, req.base_url.clone(), req.auth_token.clone()).await;
 
     Ok(AttachGatewayResponse {
-        connected: true,
+        connected: false,
         profile: profile.to_string(),
     })
 }
@@ -1023,20 +1054,12 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
         schema_version: SchemaVersion::v1(),
         gateway_version: env!("CARGO_PKG_VERSION").to_string(),
         supported_api_versions: vec!["1.0.0".to_string()],
-        transports: vec![
-            GatewayTransportCapability {
-                transport: "loopback_http".to_string(),
-                modes: vec!["json".to_string()],
-                supported_encodings: vec!["utf-8".to_string()],
-                bidirectional: false,
-            },
-            GatewayTransportCapability {
-                transport: "loopback_websocket".to_string(),
-                modes: vec!["json".to_string(), "binary".to_string()],
-                supported_encodings: vec!["utf-8".to_string(), "base64".to_string()],
-                bidirectional: true,
-            },
-        ],
+        transports: vec![GatewayTransportCapability {
+            transport: "loopback_http".to_string(),
+            modes: vec!["json".to_string()],
+            supported_encodings: vec!["utf-8".to_string()],
+            bidirectional: false,
+        }],
         features: vec![
             GatewayFeatureCapability {
                 feature: "task_graph".to_string(),
@@ -1082,10 +1105,7 @@ pub async fn gateway_connection_info(
         status,
         profile,
         base_uri,
-        transports: vec![
-            "loopback_http".to_string(),
-            "loopback_websocket".to_string(),
-        ],
+        transports: vec!["loopback_http".to_string()],
     })
 }
 
@@ -1198,9 +1218,32 @@ mod tests {
         );
         assert_eq!(
             gateway_profile_for_url("ws://localhost:8000"),
-            "loopback_websocket"
+            "loopback_http"
         );
         assert_eq!(gateway_profile_for_url("https://example.com"), "websocket");
+    }
+
+    #[tokio::test]
+    async fn gateway_capabilities_advertises_http_only_native_transport() {
+        let capabilities = gateway_capabilities().await.unwrap();
+        let transports: Vec<&str> = capabilities
+            .transports
+            .iter()
+            .map(|transport| transport.transport.as_str())
+            .collect();
+
+        assert_eq!(transports, vec!["loopback_http"]);
+    }
+
+    #[test]
+    fn normalized_profiles_for_read_does_not_persist_default_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        let profiles = normalized_profiles_for_read(ProfileStore::default());
+
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, "local-daemon");
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1255,6 +1298,8 @@ mod tests {
     fn validate_profile_gateway_url_rejects_non_http_schemes() {
         assert!(validate_profile_gateway_url("http://127.0.0.1:8000").is_ok());
         assert!(validate_profile_gateway_url("https://gateway.example").is_ok());
+        assert!(validate_profile_gateway_url("ws://localhost:8000").is_err());
+        assert!(validate_profile_gateway_url("wss://gateway.example").is_err());
         assert!(validate_profile_gateway_url("tauri://local").is_err());
     }
 
