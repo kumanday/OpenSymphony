@@ -6,9 +6,11 @@
 use crate::daemon::{DaemonConfig, DaemonHandle, StartupResult};
 use crate::types::{CommandResult, DesktopError};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tauri::State;
 use tauri::command;
@@ -18,7 +20,6 @@ use tracing::warn;
 
 const DEFAULT_GATEWAY_HTTP_URL: &str = "http://127.0.0.1:8000";
 const DEFAULT_GATEWAY_HTTP_LOCALHOST_URL: &str = "http://localhost:8000";
-const DEFAULT_GATEWAY_WS_URL: &str = "ws://127.0.0.1:8000";
 
 // ─── Executable validation ─────────────────────────────────────────────────
 
@@ -157,54 +158,276 @@ pub struct ProfileRequest {
 }
 
 /// Response with profile details.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProfileResponse {
     pub id: String,
     pub label: String,
     pub kind: String,
     pub gateway_url: String,
+    pub transport: String,
     pub managed: bool,
+    pub active: bool,
     pub daemon_path: Option<String>,
+    pub daemon_args: Vec<String>,
+    pub auto_restart: bool,
+    pub startup_timeout_secs: u64,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct ProfileStore {
+    profiles: Vec<ProfileResponse>,
+    active_profile_id: Option<String>,
 }
 
 /// Store a connection profile.
 #[command]
-pub async fn store_profile(_req: ProfileRequest) -> CommandResult<ProfileResponse> {
-    // Stub implementation - real persistence will be added in COE-409.
-    // Generate a timestamp-based unique ID to prevent collisions when
-    // multiple profiles are stored without explicit IDs.
-    let profile_id = _req.id.unwrap_or_else(|| {
-        let ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        format!("profile-{}", ts)
-    });
-    Ok(ProfileResponse {
-        id: profile_id,
-        label: _req.label,
-        kind: _req.kind.as_str().to_string(),
-        gateway_url: _req.gateway_url,
-        managed: matches!(
-            _req.kind,
-            ProfileKind::SupervisedLocalDaemon | ProfileKind::EmbeddedHost
-        ),
-        daemon_path: _req.daemon_path,
-    })
+pub async fn store_profile(req: ProfileRequest) -> CommandResult<ProfileResponse> {
+    validate_profile_gateway_url(&req.gateway_url)?;
+    let _guard = profile_store_lock()
+        .lock()
+        .map_err(|e| DesktopError::Settings {
+            message: format!("failed to lock profile store: {e}"),
+        })?;
+    let path = profile_store_path()?;
+    let mut store = load_profile_store(&path);
+    normalize_profile_store(&mut store);
+
+    let profile_id = req.id.clone().unwrap_or_else(new_profile_id);
+    let was_active = store
+        .active_profile_id
+        .as_ref()
+        .is_some_and(|active_id| active_id == &profile_id);
+    let make_active = was_active || store.active_profile_id.is_none();
+    let response = profile_response_from_request(req, profile_id.clone(), make_active);
+
+    store.profiles.retain(|profile| profile.id != profile_id);
+    store.profiles.push(response.clone());
+    if make_active {
+        store.active_profile_id = Some(profile_id);
+    }
+    normalize_profile_store(&mut store);
+    save_profile_store(&path, &store)?;
+
+    let active_id = store.active_profile_id.as_deref();
+    Ok(store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == response.id)
+        .map(|profile| with_profile_active(profile, active_id))
+        .unwrap_or(response))
 }
 
 /// List all stored connection profiles.
 #[command]
 pub async fn list_profiles() -> CommandResult<Vec<ProfileResponse>> {
-    // Real implementation reads from local storage
-    Ok(vec![])
+    let _guard = profile_store_lock()
+        .lock()
+        .map_err(|e| DesktopError::Settings {
+            message: format!("failed to lock profile store: {e}"),
+        })?;
+    let path = profile_store_path()?;
+    let mut store = load_profile_store(&path);
+    normalize_profile_store(&mut store);
+    save_profile_store(&path, &store)?;
+    Ok(profiles_with_active(&store))
 }
 
 /// Set the active connection profile.
 #[command]
-pub async fn set_active_profile(_profile_id: String) -> CommandResult<ProfileResponse> {
-    // Real implementation updates active profile in storage
-    Err(DesktopError::NotFound)
+pub async fn set_active_profile(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    profile_id: String,
+) -> CommandResult<ProfileResponse> {
+    let _guard = profile_store_lock()
+        .lock()
+        .map_err(|e| DesktopError::Settings {
+            message: format!("failed to lock profile store: {e}"),
+        })?;
+    let path = profile_store_path()?;
+    let mut store = load_profile_store(&path);
+    normalize_profile_store(&mut store);
+
+    let Some(profile) = store
+        .profiles
+        .iter()
+        .find(|candidate| candidate.id == profile_id)
+        .cloned()
+    else {
+        return Err(DesktopError::NotFound);
+    };
+
+    store.active_profile_id = Some(profile_id);
+    normalize_profile_store(&mut store);
+    save_profile_store(&path, &store)?;
+
+    {
+        let mut conn = state.write().map_err(|e| DesktopError::Gateway {
+            message: format!("Failed to acquire connection state lock: {e}"),
+        })?;
+        conn.base_url = profile.gateway_url.clone();
+        conn.auth_token = None;
+        conn.connected = true;
+    }
+
+    Ok(with_profile_active(
+        &profile,
+        store.active_profile_id.as_deref(),
+    ))
+}
+
+fn new_profile_id() -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("profile-{ts}")
+}
+
+fn profile_response_from_request(
+    req: ProfileRequest,
+    profile_id: String,
+    active: bool,
+) -> ProfileResponse {
+    let managed = matches!(
+        req.kind,
+        ProfileKind::SupervisedLocalDaemon | ProfileKind::EmbeddedHost
+    );
+    let transport = profile_transport(&req.kind, &req.gateway_url);
+    ProfileResponse {
+        id: profile_id,
+        label: req.label,
+        kind: req.kind.as_str().to_string(),
+        gateway_url: req.gateway_url,
+        transport,
+        managed,
+        active,
+        daemon_path: req.daemon_path,
+        daemon_args: req.daemon_args.unwrap_or_default(),
+        auto_restart: req.auto_restart.unwrap_or(false),
+        startup_timeout_secs: req.startup_timeout_secs.unwrap_or(30),
+    }
+}
+
+fn profile_transport(kind: &ProfileKind, gateway_url: &str) -> String {
+    match kind {
+        ProfileKind::EmbeddedHost => "loopback_http".to_string(),
+        ProfileKind::HostedGateway => "websocket".to_string(),
+        ProfileKind::ExternalGateway
+        | ProfileKind::LocalDaemon
+        | ProfileKind::SupervisedLocalDaemon => gateway_profile_for_url(gateway_url).to_string(),
+    }
+}
+
+fn validate_profile_gateway_url(gateway_url: &str) -> CommandResult<()> {
+    let parsed = url::Url::parse(gateway_url).map_err(|e| DesktopError::Gateway {
+        message: format!("Invalid gateway URL: {e}"),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(DesktopError::Gateway {
+            message: "Gateway URL must use http or https scheme".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn default_profile() -> ProfileResponse {
+    ProfileResponse {
+        id: "local-daemon".to_string(),
+        label: "Local Daemon".to_string(),
+        kind: ProfileKind::LocalDaemon.as_str().to_string(),
+        gateway_url: DEFAULT_GATEWAY_HTTP_URL.to_string(),
+        transport: "loopback_http".to_string(),
+        managed: false,
+        active: true,
+        daemon_path: None,
+        daemon_args: vec![],
+        auto_restart: false,
+        startup_timeout_secs: 30,
+    }
+}
+
+fn profile_store_lock() -> &'static StdMutex<()> {
+    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| StdMutex::new(()))
+}
+
+fn profile_store_path() -> CommandResult<PathBuf> {
+    let project_dirs =
+        directories::ProjectDirs::from("dev", "opensymphony", "app").ok_or_else(|| {
+            DesktopError::Settings {
+                message: "could not determine project directories".to_string(),
+            }
+        })?;
+    Ok(project_dirs.config_dir().join("profiles.json"))
+}
+
+fn load_profile_store(path: &Path) -> ProfileStore {
+    match fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(_) => ProfileStore::default(),
+    }
+}
+
+fn save_profile_store(path: &Path, store: &ProfileStore) -> CommandResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| DesktopError::Settings {
+            message: format!("failed to create profile store directory: {e}"),
+        })?;
+    }
+    let content = serde_json::to_string_pretty(store).map_err(|e| DesktopError::Settings {
+        message: format!("failed to serialize profile store: {e}"),
+    })?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, content).map_err(|e| DesktopError::Settings {
+        message: format!("failed to write profile store: {e}"),
+    })?;
+    fs::rename(&tmp, path).map_err(|e| DesktopError::Settings {
+        message: format!("failed to persist profile store: {e}"),
+    })?;
+    Ok(())
+}
+
+fn normalize_profile_store(store: &mut ProfileStore) {
+    if store.profiles.is_empty() {
+        store.profiles.push(default_profile());
+    }
+    let active_exists = store.active_profile_id.as_ref().is_some_and(|active_id| {
+        store
+            .profiles
+            .iter()
+            .any(|profile| profile.id.as_str() == active_id)
+    });
+    if !active_exists {
+        store.active_profile_id = store.profiles.first().map(|profile| profile.id.clone());
+    }
+    let active_id = store.active_profile_id.as_deref();
+    for profile in &mut store.profiles {
+        profile.active = active_id.is_some_and(|id| id == profile.id.as_str());
+        profile.transport = profile_transport_for_response(profile);
+    }
+}
+
+fn profile_transport_for_response(profile: &ProfileResponse) -> String {
+    match profile.kind.as_str() {
+        "hosted_gateway" => "websocket".to_string(),
+        "embedded_host" => "loopback_http".to_string(),
+        _ => gateway_profile_for_url(&profile.gateway_url).to_string(),
+    }
+}
+
+fn profiles_with_active(store: &ProfileStore) -> Vec<ProfileResponse> {
+    let active_id = store.active_profile_id.as_deref();
+    store
+        .profiles
+        .iter()
+        .map(|profile| with_profile_active(profile, active_id))
+        .collect()
+}
+
+fn with_profile_active(profile: &ProfileResponse, active_id: Option<&str>) -> ProfileResponse {
+    let mut profile = profile.clone();
+    profile.active = active_id.is_some_and(|id| id == profile.id.as_str());
+    profile
 }
 
 // ─── Gateway Discovery ──────────────────────────────────────────────────────
@@ -509,6 +732,54 @@ fn gateway_profile_for_url(base_url: &str) -> &'static str {
     }
 }
 
+async fn gateway_get_json(
+    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    path: &str,
+) -> CommandResult<serde_json::Value> {
+    let (base_url, auth_token) = {
+        let conn = state.read().map_err(|e| DesktopError::Gateway {
+            message: format!("Failed to acquire connection state lock: {e}"),
+        })?;
+        (conn.base_url.clone(), conn.auth_token.clone())
+    };
+
+    let parsed = url::Url::parse(&base_url).map_err(|e| DesktopError::Gateway {
+        message: format!("Invalid gateway URL: {e}"),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(DesktopError::Gateway {
+            message: "Gateway URL must use http or https scheme".to_string(),
+        });
+    }
+    let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| DesktopError::Internal {
+            message: format!("Failed to build HTTP client: {e}"),
+        })?;
+    let mut request = client.get(&url);
+    if let Some(token) = auth_token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.map_err(|e| DesktopError::Gateway {
+        message: format!("Gateway request failed for {path}: {e}"),
+    })?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(DesktopError::Gateway {
+            message: format!("Gateway returned {status} for {path}: {body}"),
+        });
+    }
+    response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| DesktopError::Gateway {
+            message: format!("Gateway returned invalid JSON for {path}: {e}"),
+        })
+}
+
 /// Request to attach to a local gateway instance.
 #[derive(Debug, Deserialize)]
 pub struct AttachGatewayRequest {
@@ -563,18 +834,7 @@ pub async fn attach_gateway(
 pub async fn dashboard_snapshot(
     state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
 ) -> CommandResult<serde_json::Value> {
-    // Read attached gateway URL to prove state is not dead (COE-404 will wire
-    // actual gateway calls using this value).
-    let conn = state.read().map_err(|e| DesktopError::Gateway {
-        message: format!("Failed to acquire connection state lock: {}", e),
-    })?;
-    Ok(serde_json::json!({
-        "schema_version": {"major": 1, "minor": 0, "patch": 0},
-        "projects": [],
-        "runs": [],
-        "events": [],
-        "base_url": conn.base_url.clone(),
-    }))
+    gateway_get_json(state, "/api/v1/dashboard/snapshot").await
 }
 
 /// Get task graph for a project.
@@ -583,16 +843,14 @@ pub async fn task_graph(
     state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
     project_id: String,
 ) -> CommandResult<serde_json::Value> {
-    let conn = state.read().map_err(|e| DesktopError::Gateway {
-        message: format!("Failed to acquire connection state lock: {}", e),
-    })?;
-    Ok(serde_json::json!({
-        "schema_version": {"major": 1, "minor": 0, "patch": 0},
-        "project_id": project_id,
-        "nodes": [],
-        "root_ids": [],
-        "base_url": conn.base_url.clone(),
-    }))
+    gateway_get_json(
+        state,
+        &format!(
+            "/api/v1/projects/{}/taskgraph",
+            urlencoding::encode(&project_id)
+        ),
+    )
+    .await
 }
 
 /// Get run details.
@@ -601,16 +859,11 @@ pub async fn run_detail(
     state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
     run_id: String,
 ) -> CommandResult<serde_json::Value> {
-    let conn = state.read().map_err(|e| DesktopError::Gateway {
-        message: format!("Failed to acquire connection state lock: {}", e),
-    })?;
-    Ok(serde_json::json!({
-        "schema_version": {"major": 1, "minor": 0, "patch": 0},
-        "run_id": run_id,
-        "status": "idle",
-        "events": [],
-        "base_url": conn.base_url.clone(),
-    }))
+    gateway_get_json(
+        state,
+        &format!("/api/v1/runs/{}", urlencoding::encode(&run_id)),
+    )
+    .await
 }
 
 /// Get run events with cursor support.
@@ -621,18 +874,19 @@ pub async fn run_events(
     cursor: Option<u64>,
     page_size: Option<u64>,
 ) -> CommandResult<serde_json::Value> {
-    let conn = state.read().map_err(|e| DesktopError::Gateway {
-        message: format!("Failed to acquire connection state lock: {}", e),
-    })?;
-    Ok(serde_json::json!({
-        "schema_version": {"major": 1, "minor": 0, "patch": 0},
-        "run_id": run_id,
-        "cursor": cursor.unwrap_or(0),
-        "page_size": page_size.unwrap_or(100),
-        "events": [],
-        "has_more": false,
-        "base_url": conn.base_url.clone(),
-    }))
+    let mut path = format!("/api/v1/runs/{}/events", urlencoding::encode(&run_id));
+    let mut params = Vec::new();
+    if let Some(cursor) = cursor {
+        params.push(format!("cursor={cursor}"));
+    }
+    if let Some(page_size) = page_size {
+        params.push(format!("page_size={page_size}"));
+    }
+    if !params.is_empty() {
+        path.push('?');
+        path.push_str(&params.join("&"));
+    }
+    gateway_get_json(state, &path).await
 }
 
 /// Get terminal snapshot.
@@ -642,17 +896,15 @@ pub async fn terminal_snapshot(
     run_id: String,
     terminal_id: String,
 ) -> CommandResult<serde_json::Value> {
-    let conn = state.read().map_err(|e| DesktopError::Gateway {
-        message: format!("Failed to acquire connection state lock: {}", e),
-    })?;
-    Ok(serde_json::json!({
-        "schema_version": {"major": 1, "minor": 0, "patch": 0},
-        "run_id": run_id,
-        "terminal_id": terminal_id,
-        "content": "",
-        "cursor": 0,
-        "base_url": conn.base_url.clone(),
-    }))
+    gateway_get_json(
+        state,
+        &format!(
+            "/api/v1/runs/{}/terminals/{}/snapshot",
+            urlencoding::encode(&run_id),
+            urlencoding::encode(&terminal_id)
+        ),
+    )
+    .await
 }
 
 /// Connection profile for local gateway discovery.
@@ -668,29 +920,25 @@ pub struct ConnectionProfile {
 /// Get available connection profiles for the desktop app.
 #[command]
 pub async fn get_connection_profiles() -> CommandResult<Vec<ConnectionProfile>> {
-    Ok(vec![
-        ConnectionProfile {
-            name: "Local Daemon".to_string(),
-            profile_type: "loopback_http".to_string(),
-            base_url: DEFAULT_GATEWAY_HTTP_URL.to_string(),
+    let profiles = list_profiles().await?;
+    let mut available_profiles: Vec<ConnectionProfile> = profiles
+        .into_iter()
+        .map(|profile| ConnectionProfile {
+            name: profile.label,
+            profile_type: profile.transport,
+            base_url: profile.gateway_url,
             auth_mode: "none".to_string(),
             available: true,
-        },
-        ConnectionProfile {
-            name: "Local Gateway (WebSocket)".to_string(),
-            profile_type: "loopback_websocket".to_string(),
-            base_url: DEFAULT_GATEWAY_WS_URL.to_string(),
-            auth_mode: "none".to_string(),
-            available: true,
-        },
-        ConnectionProfile {
-            name: "Tauri Native".to_string(),
-            profile_type: "tauri_channel".to_string(),
-            base_url: "tauri://local".to_string(),
-            auth_mode: "none".to_string(),
-            available: true,
-        },
-    ])
+        })
+        .collect();
+    available_profiles.push(ConnectionProfile {
+        name: "Tauri Native".to_string(),
+        profile_type: "tauri_channel".to_string(),
+        base_url: "tauri://local".to_string(),
+        auth_mode: "none".to_string(),
+        available: false,
+    });
+    Ok(available_profiles)
 }
 
 // ─── Gateway Local Stream Transport (COE-410) ──────────────────────────────
@@ -751,12 +999,6 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
         supported_api_versions: vec!["1.0.0".to_string()],
         transports: vec![
             GatewayTransportCapability {
-                transport: "tauri_channel".to_string(),
-                modes: vec!["json".to_string()],
-                supported_encodings: vec!["utf-8".to_string()],
-                bidirectional: true,
-            },
-            GatewayTransportCapability {
                 transport: "loopback_http".to_string(),
                 modes: vec!["json".to_string()],
                 supported_encodings: vec!["utf-8".to_string()],
@@ -778,7 +1020,13 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
             },
             GatewayFeatureCapability {
                 feature: "terminal_stream".to_string(),
-                available: true,
+                available: false,
+                requires_auth: false,
+                requires_plan: None,
+            },
+            GatewayFeatureCapability {
+                feature: "tauri_channel".to_string(),
+                available: false,
                 requires_auth: false,
                 requires_plan: None,
             },
@@ -811,7 +1059,6 @@ pub async fn gateway_connection_info(
         profile,
         base_uri,
         transports: vec![
-            "tauri_channel".to_string(),
             "loopback_http".to_string(),
             "loopback_websocket".to_string(),
         ],
@@ -834,12 +1081,11 @@ pub async fn subscribe_events(
     _tx: tauri::ipc::Channel<GatewayEnvelope>,
     _state: tauri::State<'_, SubscriptionState>,
 ) -> CommandResult<()> {
-    _state
-        .event_subscribers
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // COE-409 will wire this to the actual gateway event stream.
-    // The channel transport enables high-throughput local delivery.
-    Ok(())
+    Err(DesktopError::Gateway {
+        message:
+            "Tauri channel event streams are not available; use loopback HTTP/WebSocket transport"
+                .to_string(),
+    })
 }
 
 /// Subscribe to terminal frames for a specific run via a Tauri channel.
@@ -853,11 +1099,9 @@ pub async fn subscribe_terminal(
     _tx: tauri::ipc::Channel<GatewayEnvelope>,
     _state: tauri::State<'_, SubscriptionState>,
 ) -> CommandResult<()> {
-    _state
-        .terminal_subscribers
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // COE-409 will wire this to the actual gateway terminal stream.
-    Ok(())
+    Err(DesktopError::Gateway {
+        message: "Tauri channel terminal streams are not available; use loopback HTTP/WebSocket transport".to_string(),
+    })
 }
 
 /// Active subscriptions tracked for cleanup.
@@ -933,5 +1177,60 @@ mod tests {
             "loopback_websocket"
         );
         assert_eq!(gateway_profile_for_url("https://example.com"), "websocket");
+    }
+
+    #[test]
+    fn profile_store_normalizes_defaults_and_persists_active_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        let mut store = ProfileStore::default();
+
+        normalize_profile_store(&mut store);
+
+        assert_eq!(store.profiles.len(), 1);
+        assert_eq!(store.active_profile_id.as_deref(), Some("local-daemon"));
+        assert!(store.profiles[0].active);
+
+        let profile = profile_response_from_request(
+            ProfileRequest {
+                id: Some("external-dev".to_string()),
+                label: "External Dev".to_string(),
+                kind: ProfileKind::ExternalGateway,
+                gateway_url: "http://localhost:9000".to_string(),
+                daemon_path: None,
+                daemon_args: None,
+                auto_restart: None,
+                startup_timeout_secs: None,
+            },
+            "external-dev".to_string(),
+            true,
+        );
+        store.profiles.push(profile);
+        store.active_profile_id = Some("external-dev".to_string());
+        normalize_profile_store(&mut store);
+        save_profile_store(&path, &store).unwrap();
+
+        let mut loaded = load_profile_store(&path);
+        normalize_profile_store(&mut loaded);
+        let profiles = profiles_with_active(&loaded);
+
+        assert_eq!(profiles.len(), 2);
+        assert!(profiles.iter().any(|candidate| {
+            candidate.id == "external-dev"
+                && candidate.active
+                && candidate.gateway_url == "http://localhost:9000"
+        }));
+        assert!(
+            profiles
+                .iter()
+                .any(|candidate| { candidate.id == "local-daemon" && !candidate.active })
+        );
+    }
+
+    #[test]
+    fn validate_profile_gateway_url_rejects_non_http_schemes() {
+        assert!(validate_profile_gateway_url("http://127.0.0.1:8000").is_ok());
+        assert!(validate_profile_gateway_url("https://gateway.example").is_ok());
+        assert!(validate_profile_gateway_url("tauri://local").is_err());
     }
 }

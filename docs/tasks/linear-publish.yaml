@@ -137,6 +137,11 @@ tasks:
     issueId: 470d2975-0997-482e-9cc0-72fa4bbdeef8
     url: https://linear.app/trilogy-ai-coe/issue/COE-410/desktop-local-stream-optimization
     file: docs/tasks/osym-717-desktop-local-stream-optimization.md
+  OSYM-718:
+    issue: COE-449
+    issueId: 7d0c2871-8f8a-46aa-b976-5cb8b4b514e0
+    url: https://linear.app/trilogy-ai-coe/issue/COE-449/desktop-alpha-recovery-replace-stubs-with-functional-app
+    file: docs/tasks/osym-718-desktop-alpha-recovery.md
   OSYM-722:
     issue: COE-411
     issueId: 88c47ea2-53b9-41e0-ba55-822a9686c27c

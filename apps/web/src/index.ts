@@ -1,20 +1,15 @@
-/**
- * Web app shell entrypoint (stub).
- *
- * This module defines the adapter interface for the browser client.
- * Uses authenticated HTTPS/WSS transport to the gateway.
- */
-
+import { HttpGatewayTransport } from "@opensymphony/api-client";
 import type { GatewayTransport } from "@opensymphony/api-client";
 
-/**
- * Browser transport adapter using WebSocket or SSE.
- */
 export interface BrowserTransportAdapter extends GatewayTransport {
-  /** Authenticate and establish the transport. */
-  connect(token: string): Promise<void>;
+  connect(token?: string): Promise<void>;
 }
 
-export function createWebTransport(): BrowserTransportAdapter {
-  throw new Error("Browser transport adapter not yet implemented");
+export function createWebTransport(baseUri = ""): BrowserTransportAdapter {
+  const transport = new HttpGatewayTransport({
+    baseUri,
+    transport: "loopback_http",
+  }) as HttpGatewayTransport & { connect(token?: string): Promise<void> };
+  transport.connect = async () => undefined;
+  return transport;
 }

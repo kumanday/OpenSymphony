@@ -259,6 +259,7 @@ If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk
 - COE-406: Repository, Linear, And Research Analysis
 - COE-409: Desktop Settings, Keychain, And Native Actions
 - COE-410: Desktop Local Stream Optimization
+- COE-449: Desktop Alpha Recovery
 - COE-413: Implementation Plan Generator Stage
 - COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 - COE-448: Multi-repo memory server and deterministic context

@@ -14,6 +14,16 @@ import type {
 
 // Terminal renderer module
 export * from "./terminal-renderer/index.js";
+export {
+  renderOpenSymphonyApp,
+} from "./app-shell.js";
+export type {
+  EditableProfileInput,
+  GatewayReader,
+  OpenSymphonyAppHandle,
+  OpenSymphonyAppOptions,
+  ProfileController,
+} from "./app-shell.js";
 
 export interface UiTheme {
   mode: "light" | "dark";
