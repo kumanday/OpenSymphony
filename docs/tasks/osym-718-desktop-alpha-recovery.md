@@ -82,6 +82,10 @@ Recover the M7 desktop-alpha outcome by replacing remaining web/desktop stubs wi
 
 Do not accept scaffolding as completion unless the acceptance criterion explicitly says scaffold. The desktop alpha should be modest, but it must be real enough to launch and inspect OpenSymphony state.
 
+## Verification Evidence
+
+- Desktop app shell screenshot: [COE-449 desktop alpha](../images/coe-449-desktop-alpha.png)
+
 ## Linear Dependencies
 
 - Blocked by: COE-397, COE-398, COE-402, COE-404, COE-410

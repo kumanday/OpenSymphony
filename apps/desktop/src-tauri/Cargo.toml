@@ -29,7 +29,7 @@ urlencoding = "2"
 dirs = "6"
 keyring = "3"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
-tokio = { version = "1", features = ["sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 tracing = "0.1"
 
 [target.'cfg(unix)'.dependencies]

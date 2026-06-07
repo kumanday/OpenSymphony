@@ -38,28 +38,83 @@ export interface TauriTransportAdapter extends GatewayTransport {
   attach(): Promise<void>;
 }
 
-export function createDesktopTransport(
-  baseUri = DEFAULT_GATEWAY_URL,
-): TauriTransportAdapter {
-  const transport = new HttpGatewayTransport({
-    baseUri,
-    transport: "loopback_http",
-  }) as HttpGatewayTransport & { attach(): Promise<void> };
+class DesktopTransportAdapter implements TauriTransportAdapter {
+  constructor(
+    private readonly inner: GatewayTransport,
+    private readonly baseUrl: string,
+  ) {}
 
-  transport.attach = async () => {
+  get baseUri(): string {
+    return this.inner.baseUri;
+  }
+
+  health(): ReturnType<GatewayTransport["health"]> {
+    return this.inner.health();
+  }
+
+  snapshot(): ReturnType<GatewayTransport["snapshot"]> {
+    return this.inner.snapshot();
+  }
+
+  taskGraph(projectId: string): ReturnType<GatewayTransport["taskGraph"]> {
+    return this.inner.taskGraph(projectId);
+  }
+
+  runDetail(runId: string): ReturnType<GatewayTransport["runDetail"]> {
+    return this.inner.runDetail(runId);
+  }
+
+  runEvents(
+    runId: string,
+    cursor?: Parameters<GatewayTransport["runEvents"]>[1],
+  ): ReturnType<GatewayTransport["runEvents"]> {
+    return this.inner.runEvents(runId, cursor);
+  }
+
+  terminalSnapshot(
+    runId: string,
+    terminalId: string,
+  ): ReturnType<GatewayTransport["terminalSnapshot"]> {
+    return this.inner.terminalSnapshot(runId, terminalId);
+  }
+
+  events(
+    fromCursor?: Parameters<GatewayTransport["events"]>[0],
+  ): ReturnType<GatewayTransport["events"]> {
+    return this.inner.events(fromCursor);
+  }
+
+  terminalFrames(
+    runId: string,
+  ): ReturnType<GatewayTransport["terminalFrames"]> {
+    return this.inner.terminalFrames(runId);
+  }
+
+  close(): ReturnType<GatewayTransport["close"]> {
+    return this.inner.close();
+  }
+
+  async attach(): Promise<void> {
     const invoke = getTauriInvoke();
     if (!invoke) {
       return;
     }
     await invoke("attach_gateway", {
       req: {
-        base_url: baseUri,
+        base_url: this.baseUrl,
         auth_token: null,
       },
     }).catch(() => undefined);
-  };
+  }
+}
 
-  return transport;
+export function createDesktopTransport(
+  baseUri = DEFAULT_GATEWAY_URL,
+): TauriTransportAdapter {
+  return new DesktopTransportAdapter(new HttpGatewayTransport({
+    baseUri,
+    transport: "loopback_http",
+  }), baseUri);
 }
 
 export function createDesktopProfileController(): ProfileController | undefined {
@@ -175,20 +230,7 @@ async function createTransportForGateway(gatewayUrl: string): Promise<TauriTrans
     { baseUri: base, transport: "loopback_http" },
     capabilities,
   );
-  const withAttach = transport as GatewayTransport & { attach(): Promise<void> };
-  withAttach.attach = async () => {
-    const invoke = getTauriInvoke();
-    if (!invoke) {
-      return;
-    }
-    await invoke("attach_gateway", {
-      req: {
-        base_url: base,
-        auth_token: null,
-      },
-    }).catch(() => undefined);
-  };
-  return withAttach;
+  return new DesktopTransportAdapter(transport, base);
 }
 
 const root = document.getElementById("root");

@@ -7,10 +7,11 @@ use crate::daemon::{DaemonConfig, DaemonHandle, StartupResult};
 use crate::types::{CommandResult, DesktopError};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tauri::State;
 use tauri::command;
@@ -183,13 +184,9 @@ struct ProfileStore {
 #[command]
 pub async fn store_profile(req: ProfileRequest) -> CommandResult<ProfileResponse> {
     validate_profile_gateway_url(&req.gateway_url)?;
-    let _guard = profile_store_lock()
-        .lock()
-        .map_err(|e| DesktopError::Settings {
-            message: format!("failed to lock profile store: {e}"),
-        })?;
+    let _guard = profile_store_lock().lock().await;
     let path = profile_store_path()?;
-    let mut store = load_profile_store(&path);
+    let mut store = load_profile_store_async(path.clone()).await?;
     normalize_profile_store(&mut store);
 
     let profile_id = req.id.clone().unwrap_or_else(new_profile_id);
@@ -206,30 +203,28 @@ pub async fn store_profile(req: ProfileRequest) -> CommandResult<ProfileResponse
         store.active_profile_id = Some(profile_id);
     }
     normalize_profile_store(&mut store);
-    save_profile_store(&path, &store)?;
-
-    let active_id = store.active_profile_id.as_deref();
-    Ok(store
+    let active_id = store.active_profile_id.clone();
+    let stored_response = store
         .profiles
         .iter()
         .find(|profile| profile.id == response.id)
-        .map(|profile| with_profile_active(profile, active_id))
-        .unwrap_or(response))
+        .map(|profile| with_profile_active(profile, active_id.as_deref()))
+        .unwrap_or_else(|| with_profile_active(&response, active_id.as_deref()));
+    save_profile_store_async(path, store).await?;
+
+    Ok(stored_response)
 }
 
 /// List all stored connection profiles.
 #[command]
 pub async fn list_profiles() -> CommandResult<Vec<ProfileResponse>> {
-    let _guard = profile_store_lock()
-        .lock()
-        .map_err(|e| DesktopError::Settings {
-            message: format!("failed to lock profile store: {e}"),
-        })?;
+    let _guard = profile_store_lock().lock().await;
     let path = profile_store_path()?;
-    let mut store = load_profile_store(&path);
+    let mut store = load_profile_store_async(path.clone()).await?;
     normalize_profile_store(&mut store);
-    save_profile_store(&path, &store)?;
-    Ok(profiles_with_active(&store))
+    let profiles = profiles_with_active(&store);
+    save_profile_store_async(path, store).await?;
+    Ok(profiles)
 }
 
 /// Set the active connection profile.
@@ -238,13 +233,9 @@ pub async fn set_active_profile(
     state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
     profile_id: String,
 ) -> CommandResult<ProfileResponse> {
-    let _guard = profile_store_lock()
-        .lock()
-        .map_err(|e| DesktopError::Settings {
-            message: format!("failed to lock profile store: {e}"),
-        })?;
+    let _guard = profile_store_lock().lock().await;
     let path = profile_store_path()?;
-    let mut store = load_profile_store(&path);
+    let mut store = load_profile_store_async(path.clone()).await?;
     normalize_profile_store(&mut store);
 
     let Some(profile) = store
@@ -258,7 +249,8 @@ pub async fn set_active_profile(
 
     store.active_profile_id = Some(profile_id);
     normalize_profile_store(&mut store);
-    save_profile_store(&path, &store)?;
+    let active_id = store.active_profile_id.clone();
+    save_profile_store_async(path, store).await?;
 
     {
         let mut conn = state.write().map_err(|e| DesktopError::Gateway {
@@ -269,18 +261,17 @@ pub async fn set_active_profile(
         conn.connected = true;
     }
 
-    Ok(with_profile_active(
-        &profile,
-        store.active_profile_id.as_deref(),
-    ))
+    Ok(with_profile_active(&profile, active_id.as_deref()))
 }
 
 fn new_profile_id() -> String {
+    static PROFILE_ID_COUNTER: AtomicUsize = AtomicUsize::new(0);
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    format!("profile-{ts}")
+    let nonce = PROFILE_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("profile-{ts}-{nonce}")
 }
 
 fn profile_response_from_request(
@@ -346,9 +337,9 @@ fn default_profile() -> ProfileResponse {
     }
 }
 
-fn profile_store_lock() -> &'static StdMutex<()> {
-    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| StdMutex::new(()))
+fn profile_store_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 fn profile_store_path() -> CommandResult<PathBuf> {
@@ -361,10 +352,31 @@ fn profile_store_path() -> CommandResult<PathBuf> {
     Ok(project_dirs.config_dir().join("profiles.json"))
 }
 
-fn load_profile_store(path: &Path) -> ProfileStore {
+async fn load_profile_store_async(path: PathBuf) -> CommandResult<ProfileStore> {
+    tokio::task::spawn_blocking(move || load_profile_store(&path))
+        .await
+        .map_err(|e| DesktopError::Internal {
+            message: format!("profile store load task failed: {e}"),
+        })?
+}
+
+async fn save_profile_store_async(path: PathBuf, store: ProfileStore) -> CommandResult<()> {
+    tokio::task::spawn_blocking(move || save_profile_store(&path, &store))
+        .await
+        .map_err(|e| DesktopError::Internal {
+            message: format!("profile store save task failed: {e}"),
+        })?
+}
+
+fn load_profile_store(path: &Path) -> CommandResult<ProfileStore> {
     match fs::read_to_string(path) {
-        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => ProfileStore::default(),
+        Ok(content) => serde_json::from_str(&content).map_err(|e| DesktopError::Settings {
+            message: format!("failed to parse profile store at {}: {e}", path.display()),
+        }),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(ProfileStore::default()),
+        Err(e) => Err(DesktopError::Settings {
+            message: format!("failed to read profile store at {}: {e}", path.display()),
+        }),
     }
 }
 
@@ -450,13 +462,7 @@ pub async fn probe_gateway(gateway_url: String) -> CommandResult<DiscoveryResult
     let health_url = format!("{}/healthz", gateway_url.trim_end_matches('/'));
     let capabilities_url = format!("{}/api/v1/capabilities", gateway_url.trim_end_matches('/'));
 
-    // Use a client with a timeout to avoid blocking the async runtime
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| DesktopError::Internal {
-            message: format!("Failed to build HTTP client: {}", e),
-        })?;
+    let client = gateway_http_client();
 
     // Probe health
     match client.get(&health_url).send().await {
@@ -700,6 +706,7 @@ pub struct GatewayConnection {
     pub base_url: String,
     pub auth_token: Option<String>,
     pub connected: bool,
+    pub client: reqwest::Client,
 }
 
 impl Default for GatewayConnection {
@@ -708,8 +715,21 @@ impl Default for GatewayConnection {
             base_url: DEFAULT_GATEWAY_HTTP_URL.to_string(),
             auth_token: None,
             connected: false,
+            client: gateway_http_client(),
         }
     }
+}
+
+fn gateway_http_client() -> reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("gateway HTTP client configuration should be valid")
+        })
+        .clone()
 }
 
 fn gateway_profile_for_url(base_url: &str) -> &'static str {
@@ -736,11 +756,15 @@ async fn gateway_get_json(
     state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
     path: &str,
 ) -> CommandResult<serde_json::Value> {
-    let (base_url, auth_token) = {
+    let (base_url, auth_token, client) = {
         let conn = state.read().map_err(|e| DesktopError::Gateway {
             message: format!("Failed to acquire connection state lock: {e}"),
         })?;
-        (conn.base_url.clone(), conn.auth_token.clone())
+        (
+            conn.base_url.clone(),
+            conn.auth_token.clone(),
+            conn.client.clone(),
+        )
     };
 
     let parsed = url::Url::parse(&base_url).map_err(|e| DesktopError::Gateway {
@@ -752,12 +776,6 @@ async fn gateway_get_json(
         });
     }
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| DesktopError::Internal {
-            message: format!("Failed to build HTTP client: {e}"),
-        })?;
     let mut request = client.get(&url);
     if let Some(token) = auth_token {
         request = request.bearer_auth(token);
@@ -1210,7 +1228,7 @@ mod tests {
         normalize_profile_store(&mut store);
         save_profile_store(&path, &store).unwrap();
 
-        let mut loaded = load_profile_store(&path);
+        let mut loaded = load_profile_store(&path).unwrap();
         normalize_profile_store(&mut loaded);
         let profiles = profiles_with_active(&loaded);
 
@@ -1232,5 +1250,79 @@ mod tests {
         assert!(validate_profile_gateway_url("http://127.0.0.1:8000").is_ok());
         assert!(validate_profile_gateway_url("https://gateway.example").is_ok());
         assert!(validate_profile_gateway_url("tauri://local").is_err());
+    }
+
+    #[test]
+    fn load_profile_store_reports_malformed_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+        fs::write(&path, "{not json").unwrap();
+
+        let err = load_profile_store(&path).unwrap_err();
+
+        assert!(matches!(
+            err,
+            DesktopError::Settings { message }
+                if message.contains("failed to parse profile store")
+        ));
+    }
+
+    #[test]
+    fn new_profile_id_adds_process_unique_nonce() {
+        let mut ids = std::collections::HashSet::new();
+
+        for _ in 0..1000 {
+            assert!(ids.insert(new_profile_id()));
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_store_lock_serializes_concurrent_async_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("profiles.json");
+
+        let write_profile = |id: &'static str| {
+            let path = path.clone();
+            async move {
+                let _guard = profile_store_lock().lock().await;
+                let mut store = load_profile_store_async(path.clone()).await.unwrap();
+                normalize_profile_store(&mut store);
+                let profile = profile_response_from_request(
+                    ProfileRequest {
+                        id: Some(id.to_string()),
+                        label: format!("Profile {id}"),
+                        kind: ProfileKind::ExternalGateway,
+                        gateway_url: format!("http://localhost:{}", 9000 + id.len()),
+                        daemon_path: None,
+                        daemon_args: None,
+                        auto_restart: None,
+                        startup_timeout_secs: None,
+                    },
+                    id.to_string(),
+                    false,
+                );
+                store.profiles.retain(|existing| existing.id != id);
+                store.profiles.push(profile);
+                normalize_profile_store(&mut store);
+                save_profile_store_async(path, store).await.unwrap();
+            }
+        };
+
+        let ((), ()) = tokio::join!(write_profile("external-one"), write_profile("external-two"));
+        let mut loaded = load_profile_store(&path).unwrap();
+        normalize_profile_store(&mut loaded);
+
+        assert!(
+            loaded
+                .profiles
+                .iter()
+                .any(|profile| profile.id == "external-one")
+        );
+        assert!(
+            loaded
+                .profiles
+                .iter()
+                .any(|profile| profile.id == "external-two")
+        );
     }
 }

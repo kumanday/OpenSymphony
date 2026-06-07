@@ -152,7 +152,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.taskGraph = alphaTaskGraph();
       this.state.selectedProjectId = this.state.snapshot.projects[0]?.project_id ?? "opensymphony-local";
       this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
-      this.state.runDetail = alphaRunDetail("COE-449");
+      this.state.runDetail = alphaRunDetail("desktop-alpha");
       this.state.connectionMode = "fixture";
       this.state.connectionMessage = `Gateway unavailable, showing desktop-alpha fixture data: ${errorMessage(error)}`;
     }
@@ -173,7 +173,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     } catch {
       this.state.taskGraph = alphaTaskGraph(projectId);
       this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
-      this.state.runDetail = alphaRunDetail("COE-449");
+      this.state.runDetail = alphaRunDetail("desktop-alpha");
     }
   }
 
@@ -536,7 +536,7 @@ function alphaSnapshot(): DashboardSnapshot {
     recent_events: [
       {
         happened_at: new Date(1_700_000_000_000).toISOString(),
-        issue_identifier: "COE-449",
+        issue_identifier: "DESKTOP-ALPHA",
         kind: "client_attached",
         summary: "Desktop alpha shell mounted",
       },
@@ -559,15 +559,15 @@ function alphaTaskGraph(projectId = "opensymphony-local"): TaskGraphSnapshot {
         title: "Shared Client And Desktop Alpha",
         state: "Backlog",
         state_category: "backlog",
-        children: ["coe-449", "coe-410"],
+        children: ["desktop-alpha", "coe-410"],
         blocked_by: [],
         labels: ["desktop"],
       },
       {
         schema_version: schemaVersion,
-        node_id: "coe-449",
+        node_id: "desktop-alpha",
         kind: "issue",
-        identifier: "COE-449",
+        identifier: "DESKTOP-ALPHA",
         title: "Desktop alpha recovery",
         state: "Backlog",
         state_category: "backlog",
