@@ -16,7 +16,7 @@ use std::time::Duration;
 use tauri::State;
 use tauri::command;
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::warn;
 
 const DEFAULT_GATEWAY_HTTP_URL: &str = "http://127.0.0.1:8000";
@@ -182,35 +182,45 @@ struct ProfileStore {
 
 /// Store a connection profile.
 #[command]
-pub async fn store_profile(req: ProfileRequest) -> CommandResult<ProfileResponse> {
+pub async fn store_profile(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    req: ProfileRequest,
+) -> CommandResult<ProfileResponse> {
     validate_profile_gateway_url(&req.gateway_url)?;
-    let _guard = profile_store_lock().lock().await;
-    let path = profile_store_path()?;
-    let mut store = load_profile_store_async(path.clone()).await?;
-    normalize_profile_store(&mut store);
+    let stored_response = {
+        let _guard = profile_store_lock().lock().await;
+        let path = profile_store_path()?;
+        let mut store = load_profile_store_async(path.clone()).await?;
+        normalize_profile_store(&mut store);
 
-    let profile_id = req.id.clone().unwrap_or_else(new_profile_id);
-    let was_active = store
-        .active_profile_id
-        .as_ref()
-        .is_some_and(|active_id| active_id == &profile_id);
-    let make_active = was_active || store.active_profile_id.is_none();
-    let response = profile_response_from_request(req, profile_id.clone(), make_active);
+        let profile_id = req.id.clone().unwrap_or_else(new_profile_id);
+        let was_active = store
+            .active_profile_id
+            .as_ref()
+            .is_some_and(|active_id| active_id == &profile_id);
+        let make_active = was_active || store.active_profile_id.is_none();
+        let response = profile_response_from_request(req, profile_id.clone(), make_active);
 
-    store.profiles.retain(|profile| profile.id != profile_id);
-    store.profiles.push(response.clone());
-    if make_active {
-        store.active_profile_id = Some(profile_id);
+        store.profiles.retain(|profile| profile.id != profile_id);
+        store.profiles.push(response.clone());
+        if make_active {
+            store.active_profile_id = Some(profile_id);
+        }
+        normalize_profile_store(&mut store);
+        let active_id = store.active_profile_id.clone();
+        let stored_response = store
+            .profiles
+            .iter()
+            .find(|profile| profile.id == response.id)
+            .map(|profile| with_profile_active(profile, active_id.as_deref()))
+            .unwrap_or_else(|| with_profile_active(&response, active_id.as_deref()));
+        save_profile_store_async(path, store).await?;
+        stored_response
+    };
+
+    if stored_response.active {
+        update_gateway_connection(&state, stored_response.gateway_url.clone(), None).await;
     }
-    normalize_profile_store(&mut store);
-    let active_id = store.active_profile_id.clone();
-    let stored_response = store
-        .profiles
-        .iter()
-        .find(|profile| profile.id == response.id)
-        .map(|profile| with_profile_active(profile, active_id.as_deref()))
-        .unwrap_or_else(|| with_profile_active(&response, active_id.as_deref()));
-    save_profile_store_async(path, store).await?;
 
     Ok(stored_response)
 }
@@ -230,38 +240,34 @@ pub async fn list_profiles() -> CommandResult<Vec<ProfileResponse>> {
 /// Set the active connection profile.
 #[command]
 pub async fn set_active_profile(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
     profile_id: String,
 ) -> CommandResult<ProfileResponse> {
-    let _guard = profile_store_lock().lock().await;
-    let path = profile_store_path()?;
-    let mut store = load_profile_store_async(path.clone()).await?;
-    normalize_profile_store(&mut store);
+    let active_profile = {
+        let _guard = profile_store_lock().lock().await;
+        let path = profile_store_path()?;
+        let mut store = load_profile_store_async(path.clone()).await?;
+        normalize_profile_store(&mut store);
 
-    let Some(profile) = store
-        .profiles
-        .iter()
-        .find(|candidate| candidate.id == profile_id)
-        .cloned()
-    else {
-        return Err(DesktopError::NotFound);
+        let Some(profile) = store
+            .profiles
+            .iter()
+            .find(|candidate| candidate.id == profile_id)
+            .cloned()
+        else {
+            return Err(DesktopError::NotFound);
+        };
+
+        store.active_profile_id = Some(profile_id);
+        normalize_profile_store(&mut store);
+        let active_id = store.active_profile_id.clone();
+        save_profile_store_async(path, store).await?;
+        with_profile_active(&profile, active_id.as_deref())
     };
 
-    store.active_profile_id = Some(profile_id);
-    normalize_profile_store(&mut store);
-    let active_id = store.active_profile_id.clone();
-    save_profile_store_async(path, store).await?;
+    update_gateway_connection(&state, active_profile.gateway_url.clone(), None).await;
 
-    {
-        let mut conn = state.write().map_err(|e| DesktopError::Gateway {
-            message: format!("Failed to acquire connection state lock: {e}"),
-        })?;
-        conn.base_url = profile.gateway_url.clone();
-        conn.auth_token = None;
-        conn.connected = true;
-    }
-
-    Ok(with_profile_active(&profile, active_id.as_deref()))
+    Ok(active_profile)
 }
 
 fn new_profile_id() -> String {
@@ -720,6 +726,17 @@ impl Default for GatewayConnection {
     }
 }
 
+async fn update_gateway_connection(
+    state: &tauri::State<'_, RwLock<GatewayConnection>>,
+    base_url: String,
+    auth_token: Option<String>,
+) {
+    let mut conn = state.write().await;
+    conn.base_url = base_url;
+    conn.auth_token = auth_token;
+    conn.connected = true;
+}
+
 fn gateway_http_client() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT
@@ -753,13 +770,11 @@ fn gateway_profile_for_url(base_url: &str) -> &'static str {
 }
 
 async fn gateway_get_json(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
     path: &str,
 ) -> CommandResult<serde_json::Value> {
     let (base_url, auth_token, client) = {
-        let conn = state.read().map_err(|e| DesktopError::Gateway {
-            message: format!("Failed to acquire connection state lock: {e}"),
-        })?;
+        let conn = state.read().await;
         (
             conn.base_url.clone(),
             conn.auth_token.clone(),
@@ -816,7 +831,7 @@ pub struct AttachGatewayResponse {
 /// Attach to a local or remote gateway instance.
 #[command]
 pub async fn attach_gateway(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
     req: AttachGatewayRequest,
 ) -> CommandResult<AttachGatewayResponse> {
     // Validate URL using proper parser
@@ -832,14 +847,7 @@ pub async fn attach_gateway(
 
     let profile = gateway_profile_for_url(parsed.as_str());
 
-    // Mutate connection state to record the attachment
-    let mut conn = state.write().map_err(|e| DesktopError::Gateway {
-        message: format!("Failed to acquire connection state lock: {}", e),
-    })?;
-    conn.base_url = req.base_url.clone();
-    conn.auth_token = req.auth_token.clone();
-    conn.connected = true;
-    drop(conn);
+    update_gateway_connection(&state, req.base_url.clone(), req.auth_token.clone()).await;
 
     Ok(AttachGatewayResponse {
         connected: true,
@@ -850,7 +858,7 @@ pub async fn attach_gateway(
 /// Get dashboard snapshot from gateway.
 #[command]
 pub async fn dashboard_snapshot(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
 ) -> CommandResult<serde_json::Value> {
     gateway_get_json(state, "/api/v1/dashboard/snapshot").await
 }
@@ -858,7 +866,7 @@ pub async fn dashboard_snapshot(
 /// Get task graph for a project.
 #[command]
 pub async fn task_graph(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
     project_id: String,
 ) -> CommandResult<serde_json::Value> {
     gateway_get_json(
@@ -874,7 +882,7 @@ pub async fn task_graph(
 /// Get run details.
 #[command]
 pub async fn run_detail(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
     run_id: String,
 ) -> CommandResult<serde_json::Value> {
     gateway_get_json(
@@ -887,7 +895,7 @@ pub async fn run_detail(
 /// Get run events with cursor support.
 #[command]
 pub async fn run_events(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
     run_id: String,
     cursor: Option<u64>,
     page_size: Option<u64>,
@@ -910,7 +918,7 @@ pub async fn run_events(
 /// Get terminal snapshot.
 #[command]
 pub async fn terminal_snapshot(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
     run_id: String,
     terminal_id: String,
 ) -> CommandResult<serde_json::Value> {
@@ -1058,11 +1066,9 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
 /// Query the local gateway health and connection info.
 #[command]
 pub async fn gateway_connection_info(
-    state: tauri::State<'_, std::sync::RwLock<GatewayConnection>>,
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
 ) -> CommandResult<GatewayConnectionInfo> {
-    let conn = state.read().map_err(|e| DesktopError::Gateway {
-        message: format!("Failed to acquire connection state lock: {}", e),
-    })?;
+    let conn = state.read().await;
     let status = if conn.connected {
         GatewayHealthStatus::Healthy
     } else {

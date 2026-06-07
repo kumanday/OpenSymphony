@@ -18,6 +18,7 @@ pub mod types;
 pub fn run() {
     let desktop_state = commands::DesktopState::new();
     let subscription_state = commands::SubscriptionState::default();
+    let gateway_connection = tokio::sync::RwLock::new(commands::GatewayConnection::default());
 
     if let Err(e) = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -27,6 +28,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(desktop_state)
         .manage(subscription_state)
+        .manage(gateway_connection)
         .setup(|app| {
             if let Some(_window) = app.get_webview_window("main") {
                 // Window exists; future setup hooks can attach here.

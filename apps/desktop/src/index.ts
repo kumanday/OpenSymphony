@@ -24,7 +24,7 @@ interface TauriGlobal {
 interface NativeProfileResponse {
   id: string;
   label: string;
-  kind: ConnectionProfile["kind"];
+  kind: string;
   gateway_url?: string;
   gatewayUrl?: string;
   managed?: boolean;
@@ -166,7 +166,6 @@ function toConnectionProfile(profile: NativeProfileResponse): ConnectionProfile 
   const base = {
     id: profile.id,
     label: profile.label,
-    kind: profile.kind,
     active: profile.active ?? false,
     gatewayUrl,
     transport: profile.transport ?? "loopback_http",
@@ -207,29 +206,37 @@ function toConnectionProfile(profile: NativeProfileResponse): ConnectionProfile 
         probeOnConnect: true,
       };
     case "local_daemon":
-    default:
       return {
         ...base,
         kind: "local_daemon",
         managed: false,
       };
+    default:
+      throw new Error(`Unsupported connection profile kind: ${profile.kind}`);
   }
 }
 
-function isManagedKind(kind: ConnectionProfile["kind"]): boolean {
+function isManagedKind(kind: string): boolean {
   return kind === "embedded_host" || kind === "supervised_local_daemon";
 }
 
 async function createTransportForGateway(gatewayUrl: string): Promise<TauriTransportAdapter> {
   const base = gatewayUrl || DEFAULT_GATEWAY_URL;
+  const fallback = () => createDesktopTransport(base);
   const capabilities = await new HttpGatewayTransport({
     baseUri: base,
     transport: "loopback_http",
   }).health().catch(() => undefined);
+  if (!capabilities) {
+    return fallback();
+  }
   const transport = await TransportFactory.create(
     { baseUri: base, transport: "loopback_http" },
     capabilities,
-  );
+  ).catch(() => undefined);
+  if (!transport) {
+    return fallback();
+  }
   return new DesktopTransportAdapter(transport, base);
 }
 
