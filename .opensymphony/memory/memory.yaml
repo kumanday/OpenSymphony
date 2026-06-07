@@ -215,18 +215,19 @@ areas:
     confidence: 95
     aliases:
     - memory
-    - project memory
     - memory-capture-and-doc-sync
     - opensymphony memory capture and documentation sync
+    - project memory
     source_refs:
       docs:
-      - docs/memory.md
       - docs/memory-capture-and-doc-sync.md
+      - docs/memory.md
       linear_labels:
       - area:memory
       linear_milestones:
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
+      - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
   migration-1-0-0:
@@ -275,6 +276,7 @@ areas:
       - docs/operations.md
       linear_milestones:
       - 'M6.5: Memory Server'
+      - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
   prerequisites:
     title: Prerequisites
@@ -339,6 +341,7 @@ areas:
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
+      - 'M7: Shared Client And Desktop Alpha'
       - 'M9: Collaborative Planning Alpha'
   ui-frankentui:
     title: FrankenTUI Operator UI

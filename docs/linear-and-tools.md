@@ -169,11 +169,7 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Linear and Tools"]
-  area --> docs["docs/linear-and-tools.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 

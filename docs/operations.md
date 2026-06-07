@@ -255,88 +255,12 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-## Long-Running Run Operations
-
-### Harness/Scheduler Disagreement Diagnostics
-
-When the scheduler reports `retry_queued` but the harness session is still
-active, the gateway surfaces a `RunDiagnostics` block with a
-`HarnessSchedulerDisagreement` entry on the `RunDetail` payload. This section
-explains how operators should diagnose and recover from this state.
-
-#### Symptoms
-
-- **Dashboard shows**: run phase `stalled` or `active` with `stream: "stale"`,
-  while the scheduler simultaneously reports `status: "retry_queued"`.
-- **Safe actions**: `retry: true`, `cancel: true`, `rehydrate: true` — the
-  client presents all three as actionable controls.
-- **`RunLivenessState`** (client reducer): phase is `stalled` but
-  `reconnectAttempts` is non-zero and `lastProgressAt` is older than the
-  stall-probe deadline.
-
-#### Diagnosis Steps
-
-1. **Check the `RunDiagnostics.harness_scheduler_disagreement` field** on the
-   `RunDetail` payload. It contains:
-   - `scheduler_status`: the status the scheduler believes the run is in
-   - `harness_status`: the status reported by the harness adapter
-   - `detected_at`: when the disagreement was first detected
-   - `resolution_path`: the recommended recovery action
-
-2. **Verify the harness session is still active**:
-   ```bash
-   opensymphony run --status 2>&1 | grep -A5 "active\|running"
-   ```
-   Look for an active session with the same `issue_id` as the retry-queued run.
-
-3. **Check the orchestrator logs** for the specific issue ID:
-   ```bash
-   # If using managed local OpenHands:
-   tail -f /path/to/.opensymphony/logs/orchestrator.log | grep "COE-XXX"
-   ```
-   Look for `waiting_on_prior_turn` events or retry enqueue messages.
-
-4. **Confirm no duplicate harness sessions** exist for the same issue:
-   ```bash
-   opensymphony run --list 2>&1
-   ```
-   Multiple active sessions for one issue indicate a scheduling race.
-
-#### Resolution Paths
-
-| Scenario | Recommended Action | Effect |
-|:---------|:-------------------|:-------|
-| Harness active, scheduler retry_queued | **Cancel** the retry-queued scheduler entry via `opensymphony run --cancel <issue-id>` | Scheduler drops its retry; harness continues normally |
-| Harness stalled, scheduler retry_queued | **Rehydrate** the harness session via `opensymphony rehydrate <issue-id> --reason "stall recovery"` | New harness session picks up from last progress; scheduler retry is consumed |
-| Both harness and scheduler active with different turns | **Wait** — this is a transient state during turn handoff | Scheduler will reconcile once the harness reports terminal |
-| Harness dead, scheduler retry_queued | **Retry** via `safe_actions.retry` in client UI | Scheduler restarts the harness from the last snapshot |
-
-#### Client Behavior Expectations
-
-The rich client should render this disagreement as a **normal operational
-state**, not as an error by default. The `RunDiagnostics` block informs the
-UI's safe-action set but does not block user interaction.
-
-- **Phase display**: show the harness-reported phase (`stalled`, `active`,
-  `degraded`) with a visual indicator when diagnostics are present.
-- **Safe actions**: enable `retry`, `cancel`, and `rehydrate` based on the
-  `computeSafeActions` matrix (see `packages/state/src/index.ts`).
-- **Progress events**: the client's `RunProgress` journal continues to accept
-  replay events even during disagreement states.
-
-#### Prevention
-
-- Ensure the orchestrator's `retry_backoff` setting is configured to allow
-  sufficient time for the harness to complete its current turn before queuing
-  a retry.
-- Use `opensymphony run --watch <issue-id>` to monitor liveness probes during
-  long-running sessions.
-- Keep the harness adapter and scheduler in the same process group when
-  possible to reduce inter-process communication latency.
-
-## 10. Memory sync marker
-
-- COE-448 contributed: PR #100: COE-448: Add scoped memory server context (merge `fa22559`)
+- COE-252 contributed: PR #10: Implement foundation workflow and scheduler contracts
+- COE-253 contributed: PR #19: COE-253: OpenHands Runtime Adapter (merge `911b0b4`)
+- COE-254 contributed: PR #6: COE-254: bootstrap tracker, workspace, and orchestration core
+- COE-255 contributed: PR #4: COE-255: add control plane and FrankenTUI slice
+- COE-256 contributed: PR #1: COE-257: tighten hosted deployment guidance
+- COE-258 contributed: PR #83: Add memory init and mapped docs sync
 
 ## Important invariants
 
@@ -353,10 +277,96 @@ UI's safe-action set but does not block user interaction.
 
 ## Recent changes
 
+- COE-252: Foundation and Contracts
+- COE-253: OpenHands Runtime Adapter
+- COE-254: Tracker, Workspaces, and Orchestration
+- COE-255: Observability and FrankenTUI
+- COE-256: Validation and Local Operations
+- COE-258: Bootstrap workspace and crate boundaries
+- COE-259: Workflow loader and typed config
+- COE-260: Domain model and orchestrator state machine
+- COE-261: Local agent-server supervisor
+- COE-262: REST client and conversation contract
+- COE-263: Workspace manager and lifecycle hooks
+- COE-264: Linear read adapter and issue normalization
+- COE-265: WebSocket event stream, reconciliation, and recovery
+- COE-266: Issue session runner
+- COE-267: Linear MCP write surface
+- COE-268: Orchestrator scheduler, retries, and reconciliation
+- COE-269: Control-plane API and snapshot store
+- COE-270: Repository harness and generated context artifacts
+- COE-271: FrankenTUI operator client
+- COE-272: Fake OpenHands server and protocol contract suite
+- COE-273: Live local end-to-end suite
+- COE-274: CLI packaging, doctor, and local operations docs
+- COE-275: Remote agent-server mode and auth hardening
+- COE-277: Implement hierarchy-aware task selection
+- COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
+- COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
+- COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
+- COE-284: Add orchestrator run command to CLI and make it installable
+- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
+- COE-287: Add opensymphony debug command for conversational session debugging
+- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
+- COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
+- COE-382: Add supply-chain and security audits to CI
+- COE-383: Decompose oversized session and TUI modules into focused submodules
+- COE-384: Expand error-path tests for Linear client and workspace hooks
+- COE-385: Resolve runtime tracking TODO in OpenHands session runner
+- COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
+- COE-387: Audit tracing spans and diagnostics for secret leakage
+- COE-399: Linear Read Coverage And Task Graph Cache
+- COE-403: Terminal And Log Renderer Prototype
+- COE-409: Desktop Settings, Keychain, And Native Actions
+- COE-410: Desktop Local Stream Optimization
+- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 - COE-448: Multi-repo memory server and deterministic context
 
 ## Source refs
 
+- COE-252
+- COE-253
+- COE-254
+- COE-255
+- COE-256
+- COE-258
+- COE-259
+- COE-260
+- COE-261
+- COE-262
+- COE-263
+- COE-264
+- COE-265
+- COE-266
+- COE-267
+- COE-268
+- COE-269
+- COE-270
+- COE-271
+- COE-272
+- COE-273
+- COE-274
+- COE-275
+- COE-277
+- COE-280
+- COE-281
+- COE-282
+- COE-284
+- COE-286
+- COE-287
+- COE-293
+- COE-294
+- COE-382
+- COE-383
+- COE-384
+- COE-385
+- COE-386
+- COE-387
+- COE-399
+- COE-403
+- COE-409
+- COE-410
+- COE-434
 - COE-448
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

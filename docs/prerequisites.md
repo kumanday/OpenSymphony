@@ -36,7 +36,12 @@ If you already have Python 3.13.12 installed, you can keep it and just install `
 
 ## Current model
 
+- COE-256 contributed: PR #1: COE-257: tighten hosted deployment guidance
+- COE-272 contributed: PR #44: COE-272: Centralize scripted fake OpenHands runtime coverage (merge `df2f69c`)
+- COE-273 contributed: PR #45: Add live local end-to-end suite (merge `237c52c`)
+- COE-274 contributed: PR #46: Package CLI doctor preflight and local setup (merge `898935f`)
 - COE-275 contributed: PR #1: COE-257: tighten hosted deployment guidance
+- COE-280 contributed: PR #54: Support workflow-owned OpenHands runtime overrides (merge `5663898`)
 
 ## Important invariants
 
@@ -45,11 +50,7 @@ If you already have Python 3.13.12 installed, you can keep it and just install `
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Prerequisites"]
-  area --> docs["docs/prerequisites.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -57,10 +58,38 @@ flowchart TD
 
 ## Recent changes
 
+- COE-256: Validation and Local Operations
+- COE-272: Fake OpenHands server and protocol contract suite
+- COE-273: Live local end-to-end suite
+- COE-274: CLI packaging, doctor, and local operations docs
 - COE-275: Remote agent-server mode and auth hardening
+- COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
+- COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
+- COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
+- COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
+- COE-382: Add supply-chain and security audits to CI
+- COE-383: Decompose oversized session and TUI modules into focused submodules
+- COE-384: Expand error-path tests for Linear client and workspace hooks
+- COE-385: Resolve runtime tracking TODO in OpenHands session runner
+- COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
+- COE-387: Audit tracing spans and diagnostics for secret leakage
 
 ## Source refs
 
+- COE-256
+- COE-272
+- COE-273
+- COE-274
 - COE-275
+- COE-280
+- COE-281
+- COE-282
+- COE-294
+- COE-382
+- COE-383
+- COE-384
+- COE-385
+- COE-386
+- COE-387
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

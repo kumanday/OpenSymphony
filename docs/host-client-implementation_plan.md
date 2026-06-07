@@ -1747,8 +1747,12 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 
 ## Current model
 
-- COE-413 contributed: PR #96: COE-413: Implementation plan generator stage (merge `ba49e18`)
-- COE-434 contributed: PR #98: COE-434: Long-running harness liveness and scheduler/runtime ownership contract (merge `c448eaf`)
+- COE-389 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
+- COE-390 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
+- COE-391 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
+- COE-392 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
+- COE-393 contributed: PR #91: feat: Event Journal and Stream Broker (COE-393) (merge `1183bc6`)
+- COE-395 contributed: PR #88: COE-395: Expand planning artifact schema and session service (merge `c1d8be9`)
 
 ## Important invariants
 
@@ -1765,11 +1769,43 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 
 ## Recent changes
 
+- COE-389: Current Gateway Inventory And Vocabulary
+- COE-390: Gateway Schemas And Stream Feasibility
+- COE-391: Gateway Module, Capabilities, And Dashboard Snapshot
+- COE-392: Task Graph, Run Detail, File, And Diff Read APIs
+- COE-393: Event Journal And Stream Broker
+- COE-395: Planning Artifact Schema And Session Service
+- COE-397: Gateway API Client, Transport Adapters, And Reducers
+- COE-398: Tauri Shell And Security Capabilities
+- COE-399: Linear Read Coverage And Task Graph Cache
+- COE-401: Web App Entry And Deployment Modes
+- COE-402: App Shell, Dashboard, Task Graph, And Run Views
+- COE-403: Terminal And Log Renderer Prototype
+- COE-404: Desktop Connection Profiles And Daemon Management
+- COE-406: Repository, Linear, And Research Analysis
+- COE-409: Desktop Settings, Keychain, And Native Actions
+- COE-410: Desktop Local Stream Optimization
 - COE-413: Implementation Plan Generator Stage
 - COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 
 ## Source refs
 
+- COE-389
+- COE-390
+- COE-391
+- COE-392
+- COE-393
+- COE-395
+- COE-397
+- COE-398
+- COE-399
+- COE-401
+- COE-402
+- COE-403
+- COE-404
+- COE-406
+- COE-409
+- COE-410
 - COE-413
 - COE-434
 

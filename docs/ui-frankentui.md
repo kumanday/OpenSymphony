@@ -300,6 +300,10 @@ Keep the MVP read-only and reliable first.
 
 ## Current model
 
+- COE-255 contributed: PR #4: COE-255: add control plane and FrankenTUI slice
+- COE-269 contributed: PR #23: COE-269 + COE-271: add control plane and FrankenTUI slice (merge `53773f9`)
+- COE-271 contributed: PR #23: COE-269 + COE-271: add control plane and FrankenTUI slice (merge `53773f9`)
+- COE-287 contributed: PR #48: Add opensymphony debug command for issue conversations (merge `021f5ad`)
 - COE-321 contributed: PR #59: Show more issues in the TUI issue list (merge `d9bd68c`)
 
 ## Important invariants
@@ -309,11 +313,7 @@ Keep the MVP read-only and reliable first.
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["FrankenTUI Operator UI"]
-  area --> docs["docs/ui-frankentui.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
@@ -321,10 +321,18 @@ flowchart TD
 
 ## Recent changes
 
+- COE-255: Observability and FrankenTUI
+- COE-269: Control-plane API and snapshot store
+- COE-271: FrankenTUI operator client
+- COE-287: Add opensymphony debug command for conversational session debugging
 - COE-321: Add more lines to TUI issue list for better visibility
 
 ## Source refs
 
+- COE-255
+- COE-269
+- COE-271
+- COE-287
 - COE-321
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

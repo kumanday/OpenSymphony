@@ -320,11 +320,7 @@ end
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection"]
-  area --> docs["docs/elixir-hierarchy-changes.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 

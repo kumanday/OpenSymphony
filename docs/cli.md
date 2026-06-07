@@ -20,11 +20,7 @@ last_memory_sync: 2026-05-16T07:06:20.437326+00:00
 
 ## Operational flow
 
-```mermaid
-flowchart TD
-  memory["Captured issue memory"] --> area["Cli"]
-  area --> docs["docs/cli.md"]
-```
+- No generated diagram requested for this sync.
 
 ## Known gotchas
 
