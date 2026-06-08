@@ -18,7 +18,7 @@
 | `file-selection` | `main` | `dialog:allow-open`, `dialog:allow-save` | Low — user-initiated |
 | `notification` | `main` | `notification:allow-show`, `notification:allow-request-permission` | Low |
 | `settings` | `main` | `fs:allow-read-text-file`, `fs:allow-write-text-file` | Low — scoped to `$HOME/.config/opensymphony` |
-| `process-supervision` | `main` | `shell:default` | **Low** — `shell:default` only grants minimal shell plugin baseline. Stub only; COE-404 will add whitelisted executables and PID tracking |
+| `process-supervision` | `main` | `opener:default` | **Low** — process start/stop is constrained to typed native commands and validated executable paths |
 
 ## Commands
 
@@ -35,14 +35,13 @@
 - [x] Workspace lints forbid `unsafe_code`, warn on `unwrap_used` and `todo`.
 - [x] Placeholder icons are present; real icons will replace before release.
 - [x] `beforeDevCommand` and `beforeBuildCommand` point to the shared frontend workspace.
-- [ ] Production builds ship a stub HTML until the real frontend is mounted (deferred to COE-394).
+- [x] Production builds mount the Vite-built shared frontend instead of the former stub HTML.
 
 ## Audit Notes
 
-- `process-supervision` capability grants only `shell:default` (minimal shell plugin baseline). No `shell:execute` or `shell:kill` permissions are active. COE-404 must implement:
-  - Whitelisted executable paths.
-  - PID tracking to prevent arbitrary process kills.
-  - Input sanitization on any shell command arguments.
+- `process-supervision` capability grants only `opener:default`. Daemon start/stop
+  happens through typed native commands that validate executable paths, track
+  process ownership, and refuse to stop processes the app did not supervise.
 - `settings` capability grants only `fs:allow-read-text-file` and `fs:allow-write-text-file` — no `fs:default` baseline, no directory listing, copy, or binary access. File-system scope is `$HOME/.config/opensymphony/**`. Settings must not accept paths that escape this scope.
 - `connect-src` CSP restricts WebSocket connections to pinned hosts `wss://api.opensymphony.dev` and `wss://api.opensymphony.app`. Local daemon traffic uses `ws://localhost:*`.
 - Current Tauri `2.11.2` pulls the Linux GTK3 Rust bindings through

@@ -3,9 +3,9 @@
   "version": "1.6.0",
   "identifier": "dev.opensymphony.app",
   "build": {
-    "beforeDevCommand": "cd .. && npm run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "cd .. && npm run build || (echo 'Frontend build failed; see above for errors' && exit 1)",
+    "beforeBuildCommand": "npm run build || (echo 'Frontend build failed; see above for errors' && exit 1)",
     "frontendDist": "../dist"
   },
   "app": {
@@ -37,16 +37,5 @@
     "copyright": "OpenSymphony",
     "category": "DeveloperTool",
     "shortDescription": "OpenSymphony Desktop"
-  },
-  "plugins": {
-    "fs": {
-      "scope": [
-        "$HOME/.config/opensymphony/**"
-      ]
-    },
-    "opener": {
-      "https": true,
-      "http": true
-    }
   }
 }

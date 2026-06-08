@@ -38,6 +38,8 @@ tasks:
     file: docs/tasks/osym-716-desktop-settings-keychain-and-native-actions.md
   - id: OSYM-717
     file: docs/tasks/osym-717-desktop-local-stream-optimization.md
+  - id: OSYM-718
+    file: docs/tasks/osym-718-desktop-alpha-recovery.md
   - id: OSYM-720
     file: docs/tasks/osym-720-linear-read-coverage-and-task-graph-cache.md
   - id: OSYM-721

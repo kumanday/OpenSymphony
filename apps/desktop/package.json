@@ -1,13 +1,13 @@
 {
   "name": "@opensymphony/desktop",
   "version": "1.0.0",
-  "description": "OpenSymphony Tauri desktop app shell (stub)",
+  "description": "OpenSymphony Tauri desktop app shell",
   "type": "module",
   "private": true,
   "scripts": {
     "type-check": "tsc --noEmit",
-    "dev": "serve dist -l 1420",
-    "build": "node scripts/build-stub.mjs"
+    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build": "vite build"
   },
   "dependencies": {
     "@opensymphony/api-client": "*",
@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "serve": "^14.2.4",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "vite": "^6.0.0"
   }
 }

@@ -34,6 +34,7 @@ Tasks:
 - OSYM-715 Desktop Connection Profiles And Daemon Management
 - OSYM-716 Desktop Settings, Keychain, And Native Actions
 - OSYM-717 Desktop Local Stream Optimization
+- OSYM-718 Desktop Alpha Recovery
 
 ## M8: Task Graph Operations And OpenHands Run UI
 

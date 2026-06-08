@@ -27,7 +27,7 @@ export interface DiscoveryResult {
 export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:8000";
 
 /** Minimum compatible API version. */
-export const MIN_COMPATIBLE_API_VERSION = "v1";
+export const MIN_COMPATIBLE_API_VERSION = "1.0.0";
 
 /**
  * Probe the gateway health endpoint.
@@ -117,9 +117,14 @@ export async function discoverGateway(baseUrl: string = DEFAULT_GATEWAY_URL): Pr
   }
   
   // Check API version compatibility
-  const compatible = (capabilities.supported_api_versions ?? []).some(
-    (version) => version === MIN_COMPATIBLE_API_VERSION || version.startsWith(`${MIN_COMPATIBLE_API_VERSION}.`),
-  );
+  const compatible = (capabilities.supported_api_versions ?? []).some((version) => {
+    const normalized = version.startsWith("v") ? version.slice(1) : version;
+    return (
+      normalized === "1" ||
+      normalized === MIN_COMPATIBLE_API_VERSION ||
+      normalized.startsWith("1.")
+    );
+  });
   
   return {
     healthy: true,

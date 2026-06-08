@@ -41,18 +41,18 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
   // -- REST reads --
 
   async health(): Promise<GatewayCapabilities> {
-    const response = await this.fetchJson(`${this.baseUri}/api/v1/health`);
+    const response = await this.fetchJson(`${this.baseUri}/api/v1/capabilities`);
     return response as GatewayCapabilities;
   }
 
   async snapshot(): Promise<DashboardSnapshot> {
-    const response = await this.fetchJson(`${this.baseUri}/api/v1/snapshot`);
+    const response = await this.fetchJson(`${this.baseUri}/api/v1/dashboard/snapshot`);
     return response as DashboardSnapshot;
   }
 
   async taskGraph(projectId: string): Promise<TaskGraphSnapshot> {
     const response = await this.fetchJson(
-      `${this.baseUri}/api/v1/projects/${encodeURIComponent(projectId)}/task-graph`,
+      `${this.baseUri}/api/v1/projects/${encodeURIComponent(projectId)}/taskgraph`,
     );
     return response as TaskGraphSnapshot;
   }
@@ -433,12 +433,12 @@ export class WebSocketTransport implements GatewayTransport {
 
   async taskGraph(projectId: string): Promise<TaskGraphSnapshot> {
     return this.get<TaskGraphSnapshot>(
-      `/api/v1/projects/${projectId}/taskgraph`,
+      `/api/v1/projects/${encodeURIComponent(projectId)}/taskgraph`,
     );
   }
 
   async runDetail(runId: string): Promise<RunDetail> {
-    return this.get<RunDetail>(`/api/v1/runs/${runId}`);
+    return this.get<RunDetail>(`/api/v1/runs/${encodeURIComponent(runId)}`);
   }
 
   async runEvents(
@@ -452,7 +452,7 @@ export class WebSocketTransport implements GatewayTransport {
     }
     params.set("page_size", String(pageCursor.page_size));
     return this.get<RunEventPage>(
-      `/api/v1/runs/${runId}/events?${params.toString()}`,
+      `/api/v1/runs/${encodeURIComponent(runId)}/events?${params.toString()}`,
     );
   }
 
@@ -461,7 +461,7 @@ export class WebSocketTransport implements GatewayTransport {
     terminalId: string,
   ): Promise<TerminalSnapshot> {
     return this.get<TerminalSnapshot>(
-      `/api/v1/runs/${runId}/terminal/${terminalId}/snapshot`,
+      `/api/v1/runs/${encodeURIComponent(runId)}/terminals/${encodeURIComponent(terminalId)}/snapshot`,
     );
   }
 

@@ -474,6 +474,12 @@ describe("TauriChannelTransport", () => {
 // ─── HTTP Transport Tests ──────────────────────────────────────────────────
 
 describe("HttpGatewayTransport", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
   it("normalizes baseUri by removing trailing slash", () => {
     const transport = new HttpGatewayTransport({
       baseUri: "http://localhost:8080/",
@@ -503,6 +509,45 @@ describe("HttpGatewayTransport", () => {
     expect(typeof transport.events).toBe("function");
     expect(typeof transport.terminalFrames).toBe("function");
     expect(typeof transport.close).toBe("function");
+  });
+
+  it("uses the current Rust gateway read routes", async () => {
+    const urls: string[] = [];
+    global.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      let body: unknown = FIXTURE_CAPABILITIES;
+      if (url.endsWith("/api/v1/dashboard/snapshot")) {
+        body = FIXTURE_SNAPSHOT;
+      } else if (url.endsWith("/api/v1/projects/default/taskgraph")) {
+        body = FIXTURE_TASK_GRAPH;
+      } else if (url.endsWith("/api/v1/runs/fixture-run-1")) {
+        body = FIXTURE_RUN_DETAIL;
+      }
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      } as Response;
+    }) as jest.MockedFunction<typeof global.fetch>;
+
+    const transport = new HttpGatewayTransport({
+      baseUri: "http://localhost:8080",
+    });
+
+    await transport.health();
+    await transport.snapshot();
+    await transport.taskGraph("default");
+    await transport.runDetail("fixture-run-1");
+
+    expect(urls).toEqual([
+      "http://localhost:8080/api/v1/capabilities",
+      "http://localhost:8080/api/v1/dashboard/snapshot",
+      "http://localhost:8080/api/v1/projects/default/taskgraph",
+      "http://localhost:8080/api/v1/runs/fixture-run-1",
+    ]);
   });
 });
 

@@ -32,6 +32,17 @@ describe("web build output", () => {
     expect(jsFiles.length).toBeGreaterThan(0);
   });
 
+  it("should mount the shared OpenSymphony app shell", () => {
+    const assetsDir = path.join(DIST_DIR, "assets");
+    const files = fs.readdirSync(assetsDir).filter((file) => file.endsWith(".js"));
+    const bundle = files
+      .map((file) => fs.readFileSync(path.join(assetsDir, file), "utf-8"))
+      .join("\n");
+
+    expect(bundle).toContain("data-opensymphony-app-shell");
+    expect(bundle).not.toMatch(/Terminal Renderer Demo/);
+  });
+
   it("should not include Tauri or desktop-only references", () => {
     const assetsDir = path.join(DIST_DIR, "assets");
     const files = fs.readdirSync(assetsDir);
