@@ -274,6 +274,7 @@ Notable removals:
 - COE-409: Desktop Settings, Keychain, And Native Actions
 - COE-410: Desktop Local Stream Optimization
 - COE-413: Implementation Plan Generator Stage
+- COE-449: Desktop alpha recovery: replace stubs with functional app
 
 ## Source refs
 
@@ -331,5 +332,6 @@ Notable removals:
 - COE-409
 - COE-410
 - COE-413
+- COE-449
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -379,6 +379,7 @@ recovery. To archive from already captured memory without recapturing, use
 - COE-413: Implementation Plan Generator Stage
 - COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 - COE-448: Multi-repo memory server and deterministic context
+- COE-449: Desktop alpha recovery: replace stubs with functional app
 
 ## Source refs
 
@@ -425,5 +426,6 @@ recovery. To archive from already captured memory without recapturing, use
 - COE-413
 - COE-434
 - COE-448
+- COE-449
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

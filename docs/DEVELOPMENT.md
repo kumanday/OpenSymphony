@@ -223,6 +223,7 @@ Breaking changes in this line include:
 - COE-409: Desktop Settings, Keychain, And Native Actions
 - COE-410: Desktop Local Stream Optimization
 - COE-448: Multi-repo memory server and deterministic context
+- COE-449: Desktop alpha recovery: replace stubs with functional app
 
 ## Source refs
 
@@ -270,5 +271,6 @@ Breaking changes in this line include:
 - COE-409
 - COE-410
 - COE-448
+- COE-449
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

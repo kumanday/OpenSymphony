@@ -321,6 +321,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 - COE-410: Desktop Local Stream Optimization
 - COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 - COE-448: Multi-repo memory server and deterministic context
+- COE-449: Desktop alpha recovery: replace stubs with functional app
 
 ## Source refs
 
@@ -368,5 +369,6 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 - COE-410
 - COE-434
 - COE-448
+- COE-449
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

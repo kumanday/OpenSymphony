@@ -746,6 +746,7 @@ Candidate features:
 - COE-410: Desktop Local Stream Optimization
 - COE-413: Implementation Plan Generator Stage
 - COE-434: Long-running harness liveness and scheduler/runtime ownership contract
+- COE-449: Desktop alpha recovery: replace stubs with functional app
 
 ## Source refs
 
@@ -768,5 +769,6 @@ Candidate features:
 - COE-410
 - COE-413
 - COE-434
+- COE-449
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
