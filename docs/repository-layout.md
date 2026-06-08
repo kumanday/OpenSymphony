@@ -198,6 +198,7 @@ of dead bridge code.
 - COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
 - COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
 - COE-284: Add orchestrator run command to CLI and make it installable
+- COE-285: Refactor orchestrator_run.rs into smaller CLI runtime modules
 - COE-287: Add opensymphony debug command for conversational session debugging
 - COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
 - COE-382: Add supply-chain and security audits to CI
@@ -236,6 +237,7 @@ of dead bridge code.
 - COE-281
 - COE-282
 - COE-284
+- COE-285
 - COE-287
 - COE-294
 - COE-382

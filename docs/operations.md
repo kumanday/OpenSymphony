@@ -301,6 +301,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 - COE-274: CLI packaging, doctor, and local operations docs
 - COE-275: Remote agent-server mode and auth hardening
 - COE-277: Implement hierarchy-aware task selection
+- COE-278: Doctor live probe resolves repo-local OpenHands launcher paths reliably
 - COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
 - COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
 - COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
@@ -349,6 +350,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 - COE-274
 - COE-275
 - COE-277
+- COE-278
 - COE-280
 - COE-281
 - COE-282

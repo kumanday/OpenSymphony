@@ -52,23 +52,27 @@ areas:
     docs_target: docs/cli.md
     visibility: public
     status: stable
-    confidence: 85
+    confidence: 95
     aliases:
     - cli
     source_refs:
       docs:
       - docs/cli.md
+      linear_labels:
+      - cli
   configuration:
     title: Configuration
     docs_target: docs/configuration.md
     visibility: public
     status: stable
-    confidence: 85
+    confidence: 95
     aliases:
     - configuration
     source_refs:
       docs:
       - docs/configuration.md
+      linear_labels:
+      - configuration
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
@@ -92,13 +96,15 @@ areas:
     docs_target: docs/DEVELOPMENT.md
     visibility: public
     status: stable
-    confidence: 85
+    confidence: 95
     aliases:
     - development
     - development guide
     source_refs:
       docs:
       - docs/DEVELOPMENT.md
+      linear_labels:
+      - development
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
@@ -268,12 +274,14 @@ areas:
     docs_target: docs/operations.md
     visibility: public
     status: stable
-    confidence: 85
+    confidence: 95
     aliases:
     - operations
     source_refs:
       docs:
       - docs/operations.md
+      linear_labels:
+      - operations
       linear_milestones:
       - 'M6.5: Memory Server'
       - 'M7: Shared Client And Desktop Alpha'
@@ -294,12 +302,15 @@ areas:
     docs_target: docs/repository-layout.md
     visibility: public
     status: stable
-    confidence: 85
+    confidence: 95
     aliases:
     - repository layout
+    - repository-layout
     source_refs:
       docs:
       - docs/repository-layout.md
+      linear_labels:
+      - repository-layout
   sources:
     title: Sources and Trust Notes
     docs_target: docs/sources.md
@@ -331,13 +342,15 @@ areas:
     docs_target: docs/testing-and-operations.md
     visibility: public
     status: stable
-    confidence: 85
+    confidence: 95
     aliases:
     - testing
     - testing-and-operations
     source_refs:
       docs:
       - docs/testing-and-operations.md
+      linear_labels:
+      - testing-and-operations
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'

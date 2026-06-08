@@ -346,6 +346,7 @@ copy that guide into the target repository.
 - COE-273: Live local end-to-end suite
 - COE-274: CLI packaging, doctor, and local operations docs
 - COE-277: Implement hierarchy-aware task selection
+- COE-278: Doctor live probe resolves repo-local OpenHands launcher paths reliably
 - COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
 - COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
 - COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
@@ -397,6 +398,7 @@ copy that guide into the target repository.
 - COE-273
 - COE-274
 - COE-277
+- COE-278
 - COE-280
 - COE-281
 - COE-282
