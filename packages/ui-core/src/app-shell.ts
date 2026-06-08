@@ -207,6 +207,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!profile) {
       return;
     }
+    const wasActive = profile.active || this.state.activeProfileId === profileId;
     this.state.activeProfileId = profileId;
     this.state.gatewayDraft = profile.gatewayUrl;
     this.state.profiles = this.state.profiles.map((candidate) => ({
@@ -214,7 +215,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       active: candidate.id === profileId,
     }));
 
-    if (controller) {
+    if (controller && !wasActive) {
       await controller.setActiveProfile(profileId).catch((error) => {
         this.state.connectionMessage = `Profile selection failed: ${errorMessage(error)}`;
       });

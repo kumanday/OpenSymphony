@@ -214,10 +214,9 @@ function toConnectionProfile(profile: NativeProfileResponse): ConnectionProfile 
     default:
       return {
         ...base,
-        kind: "external_gateway",
-        managed: false,
-        probeOnConnect: true,
-      };
+        kind: profile.kind as ConnectionProfile["kind"],
+        managed: profile.managed ?? false,
+      } as ConnectionProfile;
   }
 }
 
