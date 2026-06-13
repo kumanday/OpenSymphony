@@ -11,8 +11,11 @@
 //!   for review before plan generation.
 //! - **Implementation Plan Generator** (`generator`): Transforms planning session context
 //!   into structured milestones, issues, sub-issues, task packages, and dependency graphs.
+//! - **Plan Compiler** (`compiler`): Enforces Linear-native taxonomy (milestone/issue/
+//!   sub-issue) on `PlanArtifacts` and emits the manifest and publish-receipt projections.
 
 pub mod codebase;
+pub mod compiler;
 pub mod domain;
 pub mod generator;
 pub mod linear_graph;
@@ -21,6 +24,12 @@ pub mod research;
 pub use codebase::{
     AnalysisRisk, CodebaseAnalysis, CodebaseAnalysisError, CodebaseAnalyzer, Convention,
     IntegrationPoint, LanguageSignature, OwnershipSignal, PackageInfo, PackageKind,
+};
+pub use compiler::{
+    AppliedHierarchy, CompilationResult, CompiledIssue, CompiledMilestone, CompiledSubIssue,
+    DependencyEdge, DependencyMetadata, DependencyRelation, LinearPublishEntity,
+    LinearPublishReceipt, MilestoneReceipt, PlanCompiler, TaskKind, TaxonomyViolation,
+    UnderspecifiedSubIssue, ValidationMessage, ValidationSeverity,
 };
 pub use generator::{
     AcceptanceCriterion, GenerationError, IntakeContext, ManifestTask, PlanArtifacts,
