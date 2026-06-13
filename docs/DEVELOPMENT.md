@@ -54,6 +54,66 @@ Key choices:
   `opensymphony init`
 - FrankenTUI is optional and must not affect correctness
 
+## Desktop alpha (COE-449)
+
+The Tauri desktop wrapper now mounts the same shared `OpenSymphonyApp`
+shell as the web bundle, instead of the historical stub renderer. Both
+entry points live under `apps/`:
+
+- `apps/desktop` — Tauri wrapper; frontend ships from `apps/desktop/dist`.
+- `apps/web` — browser bundle served by the gateway or deployed as a
+  static site.
+
+### Running the desktop alpha locally
+
+```bash
+# 1. Build the shared frontend first (workspace root).
+npm install
+npm run build --workspace=@opensymphony/gateway-schema
+npm run build --workspace=@opensymphony/ui-core
+npm run build --workspace=@opensymphony/desktop
+
+# 2. Run the desktop frontend against a loopback gateway.
+#    The bundle auto-attaches via HttpGatewayTransport if the
+#    Rust gateway isn't reachable.
+(cd apps/desktop && npm run dev)            # vite dev server on 127.0.0.1:1420
+# 3. (optional) Launch the Tauri shell once dependencies are installed.
+cargo install --path apps/desktop/src-tauri --locked
+(cd apps/desktop/src-tauri && cargo run)
+```
+
+The desktop entry detects the Tauri runtime via
+`globalThis.__TAURI__` and uses the native `list_profiles`,
+`store_profile`, and `set_active_profile` commands for connection
+profile persistence. Outside Tauri (vite dev, `npm run build` preview)
+the entry falls back to a loopback HTTP transport against
+`http://127.0.0.1:8000` and renders the same `OpenSymphony Desktop`
+shell.
+
+### Verification artifacts
+
+Every release-blocking check below is wired to a single command and is
+expected to pass on every pull request:
+
+| Check | Command | Verifies |
+|---|---|---|
+| TypeScript types | `npm run type-check` | Shared frontend compiles end-to-end |
+| Frontend tests | `npx jest --config jest.config.js` (or `npm test`) | Includes the route contract, app-shell render, transport contract, reducer, profile, and discovery suites |
+| Desktop bundle | `npm run build --workspace=@opensymphony/desktop` | `dist/index.html` + `dist/assets/main-*.js` contain the real app shell markup (no stub placeholder text) |
+| Desktop smoke | `npx jest --config jest.config.js --testPathPattern apps/desktop` | `build-smoke.test.ts` and `app-shell-render.test.ts` both pass |
+| Rust desktop | `cd apps/desktop/src-tauri && cargo test` | 36 unit tests + 5 process-ownership integration tests |
+| Rust Lint | `cd apps/desktop/src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings` | Formatting + clippy on the desktop crate |
+
+### Acceptance reminders
+
+- Capability discovery (`alphaCapabilities()` in `packages/ui-core/src/app-shell.ts`) only advertises `loopback_http` and explicitly marks `terminal_stream` as `available: false`. No stub native transport is marked as ready.
+- Connection profiles persist via the `settings` capability and the
+  `fs:allow-read-text-file` / `fs:allow-write-text-file` permission set,
+  scoped to `$HOME/.config/opensymphony` by fs-plugin config.
+- The frontend's `routes-contract.test.ts` keeps the TS API client in
+  lock-step with the Rust axum router declared in
+  `crates/opensymphony-gateway/src/lib.rs` (`pub fn router(&self) -> Router`).
+
 ## Milestones
 
 ### M1 Foundation and contracts
