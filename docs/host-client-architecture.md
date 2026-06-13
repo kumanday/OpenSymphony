@@ -908,12 +908,7 @@ Generated project plans can be over-broad, under-specified, or poorly decomposed
 
 ## Current model
 
-- COE-389 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
-- COE-390 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
-- COE-391 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
-- COE-392 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
-- COE-393 contributed: PR #91: feat: Event Journal and Stream Broker (COE-393) (merge `1183bc6`)
-- COE-394 contributed: PR #89: COE-394: Frontend workspace and shared schemas (merge `68d86ff`)
+- COE-449 contributed: PR #111: COE-449: Recover desktop alpha app shell (merge `20e50e1`)
 
 ## Important invariants
 
@@ -930,42 +925,10 @@ Generated project plans can be over-broad, under-specified, or poorly decomposed
 
 ## Recent changes
 
-- COE-389: Current Gateway Inventory And Vocabulary
-- COE-390: Gateway Schemas And Stream Feasibility
-- COE-391: Gateway Module, Capabilities, And Dashboard Snapshot
-- COE-392: Task Graph, Run Detail, File, And Diff Read APIs
-- COE-393: Event Journal And Stream Broker
-- COE-394: Frontend Workspace And Shared Schemas
-- COE-396: Action Receipts And Initial Run Actions
-- COE-397: Gateway API Client, Transport Adapters, And Reducers
-- COE-398: Tauri Shell And Security Capabilities
-- COE-402: App Shell, Dashboard, Task Graph, And Run Views
-- COE-403: Terminal And Log Renderer Prototype
-- COE-404: Desktop Connection Profiles And Daemon Management
-- COE-406: Repository, Linear, And Research Analysis
-- COE-409: Desktop Settings, Keychain, And Native Actions
-- COE-410: Desktop Local Stream Optimization
-- COE-413: Implementation Plan Generator Stage
 - COE-449: Desktop alpha recovery: replace stubs with functional app
 
 ## Source refs
 
-- COE-389
-- COE-390
-- COE-391
-- COE-392
-- COE-393
-- COE-394
-- COE-396
-- COE-397
-- COE-398
-- COE-402
-- COE-403
-- COE-404
-- COE-406
-- COE-409
-- COE-410
-- COE-413
 - COE-449
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

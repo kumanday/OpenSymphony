@@ -36,8 +36,8 @@ hooks:
   timeout_ms: 60000
 
 agent:
-  max_concurrent_agents: 4
-  max_turns: 20
+  max_concurrent_agents: 8
+  max_turns: 40
   max_retry_backoff_ms: 300000
   stall_timeout_ms: 300000
 
@@ -58,7 +58,7 @@ openhands:
     # Defaults to the current runtime-owned per-issue conversation reuse behavior.
     # This path stays relative to the per-issue workspace; parent traversal is rejected.
     persistence_dir_relative: ".opensymphony/openhands"
-    max_iterations: 500
+    max_iterations: 800
     stuck_detection: true
     # Defaults to `NeverConfirm` when omitted.
     confirmation_policy:
