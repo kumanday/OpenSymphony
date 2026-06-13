@@ -31,7 +31,19 @@ use crate::opensymphony_gateway_schema::{
 };
 
 pub mod action_handler;
+pub mod task_graph_mutations;
 use action_handler::ActionHandler;
+// Re-export the task-graph mutation types at the gateway crate level so
+// integration tests and host wiring can use them via
+// `opensymphony::opensymphony_gateway::TaskGraphMilestoneRequest` etc.
+pub use task_graph_mutations::{
+    IssueOp, LinearClientMutationAdapter, LinearMutationClient, MilestoneOp, MutationError,
+    MutationOp, SubIssueOp, TaskGraphEvidenceRequest, TaskGraphEvidenceResponse,
+    TaskGraphIssueRequest, TaskGraphIssueResponse, TaskGraphMilestoneRequest,
+    TaskGraphMilestoneResponse, TaskGraphMutationState, TaskGraphRelationRequest,
+    TaskGraphRelationResponse, TaskGraphSubIssueRequest, TaskGraphSubIssueResponse,
+    append_mutation_event, append_mutation_event_with_op, entity_kind_for, task_graph_router,
+};
 
 pub use crate::opensymphony_control::SnapshotStore;
 pub use crate::opensymphony_domain::{
@@ -188,13 +200,26 @@ impl Drop for BrokerConnectionGuard {
 }
 
 /// Shared state for the gateway server.
-#[derive(Debug, Clone)]
 pub struct GatewayState {
     pub store: SnapshotStore,
     pub journal: InMemoryEventJournal,
     pub broker: StreamBroker,
     pub web_assets_dir: Option<String>,
     pub action_handler: ActionHandler,
+    pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
+}
+
+impl Clone for GatewayState {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            journal: self.journal.clone(),
+            broker: self.broker.clone(),
+            web_assets_dir: self.web_assets_dir.clone(),
+            action_handler: self.action_handler.clone(),
+            linear_mutations: self.linear_mutations.clone(),
+        }
+    }
 }
 
 impl axum::extract::FromRef<GatewayState> for SnapshotStore {
@@ -205,12 +230,39 @@ impl axum::extract::FromRef<GatewayState> for SnapshotStore {
 
 /// V1 gateway server that exposes stable public DTO endpoints
 /// on top of the internal control-plane `SnapshotStore`.
-#[derive(Debug, Clone)]
 pub struct GatewayServer {
     store: SnapshotStore,
     journal: InMemoryEventJournal,
     broker: StreamBroker,
     web_assets_dir: Option<String>,
+    linear_mutations: Option<Arc<dyn LinearMutationClient>>,
+}
+
+impl Clone for GatewayServer {
+    fn clone(&self) -> Self {
+        Self {
+            store: self.store.clone(),
+            journal: self.journal.clone(),
+            broker: self.broker.clone(),
+            web_assets_dir: self.web_assets_dir.clone(),
+            linear_mutations: self.linear_mutations.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for GatewayServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayServer")
+            .field("store", &"<store>")
+            .field("journal", &"<journal>")
+            .field("broker", &"<broker>")
+            .field("web_assets_dir", &self.web_assets_dir)
+            .field(
+                "linear_mutations",
+                &self.linear_mutations.as_ref().map(|_| "..."),
+            )
+            .finish()
+    }
 }
 
 impl GatewayServer {
@@ -222,6 +274,7 @@ impl GatewayServer {
             broker: StreamBroker::new(journal.clone()),
             store,
             web_assets_dir: None,
+            linear_mutations: None,
         }
     }
 
@@ -236,12 +289,23 @@ impl GatewayServer {
             journal,
             broker,
             web_assets_dir: None,
+            linear_mutations: None,
         }
     }
 
     /// Enable serving of the built web client from the given directory.
     pub fn with_web_assets(mut self, dir: impl Into<String>) -> Self {
         self.web_assets_dir = Some(dir.into());
+        self
+    }
+
+    /// Install a Linear mutation client for the `/api/v1/taskgraph/*`
+    /// endpoints. The endpoints respond with 503 until this is configured
+    /// because the host client must not call Linear without an explicit
+    /// adapter wired in (tests inject fakes; production wires
+    /// `LinearClientMutationAdapter`).
+    pub fn with_linear_mutations(mut self, client: Option<Arc<dyn LinearMutationClient>>) -> Self {
+        self.linear_mutations = client;
         self
     }
 
@@ -257,6 +321,7 @@ impl GatewayServer {
             broker: self.broker.clone(),
             web_assets_dir: self.web_assets_dir.clone(),
             action_handler: ActionHandler::new(self.journal.clone()),
+            linear_mutations: self.linear_mutations.clone(),
         };
         let mut router = Router::new()
             .route("/api/v1/capabilities", get(capabilities))
@@ -282,6 +347,18 @@ impl GatewayServer {
                 .route("/app/", get(web_asset_handler))
                 .route("/app/{*path}", get(web_asset_handler));
         }
+
+        // Merge in the `/api/v1/taskgraph/*` mutation routers. They carry
+        // their own dedicated state container so the gateway state type
+        // doesn't have to expose every internal field to the mutation
+        // handlers (which only need the journal and the optional mutation
+        // client).
+        let mutation_state = TaskGraphMutationState {
+            journal: self.journal.clone(),
+            linear_mutations: self.linear_mutations.clone(),
+        };
+        let mutation_router = task_graph_router().with_state(mutation_state);
+        router = router.nest("/api/v1/taskgraph", mutation_router);
 
         router.with_state(state)
     }

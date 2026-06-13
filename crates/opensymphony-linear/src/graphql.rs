@@ -260,6 +260,181 @@ mutation IssueArchive($id: String!, $trash: Boolean) {
 }
 "#;
 
+pub(super) const PROJECT_MILESTONE_CREATE_MUTATION: &str = r#"
+mutation ProjectMilestoneCreate($input: ProjectMilestoneCreateInput!) {
+  projectMilestoneCreate(input: $input) {
+    success
+    projectMilestone {
+      id
+      name
+      description
+      targetDate
+      sortOrder
+      project {
+        id
+        name
+        slugId
+      }
+    }
+  }
+}
+"#;
+
+pub(super) const PROJECT_MILESTONE_UPDATE_MUTATION: &str = r#"
+mutation ProjectMilestoneUpdate($id: String!, $input: ProjectMilestoneUpdateInput!) {
+  projectMilestoneUpdate(id: $id, input: $input) {
+    success
+    projectMilestone {
+      id
+      name
+      description
+      targetDate
+      sortOrder
+      project {
+        id
+        name
+        slugId
+      }
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_CREATE_MUTATION: &str = r#"
+mutation IssueCreate($input: IssueCreateInput!) {
+  issueCreate(input: $input) {
+    success
+    issue {
+      id
+      identifier
+      url
+      title
+      description
+      priority
+      estimate
+      createdAt
+      updatedAt
+      state {
+        id
+        name
+        type
+      }
+      project {
+        id
+        name
+        slugId
+      }
+      projectMilestone {
+        id
+        name
+      }
+      parent {
+        id
+        identifier
+      }
+      assignee {
+        id
+        name
+        email
+      }
+      labels(first: 25) {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_UPDATE_MUTATION: &str = r#"
+mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+  issueUpdate(id: $id, input: $input) {
+    success
+    issue {
+      id
+      identifier
+      url
+      title
+      description
+      priority
+      estimate
+      createdAt
+      updatedAt
+      state {
+        id
+        name
+        type
+      }
+      project {
+        id
+        name
+        slugId
+      }
+      projectMilestone {
+        id
+        name
+      }
+      parent {
+        id
+        identifier
+      }
+      assignee {
+        id
+        name
+        email
+      }
+      labels(first: 25) {
+        nodes {
+          id
+          name
+        }
+      }
+    }
+  }
+}
+"#;
+
+pub(super) const COMMENT_CREATE_MUTATION: &str = r#"
+mutation CommentCreate($input: CommentCreateInput!) {
+  commentCreate(input: $input) {
+    success
+    comment {
+      id
+      body
+      url
+      createdAt
+      updatedAt
+      issue {
+        id
+        identifier
+      }
+    }
+  }
+}
+"#;
+
+pub(super) const ISSUE_RELATION_CREATE_MUTATION: &str = r#"
+mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) {
+    success
+    issueRelation {
+      id
+      type
+      issue {
+        id
+        identifier
+      }
+      relatedIssue {
+        id
+        identifier
+      }
+    }
+  }
+}
+"#;
+
 pub(super) const PROJECT_BY_SLUG_QUERY: &str = r#"
 query ProjectBySlug($slug: String!) {
   projects(filter: { slugId: { eq: $slug } }, first: 1) {
@@ -364,6 +539,44 @@ pub(super) struct IssueCommentsVariables {
 pub(super) struct IssueArchiveVariables {
     pub id: String,
     pub trash: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectMilestoneCreateVariables {
+    pub input: ProjectMilestoneCreateInput,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectMilestoneUpdateVariables {
+    pub id: String,
+    pub input: ProjectMilestoneUpdateInput,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueCreateVariables {
+    pub input: IssueCreateInput,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueUpdateVariables {
+    pub id: String,
+    pub input: IssueUpdateInput,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CommentCreateVariables {
+    pub input: CommentCreateInput,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueRelationCreateVariables {
+    pub input: IssueRelationCreateInput,
 }
 
 #[derive(Debug, Serialize)]
@@ -614,4 +827,274 @@ pub(super) struct LinearBlockerNode {
     pub identifier: String,
     pub title: String,
     pub state: LinearWorkflowState,
+}
+
+// =============================================================================
+// Mutation input DTOs (Linear-native names).
+//
+// These structs are serialized directly into GraphQL variables. Everything that
+// is optional comes through as `null` (not omitted) so the Linear schema's
+// "argument requires non-null" behavior stays intact.
+// =============================================================================
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMilestoneCreateInput {
+    pub project_id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectMilestoneUpdateInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueCreateInput {
+    pub team_id: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_milestone_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueUpdateInput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub priority: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_milestone_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentCreateInput {
+    pub issue_id: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueRelationCreateInput {
+    pub issue_id: String,
+    pub related_issue_id: String,
+    #[serde(rename = "type")]
+    pub relation_type: String,
+}
+
+// =============================================================================
+// Mutation response DTOs.
+// =============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectMilestoneCreateData {
+    pub project_milestone_create: ProjectMilestoneMutationPayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectMilestoneUpdateData {
+    pub project_milestone_update: ProjectMilestoneMutationPayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueCreateData {
+    pub issue_create: IssueMutationPayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueUpdateData {
+    pub issue_update: IssueMutationPayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CommentCreateData {
+    pub comment_create: CommentMutationPayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueRelationCreateData {
+    pub issue_relation_create: IssueRelationMutationPayload,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectMilestoneMutationPayload {
+    pub success: bool,
+    #[serde(default)]
+    pub project_milestone: Option<ProjectMilestoneMutationNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ProjectMilestoneMutationNode {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub target_date: Option<String>,
+    #[serde(default)]
+    pub sort_order: Option<f64>,
+    pub project: LinearProjectNode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueMutationPayload {
+    pub success: bool,
+    #[serde(default)]
+    pub issue: Option<IssueMutationNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueMutationNode {
+    pub id: String,
+    pub identifier: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub priority: Option<f64>,
+    #[serde(default)]
+    pub estimate: Option<f64>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub state: LinearWorkflowState,
+    #[serde(default)]
+    pub project: Option<LinearProjectNode>,
+    #[serde(default)]
+    pub project_milestone: Option<LinearProjectMilestoneNode>,
+    #[serde(default)]
+    pub parent: Option<LinearParentRefNode>,
+    #[serde(default)]
+    pub assignee: Option<LinearAssigneeNode>,
+    #[serde(default, rename = "labels")]
+    pub labels: LinearLabelMutationConnection,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LinearParentRefNode {
+    pub id: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LinearAssigneeNode {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct LinearLabelMutationConnection {
+    pub nodes: Vec<LinearLabelRefNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinearLabelRefNode {
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CommentMutationPayload {
+    pub success: bool,
+    #[serde(default)]
+    pub comment: Option<CommentMutationNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CommentMutationNode {
+    pub id: String,
+    pub body: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub issue: IssueRefNode,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueRefNode {
+    pub id: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueRelationMutationPayload {
+    pub success: bool,
+    #[serde(default)]
+    pub issue_relation: Option<IssueRelationMutationNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueRelationMutationNode {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub relation_type: String,
+    pub issue: IssueRefNode,
+    pub related_issue: IssueRefNode,
 }

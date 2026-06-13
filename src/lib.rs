@@ -28,3 +28,15 @@ pub mod opensymphony_workflow;
 pub mod opensymphony_workspace;
 
 pub use crate::opensymphony_cli::run;
+// Re-export the gateway task-graph mutation types so the integration tests
+// under `crates/opensymphony-gateway/tests/` and any external consumer can
+// import them straight from the gateway module instead of having to know
+// the internal module layout.
+pub use crate::opensymphony_gateway::task_graph_mutations::{
+    IssueOp, LinearClientMutationAdapter, LinearMutationClient, MilestoneOp, MutationError,
+    SubIssueOp, TaskGraphEvidenceRequest, TaskGraphEvidenceResponse, TaskGraphIssueRequest,
+    TaskGraphIssueResponse, TaskGraphMilestoneRequest, TaskGraphMilestoneResponse,
+    TaskGraphMutationState, TaskGraphRelationRequest, TaskGraphRelationResponse,
+    TaskGraphSubIssueRequest, TaskGraphSubIssueResponse, append_mutation_event, entity_kind_for,
+    task_graph_router,
+};

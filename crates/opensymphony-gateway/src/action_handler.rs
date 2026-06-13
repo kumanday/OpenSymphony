@@ -158,6 +158,11 @@ impl ActionHandler {
             ActionKind::CreateFollowup => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::ApprovalDecision => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::PublishPlan => validate_generic(&action, issue.as_ref(), &action_id),
+            ActionKind::TaskGraphMilestone => validate_task_graph(&action, &action_id),
+            ActionKind::TaskGraphIssue => validate_task_graph(&action, &action_id),
+            ActionKind::TaskGraphSubIssue => validate_task_graph(&action, &action_id),
+            ActionKind::TaskGraphRelation => validate_task_graph(&action, &action_id),
+            ActionKind::TaskGraphEvidence => validate_task_graph(&action, &action_id),
         };
 
         let receipt = validated.receipt;
@@ -429,6 +434,95 @@ fn validate_generic(
             action: action.action_kind.to_string(),
         },
     )
+}
+
+/// Validate a task-graph mutation action.
+///
+/// Unlike the orchestrator-scoped actions, task-graph mutations operate
+/// against the Linear tracker (project milestones, issues, sub-issues,
+/// relations, evidence notes). They are inherently safe at the gateway
+/// validation layer (the gateway is not an orchestrator), so they only need:
+///
+/// 1. The action target entity kind must be one of `Milestone`, `Issue`,
+///    `SubIssue`, or `Project`. Relation and evidence actions still target an
+///    issue under the hood, so the kind stays `Issue`/`SubIssue` here.
+/// 2. The correlation ID must be non-empty so events can be correlated with
+///    the returned action receipt.
+/// 3. If a payload shape is supplied, it must be a JSON object — non-object
+///    payloads are rejected because the downstream `TaskGraphMutator` expects
+///    a typed request.
+fn validate_task_graph(action: &ActionDispatch, action_id: &str) -> ValidatedAction {
+    use EntityKind as Ek;
+
+    let kind = action.target_entity.entity_kind;
+    if !matches!(kind, Ek::Milestone | Ek::Issue | Ek::SubIssue | Ek::Project) {
+        return reject(
+            action,
+            action_id,
+            format!(
+                "task-graph action {} requires Milestone/Issue/SubIssue/Project target, got {:?}",
+                action.action_kind, kind
+            ),
+        );
+    }
+    if action.correlation_id.trim().is_empty() {
+        return reject(
+            action,
+            action_id,
+            "task-graph action requires non-empty correlation_id",
+        );
+    }
+    if let Some(payload) = action.payload.as_ref()
+        && !payload.is_object()
+    {
+        return reject(
+            action,
+            action_id,
+            "task-graph action payload, when provided, must be a JSON object",
+        );
+    }
+
+    let receipt = ActionReceipt::accepted(
+        action_id.to_owned(),
+        action.correlation_id.clone(),
+        action.action_kind,
+    );
+
+    let entity_ref = EntityRef {
+        kind,
+        id: action.target_entity.entity_id.clone(),
+        identifier: None,
+    };
+
+    let event = EventRecord::builder()
+        .actor(EventActor::system("gateway"))
+        .correlation_id(action.correlation_id.clone())
+        .kind(EventKind::GatewayActionDispatched {
+            action: action.action_kind.to_string(),
+        })
+        .entity_ref(entity_ref)
+        .summary(format!(
+            "Action {} dispatched against {:?} {}",
+            action.action_kind, kind, action.target_entity.entity_id
+        ))
+        .payload(json!({
+            "action_id": action_id,
+            "action_kind": action.action_kind.to_string(),
+            "correlation_id": action.correlation_id,
+            "status": "accepted",
+            "idempotency_key": action.idempotency_key,
+            "target_entity": {
+                "kind": format!("{:?}", kind).to_lowercase(),
+                "id": action.target_entity.entity_id,
+            },
+        }))
+        .build();
+
+    ValidatedAction {
+        action_id: action_id.to_owned(),
+        receipt,
+        event: Some(event),
+    }
 }
 
 fn accepted(

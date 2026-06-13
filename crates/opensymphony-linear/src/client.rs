@@ -12,16 +12,23 @@ use tracing::debug;
 
 use super::error::{GraphqlError, LinearError, ResponseMetadata};
 use super::graphql::{
+    COMMENT_CREATE_MUTATION, CommentCreateData, CommentCreateInput, CommentCreateVariables,
     GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
-    ISSUE_COMMENTS_QUERY, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
-    ISSUE_STATES_BY_IDS_QUERY, ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables,
-    IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables,
-    IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
-    IssueLabelsVariables, IssueStatesByIdsData, IssueStatesByIdsVariables, IssuesByStateData,
-    IssuesByStateVariables, LinearIssueNode, LinearLabelConnection, LinearProjectNode,
-    LinearRelationConnection, PROJECT_BY_SLUG_QUERY, PROJECT_UPDATE_CONTENT_MUTATION,
-    ProjectBySlugData, ProjectBySlugVariables, ProjectUpdateContentData,
-    ProjectUpdateContentVariables,
+    ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
+    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_UPDATE_MUTATION,
+    ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables, IssueByIdentifierData,
+    IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables, IssueCreateData,
+    IssueCreateInput, IssueCreateVariables, IssueInverseRelationsData,
+    IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueRelationCreateData,
+    IssueRelationCreateInput, IssueRelationCreateVariables, IssueRelationMutationNode,
+    IssueStatesByIdsData, IssueStatesByIdsVariables, IssueUpdateData, IssueUpdateInput,
+    IssueUpdateVariables, IssuesByStateData, IssuesByStateVariables, LinearIssueNode,
+    LinearLabelConnection, LinearProjectNode, LinearRelationConnection, PROJECT_BY_SLUG_QUERY,
+    PROJECT_MILESTONE_CREATE_MUTATION, PROJECT_MILESTONE_UPDATE_MUTATION,
+    PROJECT_UPDATE_CONTENT_MUTATION, ProjectBySlugData, ProjectBySlugVariables,
+    ProjectMilestoneCreateData, ProjectMilestoneCreateInput, ProjectMilestoneCreateVariables,
+    ProjectMilestoneUpdateData, ProjectMilestoneUpdateInput, ProjectMilestoneUpdateVariables,
+    ProjectUpdateContentData, ProjectUpdateContentVariables,
 };
 use super::normalize::{normalize_issue, normalize_issue_state};
 
@@ -95,6 +102,141 @@ pub struct LinearProjectOverview {
     pub slug_id: String,
     pub url: String,
     pub content: Option<String>,
+}
+
+// =============================================================================
+// Mutation response DTOs (Linear-native shapes).
+//
+// These are returned by the public mutation methods and are wrapper-shaped
+// because the schema uses camelCase and we expose them as snake_case Rust DTOs.
+// =============================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearMilestoneMutationResult {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub target_date: Option<String>,
+    pub sort_order: Option<f64>,
+    pub project_id: String,
+    pub project_slug_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearIssueMutationResult {
+    pub id: String,
+    pub identifier: String,
+    pub url: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+    pub priority: Option<f64>,
+    pub estimate: Option<f64>,
+    pub state_id: String,
+    pub state_name: String,
+    pub state_kind: String,
+    pub project_id: Option<String>,
+    pub project_slug_id: Option<String>,
+    pub project_milestone_id: Option<String>,
+    pub project_milestone_name: Option<String>,
+    pub parent_id: Option<String>,
+    pub parent_identifier: Option<String>,
+    pub assignee_id: Option<String>,
+    pub assignee_name: Option<String>,
+    pub assignee_email: Option<String>,
+    pub label_names: Vec<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<super::graphql::IssueMutationNode> for LinearIssueMutationResult {
+    fn from(node: super::graphql::IssueMutationNode) -> Self {
+        Self {
+            id: node.id,
+            identifier: node.identifier,
+            url: node.url,
+            title: node.title,
+            description: node.description,
+            priority: node.priority,
+            estimate: node.estimate,
+            state_id: node.state.id,
+            state_name: node.state.name,
+            state_kind: node.state.kind,
+            project_id: node.project.as_ref().map(|p| p.id.clone()),
+            project_slug_id: node.project.as_ref().map(|p| p.slug_id.clone()),
+            project_milestone_id: node.project_milestone.as_ref().map(|m| m.id.clone()),
+            project_milestone_name: node.project_milestone.as_ref().map(|m| m.name.clone()),
+            parent_id: node.parent.as_ref().map(|p| p.id.clone()),
+            parent_identifier: node.parent.as_ref().map(|p| p.identifier.clone()),
+            assignee_id: node.assignee.as_ref().map(|a| a.id.clone()),
+            assignee_name: node.assignee.as_ref().map(|a| a.name.clone()),
+            assignee_email: node.assignee.as_ref().and_then(|a| a.email.clone()),
+            label_names: node.labels.nodes.iter().map(|l| l.name.clone()).collect(),
+            created_at: node.created_at,
+            updated_at: node.updated_at,
+        }
+    }
+}
+
+impl From<super::graphql::ProjectMilestoneMutationNode> for LinearMilestoneMutationResult {
+    fn from(node: super::graphql::ProjectMilestoneMutationNode) -> Self {
+        Self {
+            id: node.id,
+            name: node.name,
+            description: node.description,
+            target_date: node.target_date,
+            sort_order: node.sort_order,
+            project_id: node.project.id.clone(),
+            project_slug_id: node.project.slug_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearCommentMutationResult {
+    pub id: String,
+    pub body: String,
+    pub url: Option<String>,
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<super::graphql::CommentMutationNode> for LinearCommentMutationResult {
+    fn from(node: super::graphql::CommentMutationNode) -> Self {
+        Self {
+            id: node.id,
+            body: node.body,
+            url: node.url,
+            issue_id: node.issue.id.clone(),
+            issue_identifier: node.issue.identifier.clone(),
+            created_at: node.created_at,
+            updated_at: node.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearIssueRelationMutationResult {
+    pub id: String,
+    pub relation_type: String,
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub related_issue_id: String,
+    pub related_issue_identifier: String,
+}
+
+impl From<IssueRelationMutationNode> for LinearIssueRelationMutationResult {
+    fn from(node: IssueRelationMutationNode) -> Self {
+        Self {
+            id: node.id,
+            relation_type: node.relation_type,
+            issue_id: node.issue.id.clone(),
+            issue_identifier: node.issue.identifier.clone(),
+            related_issue_id: node.related_issue.id.clone(),
+            related_issue_identifier: node.related_issue.identifier.clone(),
+        }
+    }
 }
 
 impl LinearClient {
@@ -401,6 +543,172 @@ impl LinearClient {
                 "Linear projectUpdate returned success=false".to_string(),
             ))
         }
+    }
+
+    /// Create a project milestone via Linear GraphQL `projectMilestoneCreate`.
+    pub async fn create_project_milestone(
+        &self,
+        input: ProjectMilestoneCreateInput,
+    ) -> Result<LinearMilestoneMutationResult, LinearError> {
+        let variables = ProjectMilestoneCreateVariables { input };
+        let response: ProjectMilestoneCreateData = self
+            .execute_graphql(PROJECT_MILESTONE_CREATE_MUTATION, json!(variables))
+            .await?;
+        Self::milestone_mutation_result("projectMilestoneCreate", response.project_milestone_create)
+    }
+
+    /// Update a project milestone via Linear GraphQL `projectMilestoneUpdate`.
+    pub async fn update_project_milestone(
+        &self,
+        milestone_id: &str,
+        input: ProjectMilestoneUpdateInput,
+    ) -> Result<LinearMilestoneMutationResult, LinearError> {
+        let variables = ProjectMilestoneUpdateVariables {
+            id: normalize_required_string("milestone_id", milestone_id)?,
+            input,
+        };
+        let response: ProjectMilestoneUpdateData = self
+            .execute_graphql(PROJECT_MILESTONE_UPDATE_MUTATION, json!(variables))
+            .await?;
+        Self::milestone_mutation_result("projectMilestoneUpdate", response.project_milestone_update)
+    }
+
+    fn milestone_mutation_result(
+        operation: &'static str,
+        payload: super::graphql::ProjectMilestoneMutationPayload,
+    ) -> Result<LinearMilestoneMutationResult, LinearError> {
+        if !payload.success {
+            return Err(LinearError::InvalidResponse(format!(
+                "Linear {operation} returned success=false",
+            )));
+        }
+        payload.project_milestone.map_or_else(
+            || {
+                Err(LinearError::InvalidResponse(format!(
+                    "Linear {operation} returned success=true without a projectMilestone"
+                )))
+            },
+            |node| Ok(node.into()),
+        )
+    }
+
+    /// Create an issue via Linear GraphQL `issueCreate`. Sub-issues are
+    /// simply issues whose input has `parentId` set; callers pass the parent
+    /// ID explicitly so this method serves both issue and sub-issue flows.
+    pub async fn create_issue(
+        &self,
+        input: IssueCreateInput,
+    ) -> Result<LinearIssueMutationResult, LinearError> {
+        Self::validate_issue_create_input(&input)?;
+        let variables = IssueCreateVariables { input };
+        let response: IssueCreateData = self
+            .execute_graphql(ISSUE_CREATE_MUTATION, json!(variables))
+            .await?;
+        Self::issue_mutation_result("issueCreate", response.issue_create)
+    }
+
+    /// Update an issue via Linear GraphQL `issueUpdate`.
+    pub async fn update_issue(
+        &self,
+        issue_id: &str,
+        input: IssueUpdateInput,
+    ) -> Result<LinearIssueMutationResult, LinearError> {
+        let variables = IssueUpdateVariables {
+            id: normalize_required_string("issue_id", issue_id)?,
+            input,
+        };
+        let response: IssueUpdateData = self
+            .execute_graphql(ISSUE_UPDATE_MUTATION, json!(variables))
+            .await?;
+        Self::issue_mutation_result("issueUpdate", response.issue_update)
+    }
+
+    fn issue_mutation_result(
+        operation: &'static str,
+        payload: super::graphql::IssueMutationPayload,
+    ) -> Result<LinearIssueMutationResult, LinearError> {
+        if !payload.success {
+            return Err(LinearError::InvalidResponse(format!(
+                "Linear {operation} returned success=false",
+            )));
+        }
+        payload.issue.map_or_else(
+            || {
+                Err(LinearError::InvalidResponse(format!(
+                    "Linear {operation} returned success=true without an issue"
+                )))
+            },
+            |node| Ok(node.into()),
+        )
+    }
+
+    fn validate_issue_create_input(input: &IssueCreateInput) -> Result<(), LinearError> {
+        let _ = normalize_required_string("issue.team_id", &input.team_id)?;
+        let _ = normalize_required_string("issue.title", &input.title)?;
+        Ok(())
+    }
+
+    /// Create a comment (evidence note) on an issue via Linear GraphQL
+    /// `commentCreate`.
+    pub async fn create_comment(
+        &self,
+        issue_id: &str,
+        body: &str,
+    ) -> Result<LinearCommentMutationResult, LinearError> {
+        let input = CommentCreateInput {
+            issue_id: normalize_required_string("issue_id", issue_id)?,
+            body: normalize_required_string("comment.body", body)?,
+        };
+        let variables = CommentCreateVariables { input };
+        let response: CommentCreateData = self
+            .execute_graphql(COMMENT_CREATE_MUTATION, json!(variables))
+            .await?;
+        if !response.comment_create.success {
+            return Err(LinearError::InvalidResponse(
+                "Linear commentCreate returned success=false".to_string(),
+            ));
+        }
+        response.comment_create.comment.map_or_else(
+            || {
+                Err(LinearError::InvalidResponse(
+                    "Linear commentCreate returned success=true without a comment".to_string(),
+                ))
+            },
+            |node| Ok(node.into()),
+        )
+    }
+
+    /// Create an issue relation (blocker, related, duplicate) via Linear
+    /// GraphQL `issueRelationCreate`.
+    pub async fn create_issue_relation(
+        &self,
+        issue_id: &str,
+        related_issue_id: &str,
+        relation_type: &str,
+    ) -> Result<LinearIssueRelationMutationResult, LinearError> {
+        let input = IssueRelationCreateInput {
+            issue_id: normalize_required_string("issue_id", issue_id)?,
+            related_issue_id: normalize_required_string("related_issue_id", related_issue_id)?,
+            relation_type: normalize_required_string("relation_type", relation_type)?,
+        };
+        let variables = IssueRelationCreateVariables { input };
+        let response: IssueRelationCreateData = self
+            .execute_graphql(ISSUE_RELATION_CREATE_MUTATION, json!(variables))
+            .await?;
+        if !response.issue_relation_create.success {
+            return Err(LinearError::InvalidResponse(
+                "Linear issueRelationCreate returned success=false".to_string(),
+            ));
+        }
+        response.issue_relation_create.issue_relation.map_or_else(
+            || {
+                Err(LinearError::InvalidResponse(
+                    "Linear issueRelationCreate returned success=true without an issueRelation"
+                        .to_string(),
+                ))
+            },
+            |node| Ok(node.into()),
+        )
     }
 
     async fn expand_issue(
