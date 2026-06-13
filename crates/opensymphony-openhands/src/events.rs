@@ -520,6 +520,39 @@ impl ConversationStateMirror {
         }
     }
 
+    /// Record supplied token counts into the conversation statistics blob so
+    /// subsequent [`ConversationStateMirror::accumulated_token_usage`] calls
+    /// reflect the new totals. Counts are *merged additively* — callers pass
+    /// the change since the last call, not the absolute total.
+    pub fn apply_token_counts(
+        &mut self,
+        input_tokens_delta: u64,
+        output_tokens_delta: u64,
+        cache_read_tokens_delta: u64,
+    ) {
+        if input_tokens_delta == 0 && output_tokens_delta == 0 && cache_read_tokens_delta == 0 {
+            return;
+        }
+        let (prev_input, prev_output, prev_cache_read) =
+            self.accumulated_token_usage().unwrap_or((0, 0, 0));
+        merge_json(
+            &mut self.raw_state,
+            json!({
+                "stats": {
+                    "usage_to_metrics": {
+                        "default": {
+                            "accumulated_token_usage": {
+                                "prompt_tokens": prev_input + input_tokens_delta,
+                                "completion_tokens": prev_output + output_tokens_delta,
+                                "cache_read_tokens": prev_cache_read + cache_read_tokens_delta,
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+    }
+
     pub fn terminal_status(&self) -> Option<TerminalExecutionStatus> {
         match self.execution_status() {
             Some("finished") => Some(TerminalExecutionStatus::Finished),
