@@ -198,7 +198,8 @@ pub async fn store_profile(
             .active_profile_id
             .as_ref()
             .is_some_and(|active_id| active_id == &profile_id);
-        let make_active = was_active || store.active_profile_id.is_none() || store.profiles.is_empty();
+        let make_active =
+            was_active || store.active_profile_id.is_none() || store.profiles.is_empty();
         let response = profile_response_from_request(req, profile_id.clone(), make_active);
 
         store.profiles.retain(|profile| profile.id != profile_id);

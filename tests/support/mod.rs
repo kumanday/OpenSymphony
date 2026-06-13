@@ -14,6 +14,10 @@ pub mod opensymphony_gateway {
     pub use opensymphony::opensymphony_gateway::*;
 }
 
+pub mod opensymphony_gateway_schema {
+    pub use opensymphony::opensymphony_gateway_schema::*;
+}
+
 pub mod opensymphony_linear {
     pub use opensymphony::opensymphony_linear::*;
 }

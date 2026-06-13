@@ -206,6 +206,51 @@ pub fn required_fields() -> &'static [RequiredField] {
             field_name: "resolvedAt",
             critical: false,
         },
+        RequiredField {
+            type_name: "ProjectMilestoneCreateInput",
+            field_name: "projectId",
+            critical: true,
+        },
+        RequiredField {
+            type_name: "ProjectMilestoneCreateInput",
+            field_name: "name",
+            critical: true,
+        },
+        RequiredField {
+            type_name: "IssueCreateInput",
+            field_name: "teamId",
+            critical: true,
+        },
+        RequiredField {
+            type_name: "IssueCreateInput",
+            field_name: "title",
+            critical: true,
+        },
+        RequiredField {
+            type_name: "IssueRelationCreateInput",
+            field_name: "issueId",
+            critical: true,
+        },
+        RequiredField {
+            type_name: "IssueRelationCreateInput",
+            field_name: "relatedIssueId",
+            critical: true,
+        },
+        RequiredField {
+            type_name: "IssueRelationCreateInput",
+            field_name: "type",
+            critical: true,
+        },
+        RequiredField {
+            type_name: "CommentCreateInput",
+            field_name: "issueId",
+            critical: true,
+        },
+        RequiredField {
+            type_name: "CommentCreateInput",
+            field_name: "body",
+            critical: true,
+        },
     ]
 }
 

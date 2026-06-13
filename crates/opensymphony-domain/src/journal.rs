@@ -160,6 +160,19 @@ impl InMemoryEventJournal {
         StreamCursor::new(newest, partition)
     }
 
+    /// Snapshot the most recent `limit` events in insertion order.
+    ///
+    /// Used by tests that need to assert mutations are correlated with
+    /// audit events. Calling with `limit = 0` returns an empty vector.
+    pub async fn recent_events(&self, limit: usize) -> Vec<EventRecord> {
+        let state = self.inner.read().await;
+        if limit == 0 || state.events.is_empty() {
+            return Vec::new();
+        }
+        let start = state.events.len().saturating_sub(limit);
+        state.events.iter().skip(start).cloned().collect()
+    }
+
     /// Subscribe to live events. Returns a receiver for the broadcast channel.
     pub fn subscribe(&self) -> broadcast::Receiver<Result<EventRecord, StreamError>> {
         self.subscribers.subscribe()

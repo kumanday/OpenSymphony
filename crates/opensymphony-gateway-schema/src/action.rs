@@ -66,6 +66,9 @@ pub enum ExpectedFollowup {
     ActionCompletion,
     /// Expect a journal update (comment, metadata, etc.).
     JournalUpdate,
+    /// Expect a task graph update event (milestone/issue/sub-issue/relation
+    /// mutations plus evidence notes).
+    TaskGraphUpdate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +84,17 @@ pub enum ActionKind {
     CreateFollowup,
     ApprovalDecision,
     PublishPlan,
+    /// Create or update a Linear project milestone.
+    TaskGraphMilestone,
+    /// Create or update a Linear issue (including sub-issue creation).
+    TaskGraphIssue,
+    /// Update an existing Linear sub-issue.
+    TaskGraphSubIssue,
+    /// Create or replace dependency/blocker/related relations between two
+    /// Linear issues.
+    TaskGraphRelation,
+    /// Append an evidence comment/note on a Linear issue.
+    TaskGraphEvidence,
 }
 
 impl std::fmt::Display for ActionKind {
@@ -96,6 +110,11 @@ impl std::fmt::Display for ActionKind {
             ActionKind::CreateFollowup => "create_followup",
             ActionKind::ApprovalDecision => "approval_decision",
             ActionKind::PublishPlan => "publish_plan",
+            ActionKind::TaskGraphMilestone => "task_graph_milestone",
+            ActionKind::TaskGraphIssue => "task_graph_issue",
+            ActionKind::TaskGraphSubIssue => "task_graph_sub_issue",
+            ActionKind::TaskGraphRelation => "task_graph_relation",
+            ActionKind::TaskGraphEvidence => "task_graph_evidence",
         };
         f.write_str(s)
     }
@@ -146,6 +165,27 @@ impl ActionKind {
             ],
             ActionKind::PublishPlan => vec![
                 ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::JournalUpdate,
+            ],
+            ActionKind::TaskGraphMilestone => vec![
+                ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::TaskGraphUpdate,
+            ],
+            ActionKind::TaskGraphIssue => vec![
+                ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::TaskGraphUpdate,
+            ],
+            ActionKind::TaskGraphSubIssue => vec![
+                ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::TaskGraphUpdate,
+            ],
+            ActionKind::TaskGraphRelation => vec![
+                ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::TaskGraphUpdate,
+            ],
+            ActionKind::TaskGraphEvidence => vec![
+                ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::TaskGraphUpdate,
                 ExpectedFollowup::JournalUpdate,
             ],
         }
