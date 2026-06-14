@@ -63,6 +63,14 @@ Tasks:
 - OSYM-735 Planning Workspace UI
 - OSYM-736 Linear Draft Preview And Publish Flow
 
+## M9.5: Developer Build Acceleration
+
+Goal: Reduce OpenSymphony-on-OpenSymphony development compile cost after the planning alpha while preserving bundled, turnkey DuckDB behavior for normal users and releases.
+
+Tasks:
+
+- OSYM-737 DuckDB Prebuilt Developer Build Mode
+
 ## M10: Web Client And External Gateway
 
 Goal: Deploy the shared frontend as a browser app that connects to local, external, and hosted gateways with reconnect-safe remote transport behavior.

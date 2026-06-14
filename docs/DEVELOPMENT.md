@@ -138,6 +138,20 @@ Fake server, live tests, doctor command, packaging.
 
 ## Required checks
 
+Fast iterative checks can use the developer aliases. Repo-local Cargo
+configuration sets `DUCKDB_DOWNLOAD_LIB=1`, and the aliases build with
+`--no-default-features --features duckdb-prebuilt`:
+
+```bash
+cargo fmt --check
+cargo check-dev
+cargo test-dev
+cargo clippy-dev
+```
+
+Before release-sensitive, packaging, or dependency changes, also run the default
+bundled-mode checks:
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
@@ -150,9 +164,11 @@ cargo test
 # Format and lint
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
+cargo clippy-dev
 
 # Full tests
 cargo test
+cargo test-dev
 
 # CLI-focused checks
 cargo test --test init

@@ -181,9 +181,14 @@ See [Project Memory](docs/memory.md) for archive guards, YAML import/backfill,
 source schema, automation flags, and the distinction between CLI commands and
 template-managed agent skills.
 
-The memory index uses DuckDB's bundled build so local installs do not need a
-separate DuckDB system package. That choice adds compile time and binary size,
-but keeps the memory database portable for local-first operator workflows.
+The memory index uses DuckDB's bundled build by default so local installs do not
+need a separate DuckDB system package. That choice adds compile time and binary
+size, but keeps the memory database portable for local-first operator workflows.
+Repository developers can use `cargo check-dev`, `cargo test-dev`, and
+`cargo clippy-dev` to build with `--no-default-features --features
+duckdb-prebuilt`; repo-local Cargo configuration sets `DUCKDB_DOWNLOAD_LIB=1`
+so those aliases reuse a downloaded prebuilt libduckdb during iterative
+development.
 
 ## Architecture
 
@@ -354,6 +359,9 @@ contains the requested conversation.
 ```bash
 # Unit tests
 cargo test
+
+# Faster iterative development mode with prebuilt libduckdb
+cargo test-dev
 
 # Static validation
 opensymphony doctor

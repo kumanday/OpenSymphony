@@ -1,2 +1,10 @@
 [build]
 target-dir = "target"
+
+[env]
+DUCKDB_DOWNLOAD_LIB = "1"
+
+[alias]
+check-dev = "check --no-default-features --features duckdb-prebuilt"
+test-dev = "test --no-default-features --features duckdb-prebuilt"
+clippy-dev = "clippy --no-default-features --features duckdb-prebuilt --all-targets -- -D warnings"

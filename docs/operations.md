@@ -63,6 +63,23 @@ maintenance path:
 
 ## 3. Recommended validation commands
 
+For fast iterative development inside this repository, use the developer aliases
+that download and reuse a prebuilt libduckdb instead of compiling bundled
+DuckDB:
+
+```bash
+cargo fmt --check
+cargo check-dev
+cargo test-dev
+cargo test-dev --test memory
+cargo clippy-dev
+```
+
+Repo-local Cargo configuration sets `DUCKDB_DOWNLOAD_LIB=1`, and the aliases
+use `--no-default-features --features duckdb-prebuilt`. Release-sensitive,
+packaging, and dependency work should still include the default bundled-mode
+checks so `cargo install opensymphony` remains turnkey for users:
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
@@ -171,11 +188,15 @@ GitHub access should be fixed before live capture is retried.
 
 `memory capture` creates or refreshes issue capsules, updates
 `.opensymphony/memory/memory.duckdb`, and refreshes markdown indexes when
-enabled. The index is built with DuckDB's bundled native library so operators
-do not need to install DuckDB separately, at the cost of heavier Rust compile
-time and a larger binary. Treat that native dependency as part of the hosted
-deployment threat model before enabling memory in a multi-tenant service. It
-does not archive Linear issues.
+enabled. Normal builds use DuckDB's bundled native library so operators do not
+need to install DuckDB separately, at the cost of heavier Rust compile time and
+a larger binary. Repository development can opt into the `duckdb-prebuilt`
+feature through `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`;
+repo-local Cargo configuration sets `DUCKDB_DOWNLOAD_LIB=1` so
+`libduckdb-sys` downloads and reuses a prebuilt native library in
+`target/duckdb-download`. Treat that native dependency as part of the hosted
+deployment threat model before enabling memory in a multi-tenant service.
+Memory capture does not archive Linear issues.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema

@@ -1,6 +1,6 @@
 planningWave: rich-client-hosted-mode
 linearProject: e7b957855cb7
-publishedAt: '2026-05-17T00:20:01.508972+00:00'
+publishedAt: '2026-06-14T20:18:00Z'
 milestones:
   'M6: Gateway And Stream Contract':
     milestoneId: c32b5191-7349-4f30-bd46-6340af6da3e5
@@ -14,6 +14,9 @@ milestones:
   'M9: Collaborative Planning Alpha':
     milestoneId: 806afecc-4a9f-4862-8330-6ce70d606058
     name: 'M9: Collaborative Planning Alpha'
+  'M9.5: Developer Build Acceleration':
+    milestoneId: 7e66f03b-c3f1-4adf-b534-fbf07f18627c
+    name: 'M9.5: Developer Build Acceleration'
   'M10: Web Client And External Gateway':
     milestoneId: 58d8ef29-ea13-4cd2-b7a5-3768070e8a01
     name: 'M10: Web Client And External Gateway'
@@ -182,6 +185,11 @@ tasks:
     issueId: b360641b-ba85-407e-99ba-48e7b2caa795
     url: https://linear.app/trilogy-ai-coe/issue/COE-418/linear-draft-preview-and-publish-flow
     file: docs/tasks/osym-736-linear-draft-preview-and-publish-flow.md
+  OSYM-737:
+    issue: COE-452
+    issueId: 43a507cc-a292-4d5e-9d16-2c518d9e559c
+    url: https://linear.app/trilogy-ai-coe/issue/COE-452/duckdb-prebuilt-developer-build-mode
+    file: docs/tasks/osym-737-duckdb-prebuilt-developer-build-mode.md
   OSYM-742:
     issue: COE-419
     issueId: d4170095-6d55-4c36-bdc6-2e3f9d434dbe
