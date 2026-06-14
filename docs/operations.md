@@ -61,6 +61,36 @@ maintenance path:
 - leaves `WORKFLOW.md`, `AGENTS.md`, `.github/*`, and repo-local extra skills
   alone
 
+Normal user installs use bundled DuckDB. This keeps `cargo install
+opensymphony` and `opensymphony update` turnkey even when the memory database is
+enabled.
+
+Power users who want to avoid compiling bundled DuckDB may install a system
+DuckDB development package and build without default features:
+
+```bash
+# macOS with Homebrew
+brew install duckdb
+export DUCKDB_DOWNLOAD_LIB=0
+export DUCKDB_LIB_DIR="$(brew --prefix duckdb)/lib"
+export DUCKDB_INCLUDE_DIR="$(brew --prefix duckdb)/include"
+export DYLD_LIBRARY_PATH="$DUCKDB_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+cargo install opensymphony --no-default-features --features duckdb-prebuilt
+```
+
+On Linux, set `DUCKDB_LIB_DIR`, `DUCKDB_INCLUDE_DIR`, and `LD_LIBRARY_PATH` to
+the matching DuckDB installation. On Windows, set `DUCKDB_LIB_DIR`,
+`DUCKDB_INCLUDE_DIR`, and add the DuckDB DLL directory to `PATH` before running
+the same Cargo install command. This is a manual optimization path: verify a
+memory command after installation, and expect to keep the runtime library
+available anywhere the installed binary runs.
+
+To update a power-user system-linked install, run the same Cargo install command
+with the same environment first. Then run `opensymphony update` from a target
+repository only to refresh template-managed agent assets. Starting with
+`opensymphony update` may reinstall the default bundled build when a newer
+release exists.
+
 ## 3. Recommended validation commands
 
 For fast iterative development inside this repository, use the developer aliases

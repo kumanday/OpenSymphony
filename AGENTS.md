@@ -255,6 +255,8 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/ui-frankentui.md`: operator UI design
 - `docs/repository-layout.md`: crate ownership
 - `docs/deployment-modes.md`: local MVP and hosted follow-on
+- `docs/installer-and-distribution.md`: future signed installer, component
+  selection, update, and DuckDB runtime packaging strategy
 - `docs/configuration.md`: target repo bootstrap and runtime config
 - `docs/operations.md`: doctor, rehydration, diagnostics, packaging, and local ops
 - `docs/testing-and-operations.md`: test strategy and validation layers

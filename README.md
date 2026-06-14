@@ -188,7 +188,10 @@ Repository developers can use `cargo check-dev`, `cargo test-dev`, and
 `cargo clippy-dev` to build with `--no-default-features --features
 duckdb-prebuilt`; repo-local Cargo configuration sets `DUCKDB_DOWNLOAD_LIB=1`
 so those aliases reuse a downloaded prebuilt libduckdb during iterative
-development.
+development. Power users can also build against a manually installed system
+DuckDB by setting `DUCKDB_LIB_DIR`, `DUCKDB_INCLUDE_DIR`, and the platform
+runtime loader path before installing with `--no-default-features --features
+duckdb-prebuilt`; see [Installer and Distribution Strategy](docs/installer-and-distribution.md).
 
 ## Architecture
 
@@ -381,6 +384,7 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 - [Architecture](docs/architecture.md) - High-level design and component interactions
 - [Configuration](docs/configuration.md) - Target repo bootstrap and runtime config
 - [Deployment Modes](docs/deployment-modes.md) - Local vs hosted deployment
+- [Installer and Distribution Strategy](docs/installer-and-distribution.md) - Future signed installer shape and DuckDB packaging boundaries
 - [Operations](docs/operations.md) - Doctor, rehydration, diagnostics, and local ops
 - [Testing](docs/testing-and-operations.md) - Test strategy and validation layers
 - [Migration Guide](docs/migration-1.0.0.md) - Breaking changes and upgrade steps for 1.0.0

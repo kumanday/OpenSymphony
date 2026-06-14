@@ -149,6 +149,11 @@ cargo test-dev
 cargo clippy-dev
 ```
 
+These aliases download and reuse a prebuilt DuckDB library inside the checkout's
+Cargo target directory. They do not require a system DuckDB install. Use a
+system-linked DuckDB only when intentionally testing the power-user install path
+documented in [Operations](operations.md).
+
 Before release-sensitive, packaging, or dependency changes, also run the default
 bundled-mode checks:
 

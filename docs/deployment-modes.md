@@ -18,6 +18,12 @@ Stable contract:
 
 The runtime adapter should not need a redesign when moving from local development to hosted execution.
 
+Distribution is a separate concern from deployment topology. The current Cargo
+install path is the CLI/operator path. A future signed installer may install the
+desktop client, web app server, orchestrator host, memory server, and native
+runtime assets as selectable components. That future shape is specified in
+[Installer and Distribution Strategy](installer-and-distribution.md).
+
 ## 2. Mode A: local supervised mode
 
 This is the MVP target.
