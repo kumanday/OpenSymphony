@@ -223,7 +223,29 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
    - code/test/docs updated to address it, or
    - explicit, justified pushback is recorded in the originating feedback channel.
 4. **Respond to inline review comments IN THE SAME THREAD** (required):
-   - Use `gh api repos/<owner>/<repo>/pulls/<pr>/comments -f body="..." -f in_reply_to=<comment_id>` to reply directly in the thread.
+   - Use the explicit review-comment reply endpoint. Do not use top-level PR
+     comments, issue comments, or the repository-wide `/pulls/comments`
+     endpoint for inline replies.
+   - Reply to the top-level review comment ID. If the comment you are looking
+     at has `in_reply_to_id`, use that parent ID; GitHub does not support
+     replies to replies.
+   - Use the numeric `id` from `gh api /repos/{owner}/{repo}/pulls/<pr>/comments`,
+     not the GraphQL `node_id` (`PRRC_...`) and not a discussion URL fragment.
+   - Send the body as JSON via stdin to avoid shell quoting and `gh api` field
+     conversion surprises:
+     ```bash
+     jq -nc --arg body "Fixed in <commit-sha>: <brief description of change>" \
+       '{body:$body}' |
+       gh api -X POST \
+         /repos/{owner}/{repo}/pulls/<pr>/comments/<top_level_review_comment_id>/replies \
+         --input -
+     ```
+   - Verify the reply landed in the intended thread before marking the feedback
+     item resolved:
+     ```bash
+     gh api /repos/{owner}/{repo}/pulls/<pr>/comments --paginate \
+       --jq '.[] | select(.in_reply_to_id == <top_level_review_comment_id>) | {id, body, html_url}'
+     ```
    - Do NOT post new top-level comments or workpad updates to describe what was changed for a specific review item.
    - Each inline review thread must have your response directly in that conversation.
    - After making code changes, reply in the thread: "Fixed in <commit-sha>: <brief description of change>" or "Pushback: <justification for not making the requested change>".

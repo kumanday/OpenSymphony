@@ -138,6 +138,30 @@ To address AI review feedback:
 4. If accepting, implement the fix, commit, and push
 5. Optionally re-trigger AI review by adding the `review-this` label
 
+Use the explicit review-comment reply endpoint for inline AI review threads:
+
+```bash
+# Find the numeric top-level review comment id.
+gh api /repos/{owner}/{repo}/pulls/<pr_number>/comments --paginate \
+  --jq '.[] | {id, in_reply_to_id, path, body, html_url}'
+
+# Reply in the same inline thread. If the target comment has in_reply_to_id,
+# use that parent id; GitHub does not support replies to replies.
+jq -nc --arg body "Fixed in <commit-sha>: <brief resolution>" '{body:$body}' |
+  gh api -X POST \
+    /repos/{owner}/{repo}/pulls/<pr_number>/comments/<top_level_review_comment_id>/replies \
+    --input -
+
+# Verify the reply landed in-thread.
+gh api /repos/{owner}/{repo}/pulls/<pr_number>/comments --paginate \
+  --jq '.[] | select(.in_reply_to_id == <top_level_review_comment_id>) | {id, body, html_url}'
+```
+
+Use the numeric REST `id`, not the GraphQL `node_id` (`PRRC_...`) or a URL
+fragment. Do not use top-level PR comments, issue comments, or the
+repository-wide `/pulls/comments` endpoint when replying to inline review
+feedback.
+
 ### Human Review Comments
 
 Human review comments are blocking and must be addressed (responded to and
@@ -155,12 +179,14 @@ resolved) before requesting a new review or merging.
   ```
 - Reply to a specific review comment:
   ```
-  gh api -X POST /repos/{owner}/{repo}/pulls/<pr_number>/comments \
-    -f body='Your response here' -F in_reply_to=<comment_id>
+  jq -nc --arg body "Your response here" '{body:$body}' |
+    gh api -X POST \
+      /repos/{owner}/{repo}/pulls/<pr_number>/comments/<top_level_review_comment_id>/replies \
+      --input -
   ```
-- `in_reply_to` must be the numeric review comment id (e.g., `2710521800`), not
-  the GraphQL node id (e.g., `PRRC_...`), and the endpoint must include the PR
-  number (`/pulls/<pr_number>/comments`).
+- `<top_level_review_comment_id>` must be the numeric review comment `id` (e.g.,
+  `2710521800`), not the GraphQL node id (e.g., `PRRC_...`). If the comment is
+  itself a reply, use its `in_reply_to_id` parent.
 
 ### Review Response Format
 
