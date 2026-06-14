@@ -244,6 +244,8 @@ export type GatewayAction =
   // Snapshot/actions
   | { type: "SNAPSHOT_RECEIVED"; payload: DashboardSnapshot; nowMs: number }
   | { type: "TASK_GRAPH_RECEIVED"; payload: TaskGraphSnapshot; nowMs: number }
+  | { type: "TASK_GRAPH_NODE_UPDATED"; payload: TaskGraphNode; nowMs: number }
+  | { type: "TASK_GRAPH_NODE_CREATED"; payload: TaskGraphNode; nowMs: number }
   | { type: "RUN_UPDATED"; payload: RunDetail; nowMs: number }
   | { type: "TERMINAL_FRAMES_RECEIVED"; runId: string; frames: TerminalFrame[]; nowMs: number }
   | { type: "APPROVAL_RECEIVED"; payload: ApprovalRequest; nowMs: number }
@@ -483,6 +485,51 @@ export function gatewayReducer(
           rootIds: action.payload.root_ids,
           loading: false,
           error: null,
+          lastUpdated: msToIso(action.nowMs),
+        },
+      };
+    }
+
+    case "TASK_GRAPH_NODE_UPDATED": {
+      const updated = action.payload;
+      if (!state.taskGraph.nodes.has(updated.node_id)) {
+        return state;
+      }
+      const nodes = new Map(state.taskGraph.nodes);
+      nodes.set(updated.node_id, updated);
+      return {
+        ...state,
+        taskGraph: {
+          ...state.taskGraph,
+          nodes,
+          lastUpdated: msToIso(action.nowMs),
+        },
+      };
+    }
+
+    case "TASK_GRAPH_NODE_CREATED": {
+      const created = action.payload;
+      const nodes = new Map(state.taskGraph.nodes);
+      nodes.set(created.node_id, created);
+      const rootIds = Array.from(state.taskGraph.rootIds);
+      if (!created.parent_id && !rootIds.includes(created.node_id)) {
+        rootIds.push(created.node_id);
+      }
+      if (created.parent_id && nodes.has(created.parent_id)) {
+        const parent = nodes.get(created.parent_id)!;
+        if (!parent.children.includes(created.node_id)) {
+          nodes.set(created.parent_id, {
+            ...parent,
+            children: [...parent.children, created.node_id],
+          });
+        }
+      }
+      return {
+        ...state,
+        taskGraph: {
+          ...state.taskGraph,
+          nodes,
+          rootIds,
           lastUpdated: msToIso(action.nowMs),
         },
       };

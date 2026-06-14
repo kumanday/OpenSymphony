@@ -11,7 +11,8 @@ export type ActionKind =
   | "transition_issue"
   | "create_followup"
   | "approval_decision"
-  | "publish_plan";
+  | "publish_plan"
+  | "update_node";
 
 export interface ActionTarget {
   entity_kind: EntityKind;

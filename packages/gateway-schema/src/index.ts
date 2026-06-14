@@ -15,6 +15,15 @@ export type { GatewayHealth, GatewayMetrics, ProjectSummary, SnapshotEventKind, 
 
 // task_graph
 export type { TaskGraphNodeKind, TaskGraphStateCategory, TaskGraphNode, TaskGraphSnapshot } from "./task_graph.js";
+export type {
+  RuntimeBadgeKind,
+  TaskGraphRuntimeOverlay,
+  TaskGraphUpdatePayload,
+  TaskGraphCreatePayload,
+  TaskGraphDependencyPayload,
+  TaskGraphCommentPayload,
+  TaskGraphMutationResult,
+} from "./task_graph_runtime.js";
 
 // run
 export type { RunStatus, ReleaseReason, RunPhase, RunStreamLiveness, RunProgress, RunLivenessEnvelope, HarnessSchedulerDisagreement, RunDiagnostics, SafeActions, RunDetail, RunEventPage, RunEvent } from "./run.js";

@@ -9,6 +9,11 @@ import type {
   ActionDispatch,
   ActionReceipt,
   PageCursor,
+  TaskGraphNode,
+  TaskGraphCreatePayload,
+  TaskGraphUpdatePayload,
+  TaskGraphDependencyPayload,
+  TaskGraphCommentPayload,
   RunTimeline,
   RunLogPage,
   TerminalSearchResult,
@@ -237,18 +242,115 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
 
   async dispatchAction(action: ActionDispatch): Promise<ActionReceipt> {
     const receipt = this.mockActionReceipts.get(action.correlation_id);
-    if (!receipt) {
-      this.actionCounter++;
-      return {
+    if (receipt) return receipt;
+
+    this.actionCounter++;
+    const baseReceipt: ActionReceipt = {
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      action_id: `mock-action-${this.actionCounter}`,
+      correlation_id: action.correlation_id,
+      status: "accepted",
+      expected_events: [],
+      issued_at: new Date(1000000000000 + this.actionCounter).toISOString(),
+    };
+
+    // Simulate task graph mutation acknowledgements and event replay.
+    const payload = action.payload as Record<string, unknown> | undefined;
+    if (action.action_kind === "create_followup" && payload && typeof payload.title === "string") {
+      const create = payload as unknown as TaskGraphCreatePayload;
+      const nodeId = `mock-${create.kind}-${this.actionCounter}`;
+      const newNode: TaskGraphNode = {
         schema_version: { major: 1, minor: 0, patch: 0 },
-        action_id: `mock-action-${this.actionCounter}`,
-        correlation_id: action.correlation_id,
-        status: "accepted",
-        expected_events: [],
-        issued_at: new Date(1000000000000 + this.actionCounter).toISOString(),
+        node_id: nodeId,
+        kind: create.kind,
+        identifier: create.identifier ?? nodeId,
+        title: create.title,
+        state: create.state ?? "Todo",
+        state_category: this.stateToCategory(create.state ?? "Todo"),
+        parent_id: create.parent_id,
+        children: [],
+        blocked_by: [],
+        labels: create.labels ?? [],
+        priority: create.priority,
+        estimate_minutes: create.estimate_minutes,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
       };
+      this.mockTaskGraph.nodes.push(newNode);
+      if (create.parent_id) {
+        const parent = this.mockTaskGraph.nodes.find((n) => n.node_id === create.parent_id);
+        if (parent && !parent.children.includes(nodeId)) {
+          parent.children.push(nodeId);
+        }
+      } else if (!this.mockTaskGraph.root_ids.includes(nodeId)) {
+        this.mockTaskGraph.root_ids.push(nodeId);
+      }
+      baseReceipt.result = { node_id: nodeId, updated_at: newNode.updated_at, applied: true };
+      this.emitTaskGraphEvent();
     }
-    return receipt;
+
+    if (action.action_kind === "update_node" && payload && typeof payload.node_id === "string") {
+      const update = payload as unknown as TaskGraphUpdatePayload;
+      const node = this.mockTaskGraph.nodes.find((n) => n.node_id === update.node_id);
+      if (node) {
+        if (update.title !== undefined) node.title = update.title;
+        if (update.state !== undefined) {
+          node.state = update.state;
+          node.state_category = this.stateToCategory(update.state);
+        }
+        if (update.priority !== undefined) node.priority = update.priority;
+        if (update.estimate_minutes !== undefined) node.estimate_minutes = update.estimate_minutes;
+        if (update.labels !== undefined) node.labels = update.labels;
+        node.updated_at = new Date().toISOString();
+        baseReceipt.result = { node_id: node.node_id, updated_at: node.updated_at, applied: true };
+        this.emitTaskGraphEvent();
+      }
+    }
+
+    if (action.action_kind === "comment" && payload && typeof payload.node_id === "string" && typeof payload.body === "string") {
+      // Comment / evidence action.
+      const comment = payload as unknown as TaskGraphCommentPayload;
+      const node = this.mockTaskGraph.nodes.find((n) => n.node_id === comment.node_id);
+      if (node) {
+        node.comment_count = (node.comment_count ?? 0) + 1;
+        node.updated_at = new Date().toISOString();
+        baseReceipt.result = { node_id: node.node_id, updated_at: node.updated_at, applied: true };
+        this.emitTaskGraphEvent();
+      }
+    }
+
+    if (action.action_kind === "transition_issue" && payload && typeof payload.node_id === "string") {
+      const deps = payload as unknown as TaskGraphDependencyPayload;
+      const node = this.mockTaskGraph.nodes.find((n) => n.node_id === deps.node_id);
+      if (node) {
+        node.blocked_by = deps.blocked_by;
+        node.updated_at = new Date().toISOString();
+        baseReceipt.result = { node_id: node.node_id, updated_at: node.updated_at, applied: true };
+        this.emitTaskGraphEvent();
+      }
+    }
+
+    return baseReceipt;
+  }
+
+  private stateToCategory(state: string): TaskGraphNode["state_category"] {
+    const lower = state.toLowerCase();
+    if (lower === "done" || lower === "completed") return "done";
+    if (lower === "in progress" || lower === "in_progress" || lower === "started") return "in_progress";
+    if (lower === "canceled" || lower === "cancelled") return "canceled";
+    if (lower === "backlog") return "backlog";
+    return "todo";
+  }
+
+  private emitTaskGraphEvent(): void {
+    this.mockEvents.push({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      cursor: { sequence: this.mockEvents.length + 1, partition: "task_graph" },
+      entity_ref: { kind: "project", id: this.mockTaskGraph.project_id },
+      event_kind: "task_graph_updated",
+      emitted_at: new Date().toISOString(),
+      payload: { project_id: this.mockTaskGraph.project_id, nodes: this.mockTaskGraph.nodes },
+    });
   }
 
   async cancelRun(runId: string): Promise<ActionReceipt> {

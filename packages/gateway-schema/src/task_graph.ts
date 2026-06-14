@@ -28,6 +28,10 @@ export interface TaskGraphNode {
   created_at?: string;
   updated_at?: string;
   estimate_minutes?: number;
+  /** Identifier of the active or last run linked to this node, if any. */
+  run_id?: string;
+  /** Count of comments / evidence notes attached to this node. */
+  comment_count?: number;
 }
 
 /** Flat list response for a project task graph. */

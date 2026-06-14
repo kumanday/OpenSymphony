@@ -11,6 +11,7 @@ import {
 import type {
   DashboardSnapshot,
   TaskGraphSnapshot,
+  TaskGraphNode,
   RunDetail,
   TerminalFrame,
   ApprovalRequest,
@@ -54,6 +55,22 @@ function makeTaskGraphSnapshot(): TaskGraphSnapshot {
     generated_at: "2025-01-01T00:00:00Z",
     nodes: [],
     root_ids: [],
+  };
+}
+
+function makeNode(nodeId: string, parentId?: string): TaskGraphNode {
+  return {
+    schema_version: { major: 1, minor: 0, patch: 0 },
+    node_id: nodeId,
+    kind: "issue",
+    identifier: nodeId.toUpperCase(),
+    title: `Issue ${nodeId}`,
+    state: "Todo",
+    state_category: "todo",
+    parent_id: parentId,
+    children: [],
+    blocked_by: [],
+    labels: [],
   };
 }
 
@@ -177,6 +194,86 @@ describe("gatewayReducer", () => {
     expect(state.taskGraph.loading).toBe(false);
     expect(state.taskGraph.error).toBeNull();
     expect(state.taskGraph.lastUpdated).toBeTruthy();
+  });
+
+  it("TASK_GRAPH_NODE_UPDATED updates an existing node and refreshes lastUpdated", () => {
+    const graph = makeTaskGraphSnapshot();
+    graph.nodes = [makeNode("a"), makeNode("b")];
+    graph.root_ids = ["a", "b"];
+    let state = gatewayReducer(initialState, {
+      type: "TASK_GRAPH_RECEIVED",
+      nowMs: NOW,
+      payload: graph,
+    });
+    const updated = { ...state.taskGraph.nodes.get("a")!, title: "Updated A", state: "Done", state_category: "done" as const };
+    state = gatewayReducer(state, {
+      type: "TASK_GRAPH_NODE_UPDATED",
+      nowMs: NOW,
+      payload: updated,
+    });
+    expect(state.taskGraph.nodes.get("a")?.title).toBe("Updated A");
+    expect(state.taskGraph.nodes.get("a")?.state).toBe("Done");
+    expect(state.taskGraph.nodes.get("b")?.title).toBe("Issue b");
+    expect(state.taskGraph.lastUpdated).toBeTruthy();
+  });
+
+  it("TASK_GRAPH_NODE_UPDATED is a no-op for an unknown node", () => {
+    const graph = makeTaskGraphSnapshot();
+    graph.nodes = [makeNode("a")];
+    graph.root_ids = ["a"];
+    let state = gatewayReducer(initialState, {
+      type: "TASK_GRAPH_RECEIVED",
+      nowMs: NOW,
+      payload: graph,
+    });
+    const updated = makeNode("z");
+    updated.title = "Unknown";
+    state = gatewayReducer(state, {
+      type: "TASK_GRAPH_NODE_UPDATED",
+      nowMs: NOW,
+      payload: updated,
+    });
+    expect(state.taskGraph.nodes.has("z")).toBe(false);
+    expect(state.taskGraph.nodes.get("a")?.title).toBe("Issue a");
+  });
+
+  it("TASK_GRAPH_NODE_CREATED adds a child node and links it to the parent", () => {
+    const graph = makeTaskGraphSnapshot();
+    graph.nodes = [makeNode("a")];
+    graph.root_ids = ["a"];
+    let state = gatewayReducer(initialState, {
+      type: "TASK_GRAPH_RECEIVED",
+      nowMs: NOW,
+      payload: graph,
+    });
+    const child = makeNode("a-1", "a");
+    state = gatewayReducer(state, {
+      type: "TASK_GRAPH_NODE_CREATED",
+      nowMs: NOW,
+      payload: child,
+    });
+    expect(state.taskGraph.nodes.get("a-1")).toBe(child);
+    expect(state.taskGraph.nodes.get("a")?.children).toContain("a-1");
+    expect(state.taskGraph.rootIds).not.toContain("a-1");
+  });
+
+  it("TASK_GRAPH_NODE_CREATED adds a root node when no parent is provided", () => {
+    const graph = makeTaskGraphSnapshot();
+    graph.nodes = [makeNode("a")];
+    graph.root_ids = ["a"];
+    let state = gatewayReducer(initialState, {
+      type: "TASK_GRAPH_RECEIVED",
+      nowMs: NOW,
+      payload: graph,
+    });
+    const root = makeNode("c");
+    state = gatewayReducer(state, {
+      type: "TASK_GRAPH_NODE_CREATED",
+      nowMs: NOW,
+      payload: root,
+    });
+    expect(state.taskGraph.nodes.get("c")).toBe(root);
+    expect(state.taskGraph.rootIds).toContain("c");
   });
 
   it("RUN_UPDATED stores run and clears loading/error", () => {
