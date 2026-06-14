@@ -130,7 +130,9 @@ This keeps one canonical Linear API surface for the agent path.
 - `opensymphony_orchestrator`
   - scheduler loop and reconciliation
 - `opensymphony_control`
-  - control-plane API
+  - control-plane snapshot store and compatibility API
+- `opensymphony_gateway`
+  - operator gateway API, dashboard snapshots, event journal, and web assets
 - `opensymphony_cli`
   - user-facing entrypoints
 - `opensymphony_tui`
@@ -162,7 +164,8 @@ opensymphony run
   ├─ linear adapter
   ├─ openhands REST client
   ├─ openhands WebSocket client
-  ├─ control-plane API
+  ├─ gateway API
+  ├─ control-plane compatibility API
   └─ local server supervisor
        └─ python -m openhands.agent_server
 ```

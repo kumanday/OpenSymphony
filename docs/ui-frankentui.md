@@ -39,8 +39,12 @@ FrankenTUI should talk only to the local OpenSymphony control plane.
 Current implemented local contract:
 
 - `GET /api/v1/snapshot`
-- `GET /api/v1/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
+- `GET /api/v1/control/events` as SSE with `snapshot` events carrying serialized `SnapshotEnvelope`
 - `GET /healthz` for daemon liveness
+
+The standalone control-plane server still accepts the legacy
+`/api/v1/events` path, but `opensymphony run` serves the full gateway on the
+same bind address and reserves `/api/v1/events` for the gateway event journal.
 
 The implemented client treats the configured base URL as a service-root prefix, so
 `http://proxy/opensymphony` and `http://proxy/opensymphony/` both resolve API requests under
@@ -244,12 +248,12 @@ Current reconnect behavior:
 
 - fetch the latest snapshot over HTTP on startup
 - if `/api/v1/snapshot` accepts the connection but hangs without returning a body, fail that bootstrap or reconnect refresh within the bounded snapshot timeout and retry instead of waiting forever
-- if `/api/v1/events` never finishes attaching, including streams that open headers and then only emit keepalive comments before the first snapshot, fail that attach attempt within one bounded stream-attach timeout and retry instead of waiting forever in `conn=connecting` or `conn=reconnecting`
+- if `/api/v1/control/events` never finishes attaching, including streams that open headers and then only emit keepalive comments before the first snapshot, fail that attach attempt within one bounded stream-attach timeout and retry instead of waiting forever in `conn=connecting` or `conn=reconnecting`
 - keep rendering that bootstrap snapshot with `conn=connecting` until the SSE stream yields its first snapshot
 - publish the first streamed snapshot and the `conn=live` attachment signal atomically through the bridge mailbox so the header never outruns the data it is describing
 - subscribe to the SSE stream
 - if the stream closes or fails, keep the last good snapshot visible, mark the connection as reconnecting, and surface the computed reconnect reason in the top header
-- if `/api/v1/events` goes silent for longer than the keepalive watchdog budget after the connection opens, treat that stalled stream as failed and retry instead of hanging forever on stale data
+- if `/api/v1/control/events` goes silent for longer than the keepalive watchdog budget after the connection opens, treat that stalled stream as failed and retry instead of hanging forever on stale data
 - refetch the current snapshot before resubscribing
 - if that refresh succeeds before the SSE stream reattaches, keep `conn=reconnecting` but switch the compact header detail to the current snapshot state such as `refreshed; stream pending`
 - while the FTUI owns terminal output, bridge reconnect failures stay inside the reducer and header state instead of printing duplicate warning lines to `stderr`

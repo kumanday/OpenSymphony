@@ -228,6 +228,8 @@ Current implemented checks:
 - control-plane idle SSE timeout coverage in `opensymphony-control/tests/control_plane.rs`, including retry-in-place reconnect signaling
 - control-plane post-disconnect reconnect-timeout reapplication coverage in `opensymphony-control/tests/control_plane.rs`
 - control-plane monotonic lag-recovery coverage in `opensymphony-control/src/lib.rs`
+- gateway compatibility coverage for `/healthz`, `/api/v1/snapshot`, `/api/v1/capabilities`, and `/api/v1/dashboard/snapshot` in `opensymphony-gateway/tests/gateway.rs`
+- `opensymphony run` startup coverage that verifies the configured bind address exposes both health and gateway dashboard routes in `opensymphony-cli/tests/run.rs`
 - TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, disconnect retention, and reconnect-to-live recovery coverage in `opensymphony-tui`
 
 ## 4. Fake OpenHands server requirements

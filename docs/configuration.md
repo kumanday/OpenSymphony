@@ -174,6 +174,12 @@ memory:
   auto_archive: false
 ```
 
+The bind address is the single local HTTP surface for both the gateway API used
+by the web/desktop clients (`/api/v1/capabilities`,
+`/api/v1/dashboard/snapshot`, and related `/api/v1/*` routes) and the
+control-plane compatibility routes used by the TUI (`/healthz`,
+`/api/v1/snapshot`, and `/api/v1/control/events`).
+
 Provision that app-managed directory with:
 
 ```bash

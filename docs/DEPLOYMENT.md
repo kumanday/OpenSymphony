@@ -72,14 +72,14 @@ CDN, and configured to point at a remote gateway URL.
 |---|---|---|
 | `VITE_GATEWAY_URL` | Gateway base URL for API calls. Set for separately deployed mode. | (empty = same origin) |
 | `VITE_APP_BASE_PATH` | Base path for static assets in the HTML. | `/app/` |
-| `VITE_DEV_GATEWAY_URL` | Gateway URL for the Vite dev-server proxy. | `http://127.0.0.1:3000` |
+| `VITE_DEV_GATEWAY_URL` | Gateway URL for the Vite dev-server proxy. | `http://127.0.0.1:2468` |
 
 ## Local Development
 
 Run the Vite dev server with proxy support:
 
 ```bash
-VITE_DEV_GATEWAY_URL=http://127.0.0.1:3000 npm run dev --workspace=@opensymphony/web
+VITE_DEV_GATEWAY_URL=http://127.0.0.1:2468 npm run dev --workspace=@opensymphony/web
 ```
 
 The dev server proxies `/api/*` to the local gateway
@@ -119,4 +119,3 @@ After building, `apps/web/dist/` should contain:
 The web build does not include Tauri APIs or desktop-only transports. The
 `apps/web/src/` directory is isolated from `apps/desktop/src/` and only imports
 shared packages from `packages/`.
-

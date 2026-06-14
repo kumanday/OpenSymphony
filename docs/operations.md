@@ -78,6 +78,8 @@ Useful runtime checks:
 ```bash
 curl http://127.0.0.1:2468/healthz
 curl http://127.0.0.1:2468/api/v1/snapshot
+curl http://127.0.0.1:2468/api/v1/capabilities
+curl http://127.0.0.1:2468/api/v1/dashboard/snapshot
 opensymphony tui --url http://127.0.0.1:2468/ --exit-after-ms 1200
 ```
 

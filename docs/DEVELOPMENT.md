@@ -87,7 +87,7 @@ The desktop entry detects the Tauri runtime via
 `store_profile`, and `set_active_profile` commands for connection
 profile persistence. Outside Tauri (vite dev, `npm run build` preview)
 the entry falls back to a loopback HTTP transport against
-`http://127.0.0.1:8000` and renders the same `OpenSymphony Desktop`
+`http://127.0.0.1:2468` and renders the same `OpenSymphony Desktop`
 shell.
 
 ### Verification artifacts

@@ -195,7 +195,7 @@ flowchart TB
         direction TB
         orchestrator["Orchestrator Scheduler"]
         workspace["Workspace Manager"]
-        control["Read-only Control Plane API<br/>GET /healthz, /api/v1/snapshot, /api/v1/events"]
+        control["Gateway + Control API<br/>GET /healthz, /api/v1/snapshot, /api/v1/capabilities"]
         runtime["OpenHands Runtime Client<br/>(REST + WebSocket)"]
         linear_read["Linear Read Adapter"]
 
