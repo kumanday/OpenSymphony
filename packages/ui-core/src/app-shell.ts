@@ -58,6 +58,33 @@ import {
   isActionCapable,
 } from "./task-graph-editor-actions.js";
 import { generateId } from "./id.js";
+import {
+  addCriterion,
+  addMessage,
+  addPlanningNode,
+  addVerification,
+  buildFixturePlanningWorkspaceState,
+  emptyPlanningWorkspaceState,
+  removePlanningNode,
+  removeCriterion,
+  removeVerification,
+  selectArtifact,
+  selectRevision,
+  toggleCriterion,
+  toggleNodeExpanded,
+  toggleVerification,
+  updateArtifactContent,
+  updateCriterion,
+  updateNodeDependencies,
+  updatePlanningNode,
+  updateVerification,
+  type PlanningWorkspaceState,
+} from "./planning-workspace.js";
+import {
+  emptyPlanningEditState,
+  renderPlanningWorkspace,
+  type PlanningEditState,
+} from "./planning-workspace-ui.js";
 
 export interface GatewayReader {
   readonly baseUri: string;
@@ -124,6 +151,7 @@ interface AppState {
   activeProfileId: string | null;
   gatewayDraft: string;
   loading: boolean;
+  activeView: "dashboard" | "planning";
   // Task graph editor state
   taskGraphFilter: TaskGraphFilter;
   inlineEdit: InlineEditState;
@@ -135,6 +163,9 @@ interface AppState {
   pendingCreates: Map<string, string>;
   /** Snapshot of the task graph node before each optimistic mutation, keyed by correlation id. `null` means a new node was created. */
   pendingSnapshots: Map<string, TaskGraphNode | null>;
+  // Planning workspace state
+  planningWorkspace: PlanningWorkspaceState;
+  planningEdit: PlanningEditState;
 }
 
 interface AuditTrailEntry {
@@ -187,6 +218,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       activeProfileId: activeProfile?.id ?? null,
       gatewayDraft: activeProfile?.gatewayUrl ?? this.transport.baseUri,
       loading: true,
+      activeView: "dashboard",
       taskGraphFilter: { ...defaultTaskGraphFilter },
       inlineEdit: { ...emptyInlineEdit },
       createDialog: { ...emptyEditorDialog },
@@ -196,7 +228,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       pendingMutations: new Set(),
       pendingCreates: new Map(),
       pendingSnapshots: new Map(),
+      planningWorkspace: emptyPlanningWorkspaceState(),
+      planningEdit: { ...emptyPlanningEditState },
     };
+    this.loadPlanningWorkspace("opensymphony-local");
   }
 
   private async loadRunDetails(runId: string): Promise<void> {
@@ -288,6 +323,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.connectionMessage = `Connected to ${this.transport.baseUri || "same-origin gateway"}`;
       this.state.selectedProjectId = snapshot.projects[0]?.project_id ?? "default";
       await this.loadTaskGraph(this.state.selectedProjectId);
+      this.loadPlanningWorkspace(this.state.selectedProjectId);
+      this.state.planningWorkspace = {
+        ...this.state.planningWorkspace,
+        project_id: this.state.selectedProjectId,
+      };
     } catch (error) {
       this.state.capabilities = alphaCapabilities();
       this.state.snapshot = alphaSnapshot();
@@ -298,7 +338,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       await this.loadRunDetails("desktop-alpha");
       this.state.connectionMode = "fixture";
       this.state.connectionMessage = `Gateway unavailable, showing desktop-alpha fixture data: ${errorMessage(error)}`;
+      this.loadPlanningWorkspace(this.state.selectedProjectId);
+      this.state.planningWorkspace = {
+        ...this.state.planningWorkspace,
+        project_id: this.state.selectedProjectId,
+      };
     }
+  }
+
+  private loadPlanningWorkspace(projectId: string | null): void {
+    // The fixture planning session is loaded once so the UI renders immediately.
+    // Subsequent gateway/project changes only update the project_id; the workspace
+    // session (messages, edits, criteria) is intentionally kept across project switches.
+    if (this.state.planningWorkspace && this.state.planningWorkspace.session_id) {
+      return;
+    }
+    this.state.planningWorkspace = buildFixturePlanningWorkspaceState(projectId ?? "opensymphony-local");
   }
 
   private async loadTaskGraph(projectId: string | null): Promise<void> {
@@ -570,19 +625,32 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             <h1>${escapeHtml(title)}</h1>
             <p>${escapeHtml(this.state.connectionMessage)}</p>
           </div>
+          <div class="os-view-tabs">
+            <button type="button" class="os-view-tab ${this.state.activeView === "dashboard" ? "os-view-tab-active" : ""}" data-plan-view="dashboard">Dashboard</button>
+            <button type="button" class="os-view-tab ${this.state.activeView === "planning" ? "os-view-tab-active" : ""}" data-plan-view="planning">Planning</button>
+          </div>
           <div class="os-status os-status-${this.state.connectionMode}">
             <span></span>${escapeHtml(statusLabel(this.state.connectionMode))}
           </div>
         </header>
         <section class="os-grid">
           ${this.renderProfiles()}
-          ${this.renderDashboard()}
-          ${this.renderTaskGraph(selectedNode)}
-          ${this.renderRunDetail()}
+          ${this.renderViewContent(selectedNode)}
         </section>
       </main>
     `;
     this.bindEvents();
+  }
+
+  private renderViewContent(selectedNode: TaskGraphNode | undefined): string {
+    if (this.state.activeView === "planning") {
+      return renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit);
+    }
+    return `
+      ${this.renderDashboard()}
+      ${this.renderTaskGraph(selectedNode)}
+      ${this.renderRunDetail()}
+    `;
   }
 
   private renderProfiles(): string {
@@ -952,6 +1020,242 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.commentEdit = { ...emptyCommentEdit };
       this.render();
     });
+
+    // Planning workspace view navigation
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-view]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const view = button.dataset.planView as AppState["activeView"];
+        if (view) {
+          this.state.activeView = view;
+          this.render();
+        }
+      });
+    });
+
+    // Planning workspace tabs
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-tab]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const tab = button.dataset.planTab;
+        if (!tab) return;
+        this.state.planningWorkspace = { ...this.state.planningWorkspace, activeTab: tab as typeof this.state.planningWorkspace.activeTab };
+        this.render();
+      });
+    });
+
+    // Planning conversation
+    this.options.root.querySelector("[data-plan-send-message]")?.addEventListener("click", () => {
+      this.sendPlanMessage();
+    });
+    this.options.root.querySelector("[data-plan-composer]")?.addEventListener("keydown", (event) => {
+      if ((event as KeyboardEvent).key === "Enter" && !(event as KeyboardEvent).shiftKey) {
+        (event as KeyboardEvent).preventDefault();
+        this.sendPlanMessage();
+      }
+    });
+    this.options.root.querySelector("[data-plan-composer]")?.addEventListener("input", () => {
+      this.state.planningWorkspace.composerDraft = this.options.root.querySelector<HTMLTextAreaElement>("[data-plan-composer]")?.value ?? "";
+    });
+
+    // Planning artifact editor
+    this.options.root.querySelector("[data-plan-artifact-select]")?.addEventListener("change", () => {
+      const artifactId = this.options.root.querySelector<HTMLSelectElement>("[data-plan-artifact-select]")?.value ?? null;
+      this.state.planningWorkspace = selectArtifact(this.state.planningWorkspace, artifactId);
+      this.renderPreservingFocus();
+    });
+    this.options.root.querySelector("[data-plan-revision-select]")?.addEventListener("change", () => {
+      const revisionId = this.options.root.querySelector<HTMLSelectElement>("[data-plan-revision-select]")?.value ?? null;
+      this.state.planningWorkspace = selectRevision(this.state.planningWorkspace, revisionId);
+      this.renderPreservingFocus();
+    });
+    this.options.root.querySelector("[data-plan-save-artifact]")?.addEventListener("click", () => {
+      this.savePlanArtifact();
+    });
+    this.options.root.querySelector("[data-plan-add-artifact]")?.addEventListener("click", () => {
+      this.addPlanArtifact();
+    });
+    this.options.root.querySelector("[data-plan-artifact-content]")?.addEventListener("input", () => {
+      // Content is not persisted continuously; only saved on explicit save.
+    });
+
+    // Planning hierarchy editor
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-select]").forEach((row) => {
+      row.addEventListener("click", (event) => {
+        if ((event.target as HTMLElement).closest(".os-node-actions, .os-plan-toggle, .os-plan-node-body input")) return;
+        const nodeId = row.dataset.planNodeSelect;
+        if (nodeId) {
+          this.state.planningWorkspace = { ...this.state.planningWorkspace, selectedNodeId: nodeId };
+          this.render();
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-toggle]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nodeId = button.dataset.planNodeToggle;
+        if (nodeId) {
+          this.state.planningWorkspace = toggleNodeExpanded(this.state.planningWorkspace, nodeId);
+          this.render();
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-add-node]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const kind = button.dataset.planAddNode as "milestone" | "issue" | "sub_issue";
+        this.addPlanNode(kind, null);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-add-child]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const parentId = button.dataset.planAddChild;
+        if (!parentId) return;
+        const parent = this.state.planningWorkspace.nodes.find((n) => n.node_id === parentId);
+        if (!parent) return;
+        const childKind: "milestone" | "issue" | "sub_issue" = parent.kind === "milestone" ? "issue" : "sub_issue";
+        this.addPlanNode(childKind, parentId);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-edit]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nodeId = button.dataset.planNodeEdit;
+        if (!nodeId) return;
+        const node = this.state.planningWorkspace.nodes.find((n) => n.node_id === nodeId);
+        if (!node) return;
+        this.state.planningEdit = { nodeId, title: node.title, state: node.state };
+        this.render();
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-save]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nodeId = button.dataset.planNodeSave;
+        if (nodeId) this.savePlanNodeEdit(nodeId);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-node-cancel]").forEach((button) => {
+      button.addEventListener("click", () => {
+        this.state.planningEdit = { ...emptyPlanningEditState };
+        this.render();
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-remove-node]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nodeId = button.dataset.planRemoveNode;
+        if (nodeId) {
+          this.state.planningWorkspace = removePlanningNode(this.state.planningWorkspace, nodeId);
+          this.render();
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-graph-node]").forEach((node) => {
+      node.addEventListener("click", () => {
+        const nodeId = node.dataset.planGraphNode;
+        if (nodeId) {
+          this.state.planningWorkspace = { ...this.state.planningWorkspace, selectedNodeId: nodeId };
+          this.render();
+        }
+      });
+    });
+
+    // Planning dependency editor
+    this.options.root.querySelector("[data-plan-deps-node-select]")?.addEventListener("change", () => {
+      const nodeId = this.options.root.querySelector<HTMLSelectElement>("[data-plan-deps-node-select]")?.value ?? null;
+      this.state.planningWorkspace = { ...this.state.planningWorkspace, selectedNodeId: nodeId };
+      this.renderPreservingFocus();
+    });
+    this.options.root.querySelector("[data-plan-deps-save]")?.addEventListener("click", () => {
+      this.savePlanDependencies();
+    });
+
+    // Planning acceptance criteria / verification editor
+    this.options.root.querySelector("[data-plan-criteria-add]")?.addEventListener("click", () => {
+      const text = this.options.root.querySelector<HTMLInputElement>("[data-plan-criteria-new]")?.value ?? "";
+      if (!text.trim()) return;
+      this.state.planningWorkspace = addCriterion(this.state.planningWorkspace, text);
+      this.render();
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-criteria-toggle]").forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        const id = checkbox.dataset.planCriteriaToggle;
+        if (id) {
+          this.state.planningWorkspace = toggleCriterion(this.state.planningWorkspace, id);
+          this.render();
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-criteria-text]").forEach((input) => {
+      input.addEventListener("input", () => {
+        const id = input.dataset.planCriteriaText;
+        const value = (input as HTMLInputElement).value;
+        if (id) {
+          this.state.planningWorkspace = updateCriterion(this.state.planningWorkspace, id, value);
+          this.renderPreservingFocus();
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-criteria-remove]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const id = button.dataset.planCriteriaRemove;
+        if (id) {
+          this.state.planningWorkspace = removeCriterion(this.state.planningWorkspace, id);
+          this.render();
+        }
+      });
+    });
+    this.options.root.querySelector("[data-plan-verification-add]")?.addEventListener("click", () => {
+      const text = this.options.root.querySelector<HTMLInputElement>("[data-plan-verification-new]")?.value ?? "";
+      if (!text.trim()) return;
+      this.state.planningWorkspace = addVerification(this.state.planningWorkspace, text);
+      this.render();
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-verification-toggle]").forEach((checkbox) => {
+      checkbox.addEventListener("change", () => {
+        const id = checkbox.dataset.planVerificationToggle;
+        if (id) {
+          this.state.planningWorkspace = toggleVerification(this.state.planningWorkspace, id);
+          this.render();
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-verification-text]").forEach((input) => {
+      input.addEventListener("input", () => {
+        const id = input.dataset.planVerificationText;
+        const value = (input as HTMLInputElement).value;
+        if (id) {
+          this.state.planningWorkspace = updateVerification(this.state.planningWorkspace, id, value);
+          this.renderPreservingFocus();
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-verification-remove]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const id = button.dataset.planVerificationRemove;
+        if (id) {
+          this.state.planningWorkspace = removeVerification(this.state.planningWorkspace, id);
+          this.render();
+        }
+      });
+    });
+
+    // Planning validation links
+    this.options.root.querySelectorAll<HTMLElement>("[data-plan-validation-link]").forEach((link) => {
+      link.addEventListener("click", () => {
+        this.followPlanValidationLink(link);
+      });
+    });
+
+    // Planning diff revision selectors
+    this.options.root.querySelector("[data-plan-diff-left]")?.addEventListener("change", () => {
+      this.state.planningWorkspace = {
+        ...this.state.planningWorkspace,
+        diffLeftRevisionId: this.options.root.querySelector<HTMLSelectElement>("[data-plan-diff-left]")?.value ?? null,
+      };
+      this.renderPreservingFocus();
+    });
+    this.options.root.querySelector("[data-plan-diff-right]")?.addEventListener("change", () => {
+      this.state.planningWorkspace = {
+        ...this.state.planningWorkspace,
+        diffRightRevisionId: this.options.root.querySelector<HTMLSelectElement>("[data-plan-diff-right]")?.value ?? null,
+      };
+      this.renderPreservingFocus();
+    });
   }
 
   // -- Task graph filter handling --
@@ -1280,6 +1584,109 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (this.state.inlineEdit.nodeId === oldId) this.state.inlineEdit.nodeId = newId;
     if (this.state.dependencyEdit.nodeId === oldId) this.state.dependencyEdit.nodeId = newId;
     if (this.state.commentEdit.nodeId === oldId) this.state.commentEdit.nodeId = newId;
+  }
+
+  // -- Planning workspace handling --
+
+  private sendPlanMessage(): void {
+    const body = this.options.root.querySelector<HTMLTextAreaElement>("[data-plan-composer]")?.value ?? "";
+    if (!body.trim()) return;
+    this.state.planningWorkspace = addMessage(this.state.planningWorkspace, "user", body);
+    this.state.planningWorkspace = addMessage(this.state.planningWorkspace, "assistant", "Acknowledged.");
+    this.render();
+  }
+
+  private savePlanArtifact(): void {
+    const artifactId = this.state.planningWorkspace.selectedArtifactId;
+    if (!artifactId) return;
+    const content = this.options.root.querySelector<HTMLTextAreaElement>("[data-plan-artifact-content]")?.value ?? "";
+    this.state.planningWorkspace = updateArtifactContent(this.state.planningWorkspace, artifactId, content);
+    this.renderPreservingFocus();
+  }
+
+  private addPlanArtifact(): void {
+    const now = new Date().toISOString();
+    const artifactId = `artifact-new-${generateId()}`;
+    const revisionId = `rev-new-${generateId()}`;
+    const newArtifact = {
+      schema_version: schemaVersion,
+      artifact_id: artifactId,
+      session_id: this.state.planningWorkspace.session_id,
+      kind: "intake" as const,
+      title: "New Intake",
+      created_at: now,
+      updated_at: now,
+      approved: false,
+      published_to_tracker: false,
+      revisions: [{ revision_id: revisionId, created_at: now, content: "" }],
+    };
+    this.state.planningWorkspace = {
+      ...this.state.planningWorkspace,
+      artifacts: [...this.state.planningWorkspace.artifacts, newArtifact],
+      selectedArtifactId: artifactId,
+      selectedRevisionId: revisionId,
+    };
+    this.render();
+  }
+
+  private addPlanNode(kind: "milestone" | "issue" | "sub_issue", parentId: string | null): void {
+    this.state.planningWorkspace = addPlanningNode(
+      this.state.planningWorkspace,
+      kind,
+      parentId,
+      `New ${kind.replace(/_/g, " ")}`,
+    );
+    const newNodeId = this.state.planningWorkspace.selectedNodeId;
+    const newNode = newNodeId
+      ? this.state.planningWorkspace.nodes.find((n) => n.node_id === newNodeId)
+      : undefined;
+    this.state.planningEdit = newNode
+      ? { nodeId: newNode.node_id, title: newNode.title, state: newNode.state }
+      : { ...emptyPlanningEditState };
+    this.render();
+  }
+
+  private savePlanNodeEdit(nodeId: string): void {
+    const root = this.options.root;
+    const title = Array.from(root.querySelectorAll<HTMLInputElement>("[data-plan-node-title]")).find(
+      (el) => el.dataset.planNodeTitle === nodeId,
+    )?.value.trim();
+    const state = Array.from(root.querySelectorAll<HTMLInputElement>("[data-plan-node-state]")).find(
+      (el) => el.dataset.planNodeState === nodeId,
+    )?.value.trim();
+    this.state.planningWorkspace = updatePlanningNode(this.state.planningWorkspace, nodeId, { title, state });
+    this.state.planningEdit = { ...emptyPlanningEditState };
+    this.render();
+  }
+
+  private savePlanDependencies(): void {
+    const nodeId = this.state.planningWorkspace.selectedNodeId;
+    if (!nodeId) return;
+    const select = this.options.root.querySelector<HTMLSelectElement>("[data-plan-deps-select]");
+    const blockedBy = Array.from(select?.selectedOptions ?? []).map((option) => option.value);
+    this.state.planningWorkspace = updateNodeDependencies(this.state.planningWorkspace, nodeId, blockedBy);
+    this.render();
+  }
+
+  private followPlanValidationLink(link: HTMLElement): void {
+    const kind = link.dataset.planFieldKind;
+    const id = link.dataset.planFieldId;
+    if (!kind || !id) return;
+    let planningWorkspace = this.state.planningWorkspace;
+    if (kind === "artifact") {
+      planningWorkspace = selectArtifact(planningWorkspace, id);
+      planningWorkspace = { ...planningWorkspace, activeTab: "artifact" };
+    } else if (kind === "node") {
+      planningWorkspace = { ...planningWorkspace, selectedNodeId: id, activeTab: "hierarchy" };
+      planningWorkspace = { ...planningWorkspace, expandedNodeIds: new Set(planningWorkspace.expandedNodeIds).add(id) };
+    } else if (kind === "criteria" || kind === "verification") {
+      planningWorkspace = { ...planningWorkspace, activeTab: "criteria" };
+    } else if (kind === "dependency") {
+      planningWorkspace = { ...planningWorkspace, selectedNodeId: id, activeTab: "dependencies" };
+    }
+    this.state.planningWorkspace = planningWorkspace;
+    this.state.activeView = "planning";
+    this.render();
   }
 }
 
@@ -1738,6 +2145,58 @@ function appShellStyles(): string {
     .os-inline-state { width: 120px; }
     pre { margin: 0; padding: 10px; border-radius: 6px; background: #17202a; color: #d7e4ee; overflow: auto; font-size: 12px; }
     .os-empty { color: #667788; font-size: 13px; border: 1px dashed #cbd5df; border-radius: 6px; padding: 14px; }
+    .os-view-tabs { display: inline-flex; gap: 6px; }
+    .os-view-tab { min-height: 32px; padding: 6px 12px; font-size: 13px; border-radius: 6px; background: #f8fafc; border: 1px solid #cad3dd; }
+    .os-view-tab-active { background: #e7f1f5; border-color: #39708f; font-weight: 600; }
+    .os-planning-panel { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 14px; }
+    .os-planning-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+    .os-planning-head h2 { margin: 0; font-size: 16px; }
+    .os-plan-tabs { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+    .os-plan-tab { min-height: 30px; padding: 5px 10px; font-size: 12px; border-radius: 6px; background: #f8fafc; border: 1px solid #cad3dd; }
+    .os-plan-tab-active { background: #e7f1f5; border-color: #39708f; font-weight: 600; }
+    .os-planning-layout { display: flex; gap: 16px; min-height: 420px; }
+    .os-planning-conversation { flex: 0 0 300px; display: flex; flex-direction: column; gap: 10px; }
+    .os-planning-content { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+    .os-conversation-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow: auto; }
+    .os-conversation-message { border: 1px solid #d8dee4; border-radius: 6px; padding: 8px; background: #f8fafc; font-size: 13px; }
+    .os-conversation-message p { margin: 0; }
+    .os-conversation-role { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: #667788; margin-bottom: 4px; }
+    .os-conversation-user { background: #eef3f8; border-color: #cbd5df; }
+    .os-conversation-assistant { background: #f0fdf4; border-color: #bbf7d0; }
+    .os-planning-actions { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+    .os-planning-actions input { flex: 1 1 180px; }
+    .os-plan-hierarchy { display: flex; flex-direction: column; gap: 4px; }
+    .os-plan-hierarchy-row { display: flex; align-items: center; gap: 6px; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px 10px; background: #ffffff; cursor: pointer; }
+    .os-plan-hierarchy-row:hover { border-color: #39708f; background: #e7f1f5; }
+    .os-plan-hierarchy-row.is-selected { border-color: #39708f; background: #e7f1f5; }
+    .os-plan-toggle, .os-plan-toggle-spacer { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border: none; background: transparent; color: #667788; font-size: 12px; cursor: pointer; }
+    .os-plan-node-body { flex: 1; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+    .os-plan-node-body strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-plan-node-body span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-plan-checklist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+    .os-plan-checklist-row { display: flex; align-items: center; gap: 8px; border: 1px solid #d8dee4; border-radius: 6px; padding: 6px 8px; background: #ffffff; }
+    .os-plan-checklist-row input[type="checkbox"] { width: 18px; height: 18px; }
+    .os-plan-checklist-row input[type="text"] { flex: 1; min-width: 0; border: 1px solid #cbd5df; border-radius: 4px; padding: 4px 6px; }
+    .os-plan-validation-list { display: flex; flex-direction: column; gap: 6px; }
+    .os-plan-validation-row { border-radius: 6px; padding: 8px 10px; font-size: 13px; }
+    .os-plan-validation-error { background: #fee2e2; color: #991b1b; }
+    .os-plan-validation-warning { background: #fef3c7; color: #92400e; }
+    .os-plan-validation-info { background: #dbeafe; color: #1e40af; }
+    .os-plan-validation-link { background: transparent; border: none; padding: 0; margin: 0; font: inherit; color: inherit; text-decoration: underline; cursor: pointer; text-align: left; }
+    .os-plan-diff { border: 1px solid #d8dee4; border-radius: 6px; background: #ffffff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; max-height: 320px; overflow: auto; }
+    .os-plan-diff-line { display: grid; grid-template-columns: 36px 36px 1fr; gap: 8px; padding: 2px 8px; white-space: pre-wrap; }
+    .os-plan-diff-lnum, .os-plan-diff-rnum { color: #94a3b3; text-align: right; }
+    .os-plan-diff-add { background: #dcfce7; color: #166534; }
+    .os-plan-diff-remove { background: #fee2e2; color: #991b1b; }
+    .os-plan-diff-unchanged { background: transparent; }
+    .os-plan-graph { border: 1px solid #d8dee4; border-radius: 6px; background: #ffffff; overflow: auto; }
+    .os-plan-graph svg { display: block; min-width: 100%; }
+    .os-plan-graph-edge { stroke: #cbd5df; stroke-width: 2; }
+    .os-plan-graph-dependency { stroke: #92400e; stroke-dasharray: 4 2; }
+    .os-plan-graph-node rect { fill: #f8fafc; stroke: #d8dee4; stroke-width: 1; }
+    .os-plan-graph-node text { font-size: 11px; fill: #17202a; }
+    .os-plan-graph-node-sub { font-size: 10px; fill: #667788; }
+    .os-plan-graph-node-selected rect { fill: #e7f1f5; stroke: #39708f; }
     @media (max-width: 980px) {
       .os-grid { grid-template-columns: 1fr; }
       .os-inline-fields, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
@@ -1766,6 +2225,14 @@ function appShellStyles(): string {
       .os-badge-queued, .os-badge-retry { background: #3b0764; color: #d8b4fe; }
       .os-badge-workspace, .os-badge-harness, .os-badge-diff_summary, .os-badge-validation { background: #1e293b; color: #cbd5e1; }
       pre { background: #0c1116; color: #d9e2ea; }
+      .os-planning-panel, .os-plan-hierarchy-row, .os-plan-checklist-row, .os-plan-diff, .os-plan-graph, .os-conversation-message { background: #171d23; border-color: #2a3440; }
+      .os-plan-hierarchy-row:hover, .os-plan-hierarchy-row.is-selected { background: #18303a; border-color: #5ca0b8; }
+      .os-plan-diff-add { background: #14532d; color: #86efac; }
+      .os-plan-diff-remove { background: #451a1a; color: #fca5a5; }
+      .os-plan-graph-node rect { fill: #111820; stroke: #2a3440; }
+      .os-plan-graph-node text { fill: #d9e2ea; }
+      .os-plan-graph-node-sub { fill: #94a3b3; }
+      .os-plan-graph-node-selected rect { fill: #18303a; stroke: #5ca0b8; }
     }
   `;
 }

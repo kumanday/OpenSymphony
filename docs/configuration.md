@@ -208,6 +208,21 @@ the starting template if you want to inspect the checked-in example.
 developer-facing doctor fixture for this repository. It is not the runtime
 config that `opensymphony run` looks for in a target repo.
 
+## Planning Workspace
+
+The planning workspace is a dense, editable, review-oriented UI for the
+hosted-client mode. It renders from the local planning workspace state and is
+intended to feel like a task-creation tool with Linear as the publishing
+target.
+
+### Intentional MVP limitations
+
+- The fixture planning session is intentionally reused across project switches
+  in the local app shell. The workspace is not yet keyed per project, so
+  switching projects keeps the same conversation, artifacts, and hierarchy
+  until the gateway provides real planning sessions or a per-project session
+  loader is implemented. This is documented behavior, not a bug.
+
 ## Memory Configuration
 
 Project memory stores runtime state under `.opensymphony/memory` and can be

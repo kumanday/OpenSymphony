@@ -1,6 +1,8 @@
 import type { SchemaVersion } from "./version.js";
 
 export type PlanningArtifactKind =
+  | "intake"
+  | "requirements"
   | "milestone_draft"
   | "issue_draft"
   | "sub_issue_draft"

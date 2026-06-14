@@ -64,6 +64,43 @@ export type {
   ProfileController,
 } from "./app-shell.js";
 
+export {
+  addCriterion,
+  addMessage,
+  addPlanningNode,
+  addVerification,
+  buildFixturePlanningWorkspaceState,
+  computeArtifactDiff,
+  emptyPlanningWorkspaceState,
+  removePlanningNode,
+  removeCriterion,
+  removeVerification,
+  selectArtifact,
+  selectRevision,
+  toggleCriterion,
+  toggleNodeExpanded,
+  toggleVerification,
+  updateArtifactContent,
+  updateCriterion,
+  updateNodeDependencies,
+  updatePlanningNode,
+  updateVerification,
+  validatePlanningWorkspace,
+} from "./planning-workspace.js";
+export type {
+  ConversationMessage,
+  PlanningArtifactRevision,
+  PlanningArtifactWithRevisions,
+  PlanningNode,
+  PlanningValidationMessage,
+  PlanningWorkspaceState,
+  PlanningWorkspaceTab,
+  DiffLine,
+} from "./planning-workspace.js";
+
+export { renderPlanningWorkspace } from "./planning-workspace-ui.js";
+export type { PlanningEditState } from "./planning-workspace-ui.js";
+
 export interface UiTheme {
   mode: "light" | "dark";
   accent?: string;
