@@ -112,6 +112,8 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M7: Shared Client And Desktop Alpha'
+      - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9: Collaborative Planning Alpha'
   devex:
     title: Devex
     docs_target: docs/devex.md
@@ -291,8 +293,10 @@ areas:
       - operations
       linear_milestones:
       - 'M6.5: Memory Server'
+      - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9: Collaborative Planning Alpha'
   prerequisites:
     title: Prerequisites
     docs_target: docs/prerequisites.md
@@ -305,6 +309,7 @@ areas:
       docs:
       - docs/prerequisites.md
       linear_milestones:
+      - 'M6: Gateway And Stream Contract'
       - 'M8: Task Graph Operations And OpenHands Run UI'
   repository-layout:
     title: Repository Layout
@@ -334,6 +339,7 @@ areas:
       - docs/sources.md
       linear_milestones:
       - 'M10: Web Client And External Gateway'
+      - 'M6: Gateway And Stream Contract'
       - 'M9: Collaborative Planning Alpha'
   symphony-spec-alignment:
     title: Symphony Spec Alignment

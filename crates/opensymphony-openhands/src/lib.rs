@@ -14,7 +14,8 @@ pub use client::{
     TransportDiagnostics, TransportTargetKind, WebSocketAuth,
 };
 pub use conversation_store::{
-    ConversationMoveOutcome, ConversationStoreError, ConversationStoreKind, LocatedConversation,
+    ConversationMoveOutcome, ConversationStoreError, ConversationStoreKind,
+    ConversationStoreScanReport, LocatedConversation, LocatedWorkspaceConversation,
     OPENHANDS_CONVERSATIONS_PATH_ENV, OpenHandsConversationStorePaths,
 };
 pub use events::{

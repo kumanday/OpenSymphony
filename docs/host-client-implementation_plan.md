@@ -1752,7 +1752,7 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 - COE-391 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
 - COE-392 contributed: PR #85: docs: gateway inventory, domain vocabulary, and DTO boundary checklist (COE-389) (merge `3ed56af`)
 - COE-393 contributed: PR #91: feat: Event Journal and Stream Broker (COE-393) (merge `1183bc6`)
-- COE-395 contributed: PR #88: COE-395: Expand planning artifact schema and session service (merge `c1d8be9`)
+- COE-394 contributed: PR #89: COE-394: Frontend workspace and shared schemas (merge `68d86ff`)
 
 ## Important invariants
 
@@ -1774,13 +1774,13 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 - COE-391: Gateway Module, Capabilities, And Dashboard Snapshot
 - COE-392: Task Graph, Run Detail, File, And Diff Read APIs
 - COE-393: Event Journal And Stream Broker
+- COE-394: Frontend Workspace And Shared Schemas
 - COE-395: Planning Artifact Schema And Session Service
 - COE-396: Action Receipts And Initial Run Actions
 - COE-397: Gateway API Client, Transport Adapters, And Reducers
 - COE-398: Tauri Shell And Security Capabilities
 - COE-399: Linear Read Coverage And Task Graph Cache
 - COE-400: OpenHands Event Normalization And Runtime Mirror
-- COE-401: Web App Entry And Deployment Modes
 - COE-402: App Shell, Dashboard, Task Graph, And Run Views
 - COE-403: Terminal And Log Renderer Prototype
 - COE-404: Desktop Connection Profiles And Daemon Management
@@ -1796,6 +1796,7 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 - COE-416: Dependency Graph And Plan Checks
 - COE-417: Planning Workspace UI
 - COE-434: Long-running harness liveness and scheduler/runtime ownership contract
+- COE-435: Long-running run observability fixtures and client-facing diagnostics
 - COE-449: Desktop alpha recovery: replace stubs with functional app
 
 ## Source refs
@@ -1805,13 +1806,13 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 - COE-391
 - COE-392
 - COE-393
+- COE-394
 - COE-395
 - COE-396
 - COE-397
 - COE-398
 - COE-399
 - COE-400
-- COE-401
 - COE-402
 - COE-403
 - COE-404
@@ -1827,6 +1828,7 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 - COE-416
 - COE-417
 - COE-434
+- COE-435
 - COE-449
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

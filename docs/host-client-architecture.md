@@ -936,9 +936,11 @@ Generated project plans can be over-broad, under-specified, or poorly decomposed
 - COE-392: Task Graph, Run Detail, File, And Diff Read APIs
 - COE-393: Event Journal And Stream Broker
 - COE-394: Frontend Workspace And Shared Schemas
+- COE-395: Planning Artifact Schema And Session Service
 - COE-396: Action Receipts And Initial Run Actions
 - COE-397: Gateway API Client, Transport Adapters, And Reducers
 - COE-398: Tauri Shell And Security Capabilities
+- COE-399: Linear Read Coverage And Task Graph Cache
 - COE-400: OpenHands Event Normalization And Runtime Mirror
 - COE-402: App Shell, Dashboard, Task Graph, And Run Views
 - COE-403: Terminal And Log Renderer Prototype
@@ -954,6 +956,8 @@ Generated project plans can be over-broad, under-specified, or poorly decomposed
 - COE-415: Milestone, Issue, And Sub-Issue Compiler
 - COE-416: Dependency Graph And Plan Checks
 - COE-417: Planning Workspace UI
+- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
+- COE-435: Long-running run observability fixtures and client-facing diagnostics
 - COE-449: Desktop alpha recovery: replace stubs with functional app
 
 ## Source refs
@@ -964,9 +968,11 @@ Generated project plans can be over-broad, under-specified, or poorly decomposed
 - COE-392
 - COE-393
 - COE-394
+- COE-395
 - COE-396
 - COE-397
 - COE-398
+- COE-399
 - COE-400
 - COE-402
 - COE-403
@@ -982,6 +988,8 @@ Generated project plans can be over-broad, under-specified, or poorly decomposed
 - COE-415
 - COE-416
 - COE-417
+- COE-434
+- COE-435
 - COE-449
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

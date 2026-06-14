@@ -1,8 +1,10 @@
 use std::{
+    collections::HashSet,
     fmt, fs, io,
     path::{Path, PathBuf},
 };
 
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
@@ -36,6 +38,20 @@ impl fmt::Display for ConversationStoreKind {
 pub struct LocatedConversation {
     pub kind: ConversationStoreKind,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocatedWorkspaceConversation {
+    pub conversation_id: String,
+    pub working_dir: PathBuf,
+    pub kind: ConversationStoreKind,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConversationStoreScanReport {
+    pub conversations: Vec<LocatedWorkspaceConversation>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +174,27 @@ impl OpenHandsConversationStorePaths {
         })
     }
 
+    pub fn find_conversations_by_workspace_issue(
+        &self,
+        issue_key: &str,
+    ) -> ConversationStoreScanReport {
+        let mut report = ConversationStoreScanReport::default();
+        let mut seen = HashSet::new();
+
+        for kind in [
+            ConversationStoreKind::Active,
+            ConversationStoreKind::Archived,
+            ConversationStoreKind::Legacy,
+        ] {
+            self.scan_store_for_workspace_issue(kind, issue_key, &mut seen, &mut report);
+        }
+
+        report
+            .conversations
+            .sort_by(|left, right| left.conversation_id.cmp(&right.conversation_id));
+        report
+    }
+
     fn create_store_dir(&self, path: &Path) -> Result<(), ConversationStoreError> {
         fs::create_dir_all(path).map_err(|source| ConversationStoreError::CreateDirectory {
             path: path.to_path_buf(),
@@ -192,6 +229,136 @@ impl OpenHandsConversationStorePaths {
         }
         Ok(())
     }
+
+    fn scan_store_for_workspace_issue(
+        &self,
+        kind: ConversationStoreKind,
+        issue_key: &str,
+        seen: &mut HashSet<String>,
+        report: &mut ConversationStoreScanReport,
+    ) {
+        let store_path = self.path_for(kind);
+        let entries = match fs::read_dir(store_path) {
+            Ok(entries) => entries,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return,
+            Err(source) => {
+                report.warnings.push(format!(
+                    "failed to scan OpenHands {kind} conversation store {}: {source}",
+                    store_path.display()
+                ));
+                return;
+            }
+        };
+
+        let mut paths = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(source) => {
+                    report.warnings.push(format!(
+                        "failed to read OpenHands {kind} conversation store entry {}: {source}",
+                        store_path.display()
+                    ));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            if kind == ConversationStoreKind::Legacy
+                && entry.file_name().to_string_lossy().as_ref() == "repos"
+            {
+                continue;
+            }
+            if path.is_dir() {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+
+        for path in paths {
+            let Some(metadata) = self.read_workspace_conversation_metadata(&path, kind, report)
+            else {
+                continue;
+            };
+            if !workspace_matches_issue(&metadata.working_dir, issue_key) {
+                continue;
+            }
+            let key = normalize_conversation_id_for_dedupe(&metadata.conversation_id);
+            if !seen.insert(key) {
+                continue;
+            }
+            report.conversations.push(LocatedWorkspaceConversation {
+                conversation_id: metadata.conversation_id,
+                working_dir: metadata.working_dir,
+                kind,
+                path,
+            });
+        }
+    }
+
+    fn read_workspace_conversation_metadata(
+        &self,
+        path: &Path,
+        kind: ConversationStoreKind,
+        report: &mut ConversationStoreScanReport,
+    ) -> Option<WorkspaceConversationMetadata> {
+        let metadata_path = path.join("meta.json");
+        let raw = match fs::read_to_string(&metadata_path) {
+            Ok(raw) => raw,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return None,
+            Err(source) => {
+                report.warnings.push(format!(
+                    "failed to read OpenHands {kind} conversation metadata {}: {source}",
+                    metadata_path.display()
+                ));
+                return None;
+            }
+        };
+        let metadata = match serde_json::from_str::<OpenHandsConversationMetadata>(&raw) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                report.warnings.push(format!(
+                    "failed to decode OpenHands {kind} conversation metadata {}: {source}",
+                    metadata_path.display()
+                ));
+                return None;
+            }
+        };
+        let working_dir = metadata
+            .workspace
+            .and_then(|workspace| workspace.working_dir)?;
+        let conversation_id = metadata.conversation_id.or(metadata.id).or_else(|| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(ToOwned::to_owned)
+        })?;
+
+        Some(WorkspaceConversationMetadata {
+            conversation_id,
+            working_dir,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenHandsConversationMetadata {
+    #[serde(default)]
+    conversation_id: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    workspace: Option<OpenHandsWorkspaceMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenHandsWorkspaceMetadata {
+    #[serde(default)]
+    working_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceConversationMetadata {
+    conversation_id: String,
+    working_dir: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -259,6 +426,22 @@ fn repo_store_key(target_repo: &Path) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("{slug}-{hash}")
+}
+
+fn workspace_matches_issue(working_dir: &Path, issue_key: &str) -> bool {
+    working_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(issue_key.trim()))
+}
+
+fn normalize_conversation_id_for_dedupe(conversation_id: &str) -> String {
+    conversation_id
+        .trim()
+        .chars()
+        .filter(|character| *character != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 fn sanitize_repo_slug(value: &str) -> String {
@@ -570,6 +753,72 @@ mod tests {
     }
 
     #[test]
+    fn find_conversations_by_workspace_issue_reads_meta_from_scoped_and_legacy_stores() {
+        let tool_dir = tempfile::tempdir().expect("tool dir");
+        let repo = tempfile::tempdir().expect("repo");
+        let paths = OpenHandsConversationStorePaths::for_tool_dir(tool_dir.path(), repo.path())
+            .expect("paths should resolve");
+        let active_id = "dd258bb7cc1b415c9892e19af34a2e66";
+        let archived_id = "383db8232f644b7ba8aa7eecfdd656f5";
+        let legacy_id = "9bfe25c4b5ca4f62b172d15f5f672217";
+        let unrelated_id = "6b8ef416999f4e98bb0bad13fe858114";
+        write_meta(
+            &paths.active.join(active_id),
+            active_id,
+            "/tmp/workspaces/COE-337",
+        );
+        write_meta(
+            &paths.archived.join(archived_id),
+            archived_id,
+            "/tmp/workspaces/COE-337",
+        );
+        write_meta(
+            &paths.legacy_root.join(legacy_id),
+            legacy_id,
+            "/tmp/workspaces/COE-337",
+        );
+        write_meta(
+            &paths.active.join(unrelated_id),
+            unrelated_id,
+            "/tmp/workspaces/COE-338",
+        );
+        std::fs::create_dir_all(paths.legacy_root.join("repos").join("ignored"))
+            .expect("repo-scoped root should be created under legacy root");
+
+        let report = paths.find_conversations_by_workspace_issue("COE-337");
+
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.conversations.len(), 3);
+        assert!(
+            report
+                .conversations
+                .iter()
+                .any(
+                    |conversation| conversation.kind == ConversationStoreKind::Active
+                        && conversation.conversation_id == active_id
+                )
+        );
+        assert!(
+            report
+                .conversations
+                .iter()
+                .any(
+                    |conversation| conversation.kind == ConversationStoreKind::Archived
+                        && conversation.conversation_id == archived_id
+                )
+        );
+        assert!(
+            report
+                .conversations
+                .iter()
+                .any(
+                    |conversation| conversation.kind == ConversationStoreKind::Legacy
+                        && conversation.conversation_id == legacy_id
+                )
+        );
+    }
+
+    #[test]
     fn copy_conversation_dir_copies_nested_files() {
         let temp = tempfile::tempdir().expect("temp dir");
         let source = temp.path().join("source");
@@ -656,5 +905,21 @@ mod tests {
         ));
         assert!(source.is_dir());
         assert!(!destination.exists());
+    }
+
+    fn write_meta(path: &std::path::Path, conversation_id: &str, working_dir: &str) {
+        std::fs::create_dir_all(path).expect("conversation dir should be created");
+        std::fs::write(
+            path.join("meta.json"),
+            serde_json::json!({
+                "conversation_id": conversation_id,
+                "workspace": {
+                    "working_dir": working_dir,
+                    "kind": "LocalWorkspace"
+                }
+            })
+            .to_string(),
+        )
+        .expect("conversation metadata should be written");
     }
 }

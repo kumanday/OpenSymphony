@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     env, fs,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -28,7 +29,8 @@ use crate::{
         write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_openhands::{
-        ConversationMoveOutcome, IssueConversationManifest, OpenHandsConversationStorePaths,
+        ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
+        OpenHandsConversationStorePaths,
     },
     opensymphony_planning::CodebaseAnalyzer,
     opensymphony_workflow::WorkflowDefinition,
@@ -2443,10 +2445,16 @@ struct ConversationArchiveOpenHandsConfig {
 
 #[derive(Debug, Default)]
 struct ConversationArchiveReport {
-    moved: Vec<String>,
-    already_archived: Vec<String>,
+    moved: Vec<ConversationArchiveEntry>,
+    already_archived: Vec<ConversationArchiveEntry>,
     warnings: Vec<String>,
     failures: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConversationArchiveEntry {
+    issue_key: String,
+    conversation_id: String,
 }
 
 struct ConversationArchiveContext<'a> {
@@ -2515,7 +2523,10 @@ async fn archive_openhands_conversations_for_issues_with_context(
     };
 
     for issue_key in issue_keys {
-        let Some(workspace) = context
+        let mut candidate_ids = Vec::new();
+        let mut deferred_warning = None;
+
+        let workspace = context
             .manager
             .find_workspace_by_issue_reference(issue_key)
             .await
@@ -2523,72 +2534,132 @@ async fn archive_openhands_conversations_for_issues_with_context(
                 MemoryError::InvalidInput(format!(
                     "failed to find workspace for {issue_key}: {error}"
                 ))
-            })?
-        else {
-            report.warnings.push(format!(
-                "{issue_key}: skipped OpenHands conversation archive; no managed workspace found"
-            ));
-            continue;
-        };
-        let manifest_path = workspace.conversation_manifest_path();
-        let Some(raw_manifest) = context
-            .manager
-            .read_text_artifact(&workspace, &manifest_path)
-            .await
-            .map_err(|error| {
-                MemoryError::InvalidInput(format!(
-                    "failed to read conversation manifest for {issue_key}: {error}"
-                ))
-            })?
-        else {
-            report.warnings.push(format!(
-                "{issue_key}: skipped OpenHands conversation archive; no conversation manifest found"
-            ));
-            continue;
-        };
-        let manifest =
-            serde_json::from_str::<IssueConversationManifest>(&raw_manifest).map_err(|error| {
-                MemoryError::InvalidInput(format!(
-                    "failed to decode conversation manifest {} for {issue_key}: {error}",
-                    manifest_path.display()
-                ))
             })?;
 
-        match context
+        if let Some(workspace) = workspace {
+            let manifest_path = workspace.conversation_manifest_path();
+            let raw_manifest = context
+                .manager
+                .read_text_artifact(&workspace, &manifest_path)
+                .await
+                .map_err(|error| {
+                    MemoryError::InvalidInput(format!(
+                        "failed to read conversation manifest for {issue_key}: {error}"
+                    ))
+                })?;
+            if let Some(raw_manifest) = raw_manifest {
+                match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+                    Ok(manifest) => {
+                        candidate_ids.push(manifest.conversation_id.to_string());
+                    }
+                    Err(error) => {
+                        deferred_warning = Some(format!(
+                            "{issue_key}: skipped workspace conversation manifest {}; decode failed: {error}",
+                            manifest_path.display()
+                        ));
+                    }
+                }
+            } else {
+                deferred_warning = Some(format!(
+                    "{issue_key}: workspace exists but no conversation manifest was found"
+                ));
+            }
+        } else {
+            deferred_warning = Some(format!(
+                "{issue_key}: no managed workspace was found; scanning OpenHands stores by workspace metadata"
+            ));
+        }
+
+        let scan_report = context
             .conversation_store
-            .move_conversation_to(
-                manifest.conversation_id.as_str(),
-                crate::opensymphony_openhands::ConversationStoreKind::Archived,
-            )
-            .map_err(|error| error.to_string())
-        {
-            Ok(ConversationMoveOutcome::Moved { .. }) => report.moved.push(issue_key.clone()),
-            Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {
-                report.already_archived.push(issue_key.clone());
+            .find_conversations_by_workspace_issue(issue_key);
+        report.warnings.extend(
+            scan_report
+                .warnings
+                .into_iter()
+                .map(|warning| format!("{issue_key}: {warning}")),
+        );
+        candidate_ids.extend(
+            scan_report
+                .conversations
+                .into_iter()
+                .map(|conversation| conversation.conversation_id),
+        );
+
+        if candidate_ids.is_empty() {
+            report.warnings.push(deferred_warning.unwrap_or_else(|| {
+                format!(
+                    "{issue_key}: no OpenHands conversations matched the issue workspace metadata"
+                )
+            }));
+            continue;
+        }
+
+        let mut seen = BTreeSet::new();
+        for conversation_id in candidate_ids {
+            let key = conversation_archive_dedupe_key(&conversation_id);
+            if !seen.insert(key) {
+                continue;
             }
-            Ok(ConversationMoveOutcome::Missing) => {
-                report.warnings.push(format!(
-                    "{issue_key}: OpenHands conversation {} was not found in the active, archived, or legacy stores",
-                    manifest.conversation_id
-                ));
-            }
-            Err(error) => {
-                report.failures.push(format!(
-                    "{issue_key}: failed to archive OpenHands conversation {}: {error}",
-                    manifest.conversation_id
-                ));
-            }
+            archive_one_openhands_conversation(
+                context.conversation_store,
+                &mut report,
+                issue_key,
+                &conversation_id,
+            );
         }
     }
 
     Ok(report)
 }
 
+fn archive_one_openhands_conversation(
+    conversation_store: &OpenHandsConversationStorePaths,
+    report: &mut ConversationArchiveReport,
+    issue_key: &str,
+    conversation_id: &str,
+) {
+    match conversation_store.move_conversation_to(conversation_id, ConversationStoreKind::Archived)
+    {
+        Ok(ConversationMoveOutcome::Moved { .. }) => {
+            report.moved.push(ConversationArchiveEntry {
+                issue_key: issue_key.to_string(),
+                conversation_id: conversation_id.to_string(),
+            });
+        }
+        Ok(ConversationMoveOutcome::AlreadyInTarget { .. }) => {
+            report.already_archived.push(ConversationArchiveEntry {
+                issue_key: issue_key.to_string(),
+                conversation_id: conversation_id.to_string(),
+            });
+        }
+        Ok(ConversationMoveOutcome::Missing) => {
+            report.warnings.push(format!(
+                "{issue_key}: OpenHands conversation {conversation_id} was not found in the active, archived, or legacy stores"
+            ));
+        }
+        Err(error) => {
+            report.failures.push(format!(
+                "{issue_key}: failed to archive OpenHands conversation {conversation_id}: {error}"
+            ));
+        }
+    }
+}
+
+fn conversation_archive_dedupe_key(conversation_id: &str) -> String {
+    conversation_id
+        .trim()
+        .chars()
+        .filter(|character| *character != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 fn print_conversation_archive_report(report: &ConversationArchiveReport) {
     if !report.moved.is_empty() {
         println!("Archived {} OpenHands conversation(s).", report.moved.len());
-        for issue_key in &report.moved {
-            println!("- {issue_key}");
+        for entry in &report.moved {
+            println!("- {}: {}", entry.issue_key, entry.conversation_id);
         }
     }
     if !report.already_archived.is_empty() {
@@ -2596,6 +2667,9 @@ fn print_conversation_archive_report(report: &ConversationArchiveReport) {
             "{} OpenHands conversation(s) were already archived.",
             report.already_archived.len()
         );
+        for entry in &report.already_archived {
+            println!("- {}: {}", entry.issue_key, entry.conversation_id);
+        }
     }
     for warning in &report.warnings {
         eprintln!("- {warning}");
@@ -2958,7 +3032,7 @@ async fn load_linear_context_source(
                 "Linear issue lookup did not return {normalized_issue}"
             ))
         })?;
-    let mut identifiers = std::collections::BTreeSet::from([issue.identifier.clone()]);
+    let mut identifiers = BTreeSet::from([issue.identifier.clone()]);
     if let Some(parent) = &issue.parent {
         identifiers.insert(parent.identifier.clone());
     }
@@ -3002,12 +3076,12 @@ async fn load_linear_issue_tree(
     client: &LinearClient,
     identifiers: &[String],
 ) -> Result<Vec<TrackerIssue>, MemoryError> {
-    let mut seen = std::collections::BTreeSet::new();
+    let mut seen = BTreeSet::new();
     let mut pending = identifiers
         .iter()
         .map(|identifier| identifier.trim().to_string())
         .filter(|identifier| !identifier.is_empty())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<BTreeSet<_>>();
     let mut issues = Vec::new();
 
     while !pending.is_empty() {

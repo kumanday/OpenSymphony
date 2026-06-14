@@ -308,11 +308,11 @@ Keep the MVP read-only and reliable first.
 
 ## Current model
 
-- COE-255 contributed: PR #4: COE-255: add control plane and FrankenTUI slice
-- COE-269 contributed: PR #23: COE-269 + COE-271: add control plane and FrankenTUI slice (merge `53773f9`)
-- COE-271 contributed: PR #23: COE-269 + COE-271: add control plane and FrankenTUI slice (merge `53773f9`)
-- COE-287 contributed: PR #48: Add opensymphony debug command for issue conversations (merge `021f5ad`)
-- COE-321 contributed: PR #59: Show more issues in the TUI issue list (merge `d9bd68c`)
+- COE-395 contributed: PR #88: COE-395: Expand planning artifact schema and session service (merge `c1d8be9`)
+- COE-406 contributed: PR #95: COE-406: Add planning-stage analysis module (merge `59240e2`)
+- COE-413 contributed: PR #96: COE-413: Implementation plan generator stage (merge `ba49e18`)
+- COE-415 contributed: PR #112: COE-415: milestone/issue/sub-issue plan compiler (merge `14a5fd7`)
+- COE-416 contributed: PR #116: COE-416: dependency graph + manifest + plan-quality checks (merge `feda865`)
 - COE-417 contributed: PR #116: COE-416: dependency graph + manifest + plan-quality checks (merge `feda865`)
 
 ## Important invariants
@@ -330,20 +330,20 @@ Keep the MVP read-only and reliable first.
 
 ## Recent changes
 
-- COE-255: Observability and FrankenTUI
-- COE-269: Control-plane API and snapshot store
-- COE-271: FrankenTUI operator client
-- COE-287: Add opensymphony debug command for conversational session debugging
-- COE-321: Add more lines to TUI issue list for better visibility
+- COE-395: Planning Artifact Schema And Session Service
+- COE-406: Repository, Linear, And Research Analysis
+- COE-413: Implementation Plan Generator Stage
+- COE-415: Milestone, Issue, And Sub-Issue Compiler
+- COE-416: Dependency Graph And Plan Checks
 - COE-417: Planning Workspace UI
 
 ## Source refs
 
-- COE-255
-- COE-269
-- COE-271
-- COE-287
-- COE-321
+- COE-395
+- COE-406
+- COE-413
+- COE-415
+- COE-416
 - COE-417
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
