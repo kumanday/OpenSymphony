@@ -153,7 +153,7 @@ function buildTransport(opts?: { failHealth?: boolean }): MockGatewayTransport {
       }
     }
     return new AlwaysFailHealthTransport({
-      baseUri: "http://127.0.0.1:8000",
+      baseUri: "http://127.0.0.1:2468",
       health: capabilities,
       snapshot: dashboard,
       taskGraph,
@@ -161,7 +161,7 @@ function buildTransport(opts?: { failHealth?: boolean }): MockGatewayTransport {
     });
   }
   return new MockGatewayTransport({
-    baseUri: "http://127.0.0.1:8000",
+    baseUri: "http://127.0.0.1:2468",
     health: capabilities,
     snapshot: dashboard,
     taskGraph,

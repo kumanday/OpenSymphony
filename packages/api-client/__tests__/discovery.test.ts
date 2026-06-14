@@ -44,7 +44,7 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/healthz",
+            "http://127.0.0.1:2468/healthz",
             {
               ok: true,
               status: 200,
@@ -53,7 +53,7 @@ describe("gateway discovery", () => {
           ],
         ]),
       );
-      const result = await probeHealth("http://127.0.0.1:8000");
+      const result = await probeHealth("http://127.0.0.1:2468");
       expect(result.healthy).toBe(true);
       expect(result.error).toBeNull();
     });
@@ -63,12 +63,12 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/healthz",
+            "http://127.0.0.1:2468/healthz",
             { ok: false, status: 503 },
           ],
         ]),
       );
-      const result = await probeHealth("http://127.0.0.1:8000");
+      const result = await probeHealth("http://127.0.0.1:2468");
       expect(result.healthy).toBe(false);
       expect(result.error).toContain("503");
     });
@@ -78,7 +78,7 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/healthz",
+            "http://127.0.0.1:2468/healthz",
             {
               ok: true,
               status: 200,
@@ -87,7 +87,7 @@ describe("gateway discovery", () => {
           ],
         ]),
       );
-      const result = await probeHealth("http://127.0.0.1:8000");
+      const result = await probeHealth("http://127.0.0.1:2468");
       expect(result.healthy).toBe(false);
       expect(result.error).toContain("degraded");
     });
@@ -97,7 +97,7 @@ describe("gateway discovery", () => {
       global.fetch = jest.fn(async () => {
         throw new Error("Connection refused");
       }) as jest.MockedFunction<typeof global.fetch>;
-      const result = await probeHealth("http://127.0.0.1:8000");
+      const result = await probeHealth("http://127.0.0.1:2468");
       expect(result.healthy).toBe(false);
       expect(result.error).toContain("Connection refused");
     });
@@ -119,7 +119,7 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/api/v1/capabilities",
+            "http://127.0.0.1:2468/api/v1/capabilities",
             {
               ok: true,
               status: 200,
@@ -128,7 +128,7 @@ describe("gateway discovery", () => {
           ],
         ]),
       );
-      const result = await probeCapabilities("http://127.0.0.1:8000");
+      const result = await probeCapabilities("http://127.0.0.1:2468");
       expect(result).toEqual(mockCaps);
     });
 
@@ -137,12 +137,12 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/api/v1/capabilities",
+            "http://127.0.0.1:2468/api/v1/capabilities",
             { ok: false, status: 404 },
           ],
         ]),
       );
-      const result = await probeCapabilities("http://127.0.0.1:8000");
+      const result = await probeCapabilities("http://127.0.0.1:2468");
       expect(result).toBeNull();
     });
 
@@ -151,7 +151,7 @@ describe("gateway discovery", () => {
       global.fetch = jest.fn(async () => {
         throw new Error("Network error");
       }) as jest.MockedFunction<typeof global.fetch>;
-      const result = await probeCapabilities("http://127.0.0.1:8000");
+      const result = await probeCapabilities("http://127.0.0.1:2468");
       expect(result).toBeNull();
     });
   });
@@ -162,7 +162,7 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/healthz",
+            "http://127.0.0.1:2468/healthz",
             {
               ok: true,
               status: 200,
@@ -170,7 +170,7 @@ describe("gateway discovery", () => {
             },
           ],
           [
-            "http://127.0.0.1:8000/api/v1/capabilities",
+            "http://127.0.0.1:2468/api/v1/capabilities",
             {
               ok: true,
               status: 200,
@@ -188,7 +188,7 @@ describe("gateway discovery", () => {
           ],
         ]),
       );
-      const result = await discoverGateway("http://127.0.0.1:8000");
+      const result = await discoverGateway("http://127.0.0.1:2468");
       expect(result.healthy).toBe(true);
       expect(result.compatible).toBe(true);
       expect(result.error).toBeNull();
@@ -200,7 +200,7 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/healthz",
+            "http://127.0.0.1:2468/healthz",
             {
               ok: true,
               status: 200,
@@ -208,12 +208,12 @@ describe("gateway discovery", () => {
             },
           ],
           [
-            "http://127.0.0.1:8000/api/v1/capabilities",
+            "http://127.0.0.1:2468/api/v1/capabilities",
             { ok: false, status: 404 },
           ],
         ]),
       );
-      const result = await discoverGateway("http://127.0.0.1:8000");
+      const result = await discoverGateway("http://127.0.0.1:2468");
       expect(result.healthy).toBe(true);
       expect(result.compatible).toBe(false);
       expect(result.error).toContain("unreachable");
@@ -224,12 +224,12 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/healthz",
+            "http://127.0.0.1:2468/healthz",
             { ok: false, status: 503 },
           ],
         ]),
       );
-      const result = await discoverGateway("http://127.0.0.1:8000");
+      const result = await discoverGateway("http://127.0.0.1:2468");
       expect(result.healthy).toBe(false);
       expect(result.compatible).toBe(false);
       expect(result.capabilities).toBeNull();
@@ -242,7 +242,7 @@ describe("gateway discovery", () => {
       mockFetch(
         new Map([
           [
-            "http://127.0.0.1:8000/healthz",
+            "http://127.0.0.1:2468/healthz",
             {
               ok: true,
               status: 200,
@@ -250,7 +250,7 @@ describe("gateway discovery", () => {
             },
           ],
           [
-            "http://127.0.0.1:8000/api/v1/capabilities",
+            "http://127.0.0.1:2468/api/v1/capabilities",
             {
               ok: true,
               status: 200,
@@ -268,7 +268,7 @@ describe("gateway discovery", () => {
           ],
         ]),
       );
-      const result = await validateGateway("http://127.0.0.1:8000");
+      const result = await validateGateway("http://127.0.0.1:2468");
       expect(result).toBe(true);
     });
 
@@ -277,7 +277,7 @@ describe("gateway discovery", () => {
       global.fetch = jest.fn(async () => {
         throw new Error("Connection refused");
       }) as jest.MockedFunction<typeof global.fetch>;
-      const result = await validateGateway("http://127.0.0.1:8000");
+      const result = await validateGateway("http://127.0.0.1:2468");
       expect(result).toBe(false);
     });
   });
@@ -302,10 +302,10 @@ describe("gateway discovery", () => {
       let callCount = 0;
       global.fetch = jest.fn(async (url: string) => {
         callCount++;
-        if (url.includes("127.0.0.1:8000")) {
+        if (url.includes("127.0.0.1:2468")) {
           throw new Error("Connection refused");
         }
-        if (url.includes("localhost:8000")) {
+        if (url.includes("localhost:2468")) {
           if (url.includes("capabilities")) {
             return {
               ok: true,

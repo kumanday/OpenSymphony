@@ -306,6 +306,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       const active = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
       this.state.activeProfileId = active?.id ?? null;
       this.state.gatewayDraft = active?.gatewayUrl ?? this.state.gatewayDraft;
+      if (
+        active
+        && this.options.onGatewayUrlChanged
+        && active.gatewayUrl !== this.transport.baseUri
+      ) {
+        this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
+      }
     } catch (error) {
       this.state.connectionMessage = `Profiles unavailable: ${errorMessage(error)}`;
     }
@@ -593,6 +600,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     try {
       const saved = await controller.storeProfile({
+        id: this.state.activeProfileId ?? undefined,
         label,
         kind,
         gatewayUrl,
@@ -1746,7 +1754,7 @@ function defaultUiProfiles(gatewayUrl: string): ConnectionProfile[] {
       label: "Local Daemon",
       kind: "local_daemon",
       active: true,
-      gatewayUrl: gatewayUrl || "http://127.0.0.1:8000",
+      gatewayUrl: gatewayUrl || "http://127.0.0.1:2468",
       transport: "loopback_http",
       managed: false,
     },

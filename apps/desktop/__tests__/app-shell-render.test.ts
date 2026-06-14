@@ -33,7 +33,7 @@ describe("desktop app shell render", () => {
     // fallback render path because that's what users will see when the
     // gateway daemon is offline during cold launch.
     const reader: GatewayReader = {
-      baseUri: "http://127.0.0.1:8000",
+      baseUri: "http://127.0.0.1:2468",
       async health() {
         throw new Error("gateway unreachable for smoke test");
       },

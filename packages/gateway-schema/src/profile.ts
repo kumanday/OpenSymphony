@@ -29,7 +29,7 @@ export interface ConnectionProfileBase {
 /** Local daemon: connects to a separately-started daemon on loopback. */
 export interface LocalDaemonProfile extends ConnectionProfileBase {
   kind: "local_daemon";
-  /** Gateway base URL, defaults to http://127.0.0.1:8000. */
+  /** Gateway base URL, defaults to http://127.0.0.1:2468. */
   gatewayUrl: string;
   /** Preferred transport for local communication. */
   transport: TransportProfile;
@@ -40,7 +40,7 @@ export interface LocalDaemonProfile extends ConnectionProfileBase {
 /** Supervised local daemon: desktop app owns the daemon lifecycle. */
 export interface SupervisedLocalDaemonProfile extends ConnectionProfileBase {
   kind: "supervised_local_daemon";
-  /** Gateway base URL, defaults to http://127.0.0.1:8000. */
+  /** Gateway base URL, defaults to http://127.0.0.1:2468. */
   gatewayUrl: string;
   /** Preferred transport for local communication. */
   transport: TransportProfile;
@@ -111,7 +111,7 @@ export function defaultProfiles(): ConnectionProfile[] {
       label: "Local Daemon",
       kind: "local_daemon",
       active: false,
-      gatewayUrl: "http://127.0.0.1:8000",
+      gatewayUrl: "http://127.0.0.1:2468",
       transport: "loopback_http",
       managed: false,
     },
@@ -120,7 +120,7 @@ export function defaultProfiles(): ConnectionProfile[] {
       label: "Supervised Local Daemon",
       kind: "supervised_local_daemon",
       active: false,
-      gatewayUrl: "http://127.0.0.1:8000",
+      gatewayUrl: "http://127.0.0.1:2468",
       transport: "loopback_http",
       managed: true,
       daemonPath: "",
@@ -134,7 +134,7 @@ export function defaultProfiles(): ConnectionProfile[] {
       label: "Embedded Host",
       kind: "embedded_host",
       active: false,
-      gatewayUrl: "http://127.0.0.1:8000",
+      gatewayUrl: "http://127.0.0.1:2468",
       transport: "in_process_channel",
       managed: true,
     },
@@ -143,7 +143,7 @@ export function defaultProfiles(): ConnectionProfile[] {
       label: "External Gateway",
       kind: "external_gateway",
       active: false,
-      gatewayUrl: "http://127.0.0.1:8000",
+      gatewayUrl: "http://127.0.0.1:2468",
       transport: "loopback_http",
       managed: false,
       probeOnConnect: true,

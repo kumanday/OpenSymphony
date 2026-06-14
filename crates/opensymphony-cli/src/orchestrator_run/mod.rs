@@ -9,10 +9,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::opensymphony_control::{
-    ControlPlaneServer, RecentEvent, RecentEventKind, SnapshotStore,
-};
+use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
 use crate::opensymphony_domain::TimestampMs;
+use crate::opensymphony_gateway::GatewayServer;
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::OpenHandsError;
 use crate::opensymphony_orchestrator::{
@@ -244,7 +243,7 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let listener = TcpListener::bind(runtime.bind)
         .await
         .map_err(RunCommandError::BindListener)?;
-    let server = ControlPlaneServer::new(store.clone());
+    let server = GatewayServer::new(store.clone());
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
 
     let bootstrap_snapshot = tokio::select! {

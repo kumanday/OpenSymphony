@@ -534,7 +534,7 @@ mod tests {
             env: vec![("TEST_VAR".to_string(), "test_value".to_string())],
             startup_timeout: Duration::from_secs(5),
             auto_restart: true,
-            gateway_url: "http://127.0.0.1:8000".to_string(),
+            gateway_url: "http://127.0.0.1:2468".to_string(),
             skip_health_check: false,
         }
     }

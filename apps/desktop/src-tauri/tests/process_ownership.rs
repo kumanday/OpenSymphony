@@ -75,7 +75,7 @@ while true; do sleep 1; done
             env: vec![],
             startup_timeout: Duration::from_secs(1),
             auto_restart: false,
-            gateway_url: "http://127.0.0.1:8000".to_string(),
+            gateway_url: "http://127.0.0.1:2468".to_string(),
             skip_health_check: true,
         };
         let handle = DaemonHandle::new(config);
@@ -92,7 +92,7 @@ while true; do sleep 1; done
             env: vec![],
             startup_timeout: Duration::from_secs(1),
             auto_restart: false,
-            gateway_url: "http://127.0.0.1:8000".to_string(),
+            gateway_url: "http://127.0.0.1:2468".to_string(),
             skip_health_check: true,
         };
         let mut handle = DaemonHandle::new(config);
@@ -112,7 +112,7 @@ while true; do sleep 1; done
             env: vec![],
             startup_timeout: Duration::from_secs(2),
             auto_restart: false,
-            gateway_url: "http://127.0.0.1:8000".to_string(),
+            gateway_url: "http://127.0.0.1:2468".to_string(),
             skip_health_check: true,
         };
 

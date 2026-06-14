@@ -29,7 +29,7 @@ describe("defaultProfiles", () => {
     expect(localDaemon).toBeDefined();
     expect(localDaemon!.transport).toBe("loopback_http");
     expect(localDaemon!.managed).toBe(false);
-    expect(localDaemon!.gatewayUrl).toBe("http://127.0.0.1:8000");
+    expect(localDaemon!.gatewayUrl).toBe("http://127.0.0.1:2468");
   });
 
   it("includes a supervised_local_daemon profile with auto-restart", () => {
@@ -162,7 +162,7 @@ describe("profile serialization", () => {
       label: "Test Supervised",
       kind: "supervised_local_daemon",
       active: false,
-      gatewayUrl: "http://127.0.0.1:8000",
+      gatewayUrl: "http://127.0.0.1:2468",
       transport: "loopback_http",
       managed: true,
       daemonPath: "/usr/local/bin/opensymphony-daemon",

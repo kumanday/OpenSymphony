@@ -205,7 +205,7 @@ const approvals: ApprovalRequest[] = [
 
 function buildTransport(run: RunDetail): MockGatewayTransport {
   return new MockGatewayTransport({
-    baseUri: "http://127.0.0.1:8000",
+    baseUri: "http://127.0.0.1:2468",
     health: capabilities,
     snapshot: dashboard,
     taskGraph,

@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use async_stream::stream;
@@ -87,6 +87,7 @@ pub use crate::opensymphony_gateway_schema::{
 };
 
 const GATEWAY_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const CONTROL_PLANE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const GATEWAY_JOURNAL_CAPACITY: usize = 10_000;
 const GATEWAY_SUBSCRIBER_CAPACITY: usize = 256;
 const GATEWAY_EVENT_PAGE_LIMIT: usize = 100;
@@ -399,6 +400,9 @@ impl GatewayServer {
             .lock()
             .expect("terminal ingest handle mutex poisoned") = Some(handle);
         let mut router = Router::new()
+            .route("/healthz", get(healthz))
+            .route("/api/v1/snapshot", get(control_snapshot))
+            .route("/api/v1/control/events", get(control_events))
             .route("/api/v1/capabilities", get(capabilities))
             .route("/api/v1/dashboard/snapshot", get(dashboard_snapshot))
             .route("/api/v1/events", get(events))
@@ -670,6 +674,28 @@ async fn capabilities() -> Json<GatewayCapabilities> {
     Json(build_capabilities())
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct GatewayHealthzResponse {
+    pub status: String,
+    pub current_sequence: u64,
+    pub published_at: DateTime<Utc>,
+    pub issue_count: usize,
+}
+
+async fn healthz(State(state): State<GatewayState>) -> Json<GatewayHealthzResponse> {
+    let envelope = state.store.current().await;
+    Json(GatewayHealthzResponse {
+        status: "ok".to_owned(),
+        current_sequence: envelope.sequence,
+        published_at: envelope.published_at,
+        issue_count: envelope.snapshot.issue_count(),
+    })
+}
+
+async fn control_snapshot(State(state): State<GatewayState>) -> Json<SnapshotEnvelope> {
+    Json(state.store.current().await)
+}
+
 async fn dashboard_snapshot(State(state): State<GatewayState>) -> Json<DashboardSnapshot> {
     let envelope = state.store.current().await;
     Json(control_plane_to_dashboard_snapshot(&envelope))
@@ -717,6 +743,59 @@ fn dispatch_rejection_status(receipt: &ActionReceipt) -> StatusCode {
     } else {
         StatusCode::BAD_REQUEST
     }
+}
+
+async fn control_events(
+    State(state): State<GatewayState>,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let store = state.store.clone();
+    let mut receiver = store.subscribe();
+    let initial = store.current().await;
+    let stream = stream! {
+        let mut last_sent_sequence = initial.sequence;
+        if let Some(event) = control_snapshot_event(&initial) {
+            yield Ok(event);
+        }
+        loop {
+            match receiver.recv().await {
+                Ok(envelope) => {
+                    if envelope.sequence <= last_sent_sequence {
+                        continue;
+                    }
+                    last_sent_sequence = envelope.sequence;
+                    if let Some(event) = control_snapshot_event(&envelope) {
+                        yield Ok(event);
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let latest = store.current().await;
+                    if latest.sequence > last_sent_sequence {
+                        last_sent_sequence = latest.sequence;
+                        if let Some(event) = control_snapshot_event(&latest) {
+                            yield Ok(event);
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(CONTROL_PLANE_KEEPALIVE_INTERVAL)
+            .text("keepalive"),
+    )
+}
+
+fn control_snapshot_event(envelope: &SnapshotEnvelope) -> Option<Event> {
+    let payload = serde_json::to_string(envelope).ok()?;
+    Some(
+        Event::default()
+            .event("snapshot")
+            .id(envelope.sequence.to_string())
+            .data(payload),
+    )
 }
 
 /// SSE journal event stream: `GET /api/v1/events`

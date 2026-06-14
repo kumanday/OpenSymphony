@@ -424,6 +424,29 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
 
     let client = reqwest::Client::new();
 
+    let health_url = format!("http://{address}/healthz");
+    let health_response = client
+        .get(&health_url)
+        .send()
+        .await
+        .expect("fetch healthz")
+        .json::<serde_json::Value>()
+        .await
+        .expect("decode healthz");
+    assert_eq!(health_response["status"], "ok");
+    assert_eq!(health_response["current_sequence"], 1);
+
+    let control_snapshot_url = format!("http://{address}/api/v1/snapshot");
+    let control_snapshot_response = client
+        .get(&control_snapshot_url)
+        .send()
+        .await
+        .expect("fetch control snapshot")
+        .json::<SnapshotEnvelope>()
+        .await
+        .expect("decode control snapshot");
+    assert_eq!(control_snapshot_response.sequence, 1);
+
     let caps_url = format!("http://{address}/api/v1/capabilities");
     let _caps_response = client
         .get(&caps_url)

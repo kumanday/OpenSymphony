@@ -33,6 +33,12 @@ async fn run_auto_detects_config_and_workflow_from_project_directory() {
     wait_for_health(&format!("http://{bind_addr}/healthz"))
         .await
         .expect("run command should become healthy from the project directory");
+    wait_for_http_ok(&format!("http://{bind_addr}/api/v1/capabilities"))
+        .await
+        .expect("run command should expose gateway capabilities");
+    wait_for_http_ok(&format!("http://{bind_addr}/api/v1/dashboard/snapshot"))
+        .await
+        .expect("run command should expose the dashboard snapshot API");
 
     terminate_child(&mut child).await;
 }
@@ -207,9 +213,13 @@ fn reserve_socket_addr() -> std::net::SocketAddr {
 }
 
 async fn wait_for_health(url: &str) -> Result<(), String> {
+    wait_for_http_ok(url).await
+}
+
+async fn wait_for_http_ok(url: &str) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        if health_endpoint_ready(url).await {
+        if http_endpoint_ready(url).await {
             return Ok(());
         }
         sleep(Duration::from_millis(50)).await;
@@ -218,6 +228,10 @@ async fn wait_for_health(url: &str) -> Result<(), String> {
 }
 
 async fn health_endpoint_ready(url: &str) -> bool {
+    http_endpoint_ready(url).await
+}
+
+async fn http_endpoint_ready(url: &str) -> bool {
     match reqwest::Client::new().get(url).send().await {
         Ok(response) => response.status().is_success(),
         Err(_) => false,

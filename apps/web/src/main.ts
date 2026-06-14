@@ -9,13 +9,15 @@
 import { HttpGatewayTransport } from "@opensymphony/api-client";
 import { renderOpenSymphonyApp } from "@opensymphony/ui-core";
 import { createWebAppConfig } from "./config.js";
+import { createWebProfileController, defaultWebGatewayUrl } from "./profile-controller.js";
 
 const config = createWebAppConfig();
 const root = document.getElementById("root");
+const defaultGatewayUrl = config.gatewayUrl || defaultWebGatewayUrl();
 
-export function createWebTransport() {
+export function createWebTransport(gatewayUrl = defaultGatewayUrl) {
   return new HttpGatewayTransport({
-    baseUri: config.gatewayUrl,
+    baseUri: gatewayUrl,
     transport: "loopback_http",
   });
 }
@@ -26,6 +28,7 @@ if (root) {
     mode: "web",
     title: "OpenSymphony Web",
     transport: createWebTransport(),
+    profileController: createWebProfileController({ defaultGatewayUrl }),
     onGatewayUrlChanged: async (gatewayUrl) =>
       new HttpGatewayTransport({
         baseUri: gatewayUrl,

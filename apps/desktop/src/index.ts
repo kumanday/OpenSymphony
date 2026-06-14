@@ -13,7 +13,7 @@ import {
   type ProfileController,
 } from "@opensymphony/ui-core";
 
-const DEFAULT_GATEWAY_URL = "http://127.0.0.1:8000";
+const DEFAULT_GATEWAY_URL = "http://127.0.0.1:2468";
 
 type TauriInvoke = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 

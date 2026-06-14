@@ -19,8 +19,8 @@ use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use tracing::warn;
 
-const DEFAULT_GATEWAY_HTTP_URL: &str = "http://127.0.0.1:8000";
-const DEFAULT_GATEWAY_HTTP_LOCALHOST_URL: &str = "http://localhost:8000";
+const DEFAULT_GATEWAY_HTTP_URL: &str = "http://127.0.0.1:2468";
+const DEFAULT_GATEWAY_HTTP_LOCALHOST_URL: &str = "http://localhost:2468";
 
 // ─── Executable validation ─────────────────────────────────────────────────
 
@@ -852,7 +852,7 @@ async fn gateway_get_json(
 /// Request to attach to a local gateway instance.
 #[derive(Debug, Deserialize)]
 pub struct AttachGatewayRequest {
-    /// Gateway base URL (e.g., "http://127.0.0.1:8000").
+    /// Gateway base URL (e.g., "http://127.0.0.1:2468").
     pub base_url: String,
     /// Optional auth token for hosted or secured gateways.
     pub auth_token: Option<String>,
@@ -1238,11 +1238,11 @@ mod tests {
     #[test]
     fn gateway_profile_for_url_matches_loopback_and_remote_urls() {
         assert_eq!(
-            gateway_profile_for_url("http://127.0.0.1:8000"),
+            gateway_profile_for_url("http://127.0.0.1:2468"),
             "loopback_http"
         );
         assert_eq!(
-            gateway_profile_for_url("ws://localhost:8000"),
+            gateway_profile_for_url("ws://localhost:2468"),
             "loopback_http"
         );
         assert_eq!(gateway_profile_for_url("https://example.com"), "websocket");
@@ -1359,9 +1359,9 @@ mod tests {
 
     #[test]
     fn validate_profile_gateway_url_rejects_non_http_schemes() {
-        assert!(validate_profile_gateway_url("http://127.0.0.1:8000").is_ok());
+        assert!(validate_profile_gateway_url("http://127.0.0.1:2468").is_ok());
         assert!(validate_profile_gateway_url("https://gateway.example").is_ok());
-        assert!(validate_profile_gateway_url("ws://localhost:8000").is_err());
+        assert!(validate_profile_gateway_url("ws://localhost:2468").is_err());
         assert!(validate_profile_gateway_url("wss://gateway.example").is_err());
         assert!(validate_profile_gateway_url("tauri://local").is_err());
     }

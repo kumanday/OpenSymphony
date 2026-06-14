@@ -19,7 +19,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  *   VITE_GATEWAY_URL    - Gateway base URL for API calls. When omitted the
  *                         web app defaults to the origin (gateway-served mode).
  *   VITE_DEV_GATEWAY_URL - Gateway URL for the Vite dev-server proxy.
- *                          Defaults to "http://127.0.0.1:3000".
+ *                          Defaults to "http://127.0.0.1:2468".
  */
 export default defineConfig({
   root: __dirname,
@@ -38,7 +38,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       "/api": {
-        target: process.env.VITE_DEV_GATEWAY_URL ?? "http://127.0.0.1:3000",
+        target: process.env.VITE_DEV_GATEWAY_URL ?? "http://127.0.0.1:2468",
         changeOrigin: true,
       },
     },

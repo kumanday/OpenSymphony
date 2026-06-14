@@ -102,6 +102,7 @@ impl ControlPlaneServer {
         Router::new()
             .route("/healthz", get(health))
             .route("/api/v1/snapshot", get(snapshot))
+            .route("/api/v1/control/events", get(events))
             .route("/api/v1/events", get(events))
             .with_state(self.store.clone())
     }
@@ -247,7 +248,7 @@ impl ControlPlaneClient {
     }
 
     pub fn stream_updates(&self) -> Result<ControlPlaneEventStream, ControlPlaneClientError> {
-        let events_url = self.join_path("api/v1/events")?;
+        let events_url = self.join_path("api/v1/control/events")?;
         let request = self.stream_http.get(events_url);
         let inner = EventSource::new(request).map_err(ControlPlaneClientError::StreamRequest)?;
         Ok(ControlPlaneEventStream {
@@ -535,7 +536,7 @@ mod tests {
             .join_path("api/v1/snapshot")
             .expect("snapshot path should resolve beneath the prefix");
         let events_url = client
-            .join_path("api/v1/events")
+            .join_path("api/v1/control/events")
             .expect("events path should resolve beneath the prefix");
 
         assert_eq!(
@@ -544,7 +545,7 @@ mod tests {
         );
         assert_eq!(
             events_url.as_str(),
-            "http://proxy/opensymphony/api/v1/events"
+            "http://proxy/opensymphony/api/v1/control/events"
         );
     }
 
