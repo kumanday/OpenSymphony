@@ -73,6 +73,11 @@ If you already have Python 3.13.12 installed, you can keep it and just install `
 - COE-385: Resolve runtime tracking TODO in OpenHands session runner
 - COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
 - COE-387: Audit tracing spans and diagnostics for secret leakage
+- COE-400: OpenHands Event Normalization And Runtime Mirror
+- COE-405: Linear Milestone, Issue, And Sub-Issue Mutations
+- COE-411: Task Graph Editor And Runtime Overlay UI
+- COE-412: Runtime Timeline And Terminal/Log Association
+- COE-414: Diff, Validation, Approval, And Run Action Views
 
 ## Source refs
 
@@ -91,5 +96,10 @@ If you already have Python 3.13.12 installed, you can keep it and just install `
 - COE-385
 - COE-386
 - COE-387
+- COE-400
+- COE-405
+- COE-411
+- COE-412
+- COE-414
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -504,6 +504,10 @@ Live test scenarios:
 - COE-385: Resolve runtime tracking TODO in OpenHands session runner
 - COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
 - COE-387: Audit tracing spans and diagnostics for secret leakage
+- COE-400: OpenHands Event Normalization And Runtime Mirror
+- COE-411: Task Graph Editor And Runtime Overlay UI
+- COE-412: Runtime Timeline And Terminal/Log Association
+- COE-414: Diff, Validation, Approval, And Run Action Views
 
 ## Source refs
 
@@ -527,5 +531,9 @@ Live test scenarios:
 - COE-385
 - COE-386
 - COE-387
+- COE-400
+- COE-411
+- COE-412
+- COE-414
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

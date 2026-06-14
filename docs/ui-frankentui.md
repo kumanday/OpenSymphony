@@ -80,6 +80,10 @@ Columns:
 - active conversation ID suffix
 - workspace path suffix
 
+The issue list may add a compact dependency gutter and inline dependency suffix
+without adding issue-list rows. See
+[TUI Dependency Gutter Specification](tui-dependency-gutter-spec.md).
+
 ## 4.3 Issue detail
 
 Shows selected issue:
@@ -305,6 +309,7 @@ Keep the MVP read-only and reliable first.
 - COE-271 contributed: PR #23: COE-269 + COE-271: add control plane and FrankenTUI slice (merge `53773f9`)
 - COE-287 contributed: PR #48: Add opensymphony debug command for issue conversations (merge `021f5ad`)
 - COE-321 contributed: PR #59: Show more issues in the TUI issue list (merge `d9bd68c`)
+- COE-417 contributed: PR #116: COE-416: dependency graph + manifest + plan-quality checks (merge `feda865`)
 
 ## Important invariants
 
@@ -326,6 +331,7 @@ Keep the MVP read-only and reliable first.
 - COE-271: FrankenTUI operator client
 - COE-287: Add opensymphony debug command for conversational session debugging
 - COE-321: Add more lines to TUI issue list for better visibility
+- COE-417: Planning Workspace UI
 
 ## Source refs
 
@@ -334,5 +340,6 @@ Keep the MVP read-only and reliable first.
 - COE-271
 - COE-287
 - COE-321
+- COE-417
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

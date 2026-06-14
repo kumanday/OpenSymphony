@@ -46,6 +46,7 @@ areas:
       linear_milestones:
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
+      - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
   cli:
     title: Cli
@@ -76,6 +77,8 @@ areas:
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
+      - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9: Collaborative Planning Alpha'
   deployment-modes:
     title: Deployment Modes
     docs_target: docs/deployment-modes.md
@@ -146,6 +149,7 @@ areas:
       linear_milestones:
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
+      - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
   host-client-implementation-plan:
     title: OpenSymphony Rich Client, Hosted Mode, and Planning Implementation Plan
@@ -255,9 +259,12 @@ areas:
     confidence: 85
     aliases:
     - openhands agent-server integration
+    - openhands-agent-server
     source_refs:
       docs:
       - docs/openhands-agent-server.md
+      linear_milestones:
+      - 'M8: Task Graph Operations And OpenHands Run UI'
   openhands-agent-server-subscription-auth-analysis:
     title: Subscription-Based OpenAI ChatGPT/Codex Authentication with `openhands agent-server`
     docs_target: docs/openhands_agent_server_subscription_auth_analysis.md
@@ -297,6 +304,8 @@ areas:
     source_refs:
       docs:
       - docs/prerequisites.md
+      linear_milestones:
+      - 'M8: Task Graph Operations And OpenHands Run UI'
   repository-layout:
     title: Repository Layout
     docs_target: docs/repository-layout.md
@@ -355,6 +364,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
+      - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
   ui-frankentui:
     title: FrankenTUI Operator UI
@@ -364,9 +374,12 @@ areas:
     confidence: 85
     aliases:
     - frankentui operator ui
+    - ui-frankentui
     source_refs:
       docs:
       - docs/ui-frankentui.md
+      linear_milestones:
+      - 'M9: Collaborative Planning Alpha'
   websocket-runtime:
     title: WebSocket Runtime Contract
     docs_target: docs/websocket-runtime.md
@@ -375,9 +388,12 @@ areas:
     confidence: 85
     aliases:
     - websocket runtime contract
+    - websocket-runtime
     source_refs:
       docs:
       - docs/websocket-runtime.md
+      linear_milestones:
+      - 'M8: Task Graph Operations And OpenHands Run UI'
   workspace-and-lifecycle:
     title: Workspace and Lifecycle
     docs_target: docs/workspace-and-lifecycle.md
