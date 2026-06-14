@@ -61,7 +61,53 @@ maintenance path:
 - leaves `WORKFLOW.md`, `AGENTS.md`, `.github/*`, and repo-local extra skills
   alone
 
+Normal user installs use bundled DuckDB. This keeps `cargo install
+opensymphony` and `opensymphony update` turnkey even when the memory database is
+enabled.
+
+Power users who want to avoid compiling bundled DuckDB may install a system
+DuckDB development package and build without default features:
+
+```bash
+# macOS with Homebrew
+brew install duckdb
+export DUCKDB_LIB_DIR="$(brew --prefix duckdb)/lib"
+export DUCKDB_INCLUDE_DIR="$(brew --prefix duckdb)/include"
+export DYLD_LIBRARY_PATH="$DUCKDB_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+cargo install opensymphony --no-default-features --features duckdb-prebuilt
+```
+
+On Linux, set `DUCKDB_LIB_DIR`, `DUCKDB_INCLUDE_DIR`, and `LD_LIBRARY_PATH` to
+the matching DuckDB installation. On Windows, set `DUCKDB_LIB_DIR`,
+`DUCKDB_INCLUDE_DIR`, and add the DuckDB DLL directory to `PATH` before running
+the same Cargo install command. This is a manual optimization path: verify a
+memory command after installation, and expect to keep the runtime library
+available anywhere the installed binary runs.
+
+To update a power-user system-linked install, run the same Cargo install command
+with the same environment first. Then run `opensymphony update` from a target
+repository only to refresh template-managed agent assets. Starting with
+`opensymphony update` may reinstall the default bundled build when a newer
+release exists.
+
 ## 3. Recommended validation commands
+
+For fast iterative development inside this repository, use the developer aliases
+that download and reuse a prebuilt libduckdb instead of compiling bundled
+DuckDB:
+
+```bash
+cargo fmt --check
+cargo check-dev
+cargo test-dev
+cargo test-dev --test memory
+cargo clippy-dev
+```
+
+The aliases set `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and use
+`--no-default-features --features duckdb-prebuilt`. Release-sensitive,
+packaging, and dependency work should still include the default bundled-mode
+checks so `cargo install opensymphony` remains turnkey for users:
 
 ```bash
 cargo fmt --check
@@ -171,11 +217,15 @@ GitHub access should be fixed before live capture is retried.
 
 `memory capture` creates or refreshes issue capsules, updates
 `.opensymphony/memory/memory.duckdb`, and refreshes markdown indexes when
-enabled. The index is built with DuckDB's bundled native library so operators
-do not need to install DuckDB separately, at the cost of heavier Rust compile
-time and a larger binary. Treat that native dependency as part of the hosted
-deployment threat model before enabling memory in a multi-tenant service. It
-does not archive Linear issues.
+enabled. Normal builds use DuckDB's bundled native library so operators do not
+need to install DuckDB separately, at the cost of heavier Rust compile time and
+a larger binary. Repository development can opt into the `duckdb-prebuilt`
+feature through `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`;
+those aliases set `DUCKDB_DOWNLOAD_LIB=1` so
+`libduckdb-sys` downloads and reuses a prebuilt native library in
+`target/duckdb-download`. Treat that native dependency as part of the hosted
+deployment threat model before enabling memory in a multi-tenant service.
+Memory capture does not archive Linear issues.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema

@@ -77,6 +77,13 @@ Suggested gates:
 
 Current implementation:
 
+- `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev` are repository
+  aliases for iterative OpenSymphony development. The aliases set
+  `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and build with
+  `--no-default-features --features duckdb-prebuilt` so the native DuckDB
+  library is downloaded into
+  `target/duckdb-download` and reused across rebuilds in the same target
+  directory.
 - `cargo test` exercises the full root package, including the fake-server contract suite from `tests/fake_server_contract.rs`
 - `cargo test --test linear_client` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
 - `cargo test --test hierarchy_selection --test scheduler` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, and manifest-backed workspace recovery against fake tracker/workspace/worker backends

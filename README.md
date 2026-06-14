@@ -181,9 +181,17 @@ See [Project Memory](docs/memory.md) for archive guards, YAML import/backfill,
 source schema, automation flags, and the distinction between CLI commands and
 template-managed agent skills.
 
-The memory index uses DuckDB's bundled build so local installs do not need a
-separate DuckDB system package. That choice adds compile time and binary size,
-but keeps the memory database portable for local-first operator workflows.
+The memory index uses DuckDB's bundled build by default so local installs do not
+need a separate DuckDB system package. That choice adds compile time and binary
+size, but keeps the memory database portable for local-first operator workflows.
+Repository developers can use `cargo check-dev`, `cargo test-dev`, and
+`cargo clippy-dev` to build with `--no-default-features --features
+duckdb-prebuilt`; those aliases set `DUCKDB_DOWNLOAD_LIB=1` for the aliased
+command so they reuse a downloaded prebuilt libduckdb during iterative
+development. Power users can also build against a manually installed system
+DuckDB by setting `DUCKDB_LIB_DIR`, `DUCKDB_INCLUDE_DIR`, and the platform
+runtime loader path before installing with `--no-default-features --features
+duckdb-prebuilt`; see [Installer and Distribution Strategy](docs/installer-and-distribution.md).
 
 ## Architecture
 
@@ -355,6 +363,9 @@ contains the requested conversation.
 # Unit tests
 cargo test
 
+# Faster iterative development mode with prebuilt libduckdb
+cargo test-dev
+
 # Static validation
 opensymphony doctor
 
@@ -373,6 +384,7 @@ OPENSYMPHONY_LIVE_OPENHANDS=1 ./scripts/live_e2e.sh
 - [Architecture](docs/architecture.md) - High-level design and component interactions
 - [Configuration](docs/configuration.md) - Target repo bootstrap and runtime config
 - [Deployment Modes](docs/deployment-modes.md) - Local vs hosted deployment
+- [Installer and Distribution Strategy](docs/installer-and-distribution.md) - Future signed installer shape and DuckDB packaging boundaries
 - [Operations](docs/operations.md) - Doctor, rehydration, diagnostics, and local ops
 - [Testing](docs/testing-and-operations.md) - Test strategy and validation layers
 - [Migration Guide](docs/migration-1.0.0.md) - Breaking changes and upgrade steps for 1.0.0

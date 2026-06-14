@@ -156,6 +156,27 @@ The local MVP is a trusted-environment mode.
 - integration code isolated inside `opensymphony-openhands`
 - no direct OpenHands protocol types leaking into orchestrator core types
 
+### Developer build acceleration
+
+DuckDB is bundled by default so `cargo install opensymphony`, release builds,
+and normal user builds do not require a separate system DuckDB installation.
+For iterative OpenSymphony development, prefer the repo cargo aliases that link
+against a downloaded prebuilt libduckdb instead of recompiling bundled DuckDB:
+
+```bash
+cargo check-dev
+cargo test-dev
+cargo test-dev --test memory
+cargo clippy-dev
+```
+
+The aliases set `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and run
+Cargo with `--no-default-features --features duckdb-prebuilt`. `cargo fmt` is
+unaffected because it does not compile dependencies. Before release-sensitive,
+packaging, or dependency changes, also run the default bundled-mode validation
+commands such as
+`cargo clippy --all-targets -- -D warnings` and `cargo test`.
+
 ## Required tests by subsystem
 
 ### Workflow and config
@@ -234,6 +255,8 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/ui-frankentui.md`: operator UI design
 - `docs/repository-layout.md`: crate ownership
 - `docs/deployment-modes.md`: local MVP and hosted follow-on
+- `docs/installer-and-distribution.md`: future signed installer, component
+  selection, update, and DuckDB runtime packaging strategy
 - `docs/configuration.md`: target repo bootstrap and runtime config
 - `docs/operations.md`: doctor, rehydration, diagnostics, packaging, and local ops
 - `docs/testing-and-operations.md`: test strategy and validation layers
