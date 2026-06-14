@@ -78,8 +78,8 @@ Suggested gates:
 Current implementation:
 
 - `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev` are repository
-  aliases for iterative OpenSymphony development. Repo-local Cargo
-  configuration sets `DUCKDB_DOWNLOAD_LIB=1`, and the aliases build with
+  aliases for iterative OpenSymphony development. The aliases set
+  `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and build with
   `--no-default-features --features duckdb-prebuilt` so the native DuckDB
   library is downloaded into
   `target/duckdb-download` and reused across rebuilds in the same target

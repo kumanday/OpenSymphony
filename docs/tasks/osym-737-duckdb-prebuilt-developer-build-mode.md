@@ -22,7 +22,7 @@ Add an opt-in developer build mode that links DuckDB from a downloaded prebuilt 
 ### In scope
 
 - Split the DuckDB dependency into explicit `duckdb-bundled` and `duckdb-prebuilt` Cargo feature modes, with bundled remaining the default.
-- Add `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev` aliases plus repo-local Cargo configuration that uses `DUCKDB_DOWNLOAD_LIB=1`, disables default features, and enables the prebuilt DuckDB mode.
+- Add `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev` aliases that set `DUCKDB_DOWNLOAD_LIB=1`, disable default features, and enable the prebuilt DuckDB mode.
 - Document the developer-mode commands in `AGENTS.md` and local operations/testing documentation.
 - Verify the prebuilt mode against focused memory tests and standard developer validation commands.
 - Preserve release and `cargo install opensymphony` behavior for users who do not opt into the developer mode.
@@ -37,7 +37,7 @@ Add an opt-in developer build mode that links DuckDB from a downloaded prebuilt 
 ## Deliverables
 
 - Updated `Cargo.toml` feature declarations and DuckDB dependency configuration.
-- Updated `.cargo/config.toml` aliases for `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`.
+- Updated `.cargo/config.toml` aliases for `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev` without setting a repo-wide DuckDB env var.
 - Updated `AGENTS.md`, `README.md`, `docs/operations.md`, and `docs/testing-and-operations.md` instructions.
 - Validation evidence for prebuilt developer mode and default bundled mode.
 
@@ -62,7 +62,7 @@ Add an opt-in developer build mode that links DuckDB from a downloaded prebuilt 
 
 - Before this task, `Cargo.toml` enabled `duckdb` with the `bundled` feature through the workspace dependency.
 - `libduckdb-sys` supports `DUCKDB_DOWNLOAD_LIB=1` for downloaded prebuilt native libraries in non-bundled mode.
-- `.cargo/config.toml` already centralizes repository cargo settings and is the right place for stable aliases.
+- `.cargo/config.toml` already centralizes repository cargo aliases, but the DuckDB download env var should stay scoped to the developer aliases.
 - `AGENTS.md` should steer OpenSymphony development tasks toward the faster dev aliases once this work lands.
 - `README.md`, `docs/operations.md`, and `docs/testing-and-operations.md` currently describe bundled DuckDB and validation commands.
 

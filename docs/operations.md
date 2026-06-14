@@ -71,7 +71,6 @@ DuckDB development package and build without default features:
 ```bash
 # macOS with Homebrew
 brew install duckdb
-export DUCKDB_DOWNLOAD_LIB=0
 export DUCKDB_LIB_DIR="$(brew --prefix duckdb)/lib"
 export DUCKDB_INCLUDE_DIR="$(brew --prefix duckdb)/include"
 export DYLD_LIBRARY_PATH="$DUCKDB_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
@@ -105,8 +104,8 @@ cargo test-dev --test memory
 cargo clippy-dev
 ```
 
-Repo-local Cargo configuration sets `DUCKDB_DOWNLOAD_LIB=1`, and the aliases
-use `--no-default-features --features duckdb-prebuilt`. Release-sensitive,
+The aliases set `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and use
+`--no-default-features --features duckdb-prebuilt`. Release-sensitive,
 packaging, and dependency work should still include the default bundled-mode
 checks so `cargo install opensymphony` remains turnkey for users:
 
@@ -222,7 +221,7 @@ enabled. Normal builds use DuckDB's bundled native library so operators do not
 need to install DuckDB separately, at the cost of heavier Rust compile time and
 a larger binary. Repository development can opt into the `duckdb-prebuilt`
 feature through `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`;
-repo-local Cargo configuration sets `DUCKDB_DOWNLOAD_LIB=1` so
+those aliases set `DUCKDB_DOWNLOAD_LIB=1` so
 `libduckdb-sys` downloads and reuses a prebuilt native library in
 `target/duckdb-download`. Treat that native dependency as part of the hosted
 deployment threat model before enabling memory in a multi-tenant service.

@@ -186,8 +186,8 @@ need a separate DuckDB system package. That choice adds compile time and binary
 size, but keeps the memory database portable for local-first operator workflows.
 Repository developers can use `cargo check-dev`, `cargo test-dev`, and
 `cargo clippy-dev` to build with `--no-default-features --features
-duckdb-prebuilt`; repo-local Cargo configuration sets `DUCKDB_DOWNLOAD_LIB=1`
-so those aliases reuse a downloaded prebuilt libduckdb during iterative
+duckdb-prebuilt`; those aliases set `DUCKDB_DOWNLOAD_LIB=1` for the aliased
+command so they reuse a downloaded prebuilt libduckdb during iterative
 development. Power users can also build against a manually installed system
 DuckDB by setting `DUCKDB_LIB_DIR`, `DUCKDB_INCLUDE_DIR`, and the platform
 runtime loader path before installing with `--no-default-features --features

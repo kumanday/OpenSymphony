@@ -170,11 +170,11 @@ cargo test-dev --test memory
 cargo clippy-dev
 ```
 
-Repo-local Cargo configuration sets `DUCKDB_DOWNLOAD_LIB=1`, and these aliases
-run Cargo with `--no-default-features --features duckdb-prebuilt`. `cargo fmt`
-is unaffected because it does not compile dependencies. Before
-release-sensitive, packaging, or dependency changes, also run the default
-bundled-mode validation commands such as
+The aliases set `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and run
+Cargo with `--no-default-features --features duckdb-prebuilt`. `cargo fmt` is
+unaffected because it does not compile dependencies. Before release-sensitive,
+packaging, or dependency changes, also run the default bundled-mode validation
+commands such as
 `cargo clippy --all-targets -- -D warnings` and `cargo test`.
 
 ## Required tests by subsystem

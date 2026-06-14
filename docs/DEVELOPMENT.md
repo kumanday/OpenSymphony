@@ -138,8 +138,8 @@ Fake server, live tests, doctor command, packaging.
 
 ## Required checks
 
-Fast iterative checks can use the developer aliases. Repo-local Cargo
-configuration sets `DUCKDB_DOWNLOAD_LIB=1`, and the aliases build with
+Fast iterative checks can use the developer aliases. The aliases set
+`DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and build with
 `--no-default-features --features duckdb-prebuilt`:
 
 ```bash

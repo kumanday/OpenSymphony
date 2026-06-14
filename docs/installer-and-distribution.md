@@ -171,7 +171,7 @@ For power users who want faster native builds and accept manual setup:
 For OpenSymphony contributors:
 
 - Use the repository aliases for iterative checks.
-- Let repository Cargo configuration set `DUCKDB_DOWNLOAD_LIB=1`.
+- Let the repository aliases set `DUCKDB_DOWNLOAD_LIB=1`.
 - Run default bundled validation before release-sensitive or packaging changes.
 - Do not use a shared target directory across independent agent workspaces
   unless the task explicitly accepts that isolation tradeoff.
