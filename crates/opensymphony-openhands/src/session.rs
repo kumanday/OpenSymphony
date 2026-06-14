@@ -773,6 +773,7 @@ impl IssueConversationManifest {
             cache_read_tokens: self.cache_read_tokens,
             total_tokens: self.input_tokens + self.output_tokens,
             runtime_seconds: 0, // TODO: track runtime
+            next_activity_sequence: 0,
         }
     }
 }
@@ -3069,6 +3070,7 @@ fn build_summary_metadata(
         cache_read_tokens: 0,
         total_tokens: 0,
         runtime_seconds: 0,
+        next_activity_sequence: 0,
     }
 }
 

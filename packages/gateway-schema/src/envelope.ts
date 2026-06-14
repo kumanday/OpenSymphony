@@ -15,6 +15,8 @@ export type EntityKind =
   | "repository"
   | "agent"
   | "harness"
+  | "command"
+  | "approval"
   | "unknown";
 
 /** Lightweight reference to an entity. */

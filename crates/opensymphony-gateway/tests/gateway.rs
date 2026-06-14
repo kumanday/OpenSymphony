@@ -19,6 +19,8 @@ use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
 };
 use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
+use opensymphony::opensymphony_gateway_schema::run::DiffLine;
+use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
 use tokio::net::TcpListener;
 use url::Url;
 
@@ -69,6 +71,9 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             input_tokens: 1024,
             output_tokens: 512,
             cache_read_tokens: 256,
+            cancel_acknowledged: false,
+            cancel_failed: false,
+            detached: false,
         }],
         recent_events: vec![RecentEvent {
             happened_at: now,
@@ -139,6 +144,9 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 input_tokens: 0,
                 output_tokens: 0,
                 cache_read_tokens: 0,
+                cancel_acknowledged: false,
+                cancel_failed: false,
+                detached: false,
             },
             // Completed issue with events and modified files
             IssueSnapshot {
@@ -163,12 +171,14 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                         happened_at: now,
                         kind: "worker_started".to_owned(),
                         summary: "worker started".to_owned(),
+                        sequence: 1,
                     },
                     ConversationEvent {
                         event_id: "evt-2".to_owned(),
                         happened_at: now,
                         kind: "worker_completed".to_owned(),
                         summary: "worker completed".to_owned(),
+                        sequence: 2,
                     },
                 ],
                 modified_files: vec![
@@ -177,17 +187,38 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                         change_kind: FileChangeKind::Modified,
                         lines_added: 10,
                         lines_removed: 3,
+                        diff: Some(
+                            "@@ -1,3 +1,10 @@\n\
+                             -old line 1\n\
+                             -old line 2\n\
+                             -old line 3\n\
+                             +new line 1\n\
+                             +new line 2\n\
+                             +new line 3\n\
+                             +new line 4\n\
+                             +new line 5\n\
+                             +new line 6\n\
+                             +new line 7\n\
+                             +new line 8\n\
+                             +new line 9\n\
+                             +new line 10"
+                                .to_owned(),
+                        ),
                     },
                     FileChange {
                         path: "/tmp/opensymphony/COE-301/src/lib.rs".to_owned(),
                         change_kind: FileChangeKind::Created,
                         lines_added: 42,
                         lines_removed: 0,
+                        diff: None,
                     },
                 ],
                 input_tokens: 2048,
                 output_tokens: 1024,
                 cache_read_tokens: 256,
+                cancel_acknowledged: false,
+                cancel_failed: false,
+                detached: false,
             },
             // Failed issue, first attempt (no retries exhausted)
             IssueSnapshot {
@@ -211,6 +242,9 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 input_tokens: 512,
                 output_tokens: 128,
                 cache_read_tokens: 0,
+                cancel_acknowledged: false,
+                cancel_failed: false,
+                detached: false,
             },
             // RetryQueued issue: queued but NOT eligible (not idle)
             IssueSnapshot {
@@ -234,6 +268,9 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 input_tokens: 256,
                 output_tokens: 64,
                 cache_read_tokens: 0,
+                cancel_acknowledged: false,
+                cancel_failed: false,
+                detached: false,
             },
             // Blocked Idle issue: NOT eligible AND NOT queued
             IssueSnapshot {
@@ -257,6 +294,9 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 input_tokens: 0,
                 output_tokens: 0,
                 cache_read_tokens: 0,
+                cancel_acknowledged: false,
+                cancel_failed: false,
+                detached: false,
             },
         ],
         recent_events: vec![RecentEvent {
@@ -1569,6 +1609,73 @@ async fn gateway_returns_404_for_unknown_run_diffs() {
     server_task.abort();
 }
 
+#[tokio::test]
+async fn gateway_returns_404_for_unknown_run_validation() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "http://{address}/api/v1/runs/UNKNOWN-999/validation"
+        ))
+        .send()
+        .await
+        .expect("fetch unknown run validation");
+
+    assert_eq!(resp.status(), 404);
+    let body: opensymphony::opensymphony_gateway_schema::validation::RunValidationSummary =
+        resp.json().await.expect("decode 404 run validation body");
+    assert_eq!(body.run_id, "UNKNOWN-999");
+    assert_eq!(body.overall_status, ValidationStatus::Error);
+    assert!(body.commands.is_empty());
+    assert!(body.evidence.is_empty());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_returns_404_for_unknown_run_approvals() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!(
+            "http://{address}/api/v1/runs/UNKNOWN-999/approvals"
+        ))
+        .send()
+        .await
+        .expect("fetch unknown run approvals");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("decode 404 run approvals body");
+    assert_eq!(body["run_id"].as_str(), Some("UNKNOWN-999"));
+    assert!(body["approvals"].as_array().is_none_or(|a| a.is_empty()));
+
+    server_task.abort();
+}
+
 // ── Rich fixture tests (non-Running states, file/diff data) ────────────────────
 
 #[tokio::test]
@@ -1637,6 +1744,91 @@ async fn gateway_serves_run_diffs_with_modified_files() {
     assert_eq!(response.hunks.len(), 2);
     assert_eq!(response.total_lines_added, 52);
     assert_eq!(response.total_lines_removed, 3);
+    // The first file has a real unified diff, so its hunk is populated with
+    // line-level additions and deletions instead of an empty placeholder.
+    let first_hunk = response.hunks.first().expect("first hunk");
+    assert_eq!(first_hunk.lines.len(), 13);
+    let added = first_hunk
+        .lines
+        .iter()
+        .filter(|l| matches!(l, DiffLine::Addition { .. }))
+        .count();
+    let removed = first_hunk
+        .lines
+        .iter()
+        .filter(|l| matches!(l, DiffLine::Deletion { .. }))
+        .count();
+    assert_eq!(added, 10);
+    assert_eq!(removed, 3);
+    assert_eq!(first_hunk.header, "@@ -1,3 +1,10 @@");
+    assert_eq!(first_hunk.file_path, "COE-301/src/main.rs");
+    let second_hunk = response.hunks.get(1).expect("second hunk");
+    assert_eq!(second_hunk.file_path, "COE-301/src/lib.rs");
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_validation_with_modified_files() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-301/validation"))
+        .send()
+        .await
+        .expect("fetch run validation with data")
+        .json::<opensymphony::opensymphony_gateway_schema::validation::RunValidationSummary>()
+        .await
+        .expect("decode run validation");
+
+    assert_eq!(response.run_id, "COE-301");
+    assert_eq!(response.overall_status, ValidationStatus::Passed);
+    assert!(response.commands.is_empty());
+    assert!(response.evidence.is_empty());
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_approvals_with_context() {
+    let store = SnapshotStore::new(fixture_snapshot_rich(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{address}/api/v1/runs/COE-301/approvals"))
+        .send()
+        .await
+        .expect("fetch run approvals with data")
+        .json::<serde_json::Value>()
+        .await
+        .expect("decode run approvals");
+
+    assert_eq!(response["run_id"].as_str(), Some("COE-301"));
+    let approvals = response["approvals"].as_array().expect("approvals array");
+    assert!(approvals.is_empty());
 
     server_task.abort();
 }
@@ -2027,6 +2219,56 @@ async fn gateway_dispatches_action_and_returns_receipt() {
     assert_eq!(response.status(), 404);
     let body: ActionReceipt = response.json().await.expect("should not be None");
     assert_eq!(body.status, ActionStatus::Rejected);
+
+    server_task.abort();
+}
+
+/// E2E evidence: open_workspace and debug actions are accepted as dispatchable
+/// action kinds and correlated to the target issue.
+#[tokio::test]
+async fn gateway_dispatches_open_workspace_and_debug_actions() {
+    let store = SnapshotStore::new(fixture_snapshot(1));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{address}/api/v1/actions/dispatch");
+
+    for (kind, correlation_id) in [
+        (ActionKind::OpenWorkspace, "corr_open_workspace"),
+        (ActionKind::Debug, "corr_debug"),
+    ] {
+        let dispatch = ActionDispatch {
+            schema_version: Default::default(),
+            correlation_id: correlation_id.to_string(),
+            action_kind: kind,
+            target_entity: ActionTarget {
+                entity_kind: EntityKind::Issue,
+                entity_id: "COE-255".to_string(),
+            },
+            payload: None,
+            idempotency_key: None,
+        };
+        let response = client
+            .post(&url)
+            .json(&dispatch)
+            .send()
+            .await
+            .expect("POST /api/v1/actions/dispatch should respond");
+        assert_eq!(response.status(), 200, "{kind} should be accepted");
+        let body: ActionReceipt = response.json().await.expect("should not be None");
+        assert_eq!(body.status, ActionStatus::Accepted);
+        assert_eq!(body.correlation_id, correlation_id);
+    }
 
     server_task.abort();
 }

@@ -457,6 +457,9 @@ mod tests {
                 input_tokens: 1024,
                 output_tokens: 512,
                 cache_read_tokens: 256,
+                cancel_acknowledged: false,
+                cancel_failed: false,
+                detached: false,
             }],
             recent_events: vec![RecentEvent {
                 happened_at: now,

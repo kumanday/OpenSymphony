@@ -18,8 +18,13 @@ import type {
   RunLogPage,
   TerminalSearchResult,
   TerminalJumpResult,
+  ChangedFileEntry,
+  FileDiffPage,
+  RunValidationSummary,
+  ApprovalRequest,
 } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, ActionCapableTransport } from "./index.js";
+import { stableHash, stableHashJson } from "./util.js";
 
 /** Deterministic mock transport for tests. */
 export class MockGatewayTransport implements GatewayTransport, ActionCapableTransport {
@@ -30,6 +35,10 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
   private mockTaskGraph: TaskGraphSnapshot;
   private mockRunDetail: Map<string, RunDetail>;
   private mockRunEvents: Map<string, RunEventPage>;
+  private mockRunFiles: Map<string, ChangedFileEntry[]> = new Map();
+  private mockRunDiffs: Map<string, FileDiffPage> = new Map();
+  private mockRunApprovals: Map<string, ApprovalRequest[]> = new Map();
+  private mockRunValidation: Map<string, RunValidationSummary> = new Map();
   private mockTerminalSnapshot: Map<string, TerminalSnapshot>;
   private mockEvents: GatewayEnvelope[] = [];
   private mockTerminalFrames: Map<string, GatewayEnvelope[]> = new Map();
@@ -49,6 +58,10 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     taskGraph?: Partial<TaskGraphSnapshot>;
     runDetails?: RunDetail[];
     runEvents?: RunEventPage[];
+    runFiles?: { runId: string; files: ChangedFileEntry[] }[];
+    runDiffs?: { runId: string; filePath?: string; diff: FileDiffPage }[];
+    runApprovals?: { runId: string; approvals: ApprovalRequest[] }[];
+    runValidation?: { runId: string; summary: RunValidationSummary }[];
     terminalSnapshots?: TerminalSnapshot[];
     events?: GatewayEnvelope[];
     terminalFrames?: { runId: string; frames: GatewayEnvelope[] }[];
@@ -117,6 +130,23 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
       this.mockRunEvents.set(page.run_id, page);
     }
 
+    for (const entry of opts?.runFiles ?? []) {
+      this.mockRunFiles.set(entry.runId, entry.files);
+    }
+
+    for (const entry of opts?.runDiffs ?? []) {
+      const key = entry.filePath ? `${entry.runId}:${entry.filePath}` : entry.runId;
+      this.mockRunDiffs.set(key, entry.diff);
+    }
+
+    for (const entry of opts?.runApprovals ?? []) {
+      this.mockRunApprovals.set(entry.runId, entry.approvals);
+    }
+
+    for (const entry of opts?.runValidation ?? []) {
+      this.mockRunValidation.set(entry.runId, entry.summary);
+    }
+
     this.mockTerminalSnapshot = new Map();
     for (const snap of opts?.terminalSnapshots ?? []) {
       this.mockTerminalSnapshot.set(`${snap.run_id}:${snap.terminal_session_id}`, snap);
@@ -174,6 +204,41 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
 
   async runLogs(_runId: string, _cursor?: number, _limit?: number): Promise<RunLogPage> {
     throw new Error("MockGatewayTransport.runLogs not implemented");
+  }
+
+  async runFiles(runId: string): Promise<ChangedFileEntry[]> {
+    return this.mockRunFiles.get(runId) ?? [];
+  }
+
+  async runDiffs(runId: string, filePath?: string): Promise<FileDiffPage> {
+    const key = filePath ? `${runId}:${filePath}` : runId;
+    return (
+      this.mockRunDiffs.get(key) ?? {
+        schema_version: { major: 1, minor: 0, patch: 0 },
+        run_id: runId,
+        file_path: filePath ?? "",
+        hunks: [],
+        total_lines_added: 0,
+        total_lines_removed: 0,
+      }
+    );
+  }
+
+  async runApprovals(runId: string): Promise<ApprovalRequest[]> {
+    return this.mockRunApprovals.get(runId) ?? [];
+  }
+
+  async runValidation(runId: string): Promise<RunValidationSummary> {
+    return (
+      this.mockRunValidation.get(runId) ?? {
+        schema_version: { major: 1, minor: 0, patch: 0 },
+        run_id: runId,
+        generated_at: new Date().toISOString(),
+        overall_status: "pending",
+        commands: [],
+        evidence: [],
+      }
+    );
   }
 
   async terminalSnapshot(
@@ -250,7 +315,7 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
       action_id: `mock-action-${this.actionCounter}`,
       correlation_id: action.correlation_id,
       status: "accepted",
-      expected_events: [],
+      expected_followup: [],
       issued_at: new Date(1000000000000 + this.actionCounter).toISOString(),
     };
 
@@ -383,6 +448,73 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     });
   }
 
+  async rehydrateRun(runId: string): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `rehydrate-${runId}-${crypto.randomUUID()}`,
+      action_kind: "rehydrate",
+      target_entity: { entity_kind: "run", entity_id: runId },
+      idempotency_key: `rehydrate-${runId}`,
+    });
+  }
+
+  async commentRun(runId: string, text: string): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `comment-${runId}-${crypto.randomUUID()}`,
+      action_kind: "comment",
+      target_entity: { entity_kind: "run", entity_id: runId },
+      payload: { text },
+      idempotency_key: `comment-${runId}-${await stableHash(text)}`,
+    });
+  }
+
+  async createFollowup(runId: string, payload: unknown): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `followup-${runId}-${crypto.randomUUID()}`,
+      action_kind: "create_followup",
+      target_entity: { entity_kind: "run", entity_id: runId },
+      payload,
+      idempotency_key: `followup-${runId}-${await stableHashJson(payload)}`,
+    });
+  }
+
+  async approvalDecision(
+    approvalId: string,
+    decision: "approved" | "rejected",
+    explanation?: string,
+  ): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `approval-${approvalId}-${crypto.randomUUID()}`,
+      action_kind: "approval_decision",
+      target_entity: { entity_kind: "approval", entity_id: approvalId },
+      payload: { decision, explanation },
+      idempotency_key: `approval-${approvalId}-${decision}`,
+    });
+  }
+
+  async openWorkspace(runId: string): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `workspace-${runId}-${crypto.randomUUID()}`,
+      action_kind: "open_workspace",
+      target_entity: { entity_kind: "run", entity_id: runId },
+      idempotency_key: `workspace-${runId}`,
+    });
+  }
+
+  async debugRun(runId: string): Promise<ActionReceipt> {
+    return this.dispatchAction({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      correlation_id: `debug-${runId}-${crypto.randomUUID()}`,
+      action_kind: "debug",
+      target_entity: { entity_kind: "run", entity_id: runId },
+      idempotency_key: `debug-${runId}`,
+    });
+  }
+
   // -- Lifecycle --
 
   async close(): Promise<void> {
@@ -421,6 +553,27 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
   /** Update a run detail. */
   updateRunDetail(run: RunDetail): void {
     this.mockRunDetail.set(run.run_id, run);
+  }
+
+  /** Set mock changed files for a run. */
+  setRunFiles(runId: string, files: ChangedFileEntry[]): void {
+    this.mockRunFiles.set(runId, files);
+  }
+
+  /** Set mock diff for a run (or run+file path). */
+  setRunDiff(runId: string, filePath: string | undefined, diff: FileDiffPage): void {
+    const key = filePath ? `${runId}:${filePath}` : runId;
+    this.mockRunDiffs.set(key, diff);
+  }
+
+  /** Set mock approvals for a run. */
+  setRunApprovals(runId: string, approvals: ApprovalRequest[]): void {
+    this.mockRunApprovals.set(runId, approvals);
+  }
+
+  /** Set mock validation summary for a run. */
+  setRunValidation(runId: string, summary: RunValidationSummary): void {
+    this.mockRunValidation.set(runId, summary);
   }
 
   /** Set stream health status for testing degraded scenarios. */

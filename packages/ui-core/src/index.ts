@@ -14,6 +14,13 @@ import type {
   TimelineEntry,
   TimelineEntryKind,
   TerminalLogAssociation,
+  ChangedFileEntry,
+  FileDiffPage,
+  RunValidationSummary,
+  ApprovalRequest,
+  RunAction,
+  SafeActions,
+  ActionReceipt,
 } from "@opensymphony/gateway-schema";
 
 // Terminal renderer module
@@ -26,6 +33,25 @@ export {
   findTimelineEntryByEventId,
   findTimelineEntryByEntityId,
 } from "./timeline.js";
+
+// Diff/validation/approval/action modules
+export {
+  renderChangedFileList,
+  renderFileDiff,
+} from "./diff.js";
+export type { DiffFileItem } from "./diff.js";
+export { renderValidationSummary } from "./validation.js";
+export {
+  renderApprovalList,
+} from "./approval.js";
+export type { ApprovalDecision } from "./approval.js";
+export {
+  buildActionBarItems,
+  renderActionBar,
+  renderActionReceipt,
+  renderAuditTrailEntry,
+} from "./run-actions.js";
+export type { ActionBarItem } from "./run-actions.js";
 
 export {
   renderOpenSymphonyApp,
@@ -62,3 +88,10 @@ export type RunTimelineData = RunTimeline;
 export type TimelineEntryData = TimelineEntry;
 export type TimelineEntryKindData = TimelineEntryKind;
 export type TerminalLogAssociationData = TerminalLogAssociation;
+export type ChangedFileEntryData = ChangedFileEntry;
+export type FileDiffPageData = FileDiffPage;
+export type RunValidationSummaryData = RunValidationSummary;
+export type ApprovalRequestData = ApprovalRequest;
+export type RunActionData = RunAction;
+export type SafeActionsData = SafeActions;
+export type ActionReceiptData = ActionReceipt;

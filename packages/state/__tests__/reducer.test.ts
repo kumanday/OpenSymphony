@@ -164,7 +164,7 @@ function makeActionReceipt(correlationId: string): ActionReceipt {
     action_id: "action-1",
     correlation_id: correlationId,
     status: "accepted",
-    expected_events: [],
+    expected_followup: [],
     issued_at: "2025-01-01T00:00:00Z",
   };
 }

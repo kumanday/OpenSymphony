@@ -114,6 +114,17 @@ pub struct ControlPlaneIssueSnapshot {
     pub output_tokens: u64,
     #[serde(default)]
     pub cache_read_tokens: u64,
+    /// True when the harness has been detached from the run (local operator or
+    /// host requested disconnect without a clean terminal state).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
+    /// True when the harness acknowledged a cancel/force-stop request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_acknowledged: bool,
+    /// True when a cancel/force-stop request was not acknowledged and the run
+    /// ended in a cancel-failed state.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_failed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -122,6 +133,11 @@ pub struct ControlPlaneConversationEvent {
     pub happened_at: DateTime<Utc>,
     pub kind: String,
     pub summary: String,
+    /// Monotonic sequence number assigned by the event producer. Used by the
+    /// gateway to report a stable ordering key even when the snapshot truncates
+    /// or reorders events.
+    #[serde(default)]
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -130,6 +146,10 @@ pub struct ControlPlaneFileChange {
     pub change_kind: ControlPlaneFileChangeKind,
     pub lines_added: u32,
     pub lines_removed: u32,
+    /// Optional unified diff text for the file. When present, the gateway will
+    /// parse it into line-level hunks instead of returning an empty summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -219,6 +219,9 @@ fn run_detail_roundtrips() {
         liveness: None,
         diagnostics: None,
         safe_actions: SafeActions::default(),
+        detached: false,
+        cancel_acknowledged: false,
+        cancel_failed: false,
     };
     let json = must_serialize(&run);
     let back: RunDetail = must_deserialize(&json);
@@ -316,10 +319,14 @@ fn approval_request_roundtrips() {
         title: "Approve file write".into(),
         description: "Agent wants to write to src/main.rs".into(),
         proposed_action: Some(json!({"path": "src/main.rs", "content": "fn main() {}"})),
+        actor: None,
+        target_context: None,
+        risk_summary: None,
         requested_at: Utc::now(),
         expires_at: None,
         status: ApprovalStatus::Pending,
         correlation_id: "corr-1".into(),
+        decided_at: None,
     };
     let json = must_serialize(&req);
     let back: ApprovalRequest = must_deserialize(&json);
@@ -1143,6 +1150,9 @@ fn run_liveness_envelope_roundtrips() {
         phase: RunPhase::Active,
         stream: RunStreamLiveness::Healthy,
         latest_progress: None,
+        harness_acknowledged: false,
+        cancel_failed: false,
+        detached: false,
     };
     let json = must_serialize(&envelope);
     let back: RunLivenessEnvelope = must_deserialize(&json);

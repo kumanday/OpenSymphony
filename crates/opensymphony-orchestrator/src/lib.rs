@@ -117,6 +117,7 @@ mod tests {
                 cache_read_tokens: 0,
                 total_tokens: 0,
                 runtime_seconds: 0,
+                next_activity_sequence: 0,
             }),
         ));
         let execution =

@@ -1,12 +1,17 @@
 import { HttpGatewayTransport } from "@opensymphony/api-client";
-import type { GatewayTransport } from "@opensymphony/api-client";
+import type {
+  ActionCapableTransport,
+  ActionDispatch,
+  ActionReceipt,
+  GatewayTransport,
+} from "@opensymphony/api-client";
 
-export interface BrowserTransportAdapter extends GatewayTransport {
+export interface BrowserTransportAdapter extends ActionCapableTransport {
   connect(token?: string): Promise<void>;
 }
 
 class BrowserTransport implements BrowserTransportAdapter {
-  constructor(private readonly inner: GatewayTransport) {}
+  constructor(private readonly inner: ActionCapableTransport) {}
 
   get baseUri(): string {
     return this.inner.baseUri;
@@ -70,6 +75,22 @@ class BrowserTransport implements BrowserTransportAdapter {
     return this.inner.terminalJumpToEvent(runId, terminalId, eventId);
   }
 
+  runFiles(runId: string): ReturnType<GatewayTransport["runFiles"]> {
+    return this.inner.runFiles(runId);
+  }
+
+  runDiffs(runId: string, filePath?: string): ReturnType<GatewayTransport["runDiffs"]> {
+    return this.inner.runDiffs(runId, filePath);
+  }
+
+  runApprovals(runId: string): ReturnType<GatewayTransport["runApprovals"]> {
+    return this.inner.runApprovals(runId);
+  }
+
+  runValidation(runId: string): ReturnType<GatewayTransport["runValidation"]> {
+    return this.inner.runValidation(runId);
+  }
+
   events(
     fromCursor?: Parameters<GatewayTransport["events"]>[0],
   ): ReturnType<GatewayTransport["events"]> {
@@ -84,6 +105,50 @@ class BrowserTransport implements BrowserTransportAdapter {
 
   close(): ReturnType<GatewayTransport["close"]> {
     return this.inner.close();
+  }
+
+  dispatchAction(action: ActionDispatch): Promise<ActionReceipt> {
+    return this.inner.dispatchAction(action);
+  }
+
+  cancelRun(runId: string): Promise<ActionReceipt> {
+    return this.inner.cancelRun(runId);
+  }
+
+  retryRun(runId: string): Promise<ActionReceipt> {
+    return this.inner.retryRun(runId);
+  }
+
+  resumeRun(runId: string): Promise<ActionReceipt> {
+    return this.inner.resumeRun(runId);
+  }
+
+  rehydrateRun(runId: string): Promise<ActionReceipt> {
+    return this.inner.rehydrateRun(runId);
+  }
+
+  commentRun(runId: string, text: string): Promise<ActionReceipt> {
+    return this.inner.commentRun(runId, text);
+  }
+
+  createFollowup(runId: string, payload: unknown): Promise<ActionReceipt> {
+    return this.inner.createFollowup(runId, payload);
+  }
+
+  approvalDecision(
+    approvalId: string,
+    decision: "approved" | "rejected",
+    explanation?: string,
+  ): Promise<ActionReceipt> {
+    return this.inner.approvalDecision(approvalId, decision, explanation);
+  }
+
+  openWorkspace(runId: string): Promise<ActionReceipt> {
+    return this.inner.openWorkspace(runId);
+  }
+
+  debugRun(runId: string): Promise<ActionReceipt> {
+    return this.inner.debugRun(runId);
   }
 
   async connect(_token?: string): Promise<void> {

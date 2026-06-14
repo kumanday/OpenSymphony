@@ -4016,12 +4016,14 @@ mod tests {
                                 happened_at: now,
                                 kind: "tool_call".to_owned(),
                                 summary: "editing src/main.rs".to_owned(),
+                                sequence: 0,
                             },
                             ControlPlaneConversationEvent {
                                 event_id: format!("evt-{}-2", index),
                                 happened_at: now,
                                 kind: "message".to_owned(),
                                 summary: "implementing feature".to_owned(),
+                                sequence: 0,
                             },
                         ],
                         modified_files: vec![
@@ -4030,17 +4032,22 @@ mod tests {
                                 change_kind: ControlPlaneFileChangeKind::Modified,
                                 lines_added: 42,
                                 lines_removed: 10,
+                                diff: None,
                             },
                             ControlPlaneFileChange {
                                 path: format!("workspace-{}/src/lib.rs", index),
                                 change_kind: ControlPlaneFileChangeKind::Created,
                                 lines_added: 100,
                                 lines_removed: 0,
+                                diff: None,
                             },
                         ],
                         input_tokens: 1024 + (index as u64 * 100),
                         output_tokens: 512 + (index as u64 * 50),
                         cache_read_tokens: 256 + (index as u64 * 25),
+                        cancel_acknowledged: false,
+                        cancel_failed: false,
+                        detached: false,
                     })
                     .collect(),
                 recent_events: vec![RecentEvent {
@@ -4572,6 +4579,7 @@ mod tests {
             happened_at: snapshot.snapshot.generated_at,
             kind: "message".to_owned(),
             summary: summary.to_owned(),
+            sequence: 0,
         }];
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
@@ -4592,6 +4600,7 @@ mod tests {
             summary:
                 "this summary is long enough that it should wrap into the next visual row cleanly"
                     .to_owned(),
+            sequence: 0,
         }];
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
@@ -4612,24 +4621,28 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "newest event".to_owned(),
+                sequence: 0,
             },
             ControlPlaneConversationEvent {
                 event_id: "evt-3".to_owned(),
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "newer event".to_owned(),
+                sequence: 0,
             },
             ControlPlaneConversationEvent {
                 event_id: "evt-2".to_owned(),
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "middle event".to_owned(),
+                sequence: 0,
             },
             ControlPlaneConversationEvent {
                 event_id: "evt-1".to_owned(),
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "oldest event".to_owned(),
+                sequence: 0,
             },
         ];
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
@@ -4661,24 +4674,28 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "fourth event".to_owned(),
+                sequence: 0,
             },
             ControlPlaneConversationEvent {
                 event_id: "evt-3".to_owned(),
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "third event".to_owned(),
+                sequence: 0,
             },
             ControlPlaneConversationEvent {
                 event_id: "evt-2".to_owned(),
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "second event".to_owned(),
+                sequence: 0,
             },
             ControlPlaneConversationEvent {
                 event_id: "evt-1".to_owned(),
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "first event".to_owned(),
+                sequence: 0,
             },
         ];
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot.clone())));
@@ -4699,6 +4716,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "fifth event".to_owned(),
+                sequence: 0,
             },
         );
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));

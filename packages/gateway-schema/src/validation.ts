@@ -10,6 +10,49 @@ import type { GatewayEnvelope } from "./envelope.js";
 import type { SchemaVersion } from "./version.js";
 import { GATEWAY_SCHEMA_VERSION } from "./version.js";
 
+/** Status of a validation command or evidence item. */
+export type ValidationStatus =
+  | "pending"
+  | "running"
+  | "passed"
+  | "failed"
+  | "skipped"
+  | "error";
+
+/** A single validation command executed as part of a run. */
+export interface ValidationCommand {
+  command_id: string;
+  command: string;
+  status: ValidationStatus;
+  started_at?: string;
+  finished_at?: string;
+  exit_code?: number;
+  stdout_summary?: string;
+  stderr_summary?: string;
+}
+
+/** Evidence attached to a validation outcome. */
+export interface ValidationEvidenceItem {
+  evidence_id: string;
+  label: string;
+  status: ValidationStatus;
+  summary: string;
+  command_id?: string;
+  file_path?: string;
+  line_number?: number;
+  happened_at?: string;
+}
+
+/** Validation summary for a run. */
+export interface RunValidationSummary {
+  schema_version: SchemaVersion;
+  run_id: string;
+  generated_at: string;
+  overall_status: ValidationStatus;
+  commands: ValidationCommand[];
+  evidence: ValidationEvidenceItem[];
+}
+
 /** Return true when the payload's schema_version has valid numeric fields. */
 export function isValidSchemaVersion(v: unknown): v is SchemaVersion {
   if (

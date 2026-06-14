@@ -26,7 +26,27 @@ export type {
 } from "./task_graph_runtime.js";
 
 // run
-export type { RunStatus, ReleaseReason, RunPhase, RunStreamLiveness, RunProgress, RunLivenessEnvelope, HarnessSchedulerDisagreement, RunDiagnostics, SafeActions, RunDetail, RunEventPage, RunEvent } from "./run.js";
+export type {
+  RunStatus,
+  ReleaseReason,
+  RunPhase,
+  RunStreamLiveness,
+  RunProgress,
+  RunLivenessEnvelope,
+  HarnessSchedulerDisagreement,
+  RunDiagnostics,
+  SafeActions,
+  RunLifecycleState,
+  RunAction,
+  RunDetail,
+  RunEventPage,
+  RunEvent,
+  FileChangeKind,
+  ChangedFileEntry,
+  DiffLine,
+  DiffHunk,
+  FileDiffPage,
+} from "./run.js";
 
 // terminal
 export type { TerminalFrameKind, TerminalEncoding, TerminalFrame, TerminalSnapshot, TerminalSession, TerminalLogAssociation } from "./terminal.js";
@@ -47,7 +67,20 @@ export type {
 } from "./timeline.js";
 
 // approval
-export type { ApprovalKind, ApprovalStatus, ApprovalRequest, ActionReceiptStatus, ActionReceipt } from "./approval.js";
+export type {
+  ApprovalKind,
+  ApprovalStatus,
+  ApprovalActor,
+  ApprovalTargetContext,
+  ApprovalRiskLevel,
+  ApprovalRiskSummary,
+  ApprovalRequest,
+  ActionStatus,
+  ActionReceiptStatus,
+  ExpectedFollowup,
+  PermissionResult,
+  ActionReceipt,
+} from "./approval.js";
 
 // planning
 export type { PlanningArtifactKind, PlanningArtifact, PlanningSessionStatus, PlanningSessionSummary } from "./planning.js";
@@ -87,4 +120,10 @@ export {
   assertValidEnvelopeBatch,
   parseGatewayEnvelope,
   getGatewaySchemaVersion,
+} from "./validation.js";
+export type {
+  ValidationStatus,
+  ValidationCommand,
+  ValidationEvidenceItem,
+  RunValidationSummary,
 } from "./validation.js";

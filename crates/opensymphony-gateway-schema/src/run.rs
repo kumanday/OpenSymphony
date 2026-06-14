@@ -69,6 +69,15 @@ pub struct RunDetail {
     /// Actions the client may safely invoke in the current state.
     #[serde(default)]
     pub safe_actions: SafeActions,
+    /// True when the harness session has been detached from the run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
+    /// True when the harness acknowledged a cancel/force-stop request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_acknowledged: bool,
+    /// True when a cancel/force-stop request was not acknowledged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_failed: bool,
 }
 
 /// Action a client may dispatch on a run.
@@ -81,6 +90,10 @@ pub enum RunAction {
     Resume,
     Rehydrate,
     Detach,
+    Comment,
+    CreateFollowup,
+    OpenWorkspace,
+    Debug,
 }
 
 /// Operational phase observed by the client for a long-running run.
@@ -104,6 +117,9 @@ pub enum RunStreamLiveness {
     Healthy,
     Stale,
     Dead,
+    Detached,
+    Degraded,
+    Stalled,
 }
 
 /// Compact snapshot of the current run liveness surface.
@@ -112,6 +128,12 @@ pub struct RunLivenessEnvelope {
     pub phase: RunPhase,
     pub stream: RunStreamLiveness,
     pub latest_progress: Option<RunProgress>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub harness_acknowledged: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_failed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
 }
 
 /// Progress event emitted during a long-running run.
@@ -131,6 +153,12 @@ pub struct RunDiagnostics {
     /// still appears active for the same issue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_scheduler_disagreement: Option<HarnessSchedulerDisagreement>,
+    /// True when the harness acknowledged a cancel/force-stop request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_acknowledged: bool,
+    /// True when a cancel/force-stop request was not acknowledged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_failed: bool,
 }
 
 /// Details of a harness/scheduler disagreement.
@@ -173,6 +201,7 @@ pub enum ReleaseReason {
     TrackerInactive,
     TrackerTerminal,
     Cancelled,
+    CancelFailed,
     RetryExhausted,
 }
 
@@ -242,6 +271,8 @@ pub enum DiffLine {
 /// A contiguous hunk inside a unified diff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffHunk {
+    /// Path of the file this hunk belongs to, relative to the workspace root.
+    pub file_path: String,
     pub header: String,
     pub start_line: u32,
     pub old_line_count: u32,

@@ -11,4 +11,5 @@ pub mod task_graph;
 pub mod terminal;
 pub mod timeline;
 pub mod transport;
+pub mod validation;
 pub mod version;

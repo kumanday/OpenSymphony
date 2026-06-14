@@ -65,6 +65,9 @@ fn fixture_snapshot(
             input_tokens: 0,
             output_tokens: 0,
             cache_read_tokens: 0,
+            cancel_acknowledged: false,
+            cancel_failed: false,
+            detached: false,
         }],
         recent_events: Vec::new(),
     }

@@ -20,6 +20,13 @@ import type {
   RunLogPage,
   TerminalSearchResult,
   TerminalJumpResult,
+  ChangedFileEntry,
+  FileDiffPage,
+  RunValidationSummary,
+  RunAction,
+  RunPhase,
+  SafeActions,
+  RunLifecycleState,
 } from "@opensymphony/gateway-schema";
 
 export {
@@ -52,6 +59,10 @@ export interface GatewayTransport {
   runEvents(runId: string, cursor?: PageCursor): Promise<RunEventPage>;
   runTimeline(runId: string): Promise<RunTimeline>;
   runLogs(runId: string, cursor?: number, limit?: number): Promise<RunLogPage>;
+  runFiles(runId: string): Promise<ChangedFileEntry[]>;
+  runDiffs(runId: string, filePath?: string): Promise<FileDiffPage>;
+  runApprovals(runId: string): Promise<ApprovalRequest[]>;
+  runValidation(runId: string): Promise<RunValidationSummary>;
   terminalSnapshot(runId: string, terminalId: string, cursor?: number): Promise<TerminalSnapshot>;
   terminalSearch(runId: string, terminalId: string, query: string): Promise<TerminalSearchResult>;
   terminalJumpToEvent(runId: string, terminalId: string, eventId: string): Promise<TerminalJumpResult>;
@@ -71,6 +82,12 @@ export interface ActionCapableTransport extends GatewayTransport {
   cancelRun(runId: string): Promise<ActionReceipt>;
   retryRun(runId: string): Promise<ActionReceipt>;
   resumeRun(runId: string): Promise<ActionReceipt>;
+  rehydrateRun(runId: string): Promise<ActionReceipt>;
+  commentRun(runId: string, text: string): Promise<ActionReceipt>;
+  createFollowup(runId: string, payload: unknown): Promise<ActionReceipt>;
+  approvalDecision(approvalId: string, decision: "approved" | "rejected", explanation?: string): Promise<ActionReceipt>;
+  openWorkspace(runId: string): Promise<ActionReceipt>;
+  debugRun(runId: string): Promise<ActionReceipt>;
 }
 
 export interface GatewayTransportConfig {
@@ -128,4 +145,11 @@ export type {
   RunTimeline,
   RunLogPage,
   TransportProfile,
+  ChangedFileEntry,
+  FileDiffPage,
+  RunValidationSummary,
+  RunAction,
+  RunPhase,
+  SafeActions,
+  RunLifecycleState,
 };

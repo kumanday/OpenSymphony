@@ -77,6 +77,9 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                     input_tokens: 1024 + (index as u64 * 100),
                     output_tokens: 512 + (index as u64 * 50),
                     cache_read_tokens: 256 + (index as u64 * 25),
+                    cancel_acknowledged: false,
+                    cancel_failed: false,
+                    detached: false,
                 })
                 .collect(),
             recent_events: vec![RecentEvent {
@@ -115,6 +118,9 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
             input_tokens: 1024 + (index as u64 * 100),
             output_tokens: 512 + (index as u64 * 50),
             cache_read_tokens: 256 + (index as u64 * 25),
+            cancel_acknowledged: false,
+            cancel_failed: false,
+            detached: false,
         })
         .collect();
     snapshot

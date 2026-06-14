@@ -80,6 +80,10 @@ pub enum ActionKind {
     Resume,
     Rehydrate,
     Comment,
+    /// Open the run's attached workspace in the local editor/IDE.
+    OpenWorkspace,
+    /// Open a debug view for the run's active harness/agent-server.
+    Debug,
     TransitionIssue,
     CreateFollowup,
     ApprovalDecision,
@@ -106,6 +110,8 @@ impl std::fmt::Display for ActionKind {
             ActionKind::Resume => "resume",
             ActionKind::Rehydrate => "rehydrate",
             ActionKind::Comment => "comment",
+            ActionKind::OpenWorkspace => "open_workspace",
+            ActionKind::Debug => "debug",
             ActionKind::TransitionIssue => "transition_issue",
             ActionKind::CreateFollowup => "create_followup",
             ActionKind::ApprovalDecision => "approval_decision",
@@ -148,6 +154,14 @@ impl ActionKind {
                 ExpectedFollowup::StateTransition,
             ],
             ActionKind::Comment => vec![
+                ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::JournalUpdate,
+            ],
+            ActionKind::OpenWorkspace => vec![
+                ExpectedFollowup::ActionCompletion,
+                ExpectedFollowup::JournalUpdate,
+            ],
+            ActionKind::Debug => vec![
                 ExpectedFollowup::ActionCompletion,
                 ExpectedFollowup::JournalUpdate,
             ],

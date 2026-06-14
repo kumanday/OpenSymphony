@@ -8,13 +8,13 @@ use uuid::Uuid;
 
 use crate::opensymphony_domain::{
     ControlPlaneDaemonSnapshot, ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot,
-    ControlPlaneWorkerOutcome, InMemoryEventJournal, SnapshotEnvelope,
+    InMemoryEventJournal, SnapshotEnvelope,
 };
 use crate::opensymphony_gateway_schema::{
     action::{ActionDispatch, ActionKind, ActionReceipt, ActionStatus, PermissionResult},
     envelope::{EntityKind, EntityRef},
     event_journal::{EventActor, EventKind, EventRecord},
-    run::{RunAction, SafeActions},
+    run::RunAction,
 };
 
 pub struct ValidatedAction {
@@ -154,6 +154,8 @@ impl ActionHandler {
             ActionKind::Comment => validate_comment(&action, issue.as_ref(), &action_id),
             ActionKind::Pause => validate_pause(&action, issue.as_ref(), &action_id),
             ActionKind::Resume => validate_resume(&action, issue.as_ref(), &action_id),
+            ActionKind::OpenWorkspace => validate_generic(&action, issue.as_ref(), &action_id),
+            ActionKind::Debug => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::TransitionIssue => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::CreateFollowup => validate_generic(&action, issue.as_ref(), &action_id),
             ActionKind::ApprovalDecision => validate_generic(&action, issue.as_ref(), &action_id),
@@ -199,39 +201,8 @@ fn find_issue_by_id(
         .cloned()
 }
 
-fn safe_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> SafeActions {
-    use ControlPlaneIssueRuntimeState as State;
-    use ControlPlaneWorkerOutcome as Outcome;
-
-    let (retry, cancel, rehydrate, detach) = match issue.runtime_state {
-        State::Idle => (false, false, false, false),
-        State::Running => (false, true, false, true),
-        State::Paused => (false, true, false, true),
-        State::RetryQueued => (false, false, false, false),
-        State::Releasing => (false, false, false, false),
-        State::Completed => {
-            let safe_rehydrate = matches!(
-                issue.last_outcome,
-                Outcome::Completed | Outcome::Failed | Outcome::Canceled
-            );
-            (true, false, safe_rehydrate, false)
-        }
-        State::Failed => {
-            let safe_rehydrate = matches!(issue.last_outcome, Outcome::Failed | Outcome::Canceled);
-            (true, false, safe_rehydrate, false)
-        }
-    };
-
-    SafeActions {
-        retry,
-        cancel,
-        rehydrate,
-        detach,
-    }
-}
-
 fn is_run_action_safe(issue: &ControlPlaneIssueSnapshot, action: RunAction) -> bool {
-    let safe = safe_actions_for_issue(issue);
+    let safe = super::safe_actions_for_issue(issue);
     match action {
         RunAction::Retry => safe.retry,
         RunAction::Cancel => safe.cancel,
@@ -239,7 +210,14 @@ fn is_run_action_safe(issue: &ControlPlaneIssueSnapshot, action: RunAction) -> b
         RunAction::Detach => safe.detach,
         // Pause and Resume are validated by their own dedicated validators
         // (validate_pause and validate_resume) and are never routed here.
-        RunAction::Pause | RunAction::Resume => false,
+        // Comment, follow-up, workspace, and debug are not gated by SafeActions;
+        // their eligibility is driven by allowed_actions in the run detail.
+        RunAction::Pause
+        | RunAction::Resume
+        | RunAction::Comment
+        | RunAction::CreateFollowup
+        | RunAction::OpenWorkspace
+        | RunAction::Debug => false,
     }
 }
 
@@ -411,12 +389,12 @@ fn validate_resume(
 
 /// Generic action validation for actions that do not require runtime state gating.
 ///
-/// Actions validated here (`TransitionIssue`, `CreateFollowup`, `ApprovalDecision`,
-/// `PublishPlan`) are inherently safe because they operate on the issue tracker or
-/// planning layer rather than the active harness runtime. They do not mutate scheduler
-/// state and are therefore accepted for any valid issue snapshot. If a future action
-/// needs runtime state gating, it should be promoted from `validate_generic` to a
-/// dedicated validator (e.g., `validate_pause`, `validate_resume`).
+/// Actions validated here (`OpenWorkspace`, `Debug`, `TransitionIssue`, `CreateFollowup`,
+/// `ApprovalDecision`, `PublishPlan`) are inherently safe because they operate on the
+/// issue tracker, planning layer, or local UI rather than the active harness runtime.
+/// They do not mutate scheduler state and are therefore accepted for any valid issue
+/// snapshot. If a future action needs runtime state gating, it should be promoted from
+/// `validate_generic` to a dedicated validator (e.g., `validate_pause`, `validate_resume`).
 fn validate_generic(
     action: &ActionDispatch,
     issue: Option<&ControlPlaneIssueSnapshot>,

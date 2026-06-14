@@ -66,13 +66,15 @@ pub use crate::opensymphony_gateway_schema::{
         ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget, ExpectedFollowup,
         PermissionResult,
     },
+    approval::ApprovalRequest,
     capability::{AuthMode, FeatureCapability, GatewayCapabilities, TransportCapability},
     cursor::PageCursor,
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
     run::{
         ChangedFileEntry, DiffHunk, DiffLine, FileChangeKind, FileDiffPage, ReleaseReason,
-        RunAction, RunDetail, RunEvent, RunEventPage, RunFilesPage, RunLifecycleState, RunPhase,
-        RunStatus, SafeActions,
+        RunAction, RunDetail, RunDiagnostics, RunEvent, RunEventPage, RunFilesPage,
+        RunLifecycleState, RunLivenessEnvelope, RunPhase, RunProgress, RunStatus,
+        RunStreamLiveness, SafeActions,
     },
     snapshot::{
         DashboardSnapshot, GatewayHealth, GatewayMetrics, ProjectDetail, ProjectIssueSummary,
@@ -80,6 +82,7 @@ pub use crate::opensymphony_gateway_schema::{
         SnapshotEventSummary,
     },
     task_graph::{DiffSummary, TaskGraphRuntimeOverlay, TaskGraphSnapshot, TaskGraphStateCategory},
+    validation::{RunValidationSummary, ValidationStatus},
     version::{GATEWAY_SCHEMA_VERSION, SchemaVersion},
 };
 
@@ -411,6 +414,8 @@ impl GatewayServer {
             .route("/api/v1/runs/{run_id}/events", get(get_run_events))
             .route("/api/v1/runs/{run_id}/files", get(get_run_files))
             .route("/api/v1/runs/{run_id}/diffs", get(get_run_diffs))
+            .route("/api/v1/runs/{run_id}/validation", get(get_run_validation))
+            .route("/api/v1/runs/{run_id}/approvals", get(get_run_approvals))
             .route("/api/v1/runs/{run_id}/timeline", get(get_run_timeline))
             .route("/api/v1/runs/{run_id}/logs", get(get_run_logs))
             .route(
@@ -1221,6 +1226,29 @@ fn normalize_path(path: &StdPath) -> PathBuf {
     stack.into_iter().collect()
 }
 
+/// Resolve a workspace-relative path and verify it stays inside the workspace
+/// boundary after normalizing `..` components. Returns `None` for absolute paths
+/// that are not rooted in the workspace, or for paths that escape it. This is a
+/// read-time guard for workspace file fallback paths.
+fn safe_workspace_path(workspace_root: &str, raw_path: &str) -> Option<PathBuf> {
+    let root = normalize_path(StdPath::new(workspace_root));
+    let candidate = normalize_path(&StdPath::new(workspace_root).join(raw_path));
+
+    // Reject absolute paths that are not already inside the workspace root. This
+    // prevents callers from passing `/etc/passwd` or a crafted absolute path
+    // directly. The join call above returns the absolute raw_path when given one,
+    // so normalizing it is enough to detect traversal.
+    if candidate.is_absolute() && !candidate.starts_with(&root) {
+        return None;
+    }
+
+    if candidate == root || candidate.starts_with(&root) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 /// Strip the workspace root from a raw absolute path so that the public API
 /// never leaks a local filesystem path outside the workspace boundary.
 ///
@@ -1690,6 +1718,9 @@ async fn get_run_detail(
                     liveness: None,
                     diagnostics: None,
                     safe_actions: SafeActions::default(),
+                    detached: false,
+                    cancel_acknowledged: false,
+                    cancel_failed: false,
                 }),
             );
         }
@@ -1711,18 +1742,22 @@ async fn get_run_detail(
         ControlPlaneIssueRuntimeState::Failed => (RunStatus::Released, RunLifecycleState::Failed),
     };
 
-    let release_reason = match issue.last_outcome {
-        ControlPlaneWorkerOutcome::Completed => Some(ReleaseReason::Completed),
-        ControlPlaneWorkerOutcome::Canceled => Some(ReleaseReason::Cancelled),
-        // When the snapshot indicates a failure and retries are exhausted
-        // (retry_count > 0), treat it as RetryExhausted.  When the issue
-        // failed on the first attempt with no retry queued, treat it as a
-        // terminal tracker state rather than an exhausted-retry signal.
-        ControlPlaneWorkerOutcome::Failed if issue.retry_count > 0 => {
-            Some(ReleaseReason::RetryExhausted)
+    let release_reason = if issue.cancel_failed {
+        Some(ReleaseReason::CancelFailed)
+    } else {
+        match issue.last_outcome {
+            ControlPlaneWorkerOutcome::Completed => Some(ReleaseReason::Completed),
+            ControlPlaneWorkerOutcome::Canceled => Some(ReleaseReason::Cancelled),
+            // When the snapshot indicates a failure and retries are exhausted
+            // (retry_count > 0), treat it as RetryExhausted.  When the issue
+            // failed on the first attempt with no retry queued, treat it as a
+            // terminal tracker state rather than an exhausted-retry signal.
+            ControlPlaneWorkerOutcome::Failed if issue.retry_count > 0 => {
+                Some(ReleaseReason::RetryExhausted)
+            }
+            ControlPlaneWorkerOutcome::Failed => Some(ReleaseReason::TrackerTerminal),
+            _ => None,
         }
-        ControlPlaneWorkerOutcome::Failed => Some(ReleaseReason::TrackerTerminal),
-        _ => None,
     };
 
     (
@@ -1771,10 +1806,17 @@ async fn get_run_detail(
             summary: None,
             blocker: issue.blocked.then(|| "Blocked by dependency".into()),
             error: None,
-            allowed_actions: Vec::new(),
-            liveness: None,
-            diagnostics: None,
-            safe_actions: SafeActions::default(),
+            allowed_actions: allowed_actions_for_issue(issue),
+            liveness: Some(build_liveness(issue)),
+            diagnostics: Some(RunDiagnostics {
+                harness_scheduler_disagreement: None,
+                cancel_acknowledged: issue.cancel_acknowledged,
+                cancel_failed: issue.cancel_failed,
+            }),
+            safe_actions: safe_actions_for_issue(issue),
+            detached: issue.detached,
+            cancel_acknowledged: issue.cancel_acknowledged,
+            cancel_failed: issue.cancel_failed,
         }),
     )
 }
@@ -1868,11 +1910,22 @@ async fn get_run_files(
 async fn get_run_diffs(
     State(store): State<SnapshotStore>,
     AxumPath(run_id): AxumPath<String>,
+    Query(query): Query<RunDiffQuery>,
 ) -> impl IntoResponse {
     let envelope = store.current().await;
     let workspace_root = envelope.snapshot.daemon.workspace_root.clone();
     let files: Vec<&ControlPlaneFileChange> = match find_issue_snapshot(&envelope, &run_id) {
-        Some(issue) => issue.modified_files.iter().collect(),
+        Some(issue) => {
+            if let Some(path) = &query.file_path {
+                issue
+                    .modified_files
+                    .iter()
+                    .filter(|fc| sanitize_file_path(&workspace_root, &fc.path) == *path)
+                    .collect()
+            } else {
+                issue.modified_files.iter().collect()
+            }
+        }
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -1889,30 +1942,19 @@ async fn get_run_diffs(
         }
     };
 
-    // Build a summary hunk per changed file from the control-plane metadata.
-    // Full unified diff content is not yet available from the snapshot;
-    // the hunk header and line counts provide callers with change summaries.
-    let hunks: Vec<DiffHunk> = files
-        .iter()
-        .map(|fc| {
-            // Build a synthetic hunk header.  When a file is entirely new
-            // (0 lines removed) or entirely deleted (0 lines added), the
-            // header reflects the correct start,count pairs so parsers won't
-            // choke on `@@ -1,0 +1,N @@` or `@@ -1,N +1,0 @@`.
-            let old_start = if fc.lines_removed > 0 { 1 } else { 0 };
-            let new_start = if fc.lines_added > 0 { 1 } else { 0 };
-            DiffHunk {
-                header: format!(
-                    "@@ -{},{} +{},{} @@",
-                    old_start, fc.lines_removed, new_start, fc.lines_added
-                ),
-                start_line: if fc.lines_removed > 0 { 1 } else { 0 },
-                old_line_count: fc.lines_removed,
-                new_line_count: fc.lines_added,
-                lines: Vec::new(),
-            }
-        })
-        .collect();
+    // Build hunks per changed file. If the control-plane snapshot includes a
+    // unified diff string, parse it into real line-level hunks. Otherwise fall
+    // back to reading the workspace file for newly created files, or to a
+    // synthetic hunk with the line counts from the metadata.
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+    for fc in &files {
+        let hunk_path = sanitize_file_path(&workspace_root, &fc.path);
+        if let Some(diff_text) = &fc.diff {
+            hunks.extend(parse_unified_diff(&hunk_path, diff_text));
+        } else {
+            hunks.extend(build_fallback_hunks(&hunk_path, fc, &workspace_root));
+        }
+    }
 
     let total_lines_added: u32 = files.iter().map(|f| f.lines_added).sum();
     let total_lines_removed: u32 = files.iter().map(|f| f.lines_removed).sum();
@@ -1941,6 +1983,235 @@ async fn get_run_diffs(
     )
 }
 
+/// Parse a unified diff string into line-level hunks. Handles the standard
+/// `@@ -old_start,old_len +new_start,new_len @@` header and ` ` / `+` / `-`
+/// prefixed lines. Lines such as `\ No newline at end of file` are ignored.
+fn parse_unified_diff(file_path: &str, diff_text: &str) -> Vec<DiffHunk> {
+    let mut hunks = Vec::new();
+    let mut current_header: Option<String> = None;
+    let mut current_start_line = 0u32;
+    let mut current_old_count = 0u32;
+    let mut current_new_count = 0u32;
+    let mut current_lines: Vec<DiffLine> = Vec::new();
+
+    for line in diff_text.lines() {
+        if let Some((_old_start, old_count, new_start, new_count)) = parse_hunk_header(line) {
+            if let Some(header) = current_header.take() {
+                hunks.push(DiffHunk {
+                    file_path: file_path.to_owned(),
+                    header,
+                    start_line: current_start_line,
+                    old_line_count: current_old_count,
+                    new_line_count: current_new_count,
+                    lines: current_lines,
+                });
+            }
+            current_header = Some(line.to_owned());
+            current_start_line = new_start;
+            current_old_count = old_count;
+            current_new_count = new_count;
+            current_lines = Vec::new();
+        } else if current_header.is_some() {
+            if line.starts_with("\\ No newline") {
+                continue;
+            }
+            if line.is_empty() {
+                current_lines.push(DiffLine::Context {
+                    line: String::new(),
+                });
+                continue;
+            }
+            let (prefix, content) = line.split_at(1);
+            match prefix {
+                " " => current_lines.push(DiffLine::Context {
+                    line: content.to_owned(),
+                }),
+                "+" => current_lines.push(DiffLine::Addition {
+                    line: content.to_owned(),
+                }),
+                "-" => current_lines.push(DiffLine::Deletion {
+                    line: content.to_owned(),
+                }),
+                _ => {
+                    // Stray lines that do not belong to the hunk are ignored.
+                }
+            }
+        }
+    }
+
+    if let Some(header) = current_header.take() {
+        hunks.push(DiffHunk {
+            file_path: file_path.to_owned(),
+            header,
+            start_line: current_start_line,
+            old_line_count: current_old_count,
+            new_line_count: current_new_count,
+            lines: current_lines,
+        });
+    }
+
+    hunks
+}
+
+fn parse_hunk_header(line: &str) -> Option<(u32, u32, u32, u32)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let old_range_end = rest.find(" +")?;
+    let old_range = &rest[..old_range_end];
+    let rest = &rest[old_range_end + " +".len()..];
+    let new_range_end = rest.find(" @@")?;
+    let new_range = &rest[..new_range_end];
+    let (old_start, old_count) = parse_range(old_range)?;
+    let (new_start, new_count) = parse_range(new_range)?;
+    Some((old_start, old_count, new_start, new_count))
+}
+
+fn parse_range(range: &str) -> Option<(u32, u32)> {
+    let mut parts = range.split(',');
+    let start = parts.next()?.parse::<u32>().ok()?;
+    let count = parts
+        .next()
+        .map(|s| s.parse::<u32>().ok())
+        .unwrap_or(Some(1))?;
+    Some((start, count))
+}
+
+/// Build a fallback hunk for a file when no unified diff string is present.
+/// For newly created files that exist in the workspace, the file content is
+/// returned as addition lines. For all other cases a synthetic hunk carrying
+/// the line counts from the control-plane metadata is returned.
+fn build_fallback_hunks(
+    file_path: &str,
+    fc: &ControlPlaneFileChange,
+    workspace_root: &str,
+) -> Vec<DiffHunk> {
+    if fc.diff.is_none() && fc.change_kind == ControlPlaneFileChangeKind::Created {
+        // Only read the file when it resolves safely inside the workspace root. The
+        // path from the control plane may be absolute; safe_workspace_path joins it
+        // with the workspace root and then checks containment after normalization.
+        if let Some(path) = safe_workspace_path(workspace_root, &fc.path)
+            && let Ok(content) = std::fs::read_to_string(&path)
+        {
+            let lines: Vec<&str> = content.lines().collect();
+            let new_count = lines.len() as u32;
+            let diff_lines = lines
+                .into_iter()
+                .map(|line| DiffLine::Addition {
+                    line: line.to_owned(),
+                })
+                .collect();
+            return vec![DiffHunk {
+                file_path: file_path.to_owned(),
+                header: format!("@@ -0,0 +1,{} @@", new_count),
+                start_line: 1,
+                old_line_count: 0,
+                new_line_count: new_count,
+                lines: diff_lines,
+            }];
+        }
+    }
+
+    let old_start = if fc.lines_removed > 0 { 1 } else { 0 };
+    let new_start = if fc.lines_added > 0 { 1 } else { 0 };
+    vec![DiffHunk {
+        file_path: file_path.to_owned(),
+        header: format!(
+            "@@ -{},{} +{},{} @@",
+            old_start, fc.lines_removed, new_start, fc.lines_added
+        ),
+        start_line: if fc.lines_removed > 0 { 1 } else { 0 },
+        old_line_count: fc.lines_removed,
+        new_line_count: fc.lines_added,
+        lines: Vec::new(),
+    }]
+}
+
+async fn get_run_validation(
+    State(store): State<SnapshotStore>,
+    AxumPath(run_id): AxumPath<String>,
+) -> impl IntoResponse {
+    let envelope = store.current().await;
+    let issue = match find_issue_snapshot(&envelope, &run_id) {
+        Some(issue) => issue,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(RunValidationSummary {
+                    schema_version: SchemaVersion::v1(),
+                    run_id,
+                    generated_at: Utc::now(),
+                    overall_status: ValidationStatus::Error,
+                    commands: Vec::new(),
+                    evidence: Vec::new(),
+                }),
+            );
+        }
+    };
+
+    let overall_status = validation_status_for_issue(issue);
+
+    (
+        StatusCode::OK,
+        Json(RunValidationSummary {
+            schema_version: SchemaVersion::v1(),
+            run_id: issue.identifier.clone(),
+            generated_at: Utc::now(),
+            overall_status,
+            commands: Vec::new(),
+            evidence: Vec::new(),
+        }),
+    )
+}
+
+fn validation_status_for_issue(issue: &ControlPlaneIssueSnapshot) -> ValidationStatus {
+    use ControlPlaneIssueRuntimeState as State;
+    use ControlPlaneWorkerOutcome as Outcome;
+
+    if issue.cancel_failed {
+        return ValidationStatus::Error;
+    }
+    if issue.detached {
+        return ValidationStatus::Pending;
+    }
+    match (issue.runtime_state, issue.last_outcome) {
+        (_, Outcome::Completed) => ValidationStatus::Passed,
+        (_, Outcome::Failed) | (_, Outcome::Canceled) => ValidationStatus::Failed,
+        (State::Running, _) if !issue.modified_files.is_empty() => ValidationStatus::Running,
+        (State::Running, _)
+        | (State::Paused, _)
+        | (State::RetryQueued, _)
+        | (State::Releasing, _) => ValidationStatus::Pending,
+        _ if issue.modified_files.is_empty() => ValidationStatus::Skipped,
+        _ => ValidationStatus::Pending,
+    }
+}
+
+async fn get_run_approvals(
+    State(store): State<SnapshotStore>,
+    AxumPath(run_id): AxumPath<String>,
+) -> impl IntoResponse {
+    let envelope = store.current().await;
+    let issue = match find_issue_snapshot(&envelope, &run_id) {
+        Some(issue) => issue,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApprovalListPage {
+                    run_id,
+                    approvals: Vec::new(),
+                }),
+            );
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(ApprovalListPage {
+            run_id: issue.identifier.clone(),
+            approvals: Vec::new(),
+        }),
+    )
+}
+
 async fn get_run_timeline(
     State(state): State<GatewayState>,
     AxumPath(run_id): AxumPath<String>,
@@ -1956,6 +2227,18 @@ struct RunLogQuery {
     cursor: Option<u64>,
     #[serde(default = "default_terminal_limit")]
     limit: usize,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RunDiffQuery {
+    #[serde(default)]
+    file_path: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ApprovalListPage {
+    run_id: String,
+    approvals: Vec<ApprovalRequest>,
 }
 
 async fn get_run_logs(
@@ -2071,6 +2354,131 @@ struct TerminalSnapshotQuery {
 
 fn default_terminal_limit() -> usize {
     1000
+}
+
+fn allowed_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> Vec<RunAction> {
+    let mut allowed = Vec::new();
+    use ControlPlaneIssueRuntimeState as State;
+    match issue.runtime_state {
+        State::Running => {
+            allowed.push(RunAction::Cancel);
+            allowed.push(RunAction::Pause);
+        }
+        State::Paused => {
+            allowed.push(RunAction::Cancel);
+            allowed.push(RunAction::Resume);
+        }
+        State::Completed | State::Failed => {
+            allowed.push(RunAction::Retry);
+            allowed.push(RunAction::Rehydrate);
+        }
+        State::Idle => {
+            allowed.push(RunAction::Retry);
+        }
+        _ => {}
+    }
+    // Comment and follow-up are meaningful for any run that has not reached a
+    // terminal state (completed or failed).
+    if !matches!(issue.runtime_state, State::Completed | State::Failed) {
+        allowed.push(RunAction::Comment);
+        allowed.push(RunAction::CreateFollowup);
+    }
+    // OpenWorkspace is available when there is a local workspace path.
+    if !issue.workspace_path_suffix.is_empty() {
+        allowed.push(RunAction::OpenWorkspace);
+    }
+    // Debug is available when there is an active harness/agent-server or
+    // conversation to inspect.
+    if issue.server_base_url.is_some() || !issue.conversation_id_suffix.is_empty() {
+        allowed.push(RunAction::Debug);
+    }
+    // Detach is meaningful when the run is not already detached and the stream
+    // is not healthy (stalled, degraded, etc.). This mirrors the safety check in
+    // safe_actions_for_issue.
+    let stream = build_liveness(issue).stream;
+    if !issue.detached && !matches!(stream, RunStreamLiveness::Healthy) {
+        allowed.push(RunAction::Detach);
+    }
+    allowed
+}
+
+pub(crate) fn safe_actions_for_issue(issue: &ControlPlaneIssueSnapshot) -> SafeActions {
+    use ControlPlaneIssueRuntimeState as State;
+    use ControlPlaneWorkerOutcome as Outcome;
+
+    let (retry, cancel, rehydrate) = match issue.runtime_state {
+        State::Idle => (false, false, false),
+        State::Running => (false, true, false),
+        State::Paused => (false, true, false),
+        State::RetryQueued => (false, false, false),
+        State::Releasing => (false, false, false),
+        State::Completed => {
+            let safe_rehydrate = matches!(
+                issue.last_outcome,
+                Outcome::Completed | Outcome::Failed | Outcome::Canceled
+            );
+            (true, false, safe_rehydrate)
+        }
+        State::Failed => {
+            let safe_rehydrate = matches!(issue.last_outcome, Outcome::Failed | Outcome::Canceled);
+            (true, false, safe_rehydrate)
+        }
+    };
+
+    // Detach is only safe when the run is already in a non-healthy stream state
+    // (stalled, degraded, or detached) and not already detached.
+    let stream = build_liveness(issue).stream;
+    let detach = !matches!(stream, RunStreamLiveness::Healthy) && !issue.detached;
+
+    SafeActions {
+        retry,
+        cancel,
+        rehydrate,
+        detach,
+    }
+}
+
+fn build_liveness(issue: &ControlPlaneIssueSnapshot) -> RunLivenessEnvelope {
+    let phase = match issue.runtime_state {
+        ControlPlaneIssueRuntimeState::Running => RunPhase::Active,
+        ControlPlaneIssueRuntimeState::Paused => RunPhase::Quiet,
+        ControlPlaneIssueRuntimeState::Idle => RunPhase::Quiet,
+        ControlPlaneIssueRuntimeState::RetryQueued => RunPhase::RetryQueued,
+        ControlPlaneIssueRuntimeState::Releasing => RunPhase::Completed,
+        ControlPlaneIssueRuntimeState::Completed => RunPhase::Completed,
+        ControlPlaneIssueRuntimeState::Failed => RunPhase::Completed,
+    };
+    let stream = if issue.detached {
+        RunStreamLiveness::Detached
+    } else if issue.cancel_failed {
+        RunStreamLiveness::Degraded
+    } else {
+        // Active/quiet/completed phases are healthy by default; any other phase
+        // (retry queued, stalled, etc.) lacks a live stream, so report stalled.
+        match phase {
+            RunPhase::Active | RunPhase::Quiet | RunPhase::Completed => RunStreamLiveness::Healthy,
+            _ => RunStreamLiveness::Stalled,
+        }
+    };
+    let latest = if issue.recent_events.is_empty() {
+        None
+    } else {
+        issue.recent_events.last().map(|evt| RunProgress {
+            sequence: evt.sequence,
+            event_id: evt.event_id.clone(),
+            happened_at: evt.happened_at,
+            kind: evt.kind.clone(),
+            summary: evt.summary.clone(),
+        })
+    };
+    RunLivenessEnvelope {
+        phase,
+        stream,
+        latest_progress: latest,
+        harness_acknowledged: issue.cancel_acknowledged,
+        cancel_failed: issue.cancel_failed,
+        detached: issue.detached,
+    }
 }
 
 async fn get_terminal_snapshot(
@@ -2290,6 +2698,383 @@ mod tests {
         assert_eq!(
             mime_type(StdPath::new("asset.unknown")),
             "application/octet-stream"
+        );
+    }
+
+    #[test]
+    fn allowed_actions_for_running_issue_includes_comment_followup_workspace_and_debug() {
+        let issue = test_issue(
+            ControlPlaneIssueRuntimeState::Running,
+            TestIssueFlags {
+                workspace: true,
+                harness: true,
+                detached: false,
+            },
+        );
+        let actions = allowed_actions_for_issue(&issue);
+        assert!(actions.contains(&RunAction::Cancel));
+        assert!(actions.contains(&RunAction::Pause));
+        assert!(actions.contains(&RunAction::Comment));
+        assert!(actions.contains(&RunAction::CreateFollowup));
+        assert!(actions.contains(&RunAction::OpenWorkspace));
+        assert!(actions.contains(&RunAction::Debug));
+        assert!(!actions.contains(&RunAction::Retry));
+        assert!(!actions.contains(&RunAction::Rehydrate));
+        assert!(!actions.contains(&RunAction::Resume));
+    }
+
+    #[test]
+    fn allowed_actions_for_running_issue_without_workspace_hides_workspace_and_debug() {
+        let issue = test_issue(
+            ControlPlaneIssueRuntimeState::Running,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: false,
+            },
+        );
+        let actions = allowed_actions_for_issue(&issue);
+        assert!(actions.contains(&RunAction::Comment));
+        assert!(actions.contains(&RunAction::CreateFollowup));
+        assert!(!actions.contains(&RunAction::OpenWorkspace));
+        assert!(!actions.contains(&RunAction::Debug));
+    }
+
+    #[test]
+    fn allowed_actions_for_terminal_issue_excludes_comment_and_followup() {
+        let issue = test_issue(
+            ControlPlaneIssueRuntimeState::Completed,
+            TestIssueFlags {
+                workspace: true,
+                harness: true,
+                detached: false,
+            },
+        );
+        let actions = allowed_actions_for_issue(&issue);
+        assert!(actions.contains(&RunAction::Retry));
+        assert!(actions.contains(&RunAction::Rehydrate));
+        assert!(actions.contains(&RunAction::OpenWorkspace));
+        assert!(actions.contains(&RunAction::Debug));
+        assert!(!actions.contains(&RunAction::Comment));
+        assert!(!actions.contains(&RunAction::CreateFollowup));
+        assert!(!actions.contains(&RunAction::Cancel));
+        assert!(!actions.contains(&RunAction::Pause));
+        assert!(!actions.contains(&RunAction::Resume));
+    }
+
+    #[test]
+    fn allowed_actions_detach_matches_stream_health() {
+        let stalled = test_issue(
+            ControlPlaneIssueRuntimeState::RetryQueued,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: false,
+            },
+        );
+        assert!(allowed_actions_for_issue(&stalled).contains(&RunAction::Detach));
+
+        let healthy = test_issue(
+            ControlPlaneIssueRuntimeState::Running,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: false,
+            },
+        );
+        assert!(!allowed_actions_for_issue(&healthy).contains(&RunAction::Detach));
+
+        let already_detached = test_issue(
+            ControlPlaneIssueRuntimeState::Running,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: true,
+            },
+        );
+        assert!(!allowed_actions_for_issue(&already_detached).contains(&RunAction::Detach));
+    }
+
+    #[test]
+    fn safe_actions_for_healthy_running_issue_allows_cancel_forbids_detach() {
+        let issue = test_issue(
+            ControlPlaneIssueRuntimeState::Running,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: false,
+            },
+        );
+        let safe = safe_actions_for_issue(&issue);
+        assert!(safe.cancel);
+        assert!(!safe.retry);
+        assert!(!safe.rehydrate);
+        assert!(
+            !safe.detach,
+            "detach must be unsafe on a healthy running issue"
+        );
+    }
+
+    #[test]
+    fn safe_actions_for_stalled_issue_allows_detach() {
+        let issue = test_issue(
+            ControlPlaneIssueRuntimeState::RetryQueued,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: false,
+            },
+        );
+        let safe = safe_actions_for_issue(&issue);
+        assert!(
+            safe.detach,
+            "detach must be safe when the stream is stalled"
+        );
+        assert!(!safe.cancel);
+        assert!(!safe.retry);
+    }
+
+    #[test]
+    fn safe_actions_for_already_detached_issue_forbids_detach() {
+        let issue = test_issue(
+            ControlPlaneIssueRuntimeState::Running,
+            TestIssueFlags {
+                workspace: false,
+                harness: false,
+                detached: true,
+            },
+        );
+        let safe = safe_actions_for_issue(&issue);
+        assert!(
+            !safe.detach,
+            "detach must be unsafe when the issue is already detached"
+        );
+    }
+
+    #[derive(Default)]
+    struct TestIssueFlags {
+        workspace: bool,
+        harness: bool,
+        detached: bool,
+    }
+
+    fn test_issue(
+        runtime_state: ControlPlaneIssueRuntimeState,
+        flags: TestIssueFlags,
+    ) -> ControlPlaneIssueSnapshot {
+        ControlPlaneIssueSnapshot {
+            identifier: "COE-414".into(),
+            title: "Test issue".into(),
+            tracker_state: "in_progress".into(),
+            runtime_state,
+            last_outcome: ControlPlaneWorkerOutcome::Unknown,
+            last_event_at: Utc::now(),
+            conversation_id_suffix: if flags.harness {
+                "abc".into()
+            } else {
+                String::new()
+            },
+            workspace_path_suffix: if flags.workspace {
+                "/workspace".into()
+            } else {
+                String::new()
+            },
+            retry_count: 0,
+            blocked: false,
+            server_base_url: if flags.harness {
+                Some("http://localhost:3000".into())
+            } else {
+                None
+            },
+            transport_target: None,
+            http_auth_mode: None,
+            websocket_auth_mode: None,
+            websocket_query_param_name: None,
+            recent_events: vec![],
+            modified_files: vec![],
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            detached: flags.detached,
+            cancel_acknowledged: false,
+            cancel_failed: false,
+        }
+    }
+
+    // Helpers for validation status tests.
+    fn file_change(path: &str) -> ControlPlaneFileChange {
+        ControlPlaneFileChange {
+            path: path.into(),
+            change_kind: ControlPlaneFileChangeKind::Modified,
+            lines_added: 1,
+            lines_removed: 1,
+            diff: None,
+        }
+    }
+
+    fn issue_with_outcome_and_files(
+        runtime_state: ControlPlaneIssueRuntimeState,
+        outcome: ControlPlaneWorkerOutcome,
+        files: Vec<ControlPlaneFileChange>,
+    ) -> ControlPlaneIssueSnapshot {
+        let mut issue = test_issue(runtime_state, TestIssueFlags::default());
+        issue.last_outcome = outcome;
+        issue.modified_files = files;
+        issue
+    }
+
+    #[test]
+    fn validation_status_cancel_failed_overrides_completed() {
+        let mut issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Running,
+            ControlPlaneWorkerOutcome::Completed,
+            vec![file_change("src/main.rs")],
+        );
+        issue.cancel_failed = true;
+        assert_eq!(validation_status_for_issue(&issue), ValidationStatus::Error);
+    }
+
+    #[test]
+    fn validation_status_detached_is_pending() {
+        let mut issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Running,
+            ControlPlaneWorkerOutcome::Completed,
+            vec![file_change("src/main.rs")],
+        );
+        issue.detached = true;
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn validation_status_completed_is_passed() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Running,
+            ControlPlaneWorkerOutcome::Completed,
+            vec![file_change("src/main.rs")],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Passed
+        );
+    }
+
+    #[test]
+    fn validation_status_failed_is_failed() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Running,
+            ControlPlaneWorkerOutcome::Failed,
+            vec![file_change("src/main.rs")],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Failed
+        );
+    }
+
+    #[test]
+    fn validation_status_canceled_is_failed() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Running,
+            ControlPlaneWorkerOutcome::Canceled,
+            vec![file_change("src/main.rs")],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Failed
+        );
+    }
+
+    #[test]
+    fn validation_status_running_with_files_is_running() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Running,
+            ControlPlaneWorkerOutcome::Unknown,
+            vec![file_change("src/main.rs")],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Running
+        );
+    }
+
+    #[test]
+    fn validation_status_running_without_files_is_pending() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Running,
+            ControlPlaneWorkerOutcome::Unknown,
+            vec![],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn validation_status_paused_is_pending() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Paused,
+            ControlPlaneWorkerOutcome::Unknown,
+            vec![file_change("src/main.rs")],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn validation_status_retry_queued_is_pending() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::RetryQueued,
+            ControlPlaneWorkerOutcome::Unknown,
+            vec![file_change("src/main.rs")],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn validation_status_releasing_is_pending() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Releasing,
+            ControlPlaneWorkerOutcome::Unknown,
+            vec![file_change("src/main.rs")],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn validation_status_no_files_is_skipped() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Idle,
+            ControlPlaneWorkerOutcome::Unknown,
+            vec![],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Skipped
+        );
+    }
+
+    #[test]
+    fn validation_status_idle_with_files_is_pending() {
+        let issue = issue_with_outcome_and_files(
+            ControlPlaneIssueRuntimeState::Idle,
+            ControlPlaneWorkerOutcome::Unknown,
+            vec![file_change("src/main.rs")],
+        );
+        assert_eq!(
+            validation_status_for_issue(&issue),
+            ValidationStatus::Pending
         );
     }
 }

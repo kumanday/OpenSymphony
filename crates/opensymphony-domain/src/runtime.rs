@@ -546,6 +546,10 @@ pub struct ConversationMetadata {
     pub total_tokens: u64,
     #[serde(default)]
     pub runtime_seconds: u64,
+    /// Next monotonic sequence number to assign to a new activity event. Kept
+    /// separate from the activity list so truncation does not reset ordering.
+    #[serde(default)]
+    pub next_activity_sequence: u64,
 }
 
 const MAX_ACTIVITY_EVENTS: usize = 50;
@@ -556,6 +560,11 @@ pub struct ConversationActivityEvent {
     pub happened_at: TimestampMs,
     pub kind: String,
     pub summary: String,
+    /// Monotonic sequence number assigned by the event producer. This value is
+    /// preserved when the activity list is truncated so the gateway can still
+    /// report a stable ordering key for the latest event.
+    #[serde(default)]
+    pub sequence: u64,
 }
 
 impl ConversationMetadata {
@@ -579,11 +588,14 @@ impl ConversationMetadata {
         self.last_event_summary = summary.clone();
 
         if let (Some(event_id), Some(event_kind), Some(summary)) = (event_id, event_kind, summary) {
+            let sequence = self.next_activity_sequence;
+            self.next_activity_sequence += 1;
             self.recent_activity.push(ConversationActivityEvent {
                 event_id,
                 happened_at: event_at,
                 kind: event_kind,
                 summary,
+                sequence,
             });
             while self.recent_activity.len() > MAX_ACTIVITY_EVENTS {
                 self.recent_activity.remove(0);

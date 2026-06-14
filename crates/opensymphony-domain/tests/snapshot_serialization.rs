@@ -61,6 +61,9 @@ fn fixture() -> SnapshotEnvelope {
                 input_tokens: 2048,
                 output_tokens: 1024,
                 cache_read_tokens: 512,
+                cancel_acknowledged: false,
+                cancel_failed: false,
+                detached: false,
             }],
             recent_events: vec![RecentEvent {
                 happened_at: now,

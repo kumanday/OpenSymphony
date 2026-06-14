@@ -194,6 +194,7 @@ mod tests {
             cache_read_tokens: 256,
             total_tokens: 1536,
             runtime_seconds: 0,
+            next_activity_sequence: 0,
         }
     }
 

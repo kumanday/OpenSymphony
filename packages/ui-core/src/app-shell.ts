@@ -1,16 +1,30 @@
 import type {
   ActionDispatch,
   ActionReceipt,
+  ChangedFileEntry,
   ConnectionProfile,
   DashboardSnapshot,
+  FileDiffPage,
   GatewayCapabilities,
+  ApprovalRequest,
+  RunAction,
   RunDetail,
   RunPhase,
   RunStreamLiveness,
+  RunValidationSummary,
   TaskGraphNode,
   TaskGraphNodeKind,
   TaskGraphSnapshot,
 } from "@opensymphony/gateway-schema";
+import { renderChangedFileList, renderFileDiff } from "./diff.js";
+import { renderValidationSummary } from "./validation.js";
+import { renderApprovalList, type ApprovalDecision } from "./approval.js";
+import {
+  buildActionBarItems,
+  renderActionBar,
+  renderActionReceipt,
+  renderAuditTrailEntry,
+} from "./run-actions.js";
 import {
   buildRuntimeOverlay,
   defaultTaskGraphFilter,
@@ -51,6 +65,10 @@ export interface GatewayReader {
   snapshot(): Promise<DashboardSnapshot>;
   taskGraph(projectId: string): Promise<TaskGraphSnapshot>;
   runDetail(runId: string): Promise<RunDetail>;
+  runFiles?(runId: string): Promise<ChangedFileEntry[]>;
+  runDiffs?(runId: string, filePath?: string): Promise<FileDiffPage>;
+  runValidation?(runId: string): Promise<RunValidationSummary>;
+  runApprovals?(runId: string): Promise<ApprovalRequest[]>;
   /** Optional action dispatch for gateway-mediated mutations. */
   dispatchAction?(action: ActionDispatch): Promise<ActionReceipt>;
   close(): Promise<void>;
@@ -95,6 +113,13 @@ interface AppState {
   selectedProjectId: string | null;
   selectedNodeId: string | null;
   runDetail: RunDetail | null;
+  runFiles: ChangedFileEntry[] | null;
+  selectedDiffPath: string | null;
+  runDiff: FileDiffPage | null;
+  runValidation: RunValidationSummary | null;
+  runApprovals: ApprovalRequest[] | null;
+  lastActionReceipt: ActionReceipt | null;
+  auditTrail: AuditTrailEntry[];
   profiles: ConnectionProfile[];
   activeProfileId: string | null;
   gatewayDraft: string;
@@ -110,6 +135,15 @@ interface AppState {
   pendingCreates: Map<string, string>;
   /** Snapshot of the task graph node before each optimistic mutation, keyed by correlation id. `null` means a new node was created. */
   pendingSnapshots: Map<string, TaskGraphNode | null>;
+}
+
+interface AuditTrailEntry {
+  timestamp: string;
+  actor: string;
+  action: string;
+  target: string;
+  status: string;
+  details?: string;
 }
 
 const schemaVersion = { major: 1, minor: 0, patch: 0 };
@@ -142,6 +176,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       selectedProjectId: null,
       selectedNodeId: null,
       runDetail: null,
+      runFiles: null,
+      selectedDiffPath: null,
+      runDiff: null,
+      runValidation: null,
+      runApprovals: null,
+      lastActionReceipt: null,
+      auditTrail: [],
       profiles,
       activeProfileId: activeProfile?.id ?? null,
       gatewayDraft: activeProfile?.gatewayUrl ?? this.transport.baseUri,
@@ -156,6 +197,49 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       pendingCreates: new Map(),
       pendingSnapshots: new Map(),
     };
+  }
+
+  private async loadRunDetails(runId: string): Promise<void> {
+    if (typeof this.transport.runFiles !== "function") {
+      this.state.runFiles = alphaRunFiles(runId);
+      this.state.runValidation = alphaRunValidation(runId);
+      this.state.runApprovals = alphaRunApprovals(runId);
+      this.state.selectedDiffPath = this.state.runFiles[0]?.path ?? null;
+      this.state.runDiff = this.state.selectedDiffPath
+        ? alphaRunDiff(runId, this.state.selectedDiffPath)
+        : null;
+      return;
+    }
+    this.state.runFiles = null;
+    this.state.runDiff = null;
+    this.state.runValidation = null;
+    this.state.runApprovals = null;
+    this.state.selectedDiffPath = null;
+    try {
+      this.state.runFiles = await this.transport.runFiles(runId);
+    } catch {
+      this.state.runFiles = alphaRunFiles(runId);
+    }
+    this.state.selectedDiffPath = this.state.runFiles[0]?.path ?? null;
+    try {
+      this.state.runDiff = this.state.selectedDiffPath
+        ? await this.transport.runDiffs!(runId, this.state.selectedDiffPath)
+        : null;
+    } catch {
+      this.state.runDiff = this.state.selectedDiffPath
+        ? alphaRunDiff(runId, this.state.selectedDiffPath)
+        : null;
+    }
+    try {
+      this.state.runValidation = await this.transport.runValidation!(runId);
+    } catch {
+      this.state.runValidation = alphaRunValidation(runId);
+    }
+    try {
+      this.state.runApprovals = await this.transport.runApprovals!(runId);
+    } catch {
+      this.state.runApprovals = alphaRunApprovals(runId);
+    }
   }
 
   async refresh(): Promise<void> {
@@ -211,6 +295,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.selectedProjectId = this.state.snapshot.projects[0]?.project_id ?? "opensymphony-local";
       this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
       this.state.runDetail = alphaRunDetail("desktop-alpha");
+      await this.loadRunDetails("desktop-alpha");
       this.state.connectionMode = "fixture";
       this.state.connectionMessage = `Gateway unavailable, showing desktop-alpha fixture data: ${errorMessage(error)}`;
     }
@@ -228,11 +313,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.selectedNodeId =
         taskGraph.root_ids[0] ?? taskGraph.nodes[0]?.node_id ?? null;
       this.state.runDetail = null;
+      this.state.runFiles = null;
+      this.state.runDiff = null;
+      this.state.runValidation = null;
+      this.state.runApprovals = null;
+      this.state.selectedDiffPath = null;
       await this.loadRunOverlays(taskGraph);
     } catch {
       this.state.taskGraph = alphaTaskGraph(projectId);
       this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
       this.state.runDetail = alphaRunDetail("desktop-alpha");
+      await this.loadRunDetails("desktop-alpha");
     }
   }
 
@@ -257,7 +348,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async openRun(node: TaskGraphNode): Promise<void> {
-    const runId = node.run_id || node.node_id;
+    const runId = node.run_id || node.identifier || node.node_id;
     this.state.selectedNodeId = node.node_id;
     this.state.loading = true;
     this.render();
@@ -266,10 +357,132 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runOverlays.set(runId, this.state.runDetail);
     } catch {
       this.state.runDetail = alphaRunDetail(runId, node.identifier);
-    } finally {
-      this.state.loading = false;
-      this.render();
     }
+    await this.loadRunDetails(runId);
+    this.state.loading = false;
+    this.render();
+  }
+
+  private async selectDiffFile(path: string): Promise<void> {
+    this.state.selectedDiffPath = path;
+    const runId = this.state.runDetail?.run_id;
+    if (runId && typeof this.transport.runDiffs === "function") {
+      try {
+        this.state.runDiff = await this.transport.runDiffs!(runId, path);
+      } catch {
+        this.state.runDiff = alphaRunDiff(runId, path);
+      }
+    } else if (runId) {
+      this.state.runDiff = alphaRunDiff(runId, path);
+    }
+    this.render();
+  }
+
+  private async dispatchRunAction(action: RunAction): Promise<void> {
+    const runId = this.state.runDetail?.run_id;
+    if (!runId) return;
+    const transport = this.transport as unknown as {
+      cancelRun?: (id: string) => Promise<ActionReceipt>;
+      retryRun?: (id: string) => Promise<ActionReceipt>;
+      rehydrateRun?: (id: string) => Promise<ActionReceipt>;
+      resumeRun?: (id: string) => Promise<ActionReceipt>;
+      commentRun?: (id: string, text: string) => Promise<ActionReceipt>;
+      createFollowup?: (id: string, payload: unknown) => Promise<ActionReceipt>;
+      openWorkspace?: (id: string) => Promise<ActionReceipt>;
+      debugRun?: (id: string) => Promise<ActionReceipt>;
+      dispatchAction?: (action: unknown) => Promise<ActionReceipt>;
+    };
+    let receipt: ActionReceipt | null = null;
+    try {
+      switch (action) {
+        case "cancel":
+          receipt = await (transport.cancelRun?.(runId) ?? fallbackAction(runId, action));
+          break;
+        case "retry":
+          receipt = await (transport.retryRun?.(runId) ?? fallbackAction(runId, action));
+          break;
+        case "rehydrate":
+          receipt = await (transport.rehydrateRun?.(runId) ?? fallbackAction(runId, action));
+          break;
+        case "resume":
+          receipt = await (transport.resumeRun?.(runId) ?? fallbackAction(runId, action));
+          break;
+        case "detach":
+          receipt = await (transport.dispatchAction?.({
+            schema_version: schemaVersion,
+            correlation_id: `detach-${runId}-${crypto.randomUUID()}`,
+            action_kind: "transition_issue",
+            target_entity: { entity_kind: "run", entity_id: runId },
+            payload: { intent: "detach" },
+          }) ?? fallbackAction(runId, action));
+          break;
+        case "comment":
+          receipt = await (transport.commentRun?.(runId, "Operator comment") ?? fallbackAction(runId, action));
+          break;
+        case "create_followup":
+          receipt = await (transport.createFollowup?.(runId, { title: "Follow-up from run" }) ?? fallbackAction(runId, action));
+          break;
+        case "open_workspace":
+          receipt = await (transport.openWorkspace?.(runId) ?? fallbackAction(runId, action));
+          break;
+        case "debug":
+          receipt = await (transport.debugRun?.(runId) ?? fallbackAction(runId, action));
+          break;
+      }
+      if (!receipt) return;
+      this.state.lastActionReceipt = receipt;
+      this.state.auditTrail.push({
+        timestamp: new Date().toISOString(),
+        actor: "operator",
+        action,
+        target: runId,
+        status: receipt.status,
+        details: receipt.reason,
+      });
+    } catch (error) {
+      this.state.auditTrail.push({
+        timestamp: new Date().toISOString(),
+        actor: "operator",
+        action,
+        target: runId,
+        status: "failed",
+        details: errorMessage(error),
+      });
+    }
+    this.render();
+  }
+
+  private async submitApprovalDecision(
+    approvalId: string,
+    decision: ApprovalDecision,
+    explanation?: string,
+  ): Promise<void> {
+    const transport = this.transport as unknown as {
+      approvalDecision?: (id: string, d: ApprovalDecision, exp?: string) => Promise<ActionReceipt>;
+    };
+    try {
+      const receipt = await (transport.approvalDecision?.(approvalId, decision, explanation) ??
+        fallbackAction(approvalId, "approval_decision"));
+      this.state.lastActionReceipt = receipt;
+      this.state.auditTrail.push({
+        timestamp: new Date().toISOString(),
+        actor: "operator",
+        action: `approval_${decision}`,
+        target: approvalId,
+        status: receipt.status,
+        details: explanation,
+      });
+    } catch (error) {
+      this.state.auditTrail.push({
+        timestamp: new Date().toISOString(),
+        actor: "operator",
+        action: `approval_${decision}`,
+        target: approvalId,
+        status: "failed",
+        details: errorMessage(error),
+      });
+    }
+    this.render();
   }
 
   private async selectProject(projectId: string): Promise<void> {
@@ -511,18 +724,33 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!run) {
       return panel("Run Detail", `<div class="os-empty">Select an issue and open its run</div>`);
     }
-    const phase = run.liveness?.phase ?? statusToPhase(run.status, run.release_reason);
+    const phase = run.liveness?.phase ?? statusToPhase(run.status, run.release_reason, run.detached);
     const stream = run.liveness?.stream ?? "healthy";
-    const actions = run.safe_actions ?? {
-      retry: false,
-      cancel: run.status === "running" || run.status === "claimed",
-      rehydrate: false,
-      detach: false,
-    };
-    const actionLabels = Object.entries(actions)
-      .filter(([, enabled]) => enabled)
-      .map(([name]) => `<span>${escapeHtml(name)}</span>`)
-      .join("") || "<span>none</span>";
+    const cancelState = run.cancel_failed
+      ? "cancel-failed"
+      : run.cancel_acknowledged
+        ? "cancel-acknowledged"
+        : undefined;
+    const actionItems = buildActionBarItems(run);
+    const actionBar = renderActionBar(actionItems);
+    const files = renderChangedFileList(this.state.runFiles ?? [], this.state.selectedDiffPath ?? undefined);
+    const diff = this.state.runDiff ? renderFileDiff(this.state.runDiff) : "";
+    const validation = this.state.runValidation
+      ? renderValidationSummary(this.state.runValidation)
+      : "";
+    const approvals = this.state.runApprovals
+      ? renderApprovalList(this.state.runApprovals, {
+          onDecide: (id, decision, explanation) => {
+            void this.submitApprovalDecision(id, decision, explanation);
+          },
+        })
+      : "";
+    const receipt = this.state.lastActionReceipt
+      ? renderActionReceipt(this.state.lastActionReceipt)
+      : "";
+    const audit = this.state.auditTrail.length
+      ? `<div class="os-audit-trail" data-testid="audit-trail">${this.state.auditTrail.map(renderAuditTrailEntry).join("")}</div>`
+      : "";
     return panel(
       "Run Detail",
       `
@@ -531,16 +759,29 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             <strong>${escapeHtml(run.issue_identifier)}</strong>
             <span>${escapeHtml(run.run_id)}</span>
           </div>
-          <div class="os-pill">${escapeHtml(run.status)}</div>
+          <div class="os-run-pills">
+            <div class="os-pill">${escapeHtml(run.status)}</div>
+            ${run.detached ? `<div class="os-pill os-pill-detached" data-testid="run-pill-detached">detached</div>` : ""}
+            ${cancelState ? `<div class="os-pill os-pill-${cancelState}" data-testid="run-pill-cancel-state">${cancelState}</div>` : ""}
+          </div>
         </div>
         <div class="os-run-grid">
           <div><span>Phase</span><strong>${escapeHtml(phase)}</strong></div>
           <div><span>Stream</span><strong>${escapeHtml(stream)}</strong></div>
           <div><span>Turns</span><strong>${run.turn_count} / ${run.max_turns}</strong></div>
           <div><span>Runtime</span><strong>${run.runtime_seconds}s</strong></div>
+          ${run.diagnostics?.cancel_acknowledged ? `<div><span>Cancel</span><strong class="os-cancel-acknowledged" data-testid="cancel-acknowledged">acknowledged</strong></div>` : ""}
+          ${run.diagnostics?.cancel_failed ? `<div><span>Cancel</span><strong class="os-cancel-failed" data-testid="cancel-failed">failed</strong></div>` : ""}
         </div>
-        <div class="os-actions">${actionLabels}</div>
-        <pre>${escapeHtml(run.workspace_path ?? "workspace path unavailable")}</pre>
+        ${actionBar}
+        ${receipt}
+        <div class="os-run-panels">
+          <div class="os-diff-panel">${files}${diff}</div>
+          <div class="os-validation-panel">${validation}</div>
+          <div class="os-approval-panel">${approvals}</div>
+        </div>
+        ${audit}
+        <pre>${escapeHtml(run.workspace_path ?? run.workspace_id ?? "workspace path unavailable")}</pre>
       `,
     );
   }
@@ -587,6 +828,41 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       });
     });
+    this.options.root.querySelectorAll<HTMLElement>("[data-testid='changed-file-item']").forEach((button) => {
+      button.addEventListener("click", () => {
+        const path = button.dataset.path;
+        if (path) {
+          void this.selectDiffFile(path);
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-testid='run-action-button']").forEach((button) => {
+      button.addEventListener("click", () => {
+        const action = button.dataset.action as RunAction | undefined;
+        if (action) {
+          void this.dispatchRunAction(action);
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-testid='approve-button']").forEach((button) => {
+      button.addEventListener("click", () => {
+        const approvalId = button.dataset.approvalId;
+        if (!approvalId) return;
+        const container = button.closest("[data-testid='approval-item']");
+        const explanation = container?.querySelector<HTMLInputElement>("[data-testid='approval-explanation']")?.value;
+        void this.submitApprovalDecision(approvalId, "approved", explanation);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-testid='deny-button']").forEach((button) => {
+      button.addEventListener("click", () => {
+        const approvalId = button.dataset.approvalId;
+        if (!approvalId) return;
+        const container = button.closest("[data-testid='approval-item']");
+        const explanation = container?.querySelector<HTMLInputElement>("[data-testid='approval-explanation']")?.value;
+        void this.submitApprovalDecision(approvalId, "rejected", explanation);
+      });
+    });
+
 
     // Task graph filters
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-filter]").forEach((control) => {
@@ -1007,6 +1283,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 }
 
+function fallbackAction(entityId: string, action: string): ActionReceipt {
+  return {
+    schema_version: schemaVersion,
+    action_id: `${action}-${entityId}-fixture`,
+    correlation_id: `${action}-${entityId}`,
+    status: "accepted",
+    expected_followup: ["action_completion"],
+    issued_at: new Date().toISOString(),
+  };
+}
+
 function panel(title: string, body: string): string {
   return `
     <section class="os-panel">
@@ -1175,6 +1462,7 @@ function alphaRunDetail(runId: string, issueIdentifier = runId): RunDetail {
     issue_identifier: issueIdentifier,
     worker_id: "desktop-alpha",
     status: "running",
+    lifecycle_state: "running",
     claimed_at: new Date(1_700_000_000_000).toISOString(),
     started_at: new Date(1_700_000_030_000).toISOString(),
     turn_count: 1,
@@ -1184,6 +1472,7 @@ function alphaRunDetail(runId: string, issueIdentifier = runId): RunDetail {
     cache_read_tokens: 1800,
     runtime_seconds: 90,
     workspace_path: "/tmp/opensymphony/desktop-alpha",
+    allowed_actions: ["cancel", "rehydrate"],
     liveness: {
       phase: "quiet",
       stream: "stale",
@@ -1204,15 +1493,112 @@ function alphaRunDetail(runId: string, issueIdentifier = runId): RunDetail {
   };
 }
 
+function alphaRunFiles(_runId: string): ChangedFileEntry[] {
+  return [
+    {
+      path: "src/alpha.ts",
+      change_kind: "modified",
+      lines_added: 12,
+      lines_removed: 4,
+      size_bytes: 1024,
+    },
+    {
+      path: "tests/alpha.test.ts",
+      change_kind: "created",
+      lines_added: 42,
+      lines_removed: 0,
+      size_bytes: 800,
+    },
+  ];
+}
+
+function alphaRunDiff(runId: string, filePath: string): FileDiffPage {
+  return {
+    schema_version: schemaVersion,
+    run_id: runId,
+    file_path: filePath,
+    hunks: [
+      {
+        file_path: filePath,
+        header: `@@ -1,5 +1,8 @@`,
+        start_line: 1,
+        old_line_count: 5,
+        new_line_count: 8,
+        lines: [
+          { type: "context", line: "import { helper } from './helper';" },
+          { type: "deletion", line: "export function oldLogic() { return true; }" },
+          { type: "addition", line: "export function newLogic() { return false; }" },
+          { type: "addition", line: "export function newHelper() { return 1; }" },
+          { type: "context", line: "" },
+        ],
+      },
+    ],
+    total_lines_added: 2,
+    total_lines_removed: 1,
+  };
+}
+
+function alphaRunValidation(runId: string): RunValidationSummary {
+  return {
+    schema_version: schemaVersion,
+    run_id: runId,
+    generated_at: new Date().toISOString(),
+    overall_status: "passed",
+    commands: [
+      {
+        command_id: "cmd-1",
+        command: "npm test",
+        status: "passed",
+        exit_code: 0,
+        stdout_summary: "42 tests passed",
+      },
+    ],
+    evidence: [
+      {
+        evidence_id: "ev-1",
+        label: "Test coverage",
+        status: "passed",
+        summary: "Coverage is 87%",
+      },
+    ],
+  };
+}
+
+function alphaRunApprovals(runId: string): ApprovalRequest[] {
+  return [
+    {
+      schema_version: schemaVersion,
+      approval_id: "approval-1",
+      run_id: runId,
+      issue_id: "desktop-alpha",
+      kind: "file_write",
+      title: "Allow writing to src/config.ts",
+      description: "Agent wants to update local config file.",
+      actor: { actor_id: "agent-1", actor_kind: "agent", display_name: "OpenHands Agent" },
+      target_context: { file_path: "src/config.ts", issue_identifier: "DESKTOP-ALPHA", run_id: runId },
+      risk_summary: { level: "medium", reasons: ["modifies tracked config"] },
+      requested_at: new Date().toISOString(),
+      status: "pending",
+      correlation_id: "corr-approval-1",
+    },
+  ];
+}
+
 function statusToPhase(
   status: RunDetail["status"],
   releaseReason?: RunDetail["release_reason"],
+  detached?: boolean,
 ): RunPhase {
+  if (detached) {
+    return "detached";
+  }
   if (status === "retry_queued") {
     return "retry_queued";
   }
   if (status === "released") {
-    return releaseReason === "completed" ? "completed" : "cancelled";
+    if (releaseReason === "completed") return "completed";
+    if (releaseReason === "cancel_failed") return "cancelled";
+    return "cancelled";
   }
   return status === "running" || status === "claimed" ? "active" : "quiet";
 }
@@ -1289,6 +1675,45 @@ function appShellStyles(): string {
     .os-events span { color: #39708f; margin-right: 6px; }
     .os-pill, .os-actions span { border-radius: 999px; background: #e7f1f5; color: #23566f; padding: 5px 9px; font-size: 12px; }
     .os-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+    .os-run-action-bar { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+    .os-action-item { display: flex; align-items: center; gap: 8px; }
+    .os-action-warning { color: #b45309; font-size: 12px; }
+    .os-action-receipt { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; margin: 10px 0; padding: 8px; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
+    .os-receipt-status-accepted { color: #1f9d55; }
+    .os-receipt-status-rejected { color: #c2410c; }
+    .os-run-panels { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 12px 0; }
+    .os-changed-file-list { display: grid; gap: 6px; }
+    .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 8px; background: #ffffff; }
+    .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
+    .os-change-kind { text-transform: uppercase; font-size: 10px; padding: 2px 5px; border-radius: 4px; }
+    .os-change-kind-created { background: #dcfce7; color: #166534; }
+    .os-change-kind-modified { background: #e0f2fe; color: #0c4a6e; }
+    .os-change-kind-removed { background: #fee2e2; color: #991b1b; }
+    .os-file-diff { border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
+    .os-diff-header { display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid #d8dee4; background: #eef3f8; font-size: 12px; }
+    .os-diff-hunk { padding: 8px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+    .os-diff-hunk-header { color: #667788; margin-bottom: 4px; }
+    .os-diff-line { white-space: pre-wrap; }
+    .os-diff-line-addition { color: #1f9d55; background: #dcfce7; }
+    .os-diff-line-deletion { color: #c2410c; background: #fee2e2; }
+    .os-diff-line-context { color: #334155; }
+    .os-validation-header { display: flex; justify-content: space-between; padding: 8px; border-bottom: 1px solid #d8dee4; background: #eef3f8; }
+    .os-validation-status-passed { color: #1f9d55; }
+    .os-validation-status-failed { color: #c2410c; }
+    .os-validation-status-error { color: #c2410c; }
+    .os-validation-status-pending { color: #6b7280; }
+    .os-validation-command, .os-validation-evidence-item { padding: 8px; border-bottom: 1px solid #eef3f8; }
+    .os-approval-list { display: grid; gap: 10px; }
+    .os-approval-item { border: 1px solid #d8dee4; border-radius: 6px; padding: 10px; }
+    .os-approval-title { font-weight: 600; }
+    .os-approval-explain { display: flex; gap: 8px; margin-top: 8px; }
+    .os-approval-explain input { flex: 1; }
+    .os-approval-risk-high { color: #c2410c; }
+    .os-approval-risk-medium { color: #b45309; }
+    .os-approval-risk-low { color: #1f9d55; }
+    .os-audit-trail { display: grid; gap: 6px; margin-top: 12px; }
+    .os-audit-trail-entry { display: grid; grid-template-columns: auto auto auto auto 1fr; gap: 8px; font-size: 12px; }
+
     .os-node-actions { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
     .os-node-actions button { min-height: 26px; padding: 4px 8px; font-size: 11px; }
     .os-node-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
@@ -1325,6 +1750,14 @@ function appShellStyles(): string {
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
       .os-field input, .os-field select, .os-inline-input, .os-dialog textarea { background: #0f151b; color: #d9e2ea; border-color: #344454; }
       button { background: #1f2a35; color: #d9e2ea; border-color: #3b4c5e; }
+      button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .os-changed-file:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
+      .os-file-diff, .os-approval-item, .os-validation-command, .os-validation-evidence-item { background: #111820; border-color: #2a3440; }
+      .os-diff-header, .os-validation-header { background: #1f2a35; border-color: #2a3440; }
+      .os-diff-line-addition { background: #14532d; color: #86efac; }
+      .os-diff-line-deletion { background: #7f1d1d; color: #fecaca; }
+      .os-diff-line-context { color: #94a3b3; }
+      .os-action-receipt { background: #111820; border-color: #2a3440; }
+
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-badge-failed, .os-badge-blocked, .os-badge-blocker { background: #451a1a; color: #fca5a5; }
       .os-badge-running { background: #14532d; color: #86efac; }
