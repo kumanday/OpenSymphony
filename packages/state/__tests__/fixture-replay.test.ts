@@ -125,6 +125,10 @@ function makeTerminalFrame(runId: string, seq: number): TerminalFrame {
     encoding: "utf8",
     content: `line ${seq}\n`,
     timestamp: `2025-01-01T00:00:${String(seq).padStart(2, "0")}Z`,
+    association: {
+      run_id: runId,
+      workspace_id: "workspace-1",
+    },
   };
 }
 

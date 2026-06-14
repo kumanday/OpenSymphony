@@ -173,6 +173,12 @@ impl InMemoryEventJournal {
         state.events.iter().skip(start).cloned().collect()
     }
 
+    /// Return all events retained in the journal in insertion order.
+    pub async fn all_events(&self) -> Vec<EventRecord> {
+        let state = self.inner.read().await;
+        state.events.iter().cloned().collect()
+    }
+
     /// Subscribe to live events. Returns a receiver for the broadcast channel.
     pub fn subscribe(&self) -> broadcast::Receiver<Result<EventRecord, StreamError>> {
         self.subscribers.subscribe()

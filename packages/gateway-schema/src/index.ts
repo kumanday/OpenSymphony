@@ -20,7 +20,22 @@ export type { TaskGraphNodeKind, TaskGraphStateCategory, TaskGraphNode, TaskGrap
 export type { RunStatus, ReleaseReason, RunPhase, RunStreamLiveness, RunProgress, RunLivenessEnvelope, HarnessSchedulerDisagreement, RunDiagnostics, SafeActions, RunDetail, RunEventPage, RunEvent } from "./run.js";
 
 // terminal
-export type { TerminalFrameKind, TerminalEncoding, TerminalFrame, TerminalSnapshot } from "./terminal.js";
+export type { TerminalFrameKind, TerminalEncoding, TerminalFrame, TerminalSnapshot, TerminalSession, TerminalLogAssociation } from "./terminal.js";
+
+// timeline
+export type {
+  TimelineEntryKind,
+  TimelineEntityRef,
+  TokenDelta,
+  RunStateEvidence,
+  TimelineEntry,
+  RunTimeline,
+  TerminalSearchMatch,
+  TerminalSearchResult,
+  TerminalJumpResult,
+  RunLogEntry,
+  RunLogPage,
+} from "./timeline.js";
 
 // approval
 export type { ApprovalKind, ApprovalStatus, ApprovalRequest, ActionReceiptStatus, ActionReceipt } from "./approval.js";

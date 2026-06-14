@@ -86,6 +86,10 @@ function makeFrame(sequence: number): TerminalFrame {
     encoding: "utf8",
     content: `line ${sequence}`,
     timestamp: "2025-01-01T00:00:00Z",
+    association: {
+      run_id: "run-1",
+      workspace_id: "workspace-1",
+    },
   };
 }
 

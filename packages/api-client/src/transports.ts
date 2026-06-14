@@ -10,6 +10,10 @@ import type {
   ActionReceipt,
   PageCursor,
   StreamCursor,
+  RunTimeline,
+  RunLogPage,
+  TerminalSearchResult,
+  TerminalJumpResult,
 } from "@opensymphony/gateway-schema";
 import { pageCursorFirst } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, GatewayTransportConfig, ActionCapableTransport } from "./index.js";
@@ -74,14 +78,63 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
     return response as RunEventPage;
   }
 
+  async runTimeline(runId: string): Promise<RunTimeline> {
+    const response = await this.fetchJson(
+      `${this.baseUri}/api/v1/runs/${encodeURIComponent(runId)}/timeline`,
+    );
+    return response as RunTimeline;
+  }
+
+  async runLogs(
+    runId: string,
+    cursor?: number,
+    limit = 100,
+  ): Promise<RunLogPage> {
+    const params = new URLSearchParams();
+    if (cursor !== undefined) params.set("cursor", String(cursor));
+    params.set("limit", String(limit));
+    const response = await this.fetchJson(
+      `${this.baseUri}/api/v1/runs/${encodeURIComponent(runId)}/logs?${params}`,
+    );
+    return response as RunLogPage;
+  }
+
   async terminalSnapshot(
     runId: string,
     terminalId: string,
+    cursor?: number,
   ): Promise<TerminalSnapshot> {
+    const params = new URLSearchParams();
+    if (cursor !== undefined) params.set("cursor", String(cursor));
+    const query = params.toString() ? `?${params}` : "";
     const response = await this.fetchJson(
-      `${this.baseUri}/api/v1/runs/${encodeURIComponent(runId)}/terminals/${encodeURIComponent(terminalId)}/snapshot`,
+      `${this.baseUri}/api/v1/runs/${encodeURIComponent(runId)}/terminal/${encodeURIComponent(terminalId)}${query}`,
     );
     return response as TerminalSnapshot;
+  }
+
+  async terminalSearch(
+    runId: string,
+    terminalId: string,
+    query: string,
+  ): Promise<TerminalSearchResult> {
+    const params = new URLSearchParams({ q: query });
+    const response = await this.fetchJson(
+      `${this.baseUri}/api/v1/runs/${encodeURIComponent(runId)}/terminal/${encodeURIComponent(terminalId)}/search?${params}`,
+    );
+    return response as TerminalSearchResult;
+  }
+
+  async terminalJumpToEvent(
+    runId: string,
+    terminalId: string,
+    eventId: string,
+  ): Promise<TerminalJumpResult> {
+    const params = new URLSearchParams({ event_id: eventId });
+    const response = await this.fetchJson(
+      `${this.baseUri}/api/v1/runs/${encodeURIComponent(runId)}/terminal/${encodeURIComponent(terminalId)}/jump?${params}`,
+    );
+    return response as TerminalJumpResult;
   }
 
   // -- Event streams (SSE) --
@@ -456,12 +509,57 @@ export class WebSocketTransport implements GatewayTransport {
     );
   }
 
+  async runTimeline(runId: string): Promise<RunTimeline> {
+    return this.get<RunTimeline>(
+      `/api/v1/runs/${encodeURIComponent(runId)}/timeline`,
+    );
+  }
+
+  async runLogs(
+    runId: string,
+    cursor?: number,
+    limit = 100,
+  ): Promise<RunLogPage> {
+    const params = new URLSearchParams();
+    if (cursor !== undefined) params.set("cursor", String(cursor));
+    params.set("limit", String(limit));
+    return this.get<RunLogPage>(
+      `/api/v1/runs/${encodeURIComponent(runId)}/logs?${params.toString()}`,
+    );
+  }
+
   async terminalSnapshot(
     runId: string,
     terminalId: string,
+    cursor?: number,
   ): Promise<TerminalSnapshot> {
+    const params = new URLSearchParams();
+    if (cursor !== undefined) params.set("cursor", String(cursor));
+    const query = params.toString() ? `?${params.toString()}` : "";
     return this.get<TerminalSnapshot>(
-      `/api/v1/runs/${encodeURIComponent(runId)}/terminals/${encodeURIComponent(terminalId)}/snapshot`,
+      `/api/v1/runs/${encodeURIComponent(runId)}/terminal/${encodeURIComponent(terminalId)}${query}`,
+    );
+  }
+
+  async terminalSearch(
+    runId: string,
+    terminalId: string,
+    query: string,
+  ): Promise<TerminalSearchResult> {
+    const params = new URLSearchParams({ q: query });
+    return this.get<TerminalSearchResult>(
+      `/api/v1/runs/${encodeURIComponent(runId)}/terminal/${encodeURIComponent(terminalId)}/search?${params.toString()}`,
+    );
+  }
+
+  async terminalJumpToEvent(
+    runId: string,
+    terminalId: string,
+    eventId: string,
+  ): Promise<TerminalJumpResult> {
+    const params = new URLSearchParams({ event_id: eventId });
+    return this.get<TerminalJumpResult>(
+      `/api/v1/runs/${encodeURIComponent(runId)}/terminal/${encodeURIComponent(terminalId)}/jump?${params.toString()}`,
     );
   }
 
@@ -844,13 +942,51 @@ export class TauriChannelTransport implements GatewayTransport {
     return this.invoke<RunEventPage>("run_events", { run_id: runId });
   }
 
+  async runTimeline(runId: string): Promise<RunTimeline> {
+    return this.invoke<RunTimeline>("run_timeline", { run_id: runId });
+  }
+
+  async runLogs(
+    runId: string,
+    _cursor?: number,
+    _limit = 100,
+  ): Promise<RunLogPage> {
+    return this.invoke<RunLogPage>("run_logs", { run_id: runId });
+  }
+
   async terminalSnapshot(
     runId: string,
     terminalId: string,
+    cursor?: number,
   ): Promise<TerminalSnapshot> {
     return this.invoke<TerminalSnapshot>("terminal_snapshot", {
       run_id: runId,
       terminal_id: terminalId,
+      cursor,
+    });
+  }
+
+  async terminalSearch(
+    runId: string,
+    terminalId: string,
+    query: string,
+  ): Promise<TerminalSearchResult> {
+    return this.invoke<TerminalSearchResult>("terminal_search", {
+      run_id: runId,
+      terminal_id: terminalId,
+      q: query,
+    });
+  }
+
+  async terminalJumpToEvent(
+    runId: string,
+    terminalId: string,
+    eventId: string,
+  ): Promise<TerminalJumpResult> {
+    return this.invoke<TerminalJumpResult>("terminal_jump_to_event", {
+      run_id: runId,
+      terminal_id: terminalId,
+      event_id: eventId,
     });
   }
 

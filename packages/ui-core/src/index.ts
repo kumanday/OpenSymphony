@@ -10,10 +10,23 @@ import type {
   TaskGraphNode,
   RunDetail,
   TerminalFrame,
+  RunTimeline,
+  TimelineEntry,
+  TimelineEntryKind,
+  TerminalLogAssociation,
 } from "@opensymphony/gateway-schema";
 
 // Terminal renderer module
 export * from "./terminal-renderer/index.js";
+
+// Timeline renderer module
+export {
+  renderTimeline,
+  filterTimelineEntries,
+  findTimelineEntryByEventId,
+  findTimelineEntryByEntityId,
+} from "./timeline.js";
+
 export {
   renderOpenSymphonyApp,
 } from "./app-shell.js";
@@ -45,3 +58,7 @@ export type TerminalFrameWithMeta = TerminalFrame & {
 export type DashboardData = DashboardSnapshot;
 export type TaskGraphData = TaskGraphNode[];
 export type RunData = RunDetail;
+export type RunTimelineData = RunTimeline;
+export type TimelineEntryData = TimelineEntry;
+export type TimelineEntryKindData = TimelineEntryKind;
+export type TerminalLogAssociationData = TerminalLogAssociation;

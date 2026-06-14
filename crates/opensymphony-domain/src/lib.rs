@@ -5,7 +5,9 @@ mod journal;
 mod runtime;
 mod snapshot;
 mod state_machine;
+mod terminal_log;
 mod time;
+mod timeline;
 mod tracker;
 
 pub const CRATE_NAME: &str = "opensymphony-domain";
@@ -37,7 +39,9 @@ pub use snapshot::{
 pub use state_machine::{
     IssueExecution, SchedulerState, SchedulerStatus, StateTransitionError, TransitionAction,
 };
+pub use terminal_log::TerminalLogStore;
 pub use time::{DurationMs, TimestampMs};
+pub use timeline::{TimelineBuilder, belongs_to_run, payload_run_id};
 pub use tracker::{
     TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
     TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerProjectMilestone,

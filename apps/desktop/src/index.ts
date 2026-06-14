@@ -71,11 +71,40 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     return this.inner.runEvents(runId, cursor);
   }
 
+  runTimeline(runId: string): ReturnType<GatewayTransport["runTimeline"]> {
+    return this.inner.runTimeline(runId);
+  }
+
+  runLogs(
+    runId: string,
+    cursor?: Parameters<GatewayTransport["runLogs"]>[1],
+    limit?: Parameters<GatewayTransport["runLogs"]>[2],
+  ): ReturnType<GatewayTransport["runLogs"]> {
+    return this.inner.runLogs(runId, cursor, limit);
+  }
+
   terminalSnapshot(
     runId: string,
     terminalId: string,
+    cursor?: Parameters<GatewayTransport["terminalSnapshot"]>[2],
   ): ReturnType<GatewayTransport["terminalSnapshot"]> {
-    return this.inner.terminalSnapshot(runId, terminalId);
+    return this.inner.terminalSnapshot(runId, terminalId, cursor);
+  }
+
+  terminalSearch(
+    runId: string,
+    terminalId: string,
+    query: string,
+  ): ReturnType<GatewayTransport["terminalSearch"]> {
+    return this.inner.terminalSearch(runId, terminalId, query);
+  }
+
+  terminalJumpToEvent(
+    runId: string,
+    terminalId: string,
+    eventId: string,
+  ): ReturnType<GatewayTransport["terminalJumpToEvent"]> {
+    return this.inner.terminalJumpToEvent(runId, terminalId, eventId);
   }
 
   events(

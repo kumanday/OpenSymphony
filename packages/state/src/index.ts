@@ -25,6 +25,9 @@ import type {
   RunLivenessEnvelope,
   RunDiagnostics,
   SafeActions,
+  RunTimeline,
+  TerminalSearchResult,
+  TerminalJumpResult,
 } from "@opensymphony/gateway-schema";
 
 // Profile state management
@@ -160,6 +163,14 @@ export interface PlanningSlice {
   lastUpdated: string | null;
 }
 
+/** Timeline slice for run event grouping. */
+export interface TimelineSlice {
+  timelines: Map<string, RunTimeline>;
+  loading: boolean;
+  error: string | null;
+  lastUpdated: string | null;
+}
+
 /** Action receipts correlated with dispatched mutations. */
 export interface ActionReceiptSlice {
   receipts: Map<string, ActionReceipt>;
@@ -175,6 +186,7 @@ export interface GatewayState {
   taskGraph: TaskGraphSlice;
   run: RunSlice;
   terminal: TerminalSlice;
+  timeline: TimelineSlice;
   approval: ApprovalSlice;
   planning: PlanningSlice;
   actionReceipts: ActionReceiptSlice;
@@ -217,6 +229,7 @@ export const initialState: GatewayState = {
     lastUpdated: null,
     streamStale: new Map(),
   },
+  timeline: { timelines: new Map(), loading: false, error: null, lastUpdated: null },
   approval: { pending: [], resolved: new Map(), loading: false, error: null, lastUpdated: null },
   planning: { sessions: new Map(), loading: false, error: null, lastUpdated: null },
   actionReceipts: { receipts: new Map(), pending: new Map() },
@@ -237,6 +250,9 @@ export type GatewayAction =
   | { type: "APPROVAL_RESOLVED"; approvalId: string; payload: ApprovalRequest; nowMs: number }
   | { type: "PLANNING_SESSION_UPDATED"; payload: PlanningSessionSummary; nowMs: number }
   | { type: "RUN_EVENTS_RECEIVED"; runId: string; events: RunEvent[]; nowMs: number }
+  | { type: "RUN_TIMELINE_RECEIVED"; runId: string; payload: RunTimeline; nowMs: number }
+  | { type: "TERMINAL_SEARCH_RESULT"; runId: string; terminalSessionId: string; payload: TerminalSearchResult; nowMs: number }
+  | { type: "TERMINAL_JUMP_RESULT"; runId: string; terminalSessionId: string; payload: TerminalJumpResult; nowMs: number }
   // Envelope/actions
   | { type: "ENVELOPE_RECEIVED"; payload: GatewayEnvelope }
   | { type: "ACTION_RECEIPT_RECEIVED"; receipt: ActionReceipt; nowMs: number }
@@ -545,6 +561,52 @@ export function gatewayReducer(
           error: null,
           lastUpdated: msToIso(action.nowMs),
         },
+      };
+    }
+
+    case "RUN_TIMELINE_RECEIVED": {
+      const timelines = new Map(state.timeline.timelines);
+      timelines.set(action.runId, action.payload);
+      return {
+        ...state,
+        timeline: {
+          ...state.timeline,
+          timelines,
+          loading: false,
+          error: null,
+          lastUpdated: msToIso(action.nowMs),
+        },
+      };
+    }
+
+    case "TERMINAL_SEARCH_RESULT": {
+      // Store search results in the terminal cache keyed by run+session.
+      const key = `${action.runId}:${action.terminalSessionId}`;
+      const cacheTerminals = new Map(state.cache.terminals);
+      const existing = cacheTerminals.get(key);
+      cacheTerminals.set(key, {
+        lastSeen: msToIso(action.nowMs),
+        version: (existing?.version ?? 0) + 1,
+        data: action.payload,
+      });
+      return {
+        ...state,
+        cache: { ...state.cache, terminals: cacheTerminals },
+      };
+    }
+
+    case "TERMINAL_JUMP_RESULT": {
+      const key = `${action.runId}:${action.terminalSessionId}:jump`;
+      const cacheTerminals = new Map(state.cache.terminals);
+      const existing = cacheTerminals.get(key);
+      cacheTerminals.set(key, {
+        lastSeen: msToIso(action.nowMs),
+        version: (existing?.version ?? 0) + 1,
+        data: action.payload,
+      });
+      return {
+        ...state,
+        cache: { ...state.cache, terminals: cacheTerminals },
       };
     }
 
@@ -862,12 +924,13 @@ export function gatewayReducer(
         taskGraph: { ...state.taskGraph, error: action.error, loading: false },
         run: { ...state.run, error: action.error, loading: false },
         terminal: { ...state.terminal, error: action.error, loading: false },
+        timeline: { ...state.timeline, error: action.error, loading: false },
         approval: { ...state.approval, error: action.error, loading: false },
         planning: { ...state.planning, error: action.error, loading: false },
       };
 
     case "LOADING": {
-      const { dashboard, taskGraph, run, terminal, approval, planning, connection } = state;
+      const { dashboard, taskGraph, run, terminal, timeline, approval, planning, connection } = state;
       return {
         ...state,
         connection: { ...connection, error: action.loading ? null : connection.error },
@@ -875,6 +938,7 @@ export function gatewayReducer(
         taskGraph: { ...taskGraph, loading: action.loading, error: action.loading ? null : taskGraph.error },
         run: { ...run, loading: action.loading, error: action.loading ? null : run.error },
         terminal: { ...terminal, loading: action.loading, error: action.loading ? null : terminal.error },
+        timeline: { ...timeline, loading: action.loading, error: action.loading ? null : timeline.error },
         approval: { ...approval, loading: action.loading, error: action.loading ? null : approval.error },
         planning: { ...planning, loading: action.loading, error: action.loading ? null : planning.error },
       };
@@ -904,4 +968,7 @@ export type {
   RunLivenessEnvelope,
   RunDiagnostics,
   SafeActions,
+  RunTimeline,
+  TerminalSearchResult,
+  TerminalJumpResult,
 };

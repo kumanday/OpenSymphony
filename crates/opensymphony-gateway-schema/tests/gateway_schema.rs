@@ -21,7 +21,10 @@ use opensymphony::opensymphony_gateway_schema::{
         SnapshotEventSummary,
     },
     task_graph::{TaskGraphNode, TaskGraphNodeKind, TaskGraphStateCategory},
-    terminal::{TerminalEncoding, TerminalFrame, TerminalFrameKind, TerminalSnapshot},
+    terminal::{
+        TerminalEncoding, TerminalFrame, TerminalFrameKind, TerminalLogAssociation,
+        TerminalSnapshot,
+    },
     transport::{TransportProfile, TransportRecommendation},
     version::{GATEWAY_SCHEMA_VERSION, SchemaVersion},
 };
@@ -262,6 +265,17 @@ fn terminal_frame_roundtrips() {
         encoding: TerminalEncoding::Utf8,
         content: "hello world\n".into(),
         timestamp: Utc::now(),
+        association: TerminalLogAssociation {
+            run_id: "run-1".into(),
+            workspace_id: "workspace-1".into(),
+            command_id: None,
+            issue_id: None,
+            sub_issue_id: None,
+            harness_session_id: None,
+        },
+        correlation_id: None,
+        source_event_id: Some("evt-1".into()),
+        frame_id: Some("fid-1".into()),
     };
     let json = must_serialize(&frame);
     let back: TerminalFrame = must_deserialize(&json);
@@ -269,6 +283,8 @@ fn terminal_frame_roundtrips() {
     assert_eq!(back.frame_kind, TerminalFrameKind::Stdout);
     assert_eq!(back.encoding, TerminalEncoding::Utf8);
     assert_eq!(back.content, "hello world\n");
+    assert_eq!(back.source_event_id.as_deref(), Some("evt-1"));
+    assert_eq!(back.frame_id.as_deref(), Some("fid-1"));
 }
 
 #[test]
@@ -281,6 +297,7 @@ fn terminal_snapshot_roundtrips() {
         total_frames: 0,
         truncated: false,
         cursor: 0,
+        session: None,
     };
     let json = must_serialize(&snapshot);
     let back: TerminalSnapshot = must_deserialize(&json);

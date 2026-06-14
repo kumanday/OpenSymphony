@@ -5,7 +5,12 @@
  * high-throughput OpenHands output patterns for testing the renderer.
  */
 
-import type { TerminalFrame, TerminalFrameKind, TerminalEncoding, SchemaVersion } from "@opensymphony/gateway-schema";
+import type { TerminalFrame, TerminalFrameKind, TerminalEncoding, SchemaVersion, TerminalLogAssociation } from "@opensymphony/gateway-schema";
+
+const DEFAULT_ASSOCIATION: TerminalLogAssociation = {
+  run_id: "fixture-run-1",
+  workspace_id: "fixture-workspace-1",
+};
 
 export interface FixtureConfig {
   burstCount: number;
@@ -14,6 +19,7 @@ export interface FixtureConfig {
   frameKind: TerminalFrameKind;
   encoding: TerminalEncoding;
   includeAnsiCodes: boolean;
+  association?: TerminalLogAssociation;
 }
 
 const DEFAULT_CONFIG: FixtureConfig = {
@@ -46,6 +52,7 @@ export function createTerminalFrame(
     encoding: mergedConfig.encoding,
     content: generateFrameContent(mergedConfig),
     timestamp: new Date(Date.now() + sequence * mergedConfig.burstDelayMs).toISOString(),
+    association: mergedConfig.association ?? { ...DEFAULT_ASSOCIATION, run_id: runId },
   };
 }
 
@@ -157,6 +164,7 @@ export function generateRealisticSession(
       encoding: "utf8",
       content: generateRealisticLine(i, frameKind),
       timestamp,
+      association: { ...DEFAULT_ASSOCIATION, run_id: runId },
     });
   }
 
@@ -244,6 +252,7 @@ export function generateBurstySession(
         encoding: "utf8",
         content: generateRealisticLine(sequence, isBurst ? "stdout" : "log"),
         timestamp,
+        association: { ...DEFAULT_ASSOCIATION, run_id: runId },
       });
     }
   }

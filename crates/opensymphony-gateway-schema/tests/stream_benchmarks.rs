@@ -9,7 +9,7 @@ use tokio::{
 
 use opensymphony::opensymphony_gateway_schema::envelope::GatewayEnvelope;
 use opensymphony::opensymphony_gateway_schema::terminal::{
-    TerminalEncoding, TerminalFrame, TerminalFrameKind,
+    TerminalEncoding, TerminalFrame, TerminalFrameKind, TerminalLogAssociation,
 };
 use opensymphony::opensymphony_gateway_schema::transport::TransportProfile;
 use opensymphony::opensymphony_gateway_schema::version::SchemaVersion;
@@ -33,6 +33,17 @@ fn sample_terminal_frame(sequence: u64) -> TerminalFrame {
         encoding: TerminalEncoding::Utf8,
         content: BENCH_PAYLOAD.into(),
         timestamp: chrono::Utc::now(),
+        association: TerminalLogAssociation {
+            run_id: "run-bench".into(),
+            workspace_id: "workspace-bench".into(),
+            command_id: None,
+            issue_id: None,
+            sub_issue_id: None,
+            harness_session_id: None,
+        },
+        correlation_id: None,
+        source_event_id: Some(format!("evt-{sequence}")),
+        frame_id: Some(format!("fid-{sequence}")),
     }
 }
 

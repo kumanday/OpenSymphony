@@ -12,6 +12,7 @@
 import { searchText } from "@opensymphony/ui-core";
 import type { DecodedFrame, ScrollbackBuffer, TextStyle, ColorStyle } from "@opensymphony/ui-core";
 import type { TerminalRenderer } from "@opensymphony/ui-core";
+import type { TerminalLogAssociation } from "@opensymphony/gateway-schema";
 
 export interface TerminalViewerConfig {
   fontFamily: string;
@@ -52,6 +53,7 @@ export class TerminalViewer {
   private searchResults: number[] = [];
   private currentSearchIndex = 0;
   private pendingFocusFrameIndex: number | undefined;
+  private associationInfo: TerminalLogAssociation | undefined;
 
   constructor(renderer: TerminalRenderer, options: TerminalViewerOptions) {
     this.renderer = renderer;
@@ -89,6 +91,7 @@ export class TerminalViewer {
 
     // Toolbar
     const toolbar = document.createElement("div");
+    toolbar.className = "terminal-toolbar";
     toolbar.style.cssText = `
       display: flex;
       gap: 8px;
@@ -153,6 +156,7 @@ export class TerminalViewer {
 
     // Status span
     const statusSpan = document.createElement("span");
+    statusSpan.className = "terminal-status-bar";
     statusSpan.style.cssText = `
       margin-left: auto;
       color: #8b949e;
@@ -169,6 +173,7 @@ export class TerminalViewer {
 
     // Scroll container for terminal output
     const scrollContainer = document.createElement("div");
+    scrollContainer.className = "terminal-scroll-container";
     scrollContainer.style.cssText = `
       flex: 1;
       overflow-y: auto;
@@ -334,6 +339,13 @@ export class TerminalViewer {
       padding: 2px 0;
       white-space: pre-wrap;
     `;
+    line.dataset.lineIndex = String(lineIndex);
+    if (frame.frame.source_event_id) {
+      line.dataset.eventId = frame.frame.source_event_id;
+    }
+    if (frame.frame.frame_sequence !== undefined) {
+      line.dataset.frameSequence = String(frame.frame.frame_sequence);
+    }
 
     // Apply ANSI color styling
     if (frame.spans.length > 0) {
@@ -405,8 +417,17 @@ export class TerminalViewer {
     const metrics = renderer.getMetrics();
     const fps = metrics.fps > 0 ? `${metrics.fps} fps` : "idle";
     const memory = this.formatMemory(metrics.memoryBytes);
-
-    statusSpan.textContent = `${buffer.totalFrames} frames | ${fps} | ${memory} | ${buffer.visibleFrames.length} visible`;
+    const association = this.associationInfo;
+    const contextParts: string[] = [];
+    if (association) {
+      if (association.run_id) contextParts.push(`run:${association.run_id}`);
+      if (association.command_id) contextParts.push(`cmd:${association.command_id}`);
+      if (association.issue_id) contextParts.push(`issue:${association.issue_id}`);
+      if (association.sub_issue_id) contextParts.push(`sub:${association.sub_issue_id}`);
+      if (association.workspace_id) contextParts.push(`ws:${association.workspace_id}`);
+    }
+    const context = contextParts.length > 0 ? ` | ${contextParts.join(" ")}` : "";
+    statusSpan.textContent = `${buffer.totalFrames} frames | ${fps} | ${memory} | ${buffer.visibleFrames.length} visible${context}`;
   }
 
   /**
@@ -637,7 +658,41 @@ export class TerminalViewer {
     if (this.scrollContainer && this._onScroll) {
       this.scrollContainer.removeEventListener("scroll", this._onScroll);
     }
+  }
 
+  /**
+   * Update the association metadata shown in the viewer status bar so the
+   * terminal output can be traced back to its run, command, issue, and sub-issue.
+   */
+  setAssociationInfo(association: TerminalLogAssociation): void {
+    this.associationInfo = association;
+    const buffer = this.renderer?.getBuffer();
+    if (buffer) {
+      this.updateStatus(buffer);
+    }
+  }
+
+  /**
+   * Jump to the frame produced by a specific journal event id.
+   * Returns true if the event was found in the current scrollback.
+   */
+  jumpToEvent(eventId: string): boolean {
+    const renderer = this.renderer;
+    if (!renderer) return false;
+    const buffer = renderer.getBuffer();
+    const pos = buffer.allFrames.findIndex(
+      (decoded) => decoded.frame.source_event_id === eventId,
+    );
+    if (pos < 0) return false;
+
+    const totalIndex = buffer.totalFrames - buffer.allFrames.length + pos;
+    this.pendingFocusFrameIndex = totalIndex;
+    renderer.scrollToFrame(totalIndex);
+    return true;
+  }
+
+  destroy(): void {
+    this.dispose();
     this.detachRender?.();
     this.detachRender = undefined;
     this.renderer = null;
@@ -645,6 +700,7 @@ export class TerminalViewer {
     this.lineElements = [];
     this.searchResults = [];
     this.pendingFocusFrameIndex = undefined;
+    this.associationInfo = undefined;
     this.toolbar = undefined;
     this.searchInput = undefined;
     this.searchButton = undefined;

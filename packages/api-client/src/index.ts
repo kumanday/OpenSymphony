@@ -16,6 +16,10 @@ import type {
   GatewayHealth,
   StreamCursor,
   PageCursor,
+  RunTimeline,
+  RunLogPage,
+  TerminalSearchResult,
+  TerminalJumpResult,
 } from "@opensymphony/gateway-schema";
 
 export {
@@ -46,7 +50,11 @@ export interface GatewayTransport {
   taskGraph(projectId: string): Promise<TaskGraphSnapshot>;
   runDetail(runId: string): Promise<RunDetail>;
   runEvents(runId: string, cursor?: PageCursor): Promise<RunEventPage>;
-  terminalSnapshot(runId: string, terminalId: string): Promise<TerminalSnapshot>;
+  runTimeline(runId: string): Promise<RunTimeline>;
+  runLogs(runId: string, cursor?: number, limit?: number): Promise<RunLogPage>;
+  terminalSnapshot(runId: string, terminalId: string, cursor?: number): Promise<TerminalSnapshot>;
+  terminalSearch(runId: string, terminalId: string, query: string): Promise<TerminalSearchResult>;
+  terminalJumpToEvent(runId: string, terminalId: string, eventId: string): Promise<TerminalJumpResult>;
 
   /** Subscribe to gateway event stream; returns an async iterable. */
   events(fromCursor?: { sequence: number; partition: string }): AsyncIterable<GatewayEnvelope>;
@@ -104,6 +112,8 @@ export type {
   RunDetail,
   RunEventPage,
   TerminalSnapshot,
+  TerminalSearchResult,
+  TerminalJumpResult,
   TaskGraphSnapshot,
   GatewayCapabilities,
   ActionDispatch,
@@ -115,5 +125,7 @@ export type {
   GatewayHealth,
   StreamCursor,
   PageCursor,
+  RunTimeline,
+  RunLogPage,
   TransportProfile,
 };

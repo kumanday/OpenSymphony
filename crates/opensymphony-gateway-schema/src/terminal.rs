@@ -3,6 +3,22 @@ use serde::{Deserialize, Serialize};
 
 use super::version::SchemaVersion;
 
+/// Association context for a terminal/log frame so every frame can be traced
+/// back to its run, workspace, command, issue, and sub-issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TerminalLogAssociation {
+    pub run_id: String,
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_issue_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_id: Option<String>,
+}
+
 /// Terminal or log frame delivered over a high-volume stream.
 ///
 /// Supports both text and binary payloads. Binary frames are base64-encoded
@@ -18,6 +34,14 @@ pub struct TerminalFrame {
     pub encoding: TerminalEncoding,
     pub content: String,
     pub timestamp: DateTime<Utc>,
+    #[serde(default)]
+    pub association: TerminalLogAssociation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,4 +72,20 @@ pub struct TerminalSnapshot {
     pub total_frames: u64,
     pub truncated: bool,
     pub cursor: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<TerminalSession>,
+}
+
+/// Metadata for a terminal/log session associated with a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSession {
+    pub schema_version: SchemaVersion,
+    pub terminal_session_id: String,
+    pub run_id: String,
+    pub association: TerminalLogAssociation,
+    pub frame_count: u64,
+    pub total_bytes: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub current_cursor: u64,
 }
