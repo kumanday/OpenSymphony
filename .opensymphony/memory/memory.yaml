@@ -60,8 +60,10 @@ areas:
     source_refs:
       linear_labels:
       - area:build
+      - area:cli
       - area:developer-experience
       - area:memory
+      - area:operations
       linear_milestones:
       - 'M9.5: Developer Build Acceleration'
   cli:
@@ -76,7 +78,12 @@ areas:
       docs:
       - docs/cli.md
       linear_labels:
+      - area:cli
+      - area:developer-experience
+      - area:operations
       - cli
+      linear_milestones:
+      - 'M9.5: Developer Build Acceleration'
   configuration:
     title: Configuration
     docs_target: docs/configuration.md
@@ -122,8 +129,11 @@ areas:
     - developer-experience
     source_refs:
       linear_labels:
+      - area:build
+      - area:cli
       - area:developer-experience
       - area:memory
+      - area:operations
       linear_milestones:
       - 'M9.5: Developer Build Acceleration'
   development:
@@ -269,8 +279,10 @@ areas:
       - docs/memory.md
       linear_labels:
       - area:build
+      - area:cli
       - area:developer-experience
       - area:memory
+      - area:operations
       linear_milestones:
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -326,6 +338,7 @@ areas:
       docs:
       - docs/operations.md
       linear_labels:
+      - area:operations
       - operations
       linear_milestones:
       - 'M6.5: Memory Server'
@@ -362,6 +375,8 @@ areas:
       - docs/repository-layout.md
       linear_labels:
       - repository-layout
+      linear_milestones:
+      - 'M9.5: Developer Build Acceleration'
   sources:
     title: Sources and Trust Notes
     docs_target: docs/sources.md

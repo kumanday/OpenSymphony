@@ -1781,6 +1781,7 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 - COE-398: Tauri Shell And Security Capabilities
 - COE-399: Linear Read Coverage And Task Graph Cache
 - COE-400: OpenHands Event Normalization And Runtime Mirror
+- COE-401: Web App Entry And Deployment Modes
 - COE-402: App Shell, Dashboard, Task Graph, And Run Views
 - COE-403: Terminal And Log Renderer Prototype
 - COE-404: Desktop Connection Profiles And Daemon Management
@@ -1813,6 +1814,7 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 - COE-398
 - COE-399
 - COE-400
+- COE-401
 - COE-402
 - COE-403
 - COE-404

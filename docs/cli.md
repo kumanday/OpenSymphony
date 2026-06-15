@@ -13,6 +13,7 @@ last_memory_sync: 2026-05-16T07:06:20.437326+00:00
 
 - COE-284 contributed: PR #47: Add installable opensymphony run command (merge `51821f0`)
 - COE-285 contributed: PR #53: Refactor opensymphony run runtime modules (merge `696a32f`)
+- COE-453 contributed: PR #123: M9.5: Add non-interactive init automation (merge `3200ed6`)
 
 ## Important invariants
 
@@ -31,10 +32,12 @@ last_memory_sync: 2026-05-16T07:06:20.437326+00:00
 
 - COE-284: Add orchestrator run command to CLI and make it installable
 - COE-285: Refactor orchestrator_run.rs into smaller CLI runtime modules
+- COE-453: Non-Interactive Init For Automation
 
 ## Source refs
 
 - COE-284
 - COE-285
+- COE-453
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

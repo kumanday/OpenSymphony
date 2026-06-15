@@ -211,6 +211,8 @@ of dead bridge code.
 - COE-385: Resolve runtime tracking TODO in OpenHands session runner
 - COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
 - COE-387: Audit tracing spans and diagnostics for secret leakage
+- COE-452: DuckDB Prebuilt Developer Build Mode
+- COE-453: Non-Interactive Init For Automation
 
 ## Source refs
 
@@ -250,5 +252,7 @@ of dead bridge code.
 - COE-385
 - COE-386
 - COE-387
+- COE-452
+- COE-453
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
