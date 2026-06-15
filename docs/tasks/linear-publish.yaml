@@ -190,6 +190,11 @@ tasks:
     issueId: 43a507cc-a292-4d5e-9d16-2c518d9e559c
     url: https://linear.app/trilogy-ai-coe/issue/COE-452/duckdb-prebuilt-developer-build-mode
     file: docs/tasks/osym-737-duckdb-prebuilt-developer-build-mode.md
+  OSYM-738:
+    issue: COE-453
+    issueId: 4d0c78bb-7e22-485b-af5d-b261eb649d1f
+    url: https://linear.app/trilogy-ai-coe/issue/COE-453/non-interactive-init-for-automation
+    file: docs/tasks/osym-738-non-interactive-init-for-automation.md
   OSYM-742:
     issue: COE-419
     issueId: d4170095-6d55-4c36-bdc6-2e3f9d434dbe

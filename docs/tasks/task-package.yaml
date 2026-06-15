@@ -69,6 +69,8 @@ tasks:
     file: docs/tasks/osym-736-linear-draft-preview-and-publish-flow.md
   - id: OSYM-737
     file: docs/tasks/osym-737-duckdb-prebuilt-developer-build-mode.md
+  - id: OSYM-738
+    file: docs/tasks/osym-738-non-interactive-init-for-automation.md
   - id: OSYM-740
     file: docs/tasks/osym-740-web-app-entry-and-deployment-modes.md
   - id: OSYM-741

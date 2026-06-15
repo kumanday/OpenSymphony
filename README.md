@@ -184,14 +184,15 @@ template-managed agent skills.
 The memory index uses DuckDB's bundled build by default so local installs do not
 need a separate DuckDB system package. That choice adds compile time and binary
 size, but keeps the memory database portable for local-first operator workflows.
-Repository developers can use `cargo check-dev`, `cargo test-dev`, and
-`cargo clippy-dev` to build with `--no-default-features --features
-duckdb-prebuilt`; those aliases set `DUCKDB_DOWNLOAD_LIB=1` for the aliased
-command so they reuse a downloaded prebuilt libduckdb during iterative
-development. Power users can also build against a manually installed system
-DuckDB by setting `DUCKDB_LIB_DIR`, `DUCKDB_INCLUDE_DIR`, and the platform
-runtime loader path before installing with `--no-default-features --features
-duckdb-prebuilt`; see [Installer and Distribution Strategy](docs/installer-and-distribution.md).
+Repository developers on macOS/Homebrew can use `cargo check-system-duckdb`,
+`cargo test-system-duckdb`, and `cargo clippy-system-duckdb` to build against a
+system DuckDB installation with `--no-default-features --features
+duckdb-prebuilt`. The expected Homebrew DuckDB version is `1.5.3`, pinned after
+installation. That avoids both bundled source compilation and per-workspace
+download caches. The portable fallback aliases `cargo check-dev`,
+`cargo test-dev`, and `cargo clippy-dev` set `DUCKDB_DOWNLOAD_LIB=1` for the
+aliased command so they reuse a downloaded prebuilt libduckdb during iterative
+development. See [Installer and Distribution Strategy](docs/installer-and-distribution.md).
 
 ## Architecture
 

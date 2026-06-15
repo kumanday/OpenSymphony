@@ -120,6 +120,10 @@ Holds sample configs and target-repo fixtures.
 ### `docs/`
 
 Owns design, operations, and migration documentation.
+Build and developer workflow notes live in `docs/build.md` and
+`docs/developer-experience.md`; keep those discoverable from the broader
+operations/development docs when generated memory sync creates or refreshes
+them.
 
 ### `.agents/skills/` in the template repo
 

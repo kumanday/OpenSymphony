@@ -47,7 +47,23 @@ areas:
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
+  build:
+    title: Build
+    docs_target: docs/build.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - build
+    source_refs:
+      linear_labels:
+      - area:build
+      - area:developer-experience
+      - area:memory
+      linear_milestones:
+      - 'M9.5: Developer Build Acceleration'
   cli:
     title: Cli
     docs_target: docs/cli.md
@@ -78,6 +94,7 @@ areas:
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
   deployment-modes:
     title: Deployment Modes
@@ -94,6 +111,21 @@ areas:
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
+  developer-experience:
+    title: Developer Experience
+    docs_target: docs/developer-experience.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - developer experience
+    - developer-experience
+    source_refs:
+      linear_labels:
+      - area:developer-experience
+      - area:memory
+      linear_milestones:
+      - 'M9.5: Developer Build Acceleration'
   development:
     title: Development Guide
     docs_target: docs/DEVELOPMENT.md
@@ -113,6 +145,7 @@ areas:
       - 'M6.5: Memory Server'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
   devex:
     title: Devex
@@ -235,12 +268,15 @@ areas:
       - docs/memory-capture-and-doc-sync.md
       - docs/memory.md
       linear_labels:
+      - area:build
+      - area:developer-experience
       - area:memory
       linear_milestones:
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
   migration-1-0-0:
     title: OpenSymphony 1.0.0 Migration Guide
@@ -296,6 +332,7 @@ areas:
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
   prerequisites:
     title: Prerequisites
@@ -371,6 +408,7 @@ areas:
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
+      - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
   ui-frankentui:
     title: FrankenTUI Operator UI

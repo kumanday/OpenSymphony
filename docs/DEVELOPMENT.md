@@ -138,21 +138,43 @@ Fake server, live tests, doctor command, packaging.
 
 ## Required checks
 
-Fast iterative checks can use the developer aliases. The aliases set
-`DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and build with
-`--no-default-features --features duckdb-prebuilt`:
+Fast iterative checks on a macOS/Homebrew development machine should use the
+system-linked DuckDB aliases. They build with `--no-default-features --features
+duckdb-prebuilt` and point Cargo at `/opt/homebrew/opt/duckdb` for the aliased
+command. The expected native DuckDB version is `1.5.3`, matching the pinned
+Rust `duckdb` and `libduckdb-sys` dependency line.
 
 ```bash
 cargo fmt --check
+cargo check-system-duckdb
+cargo test-system-duckdb
+cargo clippy-system-duckdb
+```
+
+Install and pin DuckDB once on the host:
+
+```bash
+brew install duckdb
+brew pin duckdb
+```
+
+Homebrew does not currently provide a versioned `duckdb@...` formula. Pinning
+prevents routine Homebrew upgrades from moving the system library after it has
+been verified. If Homebrew DuckDB is later unpinned or upgraded, run
+`duckdb --version` and verify it is still DuckDB `1.5.3` before trusting
+system-linked checks. If Homebrew DuckDB is unavailable, use the portable
+downloaded fallback aliases:
+
+```bash
 cargo check-dev
 cargo test-dev
 cargo clippy-dev
 ```
 
-These aliases download and reuse a prebuilt DuckDB library inside the checkout's
-Cargo target directory. They do not require a system DuckDB install. Use a
-system-linked DuckDB only when intentionally testing the power-user install path
-documented in [Operations](operations.md).
+The fallback aliases download and reuse a prebuilt DuckDB library inside the
+checkout's Cargo target directory. If you override `CARGO_TARGET_DIR` for a
+fallback command, use an absolute path; the normal target directory does not
+need an override.
 
 Before release-sensitive, packaging, or dependency changes, also run the default
 bundled-mode checks:
@@ -170,10 +192,12 @@ cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo clippy-dev
+cargo clippy-system-duckdb
 
 # Full tests
 cargo test
 cargo test-dev
+cargo test-system-duckdb
 
 # CLI-focused checks
 cargo test --test init
@@ -199,9 +223,24 @@ Important rule:
 - keep `opensymphony update` aligned with the same recursive copy rule so
   existing target repos can refresh the template-managed skill tree without
   rerunning the full bootstrap flow
+- keep `opensymphony init --non-interactive` aligned with the interactive
+  bootstrap flow. Every prompt-driven decision should have an explicit flag,
+  and unresolved file conflicts must fail before writing.
 
 When you change shared target-repo assets, update the template first and then
 make sure the `init` and `update` flows still copy the full tree.
+
+Provisioning scripts can initialize a target repo without stdin prompts:
+
+```bash
+opensymphony init \
+  --non-interactive \
+  --linear-project-slug my-linear-project \
+  --conflict-policy overwrite \
+  --commit-and-push
+```
+
+Use `cargo test-system-duckdb --test init` after changing the init flow.
 
 ## Linear development rules
 
@@ -226,7 +265,9 @@ Breaking changes in this line include:
 
 - `AGENTS.md`
 - `docs/architecture.md`
+- `docs/build.md`
 - `docs/configuration.md`
+- `docs/developer-experience.md`
 - `docs/openhands-agent-server.md`
 - `docs/linear-and-tools.md`
 - `docs/operations.md`

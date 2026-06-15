@@ -160,21 +160,37 @@ The local MVP is a trusted-environment mode.
 
 DuckDB is bundled by default so `cargo install opensymphony`, release builds,
 and normal user builds do not require a separate system DuckDB installation.
-For iterative OpenSymphony development, prefer the repo cargo aliases that link
-against a downloaded prebuilt libduckdb instead of recompiling bundled DuckDB:
+For iterative OpenSymphony development on this macOS/Homebrew environment,
+prefer the system-linked DuckDB aliases. They use the pinned Homebrew DuckDB
+installation, currently DuckDB `1.5.3`, and avoid both bundled source
+compilation and per-workspace download caches:
+
+```bash
+cargo check-system-duckdb
+cargo test-system-duckdb
+cargo test-system-duckdb --test memory
+cargo clippy-system-duckdb
+```
+
+If system DuckDB is unavailable, fall back to the downloaded prebuilt aliases:
 
 ```bash
 cargo check-dev
 cargo test-dev
-cargo test-dev --test memory
 cargo clippy-dev
 ```
 
-The aliases set `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and run
-Cargo with `--no-default-features --features duckdb-prebuilt`. `cargo fmt` is
-unaffected because it does not compile dependencies. Before release-sensitive,
-packaging, or dependency changes, also run the default bundled-mode validation
-commands such as
+The system aliases set `DUCKDB_LIB_DIR`, `DUCKDB_INCLUDE_DIR`, and
+`DYLD_LIBRARY_PATH` for the aliased command. The fallback aliases set
+`DUCKDB_DOWNLOAD_LIB=1` for the aliased command. Both alias families run Cargo
+with `--no-default-features --features duckdb-prebuilt`. `cargo fmt` is
+unaffected because it does not compile dependencies. If a fallback command must
+override `CARGO_TARGET_DIR`, use the default target directory or an absolute
+path. Because the system aliases link whatever Homebrew exposes at
+`/opt/homebrew/opt/duckdb`, verify `duckdb --version` is still the expected
+`1.5.3` after any Homebrew upgrade or unpin before trusting system-linked test
+results. Before release-sensitive, packaging, or dependency changes, also run the
+default bundled-mode validation commands such as
 `cargo clippy --all-targets -- -D warnings` and `cargo test`.
 
 ## Required tests by subsystem

@@ -47,10 +47,51 @@ Important `init` behavior:
 - prompts whether to commit and push the generated OpenSymphony files; when
   accepted, it stages only files it wrote, commits `chore: bootstrap
   OpenSymphony`, and pushes `HEAD` to the detected remote
+- supports `--non-interactive` for automation; pass explicit flags for prompt
+  decisions and unresolved existing-file conflicts fail before any files are
+  written
 - copies `.agents/skills/` recursively so helper scripts, query files, and
   reference docs all arrive together
 - keeps bootstrap guidance in CLI output and the central OpenSymphony docs
   instead of copying `docs/` files into the target repository
+
+Automation-friendly target repo provisioning can run without stdin prompts:
+
+```bash
+cargo install opensymphony
+opensymphony install openhands
+
+cd /path/to/target-repo
+opensymphony init \
+  --non-interactive \
+  --linear-project-slug my-linear-project \
+  --conflict-policy overwrite \
+  --commit-and-push
+```
+
+For scripts that scaffold AI PR review too, add the review flags explicitly:
+
+```bash
+opensymphony init \
+  --non-interactive \
+  --ai-pr-review \
+  --configure-github \
+  --ai-review-provider-kind openai-compatible \
+  --ai-review-model-id accounts/fireworks/models/glm-5p1 \
+  --ai-review-base-url https://api.fireworks.ai/inference/v1 \
+  --ai-review-require-evidence true \
+  --ai-review-secret-env LLM_API_KEY \
+  --linear-project-slug my-linear-project \
+  --conflict-policy overwrite
+```
+
+If `--configure-github` is omitted, init still writes the AI PR review files
+when `--ai-pr-review` is present, but it prints the manual `gh` commands instead
+of mutating repository variables, secrets, or labels. If a non-interactive run
+finds an existing generated file and `--conflict-policy` was not supplied, it
+fails before applying the template.
+When `--ai-review-secret-env` is used, the named environment variable must be
+present and non-empty; init fails rather than setting a blank GitHub secret.
 
 For already-initialized repositories, `opensymphony update` is the fast
 maintenance path:
@@ -66,11 +107,20 @@ opensymphony` and `opensymphony update` turnkey even when the memory database is
 enabled.
 
 Power users who want to avoid compiling bundled DuckDB may install a system
-DuckDB development package and build without default features:
+DuckDB development package and build without default features. On the
+macOS/Homebrew development host, install and pin DuckDB once:
 
 ```bash
-# macOS with Homebrew
 brew install duckdb
+brew pin duckdb
+```
+
+Homebrew currently provides `duckdb`, not a versioned `duckdb@...` formula.
+Pinning keeps the verified local version from moving during routine Homebrew
+upgrades. The expected version for this release line is DuckDB `1.5.3`. To
+build manually against that system library:
+
+```bash
 export DUCKDB_LIB_DIR="$(brew --prefix duckdb)/lib"
 export DUCKDB_INCLUDE_DIR="$(brew --prefix duckdb)/include"
 export DYLD_LIBRARY_PATH="$DUCKDB_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
@@ -92,22 +142,32 @@ release exists.
 
 ## 3. Recommended validation commands
 
-For fast iterative development inside this repository, use the developer aliases
-that download and reuse a prebuilt libduckdb instead of compiling bundled
-DuckDB:
+For fast iterative development inside this repository on the macOS/Homebrew
+host, use the system-linked developer aliases:
 
 ```bash
 cargo fmt --check
+cargo check-system-duckdb
+cargo test-system-duckdb
+cargo test-system-duckdb --test memory
+cargo clippy-system-duckdb
+```
+
+If system DuckDB is unavailable, use the portable downloaded fallback aliases:
+
+```bash
 cargo check-dev
 cargo test-dev
-cargo test-dev --test memory
 cargo clippy-dev
 ```
 
-The aliases set `DUCKDB_DOWNLOAD_LIB=1` only for the aliased command and use
-`--no-default-features --features duckdb-prebuilt`. Release-sensitive,
-packaging, and dependency work should still include the default bundled-mode
-checks so `cargo install opensymphony` remains turnkey for users:
+The system aliases set `DUCKDB_LIB_DIR`, `DUCKDB_INCLUDE_DIR`, and
+`DYLD_LIBRARY_PATH` for the aliased command. The fallback aliases set
+`DUCKDB_DOWNLOAD_LIB=1` only for the aliased command. Both alias families use
+`--no-default-features --features duckdb-prebuilt`. If a downloaded fallback
+command must override `CARGO_TARGET_DIR`, use an absolute path. Release-
+sensitive, packaging, and dependency work should still include the default
+bundled-mode checks so `cargo install opensymphony` remains turnkey for users:
 
 ```bash
 cargo fmt --check
@@ -220,11 +280,11 @@ GitHub access should be fixed before live capture is retried.
 enabled. Normal builds use DuckDB's bundled native library so operators do not
 need to install DuckDB separately, at the cost of heavier Rust compile time and
 a larger binary. Repository development can opt into the `duckdb-prebuilt`
-feature through `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`;
-those aliases set `DUCKDB_DOWNLOAD_LIB=1` so
-`libduckdb-sys` downloads and reuses a prebuilt native library in
-`target/duckdb-download`. Treat that native dependency as part of the hosted
-deployment threat model before enabling memory in a multi-tenant service.
+feature through the system-linked `cargo check-system-duckdb`,
+`cargo test-system-duckdb`, and `cargo clippy-system-duckdb` aliases, or the
+downloaded fallback `cargo check-dev`, `cargo test-dev`, and `cargo clippy-dev`
+aliases. Treat that native dependency as part of the hosted deployment threat
+model before enabling memory in a multi-tenant service.
 Memory capture does not archive Linear issues.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and

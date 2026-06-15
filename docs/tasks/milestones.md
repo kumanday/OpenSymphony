@@ -70,6 +70,7 @@ Goal: Reduce OpenSymphony-on-OpenSymphony development compile cost after the pla
 Tasks:
 
 - OSYM-737 DuckDB Prebuilt Developer Build Mode
+- OSYM-738 Non-Interactive Init For Automation
 
 ## M10: Web Client And External Gateway
 

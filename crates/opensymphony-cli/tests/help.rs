@@ -64,6 +64,35 @@ fn memory_help_explains_capture_and_query_surface() {
 }
 
 #[test]
+fn init_help_explains_non_interactive_automation_flags() {
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["init", "--help"])
+        .output()
+        .expect("init help should run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        output.status.success(),
+        "init help should succeed: stdout={stdout}, stderr={stderr}",
+    );
+    for snippet in [
+        "--non-interactive",
+        "--linear-project-slug",
+        "--conflict-policy",
+        "--ai-pr-review",
+        "--configure-github",
+        "--commit-and-push",
+        "--ai-review-secret-env",
+    ] {
+        assert!(
+            stdout.contains(snippet),
+            "init help should include `{snippet}`: stdout={stdout}",
+        );
+    }
+}
+
+#[test]
 fn memory_capture_help_uses_dry_run_as_only_write_gate() {
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
         .args(["memory", "capture", "--help"])

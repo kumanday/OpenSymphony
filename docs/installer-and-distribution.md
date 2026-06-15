@@ -18,12 +18,14 @@ Keep `cargo install opensymphony` turnkey for normal users. The CLI package uses
 bundled DuckDB by default so first-time users do not need to install a native
 DuckDB library or configure dynamic loader paths.
 
-Keep downloaded or system-linked DuckDB as an optimization path:
+Keep system-linked or downloaded DuckDB as an optimization path:
 
-- OpenSymphony contributors use the repository aliases documented in
-  [Development Guide](DEVELOPMENT.md).
+- OpenSymphony contributors on the macOS/Homebrew development host use the
+  system-linked repository aliases documented in [Development Guide](DEVELOPMENT.md).
 - Power users may opt into system-linked DuckDB when they are willing to manage
   the native library and runtime loader path themselves.
+- Downloaded prebuilt DuckDB remains the portable fallback for contributors who
+  do not have the expected system library.
 - Release-sensitive validation still includes the default bundled path.
 
 Do not make downloaded prebuilt DuckDB the default `cargo install` path until a
@@ -159,6 +161,8 @@ For power users who want faster native builds and accept manual setup:
 
 - Install DuckDB through the platform package manager or from DuckDB release
   artifacts.
+- On Homebrew, use `brew install duckdb` and `brew pin duckdb`. Homebrew does
+  not currently provide a versioned `duckdb@...` formula.
 - Build OpenSymphony with `--no-default-features --features duckdb-prebuilt`.
 - Set `DUCKDB_LIB_DIR` and `DUCKDB_INCLUDE_DIR` at build time.
 - Keep the matching library directory on the OS runtime loader path when
@@ -170,8 +174,9 @@ For power users who want faster native builds and accept manual setup:
 
 For OpenSymphony contributors:
 
-- Use the repository aliases for iterative checks.
-- Let the repository aliases set `DUCKDB_DOWNLOAD_LIB=1`.
+- Prefer the system-linked repository aliases for iterative checks on the
+  macOS/Homebrew host.
+- Use the downloaded prebuilt aliases as the portable fallback.
 - Run default bundled validation before release-sensitive or packaging changes.
 - Do not use a shared target directory across independent agent workspaces
   unless the task explicitly accepts that isolation tradeoff.
