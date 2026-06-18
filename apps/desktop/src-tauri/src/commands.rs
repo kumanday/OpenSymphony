@@ -21,6 +21,8 @@ use tracing::warn;
 
 const DEFAULT_GATEWAY_HTTP_URL: &str = "http://127.0.0.1:2468";
 const DEFAULT_GATEWAY_HTTP_LOCALHOST_URL: &str = "http://localhost:2468";
+const LEGACY_DEFAULT_GATEWAY_HTTP_URLS: &[&str] =
+    &["http://127.0.0.1:8000", "http://localhost:8000"];
 
 // ─── Executable validation ─────────────────────────────────────────────────
 
@@ -411,6 +413,8 @@ fn normalize_profile_store(store: &mut ProfileStore) {
 }
 
 fn normalize_profile_store_without_default(store: &mut ProfileStore) {
+    migrate_legacy_default_gateway_profiles(store);
+
     let active_exists = store.active_profile_id.as_ref().is_some_and(|active_id| {
         store
             .profiles
@@ -425,6 +429,28 @@ fn normalize_profile_store_without_default(store: &mut ProfileStore) {
         profile.active = active_id.is_some_and(|id| id == profile.id.as_str());
         profile.transport = profile_transport_for_response(profile);
     }
+}
+
+fn migrate_legacy_default_gateway_profiles(store: &mut ProfileStore) {
+    for profile in &mut store.profiles {
+        if is_legacy_default_gateway_profile(profile) {
+            profile.gateway_url = DEFAULT_GATEWAY_HTTP_URL.to_string();
+        }
+    }
+}
+
+fn is_legacy_default_gateway_profile(profile: &ProfileResponse) -> bool {
+    profile.kind == ProfileKind::LocalDaemon.as_str()
+        && is_legacy_default_gateway_url(&profile.gateway_url)
+        && matches!(
+            profile.label.as_str(),
+            "Local Gateway" | "Local Daemon" | "Local daemon"
+        )
+}
+
+fn is_legacy_default_gateway_url(gateway_url: &str) -> bool {
+    let normalized = gateway_url.trim_end_matches('/');
+    LEGACY_DEFAULT_GATEWAY_HTTP_URLS.contains(&normalized)
 }
 
 fn normalized_profiles_for_read(mut store: ProfileStore) -> Vec<ProfileResponse> {
@@ -1279,6 +1305,61 @@ mod tests {
 
         assert!(store.profiles.is_empty());
         assert!(store.active_profile_id.is_none());
+    }
+
+    #[test]
+    fn normalize_profile_store_migrates_legacy_local_gateway_default_port() {
+        let mut store = ProfileStore {
+            profiles: vec![
+                ProfileResponse {
+                    id: "local-daemon".to_string(),
+                    label: "Local Gateway".to_string(),
+                    kind: ProfileKind::LocalDaemon.as_str().to_string(),
+                    gateway_url: "http://127.0.0.1:8000".to_string(),
+                    transport: "loopback_http".to_string(),
+                    managed: false,
+                    active: true,
+                    daemon_path: None,
+                    daemon_args: vec![],
+                    auto_restart: false,
+                    startup_timeout_secs: 30,
+                },
+                ProfileResponse {
+                    id: "custom-local".to_string(),
+                    label: "Custom Local 8000".to_string(),
+                    kind: ProfileKind::LocalDaemon.as_str().to_string(),
+                    gateway_url: "http://127.0.0.1:8000".to_string(),
+                    transport: "loopback_http".to_string(),
+                    managed: false,
+                    active: false,
+                    daemon_path: None,
+                    daemon_args: vec![],
+                    auto_restart: false,
+                    startup_timeout_secs: 30,
+                },
+                ProfileResponse {
+                    id: "external".to_string(),
+                    label: "Local Gateway".to_string(),
+                    kind: ProfileKind::ExternalGateway.as_str().to_string(),
+                    gateway_url: "http://127.0.0.1:8000".to_string(),
+                    transport: "loopback_http".to_string(),
+                    managed: false,
+                    active: false,
+                    daemon_path: None,
+                    daemon_args: vec![],
+                    auto_restart: false,
+                    startup_timeout_secs: 30,
+                },
+            ],
+            active_profile_id: Some("local-daemon".to_string()),
+        };
+
+        normalize_profile_store(&mut store);
+
+        assert_eq!(store.profiles[0].gateway_url, DEFAULT_GATEWAY_HTTP_URL);
+        assert_eq!(store.profiles[1].gateway_url, "http://127.0.0.1:8000");
+        assert_eq!(store.profiles[2].gateway_url, "http://127.0.0.1:8000");
+        assert!(store.profiles[0].active);
     }
 
     #[test]

@@ -63,7 +63,7 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/kumanday/OpenSymphony"
 rust-version = "1.93"
-version = "1.9.3"
+version = "1.9.4"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

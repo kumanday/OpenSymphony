@@ -1,6 +1,6 @@
 {
   "productName": "OpenSymphony",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "identifier": "dev.opensymphony.app",
   "build": {
     "beforeDevCommand": "npm run dev",
