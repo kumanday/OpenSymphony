@@ -12,6 +12,9 @@ import {
   WebSocketTransport,
   TauriChannelTransport,
   TransportFactory,
+  encodeBinaryFrame,
+  decodeBinaryFrame,
+  binaryFramesAdvertised,
 } from "../src/index.js";
 import type {
   GatewayTransport,
@@ -565,10 +568,11 @@ describe("WebSocketTransport", () => {
     static instances: FakeWebSocket[] = [];
 
     readyState = FakeWebSocket.CONNECTING;
+    binaryType: "arraybuffer" | "blob" = "blob";
     onopen: (() => void) | null = null;
     onclose: ((event: { code: number; reason: string }) => void) | null = null;
     onerror: ((event: Error) => void) | null = null;
-    onmessage: ((event: { data: string }) => void) | null = null;
+    onmessage: ((event: { data: string | ArrayBuffer }) => void) | null = null;
     sent: string[] = [];
 
     constructor(readonly url: string) {
@@ -584,7 +588,7 @@ describe("WebSocketTransport", () => {
       this.onopen?.();
     }
 
-    emit(data: string): void {
+    emit(data: string | ArrayBuffer): void {
       this.onmessage?.({ data });
     }
 
@@ -714,6 +718,121 @@ describe("WebSocketTransport", () => {
     expect((transport as unknown as { isReconnecting: boolean }).isReconnecting).toBe(true);
     await transport.close();
     await expect(pendingNext).resolves.toMatchObject({ done: true });
+  });
+
+  it("does not enable binary frames when the gateway does not advertise support", () => {
+    const transport = new WebSocketTransport({
+      baseUri: "http://localhost:8080",
+    });
+    expect(transport.supportsBinaryFrames()).toBe(false);
+    expect(binaryFramesAdvertised(undefined)).toBe(false);
+  });
+
+  it("enables binary frames and sets binaryType when the gateway advertises support", async () => {
+    const capsWithBinary: GatewayCapabilities = {
+      ...FIXTURE_CAPABILITIES,
+      transports: [
+        ...FIXTURE_CAPABILITIES.transports,
+        {
+          transport: "websocket",
+          modes: ["json", "binary"],
+          supported_encodings: ["utf-8", "base64"],
+          bidirectional: true,
+        },
+      ],
+    };
+    expect(binaryFramesAdvertised(capsWithBinary)).toBe(true);
+
+    const transport = new WebSocketTransport({
+      baseUri: "http://localhost:8080",
+      capabilities: capsWithBinary,
+    });
+    expect(transport.supportsBinaryFrames()).toBe(true);
+
+    const terminal = transport.terminalFrames("run-1")[Symbol.asyncIterator]();
+    const terminalNext = terminal.next();
+    await flushAsyncWork();
+    FakeWebSocket.instances[0].open();
+    await flushAsyncWork();
+
+    // binaryType must be set to arraybuffer so the browser delivers binary
+    // terminal/log frames as ArrayBuffer.
+    expect(FakeWebSocket.instances[0].binaryType).toBe("arraybuffer");
+
+    await transport.close();
+    await expect(terminalNext).resolves.toMatchObject({ done: true });
+  });
+
+  it("decodes binary terminal frames into envelopes when binary is advertised", async () => {
+    const capsWithBinary: GatewayCapabilities = {
+      ...FIXTURE_CAPABILITIES,
+      transports: [
+        {
+          transport: "loopback_websocket",
+          modes: ["json", "binary"],
+          supported_encodings: ["utf-8", "binary"],
+          bidirectional: true,
+        },
+      ],
+    };
+    const transport = new WebSocketTransport({
+      baseUri: "http://localhost:8080",
+      capabilities: capsWithBinary,
+    });
+    const terminal = transport.terminalFrames("run-1")[Symbol.asyncIterator]();
+    const terminalNext = terminal.next();
+    await flushAsyncWork();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    FakeWebSocket.instances[0].open();
+    await flushAsyncWork(10);
+
+    const binaryEnvelope: GatewayEnvelope = {
+      schema_version: schemaVersionV1(),
+      cursor: streamCursor(11, "terminal:run-1"),
+      entity_ref: entityRefTerminal("term-1"),
+      event_kind: "terminal_frame",
+      payload: { frame_sequence: 11, content: "binary output" },
+      emitted_at: "2025-01-15T10:00:00Z",
+    };
+    const frame = encodeBinaryFrame(binaryEnvelope);
+    FakeWebSocket.instances[0].emit(frame);
+    await flushAsyncWork();
+
+    await expect(terminalNext).resolves.toMatchObject({
+      done: false,
+      value: {
+        cursor: { sequence: 11, partition: "terminal:run-1" },
+        entity_ref: { kind: "terminal_session", id: "term-1" },
+        event_kind: "terminal_frame",
+        payload: { frame_sequence: 11, content: "binary output" },
+      },
+    });
+    await transport.close();
+  });
+
+  it("round-trips a binary frame through encode/decode", () => {
+    const envelope: GatewayEnvelope = {
+      schema_version: schemaVersionV1(),
+      cursor: streamCursor(42, "terminal:run-9"),
+      entity_ref: entityRefTerminal("term-9"),
+      event_kind: "terminal_frame",
+      payload: { content: "hello" },
+      emitted_at: "2025-01-15T10:00:00Z",
+    };
+    const encoded = encodeBinaryFrame(envelope);
+    expect(encoded).toBeInstanceOf(ArrayBuffer);
+    const decoded = decodeBinaryFrame(encoded);
+    expect(decoded).not.toBeNull();
+    expect(decoded!.cursor.sequence).toBe(42);
+    expect(decoded!.cursor.partition).toBe("terminal:run-9");
+    expect(decoded!.entity_ref.kind).toBe("terminal_session");
+    expect(isValidGatewayEnvelope(decoded)).toBe(true);
+  });
+
+  it("rejects malformed binary frames", () => {
+    const bad = new ArrayBuffer(8);
+    new DataView(bad).setUint8(0, 0x00); // wrong magic
+    expect(decodeBinaryFrame(bad)).toBeNull();
   });
 });
 

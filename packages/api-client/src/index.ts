@@ -34,9 +34,27 @@ export {
   WebSocketTransport,
   TauriChannelTransport,
   TransportFactory,
+  createTransportForProfile,
+  binaryFramesAdvertised,
+  encodeBinaryFrame,
+  decodeBinaryFrame,
 } from "./transports.js";
 export type { TauriChannel, TauriRuntime } from "./transports.js";
 export { MockGatewayTransport } from "./mock.js";
+export {
+  StreamReplayBuffer,
+  orderedEvents,
+  StreamCorrelator,
+  envelopeCorrelationId,
+} from "./stream-replay.js";
+export type {
+  StreamGap,
+  StreamDuplicate,
+  ReplayEvent,
+  StreamReplayBufferOptions,
+  OrderedEventsOptions,
+  StreamStaleInfo,
+} from "./stream-replay.js";
 export {
   discoverGateway,
   discoverGatewayWithFallback,
@@ -94,6 +112,12 @@ export interface GatewayTransportConfig {
   baseUri: string;
   authToken?: string;
   transport?: TransportProfile;
+  /**
+   * Advertised gateway capabilities. Transports use these to select optional
+   * features (for example binary WebSocket frames for terminal/log streams)
+   * without client-side protocol forks.
+   */
+  capabilities?: GatewayCapabilities;
 }
 
 /** Connection state tracked by the client. */

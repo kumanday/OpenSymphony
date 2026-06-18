@@ -18,6 +18,7 @@ import type {
   FileDiffPage,
   RunValidationSummary,
   ApprovalRequest,
+  ConnectionProfile,
 } from "@opensymphony/gateway-schema";
 import { pageCursorFirst } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, GatewayTransportConfig, ActionCapableTransport } from "./index.js";
@@ -533,6 +534,7 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
 export class WebSocketTransport implements GatewayTransport {
   readonly baseUri: string;
   private readonly authToken?: string;
+  private readonly advertisedCapabilities?: GatewayCapabilities;
   private ws?: WebSocket;
   private eventSubscribers: Set<(envelope: GatewayEnvelope) => void> = new Set();
   private terminalSubscribers: Map<string, Set<(envelope: GatewayEnvelope) => void>> = new Map();
@@ -547,6 +549,16 @@ export class WebSocketTransport implements GatewayTransport {
   constructor(config: GatewayTransportConfig) {
     this.baseUri = config.baseUri.replace(/\/+$/, "");
     this.authToken = config.authToken;
+    this.advertisedCapabilities = config.capabilities;
+  }
+
+  /**
+   * Whether the gateway advertises binary WebSocket frame support for
+   * terminal/log streams. Binary frames are only used when the gateway
+   * advertises them, so the client never forks its protocol based on profile.
+   */
+  supportsBinaryFrames(): boolean {
+    return binaryFramesAdvertised(this.advertisedCapabilities);
   }
 
   private wsUrl(path: string): string {
@@ -763,6 +775,13 @@ export class WebSocketTransport implements GatewayTransport {
         } else {
           this.lastEventCursor = undefined;
         }
+        // Request binary frames for high-volume terminal/log streams when the
+        // gateway advertises support. The browser delivers these as
+        // ArrayBuffer when binaryType is set; text JSON envelopes are still
+        // delivered as strings.
+        if (this.supportsBinaryFrames() && "binaryType" in ws) {
+          ws.binaryType = "arraybuffer";
+        }
         // Send auth if needed
         if (this.authToken) {
           ws.send(JSON.stringify({ type: "auth", token: this.authToken }));
@@ -823,7 +842,19 @@ export class WebSocketTransport implements GatewayTransport {
     return subscribers;
   }
 
-  private handleMessage(data: string): void {
+  private handleMessage(data: string | ArrayBuffer | Blob): void {
+    // Binary frames carry high-volume terminal/log payloads when the gateway
+    // advertises binary support. Decode them into envelopes via the shared
+    // binary frame codec; text frames follow the prefixed JSON protocol.
+    if (data instanceof ArrayBuffer) {
+      this.dispatchBinaryFrame(data);
+      return;
+    }
+    if (typeof data !== "string") {
+      // Blob: async conversion to ArrayBuffer before decoding.
+      this.handleBlobFrame(data);
+      return;
+    }
     // Gateway uses prefixed frames: "__event__ {...}" or "__error__ {...}"
     if (data.startsWith("__event__ ")) {
       try {
@@ -854,6 +885,47 @@ export class WebSocketTransport implements GatewayTransport {
       }
     }
   }
+
+  /**
+   * Decode an ArrayBuffer binary WebSocket frame and dispatch it synchronously.
+   *
+   * Binary frame layout (little-endian header, utf-8 payload JSON):
+   *   u8   magic        = 0x4F ('O')
+   *   u8   version      = 1
+   *   u8   frame_type   = 1 (terminal_frame envelope)
+   *   u8   reserved     = 0
+   *   u32  sequence     (little-endian)
+   *   u16  partition_len (little-endian)
+   *   u8[] partition    (utf-8)
+   *   u32  payload_len  (little-endian)
+   *   u8[] payload      (utf-8 JSON of the envelope minus the binary header)
+   *
+   * The binary header carries the cursor sequence and partition so the client
+   * can enforce monotonic ordering without parsing the full JSON payload first.
+   */
+  private dispatchBinaryFrame(buffer: ArrayBuffer): void {
+  try {
+    const envelope = decodeBinaryFrame(buffer);
+    if (envelope) {
+      this.dispatch(envelope);
+    }
+  } catch {
+    // Skip malformed binary frames; the stream stays connected.
+  }
+}
+
+/** Decode a Blob binary frame (async ArrayBuffer conversion) and dispatch it. */
+  private async handleBlobFrame(data: Blob): Promise<void> {
+  try {
+    const buffer = await data.arrayBuffer();
+    const envelope = decodeBinaryFrame(buffer);
+    if (envelope) {
+      this.dispatch(envelope);
+    }
+  } catch {
+    // Skip malformed binary frames; the stream stays connected.
+  }
+}
 
   private scheduleReconnect(): void {
     if (this.isClosed || this.isReconnecting) return;
@@ -1393,4 +1465,133 @@ export class TransportFactory {
       },
     ];
   }
+}
+
+/**
+ * Create a transport from a connection profile and advertised capabilities.
+ *
+ * Profile selection is configuration- and capability-driven: the profile kind
+ * contributes the base URL, preferred transport, auth token, and
+ * probe-on-connect behavior, while the advertised capabilities decide whether
+ * optional features (for example binary WebSocket frames) are enabled. There
+ * are no per-profile protocol forks — every profile resolves to one of the
+ * shared transport implementations through `TransportFactory`.
+ */
+export async function createTransportForProfile(
+  profile: ConnectionProfile,
+  options: {
+    authToken?: string;
+    capabilities?: GatewayCapabilities;
+  } = {},
+): Promise<GatewayTransport> {
+  const config: GatewayTransportConfig = {
+    baseUri: profile.gatewayUrl,
+    authToken: options.authToken,
+    transport: profile.transport,
+    capabilities: options.capabilities,
+  };
+  return TransportFactory.create(config, options.capabilities);
+}
+
+// ─── Binary WebSocket frame codec ──────────────────────────────────────────
+//
+// Binary frames carry high-volume terminal/log stream payloads when the
+// gateway advertises binary support. The codec is shared between the
+// WebSocketTransport decoder and tests so the wire format is exercised in
+// both directions. Text JSON envelopes remain the default for control and
+// event streams; binary is only used where the gateway advertises it.
+
+const BINARY_FRAME_MAGIC = 0x4f;
+const BINARY_FRAME_VERSION = 1;
+const BINARY_FRAME_TYPE_TERMINAL = 1;
+
+/**
+ * Return true when the advertised gateway capabilities include binary frame
+ * support for a WebSocket transport. Binary frames are opt-in per gateway so
+ * the client never forks its protocol based on profile.
+ */
+export function binaryFramesAdvertised(
+  capabilities?: GatewayCapabilities,
+): boolean {
+  if (!capabilities) return false;
+  return capabilities.transports.some(
+    (t) =>
+      (t.transport === "loopback_websocket" || t.transport === "websocket") &&
+      (t.modes.includes("binary") ||
+        t.supported_encodings.includes("binary") ||
+        t.supported_encodings.includes("base64")),
+  );
+}
+
+/** Encode a GatewayEnvelope into a binary WebSocket frame (for tests/interop). */
+export function encodeBinaryFrame(envelope: GatewayEnvelope): ArrayBuffer {
+  const partitionBytes = new TextEncoder().encode(envelope.cursor.partition);
+  const payloadJson = JSON.stringify({
+    ...envelope,
+    cursor: undefined,
+  });
+  const payloadBytes = new TextEncoder().encode(payloadJson);
+
+  const headerLen = 4 + 4 + 2 + partitionBytes.length + 4;
+  const buffer = new ArrayBuffer(headerLen + payloadBytes.length);
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+
+  let offset = 0;
+  view.setUint8(offset, BINARY_FRAME_MAGIC); offset += 1;
+  view.setUint8(offset, BINARY_FRAME_VERSION); offset += 1;
+  view.setUint8(offset, BINARY_FRAME_TYPE_TERMINAL); offset += 1;
+  view.setUint8(offset, 0); offset += 1; // reserved
+  view.setUint32(offset, envelope.cursor.sequence, true); offset += 4;
+  view.setUint16(offset, partitionBytes.length, true); offset += 2;
+  bytes.set(partitionBytes, offset); offset += partitionBytes.length;
+  view.setUint32(offset, payloadBytes.length, true); offset += 4;
+  bytes.set(payloadBytes, offset);
+
+  return buffer;
+}
+
+/** Decode a binary WebSocket frame into a GatewayEnvelope, or null if invalid. */
+export function decodeBinaryFrame(buffer: ArrayBuffer): GatewayEnvelope | null {
+  if (buffer.byteLength < 4 + 4 + 2) return null;
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+
+  let offset = 0;
+  const magic = view.getUint8(offset); offset += 1;
+  const version = view.getUint8(offset); offset += 1;
+  const frameType = view.getUint8(offset); offset += 1;
+  view.getUint8(offset); offset += 1; // reserved
+
+  if (magic !== BINARY_FRAME_MAGIC || version !== BINARY_FRAME_VERSION) {
+    return null;
+  }
+  if (frameType !== BINARY_FRAME_TYPE_TERMINAL) {
+    return null;
+  }
+
+  const sequence = view.getUint32(offset, true); offset += 4;
+  const partitionLen = view.getUint16(offset, true); offset += 2;
+  if (offset + partitionLen + 4 > buffer.byteLength) return null;
+  const partition = new TextDecoder().decode(
+    bytes.subarray(offset, offset + partitionLen),
+  );
+  offset += partitionLen;
+  const payloadLen = view.getUint32(offset, true); offset += 4;
+  if (offset + payloadLen > buffer.byteLength) return null;
+  const payloadJson = new TextDecoder().decode(
+    bytes.subarray(offset, offset + payloadLen),
+  );
+
+  let payload: Record<string, unknown>;
+  try {
+    payload = JSON.parse(payloadJson) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  return {
+    ...(payload as Omit<GatewayEnvelope, "cursor">),
+    cursor: { sequence, partition },
+  } as GatewayEnvelope;
 }
