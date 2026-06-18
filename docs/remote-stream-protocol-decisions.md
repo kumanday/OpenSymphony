@@ -116,7 +116,10 @@ already exists in `TransportProfile`. The evaluation:
   request/notification (defense in depth), mirroring the bearer-token auth used
   on HTTP. Auth must be checked on every message, not just connection open.
 - RBAC checks are out of scope for this ticket (hosted RBAC middleware is a
-  separate concern) but must be enforceable per JSON-RPC method.
+  separate concern) but must be enforceable per JSON-RPC method. This is tracked
+  as a follow-up issue ([COE-472](https://linear.app/trilogy-ai-coe/issue/COE-472/hosted-gateway-rbac-enforcement-per-requestmethod),
+  blocked by this ticket) so the auth-every-message requirement does not become
+  an implicit security gap once hosted JSON-RPC is adopted.
 
 ### Replay semantics
 - If selected, JSON-RPC **must still use** OpenSymphony event cursors,

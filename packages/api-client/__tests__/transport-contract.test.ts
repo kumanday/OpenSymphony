@@ -720,6 +720,46 @@ describe("WebSocketTransport", () => {
     await expect(pendingNext).resolves.toMatchObject({ done: true });
   });
 
+  it("resumes from the last applied cursor on an unplanned reconnect", async () => {
+    jest.useFakeTimers();
+    const transport = new WebSocketTransport({
+      baseUri: "http://localhost:8080",
+    });
+    const events = transport.events()[Symbol.asyncIterator]();
+    const pendingNext = events.next();
+    await flushAsyncWork();
+    FakeWebSocket.instances[0].open();
+    await flushAsyncWork();
+
+    // Deliver events so the transport tracks the last applied cursor (seq 3).
+    // dispatch() updates lastAppliedCursor as each envelope is emitted,
+    // independent of generator draining. Flush enough microtasks to clear the
+    // serialized message queue for all three frames.
+    for (const seq of [1, 2, 3]) {
+      FakeWebSocket.instances[0].emit(`__event__ ${JSON.stringify(createTestEnvelope(seq, "run-1"))}`);
+    }
+    await flushAsyncWork(20);
+    void pendingNext;
+
+    // Unplanned disconnect: the established socket closes.
+    FakeWebSocket.instances[0].close();
+    expect((transport as unknown as { isReconnecting: boolean }).isReconnecting).toBe(true);
+
+    // Advance fake timers past the reconnect backoff so the reconnect fires.
+    jest.advanceTimersByTime(5000);
+    await flushAsyncWork(20);
+
+    // A new socket is created for the reconnect and its URL must carry the
+    // last applied cursor so the server resumes from seq 3, not the start.
+    expect(FakeWebSocket.instances.length).toBeGreaterThanOrEqual(2);
+    const reconnectSocket = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
+    expect(reconnectSocket.url).toContain("cursor_sequence=3");
+    expect(reconnectSocket.url).toContain("cursor_partition=run%3Arun-1");
+
+    await transport.close();
+    await events.return?.();
+  });
+
   it("does not enable binary frames when the gateway does not advertise support", () => {
     const transport = new WebSocketTransport({
       baseUri: "http://localhost:8080",

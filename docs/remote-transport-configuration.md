@@ -97,6 +97,20 @@ prepare the gateway so the browser can reach it:
   allowlist), and handle preflight (`OPTIONS`) for mutating methods. Credentials
   (`Authorization`) require `Access-Control-Allow-Credentials: true` and a
   non-wildcard origin.
+  - **Origin allowlist source**: the gateway obtains the allowed origin list
+    from its own configuration (an explicit `allowed_origins` allowlist keyed to
+    the deployment profile), never from the request. Operators configure it per
+    profile (local orchestrator, external gateway, hosted gateway) before
+    separate-deployment production use.
+  - **Wildcard-with-credentials failure**: if the gateway misconfiguration
+    returns `Access-Control-Allow-Origin: *` together with
+    `Access-Control-Allow-Credentials: true`, browsers reject the credentialed
+    response (the fetch fails with a CORS error and no body is exposed). The
+    client surfaces this as a standard fetch failure: capability discovery /
+    reads return a rejected promise (transport error) and mutations fail before
+    the action is accepted. Operators must resolve the misconfiguration by
+    replacing `*` with the explicit web client origin; the client does not retry
+    past a CORS rejection beyond the normal reconnect/backoff policy.
 - **WebSocket**: the browser enforces origin checks on the WS handshake. The
   gateway should validate the `Origin` header against an allowlist and reject
   cross-origin WS connections that are not expected. Unlike HTTP, WS does not
@@ -126,7 +140,8 @@ binary frames only then.
 
 ## Out of scope (tracked separately)
 
-- Hosted RBAC middleware.
+- Hosted RBAC middleware (tracked in
+  [COE-472](https://linear.app/trilogy-ai-coe/issue/COE-472/hosted-gateway-rbac-enforcement-per-requestmethod)).
 - Desktop local native transport (in-process/native IPC).
 - Final production selection of Codex app-server WebSocket behavior.
 - Gateway-side CORS/origin enforcement configuration.

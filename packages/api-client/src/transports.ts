@@ -545,6 +545,12 @@ export class WebSocketTransport implements GatewayTransport {
   private isClosed = false;
   private connecting?: Promise<void>;
   private lastEventCursor?: { sequence: number; partition: string };
+  /**
+   * The cursor of the most recently dispatched event envelope. Used as the
+   * resume point for an unplanned reconnect so the transport resumes from the
+   * last applied cursor instead of replaying from the beginning.
+   */
+  private lastAppliedCursor?: { sequence: number; partition: string };
   /** Serialized message-handling chain to preserve frame ordering. */
   private messageQueue: Promise<void> = Promise.resolve();
 
@@ -827,6 +833,18 @@ export class WebSocketTransport implements GatewayTransport {
   }
 
   private dispatch(envelope: GatewayEnvelope): void {
+    // Track the most recently dispatched event cursor as the resume point for
+    // an unplanned reconnect. Take the highest sequence seen per partition so
+    // out-of-order delivery does not regress the resume cursor.
+    const cursor = envelope.cursor;
+    const prev = this.lastAppliedCursor;
+    if (
+      !prev ||
+      prev.partition !== cursor.partition ||
+      cursor.sequence > prev.sequence
+    ) {
+      this.lastAppliedCursor = { sequence: cursor.sequence, partition: cursor.partition };
+    }
     this.eventSubscribers.forEach((cb) => cb(envelope));
     if (envelope.entity_ref.kind !== "terminal_session") {
       return;
@@ -951,7 +969,9 @@ export class WebSocketTransport implements GatewayTransport {
       if (this.isClosed) {
         return;
       }
-      this.ensureConnected().catch(() => {
+      // Resume from the last applied cursor so an unplanned reconnect does not
+      // replay from the beginning; this preserves the cursor-replay contract.
+      this.ensureConnected(this.lastAppliedCursor).catch(() => {
         // Reconnect will be scheduled again on close
       });
     }, delay);
@@ -959,6 +979,11 @@ export class WebSocketTransport implements GatewayTransport {
 
   async *events(fromCursor?: { sequence: number; partition: string }): AsyncIterable<GatewayEnvelope> {
     await this.ensureConnected(fromCursor);
+    // Seed the resume cursor from the requested subscription point so an
+    // unplanned reconnect before any event arrives still resumes correctly.
+    if (fromCursor && !this.lastAppliedCursor) {
+      this.lastAppliedCursor = { ...fromCursor };
+    }
 
     // Create a promise-based queue for this subscriber
     const queue: GatewayEnvelope[] = [];
@@ -1065,6 +1090,8 @@ export class WebSocketTransport implements GatewayTransport {
     this.connecting = undefined;
     this.eventSubscribers.clear();
     this.terminalSubscribers.clear();
+    this.lastEventCursor = undefined;
+    this.lastAppliedCursor = undefined;
   }
 }
 
