@@ -22,7 +22,7 @@ import type {
   GatewayReader,
   OpenSymphonyAppHandle,
 } from "@opensymphony/ui-core";
-import { createDesktopProfileController } from "../src/index";
+import { createDesktopProfileController, createDesktopTransport } from "../src/index";
 
 interface TauriInvokeCall {
   command: string;
@@ -39,10 +39,9 @@ describe("desktop app shell render", () => {
     document.body.innerHTML = `<div id="root"></div>`;
     const root = document.getElementById("root") as HTMLElement;
 
-    // Fake reader that always rejects so the app shell falls back to its
-    // built-in alpha-fixture flow. We are intentionally exercising the
-    // fallback render path because that's what users will see when the
-    // gateway daemon is offline during cold launch.
+    // Fake reader that always rejects so the app shell renders the real
+    // offline/error state users see when the gateway daemon is unavailable
+    // during cold launch.
     const reader: GatewayReader = {
       baseUri: "http://127.0.0.1:2468",
       async health() {
@@ -118,5 +117,69 @@ describe("desktop app shell render", () => {
       },
     ]);
     expect(profile.gatewayUrl).toBe("http://127.0.0.1:2468");
+  });
+
+  it("uses native Tauri commands for desktop gateway reads", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          switch (command) {
+            case "gateway_capabilities":
+              return {
+                schema_version: { major: 1, minor: 0, patch: 0 },
+                gateway_version: "test",
+                supported_api_versions: ["1.0.0"],
+                transports: [],
+                features: [],
+                auth_modes: [],
+              };
+            case "dashboard_snapshot":
+              return { projects: [] };
+            case "task_graph":
+              return { project_id: args?.projectId, nodes: [], edges: [], root_ids: [] };
+            case "run_detail":
+              return { run_id: args?.runId, status: "running" };
+            case "run_events":
+              return { run_id: args?.runId, events: [] };
+            case "run_files":
+              return { files: [{ path: "src/config.ts", status: "modified" }] };
+            case "run_diffs":
+              return { file_path: args?.filePath, hunks: [] };
+            case "run_validation":
+              return { status: "passed", checks: [] };
+            case "run_approvals":
+              return { approvals: [] };
+            default:
+              throw new Error(`unexpected command ${command}`);
+          }
+        },
+      },
+    };
+
+    const transport = createDesktopTransport("http://127.0.0.1:2468");
+
+    await transport.health();
+    await transport.snapshot();
+    await transport.taskGraph("opensymphony");
+    await transport.runDetail("run-1");
+    await transport.runEvents("run-1", { page_size: 25 });
+    await transport.runFiles("run-1");
+    await transport.runDiffs("run-1", "src/config.ts");
+    await transport.runValidation("run-1");
+    await transport.runApprovals("run-1");
+
+    expect(calls).toEqual([
+      { command: "gateway_capabilities", args: {} },
+      { command: "dashboard_snapshot", args: {} },
+      { command: "task_graph", args: { projectId: "opensymphony" } },
+      { command: "run_detail", args: { runId: "run-1" } },
+      { command: "run_events", args: { runId: "run-1", cursor: null, pageSize: 25 } },
+      { command: "run_files", args: { runId: "run-1" } },
+      { command: "run_diffs", args: { runId: "run-1", filePath: "src/config.ts" } },
+      { command: "run_validation", args: { runId: "run-1" } },
+      { command: "run_approvals", args: { runId: "run-1" } },
+    ]);
   });
 });

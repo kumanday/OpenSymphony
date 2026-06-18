@@ -1,6 +1,5 @@
 import {
   HttpGatewayTransport,
-  TransportFactory,
   type ActionCapableTransport,
   type ActionDispatch,
   type ActionReceipt,
@@ -56,26 +55,35 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
   }
 
   health(): ReturnType<GatewayTransport["health"]> {
-    return this.inner.health();
+    return this.invokeOrHttp("gateway_capabilities", {}, () => this.inner.health());
   }
 
   snapshot(): ReturnType<GatewayTransport["snapshot"]> {
-    return this.inner.snapshot();
+    return this.invokeOrHttp("dashboard_snapshot", {}, () => this.inner.snapshot());
   }
 
   taskGraph(projectId: string): ReturnType<GatewayTransport["taskGraph"]> {
-    return this.inner.taskGraph(projectId);
+    return this.invokeOrHttp("task_graph", { projectId }, () => this.inner.taskGraph(projectId));
   }
 
   runDetail(runId: string): ReturnType<GatewayTransport["runDetail"]> {
-    return this.inner.runDetail(runId);
+    return this.invokeOrHttp("run_detail", { runId }, () => this.inner.runDetail(runId));
   }
 
   runEvents(
     runId: string,
     cursor?: Parameters<GatewayTransport["runEvents"]>[1],
   ): ReturnType<GatewayTransport["runEvents"]> {
-    return this.inner.runEvents(runId, cursor);
+    const parsedCursor = cursor?.page_token ? Number(cursor.page_token) : null;
+    return this.invokeOrHttp(
+      "run_events",
+      {
+        runId,
+        cursor: Number.isFinite(parsedCursor) ? parsedCursor : null,
+        pageSize: cursor?.page_size ?? null,
+      },
+      () => this.inner.runEvents(runId, cursor),
+    );
   }
 
   runTimeline(runId: string): ReturnType<GatewayTransport["runTimeline"]> {
@@ -115,19 +123,29 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
   }
 
   runFiles(runId: string): ReturnType<GatewayTransport["runFiles"]> {
-    return this.inner.runFiles(runId);
+    return this.invokeOrHttp<{ files?: Awaited<ReturnType<GatewayTransport["runFiles"]>> }>(
+      "run_files",
+      { runId },
+      async () => ({ files: await this.inner.runFiles(runId) }),
+    ).then((response) => response.files ?? []);
   }
 
   runDiffs(runId: string, filePath?: string): ReturnType<GatewayTransport["runDiffs"]> {
-    return this.inner.runDiffs(runId, filePath);
+    return this.invokeOrHttp("run_diffs", { runId, filePath: filePath ?? null }, () =>
+      this.inner.runDiffs(runId, filePath),
+    );
   }
 
   runApprovals(runId: string): ReturnType<GatewayTransport["runApprovals"]> {
-    return this.inner.runApprovals(runId);
+    return this.invokeOrHttp<{ approvals?: Awaited<ReturnType<GatewayTransport["runApprovals"]>> }>(
+      "run_approvals",
+      { runId },
+      async () => ({ approvals: await this.inner.runApprovals(runId) }),
+    ).then((response) => response.approvals ?? []);
   }
 
   runValidation(runId: string): ReturnType<GatewayTransport["runValidation"]> {
-    return this.inner.runValidation(runId);
+    return this.invokeOrHttp("run_validation", { runId }, () => this.inner.runValidation(runId));
   }
 
   events(
@@ -201,6 +219,18 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
         auth_token: null,
       },
     }).catch(() => undefined);
+  }
+
+  private async invokeOrHttp<T>(
+    command: string,
+    args: Record<string, unknown>,
+    fallback: () => Promise<T>,
+  ): Promise<T> {
+    const invoke = getTauriInvoke();
+    if (!invoke) {
+      return fallback();
+    }
+    return invoke<T>(command, args);
   }
 }
 
@@ -341,22 +371,9 @@ function isManagedKind(kind: string): boolean {
 
 async function createTransportForGateway(gatewayUrl: string): Promise<TauriTransportAdapter> {
   const base = gatewayUrl || DEFAULT_GATEWAY_URL;
-  const fallback = () => createDesktopTransport(base);
-  const capabilities = await new HttpGatewayTransport({
-    baseUri: base,
-    transport: "loopback_http",
-  }).health().catch(() => undefined);
-  if (!capabilities) {
-    return fallback();
-  }
-  const transport = await TransportFactory.create(
-    { baseUri: base, transport: "loopback_http" },
-    capabilities,
-  ).catch(() => undefined);
-  if (!transport) {
-    return fallback();
-  }
-  return new DesktopTransportAdapter(transport, base);
+  const transport = createDesktopTransport(base);
+  await transport.attach();
+  return transport;
 }
 
 const root = document.getElementById("root");

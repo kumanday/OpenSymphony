@@ -9,6 +9,8 @@ import type {
   ApprovalRequest,
   RunAction,
   RunDetail,
+  RunEvent,
+  RunEventPage,
   RunPhase,
   RunStreamLiveness,
   RunValidationSummary,
@@ -40,7 +42,6 @@ import {
   renderCommentEditor,
   renderCreateDialog,
   renderDependencyEditor,
-  renderSelectedNodeDetail,
   renderTaskGraphNode,
   renderTaskGraphToolbar,
   type CommentEditState,
@@ -92,6 +93,7 @@ export interface GatewayReader {
   snapshot(): Promise<DashboardSnapshot>;
   taskGraph(projectId: string): Promise<TaskGraphSnapshot>;
   runDetail(runId: string): Promise<RunDetail>;
+  runEvents?(runId: string): Promise<RunEventPage>;
   runFiles?(runId: string): Promise<ChangedFileEntry[]>;
   runDiffs?(runId: string, filePath?: string): Promise<FileDiffPage>;
   runValidation?(runId: string): Promise<RunValidationSummary>;
@@ -129,7 +131,7 @@ export interface OpenSymphonyAppHandle {
   destroy(): Promise<void>;
 }
 
-type ConnectionMode = "connecting" | "connected" | "fixture" | "failed";
+type ConnectionMode = "connecting" | "connected" | "failed";
 
 interface AppState {
   connectionMode: ConnectionMode;
@@ -143,6 +145,7 @@ interface AppState {
   runFiles: ChangedFileEntry[] | null;
   selectedDiffPath: string | null;
   runDiff: FileDiffPage | null;
+  runEvents: RunEvent[] | null;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
   lastActionReceipt: ActionReceipt | null;
@@ -210,6 +213,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       runFiles: null,
       selectedDiffPath: null,
       runDiff: null,
+      runEvents: null,
       runValidation: null,
       runApprovals: null,
       lastActionReceipt: null,
@@ -235,45 +239,53 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async loadRunDetails(runId: string): Promise<void> {
-    if (typeof this.transport.runFiles !== "function") {
-      this.state.runFiles = alphaRunFiles(runId);
-      this.state.runValidation = alphaRunValidation(runId);
-      this.state.runApprovals = alphaRunApprovals(runId);
-      this.state.selectedDiffPath = this.state.runFiles[0]?.path ?? null;
-      this.state.runDiff = this.state.selectedDiffPath
-        ? alphaRunDiff(runId, this.state.selectedDiffPath)
-        : null;
-      return;
-    }
     this.state.runFiles = null;
     this.state.runDiff = null;
+    this.state.runEvents = null;
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
     try {
-      this.state.runFiles = await this.transport.runFiles(runId);
-    } catch {
-      this.state.runFiles = alphaRunFiles(runId);
+      this.state.runFiles = typeof this.transport.runFiles === "function"
+        ? await this.transport.runFiles(runId)
+        : [];
+    } catch (error) {
+      this.state.runFiles = [];
+      this.state.connectionMessage = `Changed files unavailable: ${errorMessage(error)}`;
     }
     this.state.selectedDiffPath = this.state.runFiles[0]?.path ?? null;
     try {
       this.state.runDiff = this.state.selectedDiffPath
-        ? await this.transport.runDiffs!(runId, this.state.selectedDiffPath)
+        && typeof this.transport.runDiffs === "function"
+        ? await this.transport.runDiffs(runId, this.state.selectedDiffPath)
         : null;
-    } catch {
-      this.state.runDiff = this.state.selectedDiffPath
-        ? alphaRunDiff(runId, this.state.selectedDiffPath)
-        : null;
+    } catch (error) {
+      this.state.runDiff = null;
+      this.state.connectionMessage = `Diff unavailable: ${errorMessage(error)}`;
     }
     try {
-      this.state.runValidation = await this.transport.runValidation!(runId);
-    } catch {
-      this.state.runValidation = alphaRunValidation(runId);
+      this.state.runEvents = typeof this.transport.runEvents === "function"
+        ? (await this.transport.runEvents(runId)).events
+        : [];
+    } catch (error) {
+      this.state.runEvents = [];
+      this.state.connectionMessage = `Conversation activity unavailable: ${errorMessage(error)}`;
     }
     try {
-      this.state.runApprovals = await this.transport.runApprovals!(runId);
-    } catch {
-      this.state.runApprovals = alphaRunApprovals(runId);
+      this.state.runValidation = typeof this.transport.runValidation === "function"
+        ? await this.transport.runValidation(runId)
+        : null;
+    } catch (error) {
+      this.state.runValidation = null;
+      this.state.connectionMessage = `Validation summary unavailable: ${errorMessage(error)}`;
+    }
+    try {
+      this.state.runApprovals = typeof this.transport.runApprovals === "function"
+        ? await this.transport.runApprovals(runId)
+        : [];
+    } catch (error) {
+      this.state.runApprovals = [];
+      this.state.connectionMessage = `Approvals unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -336,20 +348,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         project_id: this.state.selectedProjectId,
       };
     } catch (error) {
-      this.state.capabilities = alphaCapabilities();
-      this.state.snapshot = alphaSnapshot();
-      this.state.taskGraph = alphaTaskGraph();
-      this.state.selectedProjectId = this.state.snapshot.projects[0]?.project_id ?? "opensymphony-local";
-      this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
-      this.state.runDetail = alphaRunDetail("desktop-alpha");
-      await this.loadRunDetails("desktop-alpha");
-      this.state.connectionMode = "fixture";
-      this.state.connectionMessage = `Gateway unavailable, showing desktop-alpha fixture data: ${errorMessage(error)}`;
-      this.loadPlanningWorkspace(this.state.selectedProjectId);
-      this.state.planningWorkspace = {
-        ...this.state.planningWorkspace,
-        project_id: this.state.selectedProjectId,
-      };
+      this.state.capabilities = null;
+      this.state.snapshot = null;
+      this.state.taskGraph = null;
+      this.state.selectedProjectId = null;
+      this.state.selectedNodeId = null;
+      this.state.runDetail = null;
+      this.state.runFiles = null;
+      this.state.runDiff = null;
+      this.state.runEvents = null;
+      this.state.runValidation = null;
+      this.state.runApprovals = null;
+      this.state.connectionMode = "failed";
+      this.state.connectionMessage = `Gateway unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -365,8 +376,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async loadTaskGraph(projectId: string | null): Promise<void> {
     if (!projectId) {
-      this.state.taskGraph = alphaTaskGraph();
-      this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
+      this.state.taskGraph = null;
+      this.state.selectedNodeId = null;
       return;
     }
     try {
@@ -377,15 +388,21 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
+      this.state.runEvents = null;
       this.state.runValidation = null;
       this.state.runApprovals = null;
       this.state.selectedDiffPath = null;
       await this.loadRunOverlays(taskGraph);
-    } catch {
-      this.state.taskGraph = alphaTaskGraph(projectId);
-      this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
-      this.state.runDetail = alphaRunDetail("desktop-alpha");
-      await this.loadRunDetails("desktop-alpha");
+    } catch (error) {
+      this.state.taskGraph = null;
+      this.state.selectedNodeId = null;
+      this.state.runDetail = null;
+      this.state.runFiles = null;
+      this.state.runDiff = null;
+      this.state.runEvents = null;
+      this.state.runValidation = null;
+      this.state.runApprovals = null;
+      this.state.connectionMessage = `Task graph unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -417,8 +434,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       this.state.runDetail = await this.transport.runDetail(runId);
       this.state.runOverlays.set(runId, this.state.runDetail);
-    } catch {
-      this.state.runDetail = alphaRunDetail(runId, node.identifier);
+    } catch (error) {
+      this.state.runDetail = null;
+      this.state.runFiles = null;
+      this.state.runDiff = null;
+      this.state.runEvents = null;
+      this.state.runValidation = null;
+      this.state.runApprovals = null;
+      this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
+      this.state.loading = false;
+      this.render();
+      return;
     }
     await this.loadRunDetails(runId);
     this.state.loading = false;
@@ -431,11 +457,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (runId && typeof this.transport.runDiffs === "function") {
       try {
         this.state.runDiff = await this.transport.runDiffs!(runId, path);
-      } catch {
-        this.state.runDiff = alphaRunDiff(runId, path);
+      } catch (error) {
+        this.state.runDiff = null;
+        this.state.connectionMessage = `Diff unavailable: ${errorMessage(error)}`;
       }
     } else if (runId) {
-      this.state.runDiff = alphaRunDiff(runId, path);
+      this.state.runDiff = null;
+      this.state.connectionMessage = "Diff endpoint unavailable for the active transport";
     }
     this.render();
   }
@@ -458,16 +486,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       switch (action) {
         case "cancel":
-          receipt = await (transport.cancelRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.cancelRun?.(runId) ?? unsupportedAction(action));
           break;
         case "retry":
-          receipt = await (transport.retryRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.retryRun?.(runId) ?? unsupportedAction(action));
           break;
         case "rehydrate":
-          receipt = await (transport.rehydrateRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.rehydrateRun?.(runId) ?? unsupportedAction(action));
           break;
         case "resume":
-          receipt = await (transport.resumeRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.resumeRun?.(runId) ?? unsupportedAction(action));
           break;
         case "detach":
           receipt = await (transport.dispatchAction?.({
@@ -476,19 +504,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             action_kind: "transition_issue",
             target_entity: { entity_kind: "run", entity_id: runId },
             payload: { intent: "detach" },
-          }) ?? fallbackAction(runId, action));
+          }) ?? unsupportedAction(action));
           break;
         case "comment":
-          receipt = await (transport.commentRun?.(runId, "Operator comment") ?? fallbackAction(runId, action));
+          receipt = await (transport.commentRun?.(runId, "Operator comment") ?? unsupportedAction(action));
           break;
         case "create_followup":
-          receipt = await (transport.createFollowup?.(runId, { title: "Follow-up from run" }) ?? fallbackAction(runId, action));
+          receipt = await (transport.createFollowup?.(runId, { title: "Follow-up from run" }) ?? unsupportedAction(action));
           break;
         case "open_workspace":
-          receipt = await (transport.openWorkspace?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.openWorkspace?.(runId) ?? unsupportedAction(action));
           break;
         case "debug":
-          receipt = await (transport.debugRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.debugRun?.(runId) ?? unsupportedAction(action));
           break;
       }
       if (!receipt) return;
@@ -524,7 +552,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     };
     try {
       const receipt = await (transport.approvalDecision?.(approvalId, decision, explanation) ??
-        fallbackAction(approvalId, "approval_decision"));
+        unsupportedAction("approval_decision"));
       this.state.lastActionReceipt = receipt;
       this.state.auditTrail.push({
         timestamp: new Date().toISOString(),
@@ -622,9 +650,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const title = this.options.title ?? "OpenSymphony";
-    const selectedNode = this.state.taskGraph?.nodes.find(
-      (node) => node.node_id === this.state.selectedNodeId,
-    );
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
       <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}">
@@ -643,20 +668,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </header>
         <section class="os-grid">
           ${this.renderProfiles()}
-          ${this.renderViewContent(selectedNode)}
+          ${this.renderViewContent()}
         </section>
       </main>
     `;
     this.bindEvents();
   }
 
-  private renderViewContent(selectedNode: TaskGraphNode | undefined): string {
+  private renderViewContent(): string {
     if (this.state.activeView === "planning") {
       return renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit);
     }
     return `
       ${this.renderDashboard()}
-      ${this.renderTaskGraph(selectedNode)}
+      ${this.renderTaskGraph()}
       ${this.renderRunDetail()}
     `;
   }
@@ -745,7 +770,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     );
   }
 
-  private renderTaskGraph(selectedNode: TaskGraphNode | undefined): string {
+  private renderTaskGraph(): string {
     const taskGraph = this.state.taskGraph;
     if (!taskGraph) {
       return panel("Task Graph", `<div class="os-empty">No task graph loaded</div>`);
@@ -763,7 +788,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       getOverlay(node),
     )).join("");
 
-    const selectedStrip = selectedNode ? renderSelectedNodeDetail(selectedNode) : "";
     const toolbar = renderTaskGraphToolbar();
     const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
     const pendingBanner = this.state.pendingMutations.size > 0
@@ -791,7 +815,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     return panel(
       "Task Graph",
-      `${toolbar}${filters}${pendingBanner}${selectedStrip}<div class="os-node-list">${nodes || `<div class="os-empty">No tasks match the current filters</div>`}</div>${actions}${createDialog}${dependencyDialog}${commentDialog}`,
+      `${toolbar}${filters}${pendingBanner}<div class="os-node-list">${nodes || `<div class="os-empty">No tasks match the current filters</div>`}</div>${actions}${createDialog}${dependencyDialog}${commentDialog}`,
     );
   }
 
@@ -821,6 +845,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           },
         })
       : "";
+    const activity = renderRunActivity(this.state.runEvents);
     const receipt = this.state.lastActionReceipt
       ? renderActionReceipt(this.state.lastActionReceipt)
       : "";
@@ -853,6 +878,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         ${receipt}
         <div class="os-run-panels">
           <div class="os-diff-panel">${files}${diff}</div>
+          <div class="os-activity-panel">${activity}</div>
           <div class="os-validation-panel">${validation}</div>
           <div class="os-approval-panel">${approvals}</div>
         </div>
@@ -889,8 +915,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           (candidate) => candidate.node_id === button.dataset.nodeId,
         );
         if (node) {
-          this.state.selectedNodeId = node.node_id;
-          this.render();
+          void this.openRun(node);
         }
       });
     });
@@ -1698,15 +1723,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 }
 
-function fallbackAction(entityId: string, action: string): ActionReceipt {
-  return {
-    schema_version: schemaVersion,
-    action_id: `${action}-${entityId}-fixture`,
-    correlation_id: `${action}-${entityId}`,
-    status: "accepted",
-    expected_followup: ["action_completion"],
-    issued_at: new Date().toISOString(),
-  };
+function unsupportedAction(action: string): never {
+  throw new Error(`${action} is not supported by the active gateway transport`);
 }
 
 function panel(title: string, body: string): string {
@@ -1716,6 +1734,38 @@ function panel(title: string, body: string): string {
       ${body}
     </section>
   `;
+}
+
+function renderRunActivity(events: RunEvent[] | null): string {
+  if (events === null) {
+    return `<div class="os-run-activity os-empty" data-testid="run-activity">Loading conversation activity</div>`;
+  }
+  if (events.length === 0) {
+    return `<div class="os-run-activity os-empty" data-testid="run-activity">No recent activity</div>`;
+  }
+  const items = [...events]
+    .reverse()
+    .map((event) => `
+      <div class="os-activity-entry" data-testid="run-activity-entry">
+        <span>${escapeHtml(formatEventTime(event.happened_at))}</span>
+        <strong>${escapeHtml(event.kind)}</strong>
+        <p>${escapeHtml(event.summary)}</p>
+      </div>
+    `)
+    .join("");
+  return `<div class="os-run-activity" data-testid="run-activity">${items}</div>`;
+}
+
+function formatEventTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 const editableProfileKindOptions: Array<{
@@ -1761,244 +1811,6 @@ function defaultUiProfiles(gatewayUrl: string): ConnectionProfile[] {
   ];
 }
 
-function alphaCapabilities(): GatewayCapabilities {
-  return {
-    schema_version: schemaVersion,
-    gateway_version: "desktop-alpha-fixture",
-    supported_api_versions: ["1.0.0"],
-    transports: [
-      {
-        transport: "loopback_http",
-        modes: ["json"],
-        supported_encodings: ["utf-8"],
-        bidirectional: false,
-      },
-    ],
-    features: [
-      { feature: "task_graph", available: true, requires_auth: false },
-      { feature: "terminal_stream", available: false, requires_auth: false },
-    ],
-    auth_modes: ["none"],
-    max_event_page_size: 1000,
-    max_terminal_frame_batch: 500,
-  };
-}
-
-function alphaSnapshot(): DashboardSnapshot {
-  return {
-    schema_version: schemaVersion,
-    generated_at: new Date(1_700_000_000_000).toISOString(),
-    sequence: 1,
-    health: "degraded",
-    metrics: {
-      running_issue_count: 1,
-      retry_queue_depth: 0,
-      total_input_tokens: 12000,
-      total_output_tokens: 6200,
-      total_cache_read_tokens: 1800,
-      total_cost_micros: 0,
-    },
-    projects: [
-      {
-        project_id: "opensymphony-local",
-        name: "OpenSymphony",
-        milestone_count: 1,
-        issue_count: 3,
-        running_count: 1,
-        completed_count: 2,
-        failed_count: 0,
-      },
-    ],
-    recent_events: [
-      {
-        happened_at: new Date(1_700_000_000_000).toISOString(),
-        issue_identifier: "DESKTOP-ALPHA",
-        kind: "client_attached",
-        summary: "Desktop alpha shell mounted",
-      },
-    ],
-  };
-}
-
-function alphaTaskGraph(projectId = "opensymphony-local"): TaskGraphSnapshot {
-  return {
-    schema_version: schemaVersion,
-    project_id: projectId,
-    generated_at: new Date(1_700_000_000_000).toISOString(),
-    root_ids: ["m7"],
-    nodes: [
-      {
-        schema_version: schemaVersion,
-        node_id: "m7",
-        kind: "milestone",
-        identifier: "M7",
-        title: "Shared Client And Desktop Alpha",
-        state: "Backlog",
-        state_category: "backlog",
-        children: ["desktop-alpha", "coe-410"],
-        blocked_by: [],
-        labels: ["desktop"],
-      },
-      {
-        schema_version: schemaVersion,
-        node_id: "desktop-alpha",
-        kind: "issue",
-        identifier: "DESKTOP-ALPHA",
-        title: "Desktop alpha recovery",
-        state: "Backlog",
-        state_category: "backlog",
-        parent_id: "m7",
-        children: [],
-        blocked_by: [],
-        labels: ["desktop", "recovery"],
-      },
-      {
-        schema_version: schemaVersion,
-        node_id: "coe-410",
-        kind: "issue",
-        identifier: "COE-410",
-        title: "Desktop local stream optimization",
-        state: "Done",
-        state_category: "done",
-        parent_id: "m7",
-        children: [],
-        blocked_by: [],
-        labels: ["transport"],
-      },
-    ],
-  };
-}
-
-function alphaRunDetail(runId: string, issueIdentifier = runId): RunDetail {
-  return {
-    schema_version: schemaVersion,
-    run_id: runId,
-    issue_id: issueIdentifier,
-    issue_identifier: issueIdentifier,
-    worker_id: "desktop-alpha",
-    status: "running",
-    lifecycle_state: "running",
-    claimed_at: new Date(1_700_000_000_000).toISOString(),
-    started_at: new Date(1_700_000_030_000).toISOString(),
-    turn_count: 1,
-    max_turns: 8,
-    input_tokens: 12000,
-    output_tokens: 6200,
-    cache_read_tokens: 1800,
-    runtime_seconds: 90,
-    workspace_path: "/tmp/opensymphony/desktop-alpha",
-    allowed_actions: ["cancel", "rehydrate"],
-    liveness: {
-      phase: "quiet",
-      stream: "stale",
-      latest_progress: {
-        sequence: 1,
-        event_id: "fixture-progress-1",
-        happened_at: new Date(1_700_000_060_000).toISOString(),
-        kind: "snapshot_published",
-        summary: "Fixture run detail available",
-      },
-    },
-    safe_actions: {
-      retry: false,
-      cancel: true,
-      rehydrate: true,
-      detach: false,
-    },
-  };
-}
-
-function alphaRunFiles(_runId: string): ChangedFileEntry[] {
-  return [
-    {
-      path: "src/alpha.ts",
-      change_kind: "modified",
-      lines_added: 12,
-      lines_removed: 4,
-      size_bytes: 1024,
-    },
-    {
-      path: "tests/alpha.test.ts",
-      change_kind: "created",
-      lines_added: 42,
-      lines_removed: 0,
-      size_bytes: 800,
-    },
-  ];
-}
-
-function alphaRunDiff(runId: string, filePath: string): FileDiffPage {
-  return {
-    schema_version: schemaVersion,
-    run_id: runId,
-    file_path: filePath,
-    hunks: [
-      {
-        file_path: filePath,
-        header: `@@ -1,5 +1,8 @@`,
-        start_line: 1,
-        old_line_count: 5,
-        new_line_count: 8,
-        lines: [
-          { type: "context", line: "import { helper } from './helper';" },
-          { type: "deletion", line: "export function oldLogic() { return true; }" },
-          { type: "addition", line: "export function newLogic() { return false; }" },
-          { type: "addition", line: "export function newHelper() { return 1; }" },
-          { type: "context", line: "" },
-        ],
-      },
-    ],
-    total_lines_added: 2,
-    total_lines_removed: 1,
-  };
-}
-
-function alphaRunValidation(runId: string): RunValidationSummary {
-  return {
-    schema_version: schemaVersion,
-    run_id: runId,
-    generated_at: new Date().toISOString(),
-    overall_status: "passed",
-    commands: [
-      {
-        command_id: "cmd-1",
-        command: "npm test",
-        status: "passed",
-        exit_code: 0,
-        stdout_summary: "42 tests passed",
-      },
-    ],
-    evidence: [
-      {
-        evidence_id: "ev-1",
-        label: "Test coverage",
-        status: "passed",
-        summary: "Coverage is 87%",
-      },
-    ],
-  };
-}
-
-function alphaRunApprovals(runId: string): ApprovalRequest[] {
-  return [
-    {
-      schema_version: schemaVersion,
-      approval_id: "approval-1",
-      run_id: runId,
-      issue_id: "desktop-alpha",
-      kind: "file_write",
-      title: "Allow writing to src/config.ts",
-      description: "Agent wants to update local config file.",
-      actor: { actor_id: "agent-1", actor_kind: "agent", display_name: "OpenHands Agent" },
-      target_context: { file_path: "src/config.ts", issue_identifier: "DESKTOP-ALPHA", run_id: runId },
-      risk_summary: { level: "medium", reasons: ["modifies tracked config"] },
-      requested_at: new Date().toISOString(),
-      status: "pending",
-      correlation_id: "corr-approval-1",
-    },
-  ];
-}
-
 function statusToPhase(
   status: RunDetail["status"],
   releaseReason?: RunDetail["release_reason"],
@@ -2022,8 +1834,6 @@ function statusLabel(mode: ConnectionMode): string {
   switch (mode) {
     case "connected":
       return "Connected";
-    case "fixture":
-      return "Fixture";
     case "failed":
       return "Failed";
     case "connecting":
@@ -2061,7 +1871,6 @@ function appShellStyles(): string {
     .os-status { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #cad3dd; border-radius: 6px; padding: 7px 10px; background: #f8fafc; font-size: 13px; white-space: nowrap; }
     .os-status span { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
     .os-status-connected span { background: #1f9d55; }
-    .os-status-fixture span { background: #d97706; }
     .os-status-failed span { background: #c2410c; }
     .os-grid { display: grid; grid-template-columns: minmax(260px, 0.75fr) minmax(320px, 1fr) minmax(360px, 1.15fr); gap: 14px; padding: 14px; align-items: start; }
     .os-panel { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 14px; min-width: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
@@ -2084,6 +1893,14 @@ function appShellStyles(): string {
     .os-list-item span, .os-node span, .os-node em { color: #667788; font-size: 12px; font-style: normal; }
     .is-selected { border-color: #39708f; background: #e7f1f5; }
     .os-node-kind { text-transform: uppercase; letter-spacing: 0.08em; }
+    .os-node-state { display: inline-flex; width: fit-content; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
+    .os-node-state-review { background: #fef3c7; color: #92400e; }
+    .os-node-state-blocked, .os-node-state-failed { background: #fee2e2; color: #991b1b; }
+    .os-node-state-running { background: #dcfce7; color: #166534; }
+    .os-node-state-done { background: #dbeafe; color: #1e40af; }
+    .os-node-state-backlog { background: #f1f5f9; color: #475569; }
+    .os-node-state-todo, .os-node-state-idle { background: #e0f2fe; color: #0c4a6e; }
+    .os-node-state-neutral { background: #f8fafc; color: #475569; border: 1px solid #d8dee4; }
     .os-detail-strip, .os-run-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; border: 1px solid #d8dee4; border-radius: 6px; padding: 10px; background: #fbfcfd; }
     .os-detail-strip span, .os-run-head span { color: #667788; font-size: 12px; }
     .os-events { margin: 0; padding-left: 18px; display: grid; gap: 7px; font-size: 13px; }
@@ -2097,6 +1914,11 @@ function appShellStyles(): string {
     .os-receipt-status-accepted { color: #1f9d55; }
     .os-receipt-status-rejected { color: #c2410c; }
     .os-run-panels { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 12px 0; }
+    .os-run-activity { display: grid; gap: 6px; }
+    .os-activity-entry { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px; background: #f8fafc; font-size: 12px; }
+    .os-activity-entry span { color: #667788; white-space: nowrap; }
+    .os-activity-entry strong { color: #39708f; white-space: nowrap; }
+    .os-activity-entry p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
     .os-changed-file-list { display: grid; gap: 6px; }
     .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 8px; background: #ffffff; }
     .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
@@ -2226,6 +2048,16 @@ function appShellStyles(): string {
       .os-action-receipt { background: #111820; border-color: #2a3440; }
 
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
+      .os-node-state-review { background: #451a03; color: #fcd34d; }
+      .os-node-state-blocked, .os-node-state-failed { background: #451a1a; color: #fca5a5; }
+      .os-node-state-running { background: #14532d; color: #86efac; }
+      .os-node-state-done { background: #1e3a8a; color: #93c5fd; }
+      .os-node-state-backlog { background: #1e293b; color: #cbd5e1; }
+      .os-node-state-todo, .os-node-state-idle { background: #164e63; color: #a5f3fc; }
+      .os-node-state-neutral { background: #111820; color: #cbd5e1; border-color: #2a3440; }
+      .os-activity-entry { background: #111820; border-color: #2a3440; }
+      .os-activity-entry span { color: #94a3b3; }
+      .os-activity-entry strong { color: #5ca0b8; }
       .os-badge-failed, .os-badge-blocked, .os-badge-blocker { background: #451a1a; color: #fca5a5; }
       .os-badge-running { background: #14532d; color: #86efac; }
       .os-badge-complete { background: #1e3a8a; color: #93c5fd; }

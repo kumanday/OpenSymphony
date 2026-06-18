@@ -254,27 +254,20 @@ describe("OpenSymphonyApp mount", () => {
     ) as HTMLButtonElement;
     expect(targetNode).not.toBeNull();
     targetNode.click();
-    await flushAsync();
-
-    const openRunButton = root.querySelector(
-      "[data-open-run='desktop-alpha']",
-    ) as HTMLButtonElement;
-    expect(openRunButton).not.toBeNull();
-    openRunButton.click();
     await flushUntil(() => root.querySelector(".os-run-grid") !== null);
 
     const runSection = root.querySelector(".os-run-grid");
     expect(runSection).not.toBeNull();
     // The issue identifier is rendered in the .os-run-head strip, not
     // inside the .os-run-grid metrics block. Verify the run detail
-    // panel reflects the navigation event with the mocked fixture.
+    // panel reflects the navigation event with the mock gateway response.
     expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
     expect(root.querySelector(".os-pill")?.textContent).toBe("running");
 
     await handle.destroy();
   });
 
-  it("enables loopback fallback fixtures when the gateway health probe fails", async () => {
+  it("reports a failed connection instead of falling back to fixture data", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
@@ -288,14 +281,12 @@ describe("OpenSymphonyApp mount", () => {
         root.querySelector("[data-opensymphony-app-shell='mounted']") !== null,
     );
 
-    // The first render happens before loadGatewayState resolves with the
-    // connection state. Wait for the catch path to flip the connection
-    // mode to "fixture" and re-render.
-    await flushUntil(() => root.querySelector(".os-status-fixture") !== null);
+    await flushUntil(() => root.querySelector(".os-status-failed") !== null);
 
-    expect(root.querySelector(".os-status-fixture")).not.toBeNull();
-    expect(root.textContent).toContain("Fixture");
-    expect(root.textContent).toContain("desktop-alpha");
+    expect(root.querySelector(".os-status-failed")).not.toBeNull();
+    expect(root.textContent).toContain("Failed");
+    expect(root.textContent).toContain("Gateway unavailable");
+    expect(root.textContent).not.toContain("desktop-alpha");
 
     await handle.destroy();
   });
