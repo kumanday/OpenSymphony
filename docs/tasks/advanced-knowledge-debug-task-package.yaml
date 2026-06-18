@@ -1,0 +1,43 @@
+planningWave: advanced-knowledge-debugging
+tasksDir: docs/tasks
+milestones:
+  - "M10.5: OKF Memory Bundle Foundation"
+  - "M11.5: LLM Wiki Graph View"
+  - "M12.5: ACP Debugging And IDE Attach"
+tasks:
+  - id: OSYM-800
+    file: docs/tasks/osym-800-okf-bundle-schema-and-legacy-capsule-mapping.md
+  - id: OSYM-801
+    file: docs/tasks/osym-801-okf-writer-lint-and-migration-fixtures.md
+  - id: OSYM-802
+    file: docs/tasks/osym-802-catalog-reindex-and-query-compatibility-from-okf.md
+  - id: OSYM-803
+    file: docs/tasks/osym-803-okf-export-import-and-visibility-boundaries.md
+  - id: OSYM-804
+    file: docs/tasks/osym-804-docs-sync-and-mcp-admin-parity-for-okf.md
+  - id: OSYM-820
+    file: docs/tasks/osym-820-memory-graph-dtos-and-gateway-endpoints.md
+  - id: OSYM-821
+    file: docs/tasks/osym-821-graph-extraction-metrics-and-community-pipeline.md
+  - id: OSYM-822
+    file: docs/tasks/osym-822-shared-graph-frontend-package-and-reducers.md
+  - id: OSYM-823
+    file: docs/tasks/osym-823-threejs-graph-renderer-and-worker-layouts.md
+  - id: OSYM-824
+    file: docs/tasks/osym-824-concept-inspector-search-filters-and-accessibility-fallback.md
+  - id: OSYM-825
+    file: docs/tasks/osym-825-live-memory-graph-integration-and-privacy-gates.md
+  - id: OSYM-826
+    file: docs/tasks/osym-826-graph-scale-visual-regression-and-web-desktop-hardening.md
+  - id: OSYM-840
+    file: docs/tasks/osym-840-debug-attachment-core-refactor.md
+  - id: OSYM-841
+    file: docs/tasks/osym-841-acp-stdio-server-protocol-adapter.md
+  - id: OSYM-842
+    file: docs/tasks/osym-842-zed-static-agent-configuration-and-setup-ux.md
+  - id: OSYM-843
+    file: docs/tasks/osym-843-tauri-debug-in-zed-launch-action.md
+  - id: OSYM-844
+    file: docs/tasks/osym-844-default-debug-ux-transition-and-cli-compatibility.md
+  - id: OSYM-845
+    file: docs/tasks/osym-845-acp-debug-integration-tests-and-failure-guidance.md

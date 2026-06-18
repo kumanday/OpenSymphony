@@ -180,6 +180,24 @@ Required evidence:
 
 If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk.
 
+## 11. Follow-on rich client and knowledge milestones
+
+The current Linear roadmap extends the local MVP with rich-client, hosted,
+provider, and release-quality work in M6 through M13. The additional OKF memory,
+LLM wiki graph, and ACP debugging specifications fit best as additive fractional
+milestones instead of broadening the existing hardening milestone:
+
+| Milestone | Placement | Scope |
+|---|---|---|
+| M10.5 OKF Memory Bundle Foundation | after M10 web/client transport, before M11 hosted visibility depends on portable memory documents | OKF concept schema, writer/lint, catalog reindex, import/export, docs sync and MCP/admin parity |
+| M11.5 LLM Wiki Graph View | after M11 hosted identity and visibility foundations, before provider/harness readiness | memory graph DTOs, graph extraction, shared frontend package, Three.js renderer, inspector/accessibility, live privacy gates |
+| M12.5 ACP Debugging And IDE Attach | after M12 harness/model seams, before M13 release hardening | debug attachment refactor, ACP stdio server, Zed setup, Tauri Debug in Zed action, default debug UX transition, integration tests |
+
+The planning source for this wave is
+`docs/tasks/advanced-knowledge-debug-task-package.yaml`. The existing
+`docs/tasks/task-package.yaml` remains the published source for the
+rich-client-hosted-mode wave.
+
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model

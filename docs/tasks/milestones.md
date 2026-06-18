@@ -6,6 +6,9 @@ This milestone index covers the new rich client, hosted mode, collaborative plan
 - `docs/hosted-client-PRD.md`
 - `docs/host-client-architecture.md`
 - `docs/host-client-implementation_plan.md`
+- `docs/okf-memory-spec.md`
+- `docs/llm-wiki-graph-view-spec.md`
+- `docs/opensymphony-acp-debugging-spec.md`
 
 ## M6: Gateway And Stream Contract
 
@@ -82,6 +85,18 @@ Tasks:
 - OSYM-741 Browser Transport And Remote Stream Protocols
 - OSYM-742 Hosted Auth Placeholders And Web Parity
 
+## M10.5: OKF Memory Bundle Foundation
+
+Goal: Evolve project memory into OKF-conformant bundles while keeping existing memory query, docs sync, and privacy behavior intact.
+
+Tasks:
+
+- OSYM-800 OKF Bundle Schema And Legacy Capsule Mapping
+- OSYM-801 OKF Writer, Lint, And Migration Fixtures
+- OSYM-802 Catalog Reindex And Query Compatibility From OKF
+- OSYM-803 OKF Export, Import, And Visibility Boundaries
+- OSYM-804 Docs Sync And MCP Admin Parity For OKF
+
 ## M11: Hosted Alpha
 
 Goal: Add hosted multi-user execution where server-owned runs continue after clients disconnect and permissions, secrets, workspaces, audit, and administration are enforced centrally.
@@ -93,6 +108,20 @@ Tasks:
 - OSYM-752 Hosted Workspace Isolation And Runtime Pool
 - OSYM-753 Client-Independent Run Persistence
 - OSYM-754 Hosted Audit, Metrics, And Admin Controls
+
+## M11.5: LLM Wiki Graph View
+
+Goal: Add a shared web and desktop OKF memory graph view with gateway DTOs, graph extraction, community detection, an accessible inspector, and live privacy-aware memory integration.
+
+Tasks:
+
+- OSYM-820 Memory Graph DTOs And Gateway Endpoints
+- OSYM-821 Graph Extraction, Metrics, And Community Pipeline
+- OSYM-822 Shared Graph Frontend Package And Reducers
+- OSYM-823 Three.js Graph Renderer And Worker Layouts
+- OSYM-824 Concept Inspector, Search, Filters, And Accessibility Fallback
+- OSYM-825 Live Memory Graph Integration And Privacy Gates
+- OSYM-826 Graph Scale, Visual Regression, And Web/Desktop Hardening
 
 ## M12: Provider, Harness, And Model Readiness
 
@@ -106,6 +135,19 @@ Tasks:
 - OSYM-763 Model Configuration UI And Routing Metadata
 - OSYM-764 Codex App-Server Prototype And Benchmarks
 - OSYM-765 Codex Approvals And Cross-Harness Routing
+
+## M12.5: ACP Debugging And IDE Attach
+
+Goal: Expose OpenSymphony issue debug sessions through Zed ACP while preserving issue workspace, OpenHands conversation, and debug stream ownership in OpenSymphony.
+
+Tasks:
+
+- OSYM-840 Debug Attachment Core Refactor
+- OSYM-841 ACP Stdio Server Protocol Adapter
+- OSYM-842 Zed Static Agent Configuration And Setup UX
+- OSYM-843 Tauri Debug-In-Zed Launch Action
+- OSYM-844 Default Debug UX Transition And CLI Compatibility
+- OSYM-845 ACP Debug Integration Tests And Failure Guidance
 
 ## M13: Hardening And Release Quality
 

@@ -1,0 +1,104 @@
+planningWave: advanced-knowledge-debugging
+linearProject: e7b957855cb7
+publishedAt: '2026-06-17T18:58:10.744397+00:00'
+milestones:
+  'M10.5: OKF Memory Bundle Foundation':
+    milestoneId: d326daa8-ac1d-44a1-b846-f528fade7a16
+    name: 'M10.5: OKF Memory Bundle Foundation'
+  'M11.5: LLM Wiki Graph View':
+    milestoneId: 3c7e9e36-67d9-40ec-9ce0-08b13dd2f818
+    name: 'M11.5: LLM Wiki Graph View'
+  'M12.5: ACP Debugging And IDE Attach':
+    milestoneId: 12eda288-1f93-45db-a31d-43afab515cd8
+    name: 'M12.5: ACP Debugging And IDE Attach'
+tasks:
+  OSYM-800:
+    issue: COE-454
+    issueId: f89a8030-01fb-4dda-bac4-81786a2b0983
+    url: https://linear.app/trilogy-ai-coe/issue/COE-454/okf-bundle-schema-and-legacy-capsule-mapping
+    file: docs/tasks/osym-800-okf-bundle-schema-and-legacy-capsule-mapping.md
+  OSYM-840:
+    issue: COE-455
+    issueId: 1c6b02f5-20d3-4a48-8b02-512b43b10bda
+    url: https://linear.app/trilogy-ai-coe/issue/COE-455/debug-attachment-core-refactor
+    file: docs/tasks/osym-840-debug-attachment-core-refactor.md
+  OSYM-801:
+    issue: COE-456
+    issueId: 199e2932-5098-4431-86ac-792fdb82db5f
+    url: https://linear.app/trilogy-ai-coe/issue/COE-456/okf-writer-lint-and-migration-fixtures
+    file: docs/tasks/osym-801-okf-writer-lint-and-migration-fixtures.md
+  OSYM-841:
+    issue: COE-457
+    issueId: 6144149c-5daf-439f-ae56-68255d72ab71
+    url: https://linear.app/trilogy-ai-coe/issue/COE-457/acp-stdio-server-protocol-adapter
+    file: docs/tasks/osym-841-acp-stdio-server-protocol-adapter.md
+  OSYM-802:
+    issue: COE-458
+    issueId: f8c5a697-8f64-46e5-9edd-d05c4bb0130b
+    url: https://linear.app/trilogy-ai-coe/issue/COE-458/catalog-reindex-and-query-compatibility-from-okf
+    file: docs/tasks/osym-802-catalog-reindex-and-query-compatibility-from-okf.md
+  OSYM-842:
+    issue: COE-459
+    issueId: 412da99d-aac9-4113-9ded-862fe989dc71
+    url: https://linear.app/trilogy-ai-coe/issue/COE-459/zed-static-agent-configuration-and-setup-ux
+    file: docs/tasks/osym-842-zed-static-agent-configuration-and-setup-ux.md
+  OSYM-803:
+    issue: COE-460
+    issueId: 122e37e0-1927-4696-b565-768dd5947585
+    url: https://linear.app/trilogy-ai-coe/issue/COE-460/okf-export-import-and-visibility-boundaries
+    file: docs/tasks/osym-803-okf-export-import-and-visibility-boundaries.md
+  OSYM-820:
+    issue: COE-461
+    issueId: d7ec16aa-02cb-4543-ba5b-202fe81e00cc
+    url: https://linear.app/trilogy-ai-coe/issue/COE-461/memory-graph-dtos-and-gateway-endpoints
+    file: docs/tasks/osym-820-memory-graph-dtos-and-gateway-endpoints.md
+  OSYM-843:
+    issue: COE-462
+    issueId: e35799ff-8aea-44f2-aac5-69195cc72221
+    url: https://linear.app/trilogy-ai-coe/issue/COE-462/tauri-debug-in-zed-launch-action
+    file: docs/tasks/osym-843-tauri-debug-in-zed-launch-action.md
+  OSYM-804:
+    issue: COE-463
+    issueId: 5543dfd7-99a7-46fd-88da-8338339b010e
+    url: https://linear.app/trilogy-ai-coe/issue/COE-463/docs-sync-and-mcp-admin-parity-for-okf
+    file: docs/tasks/osym-804-docs-sync-and-mcp-admin-parity-for-okf.md
+  OSYM-821:
+    issue: COE-464
+    issueId: c969cf22-64d0-4ef0-a71e-dbd323699d58
+    url: https://linear.app/trilogy-ai-coe/issue/COE-464/graph-extraction-metrics-and-community-pipeline
+    file: docs/tasks/osym-821-graph-extraction-metrics-and-community-pipeline.md
+  OSYM-822:
+    issue: COE-465
+    issueId: 6b64c507-6e8a-4f7a-b776-2a0da0610067
+    url: https://linear.app/trilogy-ai-coe/issue/COE-465/shared-graph-frontend-package-and-reducers
+    file: docs/tasks/osym-822-shared-graph-frontend-package-and-reducers.md
+  OSYM-844:
+    issue: COE-466
+    issueId: 5ef5ba64-4a9f-4eb2-be5e-19aa508a63c0
+    url: https://linear.app/trilogy-ai-coe/issue/COE-466/default-debug-ux-transition-and-cli-compatibility
+    file: docs/tasks/osym-844-default-debug-ux-transition-and-cli-compatibility.md
+  OSYM-823:
+    issue: COE-467
+    issueId: d11fdce6-e49e-4d71-875c-828481c63d89
+    url: https://linear.app/trilogy-ai-coe/issue/COE-467/threejs-graph-renderer-and-worker-layouts
+    file: docs/tasks/osym-823-threejs-graph-renderer-and-worker-layouts.md
+  OSYM-824:
+    issue: COE-468
+    issueId: 7488891c-442d-45a6-abe9-3c0f582a59b5
+    url: https://linear.app/trilogy-ai-coe/issue/COE-468/concept-inspector-search-filters-and-accessibility-fallback
+    file: docs/tasks/osym-824-concept-inspector-search-filters-and-accessibility-fallback.md
+  OSYM-825:
+    issue: COE-469
+    issueId: c3402a1b-0bce-4109-9e97-8c9895821f2a
+    url: https://linear.app/trilogy-ai-coe/issue/COE-469/live-memory-graph-integration-and-privacy-gates
+    file: docs/tasks/osym-825-live-memory-graph-integration-and-privacy-gates.md
+  OSYM-845:
+    issue: COE-470
+    issueId: e3ce0e84-3cba-447b-b0b7-2c9380c4a86d
+    url: https://linear.app/trilogy-ai-coe/issue/COE-470/acp-debug-integration-tests-and-failure-guidance
+    file: docs/tasks/osym-845-acp-debug-integration-tests-and-failure-guidance.md
+  OSYM-826:
+    issue: COE-471
+    issueId: 75e485f2-202e-4665-9058-5dcd45ec3d9f
+    url: https://linear.app/trilogy-ai-coe/issue/COE-471/graph-scale-visual-regression-and-webdesktop-hardening
+    file: docs/tasks/osym-826-graph-scale-visual-regression-and-web-desktop-hardening.md
