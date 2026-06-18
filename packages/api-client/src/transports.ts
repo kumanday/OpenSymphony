@@ -545,6 +545,8 @@ export class WebSocketTransport implements GatewayTransport {
   private isClosed = false;
   private connecting?: Promise<void>;
   private lastEventCursor?: { sequence: number; partition: string };
+  /** Serialized message-handling chain to preserve frame ordering. */
+  private messageQueue: Promise<void> = Promise.resolve();
 
   constructor(config: GatewayTransportConfig) {
     this.baseUri = config.baseUri.replace(/\/+$/, "");
@@ -813,7 +815,13 @@ export class WebSocketTransport implements GatewayTransport {
       };
 
       ws.onmessage = (event) => {
-        this.handleMessage(event.data);
+        // Serialize message handling so an async Blob conversion cannot
+        // dispatch out of order with a subsequent text frame. Each invocation
+        // chains onto the previous one; errors break the chain but do not
+        // close the socket.
+        this.messageQueue = this.messageQueue
+          .then(() => this.handleMessage(event.data))
+          .catch(() => undefined);
       };
     });
   }
@@ -842,7 +850,7 @@ export class WebSocketTransport implements GatewayTransport {
     return subscribers;
   }
 
-  private handleMessage(data: string | ArrayBuffer | Blob): void {
+  private async handleMessage(data: string | ArrayBuffer | Blob): Promise<void> {
     // Binary frames carry high-volume terminal/log payloads when the gateway
     // advertises binary support. Decode them into envelopes via the shared
     // binary frame codec; text frames follow the prefixed JSON protocol.
@@ -851,8 +859,9 @@ export class WebSocketTransport implements GatewayTransport {
       return;
     }
     if (typeof data !== "string") {
-      // Blob: async conversion to ArrayBuffer before decoding.
-      this.handleBlobFrame(data);
+      // Blob: async conversion to ArrayBuffer before decoding. Awaited so the
+      // serialized message queue preserves ordering with later frames.
+      await this.handleBlobFrame(data);
       return;
     }
     // Gateway uses prefixed frames: "__event__ {...}" or "__error__ {...}"
@@ -904,28 +913,28 @@ export class WebSocketTransport implements GatewayTransport {
    * can enforce monotonic ordering without parsing the full JSON payload first.
    */
   private dispatchBinaryFrame(buffer: ArrayBuffer): void {
-  try {
-    const envelope = decodeBinaryFrame(buffer);
-    if (envelope) {
-      this.dispatch(envelope);
+    try {
+      const envelope = decodeBinaryFrame(buffer);
+      if (envelope) {
+        this.dispatch(envelope);
+      }
+    } catch {
+      // Skip malformed binary frames; the stream stays connected.
     }
-  } catch {
-    // Skip malformed binary frames; the stream stays connected.
   }
-}
 
-/** Decode a Blob binary frame (async ArrayBuffer conversion) and dispatch it. */
+  /** Decode a Blob binary frame (async ArrayBuffer conversion) and dispatch it. */
   private async handleBlobFrame(data: Blob): Promise<void> {
-  try {
-    const buffer = await data.arrayBuffer();
-    const envelope = decodeBinaryFrame(buffer);
-    if (envelope) {
-      this.dispatch(envelope);
+    try {
+      const buffer = await data.arrayBuffer();
+      const envelope = decodeBinaryFrame(buffer);
+      if (envelope) {
+        this.dispatch(envelope);
+      }
+    } catch {
+      // Skip malformed binary frames; the stream stays connected.
     }
-  } catch {
-    // Skip malformed binary frames; the stream stays connected.
   }
-}
 
   private scheduleReconnect(): void {
     if (this.isClosed || this.isReconnecting) return;
@@ -1509,6 +1518,11 @@ const BINARY_FRAME_TYPE_TERMINAL = 1;
  * Return true when the advertised gateway capabilities include binary frame
  * support for a WebSocket transport. Binary frames are opt-in per gateway so
  * the client never forks its protocol based on profile.
+ *
+ * Only the literal `binary` mode/encoding enables binary WebSocket frames.
+ * `base64` is a text encoding (binary payloads carried as base64 inside text
+ * envelopes) and must not enable `binaryType = "arraybuffer"`, otherwise the
+ * client would emit raw binary frames a base64-only gateway cannot decode.
  */
 export function binaryFramesAdvertised(
   capabilities?: GatewayCapabilities,
@@ -1518,8 +1532,7 @@ export function binaryFramesAdvertised(
     (t) =>
       (t.transport === "loopback_websocket" || t.transport === "websocket") &&
       (t.modes.includes("binary") ||
-        t.supported_encodings.includes("binary") ||
-        t.supported_encodings.includes("base64")),
+        t.supported_encodings.includes("binary")),
   );
 }
 

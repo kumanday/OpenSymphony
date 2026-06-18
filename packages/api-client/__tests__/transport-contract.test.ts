@@ -728,6 +728,29 @@ describe("WebSocketTransport", () => {
     expect(binaryFramesAdvertised(undefined)).toBe(false);
   });
 
+  it("does not enable binary frames for a base64-only gateway (text encoding)", () => {
+    // base64 carries binary payloads as base64 inside text envelopes; it must
+    // not cause the client to set binaryType="arraybuffer" and emit raw binary
+    // WebSocket frames a base64-only gateway cannot decode.
+    const capsBase64Only: GatewayCapabilities = {
+      ...FIXTURE_CAPABILITIES,
+      transports: [
+        {
+          transport: "websocket",
+          modes: ["json"],
+          supported_encodings: ["utf-8", "base64"],
+          bidirectional: true,
+        },
+      ],
+    };
+    expect(binaryFramesAdvertised(capsBase64Only)).toBe(false);
+    const transport = new WebSocketTransport({
+      baseUri: "http://localhost:8080",
+      capabilities: capsBase64Only,
+    });
+    expect(transport.supportsBinaryFrames()).toBe(false);
+  });
+
   it("enables binary frames and sets binaryType when the gateway advertises support", async () => {
     const capsWithBinary: GatewayCapabilities = {
       ...FIXTURE_CAPABILITIES,

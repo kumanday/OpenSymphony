@@ -13,7 +13,7 @@
  * client resilience behavior is exercised, not just the pieces in isolation.
  */
 
-import { WebSocketTransport, StreamReplayBuffer, StreamCorrelator } from "../src/index.js";
+import { WebSocketTransport, StreamReplayBuffer, StreamCorrelator, orderedEvents } from "../src/index.js";
 import {
   schemaVersionV1,
   streamCursor,
@@ -107,16 +107,41 @@ function flushAsyncWork(iterations = 10): Promise<void> {
   });
 }
 
-function raceDone<T>(
+/**
+ * Pull the next value from an async iterator, rejecting on timeout instead of
+ * returning a fake "done" sentinel (a done sentinel silently swallows a
+ * slow-but-valid event and races with later assertions). A timeout means no
+ * event arrived, which is a real failure signal.
+ */
+function takeNext<T>(
   iter: AsyncIterator<T>,
-  timeoutMs = 50,
+  timeoutMs = 200,
 ): Promise<IteratorResult<T>> {
-  return Promise.race([
-    iter.next(),
-    new Promise<IteratorResult<T>>((r) =>
-      setTimeout(() => r({ value: undefined as unknown as T, done: true }), timeoutMs),
-    ),
-  ]);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        reject(new Error(`takeNext timed out after ${timeoutMs}ms`));
+      }
+    }, timeoutMs);
+    iter.next().then(
+      (result) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(result);
+        }
+      },
+      (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+      },
+    );
+  });
 }
 
 describe("Reconnect with cursor replay", () => {
@@ -149,7 +174,7 @@ describe("Reconnect with cursor replay", () => {
     const first = await firstNext;
     if (!first.done) buffer.apply(first.value);
     for (let i = 0; i < 2; i++) {
-      const next = await raceDone(eventsIter);
+      const next = await takeNext(eventsIter);
       if (next.done) break;
       buffer.apply(next.value);
     }
@@ -245,5 +270,47 @@ describe("Reconnect with cursor replay", () => {
     correlator.observe(terminalEvent(1, "corr-dup")); // duplicate
     expect(correlator.eventsFor("corr-dup")).toHaveLength(2);
     expect(correlator.hasCorrelatedEvent("corr-dup")).toBe(true);
+  });
+
+  it("pipes the transport event stream through orderedEvents end-to-end", async () => {
+    // End-to-end integration: feed a live WebSocketTransport event stream
+    // (with a resume cursor) through orderedEvents() and assert the consumer
+    // sees a de-duplicated, monotonic output directly, not the pieces
+    // side-by-side.
+    const transport = new WebSocketTransport({ baseUri: "http://localhost:8080" });
+    const resumeCursor = { sequence: 0, partition: "run:run-1" };
+
+    // Wrap the transport stream with the replay/ordering engine.
+    const ordered = orderedEvents(transport.events(resumeCursor), {
+      maxPendingPerPartition: 16,
+    });
+    const orderedIter = ordered[Symbol.asyncIterator]();
+    const firstNext = orderedIter.next(); // drive the generator -> ensureConnected
+    await flushAsyncWork(20);
+    FakeWebSocket.instances[0].open();
+    await flushAsyncWork(20);
+
+    // Deliver: 1, 2, 2 (duplicate), 4 (gap, then 3 fills it).
+    for (const seq of [1, 2, 2, 4]) {
+      FakeWebSocket.instances[0].emit(`__event__ ${JSON.stringify(eventEnvelope(seq))}`);
+    }
+    await flushAsyncWork();
+    FakeWebSocket.instances[0].emit(`__event__ ${JSON.stringify(eventEnvelope(3))}`);
+    await flushAsyncWork();
+
+    const first = await firstNext;
+    const out: number[] = [];
+    if (!first.done) out.push(first.value.cursor.sequence);
+    // Drain every applied envelope; orderedEvents only yields frontier-advancing
+    // events, so this terminates once the stream has nothing buffered.
+    while (out.length < 4) {
+      const next = await takeNext(orderedIter, 300);
+      if (next.done) break;
+      out.push(next.value.cursor.sequence);
+    }
+
+    // De-duplicated, monotonic, gap-closing sequence directly from the engine.
+    expect(out).toEqual([1, 2, 3, 4]);
+    expect(out.filter((s) => s === 2)).toHaveLength(1);
   });
 });

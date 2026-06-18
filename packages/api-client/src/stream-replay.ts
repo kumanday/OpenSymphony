@@ -50,6 +50,19 @@ export interface StreamReplayBufferOptions {
    * before declaring a gap and applying the next available sequence.
    */
   maxPendingPerPartition?: number;
+  /**
+   * Maximum number of partitions to track before the oldest inactive partition
+   * is evicted. Prevents unbounded memory growth in long-running clients that
+   * observe many runs/terminal sessions. Defaults to 1024. Use
+   * `dropPartition()` to retire a partition explicitly when a stream ends.
+   */
+  maxPartitions?: number;
+  /**
+   * Clock function used for activity tracking, stale detection, and duplicate/
+   * gap timestamps. Defaults to `Date.now`. Supply a deterministic clock in
+   * tests so `apply`/`checkStale`/`orderedEvents` behavior is reproducible.
+   */
+  now?: () => number;
   /** Called whenever a gap is detected. */
   onGap?: (gap: StreamGap) => void;
   /** Called whenever a duplicate is suppressed. */
@@ -67,13 +80,18 @@ export class StreamReplayBuffer {
   private readonly lastApplied = new Map<string, number>();
   private readonly pending = new Map<string, Map<number, GatewayEnvelope>>();
   private readonly lastActivityAt = new Map<string, number>();
-  private readonly stalePartitions = new Set<string>();
+  /** partition -> timestamp it was marked stale, for accurate idle reporting. */
+  private readonly stalePartitions = new Map<string, number>();
   private readonly maxPendingPerPartition: number;
+  private readonly maxPartitions: number;
+  private readonly now: () => number;
   private readonly onGap?: (gap: StreamGap) => void;
   private readonly onDuplicate?: (duplicate: StreamDuplicate) => void;
 
   constructor(options: StreamReplayBufferOptions = {}) {
     this.maxPendingPerPartition = options.maxPendingPerPartition ?? 64;
+    this.maxPartitions = options.maxPartitions ?? 1024;
+    this.now = options.now ?? Date.now;
     this.onGap = options.onGap;
     this.onDuplicate = options.onDuplicate;
   }
@@ -82,6 +100,7 @@ export class StreamReplayBuffer {
   seed(partition: string, sequence: number): void {
     const current = this.lastApplied.get(partition);
     if (current === undefined || sequence > current) {
+      this.maybeEvict(partition);
       this.lastApplied.set(partition, sequence);
     }
   }
@@ -126,13 +145,14 @@ export class StreamReplayBuffer {
       const duplicate: StreamDuplicate = {
         partition,
         sequence: seq,
-        suppressedAt: Date.now(),
+        suppressedAt: this.now(),
       };
       this.onDuplicate?.(duplicate);
       return [{ kind: "duplicate", duplicate }];
     }
 
     if (last === undefined || seq === last + 1) {
+      if (last === undefined) this.maybeEvict(partition);
       this.lastApplied.set(partition, seq);
       this.touchActivity(partition);
       return [{ kind: "applied", envelope }, ...this.flushPending(partition)];
@@ -159,7 +179,7 @@ export class StreamReplayBuffer {
       fromSequence: last,
       toSequence: envelope.cursor.sequence,
       missing: envelope.cursor.sequence - last - 1,
-      detectedAt: Date.now(),
+      detectedAt: this.now(),
     };
     this.onGap?.(gap);
     // Advance the frontier to the gap-triggering envelope and apply it.
@@ -201,11 +221,45 @@ export class StreamReplayBuffer {
   }
 
   private touchActivity(partition: string): void {
-    const now = Date.now();
-    this.lastActivityAt.set(partition, now);
+    this.lastActivityAt.set(partition, this.now());
     if (this.stalePartitions.has(partition)) {
       this.stalePartitions.delete(partition);
     }
+  }
+
+  /**
+   * Evict the oldest inactive partition when a new one would exceed
+   * `maxPartitions`. A partition that still has buffered pending envelopes is
+   * kept. The new partition itself is never evicted.
+   */
+  private maybeEvict(newPartition: string): void {
+    if (this.lastApplied.size < this.maxPartitions) return;
+    // Find the oldest partition by last activity that has no pending frames.
+    let oldest: string | undefined;
+    let oldestAt = Infinity;
+    for (const partition of this.lastApplied.keys()) {
+      if (partition === newPartition) continue;
+      if (this.pending.has(partition)) continue;
+      const at = this.lastActivityAt.get(partition) ?? 0;
+      if (at < oldestAt) {
+        oldestAt = at;
+        oldest = partition;
+      }
+    }
+    if (oldest !== undefined) {
+      this.dropPartition(oldest);
+    }
+  }
+
+  /**
+   * Drop all state for a partition. Call this when a stream ends (terminal
+   * session closed, run completed) to retire the partition and bound memory.
+   */
+  dropPartition(partition: string): void {
+    this.lastApplied.delete(partition);
+    this.pending.delete(partition);
+    this.lastActivityAt.delete(partition);
+    this.stalePartitions.delete(partition);
   }
 
   /** Last activity timestamp (ms) for a partition, or undefined if never active. */
@@ -218,9 +272,14 @@ export class StreamReplayBuffer {
     return this.stalePartitions.has(partition);
   }
 
+  /** Timestamp a partition was marked stale, or undefined if not stale. */
+  staleSince(partition: string): number | undefined {
+    return this.stalePartitions.get(partition);
+  }
+
   /** Mark a partition stale (for example after a disconnect before replay). */
-  markStale(partition: string): void {
-    this.stalePartitions.add(partition);
+  markStale(partition: string, now: number = Date.now()): void {
+    this.stalePartitions.set(partition, now);
   }
 
   /** Mark a partition recovered after a fresh event or successful replay. */
@@ -241,7 +300,7 @@ export class StreamReplayBuffer {
       const lastAt = this.lastActivityAt.get(partition) ?? now;
       const idleMs = now - lastAt;
       if (idleMs >= staleAfterMs) {
-        this.stalePartitions.add(partition);
+        this.stalePartitions.set(partition, now);
         newlyStale.push({
           partition,
           lastSequence: this.lastApplied.get(partition) ?? null,
@@ -265,6 +324,11 @@ export interface OrderedEventsOptions extends StreamReplayBufferOptions {
    * signal is emitted once per stale episode when no envelope is applied.
    */
   staleAfterMs?: number;
+  /**
+   * Clock function used for stale detection. Defaults to `Date.now`. Supply a
+   * deterministic clock in tests so stale/recovered reports are reproducible.
+   */
+  now?: () => number;
   /** Called when the stream goes stale. */
   onStale?: (info: StreamStaleInfo) => void;
   /** Called when the stream recovers from stale after receiving an event. */
@@ -285,7 +349,11 @@ export interface StreamStaleInfo {
  * duplicates are reported via callbacks but do not break iteration; the
  * consumer only receives envelopes that advanced the frontier. Stale
  * partitions (idle longer than `staleAfterMs`) are reported via `onStale` and
- * `onRecovered` using the buffer's deterministic staleness tracker.
+ * `onRecovered`.
+ *
+ * Staleness is driven by `options.now` (default `Date.now`). For fully
+ * deterministic stale/recovered behavior in tests, supply a `now` clock; the
+ * buffer's `checkStale(now, ...)` API is the deterministic low-level surface.
  */
 export async function* orderedEvents(
   source: AsyncIterable<GatewayEnvelope>,
@@ -293,19 +361,22 @@ export async function* orderedEvents(
 ): AsyncGenerator<GatewayEnvelope> {
   const buffer = new StreamReplayBuffer(options);
   const staleAfterMs = options.staleAfterMs ?? 30_000;
+  const now = options.now ?? Date.now;
 
   for await (const envelope of source) {
     const partition = envelope.cursor.partition;
     const wasStale = staleAfterMs > 0 && buffer.isStale(partition);
+    const staleAt = wasStale ? buffer.staleSince(partition) ?? now() : 0;
 
     for (const event of buffer.apply(envelope)) {
       if (event.kind === "applied") {
         if (wasStale) {
+          const recoveredAt = now();
           options.onRecovered?.({
             partition,
             lastSequence: event.envelope.cursor.sequence,
-            staleAt: Date.now(),
-            idleMs: 0,
+            staleAt,
+            idleMs: recoveredAt - staleAt,
           });
         }
         yield event.envelope;
@@ -317,11 +388,11 @@ export async function* orderedEvents(
       // duplicates are intentionally not yielded
     }
 
-    // Stale detection: report partitions idle longer than the window. This is
-    // best-effort against wall-clock time during iteration; deterministic
-    // staleness can also be driven directly via buffer.checkStale(now, ...).
+    // Stale detection: report partitions idle longer than the window. Driven
+    // by `options.now` (default wall-clock); supply a deterministic clock for
+    // reproducible stale reports, or use buffer.checkStale(now, ...) directly.
     if (staleAfterMs > 0) {
-      for (const info of buffer.checkStale(Date.now(), staleAfterMs)) {
+      for (const info of buffer.checkStale(now(), staleAfterMs)) {
         options.onStale?.(info);
       }
     }
@@ -363,12 +434,22 @@ function extractCorrelationId(value: unknown): string | undefined {
  * event stream; the correlator links events whose payload carries the same
  * `correlation_id` back to the originating receipt and its expected follow-up
  * events.
+ *
+ * Memory is bounded: each correlation tracks at most `maxEventsPerCorrelation`
+ * observed events (oldest dropped), and `forget()` retires a completed
+ * correlation entirely. Callers should `forget(correlationId)` once the
+ * receipt's expected follow-up events have all arrived (or the run ends).
  */
 export class StreamCorrelator {
   private readonly receiptsByCorrelation = new Map<
     string,
     { receipt: ActionReceipt; events: GatewayEnvelope[] }
   >();
+  private readonly maxEventsPerCorrelation: number;
+
+  constructor(options: { maxEventsPerCorrelation?: number } = {}) {
+    this.maxEventsPerCorrelation = options.maxEventsPerCorrelation ?? 256;
+  }
 
   /** Register a receipt returned from an action dispatch. */
   registerReceipt(receipt: ActionReceipt): void {
@@ -389,6 +470,9 @@ export class StreamCorrelator {
     const entry = this.receiptsByCorrelation.get(correlationId);
     if (!entry) return undefined;
     entry.events.push(envelope);
+    if (entry.events.length > this.maxEventsPerCorrelation) {
+      entry.events.shift();
+    }
     return entry.receipt;
   }
 
@@ -410,5 +494,19 @@ export class StreamCorrelator {
   /** All correlation ids currently tracked. */
   correlationIds(): string[] {
     return [...this.receiptsByCorrelation.keys()];
+  }
+
+  /**
+   * Retire a completed correlation, dropping its receipt and observed events.
+   * Call this once the receipt's expected follow-up events have arrived or the
+   * run has ended, to bound memory in long-running sessions.
+   */
+  forget(correlationId: string): void {
+    this.receiptsByCorrelation.delete(correlationId);
+  }
+
+  /** Number of correlations currently tracked. */
+  size(): number {
+    return this.receiptsByCorrelation.size;
   }
 }

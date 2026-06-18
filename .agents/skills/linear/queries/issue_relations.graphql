@@ -1,0 +1,21 @@
+query IssueRelations($id: String!) {
+  issue(id: $id) {
+    id
+    identifier
+    relations {
+      nodes {
+        type
+        relatedIssue {
+          id
+          identifier
+          title
+          state {
+            id
+            name
+            type
+          }
+        }
+      }
+    }
+  }
+}

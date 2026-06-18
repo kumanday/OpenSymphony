@@ -1,0 +1,29 @@
+query ProjectIssuesWithRelations($projectId: String!) {
+  project(id: $projectId) {
+    id
+    name
+    slugId
+    content
+    issues(first: 100) {
+      nodes {
+        id
+        identifier
+        title
+        url
+        state {
+          id
+          name
+          type
+        }
+        attachments {
+          nodes {
+            id
+            title
+            url
+            sourceType
+          }
+        }
+      }
+    }
+  }
+}

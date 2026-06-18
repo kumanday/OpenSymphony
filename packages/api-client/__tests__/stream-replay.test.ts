@@ -180,19 +180,27 @@ describe("orderedEvents", () => {
       runEnvelope(4), // gap (3 dropped)
       runEnvelope(3), // fills gap out of order
     ]);
-    const buffer = new StreamReplayBuffer({ maxPendingPerPartition: 16 });
+    const gaps: number[] = [];
+    const duplicates: number[] = [];
     const out: GatewayEnvelope[] = [];
-    for await (const env of orderedEvents(source, { maxPendingPerPartition: 16 })) {
+    for await (const env of orderedEvents(source, {
+      maxPendingPerPartition: 16,
+      onGap: (g) => gaps.push(g.fromSequence),
+      onDuplicate: (d) => duplicates.push(d.sequence),
+    })) {
       out.push(env);
     }
-    // 1, 2 applied; 2 duplicate suppressed; 4 buffered (gap, no immediate yield
-    // because pending limit not exceeded); 3 fills the gap and flushes 3 then 4.
+    // 1, 2 applied; 2 duplicate suppressed; 4 buffered (gap fits the reorder
+    // window so no gap is declared yet); 3 fills the gap and flushes 3 then 4.
     const seqs = out.map((e) => e.cursor.sequence);
-    expect(seqs).toContain(1);
-    expect(seqs).toContain(2);
+    // Full monotonic sequence, de-duplicated.
+    expect(seqs).toEqual([1, 2, 3, 4]);
     // The duplicate seq 2 must not be yielded twice.
     expect(seqs.filter((s) => s === 2)).toHaveLength(1);
-    void buffer;
+    // The duplicate was reported.
+    expect(duplicates).toEqual([2]);
+    // No unbridgeable gap was declared (the 3->4 reorder fit the window).
+    expect(gaps).toEqual([]);
   });
 
   it("marks a partition stale and recovers it when a fresh event is applied", () => {
@@ -223,6 +231,65 @@ describe("orderedEvents", () => {
     expect(buffer.isStale("run:run-1")).toBe(true);
     // Idempotent: a second check does not re-report.
     expect(buffer.checkStale(t0 + 12_000, 10_000)).toHaveLength(0);
+  });
+
+  it("reports accurate staleAt and idleMs on recovery via orderedEvents", async () => {
+    // Drive orderedEvents with a deterministic clock so the stale->recovered
+    // transition reports the captured staleAt (not Date.now) and a non-zero
+    // idleMs = recoveredAt - staleAt.
+    //
+    // now() is called, in order, for: touchActivity(seq1), checkStale(seq1),
+    // touchActivity(seq2) [clears stale], recoveredAt, checkStale(seq2).
+    const ticks = [1000, 61_000, 61_000, 65_000, 65_000];
+    let tickIndex = 0;
+    const now = () => ticks[Math.min(tickIndex++, ticks.length - 1)];
+
+    const staleAts: number[] = [];
+    const recovered: { staleAt: number; idleMs: number; seq: number }[] = [];
+    const source = fromArray([runEnvelope(1), runEnvelope(2)]);
+
+    for await (const env of orderedEvents(source, {
+      staleAfterMs: 30_000,
+      now,
+      onStale: (info) => staleAts.push(info.staleAt),
+      onRecovered: (info) =>
+        recovered.push({ staleAt: info.staleAt, idleMs: info.idleMs, seq: info.lastSequence ?? -1 }),
+    })) {
+      void env;
+    }
+
+    // checkStale(seq1) at 61000 sees lastActivityAt=1000 => idle 60s => stale.
+    expect(staleAts).toEqual([61_000]);
+    // seq2 recovers: staleAt is the captured mark (61000), recoveredAt=65000
+    // => idleMs=4000, and lastSequence is the recovering event's sequence.
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0].staleAt).toBe(61_000);
+    expect(recovered[0].idleMs).toBe(4_000);
+    expect(recovered[0].seq).toBe(2);
+  });
+
+  it("evicts the oldest inactive partition when exceeding maxPartitions", () => {
+    const buffer = new StreamReplayBuffer({ maxPartitions: 2 });
+    buffer.apply(runEnvelope(1, "run:run-1"));
+    buffer.apply(runEnvelope(1, "run:run-2"));
+    expect(buffer.partitions()).toHaveLength(2);
+    // Adding a third evicts the oldest inactive partition (run-1).
+    buffer.apply(runEnvelope(1, "run:run-3"));
+    expect(buffer.partitions()).toHaveLength(2);
+    expect(buffer.lastSequence("run:run-1")).toBeUndefined();
+    expect(buffer.lastSequence("run:run-2")).toBe(1);
+    expect(buffer.lastSequence("run:run-3")).toBe(1);
+  });
+
+  it("dropPartition retires a partition to bound memory", () => {
+    const buffer = new StreamReplayBuffer();
+    buffer.apply(runEnvelope(1, "run:run-1"));
+    buffer.markStale("run:run-1");
+    expect(buffer.partitions()).toContain("run:run-1");
+    buffer.dropPartition("run:run-1");
+    expect(buffer.lastSequence("run:run-1")).toBeUndefined();
+    expect(buffer.isStale("run:run-1")).toBe(false);
+    expect(buffer.partitions()).not.toContain("run:run-1");
   });
 });
 
@@ -274,5 +341,30 @@ describe("StreamCorrelator", () => {
     };
     expect(envelopeCorrelationId(env)).toBe("corr-raw");
     expect(correlator.observe(env)).toBeDefined();
+  });
+
+  it("caps observed events per correlation to bound memory", () => {
+    const correlator = new StreamCorrelator({ maxEventsPerCorrelation: 3 });
+    correlator.registerReceipt(makeReceipt("corr-cap"));
+    for (let i = 1; i <= 5; i++) {
+      correlator.observe(terminalEnvelope(i, "corr-cap"));
+    }
+    // Only the most recent 3 are retained (oldest dropped).
+    expect(correlator.eventsFor("corr-cap")).toHaveLength(3);
+    const seqs = correlator.eventsFor("corr-cap").map((e) => e.cursor.sequence);
+    expect(seqs).toEqual([3, 4, 5]);
+    expect(correlator.size()).toBe(1);
+  });
+
+  it("forgets a completed correlation to retire state", () => {
+    const correlator = new StreamCorrelator();
+    correlator.registerReceipt(makeReceipt("corr-gone"));
+    correlator.observe(terminalEnvelope(1, "corr-gone"));
+    expect(correlator.hasCorrelatedEvent("corr-gone")).toBe(true);
+    expect(correlator.size()).toBe(1);
+    correlator.forget("corr-gone");
+    expect(correlator.size()).toBe(0);
+    expect(correlator.receiptFor("corr-gone")).toBeUndefined();
+    expect(correlator.eventsFor("corr-gone")).toEqual([]);
   });
 });
