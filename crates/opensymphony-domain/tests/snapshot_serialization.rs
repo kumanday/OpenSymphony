@@ -51,6 +51,7 @@ fn fixture() -> SnapshotEnvelope {
                 workspace_path_suffix: "COE-269".to_owned(),
                 retry_count: 1,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: Some("https://agent.example.com/runtime".to_owned()),
                 transport_target: Some("remote".to_owned()),
                 http_auth_mode: Some("header".to_owned()),

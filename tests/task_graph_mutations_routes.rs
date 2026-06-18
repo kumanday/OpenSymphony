@@ -83,6 +83,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             workspace_path_suffix: "COE-405".to_owned(),
             retry_count: 0,
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
             transport_target: Some("loopback".to_owned()),
             http_auth_mode: Some("none".to_owned()),

@@ -61,6 +61,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             workspace_path_suffix: "COE-255".to_owned(),
             retry_count: 0,
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
             transport_target: Some("loopback".to_owned()),
             http_auth_mode: Some("none".to_owned()),
@@ -134,6 +135,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: String::new(),
                 retry_count: 0,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: None,
                 transport_target: None,
                 http_auth_mode: None,
@@ -160,6 +162,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: "COE-301".to_owned(),
                 retry_count: 0,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3001".to_owned()),
                 transport_target: Some("loopback".to_owned()),
                 http_auth_mode: Some("none".to_owned()),
@@ -232,6 +235,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: "COE-302".to_owned(),
                 retry_count: 0,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3002".to_owned()),
                 transport_target: Some("loopback".to_owned()),
                 http_auth_mode: Some("none".to_owned()),
@@ -258,6 +262,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: "COE-303".to_owned(),
                 retry_count: 1,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3003".to_owned()),
                 transport_target: Some("loopback".to_owned()),
                 http_auth_mode: Some("none".to_owned()),
@@ -284,6 +289,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: String::new(),
                 retry_count: 0,
                 blocked: true,
+                blocked_by: vec!["COE-300".to_owned()],
                 server_base_url: None,
                 transport_target: None,
                 http_auth_mode: None,
@@ -1924,6 +1930,13 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
     // Idle + not blocked = eligible
     assert!(overlay.eligible);
     assert!(overlay.queued);
+
+    let blocked_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-304")
+        .expect("COE-304 node should exist");
+    assert_eq!(blocked_node.blocked_by, vec!["COE-300".to_owned()]);
 
     // Completed issue should NOT be eligible
     let done_node = response

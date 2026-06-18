@@ -55,6 +55,7 @@ fn fixture_snapshot(
             workspace_path_suffix: "COE-255".to_owned(),
             retry_count: 0,
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: None,
             transport_target: None,
             http_auth_mode: None,

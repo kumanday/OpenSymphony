@@ -73,6 +73,24 @@ const dashboard: DashboardSnapshot = {
       issue_identifier: "COE-449",
       summary: "App shell mounted under test",
     },
+    {
+      happened_at: "2025-09-01T00:00:01Z",
+      kind: "snapshot_published",
+      issue_identifier: "COE-450",
+      summary: "published dependency-aware snapshot",
+    },
+    {
+      happened_at: "2025-09-01T00:00:02Z",
+      kind: "run_event",
+      issue_identifier: "COE-451",
+      summary: "captured runtime event",
+    },
+    {
+      happened_at: "2025-09-01T00:00:03Z",
+      kind: "hidden_event",
+      issue_identifier: "COE-452",
+      summary: "should not render in compact status",
+    },
   ],
 };
 
@@ -90,7 +108,7 @@ const taskGraph: TaskGraphSnapshot = {
       title: "Shared Client and Desktop Alpha",
       state: "In Progress",
       state_category: "in_progress",
-      children: ["app-shell", "desktop-alpha"],
+      children: ["app-shell", "desktop-alpha", "follow-up"],
       blocked_by: [],
       labels: ["desktop"],
     },
@@ -98,13 +116,13 @@ const taskGraph: TaskGraphSnapshot = {
       schema_version: schemaVersionV1(),
       node_id: "app-shell",
       kind: "issue",
-      identifier: "DESKTOP-ALPHA",
-      title: "Desktop alpha recovery",
-      state: "Backlog",
-      state_category: "backlog",
+      identifier: "COE-450",
+      title: "Desktop follow-on review",
+      state: "Todo",
+      state_category: "todo",
       parent_id: "m7-milestone",
       children: [],
-      blocked_by: [],
+      blocked_by: ["COE-449"],
       labels: ["desktop", "recovery"],
     },
     {
@@ -113,6 +131,32 @@ const taskGraph: TaskGraphSnapshot = {
       kind: "issue",
       identifier: "COE-449",
       title: "Replace stubs with functional app",
+      state: "In Progress",
+      state_category: "in_progress",
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: [],
+      labels: ["transport"],
+    },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "follow-up",
+      kind: "issue",
+      identifier: "COE-451",
+      title: "Released prerequisite detail",
+      state: "Todo",
+      state_category: "todo",
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: ["completed-prereq"],
+      labels: ["transport"],
+    },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "completed-prereq",
+      kind: "issue",
+      identifier: "COE-448",
+      title: "Completed prerequisite",
       state: "Done",
       state_category: "done",
       parent_id: "m7-milestone",
@@ -300,13 +344,9 @@ describe("OpenSymphonyApp mount", () => {
     });
 
     await flushUntil(
-      () => root.querySelector("[data-project-id='proj-alpha']") !== null,
+      () => root.querySelector("[data-node-id='desktop-alpha']") !== null,
     );
 
-    const projectButton = root.querySelector(
-      "[data-project-id='proj-alpha']",
-    ) as HTMLButtonElement;
-    expect(projectButton).not.toBeNull();
     expect(root.querySelector(".os-status-panel h2")?.textContent).toBe("Status");
     expect(root.querySelector(".os-profile-panel h2")?.textContent).toBe("Connection");
     expect(root.querySelector(".os-task-graph-panel h2")?.textContent).toBe("Task Graph");
@@ -314,6 +354,22 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector(".os-run-evidence-panel h2")?.textContent).toBe("Inspector");
     expect(root.querySelector("[data-profile-label]")).toBeNull();
     expect(root.querySelector(".os-metrics")).not.toBeNull();
+    expect(root.querySelector("[data-project-id='proj-alpha']")).toBeNull();
+    expect(root.querySelectorAll(".os-events li")).toHaveLength(3);
+    expect(root.querySelector(".os-event-time")).not.toBeNull();
+    expect(root.textContent).not.toContain("should not render in compact status");
+    expect(root.textContent).not.toContain("1 running, 2 done, 1 failed");
+    expect(root.querySelector("[data-tg-create='milestone']")).toBeNull();
+    expect(root.querySelector("[data-tg-create='issue']")).toBeNull();
+    expect(root.querySelector("[data-tg-edit]")).toBeNull();
+    expect(root.querySelector("[data-tg-deps]")).toBeNull();
+    expect(root.querySelector("[data-tg-comment]")).toBeNull();
+    expect(root.querySelector("[data-tg-create-child]")).toBeNull();
+    expect(root.querySelector("[data-testid='task-graph-visualization']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='task-graph-link']")).not.toBeNull();
+    expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
+    expect(root.querySelector("[data-node-id='desktop-alpha'] [data-testid='dependency-suffix']")?.textContent).toContain("-> COE-450");
+    expect(root.textContent).not.toContain("<- COE-448");
 
     taskGraph.root_ids.forEach((rootId) => {
       expect(root.querySelector(`[data-node-id='${rootId}']`)).not.toBeNull();
@@ -333,6 +389,7 @@ describe("OpenSymphonyApp mount", () => {
     // panel reflects the navigation event with the mock gateway response.
     expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
     expect(root.querySelector(".os-pill")?.textContent).toBe("running");
+    expect(root.querySelector("[data-testid='dependency-detail']")?.textContent).toContain("blocks COE-450");
     expect(root.querySelector(".os-run-detail-panel [data-testid='changed-file-list']")).not.toBeNull();
     expect(root.querySelector(".os-run-evidence-panel [data-testid='evidence-toggle']")).not.toBeNull();
     expect(root.querySelector(".os-run-evidence-panel [data-testid='file-diff']")).not.toBeNull();

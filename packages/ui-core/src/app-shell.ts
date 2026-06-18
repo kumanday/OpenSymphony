@@ -15,7 +15,6 @@ import type {
   RunStreamLiveness,
   RunValidationSummary,
   TaskGraphNode,
-  TaskGraphNodeKind,
   TaskGraphSnapshot,
 } from "@opensymphony/gateway-schema";
 import { renderChangedFileList, renderFileDiff } from "./diff.js";
@@ -31,33 +30,10 @@ import {
   buildRuntimeOverlay,
   defaultTaskGraphFilter,
   filterTaskGraphNodes,
+  renderBadge,
   renderTaskGraphFilters,
   type TaskGraphFilter,
 } from "./task-graph-editor.js";
-import {
-  emptyEditorDialog,
-  emptyInlineEdit,
-  emptyDependencyEdit,
-  emptyCommentEdit,
-  renderCommentEditor,
-  renderCreateDialog,
-  renderDependencyEditor,
-  renderTaskGraphNode,
-  renderTaskGraphToolbar,
-  type CommentEditState,
-  type DependencyEditState,
-  type EditorDialogState,
-  type InlineEditState,
-} from "./task-graph-editor-ui.js";
-import {
-  applyNodeUpdate,
-  buildCreatedNode,
-  dispatchTaskGraphComment,
-  dispatchTaskGraphCreate,
-  dispatchTaskGraphDependencies,
-  dispatchTaskGraphUpdate,
-  isActionCapable,
-} from "./task-graph-editor-actions.js";
 import { generateId } from "./id.js";
 import {
   addCriterion,
@@ -158,15 +134,7 @@ interface AppState {
   activeView: "dashboard" | "planning";
   // Task graph editor state
   taskGraphFilter: TaskGraphFilter;
-  inlineEdit: InlineEditState;
-  createDialog: EditorDialogState;
-  dependencyEdit: DependencyEditState;
-  commentEdit: CommentEditState;
   runOverlays: Map<string, RunDetail>;
-  pendingMutations: Set<string>;
-  pendingCreates: Map<string, string>;
-  /** Snapshot of the task graph node before each optimistic mutation, keyed by correlation id. `null` means a new node was created. */
-  pendingSnapshots: Map<string, TaskGraphNode | null>;
   // Planning workspace state
   planningWorkspace: PlanningWorkspaceState;
   planningEdit: PlanningEditState;
@@ -226,14 +194,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       loading: true,
       activeView: "dashboard",
       taskGraphFilter: { ...defaultTaskGraphFilter },
-      inlineEdit: { ...emptyInlineEdit },
-      createDialog: { ...emptyEditorDialog },
-      dependencyEdit: { ...emptyDependencyEdit },
-      commentEdit: { ...emptyCommentEdit },
       runOverlays: new Map(),
-      pendingMutations: new Set(),
-      pendingCreates: new Map(),
-      pendingSnapshots: new Map(),
       planningWorkspace: emptyPlanningWorkspaceState(),
       planningEdit: { ...emptyPlanningEditState },
     };
@@ -756,14 +717,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!snapshot) {
       return panel("Status", `<div class="os-empty">Loading status</div>`, "os-status-panel");
     }
-    const projectButtons = snapshot.projects.map((project) => `
-      <button type="button" class="os-list-item ${project.project_id === this.state.selectedProjectId ? "is-selected" : ""}" data-project-id="${escapeAttr(project.project_id)}">
-        <strong>${escapeHtml(project.name)}</strong>
-        <span>${project.running_count} running, ${project.completed_count} done, ${project.failed_count} failed</span>
-      </button>
-    `).join("");
-    const events = snapshot.recent_events.slice(0, 5).map((event) => `
+    const events = snapshot.recent_events.slice(0, 3).map((event) => `
       <li>
+        <time class="os-event-time" datetime="${escapeAttr(event.happened_at)}">${escapeHtml(formatEventTime(event.happened_at))}</time>
         <span>${escapeHtml(event.kind)}</span>
         <strong>${escapeHtml(event.issue_identifier ?? "system")}</strong>
         ${escapeHtml(event.summary)}
@@ -777,7 +733,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <div><strong>${snapshot.metrics.retry_queue_depth}</strong><span>Retry Queue</span></div>
           <div><strong>${formatNumber(snapshot.metrics.total_input_tokens + snapshot.metrics.total_output_tokens)}</strong><span>Tokens</span></div>
         </div>
-        <div class="os-list">${projectButtons || `<div class="os-empty">No projects</div>`}</div>
         <ol class="os-events">${events || `<li>No recent events</li>`}</ol>
       `,
       "os-status-panel",
@@ -789,47 +744,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!taskGraph) {
       return panel("Task Graph", `<div class="os-empty">No task graph loaded</div>`, "os-task-graph-panel");
     }
-    const allNodes = new Map(taskGraph.nodes.map((node) => [node.node_id, node]));
     const getOverlay = (node: TaskGraphNode) => {
       const run = node.run_id ? this.state.runOverlays.get(node.run_id) : undefined;
       return buildRuntimeOverlay(node, run);
     };
     const filtered = filterTaskGraphNodes(taskGraph.nodes, this.state.taskGraphFilter, getOverlay);
-    const nodes = filtered.map((node) => renderTaskGraphNode(
-      node,
+    const dependencySignals = buildDependencySignals(taskGraph.nodes, filtered);
+    const graph = renderTaskGraphVisualization(
+      filtered,
       this.state.selectedNodeId,
-      this.state.inlineEdit,
-      getOverlay(node),
-    )).join("");
+      getOverlay,
+      dependencySignals,
+    );
 
-    const toolbar = renderTaskGraphToolbar();
     const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
-    const pendingBanner = this.state.pendingMutations.size > 0
-      ? `<div class="os-pending-banner">${this.state.pendingMutations.size} change(s) pending server acknowledgement</div>`
-      : "";
-
-    const dependencyDialog = this.state.dependencyEdit.nodeId && allNodes.get(this.state.dependencyEdit.nodeId)
-      ? renderDependencyEditor(allNodes.get(this.state.dependencyEdit.nodeId)!, allNodes, this.state.dependencyEdit)
-      : "";
-    const commentDialog = this.state.commentEdit.nodeId && allNodes.get(this.state.commentEdit.nodeId)
-      ? renderCommentEditor(allNodes.get(this.state.commentEdit.nodeId)!, this.state.commentEdit)
-      : "";
-    const createDialog = renderCreateDialog(this.state.createDialog);
-
-    const actions = (() => {
-      if (!this.state.createDialog.open && !this.state.dependencyEdit.nodeId && !this.state.commentEdit.nodeId) return "";
-      return `
-        <div class="os-dialog-actions-bar">
-          <span data-tg-active-action="true">editing ${
-            this.state.createDialog.open ? "create" : this.state.dependencyEdit.nodeId ? "dependencies" : "comment"
-          }</span>
-        </div>
-      `;
-    })();
 
     return panel(
       "Task Graph",
-      `${toolbar}${filters}${pendingBanner}<div class="os-node-list">${nodes || `<div class="os-empty">No tasks match the current filters</div>`}</div>${actions}${createDialog}${dependencyDialog}${commentDialog}`,
+      `${filters}${graph}`,
       "os-task-graph-panel",
     );
   }
@@ -849,6 +781,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const actionItems = buildActionBarItems(run);
     const actionBar = renderActionBar(actionItems);
     const files = renderChangedFileList(this.state.runFiles ?? [], this.state.selectedDiffPath ?? undefined);
+    const selectedNode = this.selectedTaskNode();
+    const dependencyDetail = selectedNode
+      ? renderDependencyDetail(selectedNode, this.state.taskGraph?.nodes ?? [])
+      : "";
     const validation = this.state.runValidation
       ? renderValidationSummary(this.state.runValidation)
       : "";
@@ -879,6 +815,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             ${cancelState ? `<div class="os-pill os-pill-${cancelState}" data-testid="run-pill-cancel-state">${cancelState}</div>` : ""}
           </div>
         </div>
+        ${dependencyDetail}
         <div class="os-run-grid">
           <div><span>Phase</span><strong>${escapeHtml(phase)}</strong></div>
           <div><span>Stream</span><strong>${escapeHtml(stream)}</strong></div>
@@ -902,6 +839,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       `,
       "os-run-detail-panel",
     );
+  }
+
+  private selectedTaskNode(): TaskGraphNode | null {
+    const selectedNodeId = this.state.selectedNodeId;
+    const nodes = this.state.taskGraph?.nodes ?? [];
+    if (selectedNodeId) {
+      const selected = nodes.find((node) => node.node_id === selectedNodeId);
+      if (selected) return selected;
+    }
+    const runIssue = this.state.runDetail?.issue_identifier ?? this.state.runDetail?.run_id ?? null;
+    return runIssue ? (findNodeByRef(nodes, runIssue) ?? null) : null;
   }
 
   private renderRunEvidence(): string {
@@ -1023,85 +971,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
     this.options.root.querySelector("[data-tg-filter-reset]")?.addEventListener("click", () => {
       this.state.taskGraphFilter = { ...defaultTaskGraphFilter };
-      this.render();
-    });
-
-    // Toolbar create buttons
-    this.options.root.querySelectorAll<HTMLElement>("[data-tg-create]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const kind = button.dataset.tgCreate as TaskGraphNodeKind;
-        this.openCreateDialog(kind, null);
-      });
-    });
-
-    // Create child buttons
-    this.options.root.querySelectorAll<HTMLElement>("[data-tg-create-child]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const parentId = button.dataset.tgCreateChild;
-        if (!parentId) return;
-        const parent = this.state.taskGraph?.nodes.find((n) => n.node_id === parentId);
-        if (!parent) return;
-        const childKind: TaskGraphNodeKind = parent.kind === "milestone" ? "issue" : "sub_issue";
-        this.openCreateDialog(childKind, parentId);
-      });
-    });
-
-    // Create dialog actions
-    this.options.root.querySelector("[data-tg-create-save]")?.addEventListener("click", () => {
-      void this.saveCreateDialog();
-    });
-    this.options.root.querySelector("[data-tg-create-cancel]")?.addEventListener("click", () => {
-      this.state.createDialog = { ...emptyEditorDialog };
-      this.render();
-    });
-
-    // Inline edit actions
-    this.options.root.querySelectorAll<HTMLElement>("[data-tg-edit]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const nodeId = button.dataset.tgEdit;
-        if (nodeId) this.startInlineEdit(nodeId);
-      });
-    });
-    this.options.root.querySelectorAll<HTMLElement>("[data-tg-inline-save]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const nodeId = button.dataset.tgInlineSave;
-        if (nodeId) void this.saveInlineEdit(nodeId);
-      });
-    });
-    this.options.root.querySelectorAll<HTMLElement>("[data-tg-inline-cancel]").forEach((button) => {
-      button.addEventListener("click", () => {
-        this.state.inlineEdit = { ...emptyInlineEdit };
-        this.render();
-      });
-    });
-
-    // Dependency editor actions
-    this.options.root.querySelectorAll<HTMLElement>("[data-tg-deps]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const nodeId = button.dataset.tgDeps;
-        if (nodeId) this.openDependencyEditor(nodeId);
-      });
-    });
-    this.options.root.querySelector("[data-tg-deps-save]")?.addEventListener("click", () => {
-      void this.saveDependencyEdit();
-    });
-    this.options.root.querySelector("[data-tg-deps-cancel]")?.addEventListener("click", () => {
-      this.state.dependencyEdit = { ...emptyDependencyEdit };
-      this.render();
-    });
-
-    // Comment editor actions
-    this.options.root.querySelectorAll<HTMLElement>("[data-tg-comment]").forEach((button) => {
-      button.addEventListener("click", () => {
-        const nodeId = button.dataset.tgComment;
-        if (nodeId) this.openCommentEditor(nodeId);
-      });
-    });
-    this.options.root.querySelector("[data-tg-comment-save]")?.addEventListener("click", () => {
-      void this.saveCommentEdit();
-    });
-    this.options.root.querySelector("[data-tg-comment-cancel]")?.addEventListener("click", () => {
-      this.state.commentEdit = { ...emptyCommentEdit };
       this.render();
     });
 
@@ -1382,294 +1251,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
-  // -- Create dialog handling --
-
-  private openCreateDialog(kind: TaskGraphNodeKind, parentId: string | null): void {
-    this.state.createDialog = {
-      open: true,
-      kind,
-      parentId,
-      draftTitle: "",
-      draftState: "Todo",
-    };
-    this.render();
-  }
-
-  private async saveCreateDialog(): Promise<void> {
-    const dialog = this.state.createDialog;
-    if (!dialog.open || !dialog.kind) return;
-    const root = this.options.root;
-    const title = (root.querySelector<HTMLInputElement>("[data-tg-create-title]")?.value ?? "").trim();
-    const state = (root.querySelector<HTMLInputElement>("[data-tg-create-state]")?.value ?? "Todo").trim() || "Todo";
-    if (!title) return;
-
-    const parentId = dialog.parentId ?? undefined;
-    const nodeId = `new-${dialog.kind}-${generateId()}`;
-    const newNode = buildCreatedNode(
-      { parent_id: parentId, kind: dialog.kind, title, state },
-      nodeId,
-    );
-    const taskGraph = this.state.taskGraph;
-    if (taskGraph) {
-      taskGraph.nodes.push(newNode);
-      if (parentId) {
-        const parent = taskGraph.nodes.find((n) => n.node_id === parentId);
-        if (parent && !parent.children.includes(nodeId)) {
-          parent.children.push(nodeId);
-        }
-      } else if (!taskGraph.root_ids.includes(nodeId)) {
-        taskGraph.root_ids.push(nodeId);
-      }
-    }
-    this.state.createDialog = { ...emptyEditorDialog };
-    this.render();
-
-    if (isActionCapable(this.transport)) {
-      const correlationId = `tg-create-${parentId ?? "root"}-${dialog.kind}-${generateId()}`;
-      this.state.pendingMutations.add(correlationId);
-      this.state.pendingCreates.set(correlationId, nodeId);
-      this.state.pendingSnapshots.set(correlationId, null);
-      this.render();
-      try {
-        const receipt = await dispatchTaskGraphCreate(this.transport, {
-          parent_id: parentId,
-          kind: dialog.kind,
-          title,
-          state,
-        }, correlationId);
-        this.applyMutationReceipt(receipt);
-      } catch (error) {
-        this.rollbackOptimisticMutation(correlationId);
-        this.state.connectionMessage = `Create failed: ${errorMessage(error)}`;
-      }
-      this.render();
-    }
-  }
-
-  // -- Inline edit handling --
-
-  private startInlineEdit(nodeId: string): void {
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
-    if (!node) return;
-    this.state.inlineEdit = { nodeId, title: node.title, state: node.state };
-    this.render();
-  }
-
-  private async saveInlineEdit(nodeId: string): Promise<void> {
-    const root = this.options.root;
-    const title = Array.from(root.querySelectorAll<HTMLInputElement>("[data-tg-inline-title]")).find(
-      (el) => el.dataset.tgInlineTitle === nodeId,
-    )?.value.trim();
-    const state = Array.from(root.querySelectorAll<HTMLInputElement>("[data-tg-inline-state]")).find(
-      (el) => el.dataset.tgInlineState === nodeId,
-    )?.value.trim();
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
-    if (!node) return;
-    const updated = applyNodeUpdate(node, { title, state });
-    this.updateTaskGraphNode(updated);
-    this.state.inlineEdit = { ...emptyInlineEdit };
-    this.render();
-
-    if (isActionCapable(this.transport)) {
-      const correlationId = `tg-update-${nodeId}-${generateId()}`;
-      this.state.pendingMutations.add(correlationId);
-      this.state.pendingSnapshots.set(correlationId, { ...node });
-      this.render();
-      try {
-        const receipt = await dispatchTaskGraphUpdate(this.transport, {
-          node_id: nodeId,
-          title,
-          state,
-        }, correlationId);
-        this.applyMutationReceipt(receipt);
-      } catch (error) {
-        this.rollbackOptimisticMutation(correlationId);
-        this.state.connectionMessage = `Update failed: ${errorMessage(error)}`;
-      }
-      this.render();
-    }
-  }
-
-  // -- Dependency editor handling --
-
-  private openDependencyEditor(nodeId: string): void {
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
-    if (!node) return;
-    this.state.dependencyEdit = { nodeId, blockedBy: [...node.blocked_by] };
-    this.render();
-  }
-
-  private async saveDependencyEdit(): Promise<void> {
-    const nodeId = this.state.dependencyEdit.nodeId;
-    if (!nodeId) return;
-    const select = this.options.root.querySelector<HTMLSelectElement>("[data-tg-deps-select]");
-    const blockedBy = Array.from(select?.selectedOptions ?? []).map((option) => option.value);
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
-    if (!node) return;
-    const updated = { ...node, blocked_by: blockedBy };
-    this.updateTaskGraphNode(updated);
-    this.state.dependencyEdit = { ...emptyDependencyEdit };
-    this.render();
-
-    if (isActionCapable(this.transport)) {
-      const correlationId = `tg-deps-${nodeId}-${generateId()}`;
-      this.state.pendingMutations.add(correlationId);
-      this.state.pendingSnapshots.set(correlationId, { ...node });
-      this.render();
-      try {
-        const receipt = await dispatchTaskGraphDependencies(this.transport, { node_id: nodeId, blocked_by: blockedBy }, correlationId);
-        this.applyMutationReceipt(receipt);
-      } catch (error) {
-        this.rollbackOptimisticMutation(correlationId);
-        this.state.connectionMessage = `Dependency update failed: ${errorMessage(error)}`;
-      }
-      this.render();
-    }
-  }
-
-  // -- Comment editor handling --
-
-  private openCommentEditor(nodeId: string): void {
-    this.state.commentEdit = { nodeId, kind: "comment", body: "" };
-    this.render();
-  }
-
-  private async saveCommentEdit(): Promise<void> {
-    const nodeId = this.state.commentEdit.nodeId;
-    if (!nodeId) return;
-    const body = this.options.root.querySelector<HTMLTextAreaElement>("[data-tg-comment-body]")?.value.trim() ?? "";
-    if (!body) return;
-    const kind = (this.options.root.querySelector<HTMLSelectElement>("[data-tg-comment-kind]")?.value ?? "comment") as "comment" | "evidence";
-
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
-    if (node) {
-      const updated = { ...node, comment_count: (node.comment_count ?? 0) + 1 };
-      this.updateTaskGraphNode(updated);
-    }
-    this.state.commentEdit = { ...emptyCommentEdit };
-    this.render();
-
-    if (isActionCapable(this.transport)) {
-      const correlationId = `tg-comment-${nodeId}-${generateId()}`;
-      this.state.pendingMutations.add(correlationId);
-      if (node) {
-        this.state.pendingSnapshots.set(correlationId, { ...node });
-      }
-      this.render();
-      try {
-        const receipt = await dispatchTaskGraphComment(this.transport, { node_id: nodeId, body, kind }, correlationId);
-        this.applyMutationReceipt(receipt);
-      } catch (error) {
-        this.rollbackOptimisticMutation(correlationId);
-        this.state.connectionMessage = `Comment failed: ${errorMessage(error)}`;
-      }
-      this.render();
-    }
-  }
-
-  // -- Local state mutation helpers --
-
-  private updateTaskGraphNode(updated: TaskGraphNode): void {
-    const taskGraph = this.state.taskGraph;
-    if (!taskGraph) return;
-    const idx = taskGraph.nodes.findIndex((n) => n.node_id === updated.node_id);
-    if (idx >= 0) {
-      taskGraph.nodes[idx] = updated;
-    }
-  }
-
-  private applyMutationReceipt(receipt: ActionReceipt): void {
-    if (receipt.status !== "accepted") {
-      this.rollbackOptimisticMutation(receipt.correlation_id);
-      const detail = receipt.reason ? `: ${receipt.reason}` : "";
-      this.state.connectionMessage = `Mutation ${receipt.status}${detail}`;
-      return;
-    }
-
-    const result = receipt.result as { node_id?: string; updated_at?: string } | undefined;
-    if (!result?.node_id || !result?.updated_at) {
-      this.state.pendingMutations.delete(receipt.correlation_id);
-      this.state.pendingCreates.delete(receipt.correlation_id);
-      this.state.pendingSnapshots.delete(receipt.correlation_id);
-      return;
-    }
-
-    // Reconcile optimistic create ids with the server-assigned id from the receipt.
-    const localNodeId = this.state.pendingCreates.get(receipt.correlation_id);
-    if (localNodeId && localNodeId !== result.node_id) {
-      this.reconcileNodeId(localNodeId, result.node_id);
-    }
-    this.state.pendingMutations.delete(receipt.correlation_id);
-    this.state.pendingCreates.delete(receipt.correlation_id);
-    this.state.pendingSnapshots.delete(receipt.correlation_id);
-
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === result.node_id);
-    if (node) {
-      this.updateTaskGraphNode({ ...node, updated_at: result.updated_at });
-    }
-  }
-
-  private rollbackOptimisticMutation(correlationId: string): void {
-    const snapshot = this.state.pendingSnapshots.get(correlationId);
-    if (snapshot === undefined) {
-      // No snapshot recorded; nothing to roll back.
-      this.state.pendingMutations.delete(correlationId);
-      this.state.pendingCreates.delete(correlationId);
-      return;
-    }
-
-    const taskGraph = this.state.taskGraph;
-    if (snapshot === null) {
-      // Optimistic create: remove the temporary node.
-      const localNodeId = this.state.pendingCreates.get(correlationId);
-      if (taskGraph && localNodeId) {
-        taskGraph.nodes = taskGraph.nodes.filter((n) => n.node_id !== localNodeId);
-        taskGraph.root_ids = taskGraph.root_ids.filter((id) => id !== localNodeId);
-        for (const node of taskGraph.nodes) {
-          node.children = node.children.filter((id) => id !== localNodeId);
-          if (node.parent_id === localNodeId) {
-            node.parent_id = undefined;
-          }
-        }
-      }
-    } else if (taskGraph) {
-      // Restore the node from the snapshot.
-      this.updateTaskGraphNode(snapshot);
-    }
-
-    this.state.pendingMutations.delete(correlationId);
-    this.state.pendingCreates.delete(correlationId);
-    this.state.pendingSnapshots.delete(correlationId);
-  }
-
-  private reconcileNodeId(oldId: string, newId: string): void {
-    const taskGraph = this.state.taskGraph;
-    if (!taskGraph) return;
-
-    if (taskGraph.nodes.some((n) => n.node_id === newId && n.node_id !== oldId)) {
-      this.state.connectionMessage = `Server returned a duplicate node ID (${newId}); optimistic ID not reconciled.`;
-      return;
-    }
-
-    const node = taskGraph.nodes.find((n) => n.node_id === oldId);
-    if (!node) return;
-    node.node_id = newId;
-
-    if (taskGraph.root_ids.includes(oldId)) {
-      taskGraph.root_ids = taskGraph.root_ids.map((id) => (id === oldId ? newId : id));
-    }
-    for (const n of taskGraph.nodes) {
-      if (n.parent_id === oldId) n.parent_id = newId;
-      n.children = n.children.map((id) => (id === oldId ? newId : id));
-      n.blocked_by = n.blocked_by.map((id) => (id === oldId ? newId : id));
-    }
-
-    if (this.state.selectedNodeId === oldId) this.state.selectedNodeId = newId;
-    if (this.state.inlineEdit.nodeId === oldId) this.state.inlineEdit.nodeId = newId;
-    if (this.state.dependencyEdit.nodeId === oldId) this.state.dependencyEdit.nodeId = newId;
-    if (this.state.commentEdit.nodeId === oldId) this.state.commentEdit.nodeId = newId;
-  }
-
   // -- Planning workspace handling --
 
   private sendPlanMessage(): void {
@@ -1912,6 +1493,311 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US", { notation: "compact" }).format(value);
 }
 
+interface DependencySignal {
+  gutter: string;
+  suffix: string;
+  upstreamVisible: TaskGraphNode[];
+  upstreamHiddenCount: number;
+  downstreamVisible: TaskGraphNode[];
+  downstreamHiddenCount: number;
+  completedBlockers: TaskGraphNode[];
+}
+
+interface TaskGraphRenderModel {
+  node: TaskGraphNode;
+  signal: DependencySignal;
+  lane: number;
+  index: number;
+}
+
+interface TaskGraphLink {
+  from: TaskGraphRenderModel;
+  to: TaskGraphRenderModel;
+}
+
+function buildDependencySignals(
+  allNodes: TaskGraphNode[],
+  visibleNodes: TaskGraphNode[],
+): Map<string, DependencySignal> {
+  const visibleIds = new Set(visibleNodes.map((node) => node.node_id));
+  const downstream = new Map<string, TaskGraphNode[]>();
+
+  for (const node of allNodes) {
+    for (const blockerId of node.blocked_by) {
+      const blocker = findNodeByRef(allNodes, blockerId);
+      const downstreamKey = blocker?.node_id ?? normalizeNodeRef(blockerId);
+      const entries = downstream.get(downstreamKey) ?? [];
+      entries.push(node);
+      downstream.set(downstreamKey, entries);
+    }
+  }
+
+  const signals = new Map<string, DependencySignal>();
+  for (const node of allNodes) {
+    const knownBlockers = node.blocked_by.map((id) => findNodeByRef(allNodes, id)).filter((candidate): candidate is TaskGraphNode => Boolean(candidate));
+    const unknownBlockerCount = node.blocked_by.length - knownBlockers.length;
+    const unfinishedBlockers = knownBlockers.filter((candidate) => !isTerminalTaskNode(candidate));
+    const upstreamVisible = unfinishedBlockers.filter((candidate) => visibleIds.has(candidate.node_id));
+    const upstreamHiddenCount = unfinishedBlockers.length - upstreamVisible.length + unknownBlockerCount;
+    const completedBlockers = knownBlockers.filter(isTerminalTaskNode);
+
+    const downstreamNodes = downstream.get(node.node_id) ?? [];
+    const unfinishedDownstream = downstreamNodes.filter((candidate) => !isTerminalTaskNode(candidate));
+    const downstreamVisible = unfinishedDownstream.filter((candidate) => visibleIds.has(candidate.node_id));
+    const downstreamHiddenCount = unfinishedDownstream.length - downstreamVisible.length;
+    const suffix = dependencySuffix(upstreamVisible, upstreamHiddenCount, downstreamVisible, downstreamHiddenCount);
+    const gutter = upstreamVisible.length > 0
+      ? "|  "
+      : downstreamVisible.length > 0 || downstreamHiddenCount > 0
+        ? "+--"
+        : "   ";
+
+    signals.set(node.node_id, {
+      gutter,
+      suffix,
+      upstreamVisible,
+      upstreamHiddenCount,
+      downstreamVisible,
+      downstreamHiddenCount,
+      completedBlockers,
+    });
+  }
+  return signals;
+}
+
+function renderTaskGraphVisualization(
+  nodes: TaskGraphNode[],
+  selectedNodeId: string | null,
+  getOverlay: (node: TaskGraphNode) => ReturnType<typeof buildRuntimeOverlay>,
+  signals: Map<string, DependencySignal>,
+): string {
+  if (nodes.length === 0) {
+    return `<div class="os-empty">No tasks match the current filters</div>`;
+  }
+  const models = buildTaskGraphRenderModels(nodes, signals);
+  const links = buildTaskGraphLinks(models);
+  const rowHeight = 76;
+  const rowGap = 10;
+  const laneWidth = 46;
+  const railX = 20;
+  const graphHeight = models.length * rowHeight + Math.max(0, models.length - 1) * rowGap;
+  const maxLane = models.reduce((max, model) => Math.max(max, model.lane), 0);
+  const graphWidth = Math.max(620, 360 + maxLane * laneWidth);
+  const svgLinks = links.map((link) => renderTaskGraphLink(link, rowHeight, rowGap, laneWidth, railX)).join("");
+  const renderedNodes = models.map((model) => renderReadOnlyTaskGraphNode(
+    model,
+    selectedNodeId,
+    getOverlay(model.node),
+  )).join("");
+
+  return `
+    <div class="os-task-graph-stage" data-testid="task-graph-visualization" style="--os-graph-height: ${graphHeight}px; --os-graph-width: ${graphWidth}px;">
+      <svg class="os-task-graph-links" data-testid="task-graph-links" viewBox="0 0 ${graphWidth} ${graphHeight}" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <marker id="os-task-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M 0 0 L 8 4 L 0 8 z"></path>
+          </marker>
+        </defs>
+        ${svgLinks}
+      </svg>
+      <div class="os-node-list os-node-graph-list" style="min-height: ${graphHeight}px;">${renderedNodes}</div>
+    </div>
+  `;
+}
+
+function buildTaskGraphRenderModels(
+  nodes: TaskGraphNode[],
+  signals: Map<string, DependencySignal>,
+): TaskGraphRenderModel[] {
+  const laneById = new Map<string, number>();
+  const visibleIds = new Set(nodes.map((node) => node.node_id));
+
+  for (const node of nodes) {
+    const signal = signals.get(node.node_id);
+    const upstreamLanes = signal?.upstreamVisible
+      .filter((upstream) => visibleIds.has(upstream.node_id))
+      .map((upstream) => laneById.get(upstream.node_id) ?? 0) ?? [];
+    const lane = upstreamLanes.length > 0 ? Math.min(4, Math.max(...upstreamLanes) + 1) : 0;
+    laneById.set(node.node_id, lane);
+  }
+
+  return nodes.map((node, index) => ({
+    node,
+    signal: signals.get(node.node_id) ?? emptyDependencySignal(),
+    lane: laneById.get(node.node_id) ?? 0,
+    index,
+  }));
+}
+
+function buildTaskGraphLinks(models: TaskGraphRenderModel[]): TaskGraphLink[] {
+  const byId = new Map(models.map((model) => [model.node.node_id, model]));
+  const links: TaskGraphLink[] = [];
+  for (const model of models) {
+    for (const upstream of model.signal.upstreamVisible) {
+      const from = byId.get(upstream.node_id);
+      if (from) {
+        links.push({ from, to: model });
+      }
+    }
+  }
+  return links;
+}
+
+function renderTaskGraphLink(
+  link: TaskGraphLink,
+  rowHeight: number,
+  rowGap: number,
+  laneWidth: number,
+  railX: number,
+): string {
+  const x1 = railX + link.from.lane * laneWidth;
+  const x2 = railX + link.to.lane * laneWidth;
+  const y1 = link.from.index * (rowHeight + rowGap) + rowHeight / 2;
+  const y2 = link.to.index * (rowHeight + rowGap) + rowHeight / 2;
+  const bend = Math.max(34, Math.abs(y2 - y1) * 0.24);
+  const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${Math.max(x2 - bend, x1 + 18)} ${y2}, ${x2} ${y2}`;
+  return `<path class="os-task-graph-link" data-testid="task-graph-link" d="${escapeAttr(d)}"></path>`;
+}
+
+function dependencySuffix(
+  upstreamVisible: TaskGraphNode[],
+  upstreamHiddenCount: number,
+  downstreamVisible: TaskGraphNode[],
+  downstreamHiddenCount: number,
+): string {
+  const parts: string[] = [];
+  if (upstreamVisible.length > 0) {
+    parts.push(`<- ${nodeLabel(upstreamVisible[0])}`);
+    if (upstreamVisible.length > 1) {
+      parts.push(`+${upstreamVisible.length - 1}`);
+    }
+  } else if (upstreamHiddenCount > 0) {
+    parts.push(`<- ${upstreamHiddenCount} hidden`);
+  }
+
+  if (downstreamVisible.length > 0) {
+    const chain = downstreamVisible.slice(0, 2).map(nodeLabel).join(" -> ");
+    parts.push(`-> ${chain}`);
+    if (downstreamVisible.length > 2) {
+      parts.push(`+${downstreamVisible.length - 2}`);
+    }
+  } else if (downstreamHiddenCount > 0) {
+    parts.push(`-> ${downstreamHiddenCount} hidden`);
+  }
+
+  return parts.join(" ");
+}
+
+function renderReadOnlyTaskGraphNode(
+  model: TaskGraphRenderModel,
+  selectedNodeId: string | null,
+  overlay: ReturnType<typeof buildRuntimeOverlay>,
+): string {
+  const { node, signal } = model;
+  const isSelected = node.node_id === selectedNodeId;
+  const overlayBadges = overlay.badges.length ? overlay.badges.map(renderBadge).join("") : "";
+  const runMeta = overlay.run_id
+    ? `<span class="os-run-meta">run ${escapeHtml(overlay.run_id)}</span>`
+    : "";
+  const stateTone = stateToneForTaskNode(node);
+  const hasUpstream = signal.upstreamVisible.length > 0 || signal.upstreamHiddenCount > 0;
+  const hasDownstream = signal.downstreamVisible.length > 0 || signal.downstreamHiddenCount > 0;
+  const dependencyMeta = signal.suffix
+    ? `<span class="os-node-dependency" data-testid="dependency-suffix">${escapeHtml(signal.suffix)}</span>`
+    : "";
+
+  return `
+    <button type="button" class="os-node os-node-readonly ${isSelected ? "is-selected" : ""} ${hasUpstream ? "os-node-has-upstream" : ""} ${hasDownstream ? "os-node-has-downstream" : ""}" data-node-id="${escapeAttr(node.node_id)}" style="--os-lane: ${model.lane};">
+      <span class="os-node-gutter" aria-hidden="true">${escapeHtml(signal.gutter)}</span>
+      <span class="os-node-main">
+        <span class="os-node-line">
+          <strong>${escapeHtml(node.identifier)}</strong>
+          <span>${escapeHtml(node.title)}</span>
+          ${dependencyMeta}
+        </span>
+        <span class="os-node-subline">
+          <span class="os-node-kind">${escapeHtml(node.kind.replace(/_/g, " "))}</span>
+          <em class="os-node-state os-node-state-${escapeAttr(stateTone)}">${escapeHtml(node.state)}</em>
+          <span class="os-node-badges">${overlayBadges}</span>
+          ${runMeta}
+        </span>
+      </span>
+    </button>
+  `;
+}
+
+function renderDependencyDetail(node: TaskGraphNode, allNodes: TaskGraphNode[]): string {
+  const signals = buildDependencySignals(allNodes, allNodes);
+  const signal = signals.get(node.node_id);
+  if (!signal) {
+    return "";
+  }
+  const upstream = signal.upstreamVisible.length > 0
+    ? `blocked by ${signal.upstreamVisible.map(nodeLabel).join(", ")}`
+    : signal.upstreamHiddenCount > 0
+      ? `blocked by ${signal.upstreamHiddenCount} hidden`
+      : "ready";
+  const completed = signal.completedBlockers.length > 0
+    ? ` | completed blockers ${signal.completedBlockers.map(nodeLabel).join(", ")}`
+    : "";
+  const downstream = signal.downstreamVisible.length > 0
+    ? ` | blocks ${signal.downstreamVisible.map(nodeLabel).join(", ")}`
+    : signal.downstreamHiddenCount > 0
+      ? ` | blocks ${signal.downstreamHiddenCount} hidden`
+      : "";
+
+  return `<div class="os-dependency-detail" data-testid="dependency-detail">deps: ${escapeHtml(upstream + completed + downstream)}</div>`;
+}
+
+function emptyDependencySignal(): DependencySignal {
+  return {
+    gutter: "   ",
+    suffix: "",
+    upstreamVisible: [],
+    upstreamHiddenCount: 0,
+    downstreamVisible: [],
+    downstreamHiddenCount: 0,
+    completedBlockers: [],
+  };
+}
+
+function isTerminalTaskNode(node: TaskGraphNode): boolean {
+  const state = `${node.state} ${node.state_category ?? ""}`.toLowerCase();
+  return state.includes("done")
+    || state.includes("complete")
+    || state.includes("release")
+    || state.includes("cancel");
+}
+
+function nodeLabel(node: TaskGraphNode): string {
+  return node.identifier || node.node_id;
+}
+
+function findNodeByRef(nodes: TaskGraphNode[], ref: string): TaskGraphNode | undefined {
+  const normalized = normalizeNodeRef(ref);
+  return nodes.find((node) =>
+    normalizeNodeRef(node.node_id) === normalized
+    || normalizeNodeRef(node.identifier) === normalized,
+  );
+}
+
+function normalizeNodeRef(ref: string): string {
+  return ref.trim().toLowerCase();
+}
+
+function stateToneForTaskNode(node: TaskGraphNode): string {
+  const value = `${node.state} ${node.state_category ?? ""}`.toLowerCase();
+  if (value.includes("human review") || value.includes("review")) return "review";
+  if (value.includes("block")) return "blocked";
+  if (value.includes("fail") || value.includes("cancel")) return "failed";
+  if (value.includes("running") || value.includes("progress")) return "running";
+  if (value.includes("done") || value.includes("complete") || value.includes("release")) return "done";
+  if (value.includes("backlog")) return "backlog";
+  if (value.includes("todo")) return "todo";
+  if (value.includes("idle")) return "idle";
+  return "neutral";
+}
+
 function appShellStyles(): string {
   return `
     :root { color-scheme: light dark; }
@@ -1944,8 +1830,25 @@ function appShellStyles(): string {
     .os-metrics span, .os-run-grid span { display: block; color: #667788; font-size: 12px; margin-top: 3px; }
     .os-list, .os-node-list { display: grid; gap: 8px; }
     .os-list-item, .os-node { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px; background: #ffffff; }
+    .os-task-graph-stage { position: relative; min-width: min(100%, var(--os-graph-width)); overflow-x: auto; padding: 2px 0; }
+    .os-task-graph-links { position: absolute; inset: 0 auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
+    .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; opacity: 0.78; marker-end: url(#os-task-arrow); }
+    .os-task-graph-links marker path { fill: #39708f; }
+    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 10px; }
+    .os-node-readonly { grid-template-columns: 34px minmax(0, 1fr); align-items: center; min-height: 76px; margin-left: calc(var(--os-lane, 0) * 46px); margin-right: 10px; border-radius: 8px; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
+    .os-node-readonly:active { transform: scale(0.996); }
+    .os-node-gutter { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #39708f; font-size: 12px; font-weight: 700; white-space: pre; background: #e7f1f5; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.22); }
+    .os-node-main, .os-node-line, .os-node-subline { min-width: 0; }
+    .os-node-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: nowrap; }
+    .os-node-line > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-node-line strong { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+    .os-node-dependency { color: #92400e; font-size: 12px; white-space: nowrap; }
+    .os-node-subline { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 5px; }
     .os-list-item span, .os-node span, .os-node em { color: #667788; font-size: 12px; font-style: normal; }
+    .os-node .os-node-gutter { color: #39708f; }
+    .os-node .os-node-dependency { color: #92400e; }
     .is-selected { border-color: #39708f; background: #e7f1f5; }
+    .os-node-readonly.is-selected { box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.32), 0 10px 24px rgba(15, 23, 42, 0.08); }
     .os-node-kind { text-transform: uppercase; letter-spacing: 0.08em; }
     .os-node-state { display: inline-flex; width: fit-content; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
     .os-node-state-review { background: #fef3c7; color: #92400e; }
@@ -1957,8 +1860,9 @@ function appShellStyles(): string {
     .os-node-state-neutral { background: #f8fafc; color: #475569; border: 1px solid #d8dee4; }
     .os-detail-strip, .os-run-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; border: 1px solid #d8dee4; border-radius: 6px; padding: 10px; background: #fbfcfd; }
     .os-detail-strip span, .os-run-head span { color: #667788; font-size: 12px; }
-    .os-events { margin: 0; padding-left: 18px; display: grid; gap: 7px; font-size: 13px; }
-    .os-events span { color: #39708f; margin-right: 6px; }
+    .os-events { margin: 0; padding-left: 18px; display: grid; gap: 5px; font-size: 12px; line-height: 1.35; }
+    .os-events span { color: #39708f; margin-right: 5px; }
+    .os-event-time { color: #667788; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; margin-right: 6px; }
     .os-pill, .os-actions span { border-radius: 999px; background: #e7f1f5; color: #23566f; padding: 5px 9px; font-size: 12px; }
     .os-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
     .os-run-action-bar { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
@@ -1967,6 +1871,7 @@ function appShellStyles(): string {
     .os-action-receipt { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; margin: 10px 0; padding: 8px; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
     .os-receipt-status-accepted { color: #1f9d55; }
     .os-receipt-status-rejected { color: #c2410c; }
+    .os-dependency-detail { border: 1px solid #d8dee4; border-radius: 6px; padding: 8px 10px; background: #fbfcfd; color: #536170; font-size: 12px; margin-bottom: 10px; }
     .os-run-panels { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 12px 0; }
     .os-run-section { display: grid; gap: 8px; }
     .os-run-section + .os-run-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid #d8dee4; }
@@ -2098,13 +2003,17 @@ function appShellStyles(): string {
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #d9e2ea; }
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
-      .os-topbar p, .os-section-head span, .os-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta { color: #94a3b3; }
+      .os-topbar p, .os-section-head span, .os-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
       .os-segmented { background: #111820; border-color: #2a3440; }
       .os-segmented button.is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-field input, .os-field select, .os-inline-input, .os-dialog textarea { background: #0f151b; color: #d9e2ea; border-color: #344454; }
       button { background: #1f2a35; color: #d9e2ea; border-color: #3b4c5e; }
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .os-changed-file:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
+      .os-task-graph-link { stroke: #5ca0b8; opacity: 0.82; }
+      .os-task-graph-links marker path { fill: #5ca0b8; }
+      .os-node-gutter { background: #10232c; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.3); }
+      .os-node-readonly.is-selected { box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.36), 0 14px 28px rgba(0, 0, 0, 0.18); }
       .os-view-tab, .os-plan-tab, .os-changed-file { background: #111820; color: #d9e2ea; border-color: #3b4c5e; }
       .os-view-tab-active, .os-plan-tab-active, .os-changed-file.os-selected { background: #18303a; color: #f2f7fb; border-color: #5ca0b8; }
       .os-changed-file .os-file-path { color: #e6edf3; }
@@ -2117,6 +2026,8 @@ function appShellStyles(): string {
       .os-diff-line-deletion { background: #7f1d1d; color: #fecaca; }
       .os-diff-line-context { color: #94a3b3; }
       .os-action-receipt { background: #111820; border-color: #2a3440; }
+      .os-dependency-detail { background: #111820; border-color: #2a3440; color: #cbd5e1; }
+      .os-node .os-node-gutter, .os-node .os-node-dependency { color: #fbbf24; }
 
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-node-state-review { background: #451a03; color: #fcd34d; }

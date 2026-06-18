@@ -1977,9 +1977,7 @@ async fn get_task_graph(
                 priority: None,
                 parent_id: None,
                 children: Vec::new(),
-                // Dependency info not yet available from the control-plane snapshot;
-                // return an empty vector instead of self-referential placeholder data.
-                blocked_by: Vec::new(),
+                blocked_by: issue.blocked_by.clone(),
                 url: None,
                 branch_name: None,
                 labels: Vec::new(),
@@ -3275,6 +3273,7 @@ mod tests {
             },
             retry_count: 0,
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: if flags.harness {
                 Some("http://localhost:3000".into())
             } else {
