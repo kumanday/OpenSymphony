@@ -226,6 +226,33 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.children.length).toBe(0);
   });
 
+  it("keeps dark-mode tabs and changed-file rows readable", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      title: "OpenSymphony Desktop",
+      transport: buildTransport(),
+    });
+
+    await flushUntil(
+      () =>
+        root.querySelector(".os-app[data-opensymphony-app-shell='mounted']") !==
+        null,
+    );
+
+    const styleText = root.querySelector("style")?.textContent ?? "";
+    expect(styleText).toContain("@media (prefers-color-scheme: dark)");
+    expect(styleText).toContain(
+      ".os-view-tab, .os-plan-tab, .os-changed-file",
+    );
+    expect(styleText).toContain(".os-changed-file .os-file-path");
+    expect(styleText).toContain(".os-changed-file .os-file-stats");
+
+    await handle.destroy();
+  });
+
   it("wires dashboard to task graph to run detail navigation against the mock gateway", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

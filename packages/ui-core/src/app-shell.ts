@@ -1922,6 +1922,8 @@ function appShellStyles(): string {
     .os-changed-file-list { display: grid; gap: 6px; }
     .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 8px; background: #ffffff; }
     .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
+    .os-file-path { min-width: 0; overflow-wrap: anywhere; }
+    .os-file-stats { white-space: nowrap; }
     .os-change-kind { text-transform: uppercase; font-size: 10px; padding: 2px 5px; border-radius: 4px; }
     .os-change-kind-created { background: #dcfce7; color: #166534; }
     .os-change-kind-modified { background: #e0f2fe; color: #0c4a6e; }
@@ -2040,6 +2042,10 @@ function appShellStyles(): string {
       .os-field input, .os-field select, .os-inline-input, .os-dialog textarea { background: #0f151b; color: #d9e2ea; border-color: #344454; }
       button { background: #1f2a35; color: #d9e2ea; border-color: #3b4c5e; }
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .os-changed-file:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
+      .os-view-tab, .os-plan-tab, .os-changed-file { background: #111820; color: #d9e2ea; border-color: #3b4c5e; }
+      .os-view-tab-active, .os-plan-tab-active, .os-changed-file.os-selected { background: #18303a; color: #f2f7fb; border-color: #5ca0b8; }
+      .os-changed-file .os-file-path { color: #e6edf3; }
+      .os-changed-file .os-file-stats { color: #cbd5e1; }
       .os-file-diff, .os-approval-item, .os-validation-command, .os-validation-evidence-item { background: #111820; border-color: #2a3440; }
       .os-diff-header, .os-validation-header { background: #1f2a35; border-color: #2a3440; }
       .os-diff-line-addition { background: #14532d; color: #86efac; }
