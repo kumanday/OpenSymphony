@@ -243,7 +243,7 @@ export function createDesktopProfileController(): ProfileController | undefined 
 
     async setActiveProfile(profileId: string) {
       const active = await invoke<NativeProfileResponse>("set_active_profile", {
-        profile_id: profileId,
+        profileId,
       });
       return toConnectionProfile(active);
     },

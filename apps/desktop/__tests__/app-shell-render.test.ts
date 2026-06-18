@@ -22,8 +22,19 @@ import type {
   GatewayReader,
   OpenSymphonyAppHandle,
 } from "@opensymphony/ui-core";
+import { createDesktopProfileController } from "../src/index";
+
+interface TauriInvokeCall {
+  command: string;
+  args?: Record<string, unknown>;
+}
 
 describe("desktop app shell render", () => {
+  afterEach(() => {
+    delete (globalThis as unknown as { __TAURI__?: unknown }).__TAURI__;
+    document.body.innerHTML = "";
+  });
+
   it("mounts the shared OpenSymphony app shell with the expected viewport markup", async () => {
     document.body.innerHTML = `<div id="root"></div>`;
     const root = document.getElementById("root") as HTMLElement;
@@ -74,5 +85,38 @@ describe("desktop app shell render", () => {
     expect(root.querySelector("[data-save-profile]")).not.toBeNull();
 
     await handle.destroy();
+  });
+
+  it("selects active profiles with Tauri's camelCase command argument", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          return {
+            id: "local-daemon",
+            label: "Local Gateway",
+            kind: "local_daemon",
+            gateway_url: "http://127.0.0.1:2468",
+            transport: "loopback_http",
+            managed: false,
+            active: true,
+          };
+        },
+      },
+    };
+
+    const controller = createDesktopProfileController();
+
+    expect(controller).toBeDefined();
+    const profile = await controller!.setActiveProfile("local-daemon");
+
+    expect(calls).toEqual([
+      {
+        command: "set_active_profile",
+        args: { profileId: "local-daemon" },
+      },
+    ]);
+    expect(profile.gatewayUrl).toBe("http://127.0.0.1:2468");
   });
 });
