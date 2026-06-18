@@ -13,7 +13,9 @@ import type {
 } from "../src/app-shell.js";
 import type {
   ConnectionProfile,
+  ChangedFileEntry,
   DashboardSnapshot,
+  FileDiffPage,
   GatewayCapabilities,
   RunDetail,
   TaskGraphSnapshot,
@@ -145,6 +147,33 @@ const runDetail: RunDetail = {
   },
 };
 
+const changedFiles: ChangedFileEntry[] = [
+  {
+    path: "src/config.ts",
+    change_kind: "modified",
+    lines_added: 12,
+    lines_removed: 3,
+  },
+];
+
+const fileDiff: FileDiffPage = {
+  schema_version: schemaVersionV1(),
+  run_id: "COE-449",
+  file_path: "src/config.ts",
+  hunks: [
+    {
+      file_path: "src/config.ts",
+      header: "@@ -1 +1 @@",
+      start_line: 1,
+      old_line_count: 1,
+      new_line_count: 1,
+      lines: [{ type: "addition", line: "export const gateway = true;" }],
+    },
+  ],
+  total_lines_added: 12,
+  total_lines_removed: 3,
+};
+
 function buildTransport(opts?: { failHealth?: boolean }): MockGatewayTransport {
   if (opts?.failHealth) {
     class AlwaysFailHealthTransport extends MockGatewayTransport {
@@ -170,6 +199,14 @@ function buildTransport(opts?: { failHealth?: boolean }): MockGatewayTransport {
     runDetails: [
       runDetail,
       { ...runDetail, run_id: "desktop-alpha", issue_id: "desktop-alpha" },
+    ],
+    runFiles: [
+      { runId: "COE-449", files: changedFiles },
+      { runId: "desktop-alpha", files: changedFiles },
+    ],
+    runDiffs: [
+      { runId: "COE-449", filePath: "src/config.ts", diff: fileDiff },
+      { runId: "desktop-alpha", filePath: "src/config.ts", diff: { ...fileDiff, run_id: "desktop-alpha" } },
     ],
   });
 }
@@ -253,7 +290,7 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
-  it("wires dashboard to task graph to run detail navigation against the mock gateway", async () => {
+  it("lays out status, task graph, run detail, and activity panels", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
@@ -270,6 +307,12 @@ describe("OpenSymphonyApp mount", () => {
       "[data-project-id='proj-alpha']",
     ) as HTMLButtonElement;
     expect(projectButton).not.toBeNull();
+    expect(root.querySelector(".os-status-panel h2")?.textContent).toBe("Status");
+    expect(root.querySelector(".os-profile-panel h2")?.textContent).toBe("Connection");
+    expect(root.querySelector(".os-task-graph-panel h2")?.textContent).toBe("Task Graph");
+    expect(root.querySelector(".os-run-detail-panel h2")?.textContent).toBe("Run Detail");
+    expect(root.querySelector(".os-run-evidence-panel h2")?.textContent).toBe("Inspector");
+    expect(root.querySelector("[data-profile-label]")).toBeNull();
     expect(root.querySelector(".os-metrics")).not.toBeNull();
 
     taskGraph.root_ids.forEach((rootId) => {
@@ -290,6 +333,17 @@ describe("OpenSymphonyApp mount", () => {
     // panel reflects the navigation event with the mock gateway response.
     expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
     expect(root.querySelector(".os-pill")?.textContent).toBe("running");
+    expect(root.querySelector(".os-run-detail-panel [data-testid='changed-file-list']")).not.toBeNull();
+    expect(root.querySelector(".os-run-evidence-panel [data-testid='evidence-toggle']")).not.toBeNull();
+    expect(root.querySelector(".os-run-evidence-panel [data-testid='file-diff']")).not.toBeNull();
+
+    (root.querySelector("[data-evidence-view='activity']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='run-activity']") !== null);
+    expect(root.querySelector(".os-run-evidence-panel [data-testid='run-activity']")).not.toBeNull();
+
+    (root.querySelector("[data-testid='changed-file-item']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='file-diff']") !== null);
+    expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
 
     await handle.destroy();
   });
@@ -382,15 +436,11 @@ describe("OpenSymphonyApp mount", () => {
 
     await flushUntil(() => root.querySelector("[data-save-profile]") !== null);
 
-    const labelInput = root.querySelector(
-      "[data-profile-label]",
-    ) as HTMLInputElement;
     const gatewayInput = root.querySelector(
       "[data-profile-gateway]",
     ) as HTMLInputElement;
     const save = root.querySelector("[data-save-profile]") as HTMLButtonElement;
 
-    labelInput.value = "Saved Gateway";
     gatewayInput.value = newUrl;
     save.click();
 

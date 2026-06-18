@@ -145,6 +145,7 @@ interface AppState {
   runFiles: ChangedFileEntry[] | null;
   selectedDiffPath: string | null;
   runDiff: FileDiffPage | null;
+  evidenceView: "diff" | "activity";
   runEvents: RunEvent[] | null;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
@@ -213,6 +214,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       runFiles: null,
       selectedDiffPath: null,
       runDiff: null,
+      evidenceView: "diff",
       runEvents: null,
       runValidation: null,
       runApprovals: null,
@@ -245,6 +247,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
+    this.state.evidenceView = "diff";
     try {
       this.state.runFiles = typeof this.transport.runFiles === "function"
         ? await this.transport.runFiles(runId)
@@ -356,6 +359,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
+      this.state.evidenceView = "diff";
       this.state.runEvents = null;
       this.state.runValidation = null;
       this.state.runApprovals = null;
@@ -388,6 +392,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
+      this.state.evidenceView = "diff";
       this.state.runEvents = null;
       this.state.runValidation = null;
       this.state.runApprovals = null;
@@ -399,6 +404,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
+      this.state.evidenceView = "diff";
       this.state.runEvents = null;
       this.state.runValidation = null;
       this.state.runApprovals = null;
@@ -438,6 +444,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
+      this.state.evidenceView = "diff";
       this.state.runEvents = null;
       this.state.runValidation = null;
       this.state.runApprovals = null;
@@ -453,6 +460,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async selectDiffFile(path: string): Promise<void> {
     this.state.selectedDiffPath = path;
+    this.state.evidenceView = "diff";
     const runId = this.state.runDetail?.run_id;
     if (runId && typeof this.transport.runDiffs === "function") {
       try {
@@ -465,6 +473,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDiff = null;
       this.state.connectionMessage = "Diff endpoint unavailable for the active transport";
     }
+    this.render();
+  }
+
+  private selectEvidenceView(view: AppState["evidenceView"]): void {
+    this.state.evidenceView = view;
     this.render();
   }
 
@@ -615,10 +628,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const gatewayInput = this.options.root.querySelector<HTMLInputElement>("[data-profile-gateway]");
-    const labelInput = this.options.root.querySelector<HTMLInputElement>("[data-profile-label]");
     const kindInput = this.options.root.querySelector<HTMLSelectElement>("[data-profile-kind]");
     const gatewayUrl = (gatewayInput?.value ?? "").trim();
-    const label = (labelInput?.value ?? "Local Gateway").trim() || "Local Gateway";
+    const activeProfile = this.state.profiles.find((profile) => profile.id === this.state.activeProfileId);
+    const label = activeProfile?.label ?? "Local Gateway";
     const kind = editableProfileKindFromValue(kindInput?.value, this.options.mode);
     if (!gatewayUrl) {
       this.state.connectionMessage = "Profile URL is required";
@@ -667,7 +680,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           </div>
         </header>
         <section class="os-grid">
-          ${this.renderProfiles()}
           ${this.renderViewContent()}
         </section>
       </main>
@@ -677,12 +689,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private renderViewContent(): string {
     if (this.state.activeView === "planning") {
-      return renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit);
+      return `
+        ${this.renderProfiles()}
+        ${renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit)}
+      `;
     }
     return `
-      ${this.renderDashboard()}
+      ${this.renderStatus()}
+      ${this.renderProfiles()}
       ${this.renderTaskGraph()}
       ${this.renderRunDetail()}
+      ${this.renderRunEvidence()}
     `;
   }
 
@@ -720,10 +737,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </label>
         <div class="os-inline-fields">
           <label class="os-field">
-            <span>Label</span>
-            <input data-profile-label value="Local Gateway" />
-          </label>
-          <label class="os-field">
             <span>Kind</span>
             <select data-profile-kind>${kindOptions}</select>
           </label>
@@ -738,10 +751,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     `;
   }
 
-  private renderDashboard(): string {
+  private renderStatus(): string {
     const snapshot = this.state.snapshot;
     if (!snapshot) {
-      return panel("Dashboard", `<div class="os-empty">Loading dashboard</div>`);
+      return panel("Status", `<div class="os-empty">Loading status</div>`, "os-status-panel");
     }
     const projectButtons = snapshot.projects.map((project) => `
       <button type="button" class="os-list-item ${project.project_id === this.state.selectedProjectId ? "is-selected" : ""}" data-project-id="${escapeAttr(project.project_id)}">
@@ -757,7 +770,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       </li>
     `).join("");
     return panel(
-      "Dashboard",
+      "Status",
       `
         <div class="os-metrics">
           <div><strong>${snapshot.metrics.running_issue_count}</strong><span>Running</span></div>
@@ -767,13 +780,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <div class="os-list">${projectButtons || `<div class="os-empty">No projects</div>`}</div>
         <ol class="os-events">${events || `<li>No recent events</li>`}</ol>
       `,
+      "os-status-panel",
     );
   }
 
   private renderTaskGraph(): string {
     const taskGraph = this.state.taskGraph;
     if (!taskGraph) {
-      return panel("Task Graph", `<div class="os-empty">No task graph loaded</div>`);
+      return panel("Task Graph", `<div class="os-empty">No task graph loaded</div>`, "os-task-graph-panel");
     }
     const allNodes = new Map(taskGraph.nodes.map((node) => [node.node_id, node]));
     const getOverlay = (node: TaskGraphNode) => {
@@ -816,13 +830,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     return panel(
       "Task Graph",
       `${toolbar}${filters}${pendingBanner}<div class="os-node-list">${nodes || `<div class="os-empty">No tasks match the current filters</div>`}</div>${actions}${createDialog}${dependencyDialog}${commentDialog}`,
+      "os-task-graph-panel",
     );
   }
 
   private renderRunDetail(): string {
     const run = this.state.runDetail;
     if (!run) {
-      return panel("Run Detail", `<div class="os-empty">Select an issue and open its run</div>`);
+      return panel("Run Detail", `<div class="os-empty">Select an issue and open its run</div>`, "os-run-detail-panel");
     }
     const phase = run.liveness?.phase ?? statusToPhase(run.status, run.release_reason, run.detached);
     const stream = run.liveness?.stream ?? "healthy";
@@ -834,7 +849,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const actionItems = buildActionBarItems(run);
     const actionBar = renderActionBar(actionItems);
     const files = renderChangedFileList(this.state.runFiles ?? [], this.state.selectedDiffPath ?? undefined);
-    const diff = this.state.runDiff ? renderFileDiff(this.state.runDiff) : "";
     const validation = this.state.runValidation
       ? renderValidationSummary(this.state.runValidation)
       : "";
@@ -845,7 +859,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           },
         })
       : "";
-    const activity = renderRunActivity(this.state.runEvents);
     const receipt = this.state.lastActionReceipt
       ? renderActionReceipt(this.state.lastActionReceipt)
       : "";
@@ -876,15 +889,45 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </div>
         ${actionBar}
         ${receipt}
+        <div class="os-run-section">
+          <h3>Changed Files</h3>
+          ${files}
+        </div>
         <div class="os-run-panels">
-          <div class="os-diff-panel">${files}${diff}</div>
-          <div class="os-activity-panel">${activity}</div>
           <div class="os-validation-panel">${validation}</div>
           <div class="os-approval-panel">${approvals}</div>
         </div>
         ${audit}
         <pre>${escapeHtml(run.workspace_path ?? run.workspace_id ?? "workspace path unavailable")}</pre>
       `,
+      "os-run-detail-panel",
+    );
+  }
+
+  private renderRunEvidence(): string {
+    const run = this.state.runDetail;
+    if (!run) {
+      return panel("Inspector", `<div class="os-empty">Select an issue to inspect a diff or activity</div>`, "os-run-evidence-panel");
+    }
+    const diff = this.state.runDiff ? renderFileDiff(this.state.runDiff) : "";
+    const activity = renderRunActivity(this.state.runEvents);
+    const showingDiff = this.state.evidenceView === "diff";
+    const content = showingDiff
+      ? diff || `<div class="os-empty">Select a changed file to view its diff</div>`
+      : activity;
+    return panel(
+      "Inspector",
+      `
+        <div class="os-segmented" data-testid="evidence-toggle">
+          <button type="button" class="${showingDiff ? "is-selected" : ""}" data-evidence-view="diff">Diff</button>
+          <button type="button" class="${!showingDiff ? "is-selected" : ""}" data-evidence-view="activity">Activity</button>
+        </div>
+        <div class="os-run-section">
+          <h3>${showingDiff ? "Selected Diff" : "Conversation Activity"}</h3>
+          ${content}
+        </div>
+      `,
+      "os-run-evidence-panel",
     );
   }
 
@@ -934,6 +977,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         const path = button.dataset.path;
         if (path) {
           void this.selectDiffFile(path);
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-evidence-view]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const view = button.dataset.evidenceView;
+        if (view === "diff" || view === "activity") {
+          this.selectEvidenceView(view);
         }
       });
     });
@@ -1727,9 +1778,10 @@ function unsupportedAction(action: string): never {
   throw new Error(`${action} is not supported by the active gateway transport`);
 }
 
-function panel(title: string, body: string): string {
+function panel(title: string, body: string, className = ""): string {
+  const classes = `os-panel${className ? ` ${className}` : ""}`;
   return `
-    <section class="os-panel">
+    <section class="${escapeAttr(classes)}">
       <div class="os-section-head"><h2>${escapeHtml(title)}</h2></div>
       ${body}
     </section>
@@ -1872,13 +1924,15 @@ function appShellStyles(): string {
     .os-status span { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
     .os-status-connected span { background: #1f9d55; }
     .os-status-failed span { background: #c2410c; }
-    .os-grid { display: grid; grid-template-columns: minmax(260px, 0.75fr) minmax(320px, 1fr) minmax(360px, 1.15fr); gap: 14px; padding: 14px; align-items: start; }
+    .os-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 14px; align-items: start; }
     .os-panel { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 14px; min-width: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
-    .os-profile-panel { grid-column: 1 / -1; }
+    .os-status-panel, .os-run-detail-panel, .os-run-evidence-panel { grid-column: span 1; }
+    .os-profile-panel { grid-column: span 3; }
+    .os-task-graph-panel { grid-column: span 2; }
     .os-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .os-section-head h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
     .os-section-head span, .os-meta { color: #667788; font-size: 12px; }
-    .os-inline-fields { display: grid; grid-template-columns: minmax(150px, 0.75fr) minmax(140px, 0.65fr) minmax(220px, 1.2fr) auto; gap: 10px; align-items: end; }
+    .os-inline-fields { display: grid; grid-template-columns: minmax(150px, 0.7fr) minmax(260px, 1.3fr) auto; gap: 10px; align-items: end; }
     .os-field { display: grid; gap: 5px; font-size: 12px; color: #536170; }
     .os-field input, .os-field select { min-height: 34px; border: 1px solid #cbd5df; border-radius: 6px; padding: 6px 8px; background: #ffffff; color: #17202a; font: inherit; }
     button { min-height: 34px; border: 1px solid #afbac5; border-radius: 6px; background: #eef3f8; color: #17202a; font: inherit; cursor: pointer; }
@@ -1914,6 +1968,12 @@ function appShellStyles(): string {
     .os-receipt-status-accepted { color: #1f9d55; }
     .os-receipt-status-rejected { color: #c2410c; }
     .os-run-panels { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 12px 0; }
+    .os-run-section { display: grid; gap: 8px; }
+    .os-run-section + .os-run-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid #d8dee4; }
+    .os-run-section h3 { margin: 0; font-size: 13px; letter-spacing: 0; color: #536170; }
+    .os-segmented { display: inline-flex; width: fit-content; gap: 4px; padding: 3px; border: 1px solid #d8dee4; border-radius: 7px; background: #fbfcfd; margin-bottom: 12px; }
+    .os-segmented button { min-height: 28px; padding: 4px 10px; border-color: transparent; background: transparent; }
+    .os-segmented button.is-selected { border-color: #39708f; background: #e7f1f5; font-weight: 600; }
     .os-run-activity { display: grid; gap: 6px; }
     .os-activity-entry { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px; background: #f8fafc; font-size: 12px; }
     .os-activity-entry span { color: #667788; white-space: nowrap; }
@@ -2031,6 +2091,7 @@ function appShellStyles(): string {
     .os-plan-graph-node-selected rect { fill: #e7f1f5; stroke: #39708f; }
     @media (max-width: 980px) {
       .os-grid { grid-template-columns: 1fr; }
+      .os-status-panel, .os-profile-panel, .os-task-graph-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
       .os-inline-fields, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
       .os-topbar { align-items: flex-start; flex-direction: column; }
     }
@@ -2039,6 +2100,8 @@ function appShellStyles(): string {
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
       .os-topbar p, .os-section-head span, .os-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-segmented { background: #111820; border-color: #2a3440; }
+      .os-segmented button.is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-field input, .os-field select, .os-inline-input, .os-dialog textarea { background: #0f151b; color: #d9e2ea; border-color: #344454; }
       button { background: #1f2a35; color: #d9e2ea; border-color: #3b4c5e; }
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .os-changed-file:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
@@ -2047,6 +2110,8 @@ function appShellStyles(): string {
       .os-changed-file .os-file-path { color: #e6edf3; }
       .os-changed-file .os-file-stats { color: #cbd5e1; }
       .os-file-diff, .os-approval-item, .os-validation-command, .os-validation-evidence-item { background: #111820; border-color: #2a3440; }
+      .os-run-section + .os-run-section { border-color: #2a3440; }
+      .os-run-section h3 { color: #94a3b3; }
       .os-diff-header, .os-validation-header { background: #1f2a35; border-color: #2a3440; }
       .os-diff-line-addition { background: #14532d; color: #86efac; }
       .os-diff-line-deletion { background: #7f1d1d; color: #fecaca; }
