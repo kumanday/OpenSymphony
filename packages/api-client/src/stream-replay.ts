@@ -185,10 +185,25 @@ export class StreamReplayBuffer {
     // Advance the frontier to the gap-triggering envelope and apply it.
     this.lastApplied.set(partition, envelope.cursor.sequence);
     this.touchActivity(partition);
+    // Drop any buffered pending frames that now fall at or below the new
+    // frontier; the gap has skipped past them and they would otherwise be
+    // stranded in the pending map forever (never reachable by flushPending).
+    this.dropPendingBelowFrontier(partition);
     return [
       { kind: "gap", gap, envelope },
       ...this.flushPending(partition),
     ];
+  }
+
+  /** Remove buffered pending frames at or below the current frontier. */
+  private dropPendingBelowFrontier(partition: string): void {
+    const pending = this.pending.get(partition);
+    if (!pending) return;
+    const frontier = this.lastApplied.get(partition) ?? 0;
+    for (const seq of pending.keys()) {
+      if (seq <= frontier) pending.delete(seq);
+    }
+    if (pending.size === 0) this.pending.delete(partition);
   }
 
   /** Apply buffered envelopes that now connect to the frontier. */
@@ -228,13 +243,16 @@ export class StreamReplayBuffer {
   }
 
   /**
-   * Evict the oldest inactive partition when a new one would exceed
-   * `maxPartitions`. A partition that still has buffered pending envelopes is
-   * kept. The new partition itself is never evicted.
+   * Evict the oldest partition when a new one would exceed `maxPartitions`.
+   * Prefer partitions with no buffered pending frames; if every tracked
+   * partition still has pending frames, fall back to evicting the oldest
+   * regardless of pending state so `maxPartitions` is always enforced as a
+   * hard cap (accepting that some out-of-order frames for that partition may
+   * be dropped). The new partition itself is never evicted.
    */
   private maybeEvict(newPartition: string): void {
     if (this.lastApplied.size < this.maxPartitions) return;
-    // Find the oldest partition by last activity that has no pending frames.
+    // First pass: prefer the oldest partition with no pending frames.
     let oldest: string | undefined;
     let oldestAt = Infinity;
     for (const partition of this.lastApplied.keys()) {
@@ -244,6 +262,18 @@ export class StreamReplayBuffer {
       if (at < oldestAt) {
         oldestAt = at;
         oldest = partition;
+      }
+    }
+    // Fallback: every partition has pending frames; evict the oldest anyway so
+    // the cap holds.
+    if (oldest === undefined) {
+      for (const partition of this.lastApplied.keys()) {
+        if (partition === newPartition) continue;
+        const at = this.lastActivityAt.get(partition) ?? 0;
+        if (at < oldestAt) {
+          oldestAt = at;
+          oldest = partition;
+        }
       }
     }
     if (oldest !== undefined) {
@@ -277,8 +307,12 @@ export class StreamReplayBuffer {
     return this.stalePartitions.get(partition);
   }
 
-  /** Mark a partition stale (for example after a disconnect before replay). */
-  markStale(partition: string, now: number = Date.now()): void {
+  /**
+   * Mark a partition stale (for example after a disconnect before replay).
+   * Defaults to the buffer's configured clock (`options.now`, or `Date.now`)
+   * so behavior stays deterministic when a clock is supplied.
+   */
+  markStale(partition: string, now: number = this.now()): void {
     this.stalePartitions.set(partition, now);
   }
 

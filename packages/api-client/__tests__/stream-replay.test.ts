@@ -291,6 +291,53 @@ describe("orderedEvents", () => {
     expect(buffer.isStale("run:run-1")).toBe(false);
     expect(buffer.partitions()).not.toContain("run:run-1");
   });
+
+  it("drops stranded pending frames when a gap advances past them", () => {
+    // last=1, buffer out-of-order {3,4} (within the reorder window), then a
+    // far-ahead seq 6 declares a gap. The stranded {3,4} must be cleared, not
+    // left in pending forever.
+    const buffer = new StreamReplayBuffer({ maxPendingPerPartition: 2 });
+    buffer.apply(runEnvelope(1)); // frontier -> 1
+    buffer.apply(runEnvelope(3)); // buffered (missing=1 <= 2)
+    buffer.apply(runEnvelope(4)); // buffered (missing=2 <= 2)
+    expect(buffer.lastSequence("run:run-1")).toBe(1);
+    // seq 6 jumps past the reorder window (missing=4 > 2): gap, frontier -> 6.
+    const result = buffer.apply(runEnvelope(6));
+    expect(result[0].kind).toBe("gap");
+    expect(buffer.lastSequence("run:run-1")).toBe(6);
+    // A subsequent seq 7 must apply cleanly (no stranded 3/4 re-surfacing).
+    const r7 = buffer.apply(runEnvelope(7));
+    expect(r7.map((e) => e.kind)).toContain("applied");
+    expect(buffer.lastSequence("run:run-1")).toBe(7);
+    // A late duplicate seq 3 arriving after the gap is suppressed, proving it
+    // is no longer stranded/reachable as a fresh frame.
+    const r3 = buffer.apply(runEnvelope(3));
+    expect(r3.map((e) => e.kind)).toContain("duplicate");
+  });
+
+  it("evicts the oldest partition even when all partitions have pending frames", () => {
+    // Every partition has buffered out-of-order frames, so the no-pending
+    // preference finds nothing; the cap must still hold via the fallback.
+    const buffer = new StreamReplayBuffer({ maxPartitions: 2, maxPendingPerPartition: 8 });
+    buffer.apply(runEnvelope(1, "run:run-1"));
+    buffer.apply(runEnvelope(3, "run:run-1")); // pending
+    buffer.apply(runEnvelope(1, "run:run-2"));
+    buffer.apply(runEnvelope(3, "run:run-2")); // pending
+    expect(buffer.partitions()).toHaveLength(2);
+    // Adding a third forces eviction of the oldest (run-1) despite its pending.
+    buffer.apply(runEnvelope(1, "run:run-3"));
+    expect(buffer.partitions()).toHaveLength(2);
+    expect(buffer.lastSequence("run:run-1")).toBeUndefined();
+  });
+
+  it("markStale uses the configured clock by default (deterministic)", () => {
+    let t = 5_000;
+    const buffer = new StreamReplayBuffer({ now: () => t });
+    buffer.apply(runEnvelope(1, "run:run-1"));
+    t = 50_000;
+    buffer.markStale("run:run-1"); // no explicit now -> uses injected clock
+    expect(buffer.staleSince("run:run-1")).toBe(50_000);
+  });
 });
 
 describe("StreamCorrelator", () => {
