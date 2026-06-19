@@ -8,6 +8,7 @@
 
 import {
   HttpGatewayTransport,
+  WebSocketTransport,
   MockGatewayTransport,
   GatewayRequestError,
   isGatewayRequestError,
@@ -111,6 +112,65 @@ describe("GatewayRequestError classification", () => {
       ) as jest.MockedFunction<typeof global.fetch>;
 
       const transport = new HttpGatewayTransport({ baseUri: "http://localhost:8080" });
+      const rejection = transport.health();
+      await expect(rejection).rejects.toThrow(/HTTP 500/);
+      try {
+        await rejection;
+      } catch (error) {
+        expect(isGatewayRequestError(error)).toBe(false);
+      }
+    });
+  });
+
+  describe("WebSocketTransport HTTP handshake mapping", () => {
+    const originalFetch = global.fetch;
+    afterEach(() => {
+      global.fetch = originalFetch;
+    });
+
+    it("throws a GatewayRequestError with unauthenticated code on HTTP 401", async () => {
+      global.fetch = jest.fn(async () =>
+        mockResponse(401, "Unauthorized", '{"error":"missing token"}'),
+      ) as jest.MockedFunction<typeof global.fetch>;
+
+      const transport = new WebSocketTransport({ baseUri: "http://localhost:8080" });
+      await expect(transport.health()).rejects.toMatchObject({
+        code: "unauthenticated",
+        status: 401,
+        name: "GatewayRequestError",
+      });
+    });
+
+    it("throws a GatewayRequestError with forbidden code on a bare HTTP 403", async () => {
+      global.fetch = jest.fn(async () =>
+        mockResponse(403, "Forbidden", '{"error":"no access"}'),
+      ) as jest.MockedFunction<typeof global.fetch>;
+
+      const transport = new WebSocketTransport({ baseUri: "http://localhost:8080" });
+      await expect(transport.snapshot()).rejects.toMatchObject({
+        code: "forbidden",
+        status: 403,
+      });
+    });
+
+    it("classifies a 403 with an explicit unauthorized body code as unauthorized", async () => {
+      global.fetch = jest.fn(async () =>
+        mockResponse(403, "Forbidden", '{"error_code":"unauthorized","message":"no permission"}'),
+      ) as jest.MockedFunction<typeof global.fetch>;
+
+      const transport = new WebSocketTransport({ baseUri: "http://localhost:8080" });
+      await expect(transport.snapshot()).rejects.toMatchObject({
+        code: "unauthorized",
+        status: 403,
+      });
+    });
+
+    it("throws a plain Error (not GatewayRequestError) on HTTP 500", async () => {
+      global.fetch = jest.fn(async () =>
+        mockResponse(500, "Internal Server Error", '{"error":"boom"}'),
+      ) as jest.MockedFunction<typeof global.fetch>;
+
+      const transport = new WebSocketTransport({ baseUri: "http://localhost:8080" });
       const rejection = transport.health();
       await expect(rejection).rejects.toThrow(/HTTP 500/);
       try {

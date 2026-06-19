@@ -54,11 +54,3 @@ export function authStateFromError(error: unknown): AuthState {
   if (code) return code;
   return "open";
 }
-
-/**
- * Whether a gateway capabilities response advertises any auth requirement
- * beyond the unauthenticated `none` mode.
- */
-export function gatewayRequiresAuth(authModes: ReadonlyArray<string>): boolean {
-  return authModes.some((mode) => mode !== "none");
-}

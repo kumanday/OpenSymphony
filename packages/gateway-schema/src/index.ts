@@ -87,7 +87,7 @@ export type { PlanningArtifactKind, PlanningArtifact, PlanningSessionStatus, Pla
 
 // capability
 export type { AuthMode, TransportCapability, FeatureCapability, GatewayCapabilities } from "./capability.js";
-export { authStateFromError, gatewayRequiresAuth } from "./auth.js";
+export { authStateFromError } from "./auth.js";
 export type { AuthState, AuthErrorCode } from "./auth.js";
 
 // action
