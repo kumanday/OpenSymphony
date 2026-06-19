@@ -1434,17 +1434,9 @@ fn resolve_ws_auth_context(state: &GatewayState, request: &Request) -> Option<Au
         return Some(ctx.clone());
     }
     let provider = state.auth_provider.as_ref()?;
-    // Browser fallback: ?token= query parameter.
-    let query_token = request.uri().query().and_then(|q| {
-        q.split('&').find_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            if k == "token" {
-                Some(v.to_string())
-            } else {
-                None
-            }
-        })
-    });
+    // Browser fallback: ?token= query parameter (shared with the auth layer so
+    // the parsing stays in one place).
+    let query_token = auth::ws_query_token(request.uri());
     ws_auth_context(provider.as_ref(), request.headers(), query_token.as_deref())
 }
 
@@ -1488,12 +1480,19 @@ async fn event_stream_ws(
 
     // Carry the authenticated user/tenant context into the connection so the
     // stream is associated with an authenticated principal (acceptance
-    // criterion: streams carry authenticated user and tenant context).
+    // criterion: streams carry authenticated user and tenant context). The
+    // context is emitted as audit context when the connection is established.
     let connection_auth_ctx = ws_auth_ctx;
     upgrade.on_upgrade(move |socket: WebSocket| {
         let journal = state.journal.clone();
         let broker = state.broker.clone();
-        let _connection_auth_ctx = connection_auth_ctx;
+        if let Some(ctx) = &connection_auth_ctx {
+            tracing::info!(
+                user_id = %ctx.user_id,
+                organization_id = %ctx.organization_id,
+                "websocket event stream opened for authenticated principal"
+            );
+        }
         async move {
             let mut socket = socket;
             let connection_id: Arc<str> = Arc::from(format!("ws-{}", uuid::Uuid::new_v4()));
