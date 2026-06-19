@@ -34,8 +34,15 @@ pub struct FeatureCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMode {
+    /// Local trusted mode: no authentication required.
     None,
+    /// API key presented as a bearer/header credential.
     ApiKey,
+    /// Hosted session bearer token (login-issued).
     BearerToken,
+    /// Subscription/OAuth credential (e.g. OpenAI ChatGPT/Codex login).
     SubscriptionOAuth,
+    /// Hosted session token with RBAC; advertised when the gateway runs the
+    /// hosted auth provider.
+    HostedSession,
 }

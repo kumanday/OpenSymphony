@@ -14,6 +14,28 @@ pub struct ActionDispatch {
     pub target_entity: ActionTarget,
     pub payload: Option<serde_json::Value>,
     pub idempotency_key: Option<String>,
+    /// Authenticated actor context injected by the gateway from the request's
+    /// `AuthContext`. Clients do not set this; the gateway overwrites any
+    /// client-supplied value so client-side state is never the authority for
+    /// permissions (PRD 4.11). Omitted in local unauthenticated mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<ActionActor>,
+}
+
+/// Audit-ready actor context attached to an action dispatch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionActor {
+    pub user_id: String,
+    pub organization_id: String,
+    pub role: String,
+    pub user_handle: String,
+    /// True when the actor was injected by the explicit dev bypass.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dev_bypass: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 /// Action receipt returned by the gateway after dispatch validation.
@@ -52,6 +74,15 @@ pub struct PermissionResult {
     pub allowed: bool,
     pub required_role: String,
     pub evaluated: bool,
+    /// Why the check was denied, when `allowed` is false and `evaluated` is
+    /// true. Carried into the action receipt so callers see the permission
+    /// rejection reason (acceptance criterion / test plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_reason: Option<String>,
+    /// Machine-readable denial code mirroring `AuthErrorCode` so the client
+    /// shell can classify permission rejections without parsing prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied_code: Option<String>,
 }
 
 /// Hint for follow-up events the client should expect after an action.
@@ -264,15 +295,35 @@ impl PermissionResult {
             allowed: true,
             required_role: "local".into(),
             evaluated: false,
+            denied_reason: None,
+            denied_code: None,
         }
     }
 
-    /// Hosted-mode permission check: explicitly evaluated.
+    /// Hosted-mode permission check: explicitly evaluated (allowed).
     pub fn evaluated(allowed: bool, required_role: impl Into<String>) -> Self {
         Self {
             allowed,
             required_role: required_role.into(),
             evaluated: true,
+            denied_reason: None,
+            denied_code: None,
+        }
+    }
+
+    /// Hosted-mode permission denial with an explicit reason and code carried
+    /// into the action receipt.
+    pub fn denied(
+        required_role: impl Into<String>,
+        reason: impl Into<String>,
+        code: impl Into<String>,
+    ) -> Self {
+        Self {
+            allowed: false,
+            required_role: required_role.into(),
+            evaluated: true,
+            denied_reason: Some(reason.into()),
+            denied_code: Some(code.into()),
         }
     }
 }

@@ -4,6 +4,7 @@ pub mod capability;
 pub mod cursor;
 pub mod envelope;
 pub mod event_journal;
+pub mod identity;
 pub mod planning;
 pub mod run;
 pub mod snapshot;

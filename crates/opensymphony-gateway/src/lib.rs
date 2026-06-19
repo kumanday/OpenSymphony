@@ -42,6 +42,9 @@ use crate::opensymphony_gateway_schema::{
 };
 
 pub mod action_handler;
+pub mod auth;
+pub mod identity_store;
+pub mod rbac;
 pub mod task_graph_mutations;
 use action_handler::ActionHandler;
 // Re-export the task-graph mutation types at the gateway crate level so
@@ -55,6 +58,21 @@ pub use task_graph_mutations::{
     TaskGraphRelationResponse, TaskGraphSubIssueRequest, TaskGraphSubIssueResponse,
     append_mutation_event, append_mutation_event_with_op, entity_kind_for, task_graph_router,
 };
+
+// Re-export the hosted auth + identity + RBAC surface so host wiring and
+// integration tests can construct an authenticated gateway via
+// `opensymphony::opensymphony_gateway::GatewayAuthConfig` etc.
+pub use auth::{
+    AuthMiddlewareState, AuthRouterState, AuthSetupError, GatewayAuthConfig, HostedAuthProvider,
+    SessionTokenAuthProvider, auth_context_from_request, auth_middleware, auth_router,
+    bearer_token_from_header, build_auth_provider, is_public_route, unauthorized_response,
+    unauthenticated_response, ws_auth_context,
+};
+pub use identity_store::{
+    HostedIdentityStore, IdentityError, SeedMembership, SeedOrganization, SeedProjectAccess,
+    SeedUser,
+};
+pub use rbac::{Capability, PermissionEvaluator, ProtectedResource};
 
 pub use crate::opensymphony_control::SnapshotStore;
 pub use crate::opensymphony_domain::{
@@ -244,6 +262,12 @@ pub struct GatewayState {
     pub action_handler: ActionHandler,
     pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
+    /// Hosted auth provider (None when auth is disabled).
+    pub auth_provider: Option<Arc<dyn HostedAuthProvider>>,
+    /// Hosted RBAC evaluator (None when auth is disabled).
+    pub permission_evaluator: Option<PermissionEvaluator>,
+    /// Active auth configuration.
+    pub auth_config: GatewayAuthConfig,
 }
 
 impl Clone for GatewayState {
@@ -257,6 +281,9 @@ impl Clone for GatewayState {
             action_handler: self.action_handler.clone(),
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
+            auth_provider: self.auth_provider.clone(),
+            permission_evaluator: self.permission_evaluator.clone(),
+            auth_config: self.auth_config.clone(),
         }
     }
 }
@@ -276,6 +303,9 @@ pub struct GatewayServer {
     web_assets_dir: Option<String>,
     linear_mutations: Option<Arc<dyn LinearMutationClient>>,
     linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
+    auth_provider: Option<Arc<dyn HostedAuthProvider>>,
+    permission_evaluator: Option<PermissionEvaluator>,
+    auth_config: GatewayAuthConfig,
     terminal_ingest_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -288,6 +318,9 @@ impl Clone for GatewayServer {
             web_assets_dir: self.web_assets_dir.clone(),
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
+            auth_provider: self.auth_provider.clone(),
+            permission_evaluator: self.permission_evaluator.clone(),
+            auth_config: self.auth_config.clone(),
             // Each cloned server owns its own ingest handle. The task is tied
             // to the specific server instance that spawned it, so Drop aborts
             // reliably without depending on Arc uniqueness.
@@ -311,6 +344,8 @@ impl std::fmt::Debug for GatewayServer {
                 "linear_task_graph",
                 &self.linear_task_graph.as_ref().map(|_| "..."),
             )
+            .field("auth_config", &self.auth_config)
+            .field("has_auth_provider", &self.auth_provider.is_some())
             .field("terminal_ingest_handle", &"<handle>")
             .finish()
     }
@@ -340,6 +375,9 @@ impl GatewayServer {
             web_assets_dir: None,
             linear_mutations: None,
             linear_task_graph: None,
+            auth_provider: None,
+            permission_evaluator: None,
+            auth_config: GatewayAuthConfig::Disabled,
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -357,6 +395,9 @@ impl GatewayServer {
             web_assets_dir: None,
             linear_mutations: None,
             linear_task_graph: None,
+            auth_provider: None,
+            permission_evaluator: None,
+            auth_config: GatewayAuthConfig::Disabled,
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -365,6 +406,29 @@ impl GatewayServer {
     pub fn with_web_assets(mut self, dir: impl Into<String>) -> Self {
         self.web_assets_dir = Some(dir.into());
         self
+    }
+
+    /// Configure hosted identity, auth, and RBAC.
+    ///
+    /// Builds the auth provider from `config` and a permission evaluator
+    /// backed by `identity`. `production` must be true in production
+    /// deployments; when true, `DevBypass` is refused (acceptance criterion:
+    /// the local development auth bypass is explicit and unavailable in
+    /// production configuration).
+    pub fn with_hosted_auth(
+        mut self,
+        config: GatewayAuthConfig,
+        identity: HostedIdentityStore,
+        production: bool,
+    ) -> Result<Self, AuthSetupError> {
+        let provider = build_auth_provider(config.clone(), identity.clone(), production)?;
+        let evaluator = provider
+            .as_ref()
+            .map(|_| PermissionEvaluator::new(identity));
+        self.auth_provider = provider;
+        self.permission_evaluator = evaluator;
+        self.auth_config = config;
+        Ok(self)
     }
 
     /// Install a Linear mutation client for the `/api/v1/taskgraph/*`
@@ -406,6 +470,9 @@ impl GatewayServer {
             action_handler: ActionHandler::new(self.journal.clone()),
             linear_mutations: self.linear_mutations.clone(),
             linear_task_graph: self.linear_task_graph.clone(),
+            auth_provider: self.auth_provider.clone(),
+            permission_evaluator: self.permission_evaluator.clone(),
+            auth_config: self.auth_config.clone(),
         };
 
         // Abort any previous terminal ingest task associated with this server
@@ -502,6 +569,28 @@ impl GatewayServer {
         };
         let mutation_router = task_graph_router().with_state(mutation_state);
         router = router.nest("/api/v1/taskgraph", mutation_router);
+
+        // Mount the auth router (login/logout/session). It carries its own
+        // state so it can run inside the public-route exemption without
+        // depending on the full gateway state.
+        let auth_state = AuthRouterState {
+            provider: self.auth_provider.clone(),
+            config: self.auth_config.clone(),
+        };
+        router = router.nest("/api/v1/auth", auth_router::<GatewayState>(auth_state));
+
+        // Apply the hosted auth middleware to all routes. Public routes
+        // (healthz, capabilities, auth/login, /app assets) are exempt inside
+        // the middleware. The middleware injects an `AuthContext` into
+        // request extensions for protected handlers.
+        let mw_state = AuthMiddlewareState {
+            provider: self.auth_provider.clone(),
+            config: self.auth_config.clone(),
+        };
+        router = router.layer(axum::middleware::from_fn_with_state(
+            mw_state,
+            auth_middleware,
+        ));
 
         router.with_state(state)
     }
@@ -601,7 +690,12 @@ fn recent_event_kind_to_snapshot_event_kind(
     }
 }
 
-fn build_capabilities() -> GatewayCapabilities {
+fn build_capabilities(auth_config: GatewayAuthConfig) -> GatewayCapabilities {
+    let auth_modes = match auth_config {
+        GatewayAuthConfig::Disabled => vec![AuthMode::None, AuthMode::ApiKey],
+        GatewayAuthConfig::DevBypass => vec![AuthMode::None, AuthMode::HostedSession],
+        GatewayAuthConfig::Hosted => vec![AuthMode::BearerToken, AuthMode::HostedSession],
+    };
     GatewayCapabilities {
         schema_version: SchemaVersion::v1(),
         gateway_version: env!("CARGO_PKG_VERSION").into(),
@@ -712,14 +806,14 @@ fn build_capabilities() -> GatewayCapabilities {
                 requires_plan: None,
             },
         ],
-        auth_modes: vec![AuthMode::None, AuthMode::ApiKey],
+        auth_modes,
         max_event_page_size: 1000,
         max_terminal_frame_batch: 500,
     }
 }
 
-async fn capabilities() -> Json<GatewayCapabilities> {
-    Json(build_capabilities())
+async fn capabilities(State(state): State<GatewayState>) -> Json<GatewayCapabilities> {
+    Json(build_capabilities(state.auth_config))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1227,7 +1321,20 @@ async fn forward_ws_live_events(
 async fn event_stream_ws(
     State(state): State<GatewayState>,
     upgrade: axum::extract::ws::WebSocketUpgrade,
-) -> impl IntoResponse {
+    request: Request,
+) -> Response {
+    // Auth gate for WebSocket and JSON-RPC-over-WebSocket: validate the
+    // authenticated context before upgrading. The HTTP auth middleware has
+    // already injected an `AuthContext` for token/header auth; for browser
+    // WS clients that pass the token via `?token=` (which middleware does not
+    // read for WS), resolve it here so both protocols are gated.
+    let auth_ctx = resolve_ws_auth_context(&state, &request);
+    let Some(_auth_ctx) = auth_ctx else {
+        return unauthenticated_response(
+            "WebSocket requires authentication: provide a bearer token via Authorization header or ?token= query parameter",
+        );
+    };
+
     upgrade.on_upgrade(move |socket: WebSocket| {
         let journal = state.journal.clone();
         let broker = state.broker.clone();
