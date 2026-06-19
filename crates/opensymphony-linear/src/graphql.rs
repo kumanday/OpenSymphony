@@ -87,6 +87,91 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
 }
 "#;
 
+pub(super) const PROJECT_ISSUES_QUERY: &str = r#"
+query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: Int!, $after: String, $relationFirst: Int!, $labelFirst: Int!) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+    }
+    includeArchived: $includeArchived
+    first: $first
+    after: $after
+  ) {
+    nodes {
+      id
+      identifier
+      url
+      title
+      description
+      priority
+      createdAt
+      updatedAt
+      state {
+        id
+        name
+        type
+      }
+      parent {
+        id
+        identifier
+        url
+        title
+        state {
+          name
+        }
+      }
+      projectMilestone {
+        id
+        name
+      }
+      children(includeArchived: true, first: 100) {
+        nodes {
+          id
+          identifier
+          url
+          title
+          state {
+            name
+          }
+        }
+      }
+      labels(first: $labelFirst) {
+        nodes {
+          name
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+      inverseRelations(first: $relationFirst) {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            title
+            state {
+              id
+              name
+              type
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"#;
+
 pub(super) const ISSUE_LABELS_QUERY: &str = r#"
 query IssueLabelsPage($issueId: String!, $first: Int!, $after: String) {
   issue(id: $issueId) {
@@ -155,78 +240,6 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $a
     pageInfo {
       hasNextPage
       endCursor
-    }
-  }
-}
-"#;
-
-pub(super) const ISSUE_BY_IDENTIFIER_QUERY: &str = r#"
-query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst: Int!) {
-  issue(id: $identifier) {
-    id
-    identifier
-    url
-    title
-    description
-    priority
-    createdAt
-    updatedAt
-    state {
-      id
-      name
-      type
-    }
-    parent {
-      id
-      identifier
-      url
-      title
-      state {
-        name
-      }
-    }
-    projectMilestone {
-      id
-      name
-    }
-    children(includeArchived: true, first: 100) {
-      nodes {
-        id
-        identifier
-        url
-        title
-        state {
-          name
-        }
-      }
-    }
-    labels(first: $labelFirst) {
-      nodes {
-        name
-      }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-    }
-    inverseRelations(first: $relationFirst) {
-      nodes {
-        type
-        issue {
-          id
-          identifier
-          title
-          state {
-            id
-            name
-            type
-          }
-        }
-      }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
     }
   }
 }
@@ -504,8 +517,11 @@ pub(super) struct IssueStatesByIdsVariables {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct IssueByIdentifierVariables {
-    pub identifier: String,
+pub(super) struct ProjectIssuesVariables {
+    pub project_slug: String,
+    pub include_archived: bool,
+    pub first: usize,
+    pub after: Option<String>,
     pub relation_first: usize,
     pub label_first: usize,
 }
@@ -596,13 +612,13 @@ pub(super) struct IssuesByStateData {
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct IssueStatesByIdsData {
-    pub issues: IssuesConnection<LinearIssueStateNode>,
+pub(super) struct ProjectIssuesData {
+    pub issues: IssuesConnection<LinearIssueNode>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(super) struct IssueByIdentifierData {
-    pub issue: Option<LinearIssueNode>,
+pub(super) struct IssueStatesByIdsData {
+    pub issues: IssuesConnection<LinearIssueStateNode>,
 }
 
 #[derive(Debug, Deserialize)]

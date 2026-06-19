@@ -24,6 +24,8 @@ It is responsible for:
 - normalizing GraphQL payloads into stable domain models
 - serving gateway task graph reads with Linear-native parent, child, and
   blocker relationships
+- loading gateway task graph issue details through project-scoped, paged Linear
+  reads rather than per-identifier GraphQL lookups
 
 Current workflow contract:
 

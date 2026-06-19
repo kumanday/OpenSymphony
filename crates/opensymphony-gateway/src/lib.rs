@@ -1422,10 +1422,10 @@ fn issue_file_changes(
 async fn issue_file_changes_async(
     envelope: SnapshotEnvelope,
     issue: ControlPlaneIssueSnapshot,
-) -> Vec<WorkspaceRunFileChange> {
+) -> Result<Vec<WorkspaceRunFileChange>, String> {
     tokio::task::spawn_blocking(move || issue_file_changes(&envelope, &issue))
         .await
-        .unwrap_or_default()
+        .map_err(|error| format!("workspace file change task failed: {error}"))
 }
 
 fn build_workspace_run_file_changes(
@@ -1757,6 +1757,13 @@ fn single_line(value: impl AsRef<str>) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn normalize_query_file_path(path: &str) -> String {
+    normalize_path(StdPath::new(path))
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Strip the workspace root from a raw absolute path so that the public API
@@ -2526,17 +2533,30 @@ async fn get_run_files(
 ) -> impl IntoResponse {
     let envelope = store.current().await;
     let files: Vec<ChangedFileEntry> = match find_issue_snapshot(&envelope, &run_id) {
-        Some(issue) => issue_file_changes_async(envelope.clone(), issue.clone())
-            .await
-            .iter()
-            .map(|fc| ChangedFileEntry {
-                path: fc.path.clone(),
-                change_kind: map_file_change_kind(fc.change_kind),
-                lines_added: fc.lines_added,
-                lines_removed: fc.lines_removed,
-                size_bytes: None,
-            })
-            .collect(),
+        Some(issue) => match issue_file_changes_async(envelope.clone(), issue.clone()).await {
+            Ok(files) => files
+                .iter()
+                .map(|fc| ChangedFileEntry {
+                    path: fc.path.clone(),
+                    change_kind: map_file_change_kind(fc.change_kind),
+                    lines_added: fc.lines_added,
+                    lines_removed: fc.lines_removed,
+                    size_bytes: None,
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, run_id = %issue.identifier, "failed to load run files");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunFilesPage {
+                        schema_version: SchemaVersion::v1(),
+                        run_id,
+                        next_cursor: None,
+                        files: Vec::new(),
+                    }),
+                );
+            }
+        },
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -2585,8 +2605,26 @@ async fn get_run_diffs(
         }
     };
     let workspace_path = workspace_path_for_issue(&envelope, issue);
-    let all_files = issue_file_changes_async(envelope.clone(), issue.clone()).await;
-    let files: Vec<WorkspaceRunFileChange> = match &query.file_path {
+    let all_files = match issue_file_changes_async(envelope.clone(), issue.clone()).await {
+        Ok(files) => files,
+        Err(error) => {
+            tracing::warn!(%error, run_id = %issue.identifier, "failed to load run diffs");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(FileDiffPage {
+                    schema_version: SchemaVersion::v1(),
+                    run_id,
+                    file_path: String::new(),
+                    next_cursor: None,
+                    hunks: Vec::new(),
+                    total_lines_added: 0,
+                    total_lines_removed: 0,
+                }),
+            );
+        }
+    };
+    let requested_path = query.file_path.as_deref().map(normalize_query_file_path);
+    let files: Vec<WorkspaceRunFileChange> = match &requested_path {
         Some(path) => all_files
             .into_iter()
             .filter(|fc| fc.path == *path || fc.query_path == *path)
@@ -2766,9 +2804,23 @@ async fn get_run_validation(
         }
     };
 
-    let has_file_changes = !issue_file_changes_async(envelope.clone(), issue.clone())
-        .await
-        .is_empty();
+    let has_file_changes = match issue_file_changes_async(envelope.clone(), issue.clone()).await {
+        Ok(files) => !files.is_empty(),
+        Err(error) => {
+            tracing::warn!(%error, run_id = %issue.identifier, "failed to load validation files");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RunValidationSummary {
+                    schema_version: SchemaVersion::v1(),
+                    run_id,
+                    generated_at: Utc::now(),
+                    overall_status: ValidationStatus::Error,
+                    commands: Vec::new(),
+                    evidence: Vec::new(),
+                }),
+            );
+        }
+    };
     let overall_status = validation_status_for_issue(&issue, has_file_changes);
 
     (

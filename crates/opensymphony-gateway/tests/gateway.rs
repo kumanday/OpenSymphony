@@ -1966,6 +1966,21 @@ async fn gateway_serves_run_diffs_with_modified_files() {
     let second_hunk = response.hunks.get(1).expect("second hunk");
     assert_eq!(second_hunk.file_path, "COE-301/src/lib.rs");
 
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/diffs?file_path=./COE-301/src/main.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch normalized run diff")
+        .json::<opensymphony::opensymphony_gateway_schema::run::FileDiffPage>()
+        .await
+        .expect("decode normalized run diff");
+
+    assert_eq!(response.file_path, "COE-301/src/main.rs");
+    assert_eq!(response.hunks.len(), 1);
+    assert_eq!(response.hunks[0].file_path, "COE-301/src/main.rs");
+
     server_task.abort();
 }
 

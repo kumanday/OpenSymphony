@@ -218,6 +218,9 @@ come from the workspace Git history using the first available comparison base
 from `main`, `origin/main`, `master`, `origin/master`, `origin/HEAD`, or `HEAD`.
 Untracked created-file diffs are generated in-process so the gateway does not
 depend on platform-specific null device paths.
+Gateway file and diff endpoints run Git workspace inspection on a blocking
+worker thread; if that task fails or is aborted, the endpoint surfaces a server
+error instead of returning an empty file list.
 
 Current repository implementation:
 

@@ -1,4 +1,7 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crate::opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot};
 use reqwest::{
@@ -13,22 +16,22 @@ use tracing::debug;
 use super::error::{GraphqlError, LinearError, ResponseMetadata};
 use super::graphql::{
     COMMENT_CREATE_MUTATION, CommentCreateData, CommentCreateInput, CommentCreateVariables,
-    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
-    ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
+    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_COMMENTS_QUERY,
+    ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
     ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_UPDATE_MUTATION,
-    ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables, IssueByIdentifierData,
-    IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables, IssueCreateData,
-    IssueCreateInput, IssueCreateVariables, IssueInverseRelationsData,
-    IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueRelationCreateData,
-    IssueRelationCreateInput, IssueRelationCreateVariables, IssueRelationMutationNode,
-    IssueStatesByIdsData, IssueStatesByIdsVariables, IssueUpdateData, IssueUpdateInput,
-    IssueUpdateVariables, IssuesByStateData, IssuesByStateVariables, LinearIssueNode,
-    LinearLabelConnection, LinearProjectNode, LinearRelationConnection, PROJECT_BY_SLUG_QUERY,
+    ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables, IssueCommentsData,
+    IssueCommentsVariables, IssueCreateData, IssueCreateInput, IssueCreateVariables,
+    IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
+    IssueLabelsVariables, IssueRelationCreateData, IssueRelationCreateInput,
+    IssueRelationCreateVariables, IssueRelationMutationNode, IssueStatesByIdsData,
+    IssueStatesByIdsVariables, IssueUpdateData, IssueUpdateInput, IssueUpdateVariables,
+    IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
+    LinearProjectNode, LinearRelationConnection, PROJECT_BY_SLUG_QUERY, PROJECT_ISSUES_QUERY,
     PROJECT_MILESTONE_CREATE_MUTATION, PROJECT_MILESTONE_UPDATE_MUTATION,
-    PROJECT_UPDATE_CONTENT_MUTATION, ProjectBySlugData, ProjectBySlugVariables,
-    ProjectMilestoneCreateData, ProjectMilestoneCreateInput, ProjectMilestoneCreateVariables,
-    ProjectMilestoneUpdateData, ProjectMilestoneUpdateInput, ProjectMilestoneUpdateVariables,
-    ProjectUpdateContentData, ProjectUpdateContentVariables,
+    PROJECT_UPDATE_CONTENT_MUTATION, ProjectBySlugData, ProjectBySlugVariables, ProjectIssuesData,
+    ProjectIssuesVariables, ProjectMilestoneCreateData, ProjectMilestoneCreateInput,
+    ProjectMilestoneCreateVariables, ProjectMilestoneUpdateData, ProjectMilestoneUpdateInput,
+    ProjectMilestoneUpdateVariables, ProjectUpdateContentData, ProjectUpdateContentVariables,
 };
 use super::normalize::{normalize_issue, normalize_issue_state};
 
@@ -307,30 +310,26 @@ impl LinearClient {
             return Ok(Vec::new());
         }
 
+        let requested_keys = identifiers
+            .iter()
+            .map(|identifier| identifier.to_ascii_uppercase())
+            .collect::<HashSet<_>>();
+        let project_issues = self.project_issues(false).await?;
+        let mut issues_by_identifier = HashMap::new();
+        for issue in project_issues {
+            let key = issue.identifier.to_ascii_uppercase();
+            if requested_keys.contains(&key) {
+                issues_by_identifier.insert(key, issue);
+            }
+        }
+
         let mut issues = Vec::new();
         let mut missing_issue_ids = Vec::new();
-
         for identifier in &identifiers {
-            let variables = IssueByIdentifierVariables {
-                identifier: identifier.clone(),
-                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
-                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
-            };
-            let response: IssueByIdentifierData = self
-                .execute_graphql(ISSUE_BY_IDENTIFIER_QUERY, json!(variables))
-                .await?;
-            let Some(issue) = response.issue else {
-                missing_issue_ids.push(identifier.clone());
-                continue;
-            };
-            let issue = normalize_issue(self.expand_issue(issue).await?)?;
-            if issue.identifier.eq_ignore_ascii_case(identifier) {
-                issues.push(issue);
-            } else {
-                return Err(LinearError::InvalidResponse(format!(
-                    "Linear issue lookup for {identifier} returned {}",
-                    issue.identifier
-                )));
+            let key = identifier.to_ascii_uppercase();
+            match issues_by_identifier.remove(&key) {
+                Some(issue) => issues.push(issue),
+                None => missing_issue_ids.push(identifier.clone()),
             }
         }
 
@@ -340,6 +339,44 @@ impl LinearClient {
             Err(LinearError::MissingIssueIds {
                 issue_ids: missing_issue_ids,
             })
+        }
+    }
+
+    async fn project_issues(
+        &self,
+        include_archived: bool,
+    ) -> Result<Vec<TrackerIssue>, LinearError> {
+        let mut after = None;
+        let mut issues = Vec::new();
+
+        loop {
+            let variables = ProjectIssuesVariables {
+                project_slug: self.config.project_slug.clone(),
+                include_archived,
+                first: self.config.page_size,
+                after: after.clone(),
+                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
+            };
+            let response: ProjectIssuesData = self
+                .execute_graphql(PROJECT_ISSUES_QUERY, json!(variables))
+                .await?;
+
+            let page_info = response.issues.page_info;
+            for node in response.issues.nodes {
+                issues.push(normalize_issue(self.expand_issue(node).await?)?);
+            }
+
+            if !page_info.has_next_page {
+                return Ok(issues);
+            }
+
+            after = Some(page_info.end_cursor.ok_or_else(|| {
+                LinearError::InvalidResponse(
+                    "Linear project issues page indicated a next page without an end cursor"
+                        .to_string(),
+                )
+            })?);
         }
     }
 
