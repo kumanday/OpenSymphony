@@ -406,6 +406,34 @@ Hosted auth responsibilities:
 - Harness and model access.
 - Audit logging.
 
+COE-420 implements the hosted identity, auth, and RBAC foundation for the
+alpha. The gateway selects an auth mode from `GatewayAuthConfig`:
+
+- `Disabled` -- local trusted mode (loopback, no auth). Default for local
+  supervised operation; preserves the unauthenticated local contract.
+- `DevBypass` -- explicit local development bypass. Injects a dev owner
+  `AuthContext` without credentials. Refused when `production` is true, so the
+  bypass is explicit and unavailable in production configuration.
+- `Hosted` -- bearer session-token auth. A `SessionTokenAuthProvider` backed by
+  an in-memory `HostedIdentityStore` validates `Authorization: Bearer <token>`
+  (and `?token=` for browser WebSocket upgrades) against issued sessions and
+  injects an `AuthContext` (user, organization/tenant, role) into request
+  extensions.
+
+A `PermissionEvaluator` maps the authenticated context plus the targeted
+resource/action to a `PermissionResult`. Roles map to capabilities
+(`Read`/`Operate`/`Admin`); project-access rules restrict a user to a subset of
+projects. Enforcement covers HTTP reads (read-RBAC middleware), action dispatch
+(rejected receipt with denial reason/code + HTTP 403 on deny; accepted receipts
+carry the evaluated permission), and WebSocket/JSON-RPC-over-WebSocket stream
+subscriptions (gated before upgrade; stream `Read` permission evaluated).
+Login/logout/session endpoints live under `/api/v1/auth`. Capabilities
+advertise `bearer_token` and `hosted_session` auth modes.
+
+The in-memory identity store is an alpha implementation. Secret storage,
+hosted workspace isolation, and billing are out of scope for COE-420 and land
+in follow-on work.
+
 Secrets responsibilities:
 
 - Store provider keys, Linear credentials, repository credentials, and harness credentials.
@@ -823,6 +851,15 @@ Hosted mode requires:
 - Audit logs for sensitive actions.
 - Resource quotas and kill controls.
 - Admin-configurable retention policies.
+
+COE-420 implements the alpha security baseline: authenticated API and stream
+access via bearer session tokens (with `?token=` fallback for browser
+WebSocket upgrades), server-side RBAC permission checks for every hosted
+mutation (action receipts carry the permission decision and rejection reason)
+and for protected reads, an explicit dev bypass that is refused in production,
+and audit-ready `AuthContext` (user/tenant/role) carried on requests and
+streams. Tenant data isolation, workspace isolation, and scoped secret
+injection remain follow-on work for later milestones.
 
 ## 10. Technology recommendations
 

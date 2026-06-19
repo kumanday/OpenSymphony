@@ -211,16 +211,64 @@ Requirements:
 
 The MVP code should already expose the auth configuration hooks needed later.
 
+### 7.3.1 Hosted identity, auth, and RBAC (COE-420)
+
+Hosted mode adds user identity, organization/tenant membership, sessions, and
+role-based permission checks on top of the gateway auth hooks above. The
+gateway selects one of three auth modes from `GatewayAuthConfig`:
+
+- `Disabled` -- local trusted mode. No auth provider is configured; every route
+  and stream is open. This is the default for local supervised operation and
+  preserves the unauthenticated local contract.
+- `DevBypass` -- explicit local development bypass. The provider injects a dev
+  owner `AuthContext` without credentials so local dev tools keep working.
+  This mode is refused at configuration time when `production` is true, so the
+  bypass is explicit and unavailable in production configuration.
+- `Hosted` -- bearer session-token auth. A `SessionTokenAuthProvider` backed by
+  an in-memory `HostedIdentityStore` validates `Authorization: Bearer <token>`
+  headers (and the `?token=` query fallback for browser WebSocket upgrades)
+  against issued sessions and injects the authenticated `AuthContext` (user,
+  organization/tenant, role) into request extensions.
+
+Login, logout, and session probe endpoints live under `POST /api/v1/auth/login`,
+`POST /api/v1/auth/logout`, and `GET /api/v1/auth/session`. A successful login
+returns a `session_token` plus the user, organization, and role context.
+
+A `PermissionEvaluator` maps the authenticated context plus the targeted
+resource and action to a `PermissionResult` (`allowed`, `evaluated`,
+`denied_reason`, `denied_code`). Roles map to capabilities (`Read`/`Operate`/
+`Admin`) and project-access rules restrict a user to a subset of projects.
+Enforcement points:
+
+- HTTP reads: a read-RBAC middleware classifies protected read routes
+  (project, run, org-wide snapshot/event reads) and enforces a hosted
+  permission decision; project-scoped reads carry the project id so a viewer
+  restricted from a project is denied with `error_code: permission_denied`/
+  `forbidden_resource`.
+- Action dispatch (`POST /api/v1/actions/dispatch`): the gateway overwrites any
+  client-supplied actor with the authenticated context (the gateway is the
+  authority), runs `evaluate_action` before dispatch, and returns a rejected
+  receipt with the denial reason/code and HTTP 403 on deny. Accepted receipts
+  also carry the evaluated permission result so every hosted mutation has an
+  audit-ready permission decision.
+- WebSocket and JSON-RPC-over-WebSocket streams: the upgrade is gated before
+  the connection is accepted; a valid `?token=` (or header) is required in
+  hosted mode and the stream-subscription `Read` permission is evaluated so
+  every stream subscription carries an authenticated user/tenant context.
+
+Capabilities (`GET /api/v1/capabilities`) advertise `auth_modes` including
+`bearer_token` and `hosted_session` when hosted auth is configured.
+
 ## 7.4 Client auth placeholder states
 
 The shared client shell (web and desktop remote) renders auth-aware placeholder states when a hosted gateway rejects a read for auth reasons, so both clients show the same user-facing outcome:
 
-- `unauthenticated` (HTTP 401): a sign-in placeholder with a placeholder "Sign in" action and "Retry". Real hosted auth provider integration arrives in a follow-on (OSYM-750).
+- `unauthenticated` (HTTP 401): a sign-in placeholder with a "Sign in" action and "Retry". Hosted auth provider integration is implemented in COE-420 (OSYM-750); the web client login flow signs in against `POST /api/v1/auth/login`, stores the session token, and rebuilds the transport with the bearer token (see 7.3.1).
 - `unauthorized` (HTTP 403 with an explicit `error_code`/`code` body signal such as `unauthorized` or `permission_denied`): an access-denied placeholder with organization/project selection placeholders.
 - `forbidden` (HTTP 403 hard deny, no permission body signal): an access-forbidden placeholder with "Retry".
 - `open`: no placeholder. Local unauthenticated gateways that advertise only `auth_modes: ["none"]` render the dashboard, task graph, run, stream, and planning views directly with no login gate.
 
-Transport adapters throw a classified `GatewayRequestError` (code `unauthenticated`/`unauthorized`/`forbidden`/`unavailable`); the shell maps it to an `AuthState` from `@opensymphony/gateway-schema` and renders the matching placeholder. A plain HTTP 403 maps to `forbidden`; a 403 whose body carries a permission-denial code maps to `unauthorized`. These are placeholders that reduce churn when hosted auth arrives; the gateway data model and APIs are already designed for hosted mode (see PRD 4.10).
+Transport adapters throw a classified `GatewayRequestError` (code `unauthenticated`/`unauthorized`/`forbidden`/`unavailable`); the shell maps it to an `AuthState` from `@opensymphony/gateway-schema` and renders the matching placeholder. A plain HTTP 403 maps to `forbidden`; a 403 whose body carries a permission-denial code maps to `unauthorized`. With COE-420, hosted auth is implemented: the gateway enforces identity, sessions, and RBAC (see 7.3.1), and the web client renders a login form that exchanges credentials for a session token.
 
 ## 8. What the code should abstract now
 
