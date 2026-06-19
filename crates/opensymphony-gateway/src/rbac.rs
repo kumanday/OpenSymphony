@@ -45,42 +45,70 @@ impl Capability {
     }
 }
 
+/// Extension trait that derives a default [`Capability`] from an action kind.
+///
+/// This is the per-action default that [`ProtectedResource::capability_for_action`]
+/// narrows per resource. Centralizing it means a new `ActionKind` variant gets a
+/// sensible default capability (Operate, or Admin when added to the admin list)
+/// without editing every resource arm, and the admin-gated action kinds are
+/// declared in one auditable place.
+pub trait ActionCapability {
+    /// Default capability required for this action kind against its primary
+    /// mutation resource.
+    fn required_capability(self) -> Capability;
+}
+
+impl ActionCapability for ActionKind {
+    fn required_capability(self) -> Capability {
+        match self {
+            // Admin-shape actions that change authorization or publish plans.
+            ActionKind::ApprovalDecision
+            | ActionKind::TransitionIssue
+            | ActionKind::PublishPlan => Capability::Admin,
+            // All other run/operate mutations default to Member-level operate.
+            _ => Capability::Operate,
+        }
+    }
+}
+
 impl ProtectedResource {
     /// The capability required for an action kind against this resource.
+    ///
+    /// The policy derives a default capability from the action kind
+    /// ([`ActionKind::required_capability`]) and then narrows it per resource,
+    /// so adding a new `ActionKind` gets a sensible default without editing
+    /// every arm: only resources with a distinct policy for that kind need an
+    /// explicit override. This keeps the RBAC table auditable while removing
+    /// the implicit `_` catch-all fallbacks that silently routed unknown
+    /// (resource, action) pairs.
     pub fn capability_for_action(self, action_kind: ActionKind) -> Capability {
-        match (self, action_kind) {
-            // Mutations require Operate; admin-shape actions require Admin.
-            (ProtectedResource::Action, ActionKind::ApprovalDecision)
-            | (ProtectedResource::Action, ActionKind::TransitionIssue)
-            | (ProtectedResource::Action, ActionKind::PublishPlan) => Capability::Admin,
-            (ProtectedResource::Action, _) => Capability::Operate,
-            (ProtectedResource::Run, ActionKind::Retry)
-            | (ProtectedResource::Run, ActionKind::Cancel)
-            | (ProtectedResource::Run, ActionKind::Pause)
-            | (ProtectedResource::Run, ActionKind::Resume)
-            | (ProtectedResource::Run, ActionKind::Rehydrate)
-            | (ProtectedResource::Run, ActionKind::Comment)
-            | (ProtectedResource::Run, ActionKind::OpenWorkspace)
-            | (ProtectedResource::Run, ActionKind::Debug)
-            | (ProtectedResource::Run, ActionKind::TransitionIssue)
-            | (ProtectedResource::Run, ActionKind::CreateFollowup)
-            | (ProtectedResource::Run, ActionKind::ApprovalDecision)
-            | (ProtectedResource::Run, ActionKind::PublishPlan)
-            | (ProtectedResource::Run, ActionKind::TaskGraphMilestone)
-            | (ProtectedResource::Run, ActionKind::TaskGraphIssue)
-            | (ProtectedResource::Run, ActionKind::TaskGraphSubIssue)
-            | (ProtectedResource::Run, ActionKind::TaskGraphRelation)
-            | (ProtectedResource::Run, ActionKind::TaskGraphEvidence) => Capability::Operate,
-            (ProtectedResource::Secret, _) => Capability::Admin,
-            (ProtectedResource::PlanningSession, ActionKind::PublishPlan) => Capability::Admin,
-            (ProtectedResource::PlanningSession, _) => Capability::Operate,
-            (ProtectedResource::Project, ActionKind::TaskGraphMilestone)
-            | (ProtectedResource::Project, ActionKind::TaskGraphIssue)
-            | (ProtectedResource::Project, ActionKind::TaskGraphSubIssue)
-            | (ProtectedResource::Project, ActionKind::TaskGraphRelation)
-            | (ProtectedResource::Project, ActionKind::TaskGraphEvidence) => Capability::Operate,
-            (ProtectedResource::Project, _) => Capability::Read,
-            (ProtectedResource::Stream, _) => Capability::Read,
+        match self {
+            // Secrets are always admin-gated, regardless of action kind.
+            ProtectedResource::Secret => Capability::Admin,
+            // Streams are read-only subscriptions.
+            ProtectedResource::Stream => Capability::Read,
+            // Every run mutation operates at Member level.
+            ProtectedResource::Run => Capability::Operate,
+            // Planning sessions are operated by members; publishing a plan is
+            // admin-gated.
+            ProtectedResource::PlanningSession => match action_kind {
+                ActionKind::PublishPlan => Capability::Admin,
+                _ => Capability::Operate,
+            },
+            // Project task-graph mutations operate at Member level; any other
+            // action against a project falls back to read-level access.
+            ProtectedResource::Project => match action_kind {
+                ActionKind::TaskGraphMilestone
+                | ActionKind::TaskGraphIssue
+                | ActionKind::TaskGraphSubIssue
+                | ActionKind::TaskGraphRelation
+                | ActionKind::TaskGraphEvidence => Capability::Operate,
+                _ => Capability::Read,
+            },
+            // A bare action resource uses the action-kind default: admin-shape
+            // actions (approval/transition/publish) require Admin, everything
+            // else requires Operate.
+            ProtectedResource::Action => action_kind.required_capability(),
         }
     }
 
@@ -550,5 +578,71 @@ mod tests {
             "task-graph action on non-permitted project denied"
         );
         assert_eq!(denied.denied_code.as_deref(), Some("permission_denied"));
+    }
+
+    #[test]
+    fn capability_for_action_derives_from_action_kind_with_per_resource_overrides() {
+        // Admin-shape actions default to Admin against a bare Action resource.
+        for kind in [
+            ActionKind::ApprovalDecision,
+            ActionKind::TransitionIssue,
+            ActionKind::PublishPlan,
+        ] {
+            assert_eq!(
+                ProtectedResource::Action.capability_for_action(kind),
+                Capability::Admin,
+                "{kind:?} on Action requires Admin"
+            );
+        }
+        // Operate-shape actions default to Operate against a bare Action resource.
+        assert_eq!(
+            ProtectedResource::Action.capability_for_action(ActionKind::Retry),
+            Capability::Operate
+        );
+
+        // Runs always operate at Member level, even for admin-shape actions.
+        for kind in [
+            ActionKind::ApprovalDecision,
+            ActionKind::PublishPlan,
+            ActionKind::Retry,
+            ActionKind::TaskGraphIssue,
+        ] {
+            assert_eq!(
+                ProtectedResource::Run.capability_for_action(kind),
+                Capability::Operate,
+                "{kind:?} on Run requires Operate"
+            );
+        }
+
+        // Secrets are always admin-gated.
+        assert_eq!(
+            ProtectedResource::Secret.capability_for_action(ActionKind::Retry),
+            Capability::Admin
+        );
+        // Streams are read-only.
+        assert_eq!(
+            ProtectedResource::Stream.capability_for_action(ActionKind::Retry),
+            Capability::Read
+        );
+
+        // Planning session: publish is Admin, everything else Operate.
+        assert_eq!(
+            ProtectedResource::PlanningSession.capability_for_action(ActionKind::PublishPlan),
+            Capability::Admin
+        );
+        assert_eq!(
+            ProtectedResource::PlanningSession.capability_for_action(ActionKind::Comment),
+            Capability::Operate
+        );
+
+        // Project: task-graph mutations Operate, other actions Read.
+        assert_eq!(
+            ProtectedResource::Project.capability_for_action(ActionKind::TaskGraphIssue),
+            Capability::Operate
+        );
+        assert_eq!(
+            ProtectedResource::Project.capability_for_action(ActionKind::Retry),
+            Capability::Read
+        );
     }
 }
