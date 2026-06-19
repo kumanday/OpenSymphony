@@ -180,7 +180,7 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
 }
 
 #[tokio::test]
-async fn issues_by_identifiers_fetches_project_issue_details_in_one_query() {
+async fn project_issues_by_identifiers_fetches_project_issue_details_in_one_query() {
     let server = MockGraphqlServer::start(vec![QueuedResponse::json(project_issues_response(&[
         (
             "issue-260",
@@ -198,7 +198,7 @@ async fn issues_by_identifiers_fetches_project_issue_details_in_one_query() {
         .expect("client configuration should work");
 
     let issues = client
-        .issues_by_identifiers(&["COE-260", "COE-264"])
+        .project_issues_by_identifiers(&["COE-260", "COE-264"])
         .await
         .expect("identifier lookup should succeed");
 

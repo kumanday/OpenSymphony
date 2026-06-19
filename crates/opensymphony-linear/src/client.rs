@@ -16,18 +16,18 @@ use tracing::debug;
 use super::error::{GraphqlError, LinearError, ResponseMetadata};
 use super::graphql::{
     COMMENT_CREATE_MUTATION, CommentCreateData, CommentCreateInput, CommentCreateVariables,
-    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_COMMENTS_QUERY,
-    ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
+    GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
+    ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
     ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_UPDATE_MUTATION,
-    ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables, IssueCommentsData,
-    IssueCommentsVariables, IssueCreateData, IssueCreateInput, IssueCreateVariables,
-    IssueInverseRelationsData, IssueInverseRelationsVariables, IssueLabelsData,
-    IssueLabelsVariables, IssueRelationCreateData, IssueRelationCreateInput,
-    IssueRelationCreateVariables, IssueRelationMutationNode, IssueStatesByIdsData,
-    IssueStatesByIdsVariables, IssueUpdateData, IssueUpdateInput, IssueUpdateVariables,
-    IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
-    LinearProjectNode, LinearRelationConnection, PROJECT_BY_SLUG_QUERY, PROJECT_ISSUES_QUERY,
-    PROJECT_MILESTONE_CREATE_MUTATION, PROJECT_MILESTONE_UPDATE_MUTATION,
+    ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables, IssueByIdentifierData,
+    IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables, IssueCreateData,
+    IssueCreateInput, IssueCreateVariables, IssueInverseRelationsData,
+    IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueRelationCreateData,
+    IssueRelationCreateInput, IssueRelationCreateVariables, IssueRelationMutationNode,
+    IssueStatesByIdsData, IssueStatesByIdsVariables, IssueUpdateData, IssueUpdateInput,
+    IssueUpdateVariables, IssuesByStateData, IssuesByStateVariables, LinearIssueNode,
+    LinearLabelConnection, LinearProjectNode, LinearRelationConnection, PROJECT_BY_SLUG_QUERY,
+    PROJECT_ISSUES_QUERY, PROJECT_MILESTONE_CREATE_MUTATION, PROJECT_MILESTONE_UPDATE_MUTATION,
     PROJECT_UPDATE_CONTENT_MUTATION, ProjectBySlugData, ProjectBySlugVariables, ProjectIssuesData,
     ProjectIssuesVariables, ProjectMilestoneCreateData, ProjectMilestoneCreateInput,
     ProjectMilestoneCreateVariables, ProjectMilestoneUpdateData, ProjectMilestoneUpdateInput,
@@ -299,6 +299,54 @@ impl LinearClient {
     }
 
     pub async fn issues_by_identifiers<S>(
+        &self,
+        identifiers: &[S],
+    ) -> Result<Vec<TrackerIssue>, LinearError>
+    where
+        S: AsRef<str>,
+    {
+        let identifiers = normalize_strings(identifiers);
+        if identifiers.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut issues = Vec::new();
+        let mut missing_issue_ids = Vec::new();
+
+        for identifier in &identifiers {
+            let variables = IssueByIdentifierVariables {
+                identifier: identifier.clone(),
+                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+                label_first: self.config.page_size.min(MAX_INITIAL_LABEL_PAGE_SIZE),
+            };
+            let response: IssueByIdentifierData = self
+                .execute_graphql(ISSUE_BY_IDENTIFIER_QUERY, json!(variables))
+                .await?;
+            let Some(issue) = response.issue else {
+                missing_issue_ids.push(identifier.clone());
+                continue;
+            };
+            let issue = normalize_issue(self.expand_issue(issue).await?)?;
+            if issue.identifier.eq_ignore_ascii_case(identifier) {
+                issues.push(issue);
+            } else {
+                return Err(LinearError::InvalidResponse(format!(
+                    "Linear issue lookup for {identifier} returned {}",
+                    issue.identifier
+                )));
+            }
+        }
+
+        if missing_issue_ids.is_empty() {
+            Ok(issues)
+        } else {
+            Err(LinearError::MissingIssueIds {
+                issue_ids: missing_issue_ids,
+            })
+        }
+    }
+
+    pub async fn project_issues_by_identifiers<S>(
         &self,
         identifiers: &[S],
     ) -> Result<Vec<TrackerIssue>, LinearError>

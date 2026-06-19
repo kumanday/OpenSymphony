@@ -111,7 +111,7 @@ impl LinearTaskGraphClient for crate::opensymphony_linear::LinearClient {
         &self,
         identifiers: &[String],
     ) -> Result<Vec<TrackerIssue>, String> {
-        self.issues_by_identifiers(identifiers)
+        self.project_issues_by_identifiers(identifiers)
             .await
             .map_err(|error| error.to_string())
     }

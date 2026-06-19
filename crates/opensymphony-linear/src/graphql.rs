@@ -245,6 +245,78 @@ query IssueStatesByIds($projectSlug: String!, $issueIds: [ID!], $first: Int!, $a
 }
 "#;
 
+pub(super) const ISSUE_BY_IDENTIFIER_QUERY: &str = r#"
+query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst: Int!) {
+  issue(id: $identifier) {
+    id
+    identifier
+    url
+    title
+    description
+    priority
+    createdAt
+    updatedAt
+    state {
+      id
+      name
+      type
+    }
+    parent {
+      id
+      identifier
+      url
+      title
+      state {
+        name
+      }
+    }
+    projectMilestone {
+      id
+      name
+    }
+    children(includeArchived: true, first: 100) {
+      nodes {
+        id
+        identifier
+        url
+        title
+        state {
+          name
+        }
+      }
+    }
+    labels(first: $labelFirst) {
+      nodes {
+        name
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+    inverseRelations(first: $relationFirst) {
+      nodes {
+        type
+        issue {
+          id
+          identifier
+          title
+          state {
+            id
+            name
+            type
+          }
+        }
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+"#;
+
 pub(super) const ISSUE_COMMENTS_QUERY: &str = r#"
 query IssueCommentsPage($issueId: String!, $first: Int!, $after: String) {
   issue(id: $issueId) {
@@ -528,6 +600,14 @@ pub(super) struct ProjectIssuesVariables {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct IssueByIdentifierVariables {
+    pub identifier: String,
+    pub relation_first: usize,
+    pub label_first: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct IssueInverseRelationsVariables {
     pub issue_id: String,
     pub first: usize,
@@ -614,6 +694,11 @@ pub(super) struct IssuesByStateData {
 #[derive(Debug, Deserialize)]
 pub(super) struct ProjectIssuesData {
     pub issues: IssuesConnection<LinearIssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueByIdentifierData {
+    pub issue: Option<LinearIssueNode>,
 }
 
 #[derive(Debug, Deserialize)]
