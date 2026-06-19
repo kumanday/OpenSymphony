@@ -15,9 +15,13 @@
 export type GatewayErrorCode =
   /** No valid credentials supplied (HTTP 401). */
   | "unauthenticated"
-  /** Authenticated but lacking permission for the resource (HTTP 403, permission). */
+  /**
+   * Authenticated but lacking permission for this resource. Reached when a
+   * 403 response carries an explicit `error_code: "unauthorized"` (or
+   * `code: "unauthorized"`) body signal indicating a permission denial.
+   */
   | "unauthorized"
-  /** Server explicitly forbids the request (HTTP 403, hard deny). */
+  /** Server hard-denies the request (HTTP 403 without a permission signal). */
   | "forbidden"
   /** Gateway unreachable or returned a non-auth error. */
   | "unavailable";
@@ -41,15 +45,41 @@ export function isGatewayRequestError(value: unknown): value is GatewayRequestEr
 }
 
 /**
+ * Body signal a gateway may use to distinguish a permission denial
+ * (`unauthorized`) from a hard deny (`forbidden`) on an HTTP 403.
+ */
+const UNAUTHORIZED_BODY_CODES = new Set(["unauthorized", "permission_denied", "forbidden_resource"]);
+
+/**
  * Classify an HTTP status code into a gateway error code.
  *
- * Returns `undefined` for status codes that are not auth/forbidden related
- * (callers treat those as generic unavailable failures).
+ * - HTTP 401 -> `unauthenticated`.
+ * - HTTP 403 -> `unauthorized` when the (parsed) body carries an explicit
+ *   `error_code`/`code` field equal to a permission-denial signal, otherwise
+ *   `forbidden`.
+ *
+ * Pass the raw response body so a 403 can be disambiguated. Returns
+ * `undefined` for status codes that are not auth/forbidden related; callers
+ * treat those as generic unavailable failures.
  */
-export function authErrorCodeForStatus(status: number): GatewayErrorCode | undefined {
+export function authErrorCodeForStatus(
+  status: number,
+  body?: unknown,
+): GatewayErrorCode | undefined {
   if (status === 401) return "unauthenticated";
-  if (status === 403) return "forbidden";
+  if (status === 403) {
+    const code = bodyErrorCode(body);
+    return code && UNAUTHORIZED_BODY_CODES.has(code) ? "unauthorized" : "forbidden";
+  }
   return undefined;
 }
 
-export type { AuthState } from "@opensymphony/gateway-schema";
+/** Extract an `error_code`/`code` string from a JSON-parsed body, if present. */
+function bodyErrorCode(body: unknown): string | undefined {
+  if (body && typeof body === "object") {
+    const record = body as Record<string, unknown>;
+    const raw = record.error_code ?? record.code;
+    if (typeof raw === "string" && raw.length > 0) return raw;
+  }
+  return undefined;
+}

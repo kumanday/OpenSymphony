@@ -10,7 +10,7 @@
  */
 
 import { renderOpenSymphonyApp } from "../src/app-shell.js";
-import { MockGatewayTransport, GatewayRequestError } from "@opensymphony/api-client";
+import { MockGatewayTransport } from "@opensymphony/api-client";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import type {
   DashboardSnapshot,
@@ -175,21 +175,18 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
   it("renders an unauthorized placeholder when the gateway returns an explicit unauthorized code", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
+    // The mock's authFailure throws a GatewayRequestError with the explicit
+    // "unauthorized" code (a permission denial), which the UI maps to the
+    // access-denied placeholder. This mirrors a real 403 whose body carries
+    // an `error_code: "unauthorized"` permission signal.
     const transport = new MockGatewayTransport({
       baseUri: "https://hosted.opensymphony.example",
       health: hostedCapabilities,
       snapshot: dashboard,
       taskGraph,
       runDetails: [runDetail],
+      authFailure: { code: "unauthorized", methods: ["snapshot"] },
     });
-    // Override snapshot to throw an explicit unauthorized code, which the
-    // default 403 mapping does not produce (403 maps to forbidden). This
-    // exercises the dedicated unauthorized branch.
-    const originalSnapshot = transport.snapshot.bind(transport);
-    transport.snapshot = async () => {
-      throw new GatewayRequestError("unauthorized", "insufficient permission", 403);
-    };
-    void originalSnapshot;
     const handle = renderOpenSymphonyApp({ root, mode: "web", transport });
 
     await flushUntil(() => root.querySelector("[data-testid='auth-placeholder']") !== null);

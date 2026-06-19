@@ -43,8 +43,17 @@ describe("GatewayRequestError classification", () => {
     it("maps 401 to unauthenticated", () => {
       expect(authErrorCodeForStatus(401)).toBe("unauthenticated");
     });
-    it("maps 403 to forbidden", () => {
+    it("maps a bare 403 (no permission body signal) to forbidden", () => {
       expect(authErrorCodeForStatus(403)).toBe("forbidden");
+      expect(authErrorCodeForStatus(403, undefined)).toBe("forbidden");
+      expect(authErrorCodeForStatus(403, "not json")).toBe("forbidden");
+    });
+    it("maps a 403 with an explicit unauthorized body code to unauthorized", () => {
+      expect(authErrorCodeForStatus(403, { error_code: "unauthorized" })).toBe("unauthorized");
+      expect(authErrorCodeForStatus(403, { code: "permission_denied" })).toBe("unauthorized");
+    });
+    it("maps a 403 with an unrelated body code to forbidden", () => {
+      expect(authErrorCodeForStatus(403, { error_code: "rate_limited" })).toBe("forbidden");
     });
     it("returns undefined for non-auth statuses", () => {
       expect(authErrorCodeForStatus(500)).toBeUndefined();
@@ -80,6 +89,18 @@ describe("GatewayRequestError classification", () => {
       const transport = new HttpGatewayTransport({ baseUri: "http://localhost:8080" });
       await expect(transport.snapshot()).rejects.toMatchObject({
         code: "forbidden",
+        status: 403,
+      });
+    });
+
+    it("classifies a 403 with an explicit unauthorized body code as unauthorized", async () => {
+      global.fetch = jest.fn(async () =>
+        mockResponse(403, "Forbidden", '{"error_code":"unauthorized","message":"no permission"}'),
+      ) as jest.MockedFunction<typeof global.fetch>;
+
+      const transport = new HttpGatewayTransport({ baseUri: "http://localhost:8080" });
+      await expect(transport.snapshot()).rejects.toMatchObject({
+        code: "unauthorized",
         status: 403,
       });
     });

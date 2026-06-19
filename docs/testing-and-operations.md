@@ -246,7 +246,18 @@ The web and desktop clients both mount the shared `OpenSymphonyApp` shell from `
 - app-shell mount smoke (`packages/ui-core/__tests__/app-shell.test.ts`): status, task graph, run detail, evidence, profile, and failed-connection rendering
 - auth-aware placeholder states (`packages/ui-core/__tests__/auth-states.test.ts`): unauthenticated (sign-in), unauthorized (access denied), forbidden (access forbidden), organization/project selection placeholders, and local `auth_modes:["none"]` gateways rendering the dashboard with no login gate; recovery when the gateway later permits a read
 - remote web/desktop parity (`packages/ui-core/__tests__/remote-parity.test.ts`): the shell renders the same core dashboard metrics, task graph nodes, run detail, planning workspace, and stream events in both `mode:"web"` and `mode:"desktop"` against an identical fixture transport
-- gateway error classification (`packages/api-client/__tests__/gateway-errors.test.ts`): `HttpGatewayTransport` maps HTTP 401/403 to a classified `GatewayRequestError`, and `authStateFromError` maps it to an `AuthState` from `@opensymphony/gateway-schema`
+- gateway error classification (`packages/api-client/__tests__/gateway-errors.test.ts`): `HttpGatewayTransport` maps HTTP 401/403 (including a 403 with an explicit `error_code:"unauthorized"` body signal) to a classified `GatewayRequestError`, and `authStateFromError` maps it to an `AuthState` from `@opensymphony/gateway-schema`
+
+### Evidence for UI/shell changes
+
+The shell is pure DOM rendered by `renderOpenSymphonyApp` into a `jsdom` document, so the jest suites assert the rendered DOM directly (not mock return values). For the COE-419 auth placeholder states this means concrete runtime evidence of the rendered output:
+
+- `data-opensymphony-app-shell="mounted"` root carries `data-auth-state` set to `unauthenticated` / `unauthorized` / `forbidden` / `open` for each scenario.
+- `[data-testid="auth-placeholder"]` is present only in non-open states and carries the matching `data-auth-state`; `textContent` contains "Sign in required" (unauthenticated), "Access denied" plus "do not have permission" (unauthorized), and "Access forbidden" (forbidden).
+- `[data-testid="auth-sign-in"]` appears only for `unauthenticated`; `[data-testid="auth-refresh"]` appears for `forbidden`/`unauthorized`; `[data-testid="auth-org"]`/`[data-testid="auth-project"]` render the organization/project selection surface.
+- For local `auth_modes:["none"]` gateways, `[data-testid="auth-placeholder"]` is absent and `.os-task-graph-panel` renders with `data-auth-state="open"`.
+
+These DOM assertions are the runtime evidence for the new user-facing states. A screenshot/video capture is not produced in this headless unattended environment; the assertions above exercise the real `renderAuthPlaceholder` / `renderViewContent` code paths end-to-end through the shared shell.
 
 ## 4. Fake OpenHands server requirements
 

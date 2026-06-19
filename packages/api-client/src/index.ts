@@ -66,16 +66,16 @@ export {
   MIN_COMPATIBLE_API_VERSION,
 } from "./discovery.js";
 export type { DiscoveryResult } from "./discovery.js";
-// Typed gateway request errors (transport-layer) and auth-facing state
-// classification (shared via @opensymphony/gateway-schema).
+// Typed gateway request errors (transport-layer). The auth-state
+// classification (`AuthState`, `authStateFromError`, `gatewayRequiresAuth`)
+// lives in @opensymphony/gateway-schema; import it directly from there to
+// keep the package boundary sharp (ui-core must not depend on api-client).
 export {
   GatewayRequestError,
   isGatewayRequestError,
   authErrorCodeForStatus,
 } from "./errors.js";
 export type { GatewayErrorCode } from "./errors.js";
-export type { AuthState } from "@opensymphony/gateway-schema";
-export { authStateFromError, gatewayRequiresAuth } from "@opensymphony/gateway-schema";
 
 /** Transport adapter interface for all gateway communication. */
 export interface GatewayTransport {

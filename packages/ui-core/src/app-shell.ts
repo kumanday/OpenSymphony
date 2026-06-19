@@ -19,10 +19,7 @@ import type {
   TaskGraphSnapshot,
   AuthState,
 } from "@opensymphony/gateway-schema";
-import {
-  authStateFromError,
-  gatewayRequiresAuth,
-} from "@opensymphony/gateway-schema";
+import { authStateFromError } from "@opensymphony/gateway-schema";
 import { renderChangedFileList, renderFileDiff } from "./diff.js";
 import { renderValidationSummary } from "./validation.js";
 import { renderApprovalList, type ApprovalDecision } from "./approval.js";
@@ -802,8 +799,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
    */
   private renderAuthPlaceholder(): string {
     const state = this.state.authState;
-    const requiresAuth = gatewayRequiresAuth(this.state.capabilities?.auth_modes ?? []);
-    const orgProject = this.renderOrgProjectPlaceholder(state, requiresAuth);
+    const orgProject = this.renderOrgProjectPlaceholder();
     if (state === "unauthenticated") {
       return `
         ${this.renderProfiles()}
@@ -858,12 +854,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
    * Organization/project selection placeholder for hosted contexts.
    *
    * Real tenant/org selection arrives with hosted auth; this surface keeps the
-   * selector present so the data model and UI layout are stable.
+   * selector present so the data model and UI layout are stable. Only rendered
+   * for non-open auth states (see `renderAuthPlaceholder`), which all imply a
+   * hosted/auth-requiring gateway.
    */
-  private renderOrgProjectPlaceholder(state: AuthState, requiresAuth: boolean): string {
-    if (!requiresAuth && state === "unauthenticated") {
-      return "";
-    }
+  private renderOrgProjectPlaceholder(): string {
     return `
       <div class="os-auth-scope" data-testid="auth-scope">
         <div class="os-section-head"><h3>Workspace</h3></div>

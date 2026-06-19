@@ -25,6 +25,16 @@ import type { GatewayTransport, GatewayTransportConfig, ActionCapableTransport }
 import { stableHash, stableHashJson } from "./util.js";
 import { GatewayRequestError, authErrorCodeForStatus } from "./errors.js";
 
+/** Best-effort parse of a response body as JSON; returns the raw string on failure. */
+function tryParseJson(raw: string): unknown {
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
 /**
  * HTTP-based transport adapter using fetch().
  *
@@ -511,17 +521,17 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
     const response = await fetch(url, requestInit);
 
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      const authCode = authErrorCodeForStatus(response.status);
+      const rawBody = await response.text().catch(() => "");
+      const authCode = authErrorCodeForStatus(response.status, tryParseJson(rawBody));
       if (authCode) {
         throw new GatewayRequestError(
           authCode,
-          `HTTP ${response.status} ${response.statusText}: ${body}`,
+          `HTTP ${response.status} ${response.statusText}: ${rawBody}`,
           response.status,
         );
       }
       throw new Error(
-        `HTTP ${response.status} ${response.statusText}: ${body}`,
+        `HTTP ${response.status} ${response.statusText}: ${rawBody}`,
       );
     }
 
@@ -601,7 +611,8 @@ export class WebSocketTransport implements GatewayTransport {
       headers: this.headers(),
     });
     if (!response.ok) {
-      const authCode = authErrorCodeForStatus(response.status);
+      const rawBody = await response.text().catch(() => "");
+      const authCode = authErrorCodeForStatus(response.status, tryParseJson(rawBody));
       if (authCode) {
         throw new GatewayRequestError(
           authCode,
