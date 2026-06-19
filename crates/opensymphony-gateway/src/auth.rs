@@ -230,23 +230,21 @@ pub struct AuthMiddlewareState {
     pub config: GatewayAuthConfig,
 }
 
-/// Extract the bearer token from a request's `Authorization` header, mapping a
-/// missing/malformed header to a 401 response. Shared by the logout and session
-/// handlers so token parsing and the unauthenticated error stay consistent.
-/// The `Err` variant is boxed to keep the `Result` small (`Response` is large).
+/// Read the validated bearer token that `auth_middleware` injected into
+/// request extensions, mapping its absence to a 401 response. Shared by the
+/// logout and session handlers so they never re-parse the `Authorization`
+/// header; auth enforcement lives in the middleware. The `Err` variant is
+/// boxed to keep the `Result` small (`Response` is large).
 fn require_bearer_token(request: &Request) -> Result<String, Box<Response>> {
-    bearer_token_from_header(
-        request
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok()),
-    )
-    .map(|t| t.to_string())
-    .ok_or_else(|| {
-        Box::new(unauthenticated_response(
-            "missing Authorization bearer token",
-        ))
-    })
+    request
+        .extensions()
+        .get::<AuthenticatedToken>()
+        .map(|t| t.0.clone())
+        .ok_or_else(|| {
+            Box::new(unauthenticated_response(
+                "missing Authorization bearer token",
+            ))
+        })
 }
 
 /// Axum middleware that authenticates protected requests and injects an
@@ -298,9 +296,24 @@ pub async fn auth_middleware(
     let Some(ctx) = provider.auth_context_for_token(token) else {
         return unauthenticated_response("invalid or expired session token");
     };
+    // Copy the validated token out of the header/query borrow before the
+    // mutable extensions insert, so handlers (logout, session probe) can use
+    // it without re-parsing the Authorization header. Auth is enforced in this
+    // one place; handlers read the already-validated token.
+    let validated_token = token.to_string();
     request.extensions_mut().insert(ctx);
+    request
+        .extensions_mut()
+        .insert(AuthenticatedToken(validated_token));
     next.run(request).await
 }
+
+/// The validated bearer token, injected by `auth_middleware` into request
+/// extensions so handlers that need the raw token (logout, session probe) do
+/// not re-parse the `Authorization` header. Absent for public routes, disabled
+/// mode, and dev-bypass (which has no session token).
+#[derive(Clone)]
+pub struct AuthenticatedToken(pub String);
 
 /// State shared with the read-RBAC middleware layer.
 #[derive(Clone)]
