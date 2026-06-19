@@ -11,8 +11,7 @@ last_memory_sync: 2026-06-14T22:09:16.647206+00:00
 
 ## Current model
 
-- COE-452 contributed: PR #122: COE-452: Add DuckDB prebuilt developer build mode (merge `6ce8edd`)
-- COE-453 contributed: PR #123: M9.5: Add non-interactive init automation (merge `3200ed6`)
+- COE-407 contributed: PR #125: feat(api-client): browser transport streaming, replay, and remote protocols (COE-407) (merge `4d70347`)
 
 ## Important invariants
 
@@ -29,12 +28,10 @@ last_memory_sync: 2026-06-14T22:09:16.647206+00:00
 
 ## Recent changes
 
-- COE-452: DuckDB Prebuilt Developer Build Mode
-- COE-453: Non-Interactive Init For Automation
+- COE-407: Browser Transport And Remote Stream Protocols
 
 ## Source refs
 
-- COE-452
-- COE-453
+- COE-407
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

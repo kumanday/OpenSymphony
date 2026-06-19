@@ -44,6 +44,7 @@ areas:
       docs:
       - docs/architecture.md
       linear_milestones:
+      - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -65,6 +66,7 @@ areas:
       - area:memory
       - area:operations
       linear_milestones:
+      - 'M10: Web Client And External Gateway'
       - 'M9.5: Developer Build Acceleration'
   cli:
     title: Cli
@@ -192,6 +194,7 @@ areas:
       docs:
       - docs/host-client-architecture.md
       linear_milestones:
+      - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -259,9 +262,12 @@ areas:
     confidence: 85
     aliases:
     - linear and tools
+    - linear-and-tools
     source_refs:
       docs:
       - docs/linear-and-tools.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
   memory:
     title: Project Memory
     docs_target: docs/memory.md
@@ -462,8 +468,11 @@ areas:
     confidence: 85
     aliases:
     - workspace and lifecycle
+    - workspace-and-lifecycle
     source_refs:
       docs:
       - docs/workspace-and-lifecycle.md
+      linear_milestones:
+      - 'M10: Web Client And External Gateway'
 redaction:
   deny_patterns: []

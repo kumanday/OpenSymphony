@@ -508,12 +508,7 @@ trait WorkspaceManager {
 
 ## Current model
 
-- COE-253 contributed: PR #19: COE-253: OpenHands Runtime Adapter (merge `911b0b4`)
-- COE-254 contributed: PR #6: COE-254: bootstrap tracker, workspace, and orchestration core
-- COE-261 contributed: PR #83: Add memory init and mapped docs sync
-- COE-262 contributed: PR #34: COE-262: Harden OpenHands REST client contract (merge `0e2be26`)
-- COE-263 contributed: PR #35: COE-263: Implement workspace manager and lifecycle hooks (merge `2693eea`)
-- COE-264 contributed: PR #33: COE-264: Linear read adapter and issue normalization (merge `45cca3c`)
+- COE-407 contributed: PR #125: feat(api-client): browser transport streaming, replay, and remote protocols (COE-407) (merge `4d70347`)
 
 ## Important invariants
 
@@ -530,34 +525,10 @@ trait WorkspaceManager {
 
 ## Recent changes
 
-- COE-253: OpenHands Runtime Adapter
-- COE-254: Tracker, Workspaces, and Orchestration
-- COE-261: Local agent-server supervisor
-- COE-262: REST client and conversation contract
-- COE-263: Workspace manager and lifecycle hooks
-- COE-264: Linear read adapter and issue normalization
-- COE-265: WebSocket event stream, reconciliation, and recovery
-- COE-266: Issue session runner
-- COE-267: Linear MCP write surface
-- COE-268: Orchestrator scheduler, retries, and reconciliation
-- COE-270: Repository harness and generated context artifacts
-- COE-277: Implement hierarchy-aware task selection
-- COE-287: Add opensymphony debug command for conversational session debugging
+- COE-407: Browser Transport And Remote Stream Protocols
 
 ## Source refs
 
-- COE-253
-- COE-254
-- COE-261
-- COE-262
-- COE-263
-- COE-264
-- COE-265
-- COE-266
-- COE-267
-- COE-268
-- COE-270
-- COE-277
-- COE-287
+- COE-407
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
