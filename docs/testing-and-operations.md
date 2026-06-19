@@ -446,7 +446,7 @@ That document covers:
 
 ## Current model
 
-- COE-407 contributed: PR #125: feat(api-client): browser transport streaming, replay, and remote protocols (COE-407) (merge `4d70347`)
+- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
 
 ## Important invariants
 
@@ -463,10 +463,10 @@ That document covers:
 
 ## Recent changes
 
-- COE-407: Browser Transport And Remote Stream Protocols
+- COE-419: Hosted Auth Placeholders And Web Parity
 
 ## Source refs
 
-- COE-407
+- COE-419
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

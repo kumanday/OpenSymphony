@@ -371,12 +371,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-- COE-252 contributed: PR #10: Implement foundation workflow and scheduler contracts
-- COE-253 contributed: PR #19: COE-253: OpenHands Runtime Adapter (merge `911b0b4`)
-- COE-254 contributed: PR #6: COE-254: bootstrap tracker, workspace, and orchestration core
-- COE-255 contributed: PR #4: COE-255: add control plane and FrankenTUI slice
-- COE-256 contributed: PR #1: COE-257: tighten hosted deployment guidance
-- COE-258 contributed: PR #83: Add memory init and mapped docs sync
+- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
 
 ## Important invariants
 
@@ -393,150 +388,10 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Recent changes
 
-- COE-252: Foundation and Contracts
-- COE-253: OpenHands Runtime Adapter
-- COE-254: Tracker, Workspaces, and Orchestration
-- COE-255: Observability and FrankenTUI
-- COE-256: Validation and Local Operations
-- COE-258: Bootstrap workspace and crate boundaries
-- COE-259: Workflow loader and typed config
-- COE-260: Domain model and orchestrator state machine
-- COE-261: Local agent-server supervisor
-- COE-262: REST client and conversation contract
-- COE-263: Workspace manager and lifecycle hooks
-- COE-264: Linear read adapter and issue normalization
-- COE-265: WebSocket event stream, reconciliation, and recovery
-- COE-266: Issue session runner
-- COE-267: Linear MCP write surface
-- COE-268: Orchestrator scheduler, retries, and reconciliation
-- COE-269: Control-plane API and snapshot store
-- COE-270: Repository harness and generated context artifacts
-- COE-271: FrankenTUI operator client
-- COE-272: Fake OpenHands server and protocol contract suite
-- COE-273: Live local end-to-end suite
-- COE-274: CLI packaging, doctor, and local operations docs
-- COE-275: Remote agent-server mode and auth hardening
-- COE-277: Implement hierarchy-aware task selection
-- COE-278: Doctor live probe resolves repo-local OpenHands launcher paths reliably
-- COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
-- COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
-- COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
-- COE-284: Add orchestrator run command to CLI and make it installable
-- COE-286: Abort active CLI worker tasks on graceful orchestrator shutdown
-- COE-287: Add opensymphony debug command for conversational session debugging
-- COE-293: OpenHands agent has no filesystem tools - only FinishTool and ThinkTool
-- COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
-- COE-382: Add supply-chain and security audits to CI
-- COE-383: Decompose oversized session and TUI modules into focused submodules
-- COE-384: Expand error-path tests for Linear client and workspace hooks
-- COE-385: Resolve runtime tracking TODO in OpenHands session runner
-- COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
-- COE-387: Audit tracing spans and diagnostics for secret leakage
-- COE-389: Current Gateway Inventory And Vocabulary
-- COE-390: Gateway Schemas And Stream Feasibility
-- COE-391: Gateway Module, Capabilities, And Dashboard Snapshot
-- COE-392: Task Graph, Run Detail, File, And Diff Read APIs
-- COE-393: Event Journal And Stream Broker
-- COE-394: Frontend Workspace And Shared Schemas
-- COE-395: Planning Artifact Schema And Session Service
-- COE-396: Action Receipts And Initial Run Actions
-- COE-397: Gateway API Client, Transport Adapters, And Reducers
-- COE-398: Tauri Shell And Security Capabilities
-- COE-399: Linear Read Coverage And Task Graph Cache
-- COE-400: OpenHands Event Normalization And Runtime Mirror
-- COE-402: App Shell, Dashboard, Task Graph, And Run Views
-- COE-403: Terminal And Log Renderer Prototype
-- COE-404: Desktop Connection Profiles And Daemon Management
-- COE-405: Linear Milestone, Issue, And Sub-Issue Mutations
-- COE-406: Repository, Linear, And Research Analysis
-- COE-409: Desktop Settings, Keychain, And Native Actions
-- COE-410: Desktop Local Stream Optimization
-- COE-411: Task Graph Editor And Runtime Overlay UI
-- COE-412: Runtime Timeline And Terminal/Log Association
-- COE-413: Implementation Plan Generator Stage
-- COE-414: Diff, Validation, Approval, And Run Action Views
-- COE-415: Milestone, Issue, And Sub-Issue Compiler
-- COE-416: Dependency Graph And Plan Checks
-- COE-417: Planning Workspace UI
-- COE-434: Long-running harness liveness and scheduler/runtime ownership contract
-- COE-435: Long-running run observability fixtures and client-facing diagnostics
-- COE-448: Multi-repo memory server and deterministic context
-- COE-449: Desktop alpha recovery: replace stubs with functional app
-- COE-452: DuckDB Prebuilt Developer Build Mode
-- COE-453: Non-Interactive Init For Automation
+- COE-419: Hosted Auth Placeholders And Web Parity
 
 ## Source refs
 
-- COE-252
-- COE-253
-- COE-254
-- COE-255
-- COE-256
-- COE-258
-- COE-259
-- COE-260
-- COE-261
-- COE-262
-- COE-263
-- COE-264
-- COE-265
-- COE-266
-- COE-267
-- COE-268
-- COE-269
-- COE-270
-- COE-271
-- COE-272
-- COE-273
-- COE-274
-- COE-275
-- COE-277
-- COE-278
-- COE-280
-- COE-281
-- COE-282
-- COE-284
-- COE-286
-- COE-287
-- COE-293
-- COE-294
-- COE-382
-- COE-383
-- COE-384
-- COE-385
-- COE-386
-- COE-387
-- COE-389
-- COE-390
-- COE-391
-- COE-392
-- COE-393
-- COE-394
-- COE-395
-- COE-396
-- COE-397
-- COE-398
-- COE-399
-- COE-400
-- COE-402
-- COE-403
-- COE-404
-- COE-405
-- COE-406
-- COE-409
-- COE-410
-- COE-411
-- COE-412
-- COE-413
-- COE-414
-- COE-415
-- COE-416
-- COE-417
-- COE-434
-- COE-435
-- COE-448
-- COE-449
-- COE-452
-- COE-453
+- COE-419
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

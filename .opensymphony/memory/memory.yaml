@@ -348,6 +348,7 @@ areas:
       - area:operations
       - operations
       linear_milestones:
+      - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
