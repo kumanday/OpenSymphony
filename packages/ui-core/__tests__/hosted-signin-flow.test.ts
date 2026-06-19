@@ -12,12 +12,14 @@
  */
 
 import { renderOpenSymphonyApp } from "../src/app-shell.js";
-import { MockGatewayTransport } from "@opensymphony/api-client";
-import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import type {
   AppAuthIntegration,
   AppLoginCredentials,
   GatewayReader,
+} from "../src/app-shell.js";
+import { MockGatewayTransport } from "@opensymphony/api-client";
+import { schemaVersionV1 } from "@opensymphony/gateway-schema";
+import type {
   DashboardSnapshot,
   GatewayCapabilities,
   RunDetail,
