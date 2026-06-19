@@ -14,7 +14,9 @@ pub struct TaskGraphNode {
     pub state: String,
     pub state_category: TaskGraphStateCategory,
     pub priority: Option<u8>,
+    /// Parent node identifier when the parent is present in this task graph snapshot.
     pub parent_id: Option<String>,
+    /// Child node identifiers that are present in this task graph snapshot.
     pub children: Vec<String>,
     /// Blocker node identifiers that are present in this task graph snapshot.
     pub blocked_by: Vec<String>,

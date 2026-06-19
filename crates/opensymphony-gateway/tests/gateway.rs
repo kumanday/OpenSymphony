@@ -68,20 +68,16 @@ fn fake_linear_task_graph_client_with_hierarchy(
         .collect::<Vec<_>>();
 
     for (child_identifier, parent_identifier) in parent_overrides {
-        let Some(parent_ref) = issues
+        let parent_ref = issues
             .iter()
             .find(|issue| issue.identifier == *parent_identifier)
             .map(tracker_issue_ref_from_tracker)
-        else {
-            continue;
-        };
-        let Some(child_ref) = issues
+            .unwrap_or_else(|| tracker_issue_ref_from_identifier(parent_identifier));
+        let child_ref = issues
             .iter()
             .find(|issue| issue.identifier == *child_identifier)
             .map(tracker_issue_ref_from_tracker)
-        else {
-            continue;
-        };
+            .unwrap_or_else(|| tracker_issue_ref_from_identifier(child_identifier));
 
         if let Some(child_issue) = issues
             .iter_mut()
@@ -151,6 +147,16 @@ fn tracker_issue_ref_from_tracker(issue: &TrackerIssue) -> TrackerIssueRef {
         title: Some(issue.title.clone()),
         url: Some(issue.url.clone()),
         state: issue.state.clone(),
+    }
+}
+
+fn tracker_issue_ref_from_identifier(identifier: &str) -> TrackerIssueRef {
+    TrackerIssueRef {
+        id: identifier.to_owned(),
+        identifier: identifier.to_owned(),
+        title: Some(format!("External {identifier}")),
+        url: None,
+        state: "Todo".to_owned(),
     }
 }
 
@@ -2136,7 +2142,11 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
         fake_linear_task_graph_client_with_hierarchy(
             &snapshot,
             &[("COE-304", vec!["COE-300", "COE-999"])],
-            &[("COE-304", "COE-300")],
+            &[
+                ("COE-304", "COE-300"),
+                ("COE-999", "COE-300"),
+                ("COE-302", "COE-999"),
+            ],
         ),
     ));
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -2186,6 +2196,13 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
         .find(|n| n.identifier == "COE-300")
         .expect("COE-300 node should exist");
     assert_eq!(parent_node.children, vec!["COE-304".to_owned()]);
+
+    let external_parent_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-302")
+        .expect("COE-302 node should exist");
+    assert!(external_parent_node.parent_id.is_none());
 
     // Completed issue should NOT be eligible
     let done_node = response

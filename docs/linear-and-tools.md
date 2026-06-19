@@ -46,8 +46,12 @@ Important normalization rules:
   "Human Review"
 - `parent_id` comes from `parent.id`
 - `parent` retains the parent identifier when Linear returns it, and gateway
-  task graph nodes use that identifier as the client-facing `parent_id`
+  task graph nodes use that identifier as the client-facing `parent_id`; the
+  gateway clears `parent_id` when that parent is outside the returned project
+  snapshot so clients do not receive dangling hierarchy edges
 - `sub_issues` comes from `children.nodes`
+- gateway task graph `children` are filtered to nodes present in the returned
+  project snapshot
 - `state` remains the workflow-facing state name string used by
   `WORKFLOW.md`
 - gateway task graph `root_ids` are the returned node identifiers whose Linear

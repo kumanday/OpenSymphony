@@ -2146,6 +2146,18 @@ async fn get_task_graph(
                 .map(|issue| map_runtime_state_to_graph_category(&issue.runtime_state))
                 .unwrap_or_else(|| map_tracker_state_kind_to_graph_category(&issue.state_kind));
             let runtime_overlay = snapshot_issue.map(build_runtime_overlay);
+            let parent_id = issue
+                .parent
+                .as_ref()
+                .map(|parent| parent.identifier.clone())
+                .or_else(|| issue.parent_id.clone())
+                .filter(|parent_id| issue_node_ids.contains(parent_id.as_str()));
+            let children = issue
+                .sub_issues
+                .iter()
+                .filter(|sub_issue| issue_node_ids.contains(sub_issue.identifier.as_str()))
+                .map(|sub_issue| sub_issue.identifier.clone())
+                .collect();
 
             crate::opensymphony_gateway_schema::task_graph::TaskGraphNode {
                 schema_version: SchemaVersion::v1(),
@@ -2156,16 +2168,8 @@ async fn get_task_graph(
                 state: issue.state.clone(),
                 state_category,
                 priority: issue.priority,
-                parent_id: issue
-                    .parent
-                    .as_ref()
-                    .map(|parent| parent.identifier.clone())
-                    .or_else(|| issue.parent_id.clone()),
-                children: issue
-                    .sub_issues
-                    .iter()
-                    .map(|sub_issue| sub_issue.identifier.clone())
-                    .collect(),
+                parent_id,
+                children,
                 blocked_by: issue
                     .blocked_by
                     .iter()
