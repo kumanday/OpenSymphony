@@ -1444,7 +1444,14 @@ struct WorkspaceComparisonBase {
 }
 
 fn workspace_comparison_base(workspace_path: &StdPath) -> Result<WorkspaceComparisonBase, String> {
-    for reference in ["main", "origin/main"] {
+    for reference in [
+        "main",
+        "origin/main",
+        "master",
+        "origin/master",
+        "origin/HEAD",
+        "HEAD",
+    ] {
         if git_ref_exists(workspace_path, reference)? {
             return Ok(WorkspaceComparisonBase {
                 merge_base: command_single_line(
@@ -1456,7 +1463,7 @@ fn workspace_comparison_base(workspace_path: &StdPath) -> Result<WorkspaceCompar
         }
     }
 
-    Err("main branch unavailable".to_owned())
+    Err("no usable git comparison base found".to_owned())
 }
 
 fn tracked_workspace_file_changes(
@@ -2468,13 +2475,23 @@ async fn get_run_events(
             );
         }
     };
-    let start_sequence = query
-        .page_token
-        .as_deref()
-        .or(query.cursor.as_deref())
-        .and_then(|token| token.parse::<u64>().ok())
-        .unwrap_or(1)
-        .max(1);
+    let start_sequence = match query.page_token.as_deref().or(query.cursor.as_deref()) {
+        Some(token) => match token.parse::<u64>() {
+            Ok(sequence) => sequence.max(1),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(RunEventPage {
+                        schema_version: SchemaVersion::v1(),
+                        run_id,
+                        next_cursor: None,
+                        events: Vec::new(),
+                    }),
+                );
+            }
+        },
+        None => 1,
+    };
     let page_size = query
         .page_size
         .unwrap_or(GATEWAY_EVENT_PAGE_LIMIT)
@@ -3631,6 +3648,44 @@ mod tests {
             workspace_diff_for_change(workspace, created).expect("diff untracked file");
         assert!(created_diff.contains("+++ b/src/new.rs"));
         assert!(created_diff.contains("+pub fn new_file() {}"));
+    }
+
+    #[test]
+    fn workspace_run_file_changes_can_use_head_without_default_branch_ref() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::create_dir_all(workspace.join("src")).expect("create src");
+        std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").expect("write main");
+
+        run_git(workspace, &["init"]);
+        run_git(workspace, &["checkout", "-B", "feature/local"]);
+        run_git(workspace, &["add", "src/main.rs"]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+                "--no-gpg-sign",
+            ],
+        );
+
+        std::fs::write(
+            workspace.join("src/main.rs"),
+            "fn main() {\n    println!(\"changed\");\n}\n",
+        )
+        .expect("modify main");
+
+        let changes = build_workspace_run_file_changes(workspace).expect("build workspace changes");
+
+        let modified = changes
+            .iter()
+            .find(|change| change.path == "src/main.rs")
+            .expect("tracked change");
+        assert_eq!(modified.change_kind, ControlPlaneFileChangeKind::Modified);
+        assert!(modified.lines_added > 0);
     }
 
     #[test]

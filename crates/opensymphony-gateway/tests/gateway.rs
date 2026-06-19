@@ -2101,6 +2101,15 @@ async fn gateway_serves_run_events_with_data() {
     assert_eq!(response.events.len(), 1);
     assert_eq!(response.events[0].sequence, 2);
 
+    let invalid_response = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/events?page_token=opaque"
+        ))
+        .send()
+        .await
+        .expect("fetch invalid run events page");
+    assert_eq!(invalid_response.status(), reqwest::StatusCode::BAD_REQUEST);
+
     server_task.abort();
 }
 

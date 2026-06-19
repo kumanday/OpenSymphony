@@ -196,6 +196,9 @@ use the Rust command parameter names exactly, including snake_case keys such as
 `run_id`, `project_id`, `page_token`, `page_size`, and `file_path`. If a native
 desktop read command fails, the desktop adapter may retry through the loopback
 HTTP transport for the same gateway operation.
+Run-event `page_token` values are gateway-generated sequence tokens encoded as
+strings; malformed tokens are rejected with `400 Bad Request` instead of being
+silently treated as the first page.
 
 ## 6. Failure boundaries
 
