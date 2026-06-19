@@ -41,6 +41,8 @@ export {
 } from "./transports.js";
 export type { TauriChannel, TauriRuntime } from "./transports.js";
 export { MockGatewayTransport } from "./mock.js";
+export { HostedAuthClient } from "./auth.js";
+export type { HostedAuthClientConfig } from "./auth.js";
 export {
   StreamReplayBuffer,
   orderedEvents,

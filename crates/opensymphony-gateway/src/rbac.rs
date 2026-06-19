@@ -344,7 +344,8 @@ mod tests {
             assert!(permission.evaluated);
         }
         // Secret reads require Admin regardless of the read capability default.
-        let secret = evaluator.evaluate_read(&ctx(Role::Viewer, false), ProtectedResource::Secret, None);
+        let secret =
+            evaluator.evaluate_read(&ctx(Role::Viewer, false), ProtectedResource::Secret, None);
         assert!(!secret.allowed, "viewer cannot read secrets");
         assert_eq!(secret.denied_code.as_deref(), Some("unauthorized"));
         let admin_secret =
@@ -430,7 +431,10 @@ mod tests {
                 &ctx(Role::Member, false),
                 &dispatch(EntityKind::Unknown, kind),
             );
-            assert!(!member.allowed, "member cannot perform admin action {kind:?}");
+            assert!(
+                !member.allowed,
+                "member cannot perform admin action {kind:?}"
+            );
             let admin = evaluator.evaluate_action(
                 &ctx(Role::Admin, false),
                 &dispatch(EntityKind::Unknown, kind),
@@ -447,7 +451,10 @@ mod tests {
             &ctx(Role::Member, false),
             &dispatch(EntityKind::PlanningSession, ActionKind::PublishPlan),
         );
-        assert!(!member.allowed, "member cannot publish a plan from a planning session");
+        assert!(
+            !member.allowed,
+            "member cannot publish a plan from a planning session"
+        );
         let admin = evaluator.evaluate_action(
             &ctx(Role::Admin, false),
             &dispatch(EntityKind::PlanningSession, ActionKind::PublishPlan),
@@ -458,12 +465,18 @@ mod tests {
             &ctx(Role::Viewer, false),
             &dispatch(EntityKind::PlanningSession, ActionKind::Comment),
         );
-        assert!(!viewer.allowed, "viewer cannot operate on a planning session");
+        assert!(
+            !viewer.allowed,
+            "viewer cannot operate on a planning session"
+        );
         let member_operate = evaluator.evaluate_action(
             &ctx(Role::Member, false),
             &dispatch(EntityKind::PlanningSession, ActionKind::Comment),
         );
-        assert!(member_operate.allowed, "member may operate on a planning session");
+        assert!(
+            member_operate.allowed,
+            "member may operate on a planning session"
+        );
     }
 
     #[test]
@@ -524,12 +537,18 @@ mod tests {
         let mut allowed_action = dispatch(EntityKind::Project, ActionKind::TaskGraphIssue);
         allowed_action.payload = Some(serde_json::json!({"project_id": "allowed"}));
         let allowed = evaluator.evaluate_action(&ctx(Role::Member, false), &allowed_action);
-        assert!(allowed.allowed, "task-graph action on permitted project allowed");
+        assert!(
+            allowed.allowed,
+            "task-graph action on permitted project allowed"
+        );
 
         let mut denied_action = dispatch(EntityKind::Project, ActionKind::TaskGraphIssue);
         denied_action.payload = Some(serde_json::json!({"project_id": "other"}));
         let denied = evaluator.evaluate_action(&ctx(Role::Member, false), &denied_action);
-        assert!(!denied.allowed, "task-graph action on non-permitted project denied");
+        assert!(
+            !denied.allowed,
+            "task-graph action on non-permitted project denied"
+        );
         assert_eq!(denied.denied_code.as_deref(), Some("permission_denied"));
     }
 }

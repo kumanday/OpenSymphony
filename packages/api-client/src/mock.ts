@@ -27,6 +27,20 @@ import type {
 import type { GatewayTransport, ActionCapableTransport } from "./index.js";
 import { stableHash, stableHashJson } from "./util.js";
 import { GatewayRequestError } from "./errors.js";
+import type { GatewayErrorCode } from "./errors.js";
+
+/**
+ * Map a schema `AuthErrorCode` to the coarse `GatewayErrorCode` a
+ * `GatewayRequestError` carries. Permission-denial body signals collapse to
+ * `unauthorized`; a hard deny collapses to `forbidden`.
+ */
+function authErrorCodeToGatewayCode(code: AuthErrorCode): GatewayErrorCode {
+  if (code === "unauthenticated") return "unauthenticated";
+  if (code === "unauthorized" || code === "permission_denied" || code === "forbidden_resource") {
+    return "unauthorized";
+  }
+  return "forbidden";
+}
 
 /** Deterministic mock transport for tests. */
 export class MockGatewayTransport implements GatewayTransport, ActionCapableTransport {
@@ -212,7 +226,7 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     if (this.authFailureCode && this.authFailureMethods.has(method)) {
       const status = this.authFailureCode === "unauthenticated" ? 401 : 403;
       throw new GatewayRequestError(
-        this.authFailureCode,
+        authErrorCodeToGatewayCode(this.authFailureCode),
         `Simulated ${this.authFailureCode} for ${method}`,
         status,
       );

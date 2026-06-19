@@ -800,12 +800,19 @@ export class WebSocketTransport implements GatewayTransport {
     const WS_CONNECT_TIMEOUT_MS = 10_000;
     return new Promise((resolve, reject) => {
       let url = this.wsUrl("/api/v1/streams/events");
+      const urlObj = new URL(url);
+      // Browser WebSocket upgrades cannot set Authorization headers, so a
+      // hosted gateway authenticates the upgrade via a `?token=` query
+      // parameter (the same bearer credential). Append it before opening so
+      // the upgrade passes the hosted WS auth gate.
+      if (this.authToken) {
+        urlObj.searchParams.set("token", this.authToken);
+      }
       if (fromCursor) {
-        const urlObj = new URL(url);
         urlObj.searchParams.set("cursor_sequence", String(fromCursor.sequence));
         urlObj.searchParams.set("cursor_partition", fromCursor.partition);
-        url = urlObj.toString();
       }
+      url = urlObj.toString();
       const ws = new WebSocket(url);
       this.ws = ws;
       let hasOpened = false;

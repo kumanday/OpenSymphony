@@ -88,7 +88,17 @@ export type { PlanningArtifactKind, PlanningArtifact, PlanningSessionStatus, Pla
 // capability
 export type { AuthMode, TransportCapability, FeatureCapability, GatewayCapabilities } from "./capability.js";
 export { authStateFromError } from "./auth.js";
-export type { AuthState, AuthErrorCode } from "./auth.js";
+export type {
+  AuthState,
+  AuthErrorCode,
+  Role,
+  HostedUser,
+  Organization,
+  LoginRequest,
+  LoginResponse,
+  SessionResponse,
+  AuthErrorBody,
+} from "./auth.js";
 
 // action
 export type { ActionKind, ActionTarget, ActionDispatch } from "./action.js";
