@@ -310,6 +310,47 @@ async fn hosted_logout_invalidates_session_token() {
     assert_eq!(read.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn hosted_expired_session_token_is_rejected() {
+    // End-to-end proof that an expired session token is rejected: the store is
+    // seeded with a 1-second session TTL, a token is issued, and once it
+    // expires a protected read must fall back to 401 (the token is no longer a
+    // valid credential). This pins the expiry path the reviewer flagged as only
+    // implicitly covered.
+    let identity = HostedIdentityStore::with_ttl(chrono::Duration::seconds(1));
+    seed_identity_into(&identity);
+    let base = hosted_gateway_with_identity(identity).await;
+    let token = login(&base, "admin@example.com", "pw-admin").await;
+
+    // The fresh token authenticates a protected read.
+    let client = authed_client(&token);
+    let fresh = client
+        .get(format!("{base}/api/v1/projects/default"))
+        .send()
+        .await
+        .expect("project read should send");
+    assert_eq!(
+        fresh.status(),
+        reqwest::StatusCode::OK,
+        "fresh session token authenticates the read"
+    );
+
+    // Wait for the session TTL to elapse, then the same token is rejected.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let expired = client
+        .get(format!("{base}/api/v1/projects/default"))
+        .send()
+        .await
+        .expect("project read should send");
+    assert_eq!(
+        expired.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "expired session token is rejected"
+    );
+    let body: serde_json::Value = expired.json().await.expect("decode error body");
+    assert_eq!(body["error_code"], "unauthenticated");
+}
+
 // ── API permission enforcement (allowed + denied) ─────────────────────────────
 
 #[tokio::test]
