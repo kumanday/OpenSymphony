@@ -604,6 +604,7 @@ async fn runtime_events_extend_stall_deadlines_before_retrying_a_stalled_worker(
             event_id: Some("evt-1".to_string()),
             event_kind: Some("conversation_state_update".to_string()),
             summary: Some("agent still making progress".to_string()),
+            payload: None,
         });
 
     scheduler

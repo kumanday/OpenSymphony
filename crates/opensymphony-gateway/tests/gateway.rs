@@ -321,6 +321,10 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                         happened_at: now,
                         kind: "worker_started".to_owned(),
                         summary: "worker started".to_owned(),
+                        payload: Some(serde_json::json!({
+                            "tool_name": "terminal",
+                            "command": "npm test",
+                        })),
                         sequence: 1,
                     },
                     ConversationEvent {
@@ -328,6 +332,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                         happened_at: now,
                         kind: "worker_completed".to_owned(),
                         summary: "worker completed".to_owned(),
+                        payload: None,
                         sequence: 2,
                     },
                 ],
@@ -2085,6 +2090,22 @@ async fn gateway_serves_run_events_with_data() {
     assert_eq!(response.run_id, "COE-301");
     assert_eq!(response.events.len(), 1);
     assert_eq!(response.events[0].sequence, 1);
+    assert_eq!(
+        response.events[0].payload,
+        Some(serde_json::json!({
+            "tool_name": "terminal",
+            "command": "npm test",
+        }))
+    );
+    assert_eq!(
+        response.events[0]
+            .raw_payload
+            .as_ref()
+            .and_then(|payload| payload.get("payload"))
+            .and_then(|payload| payload.get("command"))
+            .and_then(serde_json::Value::as_str),
+        Some("npm test")
+    );
     assert_eq!(
         response
             .next_cursor

@@ -196,6 +196,7 @@ fn map_issue(
                         happened_at: timestamp_to_datetime(activity.happened_at),
                         kind: activity.kind.clone(),
                         summary: activity.summary.clone(),
+                        payload: activity.payload.clone(),
                         sequence: activity.sequence,
                     })
                     .collect()
@@ -358,6 +359,7 @@ mod tests {
         RuntimeStateSnapshot, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, TimestampMs,
         WorkspaceKey, WorkspaceRecord,
     };
+    use serde_json::json;
 
     use super::{map_snapshot, terminal_state_set};
 
@@ -405,6 +407,7 @@ tracker:
                     happened_at: ts(1_000 + index),
                     kind: "ActionEvent".to_owned(),
                     summary: format!("summary {index}"),
+                    payload: (index == 0).then(|| json!({"command": "npm test"})),
                     sequence: index,
                 },
             )
@@ -504,5 +507,9 @@ tracker:
         assert_eq!(mapped.issues[0].recent_events.len(), 12);
         assert_eq!(mapped.issues[0].recent_events[0].summary, "summary 11");
         assert_eq!(mapped.issues[0].recent_events[11].summary, "summary 0");
+        assert_eq!(
+            mapped.issues[0].recent_events[11].payload,
+            Some(json!({"command": "npm test"}))
+        );
     }
 }

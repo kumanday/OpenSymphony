@@ -151,6 +151,7 @@ interface AppState {
   runDiff: FileDiffPage | null;
   evidenceView: "diff" | "activity";
   runEvents: RunEvent[] | null;
+  expandedActivityEvents: Set<string>;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
   lastActionReceipt: ActionReceipt | null;
@@ -220,6 +221,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       runDiff: null,
       evidenceView: "diff",
       runEvents: null,
+      expandedActivityEvents: new Set(),
       runValidation: null,
       runApprovals: null,
       lastActionReceipt: null,
@@ -248,6 +250,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runFiles = null;
     this.state.runDiff = null;
     this.state.runEvents = null;
+    this.state.expandedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
@@ -401,6 +404,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runDiff = null;
     this.state.evidenceView = "diff";
     this.state.runEvents = null;
+    this.state.expandedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
   }
@@ -460,6 +464,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDiff = null;
       this.state.evidenceView = "diff";
       this.state.runEvents = null;
+      this.state.expandedActivityEvents = new Set();
       this.state.runValidation = null;
       this.state.runApprovals = null;
       this.state.connectionMessage = `Task graph unavailable: ${errorMessage(error)}`;
@@ -474,6 +479,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runDiff = null;
     this.state.evidenceView = "diff";
     this.state.runEvents = null;
+    this.state.expandedActivityEvents = new Set();
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
@@ -517,6 +523,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runDiff = null;
       this.state.evidenceView = "diff";
       this.state.runEvents = null;
+      this.state.expandedActivityEvents = new Set();
       this.state.runValidation = null;
       this.state.runApprovals = null;
       this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
@@ -549,6 +556,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private selectEvidenceView(view: AppState["evidenceView"]): void {
     this.state.evidenceView = view;
+    this.render();
+  }
+
+  private toggleActivityEvent(eventKey: string): void {
+    const expanded = new Set(this.state.expandedActivityEvents);
+    if (expanded.has(eventKey)) {
+      expanded.delete(eventKey);
+    } else {
+      expanded.add(eventKey);
+    }
+    this.state.expandedActivityEvents = expanded;
     this.render();
   }
 
@@ -956,9 +974,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!taskGraph) {
       return panel("Task Graph", `<div class="os-empty">No task graph loaded</div>`, "os-task-graph-panel");
     }
+    const allDependencySignals = buildDependencySignals(taskGraph.nodes, taskGraph.nodes);
     const getOverlay = (node: TaskGraphNode) => {
       const run = node.run_id ? this.state.runOverlays.get(node.run_id) : undefined;
-      return buildRuntimeOverlay(node, run);
+      return applyGraphRuntimeOverlay(
+        node,
+        allDependencySignals.get(node.node_id),
+        buildRuntimeOverlay(node, run),
+      );
     };
     const filtered = filterTaskGraphNodes(taskGraph.nodes, this.state.taskGraphFilter, getOverlay);
     if (this.options.mode === "web") {
@@ -1115,7 +1138,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return panel("Inspector", `<div class="os-empty">Select an issue to inspect a diff or activity</div>`, "os-run-evidence-panel");
     }
     const diff = this.state.runDiff ? renderFileDiff(this.state.runDiff) : "";
-    const activity = renderRunActivity(this.state.runEvents);
+    const activity = renderRunActivity(this.state.runEvents, this.state.expandedActivityEvents);
     const showingDiff = this.state.evidenceView === "diff";
     const content = showingDiff
       ? diff || `<div class="os-empty">Select a changed file to view its diff</div>`
@@ -1208,6 +1231,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         const view = button.dataset.evidenceView;
         if (view === "diff" || view === "activity") {
           this.selectEvidenceView(view);
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-activity-toggle]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const eventKey = button.dataset.activityToggle;
+        if (eventKey) {
+          this.toggleActivityEvent(eventKey);
         }
       });
     });
@@ -1973,24 +2004,158 @@ function panel(title: string, body: string, className = ""): string {
   `;
 }
 
-function renderRunActivity(events: RunEvent[] | null): string {
+function renderRunActivity(events: RunEvent[] | null, expandedActivityEvents: Set<string>): string {
   if (events === null) {
     return `<div class="os-run-activity os-empty" data-testid="run-activity">Loading conversation activity</div>`;
   }
   if (events.length === 0) {
     return `<div class="os-run-activity os-empty" data-testid="run-activity">No recent activity</div>`;
   }
-  const items = [...events]
-    .reverse()
-    .map((event) => `
-      <div class="os-activity-entry" data-testid="run-activity-entry">
-        <span>${escapeHtml(formatEventTime(event.happened_at))}</span>
-        <strong>${escapeHtml(event.kind)}</strong>
-        <p>${escapeHtml(event.summary)}</p>
+  const items = sortEventsNewestFirst(events)
+    .map((event) => {
+      const eventKey = activityEventKey(event);
+      return `
+      <div class="os-activity-entry os-activity-entry-${escapeAttr(activityClassName(event.kind))}" data-testid="run-activity-entry" data-event-kind="${escapeAttr(event.kind)}" data-event-id="${escapeAttr(event.event_id)}">
+        ${renderActivityEvent(event, eventKey, expandedActivityEvents.has(eventKey))}
       </div>
-    `)
+    `;
+    })
     .join("");
   return `<div class="os-run-activity" data-testid="run-activity">${items}</div>`;
+}
+
+function renderActivityEvent(event: RunEvent, eventKey: string, expanded: boolean): string {
+  const body = eventDisplaySummary(event).trim();
+  const preview = body ? compactActivityText(body) : "";
+  return `
+    <div class="os-activity-row">
+      <div class="os-activity-meta">
+        <span>${escapeHtml(formatEventTime(event.happened_at))}</span>
+        <strong>${escapeHtml(event.kind)}</strong>
+        ${preview ? `<span class="os-activity-separator">-</span><span class="os-activity-preview" title="${escapeAttr(preview)}">${escapeHtml(preview)}</span>` : ""}
+      </div>
+      ${body ? `
+        <button type="button" class="os-activity-toggle" data-activity-toggle="${escapeAttr(eventKey)}" aria-expanded="${expanded ? "true" : "false"}" aria-label="${expanded ? "Collapse" : "Expand"} ${escapeAttr(event.kind)} event">
+          <span aria-hidden="true">${expanded ? "v" : ">"}</span>
+        </button>
+      ` : ""}
+    </div>
+    ${body && expanded ? `<pre class="os-activity-detail">${escapeHtml(body)}</pre>` : ""}
+  `;
+}
+
+function sortEventsNewestFirst(events: RunEvent[]): RunEvent[] {
+  return [...events].sort((a, b) => {
+    const timeDiff = eventTimeValue(b) - eventTimeValue(a);
+    if (timeDiff !== 0) return timeDiff;
+    const sequenceDiff = b.sequence - a.sequence;
+    if (sequenceDiff !== 0) return sequenceDiff;
+    return b.event_id.localeCompare(a.event_id);
+  });
+}
+
+function eventTimeValue(event: RunEvent): number {
+  const parsed = Date.parse(event.happened_at);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function activityEventKey(event: RunEvent): string {
+  return event.event_id || `${event.sequence}:${event.happened_at}:${event.kind}`;
+}
+
+function compactActivityText(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function eventDisplaySummary(event: RunEvent): string {
+  const payloadText = eventPayloadText(event);
+  if (payloadText && isGenericEventSummary(event)) {
+    return payloadText;
+  }
+  if (isGenericEventSummary(event)) {
+    return "";
+  }
+  if (event.kind === "ActionEvent" && payloadText && payloadText !== event.summary) {
+    return `${event.summary}: ${payloadText}`;
+  }
+  return event.summary;
+}
+
+function isGenericEventSummary(event: RunEvent): boolean {
+  const summary = event.summary.trim().toLowerCase();
+  return summary === ""
+    || summary === event.kind.toLowerCase()
+    || summary === "action"
+    || summary === "tool call"
+    || summary === "tool result";
+}
+
+function eventPayloadText(event: RunEvent): string | null {
+  const payloads = [event.payload, event.raw_payload];
+  for (const payload of payloads) {
+    const text = actionPayloadText(payload) ?? observationPayloadText(payload);
+    if (text) {
+      return text;
+    }
+  }
+  return null;
+}
+
+function actionPayloadText(value: unknown): string | null {
+  const record = objectRecord(value);
+  if (!record) {
+    return null;
+  }
+  const action = objectRecord(record.action);
+  const argumentsRecord = objectRecord(record.arguments);
+  const summary = stringField(record, "summary");
+  const tool = stringField(record, "tool_name") ?? stringField(action, "tool_name");
+  const detail = stringField(record, "message")
+    ?? stringField(action, "message")
+    ?? stringField(record, "command")
+    ?? stringField(action, "command")
+    ?? stringField(argumentsRecord, "command")
+    ?? stringField(record, "thought")
+    ?? stringField(action, "thought");
+
+  if (summary && detail && summary !== detail) {
+    return `${summary}: ${detail}`;
+  }
+  if (detail && tool && detail !== tool) {
+    return `${tool}: ${detail}`;
+  }
+  return detail ?? summary ?? tool ?? null;
+}
+
+function observationPayloadText(value: unknown): string | null {
+  const record = objectRecord(value);
+  if (!record) {
+    return null;
+  }
+  const observation = objectRecord(record.observation);
+  const content = stringField(record, "content") ?? stringField(observation, "content");
+  const preview = stringField(record, "preview") ?? stringField(record, "summary");
+  const tool = stringField(record, "tool_name") ?? stringField(observation, "tool_name");
+  return content ?? preview ?? tool ?? null;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringField(record: Record<string, unknown> | null, field: string): string | null {
+  const value = record?.[field];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function activityClassName(kind: string): string {
+  return kind
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase() || "event";
 }
 
 function formatEventTime(value: string): string {
@@ -2134,6 +2299,8 @@ interface TaskGraphRenderModel {
 interface TaskGraphLink {
   from: TaskGraphRenderModel;
   to: TaskGraphRenderModel;
+  routeLane: number;
+  span: number;
 }
 
 function buildDependencySignals(
@@ -2184,6 +2351,54 @@ function buildDependencySignals(
     });
   }
   return signals;
+}
+
+function applyGraphRuntimeOverlay(
+  node: TaskGraphNode,
+  signal: DependencySignal | undefined,
+  overlay: ReturnType<typeof buildRuntimeOverlay>,
+): ReturnType<typeof buildRuntimeOverlay> {
+  if (!signal) {
+    return overlay;
+  }
+  const badges: ReturnType<typeof buildRuntimeOverlay>["badges"] = overlay.badges.filter((badge) => badge !== "blocker");
+  if (isActivelyBlocking(node, signal)) {
+    badges.push("blocker");
+  }
+  return {
+    ...overlay,
+    is_blocked: hasUnresolvedUpstream(signal),
+    blocked_by_count: signal.upstreamVisible.length + signal.upstreamHiddenCount,
+    badges: [...new Set(badges)],
+  };
+}
+
+function isActivelyBlocking(node: TaskGraphNode, signal: DependencySignal): boolean {
+  return node.kind !== "milestone"
+    && isDispatchableTaskNode(node)
+    && !hasUnresolvedUpstream(signal)
+    && (signal.downstreamVisible.length > 0 || signal.downstreamHiddenCount > 0);
+}
+
+function hasUnresolvedUpstream(signal: DependencySignal): boolean {
+  return signal.upstreamVisible.length > 0 || signal.upstreamHiddenCount > 0;
+}
+
+function isDispatchableTaskNode(node: TaskGraphNode): boolean {
+  if (isTerminalTaskNode(node)) {
+    return false;
+  }
+  if (node.state_category === "backlog" || node.state_category === "canceled") {
+    return false;
+  }
+  if (node.state_category === "todo" || node.state_category === "in_progress") {
+    return true;
+  }
+  const state = node.state.toLowerCase();
+  return state.includes("todo")
+    || state.includes("progress")
+    || state.includes("human review")
+    || state.includes("rework");
 }
 
 function renderTaskGraphVisualization(
@@ -2257,7 +2472,13 @@ function buildTaskGraphLinks(models: TaskGraphRenderModel[]): TaskGraphLink[] {
     for (const upstream of model.signal.upstreamVisible) {
       const from = byId.get(upstream.node_id);
       if (from) {
-        links.push({ from, to: model });
+        const span = Math.abs(model.index - from.index);
+        links.push({
+          from,
+          to: model,
+          span,
+          routeLane: Math.max(0, Math.min(3, span - 2)),
+        });
       }
     }
   }
@@ -2275,6 +2496,11 @@ function renderTaskGraphLink(
   const x2 = railX + link.to.lane * laneWidth;
   const y1 = link.from.index * (rowHeight + rowGap) + rowHeight / 2;
   const y2 = link.to.index * (rowHeight + rowGap) + rowHeight / 2;
+  if (link.span > 1) {
+    const routeX = Math.max(4, railX - 9 - link.routeLane * 7);
+    const d = `M ${x1} ${y1} H ${routeX} V ${y2} H ${x2}`;
+    return `<path class="os-task-graph-link os-task-graph-link-skip" data-testid="task-graph-link" d="${escapeAttr(d)}"></path>`;
+  }
   const bend = Math.max(34, Math.abs(y2 - y1) * 0.24);
   const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${Math.max(x2 - bend, x1 + 18)} ${y2}, ${x2} ${y2}`;
   return `<path class="os-task-graph-link" data-testid="task-graph-link" d="${escapeAttr(d)}"></path>`;
@@ -2472,6 +2698,7 @@ function appShellStyles(): string {
     .os-task-graph-stage { position: relative; min-width: min(100%, var(--os-graph-width)); overflow-x: auto; padding: 2px 0; }
     .os-task-graph-links { position: absolute; z-index: 3; inset: 0 auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
     .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: 0.9; marker-end: url(#os-task-arrow); }
+    .os-task-graph-link-skip { opacity: 0.78; }
     .os-task-graph-links marker path { fill: #39708f; }
     .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; }
     .os-node-readonly { grid-template-columns: 28px minmax(0, 1fr); align-items: center; min-height: 62px; margin-left: calc(var(--os-lane, 0) * 34px); margin-right: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
@@ -2531,10 +2758,14 @@ function appShellStyles(): string {
     .os-segmented button { min-height: 28px; padding: 4px 10px; border-color: transparent; background: transparent; }
     .os-segmented button.is-selected { border-color: #39708f; background: #e7f1f5; font-weight: 600; }
     .os-run-activity { display: grid; gap: 6px; }
-    .os-activity-entry { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px; background: #f8fafc; font-size: 12px; }
+    .os-activity-entry { display: grid; gap: 7px; align-items: start; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px; background: #f8fafc; font-size: 12px; }
+    .os-activity-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; min-width: 0; }
+    .os-activity-meta { display: flex; gap: 6px; align-items: baseline; min-width: 0; overflow: hidden; }
     .os-activity-entry span { color: #667788; white-space: nowrap; }
     .os-activity-entry strong { color: #39708f; white-space: nowrap; }
-    .os-activity-entry p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .os-activity-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #27313a; }
+    .os-activity-toggle { width: 24px; height: 24px; min-height: 24px; padding: 0; border-radius: 999px; display: inline-grid; place-items: center; font-size: 13px; line-height: 1; }
+    .os-activity-detail { margin: 0; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #d8dee4; border-radius: 5px; padding: 8px; background: #ffffff; font-size: 12px; line-height: 1.35; }
     .os-changed-file-list { display: grid; gap: 6px; }
     .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 7px 8px; background: #ffffff; font-size: 12px; line-height: 1.2; }
     .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
@@ -2709,6 +2940,8 @@ function appShellStyles(): string {
       .os-activity-entry { background: #111820; border-color: #2a3440; }
       .os-activity-entry span { color: #94a3b3; }
       .os-activity-entry strong { color: #5ca0b8; }
+      .os-activity-preview { color: #d9e2ea; }
+      .os-activity-detail { background: #0c1116; border-color: #2a3440; color: #d9e2ea; }
       .os-badge-failed, .os-badge-blocked, .os-badge-blocker { background: #451a1a; color: #fca5a5; }
       .os-badge-running { background: #14532d; color: #86efac; }
       .os-badge-complete { background: #1e3a8a; color: #93c5fd; }

@@ -222,6 +222,7 @@ mod tests {
             Some("evt_1".to_owned()),
             Some("conversation_state_update".to_owned()),
             Some("ready".to_owned()),
+            None,
         ));
 
         let running = must_some(execution.current_run(), "running attempt must exist");
@@ -654,12 +655,14 @@ mod tests {
             Some("evt_latest".to_owned()),
             Some("conversation_state_update".to_owned()),
             Some("ready".to_owned()),
+            None,
         ));
         must(execution.observe_runtime_event(
             ts(55),
             Some("evt_old".to_owned()),
             Some("tool_call".to_owned()),
             Some("replayed".to_owned()),
+            None,
         ));
 
         let conversation = must_some(

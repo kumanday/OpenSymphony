@@ -1,6 +1,7 @@
 use std::{fmt, num::NonZeroU32, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 use super::{
@@ -560,6 +561,8 @@ pub struct ConversationActivityEvent {
     pub happened_at: TimestampMs,
     pub kind: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
     /// Monotonic sequence number assigned by the event producer. This value is
     /// preserved when the activity list is truncated so the gateway can still
     /// report a stable ordering key for the latest event.
@@ -574,6 +577,7 @@ impl ConversationMetadata {
         event_id: Option<String>,
         event_kind: Option<String>,
         summary: Option<String>,
+        payload: Option<Value>,
     ) {
         if self
             .last_event_at
@@ -595,6 +599,7 @@ impl ConversationMetadata {
                 happened_at: event_at,
                 kind: event_kind,
                 summary,
+                payload,
                 sequence,
             });
             while self.recent_activity.len() > MAX_ACTIVITY_EVENTS {

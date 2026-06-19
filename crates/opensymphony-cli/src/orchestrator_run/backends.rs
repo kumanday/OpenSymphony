@@ -177,6 +177,7 @@ impl IssueSessionObserver for SchedulerObserver {
         event_id: Option<String>,
         event_kind: Option<String>,
         summary: Option<String>,
+        payload: Option<serde_json::Value>,
     ) {
         let worker_id = self.worker_id.clone();
         let _ = self.updates_tx.send(WorkerUpdate::RuntimeEvent {
@@ -186,6 +187,7 @@ impl IssueSessionObserver for SchedulerObserver {
             event_id,
             event_kind,
             summary,
+            payload,
         });
     }
 

@@ -36,7 +36,6 @@ export function buildRuntimeOverlay(
   const isStale = runDetail?.liveness?.stream === "stale";
   const isBlocked = node.blocked_by.length > 0;
 
-  if (isBlocked) badges.push("blocker");
   if (isStale) badges.push("stale");
 
   if (status === "running" || status === "claimed") {

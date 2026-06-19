@@ -121,7 +121,7 @@ function buildTaskGraph(): TaskGraphSnapshot {
         title: "Editor milestone",
         state: "In Progress",
         state_category: "in_progress",
-        children: ["editor-1", "editor-2"],
+        children: ["editor-1", "editor-2", "editor-3"],
         blocked_by: [],
         labels: ["editor"],
       },
@@ -152,6 +152,19 @@ function buildTaskGraph(): TaskGraphSnapshot {
         blocked_by: [],
         labels: ["runtime"],
         run_id: "run-2",
+      },
+      {
+        schema_version: schemaVersionV1(),
+        node_id: "editor-3",
+        kind: "issue",
+        identifier: "EDITOR-3",
+        title: "Blocked downstream issue",
+        state: "Todo",
+        state_category: "todo",
+        parent_id: "m1",
+        children: [],
+        blocked_by: ["editor-1"],
+        labels: ["runtime"],
       },
     ],
   };
@@ -206,6 +219,7 @@ describe("TaskGraphEditor", () => {
     expect(runningNode?.querySelector(".os-badge-workspace")).not.toBeNull();
     expect(runningNode?.querySelector(".os-badge-harness")).not.toBeNull();
     expect(runningNode?.querySelector(".os-badge-blocker")).not.toBeNull();
+    expect(root.querySelector("[data-node-id='editor-3']")?.querySelector(".os-badge-blocker")).toBeNull();
 
     const completedNode = root.querySelector("[data-node-id='editor-2']");
     expect(completedNode).not.toBeNull();
@@ -233,6 +247,7 @@ describe("TaskGraphEditor", () => {
 
     expect(root.querySelector("[data-node-id='editor-1']")).not.toBeNull();
     expect(root.querySelector("[data-node-id='editor-2']")).toBeNull();
+    expect(root.querySelector("[data-node-id='editor-3']")).toBeNull();
 
     runtimeSelect = root.querySelector("[data-tg-filter='runtime']") as HTMLSelectElement;
     runtimeSelect.value = "complete";
@@ -464,8 +479,7 @@ describe("TaskGraphEditor", () => {
     await flushAsync();
 
     expect(root.querySelector("[data-tg-deps-dialog='open']")).toBeNull();
-    const updatedNode = root.querySelector("[data-node-id='editor-1']");
-    expect(updatedNode?.querySelector(".os-badge-blocker")).toBeNull();
+    expect(root.querySelector("[data-node-id='editor-1']")).not.toBeNull();
 
     await handle.destroy();
   });
@@ -661,8 +675,12 @@ describe("TaskGraphEditor", () => {
 
       await flushUntil(() => root.querySelector(".os-pending-banner") === null);
 
-      const updatedNode = root.querySelector("[data-node-id='editor-1']");
-      expect(updatedNode?.querySelector(".os-badge-blocker")).not.toBeNull();
+      (root.querySelector("[data-tg-deps='editor-1']") as HTMLButtonElement).click();
+      await flushAsync();
+      const restoredSelect = root.querySelector("[data-tg-deps-select]") as HTMLSelectElement;
+      expect(
+        Array.from(restoredSelect.selectedOptions).map((option) => option.value),
+      ).toContain("editor-2");
 
       await handle.destroy();
     });

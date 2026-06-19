@@ -2493,8 +2493,14 @@ async fn get_run_events(
                 happened_at: evt.happened_at,
                 kind: evt.kind.clone(),
                 summary: evt.summary.clone(),
-                payload: Some(json!({"kind": evt.kind})),
-                raw_payload: Some(json!({"kind": evt.kind, "summary": evt.summary})),
+                payload: evt.payload.clone(),
+                raw_payload: evt.payload.as_ref().map(|payload| {
+                    json!({
+                        "kind": evt.kind,
+                        "summary": evt.summary,
+                        "payload": payload,
+                    })
+                }),
             })
             .collect(),
         None => {

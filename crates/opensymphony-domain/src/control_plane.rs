@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotEnvelope {
@@ -135,6 +136,8 @@ pub struct ControlPlaneConversationEvent {
     pub happened_at: DateTime<Utc>,
     pub kind: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
     /// Monotonic sequence number assigned by the event producer. Used by the
     /// gateway to report a stable ordering key even when the snapshot truncates
     /// or reorders events.

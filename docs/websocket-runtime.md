@@ -239,7 +239,7 @@ The orchestrator does not need the full OpenHands wire contract at its boundary.
 The worker backend that bridges `RuntimeEventStream` into the scheduler should surface:
 
 - launch-time `ConversationMetadata`
-- ordered runtime-event updates carrying `event_id`, `event_kind`, `summary`, and `observed_at`
+- ordered runtime-event updates carrying `event_id`, `event_kind`, `summary`, optional normalized `payload`, and `observed_at`
 - a terminal worker outcome once the stream resolves to `finished`, `error`, `stuck`, or another final condition
 
 When a reused conversation is already `queued` or `running` at attach time, emit

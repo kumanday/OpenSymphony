@@ -117,6 +117,7 @@ pub enum WorkerUpdate {
         event_id: Option<String>,
         event_kind: Option<String>,
         summary: Option<String>,
+        payload: Option<serde_json::Value>,
     },
     ConversationMetadataUpdate {
         worker_id: WorkerId,
@@ -770,6 +771,7 @@ where
                     event_id,
                     event_kind,
                     summary,
+                    payload,
                 } => {
                     let Some(issue_id) = self.worker_index.get(&worker_id).cloned() else {
                         continue;
@@ -780,6 +782,7 @@ where
                             event_id,
                             event_kind,
                             summary,
+                            payload,
                         )?;
                     }
                 }

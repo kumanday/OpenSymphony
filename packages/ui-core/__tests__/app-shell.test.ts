@@ -18,6 +18,7 @@ import type {
   FileDiffPage,
   GatewayCapabilities,
   RunDetail,
+  RunEventPage,
   TaskGraphSnapshot,
 } from "@opensymphony/gateway-schema";
 
@@ -108,7 +109,7 @@ const taskGraph: TaskGraphSnapshot = {
       title: "Shared Client and Desktop Alpha",
       state: "In Progress",
       state_category: "in_progress",
-      children: ["app-shell", "desktop-alpha", "hosted-auth", "follow-up"],
+      children: ["app-shell", "desktop-alpha", "hosted-auth", "follow-up", "skip-target"],
       blocked_by: [],
       labels: ["desktop"],
     },
@@ -153,6 +154,19 @@ const taskGraph: TaskGraphSnapshot = {
     },
     {
       schema_version: schemaVersionV1(),
+      node_id: "skip-target",
+      kind: "issue",
+      identifier: "COE-453",
+      title: "Nested hosted follow-up",
+      state: "Todo",
+      state_category: "todo",
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: ["COE-449", "COE-450"],
+      labels: ["hosted"],
+    },
+    {
+      schema_version: schemaVersionV1(),
       node_id: "follow-up",
       kind: "issue",
       identifier: "COE-451",
@@ -176,6 +190,28 @@ const taskGraph: TaskGraphSnapshot = {
       children: [],
       blocked_by: [],
       labels: ["transport"],
+    },
+  ],
+};
+
+const runEvents: RunEventPage = {
+  schema_version: schemaVersionV1(),
+  run_id: "COE-449",
+  events: [
+    {
+      sequence: 1,
+      event_id: "evt-action",
+      happened_at: "2025-09-01T00:00:05Z",
+      kind: "ActionEvent",
+      summary: "action",
+      payload: { tool_name: "terminal", command: "npm test -- apps/desktop" },
+    },
+    {
+      sequence: 2,
+      event_id: "evt-observation",
+      happened_at: "2025-09-01T00:00:06Z",
+      kind: "ObservationEvent",
+      summary: "A long observation detail should receive the full activity card width.\nSecond line stays hidden until expanded.",
     },
   ],
 };
@@ -278,6 +314,10 @@ function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?:
     runDiffs: [
       { runId: "COE-449", filePath: "src/config.ts", diff: fileDiff },
       { runId: "desktop-alpha", filePath: "src/config.ts", diff: { ...fileDiff, run_id: "desktop-alpha" } },
+    ],
+    runEvents: [
+      runEvents,
+      { ...runEvents, run_id: "desktop-alpha" },
     ],
   });
 }
@@ -394,9 +434,13 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-tg-create-child]")).toBeNull();
     expect(root.querySelector("[data-testid='task-graph-visualization']")).not.toBeNull();
     expect(root.querySelector("[data-testid='task-graph-link']")).not.toBeNull();
+    expect(root.querySelector(".os-task-graph-link-skip")).not.toBeNull();
+    expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("d")).toMatch(/ H \d+ V \d+ H /);
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
     expect(root.querySelector("[data-node-id='desktop-alpha'] [data-testid='dependency-suffix']")?.textContent).toContain("blocks COE-450, COE-452");
     expect(root.querySelector("[data-node-id='app-shell'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by COE-449");
+    expect(root.querySelector("[data-node-id='app-shell'] .os-badge-blocker")).toBeNull();
+    expect(root.querySelector("[data-node-id='desktop-alpha'] .os-badge-blocker")).not.toBeNull();
     expect(root.textContent).not.toContain("blocked by COE-448");
     await flushUntil(() => root.querySelector(".os-run-head strong")?.textContent === "COE-449");
 
@@ -422,6 +466,23 @@ describe("OpenSymphonyApp mount", () => {
     (root.querySelector("[data-evidence-view='activity']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='run-activity']") !== null);
     expect(root.querySelector(".os-run-evidence-panel [data-testid='run-activity']")).not.toBeNull();
+    const activityEntries = Array.from(root.querySelectorAll("[data-testid='run-activity-entry']"));
+    expect(activityEntries.map((entry) => entry.getAttribute("data-event-id"))).toEqual([
+      "evt-observation",
+      "evt-action",
+    ]);
+    expect(root.querySelector(".os-activity-entry-action-event .os-activity-preview")?.textContent).toBe("terminal: npm test -- apps/desktop");
+    expect(root.querySelector(".os-activity-entry-action-event .os-activity-detail")).toBeNull();
+    expect(root.querySelector(".os-activity-entry-observation-event .os-activity-meta strong")?.textContent).toBe("ObservationEvent");
+    expect(root.querySelector(".os-activity-entry-observation-event .os-activity-preview")?.textContent).toContain("Second line stays hidden");
+    expect(root.querySelector(".os-activity-entry-observation-event .os-activity-detail")).toBeNull();
+
+    (root.querySelector(".os-activity-entry-observation-event [data-activity-toggle]") as HTMLButtonElement).click();
+    await flushUntil(
+      () => root.querySelector(".os-activity-entry-observation-event .os-activity-detail") !== null,
+    );
+    expect(root.querySelector(".os-activity-entry-observation-event [data-activity-toggle]")?.getAttribute("aria-expanded")).toBe("true");
+    expect(root.querySelector(".os-activity-entry-observation-event .os-activity-detail")?.textContent).toContain("Second line stays hidden until expanded.");
 
     (root.querySelector("[data-testid='changed-file-item']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='file-diff']") !== null);

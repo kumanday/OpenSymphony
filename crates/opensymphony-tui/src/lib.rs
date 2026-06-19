@@ -4017,6 +4017,7 @@ mod tests {
                                 happened_at: now,
                                 kind: "tool_call".to_owned(),
                                 summary: "editing src/main.rs".to_owned(),
+                                payload: None,
                                 sequence: 0,
                             },
                             ControlPlaneConversationEvent {
@@ -4024,6 +4025,7 @@ mod tests {
                                 happened_at: now,
                                 kind: "message".to_owned(),
                                 summary: "implementing feature".to_owned(),
+                                payload: None,
                                 sequence: 0,
                             },
                         ],
@@ -4580,6 +4582,7 @@ mod tests {
             happened_at: snapshot.snapshot.generated_at,
             kind: "message".to_owned(),
             summary: summary.to_owned(),
+            payload: None,
             sequence: 0,
         }];
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
@@ -4601,6 +4604,7 @@ mod tests {
             summary:
                 "this summary is long enough that it should wrap into the next visual row cleanly"
                     .to_owned(),
+            payload: None,
             sequence: 0,
         }];
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
@@ -4622,6 +4626,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "newest event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
             ControlPlaneConversationEvent {
@@ -4629,6 +4634,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "newer event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
             ControlPlaneConversationEvent {
@@ -4636,6 +4642,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "middle event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
             ControlPlaneConversationEvent {
@@ -4643,6 +4650,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "oldest event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
         ];
@@ -4675,6 +4683,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "fourth event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
             ControlPlaneConversationEvent {
@@ -4682,6 +4691,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "third event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
             ControlPlaneConversationEvent {
@@ -4689,6 +4699,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "second event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
             ControlPlaneConversationEvent {
@@ -4696,6 +4707,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "first event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
         ];
@@ -4717,6 +4729,7 @@ mod tests {
                 happened_at: snapshot.snapshot.generated_at,
                 kind: "message".to_owned(),
                 summary: "fifth event".to_owned(),
+                payload: None,
                 sequence: 0,
             },
         );

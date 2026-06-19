@@ -111,6 +111,7 @@ pub trait IssueSessionObserver {
         _event_id: Option<String>,
         _event_kind: Option<String>,
         _summary: Option<String>,
+        _payload: Option<Value>,
     ) {
     }
 
@@ -3083,6 +3084,7 @@ where
         Some(event.id.clone()),
         Some(event.kind.clone()),
         Some(summarize_event(event)),
+        runtime_event_payload(event),
     );
 }
 
@@ -3184,7 +3186,8 @@ fn summarize_event(event: &EventEnvelope) -> String {
         }
         KnownEvent::Action(action) => {
             let tool = action.tool_name.as_deref().unwrap_or("");
-            let msg = action.message.as_deref().unwrap_or("action");
+            let command = action_command(&action.arguments);
+            let msg = action.message.as_deref().or(command).unwrap_or("action");
             if tool.is_empty() {
                 msg.to_string()
             } else {
@@ -3206,6 +3209,64 @@ fn summarize_event(event: &EventEnvelope) -> String {
         }
         KnownEvent::Unknown(unknown) => unknown.kind,
     }
+}
+
+fn runtime_event_payload(event: &EventEnvelope) -> Option<Value> {
+    match KnownEvent::from_envelope(event) {
+        KnownEvent::Action(action) => {
+            let mut body = json!({
+                "action_id": action.action_id,
+                "tool_name": action.tool_name,
+                "message": action.message,
+            });
+            if let (Value::Object(body), Value::Object(arguments)) = (&mut body, &action.arguments)
+            {
+                for (key, value) in arguments {
+                    body.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            }
+            Some(body)
+        }
+        KnownEvent::Observation(observation) => Some(json!({
+            "observation_id": observation.observation_id,
+            "tool_name": observation.tool_name,
+            "exit_code": observation.exit_code,
+            "preview": observation.text_preview,
+            "content": event
+                .payload
+                .get("observation")
+                .and_then(|value| value.get("content"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        })),
+        KnownEvent::ConversationStateUpdate(payload) => Some(json!({
+            "execution_status": payload.execution_status,
+        })),
+        KnownEvent::ConversationError(error) => Some(error.payload),
+        KnownEvent::LlmCompletionLog(log) => Some(log.payload),
+        KnownEvent::Message(message) => Some(json!({
+            "role": message.role,
+            "preview": message.text_preview,
+            "content": event.payload.get("content").cloned().unwrap_or(Value::Null),
+        })),
+        KnownEvent::Unknown(unknown) => Some(json!({
+            "kind": unknown.kind,
+            "payload": unknown.payload,
+        })),
+    }
+}
+
+fn action_command(arguments: &Value) -> Option<&str> {
+    arguments
+        .get("command")
+        .or_else(|| {
+            arguments
+                .get("arguments")
+                .and_then(|value| value.get("command"))
+        })
+        .or_else(|| arguments.get("args").and_then(|value| value.get("command")))
+        .and_then(Value::as_str)
+        .filter(|command| !command.trim().is_empty())
 }
 
 fn latest_current_turn_error(
@@ -3374,6 +3435,39 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[test]
+    fn action_event_payload_surfaces_command_when_message_is_generic() {
+        let event = EventEnvelope::new(
+            "evt-action",
+            Utc::now(),
+            "agent",
+            "ActionEvent",
+            serde_json::json!({
+                "action": {
+                    "tool_name": "terminal",
+                    "arguments": { "command": "npm test -- apps/desktop" }
+                }
+            }),
+        );
+
+        assert_eq!(
+            summarize_event(&event),
+            "terminal: npm test -- apps/desktop"
+        );
+        let payload = runtime_event_payload(&event).expect("action payload");
+        assert_eq!(
+            payload.get("tool_name").and_then(Value::as_str),
+            Some("terminal")
+        );
+        assert_eq!(
+            payload
+                .get("arguments")
+                .and_then(|arguments| arguments.get("command"))
+                .and_then(Value::as_str),
+            Some("npm test -- apps/desktop")
+        );
     }
 
     #[tokio::test]

@@ -354,11 +354,12 @@ impl IssueExecution {
         event_id: Option<String>,
         event_kind: Option<String>,
         summary: Option<String>,
+        payload: Option<serde_json::Value>,
     ) -> Result<(), StateTransitionError> {
         match &mut self.state {
             SchedulerState::Running { stall, .. } => {
                 if let Some(session) = &mut self.conversation {
-                    session.observe_event(event_at, event_id, event_kind, summary);
+                    session.observe_event(event_at, event_id, event_kind, summary, payload);
                 }
                 stall.observe_activity(event_at);
                 Ok(())
