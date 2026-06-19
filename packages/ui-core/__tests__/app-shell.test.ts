@@ -231,7 +231,7 @@ const fileDiff: FileDiffPage = {
   total_lines_removed: 3,
 };
 
-function buildTransport(opts?: { failHealth?: boolean }): MockGatewayTransport {
+function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?: boolean }): MockGatewayTransport {
   if (opts?.failHealth) {
     class AlwaysFailHealthTransport extends MockGatewayTransport {
       override async health(): Promise<never> {
@@ -239,6 +239,20 @@ function buildTransport(opts?: { failHealth?: boolean }): MockGatewayTransport {
       }
     }
     return new AlwaysFailHealthTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+    });
+  }
+  if (opts?.failTaskGraphStructured) {
+    class StructuredTaskGraphFailureTransport extends MockGatewayTransport {
+      override async taskGraph(): Promise<never> {
+        throw { type: "Gateway", message: "simulated structured task graph failure" };
+      }
+    }
+    return new StructuredTaskGraphFailureTransport({
       baseUri: "http://127.0.0.1:2468",
       health: capabilities,
       snapshot: dashboard,
@@ -436,6 +450,23 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.textContent).toContain("Failed");
     expect(root.textContent).toContain("Gateway unavailable");
     expect(root.textContent).not.toContain("desktop-alpha");
+
+    await handle.destroy();
+  });
+
+  it("renders structured native errors with their message", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ failTaskGraphStructured: true }),
+    });
+
+    await flushUntil(() => root.textContent?.includes("simulated structured task graph failure") ?? false);
+
+    expect(root.textContent).toContain("Task graph unavailable: simulated structured task graph failure");
+    expect(root.textContent).not.toContain("[object Object]");
 
     await handle.destroy();
   });

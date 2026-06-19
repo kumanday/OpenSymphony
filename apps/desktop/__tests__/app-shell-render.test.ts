@@ -86,7 +86,7 @@ describe("desktop app shell render", () => {
     await handle.destroy();
   });
 
-  it("selects active profiles with Tauri's snake_case command argument", async () => {
+  it("selects active profiles with Tauri's camelCase command argument", async () => {
     const calls: TauriInvokeCall[] = [];
     (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
       core: {
@@ -113,7 +113,7 @@ describe("desktop app shell render", () => {
     expect(calls).toEqual([
       {
         command: "set_active_profile",
-        args: { profile_id: "local-daemon" },
+        args: { profileId: "local-daemon" },
       },
     ]);
     expect(profile.gatewayUrl).toBe("http://127.0.0.1:2468");
@@ -138,15 +138,15 @@ describe("desktop app shell render", () => {
             case "dashboard_snapshot":
               return { projects: [] };
             case "task_graph":
-              return { project_id: args?.project_id, nodes: [], edges: [], root_ids: [] };
+              return { project_id: args?.projectId, nodes: [], edges: [], root_ids: [] };
             case "run_detail":
-              return { run_id: args?.run_id, status: "running" };
+              return { run_id: args?.runId, status: "running" };
             case "run_events":
-              return { run_id: args?.run_id, events: [] };
+              return { run_id: args?.runId, events: [] };
             case "run_files":
               return { files: [{ path: "src/config.ts", status: "modified" }] };
             case "run_diffs":
-              return { file_path: args?.file_path, hunks: [] };
+              return { file_path: args?.filePath, hunks: [] };
             case "run_validation":
               return { status: "passed", checks: [] };
             case "run_approvals":
@@ -173,17 +173,17 @@ describe("desktop app shell render", () => {
     expect(calls).toEqual([
       { command: "gateway_capabilities", args: {} },
       { command: "dashboard_snapshot", args: {} },
-      { command: "task_graph", args: { project_id: "opensymphony" } },
-      { command: "run_detail", args: { run_id: "run-1" } },
-      { command: "run_events", args: { run_id: "run-1", page_token: "opaque-token", page_size: 25 } },
-      { command: "run_files", args: { run_id: "run-1" } },
-      { command: "run_diffs", args: { run_id: "run-1", file_path: "src/config.ts" } },
-      { command: "run_validation", args: { run_id: "run-1" } },
-      { command: "run_approvals", args: { run_id: "run-1" } },
+      { command: "task_graph", args: { projectId: "opensymphony" } },
+      { command: "run_detail", args: { runId: "run-1" } },
+      { command: "run_events", args: { runId: "run-1", pageToken: "opaque-token", pageSize: 25 } },
+      { command: "run_files", args: { runId: "run-1" } },
+      { command: "run_diffs", args: { runId: "run-1", filePath: "src/config.ts" } },
+      { command: "run_validation", args: { runId: "run-1" } },
+      { command: "run_approvals", args: { runId: "run-1" } },
     ]);
   });
 
-  it("falls back to loopback HTTP when a native desktop command fails", async () => {
+  it("surfaces native desktop command failures instead of masking them with HTTP fallback", async () => {
     const calls: TauriInvokeCall[] = [];
     const fetchCalls: string[] = [];
     const originalFetch = globalThis.fetch;
@@ -214,10 +214,10 @@ describe("desktop app shell render", () => {
 
     try {
       const transport = createDesktopTransport("http://127.0.0.1:2468");
-      await transport.health();
+      await expect(transport.health()).rejects.toThrow("native command unavailable");
 
       expect(calls).toEqual([{ command: "gateway_capabilities", args: {} }]);
-      expect(fetchCalls).toEqual(["http://127.0.0.1:2468/api/v1/capabilities"]);
+      expect(fetchCalls).toEqual([]);
     } finally {
       globalThis.fetch = originalFetch;
     }

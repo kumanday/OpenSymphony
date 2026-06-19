@@ -449,23 +449,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.selectedNodeId = null;
       return;
     }
+    let taskGraph: TaskGraphSnapshot;
     try {
-      const taskGraph = await this.transport.taskGraph(projectId);
-      this.state.taskGraph = taskGraph;
-      const initialNode = initialSelectedTaskNode(taskGraph.nodes, taskGraph.root_ids);
-      this.state.selectedNodeId = initialNode?.node_id ?? null;
-      this.state.runDetail = null;
-      this.state.runFiles = null;
-      this.state.runDiff = null;
-      this.state.evidenceView = "diff";
-      this.state.runEvents = null;
-      this.state.runValidation = null;
-      this.state.runApprovals = null;
-      this.state.selectedDiffPath = null;
-      await this.loadRunOverlays(taskGraph);
-      if (initialNode) {
-        await this.openRun(initialNode);
-      }
+      taskGraph = await this.transport.taskGraph(projectId);
     } catch (error) {
       this.state.taskGraph = null;
       this.state.selectedNodeId = null;
@@ -477,6 +463,23 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runValidation = null;
       this.state.runApprovals = null;
       this.state.connectionMessage = `Task graph unavailable: ${errorMessage(error)}`;
+      return;
+    }
+
+    this.state.taskGraph = taskGraph;
+    const initialNode = initialSelectedTaskNode(taskGraph.nodes, taskGraph.root_ids);
+    this.state.selectedNodeId = initialNode?.node_id ?? null;
+    this.state.runDetail = null;
+    this.state.runFiles = null;
+    this.state.runDiff = null;
+    this.state.evidenceView = "diff";
+    this.state.runEvents = null;
+    this.state.runValidation = null;
+    this.state.runApprovals = null;
+    this.state.selectedDiffPath = null;
+    await this.loadRunOverlays(taskGraph);
+    if (initialNode) {
+      await this.openRun(initialNode);
     }
   }
 
@@ -2076,7 +2079,24 @@ function statusLabel(mode: ConnectionMode): string {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  if (error instanceof Error) {
+    return error.message;
+  }
+  if (typeof error === "object" && error !== null) {
+    const record = error as Record<string, unknown>;
+    if (typeof record.message === "string" && record.message.trim()) {
+      return record.message;
+    }
+    if (typeof record.error === "string" && record.error.trim()) {
+      return record.error;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+  return String(error);
 }
 
 function escapeHtml(value: unknown): string {

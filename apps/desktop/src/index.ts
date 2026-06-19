@@ -63,11 +63,11 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
   }
 
   taskGraph(projectId: string): ReturnType<GatewayTransport["taskGraph"]> {
-    return this.invokeOrHttp("task_graph", { project_id: projectId }, () => this.inner.taskGraph(projectId));
+    return this.invokeOrHttp("task_graph", { projectId }, () => this.inner.taskGraph(projectId));
   }
 
   runDetail(runId: string): ReturnType<GatewayTransport["runDetail"]> {
-    return this.invokeOrHttp("run_detail", { run_id: runId }, () => this.inner.runDetail(runId));
+    return this.invokeOrHttp("run_detail", { runId }, () => this.inner.runDetail(runId));
   }
 
   runEvents(
@@ -77,9 +77,9 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     return this.invokeOrHttp(
       "run_events",
       {
-        run_id: runId,
-        page_token: cursor?.page_token ?? null,
-        page_size: cursor?.page_size ?? null,
+        runId,
+        pageToken: cursor?.page_token ?? null,
+        pageSize: cursor?.page_size ?? null,
       },
       () => this.inner.runEvents(runId, cursor),
     );
@@ -124,13 +124,13 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
   runFiles(runId: string): ReturnType<GatewayTransport["runFiles"]> {
     return this.invokeOrHttp<{ files?: Awaited<ReturnType<GatewayTransport["runFiles"]>> }>(
       "run_files",
-      { run_id: runId },
+      { runId },
       async () => ({ files: await this.inner.runFiles(runId) }),
     ).then((response) => response.files ?? []);
   }
 
   runDiffs(runId: string, filePath?: string): ReturnType<GatewayTransport["runDiffs"]> {
-    return this.invokeOrHttp("run_diffs", { run_id: runId, file_path: filePath ?? null }, () =>
+    return this.invokeOrHttp("run_diffs", { runId, filePath: filePath ?? null }, () =>
       this.inner.runDiffs(runId, filePath),
     );
   }
@@ -138,13 +138,13 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
   runApprovals(runId: string): ReturnType<GatewayTransport["runApprovals"]> {
     return this.invokeOrHttp<{ approvals?: Awaited<ReturnType<GatewayTransport["runApprovals"]>> }>(
       "run_approvals",
-      { run_id: runId },
+      { runId },
       async () => ({ approvals: await this.inner.runApprovals(runId) }),
     ).then((response) => response.approvals ?? []);
   }
 
   runValidation(runId: string): ReturnType<GatewayTransport["runValidation"]> {
-    return this.invokeOrHttp("run_validation", { run_id: runId }, () => this.inner.runValidation(runId));
+    return this.invokeOrHttp("run_validation", { runId }, () => this.inner.runValidation(runId));
   }
 
   events(
@@ -229,11 +229,7 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     if (!invoke) {
       return fallback();
     }
-    try {
-      return await invoke<T>(command, args);
-    } catch {
-      return fallback();
-    }
+    return invoke<T>(command, args);
   }
 }
 
@@ -276,7 +272,7 @@ export function createDesktopProfileController(): ProfileController | undefined 
 
     async setActiveProfile(profileId: string) {
       const active = await invoke<NativeProfileResponse>("set_active_profile", {
-        profile_id: profileId,
+        profileId,
       });
       return toConnectionProfile(active);
     },

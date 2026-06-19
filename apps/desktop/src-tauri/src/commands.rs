@@ -786,7 +786,7 @@ fn gateway_http_client() -> reqwest::Client {
     CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
                 .build()
                 .expect("gateway HTTP client configuration should be valid")
         })
