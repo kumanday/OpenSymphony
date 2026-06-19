@@ -409,6 +409,7 @@ copy that guide into the target repository.
 - COE-449: Desktop alpha recovery: replace stubs with functional app
 - COE-452: DuckDB Prebuilt Developer Build Mode
 - COE-453: Non-Interactive Init For Automation
+- COE-473: Desktop task graph dependency and run detail parity
 
 ## Source refs
 
@@ -477,5 +478,6 @@ copy that guide into the target repository.
 - COE-449
 - COE-452
 - COE-453
+- COE-473
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

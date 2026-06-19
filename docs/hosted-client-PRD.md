@@ -757,6 +757,7 @@ Candidate features:
 - COE-434: Long-running harness liveness and scheduler/runtime ownership contract
 - COE-435: Long-running run observability fixtures and client-facing diagnostics
 - COE-449: Desktop alpha recovery: replace stubs with functional app
+- COE-473: Desktop task graph dependency and run detail parity
 
 ## Source refs
 
@@ -790,5 +791,6 @@ Candidate features:
 - COE-434
 - COE-435
 - COE-449
+- COE-473
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

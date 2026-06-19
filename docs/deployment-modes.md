@@ -296,6 +296,7 @@ This sequencing gives the project the fastest path to a working developer-focuse
 - COE-409: Desktop Settings, Keychain, And Native Actions
 - COE-410: Desktop Local Stream Optimization
 - COE-449: Desktop alpha recovery: replace stubs with functional app
+- COE-473: Desktop task graph dependency and run detail parity
 
 ## Source refs
 
@@ -329,5 +330,6 @@ This sequencing gives the project the fastest path to a working developer-focuse
 - COE-409
 - COE-410
 - COE-449
+- COE-473
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

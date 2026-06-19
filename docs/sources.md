@@ -278,6 +278,7 @@ Key takeaways carried forward:
 - COE-415: Milestone, Issue, And Sub-Issue Compiler
 - COE-416: Dependency Graph And Plan Checks
 - COE-417: Planning Workspace UI
+- COE-473: Desktop task graph dependency and run detail parity
 
 ## Source refs
 
@@ -318,5 +319,6 @@ Key takeaways carried forward:
 - COE-415
 - COE-416
 - COE-417
+- COE-473
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
