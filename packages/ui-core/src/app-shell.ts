@@ -140,7 +140,6 @@ interface AppState {
   connectionMode: ConnectionMode;
   connectionMessage: string;
   authState: AuthState;
-  authMessage: string;
   capabilities: GatewayCapabilities | null;
   snapshot: DashboardSnapshot | null;
   taskGraph: TaskGraphSnapshot | null;
@@ -210,7 +209,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       connectionMode: "connecting",
       connectionMessage: "Connecting",
       authState: "open",
-      authMessage: "",
       capabilities: null,
       snapshot: null,
       taskGraph: null,
