@@ -6,16 +6,18 @@
 //!
 //! Credential storage: a full credential vault / KMS is out of scope, but
 //! passwords are never stored in plaintext. Seeded passwords are salted and
-//! hashed with SHA-256 (`Credentials`) and verified in constant time, so a
-//! process memory inspection or accidentally committed fixture does not leak
-//! reusable credentials. Production must still replace this with a real
-//! credential store (argon2/bcrypt + external secret storage).
+//! stretched with PBKDF2-HMAC-SHA256 (`Credentials`, 600k iterations per OWASP
+//! 2023 guidance) and verified in constant time, so a process memory inspection
+//! or accidentally committed fixture does not leak reusable credentials and the
+//! stored hash resists offline brute force. Production must still replace this
+//! with a real credential store (argon2/bcrypt + external secret storage).
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use chrono::{Duration, Utc};
-use sha2::{Digest, Sha256};
+use pbkdf2::pbkdf2_hmac;
+use sha2::Sha256;
 use uuid::Uuid;
 
 use crate::opensymphony_gateway_schema::identity::{
@@ -97,6 +99,10 @@ pub struct SeedProjectAccess {
 pub struct HostedIdentityStore {
     inner: Arc<RwLock<IdentityState>>,
     session_ttl: Duration,
+    /// PBKDF2 rounds applied to seeded passwords. Defaults to
+    /// `DEFAULT_PBKDF2_ITERATIONS`; tests lower it via
+    /// `with_ttl_and_iterations` to keep the suite fast.
+    pbkdf2_iterations: u32,
 }
 
 #[derive(Default)]
@@ -117,39 +123,55 @@ struct StoredUser {
     credentials: Credentials,
 }
 
-/// A salted, hashed credential for the in-memory alpha store.
+/// A salted, stretched credential for the in-memory alpha store.
 ///
-/// Stores only a random salt and the SHA-256 digest of `salt || password`;
-/// the plain-text password is never retained. Verification recomputes the
-/// digest and compares in constant time so timing does not leak information.
-/// This is not a substitute for a production credential store (argon2/bcrypt
-/// with external secret storage) but ensures seeded fixtures and process
-/// memory do not contain reusable passwords.
+/// Stores only a random salt, the PBKDF2-HMAC-SHA256 derivation of
+/// `salt || password`, and the iteration count used; the plain-text password is
+/// never retained. PBKDF2 is a slow, iterated key-derivation function, so the
+/// stored hash resists offline brute force unlike a bare SHA-256 digest. The
+/// iteration count is carried on the credential so verification is self-
+/// describing and a store can hold credentials stretched at different costs.
+/// Verification recomputes the derivation and compares in constant time so
+/// timing does not leak information. This is not a substitute for a production
+/// credential store (argon2/bcrypt with external secret storage) but ensures
+/// seeded fixtures and process memory do not contain reusable passwords.
 #[derive(Clone)]
 struct Credentials {
     salt: Vec<u8>,
     hash: Vec<u8>,
+    iterations: u32,
 }
 
+/// Default PBKDF2 iteration count. 600,000 matches OWASP 2023 guidance for
+/// PBKDF2-HMAC-SHA256 and keeps a single login verification in the tens of
+/// milliseconds, acceptable for an in-memory alpha store. Tests override this
+/// with a trivial count via `HostedIdentityStore::with_ttl_and_iterations` so
+/// the suite stays fast without weakening the production default.
+const DEFAULT_PBKDF2_ITERATIONS: u32 = 600_000;
+
 impl Credentials {
-    /// Build a credential from a plain-text password, generating a fresh salt.
-    fn from_password(password: &str) -> Self {
+    /// Build a credential from a plain-text password, generating a fresh salt
+    /// and stretching it over `iterations` PBKDF2-HMAC-SHA256 rounds.
+    fn from_password(password: &str, iterations: u32) -> Self {
         // 16 random bytes from a v4 UUID; uuid is already a workspace dep.
         let salt = Uuid::new_v4().as_bytes().to_vec();
-        let hash = Self::digest(&salt, password);
-        Self { salt, hash }
+        let hash = Self::derive(&salt, password, iterations);
+        Self {
+            salt,
+            hash,
+            iterations,
+        }
     }
 
-    fn digest(salt: &[u8], password: &str) -> Vec<u8> {
-        let mut hasher = Sha256::new();
-        hasher.update(salt);
-        hasher.update(password.as_bytes());
-        hasher.finalize().to_vec()
+    fn derive(salt: &[u8], password: &str, iterations: u32) -> Vec<u8> {
+        let mut out = vec![0u8; 32];
+        pbkdf2_hmac::<Sha256>(password.as_bytes(), salt, iterations, &mut out);
+        out
     }
 
     /// Verify a plain-text password against the stored hash in constant time.
     fn verify(&self, password: &str) -> bool {
-        let candidate = Self::digest(&self.salt, password);
+        let candidate = Self::derive(&self.salt, password, self.iterations);
         constant_time_eq(&candidate, &self.hash)
     }
 }
@@ -174,9 +196,19 @@ impl HostedIdentityStore {
 
     /// Create an empty store with a custom session TTL.
     pub fn with_ttl(session_ttl: Duration) -> Self {
+        Self::with_ttl_and_iterations(session_ttl, DEFAULT_PBKDF2_ITERATIONS)
+    }
+
+    /// Create an empty store with a custom session TTL and PBKDF2 iteration
+    /// count. Production callers should use [`HostedIdentityStore::new`] or
+    /// [`HostedIdentityStore::with_ttl`], which keep the OWASP-recommended
+    /// default. This constructor exists so test fixtures can use a trivial
+    /// iteration count and stay fast without weakening the production default.
+    pub fn with_ttl_and_iterations(session_ttl: Duration, pbkdf2_iterations: u32) -> Self {
         Self {
             inner: Arc::new(RwLock::new(IdentityState::default())),
             session_ttl,
+            pbkdf2_iterations,
         }
     }
 
@@ -205,7 +237,7 @@ impl HostedIdentityStore {
                 u.user_id,
                 StoredUser {
                     user,
-                    credentials: Credentials::from_password(&u.password),
+                    credentials: Credentials::from_password(&u.password, self.pbkdf2_iterations),
                 },
             );
         }
@@ -555,5 +587,42 @@ impl HostedIdentityStore {
 impl Default for HostedIdentityStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::Digest;
+
+    /// The production default must stretch passwords with PBKDF2, not store a
+    /// bare SHA-256 digest. A credential built at the default iteration count
+    /// must therefore differ from a single-round SHA-256(salt || password),
+    /// which is only true when key stretching is actually applied.
+    #[test]
+    fn default_credentials_are_stretched_not_bare_sha256() {
+        let salt = Uuid::new_v4().as_bytes().to_vec();
+        let stretched = Credentials::from_password("hunter2", DEFAULT_PBKDF2_ITERATIONS);
+
+        // Bare single-round SHA-256(salt || password).
+        let mut bare = Sha256::new();
+        bare.update(&salt);
+        bare.update(b"hunter2");
+        let bare = bare.finalize().to_vec();
+
+        assert_ne!(
+            stretched.hash, bare,
+            "default credentials must be PBKDF2-stretched, not a bare SHA-256 digest"
+        );
+        // And the trivial 1-iteration derivation differs from the 600k one,
+        // proving the iteration count is honored.
+        let single = Credentials::from_password("hunter2", 1);
+        assert_ne!(
+            stretched.hash, single.hash,
+            "the iteration count must change the derived hash"
+        );
+        // Correct password verifies, wrong password does not.
+        assert!(stretched.verify("hunter2"));
+        assert!(!stretched.verify("hunter3"));
     }
 }

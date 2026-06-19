@@ -162,7 +162,9 @@ fn seed_identity_into(store: &HostedIdentityStore) {
 /// Seed an identity store with an admin, a member, a viewer, plus a
 /// restricted viewer scoped to a single project.
 fn seeded_identity() -> HostedIdentityStore {
-    let store = HostedIdentityStore::new();
+    // Trivial PBKDF2 iteration count keeps the fixture fast; the production
+    // default (600k) is exercised by the dedicated hash-acceptance test.
+    let store = HostedIdentityStore::with_ttl_and_iterations(chrono::Duration::hours(24), 1);
     seed_identity_into(&store);
     store
 }
@@ -317,7 +319,7 @@ async fn hosted_expired_session_token_is_rejected() {
     // expires a protected read must fall back to 401 (the token is no longer a
     // valid credential). This pins the expiry path the reviewer flagged as only
     // implicitly covered.
-    let identity = HostedIdentityStore::with_ttl(chrono::Duration::seconds(1));
+    let identity = HostedIdentityStore::with_ttl_and_iterations(chrono::Duration::seconds(1), 1);
     seed_identity_into(&identity);
     let base = hosted_gateway_with_identity(identity).await;
     let token = login(&base, "admin@example.com", "pw-admin").await;

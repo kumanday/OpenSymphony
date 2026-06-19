@@ -36,6 +36,7 @@ duckdb.workspace = true
 ftui.workspace = true
 futures-util.workspace = true
 liquid.workspace = true
+pbkdf2.workspace = true
 reqwest.workspace = true
 reqwest-eventsource.workspace = true
 serde.workspace = true
@@ -92,6 +93,7 @@ lru = "0.16"
 futures-util = "0.3"
 libc = "0.2"
 liquid = "0.26"
+pbkdf2 = { version = "0.12", default-features = false, features = ["simple"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 reqwest-eventsource = "0.6"
 rustix = { version = "1", features = ["process"] }
