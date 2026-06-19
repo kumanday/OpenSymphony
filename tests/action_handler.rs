@@ -101,6 +101,7 @@ fn action_dispatch(
         },
         payload: None,
         idempotency_key: None,
+        actor: None,
     }
 }
 

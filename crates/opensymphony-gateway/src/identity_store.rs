@@ -89,8 +89,8 @@ struct IdentityState {
     orgs_by_slug: HashMap<String, String>,
     memberships: HashMap<String, Vec<Membership>>, // keyed by user_id
     project_access: HashMap<String, Vec<ProjectAccess>>, // keyed by user_id
-    sessions: HashMap<String, Session>, // keyed by token
-    sessions_by_id: HashMap<String, String>, // session_id -> token
+    sessions: HashMap<String, Session>,            // keyed by token
+    sessions_by_id: HashMap<String, String>,       // session_id -> token
 }
 
 #[derive(Clone)]
@@ -131,7 +131,9 @@ impl HostedIdentityStore {
                 display_name: u.display_name,
                 handle: u.handle,
             };
-            state.users_by_email.insert(u.email.to_lowercase(), u.user_id.clone());
+            state
+                .users_by_email
+                .insert(u.email.to_lowercase(), u.user_id.clone());
             state.users.insert(
                 u.user_id,
                 StoredUser {
@@ -147,7 +149,9 @@ impl HostedIdentityStore {
                 slug: o.slug.clone(),
                 display_name: o.display_name,
             };
-            state.orgs_by_slug.insert(o.slug.clone(), o.organization_id.clone());
+            state
+                .orgs_by_slug
+                .insert(o.slug.clone(), o.organization_id.clone());
             state.orgs.insert(o.organization_id, org);
         }
         for m in memberships {
@@ -209,9 +213,7 @@ impl HostedIdentityStore {
                     .find(|m| m.organization_id == organization_id)
                     .map(|m| m.role)
             })
-            .ok_or_else(|| {
-                IdentityError::NotAMember(user_id.into(), organization_id.into())
-            })?;
+            .ok_or_else(|| IdentityError::NotAMember(user_id.into(), organization_id.into()))?;
         Ok(role)
     }
 
@@ -226,12 +228,22 @@ impl HostedIdentityStore {
 
     /// Resolve an organization by id.
     pub fn organization(&self, organization_id: &str) -> Option<Organization> {
-        self.inner.lock().expect("identity store mutex poisoned").orgs.get(organization_id).cloned()
+        self.inner
+            .lock()
+            .expect("identity store mutex poisoned")
+            .orgs
+            .get(organization_id)
+            .cloned()
     }
 
     /// Resolve a user by id.
     pub fn user(&self, user_id: &str) -> Option<HostedUser> {
-        self.inner.lock().expect("identity store mutex poisoned").users.get(user_id).map(|s| s.user.clone())
+        self.inner
+            .lock()
+            .expect("identity store mutex poisoned")
+            .users
+            .get(user_id)
+            .map(|s| s.user.clone())
     }
 
     /// Authenticate a user and issue a session token bound to an organization.
@@ -265,16 +277,10 @@ impl HostedIdentityStore {
                 .memberships
                 .get(&user_id)
                 .and_then(|ms| ms.first())
-                .ok_or_else(|| {
-                    IdentityError::NotAMember(user_id.clone(), "<none>".into())
-                })?;
-            state
-                .orgs
-                .get(&membership.organization_id)
-                .cloned()
-                .ok_or(IdentityError::UnknownOrganization(
-                    membership.organization_id.clone(),
-                ))?
+                .ok_or_else(|| IdentityError::NotAMember(user_id.clone(), "<none>".into()))?;
+            state.orgs.get(&membership.organization_id).cloned().ok_or(
+                IdentityError::UnknownOrganization(membership.organization_id.clone()),
+            )?
         };
 
         let role = state
@@ -321,10 +327,7 @@ impl HostedIdentityStore {
     }
 
     /// Validate a bearer token and return the authenticated context.
-    pub fn auth_context_for_token(
-        &self,
-        token: &str,
-    ) -> Result<AuthContext, IdentityError> {
+    pub fn auth_context_for_token(&self, token: &str) -> Result<AuthContext, IdentityError> {
         let state = self.inner.lock().expect("identity store mutex poisoned");
         let session = state
             .sessions

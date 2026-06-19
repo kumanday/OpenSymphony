@@ -18,18 +18,37 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{FromRequestParts, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 
+use crate::opensymphony_gateway::identity_store::{HostedIdentityStore, IdentityError};
 use crate::opensymphony_gateway_schema::identity::{
     AuthContext, AuthErrorBody, AuthErrorCode, LoginRequest, LoginResponse, SessionResponse,
 };
 
-use crate::opensymphony_gateway::identity_store::{HostedIdentityStore, IdentityError};
+/// Axum extractor for the authenticated principal, pulled from request
+/// extensions (injected by `auth_middleware`). Implements `FromRequestParts`
+/// so it composes with body-consuming extractors like `Json`. Yields `None`
+/// when auth is disabled or the route is public.
+#[derive(Debug, Clone, Default)]
+pub struct AuthPrincipal(pub Option<AuthContext>);
+
+impl<S: Send + Sync> FromRequestParts<S> for AuthPrincipal {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(AuthPrincipal(
+            parts.extensions.get::<AuthContext>().cloned(),
+        ))
+    }
+}
 
 /// Hosted auth configuration selected at gateway construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +71,10 @@ impl GatewayAuthConfig {
     /// True when an auth context is injected for every request (dev bypass or
     /// hosted). `Disabled` produces no auth context.
     pub fn injects_context(&self) -> bool {
-        matches!(self, GatewayAuthConfig::DevBypass | GatewayAuthConfig::Hosted)
+        matches!(
+            self,
+            GatewayAuthConfig::DevBypass | GatewayAuthConfig::Hosted
+        )
     }
 }
 
@@ -86,7 +108,10 @@ pub struct SessionTokenAuthProvider {
 
 impl SessionTokenAuthProvider {
     pub fn new(identity: HostedIdentityStore, dev_bypass: bool) -> Self {
-        Self { identity, dev_bypass }
+        Self {
+            identity,
+            dev_bypass,
+        }
     }
 }
 
@@ -132,11 +157,13 @@ pub fn build_auth_provider(
             if production {
                 return Err(AuthSetupError::DevBypassInProduction);
             }
-            Ok(Some(Arc::new(SessionTokenAuthProvider::new(identity, true))))
+            Ok(Some(Arc::new(SessionTokenAuthProvider::new(
+                identity, true,
+            ))))
         }
-        GatewayAuthConfig::Hosted => {
-            Ok(Some(Arc::new(SessionTokenAuthProvider::new(identity, false))))
-        }
+        GatewayAuthConfig::Hosted => Ok(Some(Arc::new(SessionTokenAuthProvider::new(
+            identity, false,
+        )))),
     }
 }
 
@@ -161,7 +188,7 @@ pub fn is_public_route(path: &str) -> bool {
 pub fn bearer_token_from_header(value: Option<&str>) -> Option<&str> {
     let value = value?;
     let trimmed = value.trim();
-    let rest = trimmed.strip_prefix("Bearer ")? ;
+    let rest = trimmed.strip_prefix("Bearer ")?;
     Some(rest.trim())
 }
 
@@ -277,9 +304,7 @@ pub fn ws_auth_context(
 
 /// Router for `/api/v1/auth/*` endpoints. Always mounted (login works in
 /// hosted mode; in dev-bypass/disabled mode the endpoints report the mode).
-pub fn auth_router<S: Clone + Send + Sync + 'static>(
-    state: AuthRouterState,
-) -> Router<S> {
+pub fn auth_router<S: Clone + Send + Sync + 'static>(state: AuthRouterState) -> Router<S> {
     Router::new()
         .route("/login", post(login_handler))
         .route("/logout", post(logout_handler))
@@ -302,7 +327,8 @@ async fn login_handler(
         return (
             StatusCode::OK,
             Json(LoginResponse {
-                schema_version: crate::opensymphony_gateway_schema::version::SchemaVersion::default(),
+                schema_version: crate::opensymphony_gateway_schema::version::SchemaVersion::default(
+                ),
                 session_token: String::new(),
                 user: dev_user(),
                 organization: dev_org(),
@@ -333,12 +359,13 @@ async fn login_handler(
     }
 }
 
-async fn logout_handler(
-    State(state): State<AuthRouterState>,
-    request: Request,
-) -> Response {
+async fn logout_handler(State(state): State<AuthRouterState>, request: Request) -> Response {
     let Some(provider) = state.provider.as_ref() else {
-        return (StatusCode::OK, Json(serde_json::json!({"logged_out": true}))).into_response();
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"logged_out": true})),
+        )
+            .into_response();
     };
     let token = bearer_token_from_header(
         request
@@ -350,18 +377,20 @@ async fn logout_handler(
         return unauthenticated_response("missing Authorization bearer token");
     };
     let _ = provider.logout(token);
-    (StatusCode::OK, Json(serde_json::json!({"logged_out": true}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"logged_out": true})),
+    )
+        .into_response()
 }
 
-async fn session_handler(
-    State(state): State<AuthRouterState>,
-    request: Request,
-) -> Response {
+async fn session_handler(State(state): State<AuthRouterState>, request: Request) -> Response {
     let Some(provider) = state.provider.as_ref() else {
         return (
             StatusCode::OK,
             Json(SessionResponse {
-                schema_version: crate::opensymphony_gateway_schema::version::SchemaVersion::default(),
+                schema_version: crate::opensymphony_gateway_schema::version::SchemaVersion::default(
+                ),
                 user: dev_user(),
                 organization: dev_org(),
                 role: crate::opensymphony_gateway_schema::identity::Role::Owner,

@@ -9,11 +9,9 @@
 //! access (acceptance criterion). The evaluator consults the identity store
 //! for membership and project access rules.
 
-use crate::opensymphony_gateway_schema::action::{
-    ActionDispatch, ActionKind, PermissionResult,
-};
-use crate::opensymphony_gateway_schema::identity::{AuthContext, Role};
+use crate::opensymphony_gateway_schema::action::{ActionDispatch, ActionKind, PermissionResult};
 use crate::opensymphony_gateway_schema::envelope::EntityKind;
+use crate::opensymphony_gateway_schema::identity::{AuthContext, Role};
 
 use crate::opensymphony_gateway::identity_store::{HostedIdentityStore, IdentityError};
 
@@ -132,7 +130,9 @@ impl PermissionEvaluator {
                 required_role,
                 format!(
                     "permission denied: role {} cannot read {} (requires {})",
-                    ctx.role, resource_label(resource), required_role
+                    ctx.role,
+                    resource_label(resource),
+                    required_role
                 ),
                 "unauthorized",
             );

@@ -427,6 +427,7 @@ fn action_dispatch_roundtrips() {
         },
         payload: None,
         idempotency_key: Some("idem-1".into()),
+        actor: None,
     };
     let json = must_serialize(&action);
     let back: ActionDispatch = must_deserialize(&json);

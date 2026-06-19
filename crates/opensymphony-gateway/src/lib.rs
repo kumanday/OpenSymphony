@@ -17,7 +17,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{
-        Path as AxumPath, Query, State,
+        Path as AxumPath, Query, Request, State,
         ws::{Message, WebSocket},
     },
     http::StatusCode,
@@ -33,8 +33,10 @@ use crate::opensymphony_domain::{
     TrackerIssue, TrackerIssueStateKind, belongs_to_run,
 };
 use crate::opensymphony_gateway_schema::{
+    action::ActionActor,
     cursor::StreamCursor,
     event_journal::{EventKind, EventPage, EventRecord, JournalError, StreamError},
+    identity::AuthContext,
     terminal::TerminalSnapshot,
     timeline::{
         RunLogEntry, RunLogPage, TerminalJumpResult, TerminalSearchMatch, TerminalSearchResult,
@@ -63,10 +65,10 @@ pub use task_graph_mutations::{
 // integration tests can construct an authenticated gateway via
 // `opensymphony::opensymphony_gateway::GatewayAuthConfig` etc.
 pub use auth::{
-    AuthMiddlewareState, AuthRouterState, AuthSetupError, GatewayAuthConfig, HostedAuthProvider,
-    SessionTokenAuthProvider, auth_context_from_request, auth_middleware, auth_router,
-    bearer_token_from_header, build_auth_provider, is_public_route, unauthorized_response,
-    unauthenticated_response, ws_auth_context,
+    AuthMiddlewareState, AuthPrincipal, AuthRouterState, AuthSetupError, GatewayAuthConfig,
+    HostedAuthProvider, SessionTokenAuthProvider, auth_context_from_request, auth_middleware,
+    auth_router, bearer_token_from_header, build_auth_provider, is_public_route,
+    unauthenticated_response, unauthorized_response, ws_auth_context,
 };
 pub use identity_store::{
     HostedIdentityStore, IdentityError, SeedMembership, SeedOrganization, SeedProjectAccess,
@@ -843,6 +845,53 @@ async fn dashboard_snapshot(State(state): State<GatewayState>) -> Json<Dashboard
     Json(control_plane_to_dashboard_snapshot(&envelope))
 }
 
+/// Enforce a hosted read-permission check for a protected resource.
+///
+/// Returns `Ok(())` when access is allowed (or auth is disabled), or
+/// `Err(response)` with a 403 body carrying the `error_code` the client
+/// classifier maps to `unauthorized`. Protected resources: project, run,
+/// planning session, secret, and action access (acceptance criterion).
+fn enforce_read_access(
+    state: &GatewayState,
+    auth_ctx: Option<&AuthContext>,
+    resource: ProtectedResource,
+    project_id: Option<&str>,
+) -> Result<(), Box<Response>> {
+    let Some(evaluator) = &state.permission_evaluator else {
+        return Ok(());
+    };
+    let Some(ctx) = auth_ctx else {
+        return Err(Box::new(unauthenticated_response(
+            "authenticated context required for hosted read access",
+        )));
+    };
+    let permission = evaluator.evaluate_read(ctx, resource, project_id);
+    if !permission.allowed {
+        let code = permission
+            .denied_code
+            .as_deref()
+            .map(|c| match c {
+                "permission_denied" => {
+                    crate::opensymphony_gateway_schema::identity::AuthErrorCode::PermissionDenied
+                }
+                "forbidden_resource" => {
+                    crate::opensymphony_gateway_schema::identity::AuthErrorCode::ForbiddenResource
+                }
+                _ => crate::opensymphony_gateway_schema::identity::AuthErrorCode::Unauthorized,
+            })
+            .unwrap_or(crate::opensymphony_gateway_schema::identity::AuthErrorCode::Unauthorized);
+        Err(Box::new(unauthorized_response(
+            code,
+            permission
+                .denied_reason
+                .clone()
+                .unwrap_or_else(|| "permission denied".into()),
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 /// POST /api/v1/actions/dispatch
 ///
 /// Validates the action against the current snapshot state, publishes an audit
@@ -850,16 +899,48 @@ async fn dashboard_snapshot(State(state): State<GatewayState>) -> Json<Dashboard
 /// follow-up events via the event stream.
 async fn dispatch_action(
     State(state): State<GatewayState>,
-    Json(action): Json<ActionDispatch>,
-) -> impl IntoResponse {
+    AuthPrincipal(auth_ctx): AuthPrincipal,
+    Json(mut action): Json<ActionDispatch>,
+) -> Response {
+    // Inject the authenticated actor from the request's AuthContext. The
+    // gateway is the authority; any client-supplied actor is overwritten so
+    // client-side state never decides permissions (PRD 4.11).
+    action.actor = auth_ctx.as_ref().map(|ctx| ActionActor {
+        user_id: ctx.user_id.clone(),
+        organization_id: ctx.organization_id.clone(),
+        role: ctx.role.to_string(),
+        user_handle: ctx.user_handle.clone(),
+        dev_bypass: ctx.dev_bypass,
+    });
+
+    // Hosted RBAC: evaluate the permission decision before dispatch when an
+    // evaluator is configured. Denials short-circuit with a receipt carrying
+    // the rejection reason (acceptance criterion / test plan).
+    if let (Some(evaluator), Some(ctx)) = (&state.permission_evaluator, &auth_ctx) {
+        let permission = evaluator.evaluate_action(ctx, &action);
+        if !permission.allowed {
+            let mut receipt = ActionReceipt::rejected(
+                uuid::Uuid::new_v4().to_string(),
+                action.correlation_id.clone(),
+                action.action_kind,
+                permission
+                    .denied_reason
+                    .clone()
+                    .unwrap_or_else(|| "permission denied".into()),
+            );
+            receipt = receipt.with_permission(permission);
+            return (StatusCode::FORBIDDEN, Json(receipt)).into_response();
+        }
+    }
+
     let envelope = state.store.current().await;
     let receipt = state.action_handler.dispatch(action, &envelope).await;
 
     match receipt.status {
-        ActionStatus::Accepted => (StatusCode::OK, Json(receipt)),
+        ActionStatus::Accepted => (StatusCode::OK, Json(receipt)).into_response(),
         ActionStatus::Rejected => {
             let status = dispatch_rejection_status(&receipt);
-            (status, Json(receipt))
+            (status, Json(receipt)).into_response()
         }
     }
 }
@@ -1317,6 +1398,34 @@ async fn forward_ws_live_events(
     }
 }
 
+/// Resolve an authenticated context for a WebSocket upgrade request.
+///
+/// The HTTP auth middleware has already injected an `AuthContext` into the
+/// request extensions for header-based tokens and dev bypass. For browser WS
+/// clients that cannot always set headers, fall back to the `?token=` query
+/// parameter resolved through the auth provider. Returns `None` (-> 401) when
+/// no valid context is available in hosted mode; returns `Some` trivially in
+/// disabled mode (no provider).
+fn resolve_ws_auth_context(state: &GatewayState, request: &Request) -> Option<AuthContext> {
+    // Middleware-injected context (header token or dev bypass).
+    if let Some(ctx) = request.extensions().get::<AuthContext>() {
+        return Some(ctx.clone());
+    }
+    let provider = state.auth_provider.as_ref()?;
+    // Browser fallback: ?token= query parameter.
+    let query_token = request.uri().query().and_then(|q| {
+        q.split('&').find_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            if k == "token" {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        })
+    });
+    ws_auth_context(provider.as_ref(), request.headers(), query_token.as_deref())
+}
+
 /// WebSocket event stream: `WS /api/v1/streams/events`
 async fn event_stream_ws(
     State(state): State<GatewayState>,
@@ -1328,16 +1437,56 @@ async fn event_stream_ws(
     // already injected an `AuthContext` for token/header auth; for browser
     // WS clients that pass the token via `?token=` (which middleware does not
     // read for WS), resolve it here so both protocols are gated.
-    let auth_ctx = resolve_ws_auth_context(&state, &request);
-    let Some(_auth_ctx) = auth_ctx else {
-        return unauthenticated_response(
-            "WebSocket requires authentication: provide a bearer token via Authorization header or ?token= query parameter",
-        );
-    };
+    //
+    // When no auth provider is configured (local trusted mode / `Disabled`),
+    // the WebSocket preserves the existing unauthenticated contract so local
+    // dev tools keep working. Only hosted mode (provider present) enforces a
+    // session/token gate.
+    let mut ws_auth_ctx: Option<AuthContext> = None;
+    if state.auth_provider.is_some() {
+        let auth_ctx = resolve_ws_auth_context(&state, &request);
+        let Some(auth_ctx) = auth_ctx else {
+            return unauthenticated_response(
+                "WebSocket requires authentication: provide a bearer token via Authorization header or ?token= query parameter",
+            );
+        };
+        // Enforce the stream-subscription permission decision through the RBAC
+        // evaluator so every stream subscription carries an authenticated
+        // user/tenant context and a permission decision (scope: enforce
+        // permission checks for stream subscriptions). Denials are rejected
+        // before the upgrade with a 403 carrying the denial code.
+        if let Some(evaluator) = &state.permission_evaluator {
+            let permission = evaluator.evaluate_read(&auth_ctx, ProtectedResource::Stream, None);
+            if !permission.allowed {
+                let code = permission
+                    .denied_code
+                    .as_deref()
+                    .map(|c| match c {
+                        "permission_denied" => crate::opensymphony_gateway_schema::identity::AuthErrorCode::PermissionDenied,
+                        "forbidden_resource" => crate::opensymphony_gateway_schema::identity::AuthErrorCode::ForbiddenResource,
+                        _ => crate::opensymphony_gateway_schema::identity::AuthErrorCode::Unauthorized,
+                    })
+                    .unwrap_or(crate::opensymphony_gateway_schema::identity::AuthErrorCode::Unauthorized);
+                return unauthorized_response(
+                    code,
+                    permission
+                        .denied_reason
+                        .clone()
+                        .unwrap_or_else(|| "permission denied for stream subscription".into()),
+                );
+            }
+        }
+        ws_auth_ctx = Some(auth_ctx);
+    }
 
+    // Carry the authenticated user/tenant context into the connection so the
+    // stream is associated with an authenticated principal (acceptance
+    // criterion: streams carry authenticated user and tenant context).
+    let connection_auth_ctx = ws_auth_ctx;
     upgrade.on_upgrade(move |socket: WebSocket| {
         let journal = state.journal.clone();
         let broker = state.broker.clone();
+        let _connection_auth_ctx = connection_auth_ctx;
         async move {
             let mut socket = socket;
             let connection_id: Arc<str> = Arc::from(format!("ws-{}", uuid::Uuid::new_v4()));
@@ -2098,9 +2247,20 @@ async fn list_projects(State(store): State<SnapshotStore>) -> Json<ProjectList> 
 }
 
 async fn get_project(
-    State(store): State<SnapshotStore>,
+    State(state): State<GatewayState>,
+    AuthPrincipal(auth_ctx): AuthPrincipal,
     AxumPath(project_id): AxumPath<String>,
-) -> impl IntoResponse {
+) -> Response {
+    // Hosted RBAC: protect project read access (acceptance criterion).
+    if let Err(denied) = enforce_read_access(
+        &state,
+        auth_ctx.as_ref(),
+        ProtectedResource::Project,
+        Some(&project_id),
+    ) {
+        return *denied;
+    }
+    let store = &state.store;
     // Only the "default" project is supported; reject unknown project IDs.
     if project_id != "default" {
         return (
@@ -2117,7 +2277,8 @@ async fn get_project(
                 summary: Some("Project not found".into()),
                 milestones: Vec::new(),
             }),
-        );
+        )
+            .into_response();
     }
 
     let envelope = store.current().await;
@@ -2154,15 +2315,27 @@ async fn get_project(
             milestones: Vec::new(),
         }),
     )
+        .into_response()
 }
 
 // ── Task Graph endpoint ───────────────────────────────────────────────────────
 
 async fn get_task_graph(
     State(state): State<GatewayState>,
+    AuthPrincipal(auth_ctx): AuthPrincipal,
     AxumPath(project_id): AxumPath<String>,
 ) -> Response {
     let generated_at = Utc::now();
+
+    // Hosted RBAC: protect project task-graph read access.
+    if let Err(denied) = enforce_read_access(
+        &state,
+        auth_ctx.as_ref(),
+        ProtectedResource::Project,
+        Some(&project_id),
+    ) {
+        return *denied;
+    }
 
     // Only the "default" project is supported; reject unknown project IDs.
     if project_id != "default" {
@@ -2434,9 +2607,17 @@ fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeO
 // ── Run endpoints ─────────────────────────────────────────────────────────────
 
 async fn get_run_detail(
-    State(store): State<SnapshotStore>,
+    State(state): State<GatewayState>,
+    AuthPrincipal(auth_ctx): AuthPrincipal,
     AxumPath(run_id): AxumPath<String>,
-) -> impl IntoResponse {
+) -> Response {
+    // Hosted RBAC: protect run read access (acceptance criterion).
+    if let Err(denied) =
+        enforce_read_access(&state, auth_ctx.as_ref(), ProtectedResource::Run, None)
+    {
+        return *denied;
+    }
+    let store = &state.store;
     let envelope = store.current().await;
     let issue = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue,
@@ -2477,7 +2658,8 @@ async fn get_run_detail(
                     cancel_acknowledged: false,
                     cancel_failed: false,
                 }),
-            );
+            )
+                .into_response();
         }
     };
 
@@ -2574,6 +2756,7 @@ async fn get_run_detail(
             cancel_failed: issue.cancel_failed,
         }),
     )
+        .into_response()
 }
 
 #[derive(Debug, serde::Deserialize)]

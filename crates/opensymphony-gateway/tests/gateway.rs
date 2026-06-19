@@ -2443,6 +2443,7 @@ async fn gateway_dispatches_action_and_returns_receipt() {
         },
         payload: None,
         idempotency_key: Some("idempotency_001".to_string()),
+        actor: None,
     };
     let response = client
         .post(&url)
@@ -2490,6 +2491,7 @@ async fn gateway_dispatches_action_and_returns_receipt() {
         },
         payload: None,
         idempotency_key: None,
+        actor: None,
     };
     let response = client
         .post(&url)
@@ -2520,6 +2522,7 @@ async fn gateway_dispatches_action_and_returns_receipt() {
         },
         payload: None,
         idempotency_key: None,
+        actor: None,
     };
     let response = client
         .post(&url)
@@ -2568,6 +2571,7 @@ async fn gateway_dispatches_open_workspace_and_debug_actions() {
             },
             payload: None,
             idempotency_key: None,
+            actor: None,
         };
         let response = client
             .post(&url)
