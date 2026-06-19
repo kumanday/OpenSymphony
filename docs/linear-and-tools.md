@@ -30,6 +30,9 @@ Current workflow contract:
 - `tracker.kind` must be `linear`
 - `tracker.project_slug` stores Linear `Project.slugId`
 - `LINEAR_API_KEY` must be available when Linear mode is enabled
+- the scheduler's Linear tracker client remains mandatory for `opensymphony run`;
+  the gateway task graph reader is optional and, when unavailable, causes only
+  the task graph endpoint to return `503`
 
 Important normalization rules:
 

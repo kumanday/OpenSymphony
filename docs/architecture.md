@@ -189,6 +189,9 @@ orchestrator-side Linear adapter for tracker hierarchy and dependency
 relationships, then overlays live runtime details from the latest snapshot.
 The gateway emits `root_ids` from the returned Linear parent/child graph so
 clients can render the same forest without inventing hierarchy locally.
+If the optional task graph reader cannot be built, `opensymphony run` still
+starts the gateway and the task graph endpoint returns `503`; this does not
+weaken the scheduler's separate Linear tracker requirement.
 
 Native desktop builds may call the same operations through Tauri IPC instead
 of loopback HTTP, but the data contract is identical. Tauri command arguments
