@@ -22,6 +22,22 @@ const config = createWebAppConfig();
 const root = document.getElementById("root");
 const defaultGatewayUrl = config.gatewayUrl || defaultWebGatewayUrl();
 
+/**
+ * Session token storage key for the hosted web client.
+ *
+ * Security note: the session token is persisted in `localStorage` so an
+ * authenticated session survives reloads. `localStorage` is readable by any
+ * script running in the page origin, so it is exposed to XSS payloads. This is
+ * an explicit, documented alpha trade-off: the hosted alpha has no cookie-based
+ * session mechanism yet, and a bearer token in `localStorage` is the simplest
+ * contract that works across the HTTP and WebSocket (`?token=`) auth paths.
+ * Production hardening should move session issuance to an `httpOnly`,
+ * `SameSite` cookie set by the gateway so the token is never visible to
+ * client-side JavaScript; the web auth integration surface (`AppAuthIntegration`)
+ * is transport-agnostic and can adopt that without changing the shell. Until
+ * then, the web client is served from a trusted, CSP-locked origin and must not
+ * embed untrusted content, which bounds the XSS surface.
+ */
 const SESSION_TOKEN_KEY = "opensymphony.session_token";
 
 function readStoredToken(): string | undefined {

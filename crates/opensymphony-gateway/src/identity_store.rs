@@ -4,15 +4,18 @@
 //! tokens. A relational store is a follow-on (out of scope for COE-420); the
 //! in-memory store preserves the gateway contract and is seedable for tests.
 //!
-//! Credential storage is intentionally out of scope: passwords are compared in
-//! plain text against seeded fixtures only because this is an alpha auth
-//! provider strategy. Production must replace `SessionTokenAuthProvider` with
-//! a real credential store.
+//! Credential storage: a full credential vault / KMS is out of scope, but
+//! passwords are never stored in plaintext. Seeded passwords are salted and
+//! hashed with SHA-256 (`Credentials`) and verified in constant time, so a
+//! process memory inspection or accidentally committed fixture does not leak
+//! reusable credentials. Production must still replace this with a real
+//! credential store (argon2/bcrypt + external secret storage).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use chrono::{Duration, Utc};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::opensymphony_gateway_schema::identity::{
@@ -45,7 +48,8 @@ pub struct SeedUser {
     pub email: String,
     pub display_name: String,
     pub handle: String,
-    /// Plain-text password (alpha only; production must use a credential store).
+    /// Plain-text password supplied by the seed fixture. It is salted and
+    /// hashed on insert (see `Credentials`); only the hash is stored.
     pub password: String,
 }
 
@@ -75,9 +79,23 @@ pub struct SeedProjectAccess {
 }
 
 /// In-memory hosted identity + session store.
+///
+/// Concurrency note: the inner state is guarded by `std::sync::RwLock`, not
+/// `tokio::sync::RwLock`. The overwhelmingly common path is read access
+/// (token/session validation and project-access checks on every authenticated
+/// request), and `RwLock` lets those reads proceed concurrently instead of
+/// serializing through a single `Mutex`. Every critical section is a
+/// synchronous HashMap lookup/insert that completes in microseconds and
+/// explicitly drops the guard (`drop(state)`) before any await point, so no
+/// Tokio task is ever parked across the lock. The Tokio docs endorse
+/// `std::sync` locks for short, non-async critical sections; an async lock
+/// here would force every store method (and its callers in the auth
+/// provider/middleware/RBAC evaluator) to become async with no throughput
+/// benefit for an in-memory alpha store. A production store backed by a
+/// relational DB should use connection-pooled async access instead.
 #[derive(Clone)]
 pub struct HostedIdentityStore {
-    inner: Arc<Mutex<IdentityState>>,
+    inner: Arc<RwLock<IdentityState>>,
     session_ttl: Duration,
 }
 
@@ -96,7 +114,56 @@ struct IdentityState {
 #[derive(Clone)]
 struct StoredUser {
     user: HostedUser,
-    password: String,
+    credentials: Credentials,
+}
+
+/// A salted, hashed credential for the in-memory alpha store.
+///
+/// Stores only a random salt and the SHA-256 digest of `salt || password`;
+/// the plain-text password is never retained. Verification recomputes the
+/// digest and compares in constant time so timing does not leak information.
+/// This is not a substitute for a production credential store (argon2/bcrypt
+/// with external secret storage) but ensures seeded fixtures and process
+/// memory do not contain reusable passwords.
+#[derive(Clone)]
+struct Credentials {
+    salt: Vec<u8>,
+    hash: Vec<u8>,
+}
+
+impl Credentials {
+    /// Build a credential from a plain-text password, generating a fresh salt.
+    fn from_password(password: &str) -> Self {
+        // 16 random bytes from a v4 UUID; uuid is already a workspace dep.
+        let salt = Uuid::new_v4().as_bytes().to_vec();
+        let hash = Self::digest(&salt, password);
+        Self { salt, hash }
+    }
+
+    fn digest(salt: &[u8], password: &str) -> Vec<u8> {
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(password.as_bytes());
+        hasher.finalize().to_vec()
+    }
+
+    /// Verify a plain-text password against the stored hash in constant time.
+    fn verify(&self, password: &str) -> bool {
+        let candidate = Self::digest(&self.salt, password);
+        constant_time_eq(&candidate, &self.hash)
+    }
+}
+
+/// Constant-time equality comparison for two equal-length byte slices.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 impl HostedIdentityStore {
@@ -108,7 +175,7 @@ impl HostedIdentityStore {
     /// Create an empty store with a custom session TTL.
     pub fn with_ttl(session_ttl: Duration) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(IdentityState::default())),
+            inner: Arc::new(RwLock::new(IdentityState::default())),
             session_ttl,
         }
     }
@@ -122,7 +189,7 @@ impl HostedIdentityStore {
         memberships: Vec<SeedMembership>,
         project_access: Vec<SeedProjectAccess>,
     ) {
-        let mut state = self.inner.lock().expect("identity store mutex poisoned");
+        let mut state = self.inner.write().expect("identity store lock poisoned");
         for u in users {
             let user = HostedUser {
                 schema_version: SchemaVersion::default(),
@@ -138,7 +205,7 @@ impl HostedIdentityStore {
                 u.user_id,
                 StoredUser {
                     user,
-                    password: u.password,
+                    credentials: Credentials::from_password(&u.password),
                 },
             );
         }
@@ -199,7 +266,7 @@ impl HostedIdentityStore {
         user_id: &str,
         organization_id: &str,
     ) -> Result<Role, IdentityError> {
-        let state = self.inner.lock().expect("identity store mutex poisoned");
+        let state = self.inner.read().expect("identity store lock poisoned");
         if !state.users.contains_key(user_id) {
             return Err(IdentityError::UnknownUser(user_id.into()));
         }
@@ -219,7 +286,7 @@ impl HostedIdentityStore {
 
     /// Resolve an organization by slug.
     pub fn organization_by_slug(&self, slug: &str) -> Option<Organization> {
-        let state = self.inner.lock().expect("identity store mutex poisoned");
+        let state = self.inner.read().expect("identity store lock poisoned");
         state
             .orgs_by_slug
             .get(slug)
@@ -229,8 +296,8 @@ impl HostedIdentityStore {
     /// Resolve an organization by id.
     pub fn organization(&self, organization_id: &str) -> Option<Organization> {
         self.inner
-            .lock()
-            .expect("identity store mutex poisoned")
+            .read()
+            .expect("identity store lock poisoned")
             .orgs
             .get(organization_id)
             .cloned()
@@ -239,8 +306,8 @@ impl HostedIdentityStore {
     /// Resolve a user by id.
     pub fn user(&self, user_id: &str) -> Option<HostedUser> {
         self.inner
-            .lock()
-            .expect("identity store mutex poisoned")
+            .read()
+            .expect("identity store lock poisoned")
             .users
             .get(user_id)
             .map(|s| s.user.clone())
@@ -248,7 +315,7 @@ impl HostedIdentityStore {
 
     /// Authenticate a user and issue a session token bound to an organization.
     pub fn login(&self, request: &LoginRequest) -> Result<LoginResponse, IdentityError> {
-        let state = self.inner.lock().expect("identity store mutex poisoned");
+        let state = self.inner.read().expect("identity store lock poisoned");
         let user_id = state
             .users_by_email
             .get(&request.email.to_lowercase())
@@ -258,7 +325,7 @@ impl HostedIdentityStore {
             .users
             .get(&user_id)
             .ok_or(IdentityError::InvalidCredentials)?;
-        if stored.password != request.password {
+        if !stored.credentials.verify(&request.password) {
             return Err(IdentityError::InvalidCredentials);
         }
         let user = stored.user.clone();
@@ -311,7 +378,7 @@ impl HostedIdentityStore {
             expires_at: expires_at.to_rfc3339(),
         };
         {
-            let mut w = self.inner.lock().expect("identity store mutex poisoned");
+            let mut w = self.inner.write().expect("identity store lock poisoned");
             w.sessions_by_id.insert(session_id, token.clone());
             w.sessions.insert(token.clone(), session);
         }
@@ -328,7 +395,7 @@ impl HostedIdentityStore {
 
     /// Validate a bearer token and return the authenticated context.
     pub fn auth_context_for_token(&self, token: &str) -> Result<AuthContext, IdentityError> {
-        let state = self.inner.lock().expect("identity store mutex poisoned");
+        let state = self.inner.read().expect("identity store lock poisoned");
         let session = state
             .sessions
             .get(token)
@@ -376,7 +443,7 @@ impl HostedIdentityStore {
         token: &str,
     ) -> Result<SessionResponse, IdentityError> {
         let ctx = self.auth_context_for_token(token)?;
-        let state = self.inner.lock().expect("identity store mutex poisoned");
+        let state = self.inner.read().expect("identity store lock poisoned");
         let user = state
             .users
             .get(&ctx.user_id)
@@ -403,7 +470,7 @@ impl HostedIdentityStore {
 
     /// Invalidate a session (logout).
     pub fn logout(&self, token: &str) -> Result<(), IdentityError> {
-        let mut state = self.inner.lock().expect("identity store mutex poisoned");
+        let mut state = self.inner.write().expect("identity store lock poisoned");
         if let Some(session) = state.sessions.remove(token) {
             state.sessions_by_id.remove(&session.session_id);
         }
@@ -417,7 +484,7 @@ impl HostedIdentityStore {
         organization_id: &str,
         project_id: &str,
     ) -> Result<bool, IdentityError> {
-        let state = self.inner.lock().expect("identity store mutex poisoned");
+        let state = self.inner.read().expect("identity store lock poisoned");
         // Must be a member first.
         let is_member = state
             .memberships
@@ -457,7 +524,7 @@ impl HostedIdentityStore {
         project_id: &str,
     ) -> Result<Role, IdentityError> {
         let org_role = self.membership_role(user_id, organization_id)?;
-        let state = self.inner.lock().expect("identity store mutex poisoned");
+        let state = self.inner.read().expect("identity store lock poisoned");
         let access_list = state.project_access.get(user_id);
         let project_role = access_list
             .and_then(|list| {

@@ -234,6 +234,24 @@ Login, logout, and session probe endpoints live under `POST /api/v1/auth/login`,
 `POST /api/v1/auth/logout`, and `GET /api/v1/auth/session`. A successful login
 returns a `session_token` plus the user, organization, and role context.
 
+Security hardening notes for the alpha store:
+
+- Credentials are never stored in plaintext. Seeded passwords are salted and
+  SHA-256 hashed inside the in-memory store and verified in constant time, so
+  process memory inspection or accidentally committed fixtures do not leak
+  reusable credentials. A production deployment must still replace this with a
+  real credential store (argon2/bcrypt + external secret storage); a full
+  secret-storage subsystem is explicitly out of scope for COE-420.
+- The `?token=` query-parameter fallback is restricted to WebSocket upgrade
+  requests only. Ordinary HTTP requests must use the `Authorization` header so
+  session tokens are not leaked through server logs, proxies, browser history,
+  or referrer headers.
+- The web client persists the session token in `localStorage` so an
+  authenticated session survives reloads; this is readable by any script on the
+  page origin and is an accepted XSS trade-off for the hosted alpha. The
+  follow-on is an httpOnly, `SameSite=Strict` cookie session issued by the
+  gateway so client scripts cannot read the credential.
+
 A `PermissionEvaluator` maps the authenticated context plus the targeted
 resource and action to a `PermissionResult` (`allowed`, `evaluated`,
 `denied_reason`, `denied_code`). Roles map to capabilities (`Read`/`Operate`/

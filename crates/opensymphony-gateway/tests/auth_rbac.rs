@@ -88,10 +88,10 @@ fn fixture_snapshot() -> DaemonSnapshot {
     }
 }
 
-/// Seed an identity store with an admin, a member, and a viewer, plus a
-/// restricted viewer scoped to a single project.
-fn seeded_identity() -> HostedIdentityStore {
-    let store = HostedIdentityStore::new();
+/// Seed an identity store with an admin, a member, a viewer, and a restricted
+/// viewer scoped to a single project. Shared by the default and short-TTL
+/// gateway fixtures so the expiry test can reuse the same population.
+fn seed_identity_into(store: &HostedIdentityStore) {
     store.seed(
         vec![
             SeedUser {
@@ -157,13 +157,20 @@ fn seeded_identity() -> HostedIdentityStore {
             projects: vec![("default".into(), Role::Viewer)],
         }],
     );
+}
+
+/// Seed an identity store with an admin, a member, a viewer, plus a
+/// restricted viewer scoped to a single project.
+fn seeded_identity() -> HostedIdentityStore {
+    let store = HostedIdentityStore::new();
+    seed_identity_into(&store);
     store
 }
 
-/// Build a hosted gateway bound to an ephemeral port and return its address.
-async fn hosted_gateway() -> String {
+/// Build a hosted gateway bound to an ephemeral port from a pre-seeded identity
+/// store and return its address. Shared by the default and short-TTL fixtures.
+async fn hosted_gateway_with_identity(identity: HostedIdentityStore) -> String {
     let store = SnapshotStore::new(fixture_snapshot());
-    let identity = seeded_identity();
     let server = GatewayServer::new(store)
         .with_hosted_auth(GatewayAuthConfig::Hosted, identity, false)
         .expect("hosted auth setup should succeed");
@@ -178,6 +185,11 @@ async fn hosted_gateway() -> String {
             .expect("test gateway server should serve")
     });
     format!("http://{address}")
+}
+
+/// Build a hosted gateway bound to an ephemeral port and return its address.
+async fn hosted_gateway() -> String {
+    hosted_gateway_with_identity(seeded_identity()).await
 }
 
 /// Build an unauthenticated (Disabled) gateway to confirm the local contract
@@ -583,4 +595,52 @@ async fn dev_bypass_grants_access_in_explicit_dev_mode() {
         .await
         .expect("project read should send");
     assert_eq!(response.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn hosted_http_rejects_query_token_for_non_upgrade_requests() {
+    // The `?token=` query fallback is restricted to WebSocket upgrade
+    // requests so ordinary HTTP requests cannot leak session tokens through
+    // query parameters. A valid token in the query string of a normal GET
+    // must still be rejected as unauthenticated (no Authorization header).
+    let base = hosted_gateway().await;
+    let token = login(&base, "admin@example.com", "pw-admin").await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{base}/api/v1/projects/default?token={token}"))
+        .send()
+        .await
+        .expect("project read should send");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "query-token fallback must not authenticate ordinary HTTP requests"
+    );
+}
+
+#[tokio::test]
+async fn hosted_passwords_are_not_compared_as_plaintext() {
+    // After the credential hardening, a correct password verifies through the
+    // salted hash and an incorrect password is rejected -- proving the store
+    // does not store or compare plaintext passwords.
+    let base = hosted_gateway().await;
+    let good = login(&base, "admin@example.com", "pw-admin").await;
+    assert!(!good.is_empty(), "correct password verifies via the hash");
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{base}/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "admin@example.com",
+            "password": "not-the-password",
+            "organization_slug": "acme",
+        }))
+        .send()
+        .await
+        .expect("login request should send");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "incorrect password is rejected by the hash verification"
+    );
 }

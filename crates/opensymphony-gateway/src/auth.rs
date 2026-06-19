@@ -259,12 +259,18 @@ pub async fn auth_middleware(
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok()),
     );
-    // Browser fallback: browsers cannot set headers on a WebSocket upgrade, so
-    // accept a `?token=` query parameter as an equivalent bearer credential.
-    // This is required for the WS/JSON-RPC-over-WS auth path; the same fallback
-    // is harmless for ordinary HTTP because the token is still validated by the
-    // provider below.
-    let query_token = ws_query_token(request.uri());
+    // Browser fallback for WebSocket upgrades only: browsers cannot set
+    // `Authorization` headers on a WS upgrade, so accept a `?token=` query
+    // parameter as an equivalent bearer credential *only* for upgrade
+    // requests. Restricting the fallback to upgrades avoids leaking session
+    // tokens through server logs, proxies, browser history, and referrer
+    // headers that capture query parameters on ordinary HTTP requests. The
+    // token is still validated by the provider below.
+    let query_token = if is_websocket_upgrade(request.headers()) {
+        ws_query_token(request.uri())
+    } else {
+        None
+    };
     let token: &str = match header_token.or(query_token.as_deref()) {
         Some(token) => token,
         None => return unauthenticated_response("missing or malformed Authorization bearer token"),
@@ -383,6 +389,18 @@ pub fn auth_context_from_request(request: &Request) -> Option<AuthContext> {
 pub struct WsAuthQuery {
     #[serde(default)]
     pub token: Option<String>,
+}
+
+/// True when the request is a WebSocket upgrade (carries an
+/// `Upgrade: websocket` header). Used to restrict the `?token=` query fallback
+/// to upgrade requests only, so ordinary HTTP requests must use the
+/// `Authorization` header and do not leak tokens through query parameters.
+pub fn is_websocket_upgrade(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false)
 }
 
 /// Extract a `?token=` query parameter from a URI, for the browser WebSocket
