@@ -1419,6 +1419,15 @@ fn issue_file_changes(
         .collect()
 }
 
+async fn issue_file_changes_async(
+    envelope: SnapshotEnvelope,
+    issue: ControlPlaneIssueSnapshot,
+) -> Vec<WorkspaceRunFileChange> {
+    tokio::task::spawn_blocking(move || issue_file_changes(&envelope, &issue))
+        .await
+        .unwrap_or_default()
+}
+
 fn build_workspace_run_file_changes(
     workspace_path: &StdPath,
 ) -> Result<Vec<WorkspaceRunFileChange>, String> {
@@ -1620,6 +1629,15 @@ fn workspace_diff_for_change(
         args.push(change.query_path.clone());
         command_output_args(workspace_path, "git", args)
     }
+}
+
+async fn workspace_diff_for_change_async(
+    workspace_path: PathBuf,
+    change: WorkspaceRunFileChange,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || workspace_diff_for_change(&workspace_path, &change))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn change_kind_from_status(status_code: &str) -> ControlPlaneFileChangeKind {
@@ -2378,12 +2396,20 @@ async fn get_run_detail(
     )
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct RunEventQuery {
+    page_token: Option<String>,
+    cursor: Option<u64>,
+    page_size: Option<usize>,
+}
+
 async fn get_run_events(
     State(store): State<SnapshotStore>,
     AxumPath(run_id): AxumPath<String>,
+    Query(query): Query<RunEventQuery>,
 ) -> impl IntoResponse {
     let envelope = store.current().await;
-    let events: Vec<RunEvent> = match find_issue_snapshot(&envelope, &run_id) {
+    let all_events: Vec<RunEvent> = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue
             .recent_events
             .iter()
@@ -2410,13 +2436,36 @@ async fn get_run_events(
             );
         }
     };
+    let start_sequence = query
+        .page_token
+        .as_deref()
+        .and_then(|token| token.parse::<u64>().ok())
+        .or(query.cursor)
+        .unwrap_or(1)
+        .max(1);
+    let page_size = query
+        .page_size
+        .unwrap_or(GATEWAY_EVENT_PAGE_LIMIT)
+        .clamp(1, GATEWAY_EVENT_PAGE_LIMIT);
+    let start_index = start_sequence.saturating_sub(1) as usize;
+    let next_start = start_index.saturating_add(page_size);
+    let events: Vec<RunEvent> = all_events
+        .iter()
+        .skip(start_index)
+        .take(page_size)
+        .cloned()
+        .collect();
+    let next_cursor = (next_start < all_events.len()).then(|| PageCursor {
+        page_token: (next_start as u64 + 1).to_string(),
+        page_size: page_size as u32,
+    });
 
     (
         StatusCode::OK,
         Json(RunEventPage {
             schema_version: SchemaVersion::v1(),
             run_id,
-            next_cursor: None,
+            next_cursor,
             events,
         }),
     )
@@ -2428,7 +2477,8 @@ async fn get_run_files(
 ) -> impl IntoResponse {
     let envelope = store.current().await;
     let files: Vec<ChangedFileEntry> = match find_issue_snapshot(&envelope, &run_id) {
-        Some(issue) => issue_file_changes(&envelope, issue)
+        Some(issue) => issue_file_changes_async(envelope.clone(), issue.clone())
+            .await
             .iter()
             .map(|fc| ChangedFileEntry {
                 path: fc.path.clone(),
@@ -2485,7 +2535,8 @@ async fn get_run_diffs(
             );
         }
     };
-    let all_files = issue_file_changes(&envelope, issue);
+    let workspace_path = workspace_path_for_issue(&envelope, issue);
+    let all_files = issue_file_changes_async(envelope.clone(), issue.clone()).await;
     let files: Vec<WorkspaceRunFileChange> = match &query.file_path {
         Some(path) => all_files
             .into_iter()
@@ -2494,12 +2545,10 @@ async fn get_run_diffs(
         None => all_files,
     };
 
-    let workspace_path = workspace_path_for_issue(&envelope, issue);
-
     let mut hunks: Vec<DiffHunk> = Vec::new();
     for fc in &files {
         if let Some(path) = &workspace_path
-            && let Ok(diff_text) = workspace_diff_for_change(path, fc)
+            && let Ok(diff_text) = workspace_diff_for_change_async(path.clone(), fc.clone()).await
         {
             hunks.extend(parse_unified_diff(&fc.path, &diff_text));
             continue;
@@ -2652,7 +2701,7 @@ async fn get_run_validation(
 ) -> impl IntoResponse {
     let envelope = store.current().await;
     let issue = match find_issue_snapshot(&envelope, &run_id) {
-        Some(issue) => issue,
+        Some(issue) => issue.clone(),
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -2668,8 +2717,10 @@ async fn get_run_validation(
         }
     };
 
-    let has_file_changes = !issue_file_changes(&envelope, issue).is_empty();
-    let overall_status = validation_status_for_issue(issue, has_file_changes);
+    let has_file_changes = !issue_file_changes_async(envelope.clone(), issue.clone())
+        .await
+        .is_empty();
+    let overall_status = validation_status_for_issue(&issue, has_file_changes);
 
     (
         StatusCode::OK,

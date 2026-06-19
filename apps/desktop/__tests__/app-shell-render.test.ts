@@ -86,7 +86,7 @@ describe("desktop app shell render", () => {
     await handle.destroy();
   });
 
-  it("selects active profiles with Tauri's camelCase command argument", async () => {
+  it("selects active profiles with Tauri's snake_case command argument", async () => {
     const calls: TauriInvokeCall[] = [];
     (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
       core: {
@@ -113,7 +113,7 @@ describe("desktop app shell render", () => {
     expect(calls).toEqual([
       {
         command: "set_active_profile",
-        args: { profileId: "local-daemon" },
+        args: { profile_id: "local-daemon" },
       },
     ]);
     expect(profile.gatewayUrl).toBe("http://127.0.0.1:2468");
@@ -138,15 +138,15 @@ describe("desktop app shell render", () => {
             case "dashboard_snapshot":
               return { projects: [] };
             case "task_graph":
-              return { project_id: args?.projectId, nodes: [], edges: [], root_ids: [] };
+              return { project_id: args?.project_id, nodes: [], edges: [], root_ids: [] };
             case "run_detail":
-              return { run_id: args?.runId, status: "running" };
+              return { run_id: args?.run_id, status: "running" };
             case "run_events":
-              return { run_id: args?.runId, events: [] };
+              return { run_id: args?.run_id, events: [] };
             case "run_files":
               return { files: [{ path: "src/config.ts", status: "modified" }] };
             case "run_diffs":
-              return { file_path: args?.filePath, hunks: [] };
+              return { file_path: args?.file_path, hunks: [] };
             case "run_validation":
               return { status: "passed", checks: [] };
             case "run_approvals":
@@ -173,13 +173,13 @@ describe("desktop app shell render", () => {
     expect(calls).toEqual([
       { command: "gateway_capabilities", args: {} },
       { command: "dashboard_snapshot", args: {} },
-      { command: "task_graph", args: { projectId: "opensymphony" } },
-      { command: "run_detail", args: { runId: "run-1" } },
-      { command: "run_events", args: { runId: "run-1", cursor: null, pageSize: 25 } },
-      { command: "run_files", args: { runId: "run-1" } },
-      { command: "run_diffs", args: { runId: "run-1", filePath: "src/config.ts" } },
-      { command: "run_validation", args: { runId: "run-1" } },
-      { command: "run_approvals", args: { runId: "run-1" } },
+      { command: "task_graph", args: { project_id: "opensymphony" } },
+      { command: "run_detail", args: { run_id: "run-1" } },
+      { command: "run_events", args: { run_id: "run-1", cursor: null, page_size: 25 } },
+      { command: "run_files", args: { run_id: "run-1" } },
+      { command: "run_diffs", args: { run_id: "run-1", file_path: "src/config.ts" } },
+      { command: "run_validation", args: { run_id: "run-1" } },
+      { command: "run_approvals", args: { run_id: "run-1" } },
     ]);
   });
 });

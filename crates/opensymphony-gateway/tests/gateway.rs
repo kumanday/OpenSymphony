@@ -1987,7 +1987,9 @@ async fn gateway_serves_run_events_with_data() {
 
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("http://{address}/api/v1/runs/COE-301/events"))
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/events?page_size=1"
+        ))
         .send()
         .await
         .expect("fetch run events with data")
@@ -1996,7 +1998,44 @@ async fn gateway_serves_run_events_with_data() {
         .expect("decode run events");
 
     assert_eq!(response.run_id, "COE-301");
-    assert_eq!(response.events.len(), 2);
+    assert_eq!(response.events.len(), 1);
+    assert_eq!(response.events[0].sequence, 1);
+    assert_eq!(
+        response
+            .next_cursor
+            .as_ref()
+            .map(|cursor| cursor.page_token.as_str()),
+        Some("2")
+    );
+
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/events?page_token=2&page_size=1"
+        ))
+        .send()
+        .await
+        .expect("fetch second run events page")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunEventPage>()
+        .await
+        .expect("decode second run events page");
+
+    assert_eq!(response.events.len(), 1);
+    assert_eq!(response.events[0].sequence, 2);
+    assert!(response.next_cursor.is_none());
+
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/events?cursor=2&page_size=1"
+        ))
+        .send()
+        .await
+        .expect("fetch desktop cursor run events page")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunEventPage>()
+        .await
+        .expect("decode desktop cursor run events page");
+
+    assert_eq!(response.events.len(), 1);
+    assert_eq!(response.events[0].sequence, 2);
 
     server_task.abort();
 }

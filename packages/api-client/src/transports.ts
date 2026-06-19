@@ -1070,8 +1070,13 @@ export class TauriChannelTransport implements GatewayTransport {
     return this.invoke<RunDetail>("run_detail", { run_id: runId });
   }
 
-  async runEvents(runId: string, _cursor?: PageCursor): Promise<RunEventPage> {
-    return this.invoke<RunEventPage>("run_events", { run_id: runId });
+  async runEvents(runId: string, cursor?: PageCursor): Promise<RunEventPage> {
+    const parsedCursor = cursor?.page_token ? Number(cursor.page_token) : null;
+    return this.invoke<RunEventPage>("run_events", {
+      run_id: runId,
+      cursor: Number.isFinite(parsedCursor) ? parsedCursor : null,
+      page_size: cursor?.page_size ?? null,
+    });
   }
 
   async runTimeline(runId: string): Promise<RunTimeline> {

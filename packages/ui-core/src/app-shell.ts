@@ -15,6 +15,7 @@ import type {
   RunStreamLiveness,
   RunValidationSummary,
   TaskGraphNode,
+  TaskGraphNodeKind,
   TaskGraphSnapshot,
 } from "@opensymphony/gateway-schema";
 import { renderChangedFileList, renderFileDiff } from "./diff.js";
@@ -34,6 +35,30 @@ import {
   renderTaskGraphFilters,
   type TaskGraphFilter,
 } from "./task-graph-editor.js";
+import {
+  emptyCommentEdit,
+  emptyDependencyEdit,
+  emptyEditorDialog,
+  emptyInlineEdit,
+  renderCommentEditor,
+  renderCreateDialog,
+  renderDependencyEditor,
+  renderTaskGraphNode,
+  renderTaskGraphToolbar,
+  type CommentEditState,
+  type DependencyEditState,
+  type EditorDialogState,
+  type InlineEditState,
+} from "./task-graph-editor-ui.js";
+import {
+  applyNodeUpdate,
+  buildCreatedNode,
+  dispatchTaskGraphComment,
+  dispatchTaskGraphCreate,
+  dispatchTaskGraphDependencies,
+  dispatchTaskGraphUpdate,
+  isActionCapable,
+} from "./task-graph-editor-actions.js";
 import { generateId } from "./id.js";
 import {
   addCriterion,
@@ -134,7 +159,14 @@ interface AppState {
   activeView: "dashboard" | "planning";
   // Task graph editor state
   taskGraphFilter: TaskGraphFilter;
+  inlineEdit: InlineEditState;
+  createDialog: EditorDialogState;
+  dependencyEdit: DependencyEditState;
+  commentEdit: CommentEditState;
   runOverlays: Map<string, RunDetail>;
+  pendingMutations: Set<string>;
+  pendingCreates: Map<string, string>;
+  pendingSnapshots: Map<string, TaskGraphNode | null>;
   // Planning workspace state
   planningWorkspace: PlanningWorkspaceState;
   planningEdit: PlanningEditState;
@@ -194,7 +226,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       loading: true,
       activeView: "dashboard",
       taskGraphFilter: { ...defaultTaskGraphFilter },
+      inlineEdit: { ...emptyInlineEdit },
+      createDialog: { ...emptyEditorDialog },
+      dependencyEdit: { ...emptyDependencyEdit },
+      commentEdit: { ...emptyCommentEdit },
       runOverlays: new Map(),
+      pendingMutations: new Set(),
+      pendingCreates: new Map(),
+      pendingSnapshots: new Map(),
       planningWorkspace: emptyPlanningWorkspaceState(),
       planningEdit: { ...emptyPlanningEditState },
     };
@@ -752,6 +791,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return buildRuntimeOverlay(node, run);
     };
     const filtered = filterTaskGraphNodes(taskGraph.nodes, this.state.taskGraphFilter, getOverlay);
+    if (this.options.mode === "web") {
+      return this.renderEditableTaskGraph(taskGraph, filtered, getOverlay);
+    }
     const dependencySignals = buildDependencySignals(taskGraph.nodes, filtered);
     const graph = renderTaskGraphVisualization(
       filtered,
@@ -765,6 +807,48 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     return panel(
       "Task Graph",
       `${filters}${graph}`,
+      "os-task-graph-panel",
+    );
+  }
+
+  private renderEditableTaskGraph(
+    taskGraph: TaskGraphSnapshot,
+    filtered: TaskGraphNode[],
+    getOverlay: (node: TaskGraphNode) => ReturnType<typeof buildRuntimeOverlay>,
+  ): string {
+    const allNodes = new Map(taskGraph.nodes.map((node) => [node.node_id, node]));
+    const nodes = filtered.map((node) => renderTaskGraphNode(
+      node,
+      this.state.selectedNodeId,
+      this.state.inlineEdit,
+      getOverlay(node),
+    )).join("");
+    const toolbar = renderTaskGraphToolbar();
+    const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
+    const pendingBanner = this.state.pendingMutations.size > 0
+      ? `<div class="os-pending-banner">${this.state.pendingMutations.size} change(s) pending server acknowledgement</div>`
+      : "";
+    const dependencyDialog = this.state.dependencyEdit.nodeId && allNodes.get(this.state.dependencyEdit.nodeId)
+      ? renderDependencyEditor(allNodes.get(this.state.dependencyEdit.nodeId)!, allNodes, this.state.dependencyEdit)
+      : "";
+    const commentDialog = this.state.commentEdit.nodeId && allNodes.get(this.state.commentEdit.nodeId)
+      ? renderCommentEditor(allNodes.get(this.state.commentEdit.nodeId)!, this.state.commentEdit)
+      : "";
+    const createDialog = renderCreateDialog(this.state.createDialog);
+    const actions = (() => {
+      if (!this.state.createDialog.open && !this.state.dependencyEdit.nodeId && !this.state.commentEdit.nodeId) return "";
+      return `
+        <div class="os-dialog-actions-bar">
+          <span data-tg-active-action="true">editing ${
+            this.state.createDialog.open ? "create" : this.state.dependencyEdit.nodeId ? "dependencies" : "comment"
+          }</span>
+        </div>
+      `;
+    })();
+
+    return panel(
+      "Task Graph",
+      `${toolbar}${filters}${pendingBanner}<div class="os-node-list">${nodes || `<div class="os-empty">No tasks match the current filters</div>`}</div>${actions}${createDialog}${dependencyDialog}${commentDialog}`,
       "os-task-graph-panel",
     );
   }
@@ -909,7 +993,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           (candidate) => candidate.node_id === button.dataset.nodeId,
         );
         if (node) {
-          void this.openRun(node);
+          if (this.options.mode === "desktop") {
+            void this.openRun(node);
+          } else {
+            this.state.selectedNodeId = node.node_id;
+            this.render();
+          }
         }
       });
     });
@@ -974,6 +1063,74 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
     this.options.root.querySelector("[data-tg-filter-reset]")?.addEventListener("click", () => {
       this.state.taskGraphFilter = { ...defaultTaskGraphFilter };
+      this.render();
+    });
+
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-create]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const kind = button.dataset.tgCreate as TaskGraphNodeKind;
+        this.openCreateDialog(kind, null);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-create-child]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const parentId = button.dataset.tgCreateChild;
+        if (!parentId) return;
+        const parent = this.state.taskGraph?.nodes.find((node) => node.node_id === parentId);
+        if (!parent) return;
+        const childKind: TaskGraphNodeKind = parent.kind === "milestone" ? "issue" : "sub_issue";
+        this.openCreateDialog(childKind, parentId);
+      });
+    });
+    this.options.root.querySelector("[data-tg-create-save]")?.addEventListener("click", () => {
+      void this.saveCreateDialog();
+    });
+    this.options.root.querySelector("[data-tg-create-cancel]")?.addEventListener("click", () => {
+      this.state.createDialog = { ...emptyEditorDialog };
+      this.render();
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-edit]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nodeId = button.dataset.tgEdit;
+        if (nodeId) this.startInlineEdit(nodeId);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-inline-save]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nodeId = button.dataset.tgInlineSave;
+        if (nodeId) void this.saveInlineEdit(nodeId);
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-inline-cancel]").forEach((button) => {
+      button.addEventListener("click", () => {
+        this.state.inlineEdit = { ...emptyInlineEdit };
+        this.render();
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-deps]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nodeId = button.dataset.tgDeps;
+        if (nodeId) this.openDependencyEditor(nodeId);
+      });
+    });
+    this.options.root.querySelector("[data-tg-deps-save]")?.addEventListener("click", () => {
+      void this.saveDependencyEdit();
+    });
+    this.options.root.querySelector("[data-tg-deps-cancel]")?.addEventListener("click", () => {
+      this.state.dependencyEdit = { ...emptyDependencyEdit };
+      this.render();
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-tg-comment]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const nodeId = button.dataset.tgComment;
+        if (nodeId) this.openCommentEditor(nodeId);
+      });
+    });
+    this.options.root.querySelector("[data-tg-comment-save]")?.addEventListener("click", () => {
+      void this.saveCommentEdit();
+    });
+    this.options.root.querySelector("[data-tg-comment-cancel]")?.addEventListener("click", () => {
+      this.state.commentEdit = { ...emptyCommentEdit };
       this.render();
     });
 
@@ -1252,6 +1409,267 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         (match as HTMLInputElement | HTMLTextAreaElement).setSelectionRange(selectionStart, selectionEnd);
       }
     }
+  }
+
+  private openCreateDialog(kind: TaskGraphNodeKind, parentId: string | null): void {
+    this.state.createDialog = {
+      open: true,
+      kind,
+      parentId,
+      draftTitle: "",
+      draftState: "Todo",
+    };
+    this.render();
+  }
+
+  private async saveCreateDialog(): Promise<void> {
+    const dialog = this.state.createDialog;
+    if (!dialog.open || !dialog.kind) return;
+    const title = (this.options.root.querySelector<HTMLInputElement>("[data-tg-create-title]")?.value ?? "").trim();
+    const state = (this.options.root.querySelector<HTMLInputElement>("[data-tg-create-state]")?.value ?? "Todo").trim() || "Todo";
+    if (!title) return;
+
+    const parentId = dialog.parentId ?? undefined;
+    const nodeId = `new-${dialog.kind}-${generateId()}`;
+    const newNode = buildCreatedNode({ parent_id: parentId, kind: dialog.kind, title, state }, nodeId);
+    const taskGraph = this.state.taskGraph;
+    if (taskGraph) {
+      taskGraph.nodes.push(newNode);
+      if (parentId) {
+        const parent = taskGraph.nodes.find((node) => node.node_id === parentId);
+        if (parent && !parent.children.includes(nodeId)) {
+          parent.children.push(nodeId);
+        }
+      } else if (!taskGraph.root_ids.includes(nodeId)) {
+        taskGraph.root_ids.push(nodeId);
+      }
+    }
+    this.state.createDialog = { ...emptyEditorDialog };
+    this.render();
+
+    if (isActionCapable(this.transport)) {
+      const correlationId = `tg-create-${parentId ?? "root"}-${dialog.kind}-${generateId()}`;
+      this.state.pendingMutations.add(correlationId);
+      this.state.pendingCreates.set(correlationId, nodeId);
+      this.state.pendingSnapshots.set(correlationId, null);
+      this.render();
+      try {
+        const receipt = await dispatchTaskGraphCreate(this.transport, {
+          parent_id: parentId,
+          kind: dialog.kind,
+          title,
+          state,
+        }, correlationId);
+        this.applyMutationReceipt(receipt);
+      } catch (error) {
+        this.rollbackOptimisticMutation(correlationId);
+        this.state.connectionMessage = `Create failed: ${errorMessage(error)}`;
+      }
+      this.render();
+    }
+  }
+
+  private startInlineEdit(nodeId: string): void {
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
+    if (!node) return;
+    this.state.inlineEdit = { nodeId, title: node.title, state: node.state };
+    this.render();
+  }
+
+  private async saveInlineEdit(nodeId: string): Promise<void> {
+    const title = Array.from(this.options.root.querySelectorAll<HTMLInputElement>("[data-tg-inline-title]")).find(
+      (input) => input.dataset.tgInlineTitle === nodeId,
+    )?.value.trim();
+    const state = Array.from(this.options.root.querySelectorAll<HTMLInputElement>("[data-tg-inline-state]")).find(
+      (input) => input.dataset.tgInlineState === nodeId,
+    )?.value.trim();
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
+    if (!node) return;
+    const snapshot = { ...node };
+    this.updateTaskGraphNode(applyNodeUpdate(node, { title, state }));
+    this.state.inlineEdit = { ...emptyInlineEdit };
+    this.render();
+
+    if (isActionCapable(this.transport)) {
+      const correlationId = `tg-update-${nodeId}-${generateId()}`;
+      this.state.pendingMutations.add(correlationId);
+      this.state.pendingSnapshots.set(correlationId, snapshot);
+      this.render();
+      try {
+        const receipt = await dispatchTaskGraphUpdate(this.transport, { node_id: nodeId, title, state }, correlationId);
+        this.applyMutationReceipt(receipt);
+      } catch (error) {
+        this.rollbackOptimisticMutation(correlationId);
+        this.state.connectionMessage = `Update failed: ${errorMessage(error)}`;
+      }
+      this.render();
+    }
+  }
+
+  private openDependencyEditor(nodeId: string): void {
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
+    if (!node) return;
+    this.state.dependencyEdit = { nodeId, blockedBy: [...node.blocked_by] };
+    this.render();
+  }
+
+  private async saveDependencyEdit(): Promise<void> {
+    const nodeId = this.state.dependencyEdit.nodeId;
+    if (!nodeId) return;
+    const select = this.options.root.querySelector<HTMLSelectElement>("[data-tg-deps-select]");
+    const blockedBy = Array.from(select?.selectedOptions ?? []).map((option) => option.value);
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
+    if (!node) return;
+    const snapshot = { ...node };
+    this.updateTaskGraphNode({ ...node, blocked_by: blockedBy });
+    this.state.dependencyEdit = { ...emptyDependencyEdit };
+    this.render();
+
+    if (isActionCapable(this.transport)) {
+      const correlationId = `tg-deps-${nodeId}-${generateId()}`;
+      this.state.pendingMutations.add(correlationId);
+      this.state.pendingSnapshots.set(correlationId, snapshot);
+      this.render();
+      try {
+        const receipt = await dispatchTaskGraphDependencies(this.transport, { node_id: nodeId, blocked_by: blockedBy }, correlationId);
+        this.applyMutationReceipt(receipt);
+      } catch (error) {
+        this.rollbackOptimisticMutation(correlationId);
+        this.state.connectionMessage = `Dependency update failed: ${errorMessage(error)}`;
+      }
+      this.render();
+    }
+  }
+
+  private openCommentEditor(nodeId: string): void {
+    this.state.commentEdit = { nodeId, kind: "comment", body: "" };
+    this.render();
+  }
+
+  private async saveCommentEdit(): Promise<void> {
+    const nodeId = this.state.commentEdit.nodeId;
+    if (!nodeId) return;
+    const body = this.options.root.querySelector<HTMLTextAreaElement>("[data-tg-comment-body]")?.value.trim() ?? "";
+    if (!body) return;
+    const kind = (this.options.root.querySelector<HTMLSelectElement>("[data-tg-comment-kind]")?.value ?? "comment") as "comment" | "evidence";
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
+    const snapshot = node ? { ...node } : null;
+    if (node) {
+      this.updateTaskGraphNode({ ...node, comment_count: (node.comment_count ?? 0) + 1 });
+    }
+    this.state.commentEdit = { ...emptyCommentEdit };
+    this.render();
+
+    if (isActionCapable(this.transport)) {
+      const correlationId = `tg-comment-${nodeId}-${generateId()}`;
+      this.state.pendingMutations.add(correlationId);
+      if (snapshot) {
+        this.state.pendingSnapshots.set(correlationId, snapshot);
+      }
+      this.render();
+      try {
+        const receipt = await dispatchTaskGraphComment(this.transport, { node_id: nodeId, body, kind }, correlationId);
+        this.applyMutationReceipt(receipt);
+      } catch (error) {
+        this.rollbackOptimisticMutation(correlationId);
+        this.state.connectionMessage = `Comment failed: ${errorMessage(error)}`;
+      }
+      this.render();
+    }
+  }
+
+  private updateTaskGraphNode(updated: TaskGraphNode): void {
+    const taskGraph = this.state.taskGraph;
+    if (!taskGraph) return;
+    const idx = taskGraph.nodes.findIndex((node) => node.node_id === updated.node_id);
+    if (idx >= 0) {
+      taskGraph.nodes[idx] = updated;
+    }
+  }
+
+  private applyMutationReceipt(receipt: ActionReceipt): void {
+    if (receipt.status !== "accepted") {
+      this.rollbackOptimisticMutation(receipt.correlation_id);
+      const detail = receipt.reason ? `: ${receipt.reason}` : "";
+      this.state.connectionMessage = `Mutation ${receipt.status}${detail}`;
+      return;
+    }
+
+    const result = receipt.result as { node_id?: string; updated_at?: string } | undefined;
+    if (!result?.node_id || !result?.updated_at) {
+      this.state.pendingMutations.delete(receipt.correlation_id);
+      this.state.pendingCreates.delete(receipt.correlation_id);
+      this.state.pendingSnapshots.delete(receipt.correlation_id);
+      return;
+    }
+
+    const localNodeId = this.state.pendingCreates.get(receipt.correlation_id);
+    if (localNodeId && localNodeId !== result.node_id) {
+      this.reconcileNodeId(localNodeId, result.node_id);
+    }
+    this.state.pendingMutations.delete(receipt.correlation_id);
+    this.state.pendingCreates.delete(receipt.correlation_id);
+    this.state.pendingSnapshots.delete(receipt.correlation_id);
+
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === result.node_id);
+    if (node) {
+      this.updateTaskGraphNode({ ...node, updated_at: result.updated_at });
+    }
+  }
+
+  private rollbackOptimisticMutation(correlationId: string): void {
+    const snapshot = this.state.pendingSnapshots.get(correlationId);
+    if (snapshot === undefined) {
+      this.state.pendingMutations.delete(correlationId);
+      this.state.pendingCreates.delete(correlationId);
+      return;
+    }
+
+    const taskGraph = this.state.taskGraph;
+    if (snapshot === null) {
+      const localNodeId = this.state.pendingCreates.get(correlationId);
+      if (taskGraph && localNodeId) {
+        taskGraph.nodes = taskGraph.nodes.filter((node) => node.node_id !== localNodeId);
+        taskGraph.root_ids = taskGraph.root_ids.filter((id) => id !== localNodeId);
+        for (const node of taskGraph.nodes) {
+          node.children = node.children.filter((id) => id !== localNodeId);
+          if (node.parent_id === localNodeId) {
+            node.parent_id = undefined;
+          }
+        }
+      }
+    } else if (taskGraph) {
+      this.updateTaskGraphNode(snapshot);
+    }
+
+    this.state.pendingMutations.delete(correlationId);
+    this.state.pendingCreates.delete(correlationId);
+    this.state.pendingSnapshots.delete(correlationId);
+  }
+
+  private reconcileNodeId(oldId: string, newId: string): void {
+    const taskGraph = this.state.taskGraph;
+    if (!taskGraph) return;
+    if (taskGraph.nodes.some((node) => node.node_id === newId && node.node_id !== oldId)) {
+      this.state.connectionMessage = `Server returned a duplicate node ID (${newId}); optimistic ID not reconciled.`;
+      return;
+    }
+
+    const node = taskGraph.nodes.find((candidate) => candidate.node_id === oldId);
+    if (!node) return;
+    node.node_id = newId;
+    if (taskGraph.root_ids.includes(oldId)) {
+      taskGraph.root_ids = taskGraph.root_ids.map((id) => (id === oldId ? newId : id));
+    }
+    for (const candidate of taskGraph.nodes) {
+      if (candidate.parent_id === oldId) candidate.parent_id = newId;
+      candidate.children = candidate.children.map((id) => (id === oldId ? newId : id));
+      candidate.blocked_by = candidate.blocked_by.map((id) => (id === oldId ? newId : id));
+    }
+    if (this.state.selectedNodeId === oldId) this.state.selectedNodeId = newId;
+    if (this.state.inlineEdit.nodeId === oldId) this.state.inlineEdit.nodeId = newId;
+    if (this.state.dependencyEdit.nodeId === oldId) this.state.dependencyEdit.nodeId = newId;
+    if (this.state.commentEdit.nodeId === oldId) this.state.commentEdit.nodeId = newId;
   }
 
   // -- Planning workspace handling --
