@@ -164,7 +164,7 @@ describe("desktop app shell render", () => {
     await transport.snapshot();
     await transport.taskGraph("opensymphony");
     await transport.runDetail("run-1");
-    await transport.runEvents("run-1", { page_size: 25 });
+    await transport.runEvents("run-1", { page_token: "opaque-token", page_size: 25 });
     await transport.runFiles("run-1");
     await transport.runDiffs("run-1", "src/config.ts");
     await transport.runValidation("run-1");
@@ -175,11 +175,51 @@ describe("desktop app shell render", () => {
       { command: "dashboard_snapshot", args: {} },
       { command: "task_graph", args: { project_id: "opensymphony" } },
       { command: "run_detail", args: { run_id: "run-1" } },
-      { command: "run_events", args: { run_id: "run-1", cursor: null, page_size: 25 } },
+      { command: "run_events", args: { run_id: "run-1", page_token: "opaque-token", page_size: 25 } },
       { command: "run_files", args: { run_id: "run-1" } },
       { command: "run_diffs", args: { run_id: "run-1", file_path: "src/config.ts" } },
       { command: "run_validation", args: { run_id: "run-1" } },
       { command: "run_approvals", args: { run_id: "run-1" } },
     ]);
+  });
+
+  it("falls back to loopback HTTP when a native desktop command fails", async () => {
+    const calls: TauriInvokeCall[] = [];
+    const fetchCalls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          throw new Error("native command unavailable");
+        },
+      },
+    };
+    globalThis.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      fetchCalls.push(String(input));
+      return {
+        ok: true,
+        async json() {
+          return {
+            schema_version: { major: 1, minor: 0, patch: 0 },
+            gateway_version: "test",
+            supported_api_versions: ["1.0.0"],
+            transports: [],
+            features: [],
+            auth_modes: [],
+          };
+        },
+      } as Response;
+    });
+
+    try {
+      const transport = createDesktopTransport("http://127.0.0.1:2468");
+      await transport.health();
+
+      expect(calls).toEqual([{ command: "gateway_capabilities", args: {} }]);
+      expect(fetchCalls).toEqual(["http://127.0.0.1:2468/api/v1/capabilities"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

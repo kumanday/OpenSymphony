@@ -119,6 +119,7 @@ fn tracker_issue_from_snapshot(
         description: None,
         priority: None,
         state: issue.tracker_state.clone(),
+        state_kind: tracker_state_kind_from_name(&issue.tracker_state),
         labels: Vec::new(),
         parent_id: None,
         parent: None,
@@ -150,6 +151,17 @@ fn tracker_issue_ref_from_tracker(issue: &TrackerIssue) -> TrackerIssueRef {
         title: Some(issue.title.clone()),
         url: Some(issue.url.clone()),
         state: issue.state.clone(),
+    }
+}
+
+fn tracker_state_kind_from_name(state: &str) -> TrackerIssueStateKind {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "backlog" => TrackerIssueStateKind::Backlog,
+        "todo" => TrackerIssueStateKind::Unstarted,
+        "in progress" | "human review" | "review" => TrackerIssueStateKind::Started,
+        "done" | "completed" | "closed" => TrackerIssueStateKind::Completed,
+        "canceled" | "cancelled" => TrackerIssueStateKind::Canceled,
+        other => TrackerIssueStateKind::Unknown(other.to_owned()),
     }
 }
 

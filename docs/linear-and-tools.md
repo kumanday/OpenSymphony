@@ -35,6 +35,9 @@ Important normalization rules:
 
 - `blocked_by` is derived from `inverseRelations` entries whose relation type is
   `blocks`
+- `state_kind` is derived from Linear's stable workflow-state `type`; clients and
+  caches must not infer categories from mutable display names such as
+  "Human Review"
 - `parent_id` comes from `parent.id`
 - `parent` retains the parent identifier when Linear returns it, and gateway
   task graph nodes use that identifier as the client-facing `parent_id`

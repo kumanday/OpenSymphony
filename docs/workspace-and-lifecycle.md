@@ -213,7 +213,10 @@ Gateway run-detail reads use the same workspace ownership boundary. Changed-file
 lists come from the control-plane issue snapshot, and per-file diffs are read
 from the issue workspace path recorded for that issue. These reads must stay
 inside the issue workspace and are exposed through the gateway/Tauri contract
-only; rich clients do not inspect workspace paths directly.
+only; rich clients do not inspect workspace paths directly. Tracked-file diffs
+come from the workspace Git history, while untracked created-file diffs are
+generated in-process so the gateway does not depend on platform-specific null
+device paths.
 
 Current repository implementation:
 

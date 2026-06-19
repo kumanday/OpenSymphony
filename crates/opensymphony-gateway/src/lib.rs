@@ -30,7 +30,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::opensymphony_domain::{
     EventStream, InMemoryEventJournal, StreamBroker, TerminalLogStore, TimelineBuilder,
-    TrackerIssue, belongs_to_run,
+    TrackerIssue, TrackerIssueStateKind, belongs_to_run,
 };
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
@@ -1603,18 +1603,7 @@ fn workspace_diff_for_change(
     change: &WorkspaceRunFileChange,
 ) -> Result<String, String> {
     if change.status_code.starts_with("??") {
-        command_output_args_allow_status(
-            workspace_path,
-            "git",
-            [
-                "diff".to_owned(),
-                "--no-index".to_owned(),
-                "--".to_owned(),
-                "/dev/null".to_owned(),
-                change.query_path.clone(),
-            ],
-            &[1],
-        )
+        untracked_file_unified_diff(workspace_path, &change.query_path)
     } else {
         let comparison_base = workspace_comparison_base(workspace_path)?;
         let mut args = vec![
@@ -1629,6 +1618,35 @@ fn workspace_diff_for_change(
         args.push(change.query_path.clone());
         command_output_args(workspace_path, "git", args)
     }
+}
+
+fn untracked_file_unified_diff(
+    workspace_path: &StdPath,
+    query_path: &str,
+) -> Result<String, String> {
+    let bytes = std::fs::read(workspace_path.join(query_path))
+        .map_err(|error| format!("failed to read untracked file {query_path}: {error}"))?;
+    let text = if bytes.contains(&0) {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let lines = text.lines().collect::<Vec<_>>();
+    let new_start = if lines.is_empty() { 0 } else { 1 };
+
+    let mut diff = String::new();
+    diff.push_str(&format!("diff --git a/{query_path} b/{query_path}\n"));
+    diff.push_str("new file mode 100644\n");
+    diff.push_str("index 0000000..0000000\n");
+    diff.push_str("--- /dev/null\n");
+    diff.push_str(&format!("+++ b/{query_path}\n"));
+    diff.push_str(&format!("@@ -0,0 +{new_start},{} @@\n", lines.len()));
+    for line in lines {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    Ok(diff)
 }
 
 async fn workspace_diff_for_change_async(
@@ -2090,7 +2108,7 @@ async fn get_task_graph(
                 .copied();
             let state_category = snapshot_issue
                 .map(|issue| map_runtime_state_to_graph_category(&issue.runtime_state))
-                .unwrap_or_else(|| map_tracker_state_to_graph_category(&issue.state));
+                .unwrap_or_else(|| map_tracker_state_kind_to_graph_category(&issue.state_kind));
             let runtime_overlay = snapshot_issue.map(build_runtime_overlay);
 
             crate::opensymphony_gateway_schema::task_graph::TaskGraphNode {
@@ -2170,14 +2188,18 @@ fn map_runtime_state_to_graph_category(
     }
 }
 
-fn map_tracker_state_to_graph_category(state: &str) -> TaskGraphStateCategory {
-    match state.trim().to_ascii_lowercase().as_str() {
-        "backlog" => TaskGraphStateCategory::Backlog,
-        "todo" | "unstarted" => TaskGraphStateCategory::Todo,
-        "in progress" | "started" | "human review" | "review" => TaskGraphStateCategory::InProgress,
-        "done" | "completed" | "closed" => TaskGraphStateCategory::Done,
-        "canceled" | "cancelled" => TaskGraphStateCategory::Canceled,
-        _ => TaskGraphStateCategory::Todo,
+fn map_tracker_state_kind_to_graph_category(
+    kind: &TrackerIssueStateKind,
+) -> TaskGraphStateCategory {
+    match kind {
+        TrackerIssueStateKind::Backlog => TaskGraphStateCategory::Backlog,
+        TrackerIssueStateKind::Unstarted | TrackerIssueStateKind::Triage => {
+            TaskGraphStateCategory::Todo
+        }
+        TrackerIssueStateKind::Started => TaskGraphStateCategory::InProgress,
+        TrackerIssueStateKind::Completed => TaskGraphStateCategory::Done,
+        TrackerIssueStateKind::Canceled => TaskGraphStateCategory::Canceled,
+        TrackerIssueStateKind::Unknown(_) => TaskGraphStateCategory::Todo,
     }
 }
 
@@ -2409,7 +2431,7 @@ async fn get_run_detail(
 #[derive(Debug, serde::Deserialize)]
 struct RunEventQuery {
     page_token: Option<String>,
-    cursor: Option<u64>,
+    cursor: Option<String>,
     page_size: Option<usize>,
 }
 
@@ -2449,8 +2471,8 @@ async fn get_run_events(
     let start_sequence = query
         .page_token
         .as_deref()
+        .or(query.cursor.as_deref())
         .and_then(|token| token.parse::<u64>().ok())
-        .or(query.cursor)
         .unwrap_or(1)
         .max(1);
     let page_size = query
@@ -3221,6 +3243,24 @@ mod tests {
     }
 
     #[test]
+    fn tracker_state_kind_mapping_uses_stable_linear_kind() {
+        assert_eq!(
+            map_tracker_state_kind_to_graph_category(&TrackerIssueStateKind::Started),
+            TaskGraphStateCategory::InProgress
+        );
+        assert_eq!(
+            map_tracker_state_kind_to_graph_category(&TrackerIssueStateKind::Completed),
+            TaskGraphStateCategory::Done
+        );
+        assert_eq!(
+            map_tracker_state_kind_to_graph_category(&TrackerIssueStateKind::Unknown(
+                "custom-review".to_owned()
+            )),
+            TaskGraphStateCategory::Todo
+        );
+    }
+
+    #[test]
     fn serialize_stream_error_matches_flat_error_type_contract() {
         let json = serialize_stream_error(&StreamError::server_error("boom"));
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -3587,6 +3627,34 @@ mod tests {
 
         let diff = workspace_diff_for_change(workspace, modified).expect("diff tracked file");
         assert!(diff.contains("println!"));
+        let created_diff =
+            workspace_diff_for_change(workspace, created).expect("diff untracked file");
+        assert!(created_diff.contains("+++ b/src/new.rs"));
+        assert!(created_diff.contains("+pub fn new_file() {}"));
+    }
+
+    #[test]
+    fn workspace_diff_for_untracked_file_does_not_require_git_repository() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::create_dir_all(workspace.join("src")).expect("create src");
+        std::fs::write(workspace.join("src/new.rs"), "pub fn new_file() {}\n").expect("write new");
+        let change = WorkspaceRunFileChange {
+            path: "src/new.rs".to_owned(),
+            query_path: "src/new.rs".to_owned(),
+            previous_path: None,
+            status_code: "??".to_owned(),
+            change_kind: ControlPlaneFileChangeKind::Created,
+            lines_added: 1,
+            lines_removed: 0,
+            snapshot_diff: None,
+        };
+
+        let diff = workspace_diff_for_change(workspace, &change).expect("diff untracked file");
+
+        assert!(diff.contains("new file mode 100644"));
+        assert!(diff.contains("+++ b/src/new.rs"));
+        assert!(diff.contains("+pub fn new_file() {}"));
     }
 
     #[test]

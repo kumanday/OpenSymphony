@@ -74,12 +74,11 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     runId: string,
     cursor?: Parameters<GatewayTransport["runEvents"]>[1],
   ): ReturnType<GatewayTransport["runEvents"]> {
-    const parsedCursor = cursor?.page_token ? Number(cursor.page_token) : null;
     return this.invokeOrHttp(
       "run_events",
       {
         run_id: runId,
-        cursor: Number.isFinite(parsedCursor) ? parsedCursor : null,
+        page_token: cursor?.page_token ?? null,
         page_size: cursor?.page_size ?? null,
       },
       () => this.inner.runEvents(runId, cursor),
@@ -230,7 +229,11 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     if (!invoke) {
       return fallback();
     }
-    return invoke<T>(command, args);
+    try {
+      return await invoke<T>(command, args);
+    } catch {
+      return fallback();
+    }
   }
 }
 

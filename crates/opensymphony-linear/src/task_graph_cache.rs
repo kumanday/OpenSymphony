@@ -2,7 +2,7 @@ use std::{collections::HashMap, time::Duration};
 
 use chrono::{DateTime, Utc};
 
-use crate::opensymphony_domain::TrackerIssue;
+use crate::opensymphony_domain::{TrackerIssue, TrackerIssueStateKind};
 
 /// Cached Linear entity with sync metadata.
 #[derive(Debug, Clone)]
@@ -149,16 +149,16 @@ impl TaskGraphCache {
         self.overlays.iter()
     }
 
-    fn infer_state_kind(state: &str) -> String {
-        match state.to_lowercase().as_str() {
-            "done" | "completed" | "closed" => "completed",
-            "canceled" | "cancelled" => "canceled",
-            "in progress" | "started" => "started",
-            "todo" | "unstarted" => "unstarted",
-            "backlog" => "backlog",
-            _ => "unknown",
+    fn state_kind_label(kind: &TrackerIssueStateKind) -> &'static str {
+        match kind {
+            TrackerIssueStateKind::Backlog => "backlog",
+            TrackerIssueStateKind::Unstarted => "unstarted",
+            TrackerIssueStateKind::Started => "started",
+            TrackerIssueStateKind::Completed => "completed",
+            TrackerIssueStateKind::Canceled => "canceled",
+            TrackerIssueStateKind::Triage => "triage",
+            TrackerIssueStateKind::Unknown(_) => "unknown",
         }
-        .to_string()
     }
 }
 
@@ -169,7 +169,7 @@ impl From<TrackerIssue> for CachedLinearEntity {
             identifier: issue.identifier.clone(),
             title: issue.title.clone(),
             state: issue.state.clone(),
-            state_kind: TaskGraphCache::infer_state_kind(&issue.state),
+            state_kind: TaskGraphCache::state_kind_label(&issue.state_kind).to_owned(),
             priority: issue.priority,
             labels: issue.labels,
             parent_id: issue.parent_id,
@@ -221,6 +221,7 @@ mod tests {
             description: None,
             priority: Some(1),
             state: state.to_string(),
+            state_kind: tracker_issue_state_kind_from_name(state),
             labels: vec!["backend".to_string()],
             parent_id: None,
             parent: None,
@@ -232,6 +233,17 @@ mod tests {
             sub_issues: Vec::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    fn tracker_issue_state_kind_from_name(state: &str) -> TrackerIssueStateKind {
+        match state.trim().to_ascii_lowercase().as_str() {
+            "backlog" => TrackerIssueStateKind::Backlog,
+            "todo" => TrackerIssueStateKind::Unstarted,
+            "in progress" | "review" | "human review" => TrackerIssueStateKind::Started,
+            "done" | "completed" | "closed" => TrackerIssueStateKind::Completed,
+            "canceled" | "cancelled" => TrackerIssueStateKind::Canceled,
+            other => TrackerIssueStateKind::Unknown(other.to_owned()),
         }
     }
 
@@ -313,12 +325,27 @@ mod tests {
     }
 
     #[test]
-    fn infer_state_kind_maps_known_states() {
-        assert_eq!(TaskGraphCache::infer_state_kind("Done"), "completed");
-        assert_eq!(TaskGraphCache::infer_state_kind("In Progress"), "started");
-        assert_eq!(TaskGraphCache::infer_state_kind("Todo"), "unstarted");
-        assert_eq!(TaskGraphCache::infer_state_kind("Backlog"), "backlog");
-        assert_eq!(TaskGraphCache::infer_state_kind("Custom"), "unknown");
+    fn state_kind_label_maps_stable_kinds() {
+        assert_eq!(
+            TaskGraphCache::state_kind_label(&TrackerIssueStateKind::Completed),
+            "completed"
+        );
+        assert_eq!(
+            TaskGraphCache::state_kind_label(&TrackerIssueStateKind::Started),
+            "started"
+        );
+        assert_eq!(
+            TaskGraphCache::state_kind_label(&TrackerIssueStateKind::Unstarted),
+            "unstarted"
+        );
+        assert_eq!(
+            TaskGraphCache::state_kind_label(&TrackerIssueStateKind::Backlog),
+            "backlog"
+        );
+        assert_eq!(
+            TaskGraphCache::state_kind_label(&TrackerIssueStateKind::Unknown("custom".to_owned())),
+            "unknown"
+        );
     }
 
     #[test]

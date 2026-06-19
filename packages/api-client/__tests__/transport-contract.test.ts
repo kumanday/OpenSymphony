@@ -401,6 +401,31 @@ describe("TauriChannelTransport", () => {
     expect(invoke).toHaveBeenCalledWith("gateway_capabilities", {});
   });
 
+  it("passes run event page tokens through native commands without numeric coercion", async () => {
+    const invoke = jest.fn().mockResolvedValue({
+      schema_version: { major: 1, minor: 0, patch: 0 },
+      run_id: "run-1",
+      events: [],
+    });
+    globalWithTauri.__TAURI__ = {
+      invoke,
+      core: { Channel: jest.fn() },
+    };
+
+    const transport = new TauriChannelTransport({ baseUri: "tauri://local" });
+
+    await transport.runEvents("run-1", {
+      page_token: "opaque-token",
+      page_size: 25,
+    });
+
+    expect(invoke).toHaveBeenCalledWith("run_events", {
+      run_id: "run-1",
+      page_token: "opaque-token",
+      page_size: 25,
+    });
+  });
+
   it("forwards event cursors and unsubscribes on close", async () => {
     const channels: Array<{ close: jest.Mock; emit: (envelope: GatewayEnvelope) => void }> = [];
     const invoke = jest.fn().mockResolvedValue(undefined);

@@ -132,6 +132,7 @@ mod tests {
             description: None,
             priority,
             state: "In Progress".to_string(),
+            state_kind: TrackerIssueStateKind::Started,
             labels: Vec::new(),
             parent_id: None,
             parent: None,

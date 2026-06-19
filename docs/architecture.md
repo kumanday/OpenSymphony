@@ -193,7 +193,9 @@ clients can render the same forest without inventing hierarchy locally.
 Native desktop builds may call the same operations through Tauri IPC instead
 of loopback HTTP, but the data contract is identical. Tauri command arguments
 use the Rust command parameter names exactly, including snake_case keys such as
-`run_id`, `project_id`, `page_size`, and `file_path`.
+`run_id`, `project_id`, `page_token`, `page_size`, and `file_path`. If a native
+desktop read command fails, the desktop adapter may retry through the loopback
+HTTP transport for the same gateway operation.
 
 ## 6. Failure boundaries
 

@@ -1013,13 +1013,16 @@ pub async fn run_approvals(
 pub async fn run_events(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     run_id: String,
-    cursor: Option<u64>,
+    page_token: Option<String>,
     page_size: Option<u64>,
 ) -> CommandResult<serde_json::Value> {
     let mut path = format!("/api/v1/runs/{}/events", urlencoding::encode(&run_id));
     let mut params = Vec::new();
-    if let Some(cursor) = cursor {
-        params.push(format!("cursor={cursor}"));
+    if let Some(page_token) = page_token {
+        params.push(format!(
+            "page_token={}",
+            urlencoding::encode(&page_token)
+        ));
     }
     if let Some(page_size) = page_size {
         params.push(format!("page_size={page_size}"));
