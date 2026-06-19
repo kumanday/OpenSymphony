@@ -237,11 +237,13 @@ returns a `session_token` plus the user, organization, and role context.
 Security hardening notes for the alpha store:
 
 - Credentials are never stored in plaintext. Seeded passwords are salted and
-  SHA-256 hashed inside the in-memory store and verified in constant time, so
+  stretched with PBKDF2-HMAC-SHA256 (OWASP-recommended 600,000 iterations by
+  default) inside the in-memory store and verified in constant time, so
   process memory inspection or accidentally committed fixtures do not leak
-  reusable credentials. A production deployment must still replace this with a
-  real credential store (argon2/bcrypt + external secret storage); a full
-  secret-storage subsystem is explicitly out of scope for COE-420.
+  reusable credentials and the stored hash resists offline brute force. A
+  production deployment must still replace this with a real credential store
+  (argon2/bcrypt + external secret storage); a full secret-storage subsystem is
+  explicitly out of scope for COE-420.
 - The `?token=` query-parameter fallback is restricted to WebSocket upgrade
   requests only. Ordinary HTTP requests must use the `Authorization` header so
   session tokens are not leaked through server logs, proxies, browser history,
