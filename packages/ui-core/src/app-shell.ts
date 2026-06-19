@@ -347,7 +347,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       capabilities = await this.transport.health();
     } catch (error) {
       this.state.capabilities = null;
-      this.state.authState = this.resolveAuthState(null, error);
+      this.state.authState = this.resolveAuthState(error);
       if (this.state.authState !== "open") {
         this.state.connectionMode = "connected";
         this.state.connectionMessage = this.authMessage(this.state.authState);
@@ -365,7 +365,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.capabilities = capabilities;
       this.state.snapshot = snapshot;
       this.state.connectionMode = "connected";
-      this.state.authState = this.resolveAuthState(capabilities, null);
+      this.state.authState = this.resolveAuthState(null);
       this.state.connectionMessage = `Connected to ${this.transport.baseUri || "same-origin gateway"}`;
       this.state.selectedProjectId = snapshot.projects[0]?.project_id ?? "default";
       await this.loadTaskGraph(this.state.selectedProjectId);
@@ -376,7 +376,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       };
     } catch (error) {
       this.state.capabilities = capabilities;
-      this.state.authState = this.resolveAuthState(capabilities, error);
+      this.state.authState = this.resolveAuthState(error);
       if (this.state.authState !== "open") {
         // Capabilities resolved, but the protected resource rejected us.
         // Treat the connection as established so the auth placeholder renders
@@ -406,29 +406,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   /**
-   * Resolve the auth-facing state from capabilities and a thrown error.
+   * Resolve the auth-facing state from a thrown error.
    *
-   * - A classified auth error (`unauthenticated`/`unauthorized`/`forbidden`)
-   *   wins regardless of advertised auth modes.
-   * - With no error and `auth_modes` containing only `none`, the gateway is
-   *   `open` (local unauthenticated development mode).
-   * - With no error but auth-required capabilities, the shell still renders
-   *   `open` once a snapshot loaded successfully (the caller is signed in).
+   * The shell only gates on auth when a protected read fails: a classified
+   * auth error (`unauthenticated`/`unauthorized`/`forbidden`) wins, and any
+   * successful load (authenticated caller or local no-auth gateway) is
+   * `open`. Advertised `auth_modes` are not consulted here; capabilities are
+   * fetched separately so a snapshot that 401s still reports the gateway's
+   * auth modes, but they do not change the gate decision.
    */
-  private resolveAuthState(
-    capabilities: GatewayCapabilities | null,
-    error: unknown,
-  ): AuthState {
-    const fromError = authStateFromError(error);
-    if (fromError !== "open") {
-      return fromError;
-    }
-    if (error || !capabilities) {
-      return "open";
-    }
-    // Successful load: authenticated or no-auth gateway. Keep the dashboard
-    // open; the shell only gates on auth when a protected read fails.
-    return "open";
+  private resolveAuthState(error: unknown): AuthState {
+    return authStateFromError(error);
   }
 
   private authMessage(state: AuthState): string {
