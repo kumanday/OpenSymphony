@@ -1605,18 +1605,33 @@ fn count_untracked_lines(workspace_path: &StdPath, query_path: &str) -> Option<u
     Some(text.lines().count().min(u32::MAX as usize) as u32)
 }
 
+#[cfg(test)]
 fn workspace_diff_for_change(
     workspace_path: &StdPath,
     change: &WorkspaceRunFileChange,
 ) -> Result<String, String> {
+    let comparison_base = if change.status_code.starts_with("??") {
+        None
+    } else {
+        Some(workspace_comparison_base(workspace_path)?)
+    };
+    workspace_diff_for_change_with_base(workspace_path, change, comparison_base.as_ref())
+}
+
+fn workspace_diff_for_change_with_base(
+    workspace_path: &StdPath,
+    change: &WorkspaceRunFileChange,
+    comparison_base: Option<&WorkspaceComparisonBase>,
+) -> Result<String, String> {
     if change.status_code.starts_with("??") {
         untracked_file_unified_diff(workspace_path, &change.query_path)
     } else {
-        let comparison_base = workspace_comparison_base(workspace_path)?;
+        let comparison_base =
+            comparison_base.ok_or_else(|| "missing git comparison base".to_owned())?;
         let mut args = vec![
             "diff".to_owned(),
             "--find-renames".to_owned(),
-            comparison_base.merge_base,
+            comparison_base.merge_base.clone(),
             "--".to_owned(),
         ];
         if let Some(previous_path) = &change.previous_path {
@@ -1659,10 +1674,13 @@ fn untracked_file_unified_diff(
 async fn workspace_diff_for_change_async(
     workspace_path: PathBuf,
     change: WorkspaceRunFileChange,
+    comparison_base: Option<WorkspaceComparisonBase>,
 ) -> Result<String, String> {
-    tokio::task::spawn_blocking(move || workspace_diff_for_change(&workspace_path, &change))
-        .await
-        .map_err(|error| error.to_string())?
+    tokio::task::spawn_blocking(move || {
+        workspace_diff_for_change_with_base(&workspace_path, &change, comparison_base.as_ref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn change_kind_from_status(status_code: &str) -> ControlPlaneFileChangeKind {
@@ -2108,6 +2126,10 @@ async fn get_task_graph(
         }
     };
 
+    let issue_node_ids = linear_issues
+        .iter()
+        .map(|issue| issue.identifier.clone())
+        .collect::<HashSet<_>>();
     let snapshot_by_identifier = snapshot
         .issues
         .iter()
@@ -2147,6 +2169,7 @@ async fn get_task_graph(
                 blocked_by: issue
                     .blocked_by
                     .iter()
+                    .filter(|blocker| issue_node_ids.contains(blocker.identifier.as_str()))
                     .map(|blocker| blocker.identifier.clone())
                     .collect(),
                 url: Some(issue.url.clone()).filter(|url| !url.is_empty()),
@@ -2632,10 +2655,15 @@ async fn get_run_diffs(
         None => all_files,
     };
 
+    let comparison_base = workspace_path
+        .as_ref()
+        .and_then(|path| workspace_comparison_base(path).ok());
     let mut hunks: Vec<DiffHunk> = Vec::new();
     for fc in &files {
         if let Some(path) = &workspace_path
-            && let Ok(diff_text) = workspace_diff_for_change_async(path.clone(), fc.clone()).await
+            && let Ok(diff_text) =
+                workspace_diff_for_change_async(path.clone(), fc.clone(), comparison_base.clone())
+                    .await
         {
             hunks.extend(parse_unified_diff(&fc.path, &diff_text));
             continue;

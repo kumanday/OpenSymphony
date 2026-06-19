@@ -21,6 +21,7 @@ export interface TaskGraphNode {
   priority?: number;
   parent_id?: string;
   children: string[];
+  /** Blocker node identifiers that are present in this task graph snapshot. */
   blocked_by: string[];
   url?: string;
   branch_name?: string;

@@ -39,7 +39,8 @@ Current workflow contract:
 Important normalization rules:
 
 - `blocked_by` is derived from `inverseRelations` entries whose relation type is
-  `blocks`
+  `blocks`; gateway task graph responses filter these IDs to nodes present in
+  the returned project snapshot so clients do not receive dangling graph edges
 - `state_kind` is derived from Linear's stable workflow-state `type`; clients and
   caches must not infer categories from mutable display names such as
   "Human Review"

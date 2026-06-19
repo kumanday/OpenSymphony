@@ -2135,7 +2135,7 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
     let server = GatewayServer::new(store.clone()).with_linear_task_graph(Some(
         fake_linear_task_graph_client_with_hierarchy(
             &snapshot,
-            &[("COE-304", vec!["COE-300"])],
+            &[("COE-304", vec!["COE-300", "COE-999"])],
             &[("COE-304", "COE-300")],
         ),
     ));

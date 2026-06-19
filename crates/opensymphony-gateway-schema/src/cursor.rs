@@ -34,7 +34,7 @@ impl StreamCursor {
 /// Pagination cursor for detail reads (runs, events, files, diffs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PageCursor {
-    /// Opaque page token; empty means first page.
+    /// Gateway-issued numeric sequence token encoded as a string; empty means first page.
     pub page_token: String,
     /// Desired page size.
     pub page_size: u32,

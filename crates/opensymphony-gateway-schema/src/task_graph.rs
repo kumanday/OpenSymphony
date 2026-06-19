@@ -16,6 +16,7 @@ pub struct TaskGraphNode {
     pub priority: Option<u8>,
     pub parent_id: Option<String>,
     pub children: Vec<String>,
+    /// Blocker node identifiers that are present in this task graph snapshot.
     pub blocked_by: Vec<String>,
     pub url: Option<String>,
     pub branch_name: Option<String>,
