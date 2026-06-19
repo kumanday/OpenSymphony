@@ -65,6 +65,7 @@ export function renderTaskGraphNode(
   const runMeta = overlay?.run_id
     ? `<span class="os-run-meta">run ${escapeHtml(overlay.run_id)}</span>`
     : "";
+  const stateTone = stateToneForNode(node);
 
   const titleContent = isEditing
     ? `<input class="os-inline-input" data-tg-inline-title="${escapeAttr(node.node_id)}" value="${escapeAttr(inlineEdit.title)}" />`
@@ -74,7 +75,7 @@ export function renderTaskGraphNode(
 
   const stateContent = isEditing
     ? `<input class="os-inline-input os-inline-state" data-tg-inline-state="${escapeAttr(node.node_id)}" value="${escapeAttr(inlineEdit.state)}" />`
-    : `<em>${escapeHtml(node.state)}</em>`;
+    : `<em class="os-node-state os-node-state-${escapeAttr(stateTone)}">${escapeHtml(node.state)}</em>`;
 
   const editButtons = isEditing
     ? `<button type="button" data-tg-inline-save="${escapeAttr(node.node_id)}">Save</button><button type="button" data-tg-inline-cancel="${escapeAttr(node.node_id)}">Cancel</button>`
@@ -96,6 +97,19 @@ export function renderTaskGraphNode(
       </div>
     </div>
   `;
+}
+
+function stateToneForNode(node: TaskGraphNode): string {
+  const value = `${node.state} ${node.state_category ?? ""}`.toLowerCase();
+  if (value.includes("human review") || value.includes("review")) return "review";
+  if (value.includes("block")) return "blocked";
+  if (value.includes("fail") || value.includes("cancel")) return "failed";
+  if (value.includes("running") || value.includes("progress")) return "running";
+  if (value.includes("done") || value.includes("complete") || value.includes("release")) return "done";
+  if (value.includes("backlog")) return "backlog";
+  if (value.includes("todo")) return "todo";
+  if (value.includes("idle")) return "idle";
+  return "neutral";
 }
 
 /** Render the selected node detail strip and actions. */

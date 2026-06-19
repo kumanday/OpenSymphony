@@ -156,6 +156,13 @@ fn map_issue(
                 .sub_issues
                 .iter()
                 .any(|sub_issue| !is_terminal_state(terminal_states, &sub_issue.state))),
+        blocked_by: issue
+            .issue
+            .blocked_by
+            .iter()
+            .filter_map(|blocker| blocker.identifier.as_ref())
+            .map(ToString::to_string)
+            .collect(),
         server_base_url: issue
             .conversation
             .as_ref()

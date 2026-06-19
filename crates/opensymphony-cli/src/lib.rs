@@ -1850,6 +1850,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
                 0
             },
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
             transport_target: Some("loopback".to_owned()),
             http_auth_mode: Some("none".to_owned()),
@@ -1875,6 +1876,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             workspace_path_suffix: "OSYM-401".to_owned(),
             retry_count: 0,
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: Some("https://agent.example.com/runtime".to_owned()),
             transport_target: Some("remote".to_owned()),
             http_auth_mode: Some("header".to_owned()),
@@ -1908,6 +1910,7 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             workspace_path_suffix: "OSYM-402".to_owned(),
             retry_count: 0,
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: Some("https://agent.example.com/runtime".to_owned()),
             transport_target: Some("remote".to_owned()),
             http_auth_mode: Some("header".to_owned()),

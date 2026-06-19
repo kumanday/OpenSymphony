@@ -180,50 +180,52 @@ async fn candidate_issues_fetch_all_inverse_relation_pages() {
 }
 
 #[tokio::test]
-async fn issues_by_identifiers_fetches_archived_issue_details() {
-    let server = MockGraphqlServer::start(vec![
-        QueuedResponse::json(issue_by_identifier_response(
+async fn project_issues_by_identifiers_fetches_project_issue_details_in_one_query() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(project_issues_response(&[
+        (
             "issue-260",
             "COE-260",
             "Domain model and orchestrator state machine",
-        )),
-        QueuedResponse::json(issue_by_identifier_response(
+        ),
+        (
             "issue-264",
             "COE-264",
             "Linear read adapter and issue normalization",
-        )),
-    ])
+        ),
+    ]))])
     .await;
     let client = LinearClient::new(test_config(server.base_url()))
         .expect("client configuration should work");
 
     let issues = client
-        .issues_by_identifiers(&["COE-260", "COE-264"])
+        .project_issues_by_identifiers(&["COE-260", "COE-264"])
         .await
         .expect("identifier lookup should succeed");
 
     assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0].identifier, "COE-260");
+    assert_eq!(issues[1].identifier, "COE-264");
     let requests = server.recorded_requests().await;
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 1);
     assert_eq!(
-        requests[0].body["variables"]["identifier"],
-        serde_json::json!("COE-260")
+        requests[0].body["variables"]["projectSlug"],
+        serde_json::json!("e7b957855cb7")
     );
     assert_eq!(
-        requests[1].body["variables"]["identifier"],
-        serde_json::json!("COE-264")
+        requests[0].body["variables"]["includeArchived"],
+        serde_json::json!(false)
     );
     assert!(
         requests[0].body["query"]
             .as_str()
             .expect("query should be a string")
-            .contains("query IssueByIdentifier")
+            .contains("query ProjectIssues")
     );
     assert!(
         !requests[0].body["query"]
             .as_str()
             .expect("query should be a string")
-            .contains("identifier: {")
+            .contains("query IssueByIdentifier")
     );
 }
 
@@ -887,11 +889,12 @@ fn test_config(base_url: &str) -> LinearConfig {
     config
 }
 
-fn issue_by_identifier_response(issue_id: &str, identifier: &str, title: &str) -> String {
-    format!(
-        r#"{{
-  "data": {{
-    "issue": {{
+fn project_issues_response(issues: &[(&str, &str, &str)]) -> String {
+    let nodes = issues
+        .iter()
+        .map(|(issue_id, identifier, title)| {
+            format!(
+                r#"{{
       "id": "{issue_id}",
       "identifier": "{identifier}",
       "url": "https://linear.app/example/issue/{identifier}",
@@ -922,6 +925,23 @@ fn issue_by_identifier_response(issue_id: &str, identifier: &str, title: &str) -
           "hasNextPage": false,
           "endCursor": null
         }}
+      }}
+    }}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!(
+        r#"{{
+  "data": {{
+    "issues": {{
+      "nodes": [
+        {nodes}
+      ],
+      "pageInfo": {{
+        "hasNextPage": false,
+        "endCursor": null
       }}
     }}
   }}

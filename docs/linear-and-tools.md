@@ -22,21 +22,41 @@ It is responsible for:
 - refreshing current state for already-running issues
 - reading terminal issues for startup cleanup
 - normalizing GraphQL payloads into stable domain models
+- serving gateway task graph reads with Linear-native parent, child, and
+  blocker relationships
+- loading gateway task graph issue details through project-scoped, paged Linear
+  reads rather than per-identifier GraphQL lookups
 
 Current workflow contract:
 
 - `tracker.kind` must be `linear`
 - `tracker.project_slug` stores Linear `Project.slugId`
 - `LINEAR_API_KEY` must be available when Linear mode is enabled
+- the scheduler's Linear tracker client remains mandatory for `opensymphony run`;
+  the gateway task graph reader is optional and, when unavailable, causes only
+  the task graph endpoint to return `503`
 
 Important normalization rules:
 
 - `blocked_by` is derived from `inverseRelations` entries whose relation type is
-  `blocks`
+  `blocks`; gateway task graph responses filter these IDs to nodes present in
+  the returned project snapshot so clients do not receive dangling graph edges
+- `state_kind` is derived from Linear's stable workflow-state `type`; clients and
+  caches must not infer categories from mutable display names such as
+  "Human Review"
 - `parent_id` comes from `parent.id`
+- `parent` retains the parent identifier when Linear returns it, and gateway
+  task graph nodes use that identifier as the client-facing `parent_id`; the
+  gateway clears `parent_id` when that parent is outside the returned project
+  snapshot so clients do not receive dangling hierarchy edges
 - `sub_issues` comes from `children.nodes`
+- gateway task graph `children` are filtered to nodes present in the returned
+  project snapshot
 - `state` remains the workflow-facing state name string used by
   `WORKFLOW.md`
+- gateway task graph `root_ids` are the returned node identifiers whose Linear
+  parent is absent or outside the returned node set; clients must not infer
+  tracker hierarchy from fixture data or local fallbacks
 
 ## 3. Agent-side Linear access
 

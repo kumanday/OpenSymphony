@@ -15,6 +15,7 @@ export function streamCursor(
 
 /** Pagination cursor for detail reads. */
 export interface PageCursor {
+  /** Gateway-issued numeric sequence token encoded as a string. */
   page_token?: string;
   page_size: number;
 }

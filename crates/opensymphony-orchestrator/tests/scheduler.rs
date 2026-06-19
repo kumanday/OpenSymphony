@@ -46,6 +46,7 @@ fn tracker_issue(id: &str, identifier: &str, state: &str, created_at: u64) -> Tr
         description: Some("scheduler test fixture".to_string()),
         priority: Some(1),
         state: state.to_string(),
+        state_kind: tracker_issue_state_kind_from_name(state),
         labels: Vec::new(),
         parent_id: None,
         parent: None,
@@ -54,6 +55,17 @@ fn tracker_issue(id: &str, identifier: &str, state: &str, created_at: u64) -> Tr
         sub_issues: Vec::new(),
         created_at: dt(created_at),
         updated_at: dt(created_at),
+    }
+}
+
+fn tracker_issue_state_kind_from_name(state: &str) -> TrackerIssueStateKind {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "backlog" => TrackerIssueStateKind::Backlog,
+        "todo" => TrackerIssueStateKind::Unstarted,
+        "in progress" | "review" | "human review" => TrackerIssueStateKind::Started,
+        "done" | "completed" | "closed" => TrackerIssueStateKind::Completed,
+        "canceled" | "cancelled" => TrackerIssueStateKind::Canceled,
+        other => TrackerIssueStateKind::Unknown(other.to_owned()),
     }
 }
 

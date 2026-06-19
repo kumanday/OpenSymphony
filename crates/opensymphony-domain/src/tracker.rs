@@ -12,6 +12,8 @@ pub struct TrackerIssue {
     pub description: Option<String>,
     pub priority: Option<u8>,
     pub state: String,
+    #[serde(default = "unknown_tracker_state_kind")]
+    pub state_kind: TrackerIssueStateKind,
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
@@ -24,6 +26,10 @@ pub struct TrackerIssue {
     pub sub_issues: Vec<TrackerIssueRef>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn unknown_tracker_state_kind() -> TrackerIssueStateKind {
+    TrackerIssueStateKind::Unknown("unknown".to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

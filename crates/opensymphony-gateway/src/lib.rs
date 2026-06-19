@@ -1,6 +1,9 @@
 use std::{
+    collections::{HashMap, HashSet},
     convert::Infallible,
+    ffi::OsStr,
     path::{Path as StdPath, PathBuf},
+    process::Command,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -9,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use async_stream::stream;
+use async_trait::async_trait;
 use axum::{
     Json, Router,
     body::Body,
@@ -26,7 +30,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::opensymphony_domain::{
     EventStream, InMemoryEventJournal, StreamBroker, TerminalLogStore, TimelineBuilder,
-    belongs_to_run,
+    TrackerIssue, TrackerIssueStateKind, belongs_to_run,
 };
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
@@ -92,6 +96,26 @@ const GATEWAY_JOURNAL_CAPACITY: usize = 10_000;
 const GATEWAY_SUBSCRIBER_CAPACITY: usize = 256;
 const GATEWAY_EVENT_PAGE_LIMIT: usize = 100;
 const GATEWAY_WS_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[async_trait]
+pub trait LinearTaskGraphClient: Send + Sync + 'static {
+    async fn issues_by_identifiers(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String>;
+}
+
+#[async_trait]
+impl LinearTaskGraphClient for crate::opensymphony_linear::LinearClient {
+    async fn issues_by_identifiers(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String> {
+        self.project_issues_by_identifiers(identifiers)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 fn stream_error_from_journal_error(err: &JournalError, cursor_sequence: u64) -> StreamError {
     match err {
@@ -219,6 +243,7 @@ pub struct GatewayState {
     pub web_assets_dir: Option<String>,
     pub action_handler: ActionHandler,
     pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
+    pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
 }
 
 impl Clone for GatewayState {
@@ -231,6 +256,7 @@ impl Clone for GatewayState {
             web_assets_dir: self.web_assets_dir.clone(),
             action_handler: self.action_handler.clone(),
             linear_mutations: self.linear_mutations.clone(),
+            linear_task_graph: self.linear_task_graph.clone(),
         }
     }
 }
@@ -249,6 +275,7 @@ pub struct GatewayServer {
     broker: StreamBroker,
     web_assets_dir: Option<String>,
     linear_mutations: Option<Arc<dyn LinearMutationClient>>,
+    linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     terminal_ingest_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -260,6 +287,7 @@ impl Clone for GatewayServer {
             broker: self.broker.clone(),
             web_assets_dir: self.web_assets_dir.clone(),
             linear_mutations: self.linear_mutations.clone(),
+            linear_task_graph: self.linear_task_graph.clone(),
             // Each cloned server owns its own ingest handle. The task is tied
             // to the specific server instance that spawned it, so Drop aborts
             // reliably without depending on Arc uniqueness.
@@ -278,6 +306,10 @@ impl std::fmt::Debug for GatewayServer {
             .field(
                 "linear_mutations",
                 &self.linear_mutations.as_ref().map(|_| "..."),
+            )
+            .field(
+                "linear_task_graph",
+                &self.linear_task_graph.as_ref().map(|_| "..."),
             )
             .field("terminal_ingest_handle", &"<handle>")
             .finish()
@@ -307,6 +339,7 @@ impl GatewayServer {
             store,
             web_assets_dir: None,
             linear_mutations: None,
+            linear_task_graph: None,
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -323,6 +356,7 @@ impl GatewayServer {
             broker,
             web_assets_dir: None,
             linear_mutations: None,
+            linear_task_graph: None,
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -343,6 +377,19 @@ impl GatewayServer {
         self
     }
 
+    /// Install a Linear GraphQL read client for the project task graph.
+    ///
+    /// The task graph read endpoint intentionally requires Linear relation
+    /// data. Without this client it returns 503 instead of synthesizing or
+    /// omitting dependency edges from stale control-plane snapshots.
+    pub fn with_linear_task_graph(
+        mut self,
+        client: Option<Arc<dyn LinearTaskGraphClient>>,
+    ) -> Self {
+        self.linear_task_graph = client;
+        self
+    }
+
     /// Extract clones of the journal and broker so the caller can keep them for testing.
     pub fn journal_and_broker(self) -> (InMemoryEventJournal, StreamBroker) {
         (self.journal.clone(), self.broker.clone())
@@ -358,6 +405,7 @@ impl GatewayServer {
             web_assets_dir: self.web_assets_dir.clone(),
             action_handler: ActionHandler::new(self.journal.clone()),
             linear_mutations: self.linear_mutations.clone(),
+            linear_task_graph: self.linear_task_graph.clone(),
         };
 
         // Abort any previous terminal ingest task associated with this server
@@ -1305,27 +1353,435 @@ fn normalize_path(path: &StdPath) -> PathBuf {
     stack.into_iter().collect()
 }
 
-/// Resolve a workspace-relative path and verify it stays inside the workspace
-/// boundary after normalizing `..` components. Returns `None` for absolute paths
-/// that are not rooted in the workspace, or for paths that escape it. This is a
-/// read-time guard for workspace file fallback paths.
-fn safe_workspace_path(workspace_root: &str, raw_path: &str) -> Option<PathBuf> {
-    let root = normalize_path(StdPath::new(workspace_root));
-    let candidate = normalize_path(&StdPath::new(workspace_root).join(raw_path));
+#[derive(Debug, Clone)]
+struct WorkspaceRunFileChange {
+    path: String,
+    query_path: String,
+    previous_path: Option<String>,
+    status_code: String,
+    change_kind: ControlPlaneFileChangeKind,
+    lines_added: u32,
+    lines_removed: u32,
+    snapshot_diff: Option<String>,
+}
 
-    // Reject absolute paths that are not already inside the workspace root. This
-    // prevents callers from passing `/etc/passwd` or a crafted absolute path
-    // directly. The join call above returns the absolute raw_path when given one,
-    // so normalizing it is enough to detect traversal.
-    if candidate.is_absolute() && !candidate.starts_with(&root) {
+fn workspace_path_for_issue(
+    envelope: &SnapshotEnvelope,
+    issue: &ControlPlaneIssueSnapshot,
+) -> Option<PathBuf> {
+    if issue.workspace_path_suffix.is_empty() || issue.workspace_path_suffix == "-" {
         return None;
     }
 
-    if candidate == root || candidate.starts_with(&root) {
-        Some(candidate)
-    } else {
-        None
+    let suffix = StdPath::new(&issue.workspace_path_suffix);
+    let mut components = suffix.components();
+    if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return None;
     }
+
+    let root = normalize_path(StdPath::new(&envelope.snapshot.daemon.workspace_root));
+    if root.as_os_str().is_empty() {
+        return None;
+    }
+    let candidate = normalize_path(&root.join(&issue.workspace_path_suffix));
+    candidate.starts_with(&root).then_some(candidate)
+}
+
+fn issue_file_changes(
+    envelope: &SnapshotEnvelope,
+    issue: &ControlPlaneIssueSnapshot,
+) -> Vec<WorkspaceRunFileChange> {
+    if let Some(workspace_path) = workspace_path_for_issue(envelope, issue)
+        && let Ok(files) = build_workspace_run_file_changes(&workspace_path)
+    {
+        return files;
+    }
+
+    let workspace_root = &envelope.snapshot.daemon.workspace_root;
+    issue
+        .modified_files
+        .iter()
+        .map(|fc| {
+            let path = sanitize_file_path(workspace_root, &fc.path);
+            WorkspaceRunFileChange {
+                query_path: path.clone(),
+                path,
+                previous_path: None,
+                status_code: status_code_for_change_kind(fc.change_kind).to_owned(),
+                change_kind: fc.change_kind,
+                lines_added: fc.lines_added,
+                lines_removed: fc.lines_removed,
+                snapshot_diff: fc.diff.clone(),
+            }
+        })
+        .collect()
+}
+
+async fn issue_file_changes_async(
+    envelope: SnapshotEnvelope,
+    issue: ControlPlaneIssueSnapshot,
+) -> Result<Vec<WorkspaceRunFileChange>, String> {
+    tokio::task::spawn_blocking(move || issue_file_changes(&envelope, &issue))
+        .await
+        .map_err(|error| format!("workspace file change task failed: {error}"))
+}
+
+fn build_workspace_run_file_changes(
+    workspace_path: &StdPath,
+) -> Result<Vec<WorkspaceRunFileChange>, String> {
+    let comparison_base = workspace_comparison_base(workspace_path)?;
+    let mut files = tracked_workspace_file_changes(workspace_path, &comparison_base)?;
+    files.extend(untracked_workspace_file_changes(workspace_path)?);
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceComparisonBase {
+    merge_base: String,
+}
+
+fn workspace_comparison_base(workspace_path: &StdPath) -> Result<WorkspaceComparisonBase, String> {
+    for reference in [
+        "main",
+        "origin/main",
+        "master",
+        "origin/master",
+        "origin/HEAD",
+        "HEAD",
+    ] {
+        if git_ref_exists(workspace_path, reference)? {
+            return Ok(WorkspaceComparisonBase {
+                merge_base: command_single_line(
+                    workspace_path,
+                    "git",
+                    &["merge-base", "HEAD", reference],
+                )?,
+            });
+        }
+    }
+
+    Err("no usable git comparison base found".to_owned())
+}
+
+fn tracked_workspace_file_changes(
+    workspace_path: &StdPath,
+    comparison_base: &WorkspaceComparisonBase,
+) -> Result<Vec<WorkspaceRunFileChange>, String> {
+    let output = command_output_args(
+        workspace_path,
+        "git",
+        [
+            "diff".to_owned(),
+            "--name-status".to_owned(),
+            "-z".to_owned(),
+            "--find-renames".to_owned(),
+            comparison_base.merge_base.clone(),
+            "--".to_owned(),
+        ],
+    )?;
+    let mut fields = output
+        .split('\0')
+        .filter(|field| !field.is_empty())
+        .peekable();
+    let mut files = Vec::new();
+
+    while let Some(status_code) = fields.next() {
+        if status_code.starts_with('R') || status_code.starts_with('C') {
+            let previous_path = fields
+                .next()
+                .ok_or_else(|| "missing previous path for rename entry".to_owned())?;
+            let query_path = fields
+                .next()
+                .ok_or_else(|| "missing current path for rename entry".to_owned())?;
+            let (lines_added, lines_removed) = git_numstat_for_change(
+                workspace_path,
+                comparison_base,
+                query_path,
+                Some(previous_path),
+            )?;
+            files.push(WorkspaceRunFileChange {
+                path: query_path.to_owned(),
+                query_path: query_path.to_owned(),
+                previous_path: Some(previous_path.to_owned()),
+                status_code: status_code.to_owned(),
+                change_kind: change_kind_from_status(status_code),
+                lines_added,
+                lines_removed,
+                snapshot_diff: None,
+            });
+        } else {
+            let query_path = fields
+                .next()
+                .ok_or_else(|| "missing path for git diff entry".to_owned())?;
+            let (lines_added, lines_removed) =
+                git_numstat_for_change(workspace_path, comparison_base, query_path, None)?;
+            files.push(WorkspaceRunFileChange {
+                path: query_path.to_owned(),
+                query_path: query_path.to_owned(),
+                previous_path: None,
+                status_code: status_code.to_owned(),
+                change_kind: change_kind_from_status(status_code),
+                lines_added,
+                lines_removed,
+                snapshot_diff: None,
+            });
+        }
+    }
+
+    Ok(files)
+}
+
+fn untracked_workspace_file_changes(
+    workspace_path: &StdPath,
+) -> Result<Vec<WorkspaceRunFileChange>, String> {
+    let output = command_output_args(
+        workspace_path,
+        "git",
+        ["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
+
+    let mut files = Vec::new();
+    for query_path in output.split('\0').filter(|field| !field.is_empty()) {
+        files.push(WorkspaceRunFileChange {
+            path: query_path.to_owned(),
+            query_path: query_path.to_owned(),
+            previous_path: None,
+            status_code: "??".to_owned(),
+            change_kind: ControlPlaneFileChangeKind::Created,
+            lines_added: count_untracked_lines(workspace_path, query_path).unwrap_or(0),
+            lines_removed: 0,
+            snapshot_diff: None,
+        });
+    }
+
+    Ok(files)
+}
+
+fn git_numstat_for_change(
+    workspace_path: &StdPath,
+    comparison_base: &WorkspaceComparisonBase,
+    query_path: &str,
+    previous_path: Option<&str>,
+) -> Result<(u32, u32), String> {
+    let mut args = vec![
+        "diff".to_owned(),
+        "--numstat".to_owned(),
+        "--find-renames".to_owned(),
+        comparison_base.merge_base.clone(),
+        "--".to_owned(),
+    ];
+    if let Some(previous_path) = previous_path {
+        args.push(previous_path.to_owned());
+    }
+    args.push(query_path.to_owned());
+
+    let output = command_output_args(workspace_path, "git", args)?;
+    let Some(line) = output.lines().find(|line| !line.trim().is_empty()) else {
+        return Ok((0, 0));
+    };
+    let mut fields = line.split('\t');
+    Ok((
+        parse_numstat_count(fields.next()),
+        parse_numstat_count(fields.next()),
+    ))
+}
+
+fn parse_numstat_count(field: Option<&str>) -> u32 {
+    match field.map(str::trim) {
+        Some("-") | None => 0,
+        Some(value) => value.parse().unwrap_or(0),
+    }
+}
+
+fn count_untracked_lines(workspace_path: &StdPath, query_path: &str) -> Option<u32> {
+    let bytes = std::fs::read(workspace_path.join(query_path)).ok()?;
+    if bytes.contains(&0) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    Some(text.lines().count().min(u32::MAX as usize) as u32)
+}
+
+#[cfg(test)]
+fn workspace_diff_for_change(
+    workspace_path: &StdPath,
+    change: &WorkspaceRunFileChange,
+) -> Result<String, String> {
+    let comparison_base = if change.status_code.starts_with("??") {
+        None
+    } else {
+        Some(workspace_comparison_base(workspace_path)?)
+    };
+    workspace_diff_for_change_with_base(workspace_path, change, comparison_base.as_ref())
+}
+
+fn workspace_diff_for_change_with_base(
+    workspace_path: &StdPath,
+    change: &WorkspaceRunFileChange,
+    comparison_base: Option<&WorkspaceComparisonBase>,
+) -> Result<String, String> {
+    if change.status_code.starts_with("??") {
+        untracked_file_unified_diff(workspace_path, &change.query_path)
+    } else {
+        let comparison_base =
+            comparison_base.ok_or_else(|| "missing git comparison base".to_owned())?;
+        let mut args = vec![
+            "diff".to_owned(),
+            "--find-renames".to_owned(),
+            comparison_base.merge_base.clone(),
+            "--".to_owned(),
+        ];
+        if let Some(previous_path) = &change.previous_path {
+            args.push(previous_path.clone());
+        }
+        args.push(change.query_path.clone());
+        command_output_args(workspace_path, "git", args)
+    }
+}
+
+fn untracked_file_unified_diff(
+    workspace_path: &StdPath,
+    query_path: &str,
+) -> Result<String, String> {
+    let bytes = std::fs::read(workspace_path.join(query_path))
+        .map_err(|error| format!("failed to read untracked file {query_path}: {error}"))?;
+    let text = if bytes.contains(&0) {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    let lines = text.lines().collect::<Vec<_>>();
+    let new_start = if lines.is_empty() { 0 } else { 1 };
+
+    let mut diff = String::new();
+    diff.push_str(&format!("diff --git a/{query_path} b/{query_path}\n"));
+    diff.push_str("new file mode 100644\n");
+    diff.push_str("index 0000000..0000000\n");
+    diff.push_str("--- /dev/null\n");
+    diff.push_str(&format!("+++ b/{query_path}\n"));
+    diff.push_str(&format!("@@ -0,0 +{new_start},{} @@\n", lines.len()));
+    for line in lines {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    Ok(diff)
+}
+
+async fn workspace_diff_for_change_async(
+    workspace_path: PathBuf,
+    change: WorkspaceRunFileChange,
+    comparison_base: Option<WorkspaceComparisonBase>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        workspace_diff_for_change_with_base(&workspace_path, &change, comparison_base.as_ref())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn change_kind_from_status(status_code: &str) -> ControlPlaneFileChangeKind {
+    if status_code.starts_with('A') || status_code.starts_with("??") {
+        ControlPlaneFileChangeKind::Created
+    } else if status_code.starts_with('D') {
+        ControlPlaneFileChangeKind::Removed
+    } else {
+        ControlPlaneFileChangeKind::Modified
+    }
+}
+
+fn status_code_for_change_kind(kind: ControlPlaneFileChangeKind) -> &'static str {
+    match kind {
+        ControlPlaneFileChangeKind::Created => "A",
+        ControlPlaneFileChangeKind::Modified => "M",
+        ControlPlaneFileChangeKind::Removed => "D",
+    }
+}
+
+fn git_ref_exists(workspace_path: &StdPath, reference: &str) -> Result<bool, String> {
+    let output = command_output_args_allow_status(
+        workspace_path,
+        "git",
+        ["rev-parse", "--verify", "--quiet", reference],
+        &[1],
+    )?;
+    Ok(!output.trim().is_empty())
+}
+
+fn command_single_line(
+    workspace_path: &StdPath,
+    program: &str,
+    args: &[&str],
+) -> Result<String, String> {
+    command_output_args(workspace_path, program, args.iter().copied())
+        .map(|output| single_line(output.trim()))
+}
+
+fn command_output_args<I, S>(
+    workspace_path: &StdPath,
+    program: &str,
+    args: I,
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    command_output_args_allow_status(workspace_path, program, args, &[])
+}
+
+fn command_output_args_allow_status<I, S>(
+    workspace_path: &StdPath,
+    program: &str,
+    args: I,
+    allowed_status_codes: &[i32],
+) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new(program)
+        .args(args)
+        .current_dir(workspace_path)
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success()
+        || output
+            .status
+            .code()
+            .is_some_and(|code| allowed_status_codes.contains(&code))
+    {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = single_line(stderr.trim());
+        if stderr.is_empty() {
+            Err(format!("{program} exited with {}", output.status))
+        } else {
+            Err(stderr)
+        }
+    }
+}
+
+fn single_line(value: impl AsRef<str>) -> String {
+    value
+        .as_ref()
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalize_query_file_path(path: &str) -> String {
+    normalize_path(StdPath::new(path))
+        .to_string_lossy()
+        .trim_start_matches('/')
+        .to_string()
 }
 
 /// Strip the workspace root from a raw absolute path so that the public API
@@ -1336,7 +1792,12 @@ fn safe_workspace_path(workspace_root: &str, raw_path: &str) -> Option<PathBuf> 
 /// `/tmp/opensymphony/../etc/passwd` cannot bypass the workspace guard.
 pub fn sanitize_file_path(workspace_root: &str, raw_path: &str) -> String {
     let root = normalize_path(StdPath::new(workspace_root));
-    let normalized = normalize_path(StdPath::new(raw_path));
+    let raw = StdPath::new(raw_path);
+    let normalized = if raw.is_absolute() {
+        normalize_path(raw)
+    } else {
+        normalize_path(&root.join(raw))
+    };
 
     normalized
         .strip_prefix(&root)
@@ -1591,9 +2052,11 @@ async fn get_project(
 // ── Task Graph endpoint ───────────────────────────────────────────────────────
 
 async fn get_task_graph(
-    State(store): State<SnapshotStore>,
+    State(state): State<GatewayState>,
     AxumPath(project_id): AxumPath<String>,
-) -> impl IntoResponse {
+) -> Response {
+    let generated_at = Utc::now();
+
     // Only the "default" project is supported; reject unknown project IDs.
     if project_id != "default" {
         return (
@@ -1601,23 +2064,100 @@ async fn get_task_graph(
             Json(TaskGraphSnapshot {
                 schema_version: SchemaVersion::v1(),
                 project_id,
-                generated_at: Utc::now(),
+                generated_at,
                 nodes: Vec::new(),
                 root_ids: Vec::new(),
             }),
-        );
+        )
+            .into_response();
     }
 
-    let envelope = store.current().await;
+    let envelope = state.store.current().await;
     let snapshot = &envelope.snapshot;
-    let generated_at = Utc::now();
-
-    let nodes: Vec<_> = snapshot
+    let identifiers = snapshot
         .issues
         .iter()
+        .map(|issue| issue.identifier.clone())
+        .collect::<Vec<_>>();
+
+    if identifiers.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(TaskGraphSnapshot {
+                schema_version: SchemaVersion::v1(),
+                project_id,
+                generated_at,
+                nodes: Vec::new(),
+                root_ids: Vec::new(),
+            }),
+        )
+            .into_response();
+    }
+
+    let Some(linear_task_graph) = state.linear_task_graph.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(TaskGraphSnapshot {
+                schema_version: SchemaVersion::v1(),
+                project_id,
+                generated_at,
+                nodes: Vec::new(),
+                root_ids: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let linear_issues = match linear_task_graph.issues_by_identifiers(&identifiers).await {
+        Ok(issues) => issues,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load task graph dependencies from Linear");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(TaskGraphSnapshot {
+                    schema_version: SchemaVersion::v1(),
+                    project_id,
+                    generated_at,
+                    nodes: Vec::new(),
+                    root_ids: Vec::new(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let issue_node_ids = linear_issues
+        .iter()
+        .map(|issue| issue.identifier.clone())
+        .collect::<HashSet<_>>();
+    let snapshot_by_identifier = snapshot
+        .issues
+        .iter()
+        .map(|issue| (issue.identifier.as_str(), issue))
+        .collect::<HashMap<_, _>>();
+
+    let nodes: Vec<_> = linear_issues
+        .into_iter()
         .map(|issue| {
-            let state_category = map_runtime_state_to_graph_category(&issue.runtime_state);
-            let runtime_overlay = build_runtime_overlay(issue);
+            let snapshot_issue = snapshot_by_identifier
+                .get(issue.identifier.as_str())
+                .copied();
+            let state_category = snapshot_issue
+                .map(|issue| map_runtime_state_to_graph_category(&issue.runtime_state))
+                .unwrap_or_else(|| map_tracker_state_kind_to_graph_category(&issue.state_kind));
+            let runtime_overlay = snapshot_issue.map(build_runtime_overlay);
+            let parent_id = issue
+                .parent
+                .as_ref()
+                .map(|parent| parent.identifier.clone())
+                .or_else(|| issue.parent_id.clone())
+                .filter(|parent_id| issue_node_ids.contains(parent_id.as_str()));
+            let children = issue
+                .sub_issues
+                .iter()
+                .filter(|sub_issue| issue_node_ids.contains(sub_issue.identifier.as_str()))
+                .map(|sub_issue| sub_issue.identifier.clone())
+                .collect();
 
             crate::opensymphony_gateway_schema::task_graph::TaskGraphNode {
                 schema_version: SchemaVersion::v1(),
@@ -1625,29 +2165,42 @@ async fn get_task_graph(
                 kind: crate::opensymphony_gateway_schema::task_graph::TaskGraphNodeKind::Issue,
                 identifier: issue.identifier.clone(),
                 title: issue.title.clone(),
-                state: issue.tracker_state.clone(),
+                state: issue.state.clone(),
                 state_category,
-                priority: None,
-                parent_id: None,
-                children: Vec::new(),
-                // Dependency info not yet available from the control-plane snapshot;
-                // return an empty vector instead of self-referential placeholder data.
-                blocked_by: Vec::new(),
-                url: None,
+                priority: issue.priority,
+                parent_id,
+                children,
+                blocked_by: issue
+                    .blocked_by
+                    .iter()
+                    .filter(|blocker| issue_node_ids.contains(blocker.identifier.as_str()))
+                    .map(|blocker| blocker.identifier.clone())
+                    .collect(),
+                url: Some(issue.url.clone()).filter(|url| !url.is_empty()),
                 branch_name: None,
-                labels: Vec::new(),
-                created_at: None,
-                updated_at: None,
+                labels: issue.labels.clone(),
+                created_at: Some(issue.created_at),
+                updated_at: Some(issue.updated_at),
                 estimate_minutes: None,
-                runtime_overlay: Some(runtime_overlay),
+                runtime_overlay,
             }
         })
         .collect();
 
-    // Parent/child relationship data is not yet available from the control-plane
-    // snapshot, so every node is treated as a standalone leaf. Returning an empty
-    // root_ids prevents clients from building an incorrect flat-forest layout.
-    let root_ids: Vec<String> = Vec::new();
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect::<HashSet<_>>();
+    let root_ids = nodes
+        .iter()
+        .filter(|node| {
+            node.parent_id
+                .as_deref()
+                .map(|parent_id| !node_ids.contains(parent_id))
+                .unwrap_or(true)
+        })
+        .map(|node| node.node_id.clone())
+        .collect();
 
     (
         StatusCode::OK,
@@ -1659,6 +2212,7 @@ async fn get_task_graph(
             root_ids,
         }),
     )
+        .into_response()
 }
 
 fn map_runtime_state_to_graph_category(
@@ -1672,6 +2226,21 @@ fn map_runtime_state_to_graph_category(
         ControlPlaneIssueRuntimeState::Releasing => TaskGraphStateCategory::InProgress,
         ControlPlaneIssueRuntimeState::Completed => TaskGraphStateCategory::Done,
         ControlPlaneIssueRuntimeState::Failed => TaskGraphStateCategory::Done,
+    }
+}
+
+fn map_tracker_state_kind_to_graph_category(
+    kind: &TrackerIssueStateKind,
+) -> TaskGraphStateCategory {
+    match kind {
+        TrackerIssueStateKind::Backlog => TaskGraphStateCategory::Backlog,
+        TrackerIssueStateKind::Unstarted | TrackerIssueStateKind::Triage => {
+            TaskGraphStateCategory::Todo
+        }
+        TrackerIssueStateKind::Started => TaskGraphStateCategory::InProgress,
+        TrackerIssueStateKind::Completed => TaskGraphStateCategory::Done,
+        TrackerIssueStateKind::Canceled => TaskGraphStateCategory::Canceled,
+        TrackerIssueStateKind::Unknown(_) => TaskGraphStateCategory::Todo,
     }
 }
 
@@ -1900,12 +2469,20 @@ async fn get_run_detail(
     )
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct RunEventQuery {
+    page_token: Option<String>,
+    cursor: Option<String>,
+    page_size: Option<usize>,
+}
+
 async fn get_run_events(
     State(store): State<SnapshotStore>,
     AxumPath(run_id): AxumPath<String>,
+    Query(query): Query<RunEventQuery>,
 ) -> impl IntoResponse {
     let envelope = store.current().await;
-    let events: Vec<RunEvent> = match find_issue_snapshot(&envelope, &run_id) {
+    let all_events: Vec<RunEvent> = match find_issue_snapshot(&envelope, &run_id) {
         Some(issue) => issue
             .recent_events
             .iter()
@@ -1932,13 +2509,46 @@ async fn get_run_events(
             );
         }
     };
+    let start_sequence = match query.page_token.as_deref().or(query.cursor.as_deref()) {
+        Some(token) => match token.parse::<u64>() {
+            Ok(sequence) => sequence.max(1),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(RunEventPage {
+                        schema_version: SchemaVersion::v1(),
+                        run_id,
+                        next_cursor: None,
+                        events: Vec::new(),
+                    }),
+                );
+            }
+        },
+        None => 1,
+    };
+    let page_size = query
+        .page_size
+        .unwrap_or(GATEWAY_EVENT_PAGE_LIMIT)
+        .clamp(1, GATEWAY_EVENT_PAGE_LIMIT);
+    let start_index = start_sequence.saturating_sub(1) as usize;
+    let next_start = start_index.saturating_add(page_size);
+    let events: Vec<RunEvent> = all_events
+        .iter()
+        .skip(start_index)
+        .take(page_size)
+        .cloned()
+        .collect();
+    let next_cursor = (next_start < all_events.len()).then(|| PageCursor {
+        page_token: (next_start as u64 + 1).to_string(),
+        page_size: page_size as u32,
+    });
 
     (
         StatusCode::OK,
         Json(RunEventPage {
             schema_version: SchemaVersion::v1(),
             run_id,
-            next_cursor: None,
+            next_cursor,
             events,
         }),
     )
@@ -1949,19 +2559,31 @@ async fn get_run_files(
     AxumPath(run_id): AxumPath<String>,
 ) -> impl IntoResponse {
     let envelope = store.current().await;
-    let workspace_root = envelope.snapshot.daemon.workspace_root.clone();
     let files: Vec<ChangedFileEntry> = match find_issue_snapshot(&envelope, &run_id) {
-        Some(issue) => issue
-            .modified_files
-            .iter()
-            .map(|fc| ChangedFileEntry {
-                path: sanitize_file_path(&workspace_root, &fc.path),
-                change_kind: map_file_change_kind(fc.change_kind),
-                lines_added: fc.lines_added,
-                lines_removed: fc.lines_removed,
-                size_bytes: None,
-            })
-            .collect(),
+        Some(issue) => match issue_file_changes_async(envelope.clone(), issue.clone()).await {
+            Ok(files) => files
+                .iter()
+                .map(|fc| ChangedFileEntry {
+                    path: fc.path.clone(),
+                    change_kind: map_file_change_kind(fc.change_kind),
+                    lines_added: fc.lines_added,
+                    lines_removed: fc.lines_removed,
+                    size_bytes: None,
+                })
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, run_id = %issue.identifier, "failed to load run files");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(RunFilesPage {
+                        schema_version: SchemaVersion::v1(),
+                        run_id,
+                        next_cursor: None,
+                        files: Vec::new(),
+                    }),
+                );
+            }
+        },
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -1992,19 +2614,8 @@ async fn get_run_diffs(
     Query(query): Query<RunDiffQuery>,
 ) -> impl IntoResponse {
     let envelope = store.current().await;
-    let workspace_root = envelope.snapshot.daemon.workspace_root.clone();
-    let files: Vec<&ControlPlaneFileChange> = match find_issue_snapshot(&envelope, &run_id) {
-        Some(issue) => {
-            if let Some(path) = &query.file_path {
-                issue
-                    .modified_files
-                    .iter()
-                    .filter(|fc| sanitize_file_path(&workspace_root, &fc.path) == *path)
-                    .collect()
-            } else {
-                issue.modified_files.iter().collect()
-            }
-        }
+    let issue = match find_issue_snapshot(&envelope, &run_id) {
+        Some(issue) => issue,
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -2020,19 +2631,54 @@ async fn get_run_diffs(
             );
         }
     };
+    let workspace_path = workspace_path_for_issue(&envelope, issue);
+    let all_files = match issue_file_changes_async(envelope.clone(), issue.clone()).await {
+        Ok(files) => files,
+        Err(error) => {
+            tracing::warn!(%error, run_id = %issue.identifier, "failed to load run diffs");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(FileDiffPage {
+                    schema_version: SchemaVersion::v1(),
+                    run_id,
+                    file_path: String::new(),
+                    next_cursor: None,
+                    hunks: Vec::new(),
+                    total_lines_added: 0,
+                    total_lines_removed: 0,
+                }),
+            );
+        }
+    };
+    let requested_path = query.file_path.as_deref().map(normalize_query_file_path);
+    let files: Vec<WorkspaceRunFileChange> = match &requested_path {
+        Some(path) => all_files
+            .into_iter()
+            .filter(|fc| fc.path == *path || fc.query_path == *path)
+            .collect(),
+        None => all_files,
+    };
 
-    // Build hunks per changed file. If the control-plane snapshot includes a
-    // unified diff string, parse it into real line-level hunks. Otherwise fall
-    // back to reading the workspace file for newly created files, or to a
-    // synthetic hunk with the line counts from the metadata.
+    let comparison_base = workspace_path
+        .as_ref()
+        .and_then(|path| workspace_comparison_base(path).ok());
     let mut hunks: Vec<DiffHunk> = Vec::new();
     for fc in &files {
-        let hunk_path = sanitize_file_path(&workspace_root, &fc.path);
-        if let Some(diff_text) = &fc.diff {
-            hunks.extend(parse_unified_diff(&hunk_path, diff_text));
-        } else {
-            hunks.extend(build_fallback_hunks(&hunk_path, fc, &workspace_root));
+        if let Some(path) = &workspace_path
+            && let Ok(diff_text) =
+                workspace_diff_for_change_async(path.clone(), fc.clone(), comparison_base.clone())
+                    .await
+        {
+            hunks.extend(parse_unified_diff(&fc.path, &diff_text));
+            continue;
         }
+
+        if let Some(diff_text) = &fc.snapshot_diff {
+            hunks.extend(parse_unified_diff(&fc.path, diff_text));
+            continue;
+        }
+
+        hunks.extend(build_synthetic_hunks(fc));
     }
 
     let total_lines_added: u32 = files.iter().map(|f| f.lines_added).sum();
@@ -2041,9 +2687,7 @@ async fn get_run_diffs(
     // When multiple files are present, list all paths so the caller knows the
     // response is an aggregate rather than a single-file diff.
     let file_path = if files.len() == 1 {
-        files
-            .first()
-            .map(|fc| sanitize_file_path(&workspace_root, &fc.path))
+        files.first().map(|fc| fc.path.clone())
     } else {
         Some(format!("[{} files]", files.len()))
     };
@@ -2154,45 +2798,11 @@ fn parse_range(range: &str) -> Option<(u32, u32)> {
     Some((start, count))
 }
 
-/// Build a fallback hunk for a file when no unified diff string is present.
-/// For newly created files that exist in the workspace, the file content is
-/// returned as addition lines. For all other cases a synthetic hunk carrying
-/// the line counts from the control-plane metadata is returned.
-fn build_fallback_hunks(
-    file_path: &str,
-    fc: &ControlPlaneFileChange,
-    workspace_root: &str,
-) -> Vec<DiffHunk> {
-    if fc.diff.is_none() && fc.change_kind == ControlPlaneFileChangeKind::Created {
-        // Only read the file when it resolves safely inside the workspace root. The
-        // path from the control plane may be absolute; safe_workspace_path joins it
-        // with the workspace root and then checks containment after normalization.
-        if let Some(path) = safe_workspace_path(workspace_root, &fc.path)
-            && let Ok(content) = std::fs::read_to_string(&path)
-        {
-            let lines: Vec<&str> = content.lines().collect();
-            let new_count = lines.len() as u32;
-            let diff_lines = lines
-                .into_iter()
-                .map(|line| DiffLine::Addition {
-                    line: line.to_owned(),
-                })
-                .collect();
-            return vec![DiffHunk {
-                file_path: file_path.to_owned(),
-                header: format!("@@ -0,0 +1,{} @@", new_count),
-                start_line: 1,
-                old_line_count: 0,
-                new_line_count: new_count,
-                lines: diff_lines,
-            }];
-        }
-    }
-
+fn build_synthetic_hunks(fc: &WorkspaceRunFileChange) -> Vec<DiffHunk> {
     let old_start = if fc.lines_removed > 0 { 1 } else { 0 };
     let new_start = if fc.lines_added > 0 { 1 } else { 0 };
     vec![DiffHunk {
-        file_path: file_path.to_owned(),
+        file_path: fc.path.clone(),
         header: format!(
             "@@ -{},{} +{},{} @@",
             old_start, fc.lines_removed, new_start, fc.lines_added
@@ -2210,7 +2820,7 @@ async fn get_run_validation(
 ) -> impl IntoResponse {
     let envelope = store.current().await;
     let issue = match find_issue_snapshot(&envelope, &run_id) {
-        Some(issue) => issue,
+        Some(issue) => issue.clone(),
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -2226,7 +2836,24 @@ async fn get_run_validation(
         }
     };
 
-    let overall_status = validation_status_for_issue(issue);
+    let has_file_changes = match issue_file_changes_async(envelope.clone(), issue.clone()).await {
+        Ok(files) => !files.is_empty(),
+        Err(error) => {
+            tracing::warn!(%error, run_id = %issue.identifier, "failed to load validation files");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RunValidationSummary {
+                    schema_version: SchemaVersion::v1(),
+                    run_id,
+                    generated_at: Utc::now(),
+                    overall_status: ValidationStatus::Error,
+                    commands: Vec::new(),
+                    evidence: Vec::new(),
+                }),
+            );
+        }
+    };
+    let overall_status = validation_status_for_issue(&issue, has_file_changes);
 
     (
         StatusCode::OK,
@@ -2241,7 +2868,10 @@ async fn get_run_validation(
     )
 }
 
-fn validation_status_for_issue(issue: &ControlPlaneIssueSnapshot) -> ValidationStatus {
+fn validation_status_for_issue(
+    issue: &ControlPlaneIssueSnapshot,
+    has_file_changes: bool,
+) -> ValidationStatus {
     use ControlPlaneIssueRuntimeState as State;
     use ControlPlaneWorkerOutcome as Outcome;
 
@@ -2254,12 +2884,12 @@ fn validation_status_for_issue(issue: &ControlPlaneIssueSnapshot) -> ValidationS
     match (issue.runtime_state, issue.last_outcome) {
         (_, Outcome::Completed) => ValidationStatus::Passed,
         (_, Outcome::Failed) | (_, Outcome::Canceled) => ValidationStatus::Failed,
-        (State::Running, _) if !issue.modified_files.is_empty() => ValidationStatus::Running,
+        (State::Running, _) if has_file_changes => ValidationStatus::Running,
         (State::Running, _)
         | (State::Paused, _)
         | (State::RetryQueued, _)
         | (State::Releasing, _) => ValidationStatus::Pending,
-        _ if issue.modified_files.is_empty() => ValidationStatus::Skipped,
+        _ if !has_file_changes => ValidationStatus::Skipped,
         _ => ValidationStatus::Pending,
     }
 }
@@ -2714,6 +3344,24 @@ mod tests {
     }
 
     #[test]
+    fn tracker_state_kind_mapping_uses_stable_linear_kind() {
+        assert_eq!(
+            map_tracker_state_kind_to_graph_category(&TrackerIssueStateKind::Started),
+            TaskGraphStateCategory::InProgress
+        );
+        assert_eq!(
+            map_tracker_state_kind_to_graph_category(&TrackerIssueStateKind::Completed),
+            TaskGraphStateCategory::Done
+        );
+        assert_eq!(
+            map_tracker_state_kind_to_graph_category(&TrackerIssueStateKind::Unknown(
+                "custom-review".to_owned()
+            )),
+            TaskGraphStateCategory::Todo
+        );
+    }
+
+    #[test]
     fn serialize_stream_error_matches_flat_error_type_contract() {
         let json = serialize_stream_error(&StreamError::server_error("boom"));
         let value: serde_json::Value = serde_json::from_str(&json).expect("valid json");
@@ -2960,6 +3608,7 @@ mod tests {
             },
             retry_count: 0,
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: if flags.harness {
                 Some("http://localhost:3000".into())
             } else {
@@ -3002,6 +3651,151 @@ mod tests {
         issue
     }
 
+    fn validation_status_for_test(issue: &ControlPlaneIssueSnapshot) -> ValidationStatus {
+        validation_status_for_issue(issue, !issue.modified_files.is_empty())
+    }
+
+    fn run_git(workspace_path: &StdPath, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(workspace_path)
+            .env("GIT_AUTHOR_NAME", "OpenSymphony Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "OpenSymphony Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn sanitize_file_path_preserves_workspace_relative_paths() {
+        assert_eq!(
+            sanitize_file_path("/tmp/opensymphony/workspace", "src/main.rs"),
+            "src/main.rs"
+        );
+    }
+
+    #[test]
+    fn workspace_run_file_changes_include_tracked_and_untracked_files() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::create_dir_all(workspace.join("src")).expect("create src");
+        std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").expect("write main");
+
+        run_git(workspace, &["init"]);
+        run_git(workspace, &["checkout", "-B", "main"]);
+        run_git(workspace, &["add", "src/main.rs"]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+                "--no-gpg-sign",
+            ],
+        );
+
+        std::fs::write(
+            workspace.join("src/main.rs"),
+            "fn main() {\n    println!(\"changed\");\n}\n",
+        )
+        .expect("modify main");
+        std::fs::write(workspace.join("src/new.rs"), "pub fn new_file() {}\n").expect("write new");
+
+        let changes = build_workspace_run_file_changes(workspace).expect("build workspace changes");
+
+        let modified = changes
+            .iter()
+            .find(|change| change.path == "src/main.rs")
+            .expect("tracked change");
+        assert_eq!(modified.change_kind, ControlPlaneFileChangeKind::Modified);
+        assert!(modified.lines_added > 0);
+
+        let created = changes
+            .iter()
+            .find(|change| change.path == "src/new.rs")
+            .expect("untracked change");
+        assert_eq!(created.change_kind, ControlPlaneFileChangeKind::Created);
+        assert_eq!(created.lines_removed, 0);
+
+        let diff = workspace_diff_for_change(workspace, modified).expect("diff tracked file");
+        assert!(diff.contains("println!"));
+        let created_diff =
+            workspace_diff_for_change(workspace, created).expect("diff untracked file");
+        assert!(created_diff.contains("+++ b/src/new.rs"));
+        assert!(created_diff.contains("+pub fn new_file() {}"));
+    }
+
+    #[test]
+    fn workspace_run_file_changes_can_use_head_without_default_branch_ref() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::create_dir_all(workspace.join("src")).expect("create src");
+        std::fs::write(workspace.join("src/main.rs"), "fn main() {}\n").expect("write main");
+
+        run_git(workspace, &["init"]);
+        run_git(workspace, &["checkout", "-B", "feature/local"]);
+        run_git(workspace, &["add", "src/main.rs"]);
+        run_git(
+            workspace,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "initial",
+                "--no-gpg-sign",
+            ],
+        );
+
+        std::fs::write(
+            workspace.join("src/main.rs"),
+            "fn main() {\n    println!(\"changed\");\n}\n",
+        )
+        .expect("modify main");
+
+        let changes = build_workspace_run_file_changes(workspace).expect("build workspace changes");
+
+        let modified = changes
+            .iter()
+            .find(|change| change.path == "src/main.rs")
+            .expect("tracked change");
+        assert_eq!(modified.change_kind, ControlPlaneFileChangeKind::Modified);
+        assert!(modified.lines_added > 0);
+    }
+
+    #[test]
+    fn workspace_diff_for_untracked_file_does_not_require_git_repository() {
+        let temp = tempfile::tempdir().expect("temp workspace");
+        let workspace = temp.path();
+        std::fs::create_dir_all(workspace.join("src")).expect("create src");
+        std::fs::write(workspace.join("src/new.rs"), "pub fn new_file() {}\n").expect("write new");
+        let change = WorkspaceRunFileChange {
+            path: "src/new.rs".to_owned(),
+            query_path: "src/new.rs".to_owned(),
+            previous_path: None,
+            status_code: "??".to_owned(),
+            change_kind: ControlPlaneFileChangeKind::Created,
+            lines_added: 1,
+            lines_removed: 0,
+            snapshot_diff: None,
+        };
+
+        let diff = workspace_diff_for_change(workspace, &change).expect("diff untracked file");
+
+        assert!(diff.contains("new file mode 100644"));
+        assert!(diff.contains("+++ b/src/new.rs"));
+        assert!(diff.contains("+pub fn new_file() {}"));
+    }
+
     #[test]
     fn validation_status_cancel_failed_overrides_completed() {
         let mut issue = issue_with_outcome_and_files(
@@ -3010,7 +3804,7 @@ mod tests {
             vec![file_change("src/main.rs")],
         );
         issue.cancel_failed = true;
-        assert_eq!(validation_status_for_issue(&issue), ValidationStatus::Error);
+        assert_eq!(validation_status_for_test(&issue), ValidationStatus::Error);
     }
 
     #[test]
@@ -3022,7 +3816,7 @@ mod tests {
         );
         issue.detached = true;
         assert_eq!(
-            validation_status_for_issue(&issue),
+            validation_status_for_test(&issue),
             ValidationStatus::Pending
         );
     }
@@ -3034,10 +3828,7 @@ mod tests {
             ControlPlaneWorkerOutcome::Completed,
             vec![file_change("src/main.rs")],
         );
-        assert_eq!(
-            validation_status_for_issue(&issue),
-            ValidationStatus::Passed
-        );
+        assert_eq!(validation_status_for_test(&issue), ValidationStatus::Passed);
     }
 
     #[test]
@@ -3047,10 +3838,7 @@ mod tests {
             ControlPlaneWorkerOutcome::Failed,
             vec![file_change("src/main.rs")],
         );
-        assert_eq!(
-            validation_status_for_issue(&issue),
-            ValidationStatus::Failed
-        );
+        assert_eq!(validation_status_for_test(&issue), ValidationStatus::Failed);
     }
 
     #[test]
@@ -3060,10 +3848,7 @@ mod tests {
             ControlPlaneWorkerOutcome::Canceled,
             vec![file_change("src/main.rs")],
         );
-        assert_eq!(
-            validation_status_for_issue(&issue),
-            ValidationStatus::Failed
-        );
+        assert_eq!(validation_status_for_test(&issue), ValidationStatus::Failed);
     }
 
     #[test]
@@ -3074,7 +3859,7 @@ mod tests {
             vec![file_change("src/main.rs")],
         );
         assert_eq!(
-            validation_status_for_issue(&issue),
+            validation_status_for_test(&issue),
             ValidationStatus::Running
         );
     }
@@ -3087,7 +3872,7 @@ mod tests {
             vec![],
         );
         assert_eq!(
-            validation_status_for_issue(&issue),
+            validation_status_for_test(&issue),
             ValidationStatus::Pending
         );
     }
@@ -3100,7 +3885,7 @@ mod tests {
             vec![file_change("src/main.rs")],
         );
         assert_eq!(
-            validation_status_for_issue(&issue),
+            validation_status_for_test(&issue),
             ValidationStatus::Pending
         );
     }
@@ -3113,7 +3898,7 @@ mod tests {
             vec![file_change("src/main.rs")],
         );
         assert_eq!(
-            validation_status_for_issue(&issue),
+            validation_status_for_test(&issue),
             ValidationStatus::Pending
         );
     }
@@ -3126,7 +3911,7 @@ mod tests {
             vec![file_change("src/main.rs")],
         );
         assert_eq!(
-            validation_status_for_issue(&issue),
+            validation_status_for_test(&issue),
             ValidationStatus::Pending
         );
     }
@@ -3139,7 +3924,7 @@ mod tests {
             vec![],
         );
         assert_eq!(
-            validation_status_for_issue(&issue),
+            validation_status_for_test(&issue),
             ValidationStatus::Skipped
         );
     }
@@ -3152,7 +3937,7 @@ mod tests {
             vec![file_change("src/main.rs")],
         );
         assert_eq!(
-            validation_status_for_issue(&issue),
+            validation_status_for_test(&issue),
             ValidationStatus::Pending
         );
     }

@@ -9,6 +9,8 @@ import type {
   ApprovalRequest,
   RunAction,
   RunDetail,
+  RunEvent,
+  RunEventPage,
   RunPhase,
   RunStreamLiveness,
   RunValidationSummary,
@@ -29,18 +31,18 @@ import {
   buildRuntimeOverlay,
   defaultTaskGraphFilter,
   filterTaskGraphNodes,
+  renderBadge,
   renderTaskGraphFilters,
   type TaskGraphFilter,
 } from "./task-graph-editor.js";
 import {
+  emptyCommentEdit,
+  emptyDependencyEdit,
   emptyEditorDialog,
   emptyInlineEdit,
-  emptyDependencyEdit,
-  emptyCommentEdit,
   renderCommentEditor,
   renderCreateDialog,
   renderDependencyEditor,
-  renderSelectedNodeDetail,
   renderTaskGraphNode,
   renderTaskGraphToolbar,
   type CommentEditState,
@@ -92,6 +94,7 @@ export interface GatewayReader {
   snapshot(): Promise<DashboardSnapshot>;
   taskGraph(projectId: string): Promise<TaskGraphSnapshot>;
   runDetail(runId: string): Promise<RunDetail>;
+  runEvents?(runId: string): Promise<RunEventPage>;
   runFiles?(runId: string): Promise<ChangedFileEntry[]>;
   runDiffs?(runId: string, filePath?: string): Promise<FileDiffPage>;
   runValidation?(runId: string): Promise<RunValidationSummary>;
@@ -129,7 +132,7 @@ export interface OpenSymphonyAppHandle {
   destroy(): Promise<void>;
 }
 
-type ConnectionMode = "connecting" | "connected" | "fixture" | "failed";
+type ConnectionMode = "connecting" | "connected" | "failed";
 
 interface AppState {
   connectionMode: ConnectionMode;
@@ -143,6 +146,8 @@ interface AppState {
   runFiles: ChangedFileEntry[] | null;
   selectedDiffPath: string | null;
   runDiff: FileDiffPage | null;
+  evidenceView: "diff" | "activity";
+  runEvents: RunEvent[] | null;
   runValidation: RunValidationSummary | null;
   runApprovals: ApprovalRequest[] | null;
   lastActionReceipt: ActionReceipt | null;
@@ -161,7 +166,6 @@ interface AppState {
   runOverlays: Map<string, RunDetail>;
   pendingMutations: Set<string>;
   pendingCreates: Map<string, string>;
-  /** Snapshot of the task graph node before each optimistic mutation, keyed by correlation id. `null` means a new node was created. */
   pendingSnapshots: Map<string, TaskGraphNode | null>;
   // Planning workspace state
   planningWorkspace: PlanningWorkspaceState;
@@ -210,6 +214,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       runFiles: null,
       selectedDiffPath: null,
       runDiff: null,
+      evidenceView: "diff",
+      runEvents: null,
       runValidation: null,
       runApprovals: null,
       lastActionReceipt: null,
@@ -235,45 +241,54 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async loadRunDetails(runId: string): Promise<void> {
-    if (typeof this.transport.runFiles !== "function") {
-      this.state.runFiles = alphaRunFiles(runId);
-      this.state.runValidation = alphaRunValidation(runId);
-      this.state.runApprovals = alphaRunApprovals(runId);
-      this.state.selectedDiffPath = this.state.runFiles[0]?.path ?? null;
-      this.state.runDiff = this.state.selectedDiffPath
-        ? alphaRunDiff(runId, this.state.selectedDiffPath)
-        : null;
-      return;
-    }
     this.state.runFiles = null;
     this.state.runDiff = null;
+    this.state.runEvents = null;
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
+    this.state.evidenceView = "diff";
     try {
-      this.state.runFiles = await this.transport.runFiles(runId);
-    } catch {
-      this.state.runFiles = alphaRunFiles(runId);
+      this.state.runFiles = typeof this.transport.runFiles === "function"
+        ? await this.transport.runFiles(runId)
+        : [];
+    } catch (error) {
+      this.state.runFiles = [];
+      this.state.connectionMessage = `Changed files unavailable: ${errorMessage(error)}`;
     }
     this.state.selectedDiffPath = this.state.runFiles[0]?.path ?? null;
     try {
       this.state.runDiff = this.state.selectedDiffPath
-        ? await this.transport.runDiffs!(runId, this.state.selectedDiffPath)
+        && typeof this.transport.runDiffs === "function"
+        ? await this.transport.runDiffs(runId, this.state.selectedDiffPath)
         : null;
-    } catch {
-      this.state.runDiff = this.state.selectedDiffPath
-        ? alphaRunDiff(runId, this.state.selectedDiffPath)
-        : null;
+    } catch (error) {
+      this.state.runDiff = null;
+      this.state.connectionMessage = `Diff unavailable: ${errorMessage(error)}`;
     }
     try {
-      this.state.runValidation = await this.transport.runValidation!(runId);
-    } catch {
-      this.state.runValidation = alphaRunValidation(runId);
+      this.state.runEvents = typeof this.transport.runEvents === "function"
+        ? (await this.transport.runEvents(runId)).events
+        : [];
+    } catch (error) {
+      this.state.runEvents = [];
+      this.state.connectionMessage = `Conversation activity unavailable: ${errorMessage(error)}`;
     }
     try {
-      this.state.runApprovals = await this.transport.runApprovals!(runId);
-    } catch {
-      this.state.runApprovals = alphaRunApprovals(runId);
+      this.state.runValidation = typeof this.transport.runValidation === "function"
+        ? await this.transport.runValidation(runId)
+        : null;
+    } catch (error) {
+      this.state.runValidation = null;
+      this.state.connectionMessage = `Validation summary unavailable: ${errorMessage(error)}`;
+    }
+    try {
+      this.state.runApprovals = typeof this.transport.runApprovals === "function"
+        ? await this.transport.runApprovals(runId)
+        : [];
+    } catch (error) {
+      this.state.runApprovals = [];
+      this.state.connectionMessage = `Approvals unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -336,20 +351,20 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         project_id: this.state.selectedProjectId,
       };
     } catch (error) {
-      this.state.capabilities = alphaCapabilities();
-      this.state.snapshot = alphaSnapshot();
-      this.state.taskGraph = alphaTaskGraph();
-      this.state.selectedProjectId = this.state.snapshot.projects[0]?.project_id ?? "opensymphony-local";
-      this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
-      this.state.runDetail = alphaRunDetail("desktop-alpha");
-      await this.loadRunDetails("desktop-alpha");
-      this.state.connectionMode = "fixture";
-      this.state.connectionMessage = `Gateway unavailable, showing desktop-alpha fixture data: ${errorMessage(error)}`;
-      this.loadPlanningWorkspace(this.state.selectedProjectId);
-      this.state.planningWorkspace = {
-        ...this.state.planningWorkspace,
-        project_id: this.state.selectedProjectId,
-      };
+      this.state.capabilities = null;
+      this.state.snapshot = null;
+      this.state.taskGraph = null;
+      this.state.selectedProjectId = null;
+      this.state.selectedNodeId = null;
+      this.state.runDetail = null;
+      this.state.runFiles = null;
+      this.state.runDiff = null;
+      this.state.evidenceView = "diff";
+      this.state.runEvents = null;
+      this.state.runValidation = null;
+      this.state.runApprovals = null;
+      this.state.connectionMode = "failed";
+      this.state.connectionMessage = `Gateway unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -365,27 +380,38 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async loadTaskGraph(projectId: string | null): Promise<void> {
     if (!projectId) {
-      this.state.taskGraph = alphaTaskGraph();
-      this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
+      this.state.taskGraph = null;
+      this.state.selectedNodeId = null;
       return;
     }
     try {
       const taskGraph = await this.transport.taskGraph(projectId);
       this.state.taskGraph = taskGraph;
-      this.state.selectedNodeId =
-        taskGraph.root_ids[0] ?? taskGraph.nodes[0]?.node_id ?? null;
+      const initialNode = initialSelectedTaskNode(taskGraph.nodes, taskGraph.root_ids);
+      this.state.selectedNodeId = initialNode?.node_id ?? null;
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
+      this.state.evidenceView = "diff";
+      this.state.runEvents = null;
       this.state.runValidation = null;
       this.state.runApprovals = null;
       this.state.selectedDiffPath = null;
       await this.loadRunOverlays(taskGraph);
-    } catch {
-      this.state.taskGraph = alphaTaskGraph(projectId);
-      this.state.selectedNodeId = this.state.taskGraph.nodes[1]?.node_id ?? null;
-      this.state.runDetail = alphaRunDetail("desktop-alpha");
-      await this.loadRunDetails("desktop-alpha");
+      if (initialNode) {
+        await this.openRun(initialNode);
+      }
+    } catch (error) {
+      this.state.taskGraph = null;
+      this.state.selectedNodeId = null;
+      this.state.runDetail = null;
+      this.state.runFiles = null;
+      this.state.runDiff = null;
+      this.state.evidenceView = "diff";
+      this.state.runEvents = null;
+      this.state.runValidation = null;
+      this.state.runApprovals = null;
+      this.state.connectionMessage = `Task graph unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -417,8 +443,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       this.state.runDetail = await this.transport.runDetail(runId);
       this.state.runOverlays.set(runId, this.state.runDetail);
-    } catch {
-      this.state.runDetail = alphaRunDetail(runId, node.identifier);
+    } catch (error) {
+      this.state.runDetail = null;
+      this.state.runFiles = null;
+      this.state.runDiff = null;
+      this.state.evidenceView = "diff";
+      this.state.runEvents = null;
+      this.state.runValidation = null;
+      this.state.runApprovals = null;
+      this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
+      this.state.loading = false;
+      this.render();
+      return;
     }
     await this.loadRunDetails(runId);
     this.state.loading = false;
@@ -427,16 +463,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   private async selectDiffFile(path: string): Promise<void> {
     this.state.selectedDiffPath = path;
+    this.state.evidenceView = "diff";
     const runId = this.state.runDetail?.run_id;
     if (runId && typeof this.transport.runDiffs === "function") {
       try {
         this.state.runDiff = await this.transport.runDiffs!(runId, path);
-      } catch {
-        this.state.runDiff = alphaRunDiff(runId, path);
+      } catch (error) {
+        this.state.runDiff = null;
+        this.state.connectionMessage = `Diff unavailable: ${errorMessage(error)}`;
       }
     } else if (runId) {
-      this.state.runDiff = alphaRunDiff(runId, path);
+      this.state.runDiff = null;
+      this.state.connectionMessage = "Diff endpoint unavailable for the active transport";
     }
+    this.render();
+  }
+
+  private selectEvidenceView(view: AppState["evidenceView"]): void {
+    this.state.evidenceView = view;
     this.render();
   }
 
@@ -458,16 +502,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       switch (action) {
         case "cancel":
-          receipt = await (transport.cancelRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.cancelRun?.(runId) ?? unsupportedAction(action));
           break;
         case "retry":
-          receipt = await (transport.retryRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.retryRun?.(runId) ?? unsupportedAction(action));
           break;
         case "rehydrate":
-          receipt = await (transport.rehydrateRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.rehydrateRun?.(runId) ?? unsupportedAction(action));
           break;
         case "resume":
-          receipt = await (transport.resumeRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.resumeRun?.(runId) ?? unsupportedAction(action));
           break;
         case "detach":
           receipt = await (transport.dispatchAction?.({
@@ -476,19 +520,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             action_kind: "transition_issue",
             target_entity: { entity_kind: "run", entity_id: runId },
             payload: { intent: "detach" },
-          }) ?? fallbackAction(runId, action));
+          }) ?? unsupportedAction(action));
           break;
         case "comment":
-          receipt = await (transport.commentRun?.(runId, "Operator comment") ?? fallbackAction(runId, action));
+          receipt = await (transport.commentRun?.(runId, "Operator comment") ?? unsupportedAction(action));
           break;
         case "create_followup":
-          receipt = await (transport.createFollowup?.(runId, { title: "Follow-up from run" }) ?? fallbackAction(runId, action));
+          receipt = await (transport.createFollowup?.(runId, { title: "Follow-up from run" }) ?? unsupportedAction(action));
           break;
         case "open_workspace":
-          receipt = await (transport.openWorkspace?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.openWorkspace?.(runId) ?? unsupportedAction(action));
           break;
         case "debug":
-          receipt = await (transport.debugRun?.(runId) ?? fallbackAction(runId, action));
+          receipt = await (transport.debugRun?.(runId) ?? unsupportedAction(action));
           break;
       }
       if (!receipt) return;
@@ -524,7 +568,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     };
     try {
       const receipt = await (transport.approvalDecision?.(approvalId, decision, explanation) ??
-        fallbackAction(approvalId, "approval_decision"));
+        unsupportedAction("approval_decision"));
       this.state.lastActionReceipt = receipt;
       this.state.auditTrail.push({
         timestamp: new Date().toISOString(),
@@ -587,10 +631,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const gatewayInput = this.options.root.querySelector<HTMLInputElement>("[data-profile-gateway]");
-    const labelInput = this.options.root.querySelector<HTMLInputElement>("[data-profile-label]");
     const kindInput = this.options.root.querySelector<HTMLSelectElement>("[data-profile-kind]");
     const gatewayUrl = (gatewayInput?.value ?? "").trim();
-    const label = (labelInput?.value ?? "Local Gateway").trim() || "Local Gateway";
+    const activeProfile = this.state.profiles.find((profile) => profile.id === this.state.activeProfileId);
+    const label = activeProfile?.label ?? "Local Gateway";
     const kind = editableProfileKindFromValue(kindInput?.value, this.options.mode);
     if (!gatewayUrl) {
       this.state.connectionMessage = "Profile URL is required";
@@ -622,9 +666,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     const title = this.options.title ?? "OpenSymphony";
-    const selectedNode = this.state.taskGraph?.nodes.find(
-      (node) => node.node_id === this.state.selectedNodeId,
-    );
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
       <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}">
@@ -642,22 +683,26 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           </div>
         </header>
         <section class="os-grid">
-          ${this.renderProfiles()}
-          ${this.renderViewContent(selectedNode)}
+          ${this.renderViewContent()}
         </section>
       </main>
     `;
     this.bindEvents();
   }
 
-  private renderViewContent(selectedNode: TaskGraphNode | undefined): string {
+  private renderViewContent(): string {
     if (this.state.activeView === "planning") {
-      return renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit);
+      return `
+        ${this.renderProfiles()}
+        ${renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit)}
+      `;
     }
     return `
-      ${this.renderDashboard()}
-      ${this.renderTaskGraph(selectedNode)}
+      ${this.renderStatus()}
+      ${this.renderProfiles()}
+      ${this.renderTaskGraph()}
       ${this.renderRunDetail()}
+      ${this.renderRunEvidence()}
     `;
   }
 
@@ -695,10 +740,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </label>
         <div class="os-inline-fields">
           <label class="os-field">
-            <span>Label</span>
-            <input data-profile-label value="Local Gateway" />
-          </label>
-          <label class="os-field">
             <span>Kind</span>
             <select data-profile-kind>${kindOptions}</select>
           </label>
@@ -713,63 +754,80 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     `;
   }
 
-  private renderDashboard(): string {
+  private renderStatus(): string {
     const snapshot = this.state.snapshot;
     if (!snapshot) {
-      return panel("Dashboard", `<div class="os-empty">Loading dashboard</div>`);
+      return panel("Status", `<div class="os-empty">Loading status</div>`, "os-status-panel");
     }
-    const projectButtons = snapshot.projects.map((project) => `
-      <button type="button" class="os-list-item ${project.project_id === this.state.selectedProjectId ? "is-selected" : ""}" data-project-id="${escapeAttr(project.project_id)}">
-        <strong>${escapeHtml(project.name)}</strong>
-        <span>${project.running_count} running, ${project.completed_count} done, ${project.failed_count} failed</span>
-      </button>
-    `).join("");
-    const events = snapshot.recent_events.slice(0, 5).map((event) => `
+    const events = snapshot.recent_events.slice(0, 3).map((event) => `
       <li>
+        <time class="os-event-time" datetime="${escapeAttr(event.happened_at)}">${escapeHtml(formatEventTime(event.happened_at))}</time>
         <span>${escapeHtml(event.kind)}</span>
         <strong>${escapeHtml(event.issue_identifier ?? "system")}</strong>
         ${escapeHtml(event.summary)}
       </li>
     `).join("");
     return panel(
-      "Dashboard",
+      "Status",
       `
         <div class="os-metrics">
           <div><strong>${snapshot.metrics.running_issue_count}</strong><span>Running</span></div>
           <div><strong>${snapshot.metrics.retry_queue_depth}</strong><span>Retry Queue</span></div>
           <div><strong>${formatNumber(snapshot.metrics.total_input_tokens + snapshot.metrics.total_output_tokens)}</strong><span>Tokens</span></div>
         </div>
-        <div class="os-list">${projectButtons || `<div class="os-empty">No projects</div>`}</div>
         <ol class="os-events">${events || `<li>No recent events</li>`}</ol>
       `,
+      "os-status-panel",
     );
   }
 
-  private renderTaskGraph(selectedNode: TaskGraphNode | undefined): string {
+  private renderTaskGraph(): string {
     const taskGraph = this.state.taskGraph;
     if (!taskGraph) {
-      return panel("Task Graph", `<div class="os-empty">No task graph loaded</div>`);
+      return panel("Task Graph", `<div class="os-empty">No task graph loaded</div>`, "os-task-graph-panel");
     }
-    const allNodes = new Map(taskGraph.nodes.map((node) => [node.node_id, node]));
     const getOverlay = (node: TaskGraphNode) => {
       const run = node.run_id ? this.state.runOverlays.get(node.run_id) : undefined;
       return buildRuntimeOverlay(node, run);
     };
     const filtered = filterTaskGraphNodes(taskGraph.nodes, this.state.taskGraphFilter, getOverlay);
+    if (this.options.mode === "web") {
+      return this.renderEditableTaskGraph(taskGraph, filtered, getOverlay);
+    }
+    const dependencySignals = buildDependencySignals(taskGraph.nodes, filtered);
+    const graph = renderTaskGraphVisualization(
+      filtered,
+      this.state.selectedNodeId,
+      getOverlay,
+      dependencySignals,
+    );
+
+    const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
+
+    return panel(
+      "Task Graph",
+      `${filters}${graph}`,
+      "os-task-graph-panel",
+    );
+  }
+
+  private renderEditableTaskGraph(
+    taskGraph: TaskGraphSnapshot,
+    filtered: TaskGraphNode[],
+    getOverlay: (node: TaskGraphNode) => ReturnType<typeof buildRuntimeOverlay>,
+  ): string {
+    const allNodes = new Map(taskGraph.nodes.map((node) => [node.node_id, node]));
     const nodes = filtered.map((node) => renderTaskGraphNode(
       node,
       this.state.selectedNodeId,
       this.state.inlineEdit,
       getOverlay(node),
     )).join("");
-
-    const selectedStrip = selectedNode ? renderSelectedNodeDetail(selectedNode) : "";
     const toolbar = renderTaskGraphToolbar();
     const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
     const pendingBanner = this.state.pendingMutations.size > 0
       ? `<div class="os-pending-banner">${this.state.pendingMutations.size} change(s) pending server acknowledgement</div>`
       : "";
-
     const dependencyDialog = this.state.dependencyEdit.nodeId && allNodes.get(this.state.dependencyEdit.nodeId)
       ? renderDependencyEditor(allNodes.get(this.state.dependencyEdit.nodeId)!, allNodes, this.state.dependencyEdit)
       : "";
@@ -777,7 +835,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       ? renderCommentEditor(allNodes.get(this.state.commentEdit.nodeId)!, this.state.commentEdit)
       : "";
     const createDialog = renderCreateDialog(this.state.createDialog);
-
     const actions = (() => {
       if (!this.state.createDialog.open && !this.state.dependencyEdit.nodeId && !this.state.commentEdit.nodeId) return "";
       return `
@@ -791,14 +848,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     return panel(
       "Task Graph",
-      `${toolbar}${filters}${pendingBanner}${selectedStrip}<div class="os-node-list">${nodes || `<div class="os-empty">No tasks match the current filters</div>`}</div>${actions}${createDialog}${dependencyDialog}${commentDialog}`,
+      `${toolbar}${filters}${pendingBanner}<div class="os-node-list">${nodes || `<div class="os-empty">No tasks match the current filters</div>`}</div>${actions}${createDialog}${dependencyDialog}${commentDialog}`,
+      "os-task-graph-panel",
     );
   }
 
   private renderRunDetail(): string {
     const run = this.state.runDetail;
     if (!run) {
-      return panel("Run Detail", `<div class="os-empty">Select an issue and open its run</div>`);
+      return panel("Run Detail", `<div class="os-empty">Select an issue and open its run</div>`, "os-run-detail-panel");
     }
     const phase = run.liveness?.phase ?? statusToPhase(run.status, run.release_reason, run.detached);
     const stream = run.liveness?.stream ?? "healthy";
@@ -810,7 +868,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const actionItems = buildActionBarItems(run);
     const actionBar = renderActionBar(actionItems);
     const files = renderChangedFileList(this.state.runFiles ?? [], this.state.selectedDiffPath ?? undefined);
-    const diff = this.state.runDiff ? renderFileDiff(this.state.runDiff) : "";
+    const selectedNode = this.selectedTaskNode();
+    const dependencyDetail = selectedNode
+      ? renderDependencyDetail(selectedNode, this.state.taskGraph?.nodes ?? [])
+      : "";
     const validation = this.state.runValidation
       ? renderValidationSummary(this.state.runValidation)
       : "";
@@ -841,6 +902,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             ${cancelState ? `<div class="os-pill os-pill-${cancelState}" data-testid="run-pill-cancel-state">${cancelState}</div>` : ""}
           </div>
         </div>
+        ${dependencyDetail}
         <div class="os-run-grid">
           <div><span>Phase</span><strong>${escapeHtml(phase)}</strong></div>
           <div><span>Stream</span><strong>${escapeHtml(stream)}</strong></div>
@@ -851,14 +913,56 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </div>
         ${actionBar}
         ${receipt}
+        <div class="os-run-section">
+          <h3>Changed Files</h3>
+          ${files}
+        </div>
         <div class="os-run-panels">
-          <div class="os-diff-panel">${files}${diff}</div>
           <div class="os-validation-panel">${validation}</div>
           <div class="os-approval-panel">${approvals}</div>
         </div>
         ${audit}
         <pre>${escapeHtml(run.workspace_path ?? run.workspace_id ?? "workspace path unavailable")}</pre>
       `,
+      "os-run-detail-panel",
+    );
+  }
+
+  private selectedTaskNode(): TaskGraphNode | null {
+    const selectedNodeId = this.state.selectedNodeId;
+    const nodes = this.state.taskGraph?.nodes ?? [];
+    if (selectedNodeId) {
+      const selected = nodes.find((node) => node.node_id === selectedNodeId);
+      if (selected) return selected;
+    }
+    const runIssue = this.state.runDetail?.issue_identifier ?? this.state.runDetail?.run_id ?? null;
+    return runIssue ? (findNodeByRef(nodes, runIssue) ?? null) : null;
+  }
+
+  private renderRunEvidence(): string {
+    const run = this.state.runDetail;
+    if (!run) {
+      return panel("Inspector", `<div class="os-empty">Select an issue to inspect a diff or activity</div>`, "os-run-evidence-panel");
+    }
+    const diff = this.state.runDiff ? renderFileDiff(this.state.runDiff) : "";
+    const activity = renderRunActivity(this.state.runEvents);
+    const showingDiff = this.state.evidenceView === "diff";
+    const content = showingDiff
+      ? diff || `<div class="os-empty">Select a changed file to view its diff</div>`
+      : activity;
+    return panel(
+      "Inspector",
+      `
+        <div class="os-segmented" data-testid="evidence-toggle">
+          <button type="button" class="${showingDiff ? "is-selected" : ""}" data-evidence-view="diff">Diff</button>
+          <button type="button" class="${!showingDiff ? "is-selected" : ""}" data-evidence-view="activity">Activity</button>
+        </div>
+        <div class="os-run-section">
+          <h3>${showingDiff ? "Selected Diff" : "Conversation Activity"}</h3>
+          ${content}
+        </div>
+      `,
+      "os-run-evidence-panel",
     );
   }
 
@@ -889,8 +993,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           (candidate) => candidate.node_id === button.dataset.nodeId,
         );
         if (node) {
-          this.state.selectedNodeId = node.node_id;
-          this.render();
+          if (this.options.mode === "desktop") {
+            void this.openRun(node);
+          } else {
+            this.state.selectedNodeId = node.node_id;
+            this.render();
+          }
         }
       });
     });
@@ -909,6 +1017,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         const path = button.dataset.path;
         if (path) {
           void this.selectDiffFile(path);
+        }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-evidence-view]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const view = button.dataset.evidenceView;
+        if (view === "diff" || view === "activity") {
+          this.selectEvidenceView(view);
         }
       });
     });
@@ -950,27 +1066,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.render();
     });
 
-    // Toolbar create buttons
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-create]").forEach((button) => {
       button.addEventListener("click", () => {
         const kind = button.dataset.tgCreate as TaskGraphNodeKind;
         this.openCreateDialog(kind, null);
       });
     });
-
-    // Create child buttons
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-create-child]").forEach((button) => {
       button.addEventListener("click", () => {
         const parentId = button.dataset.tgCreateChild;
         if (!parentId) return;
-        const parent = this.state.taskGraph?.nodes.find((n) => n.node_id === parentId);
+        const parent = this.state.taskGraph?.nodes.find((node) => node.node_id === parentId);
         if (!parent) return;
         const childKind: TaskGraphNodeKind = parent.kind === "milestone" ? "issue" : "sub_issue";
         this.openCreateDialog(childKind, parentId);
       });
     });
-
-    // Create dialog actions
     this.options.root.querySelector("[data-tg-create-save]")?.addEventListener("click", () => {
       void this.saveCreateDialog();
     });
@@ -978,8 +1089,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.createDialog = { ...emptyEditorDialog };
       this.render();
     });
-
-    // Inline edit actions
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-edit]").forEach((button) => {
       button.addEventListener("click", () => {
         const nodeId = button.dataset.tgEdit;
@@ -998,8 +1107,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         this.render();
       });
     });
-
-    // Dependency editor actions
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-deps]").forEach((button) => {
       button.addEventListener("click", () => {
         const nodeId = button.dataset.tgDeps;
@@ -1013,8 +1120,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.dependencyEdit = { ...emptyDependencyEdit };
       this.render();
     });
-
-    // Comment editor actions
     this.options.root.querySelectorAll<HTMLElement>("[data-tg-comment]").forEach((button) => {
       button.addEventListener("click", () => {
         const nodeId = button.dataset.tgComment;
@@ -1306,8 +1411,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
-  // -- Create dialog handling --
-
   private openCreateDialog(kind: TaskGraphNodeKind, parentId: string | null): void {
     this.state.createDialog = {
       open: true,
@@ -1322,22 +1425,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private async saveCreateDialog(): Promise<void> {
     const dialog = this.state.createDialog;
     if (!dialog.open || !dialog.kind) return;
-    const root = this.options.root;
-    const title = (root.querySelector<HTMLInputElement>("[data-tg-create-title]")?.value ?? "").trim();
-    const state = (root.querySelector<HTMLInputElement>("[data-tg-create-state]")?.value ?? "Todo").trim() || "Todo";
+    const title = (this.options.root.querySelector<HTMLInputElement>("[data-tg-create-title]")?.value ?? "").trim();
+    const state = (this.options.root.querySelector<HTMLInputElement>("[data-tg-create-state]")?.value ?? "Todo").trim() || "Todo";
     if (!title) return;
 
     const parentId = dialog.parentId ?? undefined;
     const nodeId = `new-${dialog.kind}-${generateId()}`;
-    const newNode = buildCreatedNode(
-      { parent_id: parentId, kind: dialog.kind, title, state },
-      nodeId,
-    );
+    const newNode = buildCreatedNode({ parent_id: parentId, kind: dialog.kind, title, state }, nodeId);
     const taskGraph = this.state.taskGraph;
     if (taskGraph) {
       taskGraph.nodes.push(newNode);
       if (parentId) {
-        const parent = taskGraph.nodes.find((n) => n.node_id === parentId);
+        const parent = taskGraph.nodes.find((node) => node.node_id === parentId);
         if (parent && !parent.children.includes(nodeId)) {
           parent.children.push(nodeId);
         }
@@ -1370,41 +1469,34 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
-  // -- Inline edit handling --
-
   private startInlineEdit(nodeId: string): void {
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
     if (!node) return;
     this.state.inlineEdit = { nodeId, title: node.title, state: node.state };
     this.render();
   }
 
   private async saveInlineEdit(nodeId: string): Promise<void> {
-    const root = this.options.root;
-    const title = Array.from(root.querySelectorAll<HTMLInputElement>("[data-tg-inline-title]")).find(
-      (el) => el.dataset.tgInlineTitle === nodeId,
+    const title = Array.from(this.options.root.querySelectorAll<HTMLInputElement>("[data-tg-inline-title]")).find(
+      (input) => input.dataset.tgInlineTitle === nodeId,
     )?.value.trim();
-    const state = Array.from(root.querySelectorAll<HTMLInputElement>("[data-tg-inline-state]")).find(
-      (el) => el.dataset.tgInlineState === nodeId,
+    const state = Array.from(this.options.root.querySelectorAll<HTMLInputElement>("[data-tg-inline-state]")).find(
+      (input) => input.dataset.tgInlineState === nodeId,
     )?.value.trim();
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
     if (!node) return;
-    const updated = applyNodeUpdate(node, { title, state });
-    this.updateTaskGraphNode(updated);
+    const snapshot = { ...node };
+    this.updateTaskGraphNode(applyNodeUpdate(node, { title, state }));
     this.state.inlineEdit = { ...emptyInlineEdit };
     this.render();
 
     if (isActionCapable(this.transport)) {
       const correlationId = `tg-update-${nodeId}-${generateId()}`;
       this.state.pendingMutations.add(correlationId);
-      this.state.pendingSnapshots.set(correlationId, { ...node });
+      this.state.pendingSnapshots.set(correlationId, snapshot);
       this.render();
       try {
-        const receipt = await dispatchTaskGraphUpdate(this.transport, {
-          node_id: nodeId,
-          title,
-          state,
-        }, correlationId);
+        const receipt = await dispatchTaskGraphUpdate(this.transport, { node_id: nodeId, title, state }, correlationId);
         this.applyMutationReceipt(receipt);
       } catch (error) {
         this.rollbackOptimisticMutation(correlationId);
@@ -1414,10 +1506,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
-  // -- Dependency editor handling --
-
   private openDependencyEditor(nodeId: string): void {
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
     if (!node) return;
     this.state.dependencyEdit = { nodeId, blockedBy: [...node.blocked_by] };
     this.render();
@@ -1428,17 +1518,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!nodeId) return;
     const select = this.options.root.querySelector<HTMLSelectElement>("[data-tg-deps-select]");
     const blockedBy = Array.from(select?.selectedOptions ?? []).map((option) => option.value);
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
     if (!node) return;
-    const updated = { ...node, blocked_by: blockedBy };
-    this.updateTaskGraphNode(updated);
+    const snapshot = { ...node };
+    this.updateTaskGraphNode({ ...node, blocked_by: blockedBy });
     this.state.dependencyEdit = { ...emptyDependencyEdit };
     this.render();
 
     if (isActionCapable(this.transport)) {
       const correlationId = `tg-deps-${nodeId}-${generateId()}`;
       this.state.pendingMutations.add(correlationId);
-      this.state.pendingSnapshots.set(correlationId, { ...node });
+      this.state.pendingSnapshots.set(correlationId, snapshot);
       this.render();
       try {
         const receipt = await dispatchTaskGraphDependencies(this.transport, { node_id: nodeId, blocked_by: blockedBy }, correlationId);
@@ -1451,8 +1541,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
-  // -- Comment editor handling --
-
   private openCommentEditor(nodeId: string): void {
     this.state.commentEdit = { nodeId, kind: "comment", body: "" };
     this.render();
@@ -1464,11 +1552,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const body = this.options.root.querySelector<HTMLTextAreaElement>("[data-tg-comment-body]")?.value.trim() ?? "";
     if (!body) return;
     const kind = (this.options.root.querySelector<HTMLSelectElement>("[data-tg-comment-kind]")?.value ?? "comment") as "comment" | "evidence";
-
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === nodeId);
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === nodeId);
+    const snapshot = node ? { ...node } : null;
     if (node) {
-      const updated = { ...node, comment_count: (node.comment_count ?? 0) + 1 };
-      this.updateTaskGraphNode(updated);
+      this.updateTaskGraphNode({ ...node, comment_count: (node.comment_count ?? 0) + 1 });
     }
     this.state.commentEdit = { ...emptyCommentEdit };
     this.render();
@@ -1476,8 +1563,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (isActionCapable(this.transport)) {
       const correlationId = `tg-comment-${nodeId}-${generateId()}`;
       this.state.pendingMutations.add(correlationId);
-      if (node) {
-        this.state.pendingSnapshots.set(correlationId, { ...node });
+      if (snapshot) {
+        this.state.pendingSnapshots.set(correlationId, snapshot);
       }
       this.render();
       try {
@@ -1491,12 +1578,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
-  // -- Local state mutation helpers --
-
   private updateTaskGraphNode(updated: TaskGraphNode): void {
     const taskGraph = this.state.taskGraph;
     if (!taskGraph) return;
-    const idx = taskGraph.nodes.findIndex((n) => n.node_id === updated.node_id);
+    const idx = taskGraph.nodes.findIndex((node) => node.node_id === updated.node_id);
     if (idx >= 0) {
       taskGraph.nodes[idx] = updated;
     }
@@ -1518,7 +1603,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
 
-    // Reconcile optimistic create ids with the server-assigned id from the receipt.
     const localNodeId = this.state.pendingCreates.get(receipt.correlation_id);
     if (localNodeId && localNodeId !== result.node_id) {
       this.reconcileNodeId(localNodeId, result.node_id);
@@ -1527,7 +1611,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.pendingCreates.delete(receipt.correlation_id);
     this.state.pendingSnapshots.delete(receipt.correlation_id);
 
-    const node = this.state.taskGraph?.nodes.find((n) => n.node_id === result.node_id);
+    const node = this.state.taskGraph?.nodes.find((candidate) => candidate.node_id === result.node_id);
     if (node) {
       this.updateTaskGraphNode({ ...node, updated_at: result.updated_at });
     }
@@ -1536,7 +1620,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private rollbackOptimisticMutation(correlationId: string): void {
     const snapshot = this.state.pendingSnapshots.get(correlationId);
     if (snapshot === undefined) {
-      // No snapshot recorded; nothing to roll back.
       this.state.pendingMutations.delete(correlationId);
       this.state.pendingCreates.delete(correlationId);
       return;
@@ -1544,10 +1627,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     const taskGraph = this.state.taskGraph;
     if (snapshot === null) {
-      // Optimistic create: remove the temporary node.
       const localNodeId = this.state.pendingCreates.get(correlationId);
       if (taskGraph && localNodeId) {
-        taskGraph.nodes = taskGraph.nodes.filter((n) => n.node_id !== localNodeId);
+        taskGraph.nodes = taskGraph.nodes.filter((node) => node.node_id !== localNodeId);
         taskGraph.root_ids = taskGraph.root_ids.filter((id) => id !== localNodeId);
         for (const node of taskGraph.nodes) {
           node.children = node.children.filter((id) => id !== localNodeId);
@@ -1557,7 +1639,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       }
     } else if (taskGraph) {
-      // Restore the node from the snapshot.
       this.updateTaskGraphNode(snapshot);
     }
 
@@ -1569,25 +1650,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private reconcileNodeId(oldId: string, newId: string): void {
     const taskGraph = this.state.taskGraph;
     if (!taskGraph) return;
-
-    if (taskGraph.nodes.some((n) => n.node_id === newId && n.node_id !== oldId)) {
+    if (taskGraph.nodes.some((node) => node.node_id === newId && node.node_id !== oldId)) {
       this.state.connectionMessage = `Server returned a duplicate node ID (${newId}); optimistic ID not reconciled.`;
       return;
     }
 
-    const node = taskGraph.nodes.find((n) => n.node_id === oldId);
+    const node = taskGraph.nodes.find((candidate) => candidate.node_id === oldId);
     if (!node) return;
     node.node_id = newId;
-
     if (taskGraph.root_ids.includes(oldId)) {
       taskGraph.root_ids = taskGraph.root_ids.map((id) => (id === oldId ? newId : id));
     }
-    for (const n of taskGraph.nodes) {
-      if (n.parent_id === oldId) n.parent_id = newId;
-      n.children = n.children.map((id) => (id === oldId ? newId : id));
-      n.blocked_by = n.blocked_by.map((id) => (id === oldId ? newId : id));
+    for (const candidate of taskGraph.nodes) {
+      if (candidate.parent_id === oldId) candidate.parent_id = newId;
+      candidate.children = candidate.children.map((id) => (id === oldId ? newId : id));
+      candidate.blocked_by = candidate.blocked_by.map((id) => (id === oldId ? newId : id));
     }
-
     if (this.state.selectedNodeId === oldId) this.state.selectedNodeId = newId;
     if (this.state.inlineEdit.nodeId === oldId) this.state.inlineEdit.nodeId = newId;
     if (this.state.dependencyEdit.nodeId === oldId) this.state.dependencyEdit.nodeId = newId;
@@ -1698,24 +1776,50 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 }
 
-function fallbackAction(entityId: string, action: string): ActionReceipt {
-  return {
-    schema_version: schemaVersion,
-    action_id: `${action}-${entityId}-fixture`,
-    correlation_id: `${action}-${entityId}`,
-    status: "accepted",
-    expected_followup: ["action_completion"],
-    issued_at: new Date().toISOString(),
-  };
+function unsupportedAction(action: string): never {
+  throw new Error(`${action} is not supported by the active gateway transport`);
 }
 
-function panel(title: string, body: string): string {
+function panel(title: string, body: string, className = ""): string {
+  const classes = `os-panel${className ? ` ${className}` : ""}`;
   return `
-    <section class="os-panel">
+    <section class="${escapeAttr(classes)}">
       <div class="os-section-head"><h2>${escapeHtml(title)}</h2></div>
       ${body}
     </section>
   `;
+}
+
+function renderRunActivity(events: RunEvent[] | null): string {
+  if (events === null) {
+    return `<div class="os-run-activity os-empty" data-testid="run-activity">Loading conversation activity</div>`;
+  }
+  if (events.length === 0) {
+    return `<div class="os-run-activity os-empty" data-testid="run-activity">No recent activity</div>`;
+  }
+  const items = [...events]
+    .reverse()
+    .map((event) => `
+      <div class="os-activity-entry" data-testid="run-activity-entry">
+        <span>${escapeHtml(formatEventTime(event.happened_at))}</span>
+        <strong>${escapeHtml(event.kind)}</strong>
+        <p>${escapeHtml(event.summary)}</p>
+      </div>
+    `)
+    .join("");
+  return `<div class="os-run-activity" data-testid="run-activity">${items}</div>`;
+}
+
+function formatEventTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
 }
 
 const editableProfileKindOptions: Array<{
@@ -1761,244 +1865,6 @@ function defaultUiProfiles(gatewayUrl: string): ConnectionProfile[] {
   ];
 }
 
-function alphaCapabilities(): GatewayCapabilities {
-  return {
-    schema_version: schemaVersion,
-    gateway_version: "desktop-alpha-fixture",
-    supported_api_versions: ["1.0.0"],
-    transports: [
-      {
-        transport: "loopback_http",
-        modes: ["json"],
-        supported_encodings: ["utf-8"],
-        bidirectional: false,
-      },
-    ],
-    features: [
-      { feature: "task_graph", available: true, requires_auth: false },
-      { feature: "terminal_stream", available: false, requires_auth: false },
-    ],
-    auth_modes: ["none"],
-    max_event_page_size: 1000,
-    max_terminal_frame_batch: 500,
-  };
-}
-
-function alphaSnapshot(): DashboardSnapshot {
-  return {
-    schema_version: schemaVersion,
-    generated_at: new Date(1_700_000_000_000).toISOString(),
-    sequence: 1,
-    health: "degraded",
-    metrics: {
-      running_issue_count: 1,
-      retry_queue_depth: 0,
-      total_input_tokens: 12000,
-      total_output_tokens: 6200,
-      total_cache_read_tokens: 1800,
-      total_cost_micros: 0,
-    },
-    projects: [
-      {
-        project_id: "opensymphony-local",
-        name: "OpenSymphony",
-        milestone_count: 1,
-        issue_count: 3,
-        running_count: 1,
-        completed_count: 2,
-        failed_count: 0,
-      },
-    ],
-    recent_events: [
-      {
-        happened_at: new Date(1_700_000_000_000).toISOString(),
-        issue_identifier: "DESKTOP-ALPHA",
-        kind: "client_attached",
-        summary: "Desktop alpha shell mounted",
-      },
-    ],
-  };
-}
-
-function alphaTaskGraph(projectId = "opensymphony-local"): TaskGraphSnapshot {
-  return {
-    schema_version: schemaVersion,
-    project_id: projectId,
-    generated_at: new Date(1_700_000_000_000).toISOString(),
-    root_ids: ["m7"],
-    nodes: [
-      {
-        schema_version: schemaVersion,
-        node_id: "m7",
-        kind: "milestone",
-        identifier: "M7",
-        title: "Shared Client And Desktop Alpha",
-        state: "Backlog",
-        state_category: "backlog",
-        children: ["desktop-alpha", "coe-410"],
-        blocked_by: [],
-        labels: ["desktop"],
-      },
-      {
-        schema_version: schemaVersion,
-        node_id: "desktop-alpha",
-        kind: "issue",
-        identifier: "DESKTOP-ALPHA",
-        title: "Desktop alpha recovery",
-        state: "Backlog",
-        state_category: "backlog",
-        parent_id: "m7",
-        children: [],
-        blocked_by: [],
-        labels: ["desktop", "recovery"],
-      },
-      {
-        schema_version: schemaVersion,
-        node_id: "coe-410",
-        kind: "issue",
-        identifier: "COE-410",
-        title: "Desktop local stream optimization",
-        state: "Done",
-        state_category: "done",
-        parent_id: "m7",
-        children: [],
-        blocked_by: [],
-        labels: ["transport"],
-      },
-    ],
-  };
-}
-
-function alphaRunDetail(runId: string, issueIdentifier = runId): RunDetail {
-  return {
-    schema_version: schemaVersion,
-    run_id: runId,
-    issue_id: issueIdentifier,
-    issue_identifier: issueIdentifier,
-    worker_id: "desktop-alpha",
-    status: "running",
-    lifecycle_state: "running",
-    claimed_at: new Date(1_700_000_000_000).toISOString(),
-    started_at: new Date(1_700_000_030_000).toISOString(),
-    turn_count: 1,
-    max_turns: 8,
-    input_tokens: 12000,
-    output_tokens: 6200,
-    cache_read_tokens: 1800,
-    runtime_seconds: 90,
-    workspace_path: "/tmp/opensymphony/desktop-alpha",
-    allowed_actions: ["cancel", "rehydrate"],
-    liveness: {
-      phase: "quiet",
-      stream: "stale",
-      latest_progress: {
-        sequence: 1,
-        event_id: "fixture-progress-1",
-        happened_at: new Date(1_700_000_060_000).toISOString(),
-        kind: "snapshot_published",
-        summary: "Fixture run detail available",
-      },
-    },
-    safe_actions: {
-      retry: false,
-      cancel: true,
-      rehydrate: true,
-      detach: false,
-    },
-  };
-}
-
-function alphaRunFiles(_runId: string): ChangedFileEntry[] {
-  return [
-    {
-      path: "src/alpha.ts",
-      change_kind: "modified",
-      lines_added: 12,
-      lines_removed: 4,
-      size_bytes: 1024,
-    },
-    {
-      path: "tests/alpha.test.ts",
-      change_kind: "created",
-      lines_added: 42,
-      lines_removed: 0,
-      size_bytes: 800,
-    },
-  ];
-}
-
-function alphaRunDiff(runId: string, filePath: string): FileDiffPage {
-  return {
-    schema_version: schemaVersion,
-    run_id: runId,
-    file_path: filePath,
-    hunks: [
-      {
-        file_path: filePath,
-        header: `@@ -1,5 +1,8 @@`,
-        start_line: 1,
-        old_line_count: 5,
-        new_line_count: 8,
-        lines: [
-          { type: "context", line: "import { helper } from './helper';" },
-          { type: "deletion", line: "export function oldLogic() { return true; }" },
-          { type: "addition", line: "export function newLogic() { return false; }" },
-          { type: "addition", line: "export function newHelper() { return 1; }" },
-          { type: "context", line: "" },
-        ],
-      },
-    ],
-    total_lines_added: 2,
-    total_lines_removed: 1,
-  };
-}
-
-function alphaRunValidation(runId: string): RunValidationSummary {
-  return {
-    schema_version: schemaVersion,
-    run_id: runId,
-    generated_at: new Date().toISOString(),
-    overall_status: "passed",
-    commands: [
-      {
-        command_id: "cmd-1",
-        command: "npm test",
-        status: "passed",
-        exit_code: 0,
-        stdout_summary: "42 tests passed",
-      },
-    ],
-    evidence: [
-      {
-        evidence_id: "ev-1",
-        label: "Test coverage",
-        status: "passed",
-        summary: "Coverage is 87%",
-      },
-    ],
-  };
-}
-
-function alphaRunApprovals(runId: string): ApprovalRequest[] {
-  return [
-    {
-      schema_version: schemaVersion,
-      approval_id: "approval-1",
-      run_id: runId,
-      issue_id: "desktop-alpha",
-      kind: "file_write",
-      title: "Allow writing to src/config.ts",
-      description: "Agent wants to update local config file.",
-      actor: { actor_id: "agent-1", actor_kind: "agent", display_name: "OpenHands Agent" },
-      target_context: { file_path: "src/config.ts", issue_identifier: "DESKTOP-ALPHA", run_id: runId },
-      risk_summary: { level: "medium", reasons: ["modifies tracked config"] },
-      requested_at: new Date().toISOString(),
-      status: "pending",
-      correlation_id: "corr-approval-1",
-    },
-  ];
-}
-
 function statusToPhase(
   status: RunDetail["status"],
   releaseReason?: RunDetail["release_reason"],
@@ -2022,8 +1888,6 @@ function statusLabel(mode: ConnectionMode): string {
   switch (mode) {
     case "connected":
       return "Connected";
-    case "fixture":
-      return "Fixture";
     case "failed":
       return "Failed";
     case "connecting":
@@ -2050,6 +1914,329 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US", { notation: "compact" }).format(value);
 }
 
+interface DependencySignal {
+  gutter: string;
+  suffix: string;
+  upstreamVisible: TaskGraphNode[];
+  upstreamHiddenCount: number;
+  downstreamVisible: TaskGraphNode[];
+  downstreamHiddenCount: number;
+  completedBlockers: TaskGraphNode[];
+}
+
+interface TaskGraphRenderModel {
+  node: TaskGraphNode;
+  signal: DependencySignal;
+  lane: number;
+  index: number;
+}
+
+interface TaskGraphLink {
+  from: TaskGraphRenderModel;
+  to: TaskGraphRenderModel;
+}
+
+function buildDependencySignals(
+  allNodes: TaskGraphNode[],
+  visibleNodes: TaskGraphNode[],
+): Map<string, DependencySignal> {
+  const visibleIds = new Set(visibleNodes.map((node) => node.node_id));
+  const downstream = new Map<string, TaskGraphNode[]>();
+
+  for (const node of allNodes) {
+    for (const blockerId of node.blocked_by) {
+      const blocker = findNodeByRef(allNodes, blockerId);
+      const downstreamKey = blocker?.node_id ?? normalizeNodeRef(blockerId);
+      const entries = downstream.get(downstreamKey) ?? [];
+      entries.push(node);
+      downstream.set(downstreamKey, entries);
+    }
+  }
+
+  const signals = new Map<string, DependencySignal>();
+  for (const node of allNodes) {
+    const knownBlockers = node.blocked_by.map((id) => findNodeByRef(allNodes, id)).filter((candidate): candidate is TaskGraphNode => Boolean(candidate));
+    const unknownBlockerCount = node.blocked_by.length - knownBlockers.length;
+    const unfinishedBlockers = knownBlockers.filter((candidate) => !isTerminalTaskNode(candidate));
+    const upstreamVisible = unfinishedBlockers.filter((candidate) => visibleIds.has(candidate.node_id));
+    const upstreamHiddenCount = unfinishedBlockers.length - upstreamVisible.length + unknownBlockerCount;
+    const completedBlockers = knownBlockers.filter(isTerminalTaskNode);
+
+    const downstreamNodes = downstream.get(node.node_id) ?? [];
+    const unfinishedDownstream = downstreamNodes.filter((candidate) => !isTerminalTaskNode(candidate));
+    const downstreamVisible = unfinishedDownstream.filter((candidate) => visibleIds.has(candidate.node_id));
+    const downstreamHiddenCount = unfinishedDownstream.length - downstreamVisible.length;
+    const suffix = dependencySuffix(upstreamVisible, upstreamHiddenCount, downstreamVisible, downstreamHiddenCount);
+    const gutter = upstreamVisible.length > 0
+      ? "|  "
+      : downstreamVisible.length > 0 || downstreamHiddenCount > 0
+        ? "+--"
+        : "   ";
+
+    signals.set(node.node_id, {
+      gutter,
+      suffix,
+      upstreamVisible,
+      upstreamHiddenCount,
+      downstreamVisible,
+      downstreamHiddenCount,
+      completedBlockers,
+    });
+  }
+  return signals;
+}
+
+function renderTaskGraphVisualization(
+  nodes: TaskGraphNode[],
+  selectedNodeId: string | null,
+  getOverlay: (node: TaskGraphNode) => ReturnType<typeof buildRuntimeOverlay>,
+  signals: Map<string, DependencySignal>,
+): string {
+  if (nodes.length === 0) {
+    return `<div class="os-empty">No tasks match the current filters</div>`;
+  }
+  const models = buildTaskGraphRenderModels(nodes, signals);
+  const links = buildTaskGraphLinks(models);
+  const rowHeight = 62;
+  const rowGap = 8;
+  const laneWidth = 34;
+  const railX = 20;
+  const graphHeight = models.length * rowHeight + Math.max(0, models.length - 1) * rowGap;
+  const maxLane = models.reduce((max, model) => Math.max(max, model.lane), 0);
+  const graphWidth = Math.max(620, 360 + maxLane * laneWidth);
+  const svgLinks = links.map((link) => renderTaskGraphLink(link, rowHeight, rowGap, laneWidth, railX)).join("");
+  const renderedNodes = models.map((model) => renderReadOnlyTaskGraphNode(
+    model,
+    selectedNodeId,
+    getOverlay(model.node),
+  )).join("");
+
+  return `
+    <div class="os-task-graph-stage" data-testid="task-graph-visualization" style="--os-graph-height: ${graphHeight}px; --os-graph-width: ${graphWidth}px;">
+      <svg class="os-task-graph-links" data-testid="task-graph-links" viewBox="0 0 ${graphWidth} ${graphHeight}" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <marker id="os-task-arrow" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+            <path d="M 0 0 L 8 4 L 0 8 z"></path>
+          </marker>
+        </defs>
+        ${svgLinks}
+      </svg>
+      <div class="os-node-list os-node-graph-list" style="min-height: ${graphHeight}px;">${renderedNodes}</div>
+    </div>
+  `;
+}
+
+function buildTaskGraphRenderModels(
+  nodes: TaskGraphNode[],
+  signals: Map<string, DependencySignal>,
+): TaskGraphRenderModel[] {
+  const laneById = new Map<string, number>();
+  const visibleIds = new Set(nodes.map((node) => node.node_id));
+
+  for (const node of nodes) {
+    const signal = signals.get(node.node_id);
+    const upstreamLanes = signal?.upstreamVisible
+      .filter((upstream) => visibleIds.has(upstream.node_id))
+      .map((upstream) => laneById.get(upstream.node_id) ?? 0) ?? [];
+    const lane = upstreamLanes.length > 0 ? Math.min(4, Math.max(...upstreamLanes) + 1) : 0;
+    laneById.set(node.node_id, lane);
+  }
+
+  return nodes.map((node, index) => ({
+    node,
+    signal: signals.get(node.node_id) ?? emptyDependencySignal(),
+    lane: laneById.get(node.node_id) ?? 0,
+    index,
+  }));
+}
+
+function buildTaskGraphLinks(models: TaskGraphRenderModel[]): TaskGraphLink[] {
+  const byId = new Map(models.map((model) => [model.node.node_id, model]));
+  const links: TaskGraphLink[] = [];
+  for (const model of models) {
+    for (const upstream of model.signal.upstreamVisible) {
+      const from = byId.get(upstream.node_id);
+      if (from) {
+        links.push({ from, to: model });
+      }
+    }
+  }
+  return links;
+}
+
+function renderTaskGraphLink(
+  link: TaskGraphLink,
+  rowHeight: number,
+  rowGap: number,
+  laneWidth: number,
+  railX: number,
+): string {
+  const x1 = railX + link.from.lane * laneWidth;
+  const x2 = railX + link.to.lane * laneWidth;
+  const y1 = link.from.index * (rowHeight + rowGap) + rowHeight / 2;
+  const y2 = link.to.index * (rowHeight + rowGap) + rowHeight / 2;
+  const bend = Math.max(34, Math.abs(y2 - y1) * 0.24);
+  const d = `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${Math.max(x2 - bend, x1 + 18)} ${y2}, ${x2} ${y2}`;
+  return `<path class="os-task-graph-link" data-testid="task-graph-link" d="${escapeAttr(d)}"></path>`;
+}
+
+function dependencySuffix(
+  upstreamVisible: TaskGraphNode[],
+  upstreamHiddenCount: number,
+  downstreamVisible: TaskGraphNode[],
+  downstreamHiddenCount: number,
+): string {
+  const parts: string[] = [];
+  if (upstreamVisible.length > 0) {
+    parts.push(`blocked by ${upstreamVisible.slice(0, 2).map(nodeLabel).join(", ")}`);
+    if (upstreamVisible.length > 2) {
+      parts.push(`+${upstreamVisible.length - 2}`);
+    }
+  } else if (upstreamHiddenCount > 0) {
+    parts.push(`blocked by ${upstreamHiddenCount} hidden`);
+  }
+
+  if (downstreamVisible.length > 0) {
+    parts.push(`blocks ${downstreamVisible.slice(0, 3).map(nodeLabel).join(", ")}`);
+    if (downstreamVisible.length > 3) {
+      parts.push(`+${downstreamVisible.length - 3}`);
+    }
+  } else if (downstreamHiddenCount > 0) {
+    parts.push(`blocks ${downstreamHiddenCount} hidden`);
+  }
+
+  return parts.join(" | ");
+}
+
+function renderReadOnlyTaskGraphNode(
+  model: TaskGraphRenderModel,
+  selectedNodeId: string | null,
+  overlay: ReturnType<typeof buildRuntimeOverlay>,
+): string {
+  const { node, signal } = model;
+  const isSelected = node.node_id === selectedNodeId;
+  const overlayBadges = overlay.badges.length ? overlay.badges.map(renderBadge).join("") : "";
+  const runMeta = overlay.run_id
+    ? `<span class="os-run-meta">run ${escapeHtml(overlay.run_id)}</span>`
+    : "";
+  const stateTone = stateToneForTaskNode(node);
+  const hasUpstream = signal.upstreamVisible.length > 0 || signal.upstreamHiddenCount > 0;
+  const hasDownstream = signal.downstreamVisible.length > 0 || signal.downstreamHiddenCount > 0;
+  const dependencyMeta = signal.suffix
+    ? `<span class="os-node-dependency" data-testid="dependency-suffix">${escapeHtml(signal.suffix)}</span>`
+    : "";
+  const dependencyGlyph = hasUpstream && hasDownstream
+    ? "<>"
+    : hasUpstream
+      ? "<"
+      : hasDownstream
+        ? ">"
+        : "";
+
+  return `
+    <button type="button" class="os-node os-node-readonly ${isSelected ? "is-selected" : ""} ${hasUpstream ? "os-node-has-upstream" : ""} ${hasDownstream ? "os-node-has-downstream" : ""}" data-node-id="${escapeAttr(node.node_id)}" style="--os-lane: ${model.lane};">
+      <span class="os-node-gutter" aria-hidden="true">${escapeHtml(dependencyGlyph)}</span>
+      <span class="os-node-main">
+        <span class="os-node-line">
+          <strong>${escapeHtml(node.identifier)}</strong>
+          <span>${escapeHtml(node.title)}</span>
+          ${dependencyMeta}
+        </span>
+        <span class="os-node-subline">
+          <span class="os-node-kind">${escapeHtml(node.kind.replace(/_/g, " "))}</span>
+          <em class="os-node-state os-node-state-${escapeAttr(stateTone)}">${escapeHtml(node.state)}</em>
+          <span class="os-node-badges">${overlayBadges}</span>
+          ${runMeta}
+        </span>
+      </span>
+    </button>
+  `;
+}
+
+function renderDependencyDetail(node: TaskGraphNode, allNodes: TaskGraphNode[]): string {
+  const signals = buildDependencySignals(allNodes, allNodes);
+  const signal = signals.get(node.node_id);
+  if (!signal) {
+    return "";
+  }
+  const upstream = signal.upstreamVisible.length > 0
+    ? `blocked by ${signal.upstreamVisible.map(nodeLabel).join(", ")}`
+    : signal.upstreamHiddenCount > 0
+      ? `blocked by ${signal.upstreamHiddenCount} hidden`
+      : "ready";
+  const completed = signal.completedBlockers.length > 0
+    ? ` | completed blockers ${signal.completedBlockers.map(nodeLabel).join(", ")}`
+    : "";
+  const downstream = signal.downstreamVisible.length > 0
+    ? ` | blocks ${signal.downstreamVisible.map(nodeLabel).join(", ")}`
+    : signal.downstreamHiddenCount > 0
+      ? ` | blocks ${signal.downstreamHiddenCount} hidden`
+      : "";
+
+  return `<div class="os-dependency-detail" data-testid="dependency-detail">deps: ${escapeHtml(upstream + completed + downstream)}</div>`;
+}
+
+function emptyDependencySignal(): DependencySignal {
+  return {
+    gutter: "   ",
+    suffix: "",
+    upstreamVisible: [],
+    upstreamHiddenCount: 0,
+    downstreamVisible: [],
+    downstreamHiddenCount: 0,
+    completedBlockers: [],
+  };
+}
+
+function isTerminalTaskNode(node: TaskGraphNode): boolean {
+  const state = `${node.state} ${node.state_category ?? ""}`.toLowerCase();
+  return state.includes("done")
+    || state.includes("complete")
+    || state.includes("release")
+    || state.includes("cancel");
+}
+
+function nodeLabel(node: TaskGraphNode): string {
+  return node.identifier || node.node_id;
+}
+
+function findNodeByRef(nodes: TaskGraphNode[], ref: string): TaskGraphNode | undefined {
+  const normalized = normalizeNodeRef(ref);
+  return nodes.find((node) =>
+    normalizeNodeRef(node.node_id) === normalized
+    || normalizeNodeRef(node.identifier) === normalized,
+  );
+}
+
+function normalizeNodeRef(ref: string): string {
+  return ref.trim().toLowerCase();
+}
+
+function initialSelectedTaskNode(nodes: TaskGraphNode[], rootIds: string[]): TaskGraphNode | null {
+  const ordered = [
+    ...rootIds.map((id) => findNodeByRef(nodes, id)).filter((node): node is TaskGraphNode => Boolean(node)),
+    ...nodes,
+  ];
+  return ordered.find((node) => node.kind !== "milestone" && node.state_category === "in_progress")
+    ?? ordered.find((node) => node.kind !== "milestone" && node.run_id)
+    ?? ordered.find((node) => node.kind !== "milestone")
+    ?? ordered[0]
+    ?? null;
+}
+
+function stateToneForTaskNode(node: TaskGraphNode): string {
+  const value = `${node.state} ${node.state_category ?? ""}`.toLowerCase();
+  if (value.includes("human review") || value.includes("review")) return "review";
+  if (value.includes("block")) return "blocked";
+  if (value.includes("fail") || value.includes("cancel")) return "failed";
+  if (value.includes("running") || value.includes("progress")) return "running";
+  if (value.includes("done") || value.includes("complete") || value.includes("release")) return "done";
+  if (value.includes("backlog")) return "backlog";
+  if (value.includes("todo")) return "todo";
+  if (value.includes("idle")) return "idle";
+  return "neutral";
+}
+
 function appShellStyles(): string {
   return `
     :root { color-scheme: light dark; }
@@ -2061,15 +2248,16 @@ function appShellStyles(): string {
     .os-status { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #cad3dd; border-radius: 6px; padding: 7px 10px; background: #f8fafc; font-size: 13px; white-space: nowrap; }
     .os-status span { width: 9px; height: 9px; border-radius: 50%; background: #6b7280; }
     .os-status-connected span { background: #1f9d55; }
-    .os-status-fixture span { background: #d97706; }
     .os-status-failed span { background: #c2410c; }
-    .os-grid { display: grid; grid-template-columns: minmax(260px, 0.75fr) minmax(320px, 1fr) minmax(360px, 1.15fr); gap: 14px; padding: 14px; align-items: start; }
+    .os-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 14px; align-items: start; }
     .os-panel { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 14px; min-width: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
-    .os-profile-panel { grid-column: 1 / -1; }
+    .os-status-panel, .os-run-detail-panel, .os-run-evidence-panel { grid-column: span 1; }
+    .os-profile-panel { grid-column: span 3; }
+    .os-task-graph-panel { grid-column: span 2; }
     .os-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .os-section-head h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
     .os-section-head span, .os-meta { color: #667788; font-size: 12px; }
-    .os-inline-fields { display: grid; grid-template-columns: minmax(150px, 0.75fr) minmax(140px, 0.65fr) minmax(220px, 1.2fr) auto; gap: 10px; align-items: end; }
+    .os-inline-fields { display: grid; grid-template-columns: minmax(150px, 0.7fr) minmax(260px, 1.3fr) auto; gap: 10px; align-items: end; }
     .os-field { display: grid; gap: 5px; font-size: 12px; color: #536170; }
     .os-field input, .os-field select { min-height: 34px; border: 1px solid #cbd5df; border-radius: 6px; padding: 6px 8px; background: #ffffff; color: #17202a; font: inherit; }
     button { min-height: 34px; border: 1px solid #afbac5; border-radius: 6px; background: #eef3f8; color: #17202a; font: inherit; cursor: pointer; }
@@ -2081,25 +2269,77 @@ function appShellStyles(): string {
     .os-metrics span, .os-run-grid span { display: block; color: #667788; font-size: 12px; margin-top: 3px; }
     .os-list, .os-node-list { display: grid; gap: 8px; }
     .os-list-item, .os-node { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px; background: #ffffff; }
+    .os-task-graph-stage { position: relative; min-width: min(100%, var(--os-graph-width)); overflow-x: auto; padding: 2px 0; }
+    .os-task-graph-links { position: absolute; z-index: 3; inset: 0 auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
+    .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: 0.9; marker-end: url(#os-task-arrow); }
+    .os-task-graph-links marker path { fill: #39708f; }
+    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; }
+    .os-node-readonly { grid-template-columns: 28px minmax(0, 1fr); align-items: center; min-height: 62px; margin-left: calc(var(--os-lane, 0) * 34px); margin-right: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
+    .os-node-readonly:active { transform: scale(0.996); }
+    .os-node-gutter { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #39708f; font-size: 11px; font-weight: 800; white-space: pre; background: #e7f1f5; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.28); }
+    .os-node-gutter:empty { background: transparent; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.18); }
+    .os-node-has-upstream .os-node-gutter { background: #fff7ed; color: #92400e; box-shadow: 0 0 0 1px rgba(146, 64, 14, 0.32); }
+    .os-node-has-downstream .os-node-gutter { background: #e7f1f5; color: #23566f; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.34); }
+    .os-node-has-upstream.os-node-has-downstream .os-node-gutter { background: #fef3c7; color: #78350f; box-shadow: 0 0 0 1px rgba(146, 64, 14, 0.38); }
+    .os-node-main, .os-node-line, .os-node-subline { min-width: 0; }
+    .os-node-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: nowrap; }
+    .os-node-line > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-node-line strong { flex: 0 0 auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .os-node-dependency { flex: 0 1 auto; color: #92400e; font-size: 11px; white-space: nowrap; }
+    .os-node-subline { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
     .os-list-item span, .os-node span, .os-node em { color: #667788; font-size: 12px; font-style: normal; }
+    .os-node .os-node-gutter { color: #39708f; }
+    .os-node .os-node-dependency { color: #92400e; }
     .is-selected { border-color: #39708f; background: #e7f1f5; }
+    .os-node-readonly.is-selected { box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.32), 0 10px 24px rgba(15, 23, 42, 0.08); }
     .os-node-kind { text-transform: uppercase; letter-spacing: 0.08em; }
+    .os-node-state { display: inline-flex; width: fit-content; border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 600; }
+    .os-node-state-review { background: #fef3c7; color: #92400e; }
+    .os-node-state-blocked, .os-node-state-failed { background: #fee2e2; color: #991b1b; }
+    .os-node-state-running { background: #dcfce7; color: #166534; }
+    .os-node-state-done { background: #dbeafe; color: #1e40af; }
+    .os-node-state-backlog { background: #f1f5f9; color: #475569; }
+    .os-node-state-todo, .os-node-state-idle { background: #e0f2fe; color: #0c4a6e; }
+    .os-node-state-neutral { background: #f8fafc; color: #475569; border: 1px solid #d8dee4; }
     .os-detail-strip, .os-run-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; border: 1px solid #d8dee4; border-radius: 6px; padding: 10px; background: #fbfcfd; }
     .os-detail-strip span, .os-run-head span { color: #667788; font-size: 12px; }
-    .os-events { margin: 0; padding-left: 18px; display: grid; gap: 7px; font-size: 13px; }
-    .os-events span { color: #39708f; margin-right: 6px; }
+    .os-events { margin: 0; padding-left: 18px; display: grid; gap: 5px; font-size: 12px; line-height: 1.35; }
+    .os-events span { color: #39708f; margin-right: 5px; }
+    .os-event-time { color: #667788; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; margin-right: 6px; }
     .os-pill, .os-actions span { border-radius: 999px; background: #e7f1f5; color: #23566f; padding: 5px 9px; font-size: 12px; }
     .os-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
-    .os-run-action-bar { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+    .os-run-detail-panel { font-size: 12px; }
+    .os-run-detail-panel .os-section-head h2 { font-size: 14px; }
+    .os-run-detail-panel button { min-height: 30px; padding: 5px 8px; font-size: 12px; }
+    .os-run-detail-panel .os-run-head { padding: 8px 10px; margin-bottom: 8px; }
+    .os-run-detail-panel .os-run-head strong { font-size: 14px; }
+    .os-run-detail-panel .os-run-grid { gap: 8px; margin-bottom: 8px; }
+    .os-run-detail-panel .os-run-grid div { padding: 8px; }
+    .os-run-detail-panel .os-run-grid strong { font-size: 15px; }
+    .os-run-action-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
     .os-action-item { display: flex; align-items: center; gap: 8px; }
     .os-action-warning { color: #b45309; font-size: 12px; }
     .os-action-receipt { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; margin: 10px 0; padding: 8px; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
     .os-receipt-status-accepted { color: #1f9d55; }
     .os-receipt-status-rejected { color: #c2410c; }
+    .os-dependency-detail { border: 1px solid #d8dee4; border-radius: 6px; padding: 8px 10px; background: #fbfcfd; color: #536170; font-size: 12px; margin-bottom: 10px; }
     .os-run-panels { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 12px 0; }
+    .os-run-section { display: grid; gap: 8px; }
+    .os-run-section + .os-run-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid #d8dee4; }
+    .os-run-section h3 { margin: 0; font-size: 13px; letter-spacing: 0; color: #536170; }
+    .os-segmented { display: inline-flex; width: fit-content; gap: 4px; padding: 3px; border: 1px solid #d8dee4; border-radius: 7px; background: #fbfcfd; margin-bottom: 12px; }
+    .os-segmented button { min-height: 28px; padding: 4px 10px; border-color: transparent; background: transparent; }
+    .os-segmented button.is-selected { border-color: #39708f; background: #e7f1f5; font-weight: 600; }
+    .os-run-activity { display: grid; gap: 6px; }
+    .os-activity-entry { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 8px; align-items: start; border: 1px solid #d8dee4; border-radius: 6px; padding: 8px; background: #f8fafc; font-size: 12px; }
+    .os-activity-entry span { color: #667788; white-space: nowrap; }
+    .os-activity-entry strong { color: #39708f; white-space: nowrap; }
+    .os-activity-entry p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
     .os-changed-file-list { display: grid; gap: 6px; }
-    .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 8px; background: #ffffff; }
+    .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 7px 8px; background: #ffffff; font-size: 12px; line-height: 1.2; }
     .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
+    .os-file-path { min-width: 0; overflow-wrap: anywhere; }
+    .os-file-stats { white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
     .os-change-kind { text-transform: uppercase; font-size: 10px; padding: 2px 5px; border-radius: 4px; }
     .os-change-kind-created { background: #dcfce7; color: #166534; }
     .os-change-kind-modified { background: #e0f2fe; color: #0c4a6e; }
@@ -2207,25 +2447,54 @@ function appShellStyles(): string {
     .os-plan-graph-node-selected rect { fill: #e7f1f5; stroke: #39708f; }
     @media (max-width: 980px) {
       .os-grid { grid-template-columns: 1fr; }
+      .os-status-panel, .os-profile-panel, .os-task-graph-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
       .os-inline-fields, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
       .os-topbar { align-items: flex-start; flex-direction: column; }
     }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #d9e2ea; }
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
-      .os-topbar p, .os-section-head span, .os-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta { color: #94a3b3; }
+      .os-topbar p, .os-section-head span, .os-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-segmented { background: #111820; border-color: #2a3440; }
+      .os-segmented button.is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-field input, .os-field select, .os-inline-input, .os-dialog textarea { background: #0f151b; color: #d9e2ea; border-color: #344454; }
       button { background: #1f2a35; color: #d9e2ea; border-color: #3b4c5e; }
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .os-changed-file:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
+      .os-task-graph-link { stroke: #5ca0b8; opacity: 0.82; }
+      .os-task-graph-links marker path { fill: #5ca0b8; }
+      .os-node-gutter { background: #10232c; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.3); }
+      .os-node-gutter:empty { background: transparent; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.22); }
+      .os-node-has-upstream .os-node-gutter { background: #3a2414; color: #fbbf24; box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.34); }
+      .os-node-has-downstream .os-node-gutter { background: #102c34; color: #8bd0e6; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.38); }
+      .os-node-has-upstream.os-node-has-downstream .os-node-gutter { background: #3f3215; color: #fde68a; box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.42); }
+      .os-node-readonly.is-selected { box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.36), 0 14px 28px rgba(0, 0, 0, 0.18); }
+      .os-view-tab, .os-plan-tab, .os-changed-file { background: #111820; color: #d9e2ea; border-color: #3b4c5e; }
+      .os-view-tab-active, .os-plan-tab-active, .os-changed-file.os-selected { background: #18303a; color: #f2f7fb; border-color: #5ca0b8; }
+      .os-changed-file .os-file-path { color: #e6edf3; }
+      .os-changed-file .os-file-stats { color: #cbd5e1; }
       .os-file-diff, .os-approval-item, .os-validation-command, .os-validation-evidence-item { background: #111820; border-color: #2a3440; }
+      .os-run-section + .os-run-section { border-color: #2a3440; }
+      .os-run-section h3 { color: #94a3b3; }
       .os-diff-header, .os-validation-header { background: #1f2a35; border-color: #2a3440; }
       .os-diff-line-addition { background: #14532d; color: #86efac; }
       .os-diff-line-deletion { background: #7f1d1d; color: #fecaca; }
       .os-diff-line-context { color: #94a3b3; }
       .os-action-receipt { background: #111820; border-color: #2a3440; }
+      .os-dependency-detail { background: #111820; border-color: #2a3440; color: #cbd5e1; }
+      .os-node .os-node-dependency { color: #fbbf24; }
 
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
+      .os-node-state-review { background: #451a03; color: #fcd34d; }
+      .os-node-state-blocked, .os-node-state-failed { background: #451a1a; color: #fca5a5; }
+      .os-node-state-running { background: #14532d; color: #86efac; }
+      .os-node-state-done { background: #1e3a8a; color: #93c5fd; }
+      .os-node-state-backlog { background: #1e293b; color: #cbd5e1; }
+      .os-node-state-todo, .os-node-state-idle { background: #164e63; color: #a5f3fc; }
+      .os-node-state-neutral { background: #111820; color: #cbd5e1; border-color: #2a3440; }
+      .os-activity-entry { background: #111820; border-color: #2a3440; }
+      .os-activity-entry span { color: #94a3b3; }
+      .os-activity-entry strong { color: #5ca0b8; }
       .os-badge-failed, .os-badge-blocked, .os-badge-blocker { background: #451a1a; color: #fca5a5; }
       .os-badge-running { background: #14532d; color: #86efac; }
       .os-badge-complete { background: #1e3a8a; color: #93c5fd; }

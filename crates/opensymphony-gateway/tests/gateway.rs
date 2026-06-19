@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use chrono::Utc;
 use futures_util::StreamExt;
 use opensymphony::opensymphony_control::{ControlPlaneServer, SnapshotStore};
@@ -10,10 +11,11 @@ use opensymphony::opensymphony_domain::{
     ControlPlaneIssueRuntimeState as IssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
     ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
     ControlPlaneRecentEventKind as RecentEventKind, ControlPlaneWorkerOutcome as WorkerOutcome,
-    SnapshotEnvelope,
+    SnapshotEnvelope, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
+    TrackerIssueStateKind,
 };
 use opensymphony::opensymphony_gateway::{
-    GatewayCapabilities, GatewayServer, control_plane_to_dashboard_snapshot,
+    GatewayCapabilities, GatewayServer, LinearTaskGraphClient, control_plane_to_dashboard_snapshot,
 };
 use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
@@ -23,6 +25,151 @@ use opensymphony::opensymphony_gateway_schema::run::DiffLine;
 use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
 use tokio::net::TcpListener;
 use url::Url;
+
+#[derive(Clone)]
+struct FakeLinearTaskGraphClient {
+    issues: Vec<TrackerIssue>,
+}
+
+#[async_trait]
+impl LinearTaskGraphClient for FakeLinearTaskGraphClient {
+    async fn issues_by_identifiers(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String> {
+        Ok(identifiers
+            .iter()
+            .filter_map(|identifier| {
+                self.issues
+                    .iter()
+                    .find(|issue| issue.identifier == *identifier)
+                    .cloned()
+            })
+            .collect())
+    }
+}
+
+fn fake_linear_task_graph_client(
+    snapshot: &DaemonSnapshot,
+    blocker_overrides: &[(&str, Vec<&str>)],
+) -> std::sync::Arc<dyn LinearTaskGraphClient> {
+    fake_linear_task_graph_client_with_hierarchy(snapshot, blocker_overrides, &[])
+}
+
+fn fake_linear_task_graph_client_with_hierarchy(
+    snapshot: &DaemonSnapshot,
+    blocker_overrides: &[(&str, Vec<&str>)],
+    parent_overrides: &[(&str, &str)],
+) -> std::sync::Arc<dyn LinearTaskGraphClient> {
+    let mut issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, blocker_overrides))
+        .collect::<Vec<_>>();
+
+    for (child_identifier, parent_identifier) in parent_overrides {
+        let parent_ref = issues
+            .iter()
+            .find(|issue| issue.identifier == *parent_identifier)
+            .map(tracker_issue_ref_from_tracker)
+            .unwrap_or_else(|| tracker_issue_ref_from_identifier(parent_identifier));
+        let child_ref = issues
+            .iter()
+            .find(|issue| issue.identifier == *child_identifier)
+            .map(tracker_issue_ref_from_tracker)
+            .unwrap_or_else(|| tracker_issue_ref_from_identifier(child_identifier));
+
+        if let Some(child_issue) = issues
+            .iter_mut()
+            .find(|issue| issue.identifier == *child_identifier)
+        {
+            child_issue.parent_id = Some(parent_ref.identifier.clone());
+            child_issue.parent = Some(parent_ref);
+        }
+
+        if let Some(parent_issue) = issues
+            .iter_mut()
+            .find(|issue| issue.identifier == *parent_identifier)
+        {
+            parent_issue.sub_issues.push(child_ref);
+        }
+    }
+
+    std::sync::Arc::new(FakeLinearTaskGraphClient { issues })
+}
+
+fn tracker_issue_from_snapshot(
+    issue: &IssueSnapshot,
+    blocker_overrides: &[(&str, Vec<&str>)],
+) -> TrackerIssue {
+    let blocked_by = blocker_overrides
+        .iter()
+        .find(|(identifier, _)| *identifier == issue.identifier)
+        .map(|(_, blockers)| blockers.as_slice())
+        .unwrap_or(&[]);
+    TrackerIssue {
+        id: issue.identifier.clone(),
+        identifier: issue.identifier.clone(),
+        url: format!("https://linear.app/kumanday/issue/{}", issue.identifier),
+        title: issue.title.clone(),
+        description: None,
+        priority: None,
+        state: issue.tracker_state.clone(),
+        state_kind: tracker_state_kind_from_name(&issue.tracker_state),
+        labels: Vec::new(),
+        parent_id: None,
+        parent: None,
+        project_milestone: None,
+        blocked_by: blocked_by
+            .iter()
+            .map(|identifier| TrackerIssueBlocker {
+                id: (*identifier).to_owned(),
+                identifier: (*identifier).to_owned(),
+                title: format!("Blocker {identifier}"),
+                state: TrackerIssueState {
+                    id: format!("state-{identifier}"),
+                    name: "Todo".to_owned(),
+                    tracker_type: "unstarted".to_owned(),
+                    kind: TrackerIssueStateKind::Unstarted,
+                },
+            })
+            .collect(),
+        sub_issues: Vec::new(),
+        created_at: issue.last_event_at,
+        updated_at: issue.last_event_at,
+    }
+}
+
+fn tracker_issue_ref_from_tracker(issue: &TrackerIssue) -> TrackerIssueRef {
+    TrackerIssueRef {
+        id: issue.id.clone(),
+        identifier: issue.identifier.clone(),
+        title: Some(issue.title.clone()),
+        url: Some(issue.url.clone()),
+        state: issue.state.clone(),
+    }
+}
+
+fn tracker_issue_ref_from_identifier(identifier: &str) -> TrackerIssueRef {
+    TrackerIssueRef {
+        id: identifier.to_owned(),
+        identifier: identifier.to_owned(),
+        title: Some(format!("External {identifier}")),
+        url: None,
+        state: "Todo".to_owned(),
+    }
+}
+
+fn tracker_state_kind_from_name(state: &str) -> TrackerIssueStateKind {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "backlog" => TrackerIssueStateKind::Backlog,
+        "todo" => TrackerIssueStateKind::Unstarted,
+        "in progress" | "human review" | "review" => TrackerIssueStateKind::Started,
+        "done" | "completed" | "closed" => TrackerIssueStateKind::Completed,
+        "canceled" | "cancelled" => TrackerIssueStateKind::Canceled,
+        other => TrackerIssueStateKind::Unknown(other.to_owned()),
+    }
+}
 
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {
     let now = Utc::now();
@@ -61,6 +208,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             workspace_path_suffix: "COE-255".to_owned(),
             retry_count: 0,
             blocked: false,
+            blocked_by: Vec::new(),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
             transport_target: Some("loopback".to_owned()),
             http_auth_mode: Some("none".to_owned()),
@@ -134,6 +282,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: String::new(),
                 retry_count: 0,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: None,
                 transport_target: None,
                 http_auth_mode: None,
@@ -160,6 +309,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: "COE-301".to_owned(),
                 retry_count: 0,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3001".to_owned()),
                 transport_target: Some("loopback".to_owned()),
                 http_auth_mode: Some("none".to_owned()),
@@ -232,6 +382,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: "COE-302".to_owned(),
                 retry_count: 0,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3002".to_owned()),
                 transport_target: Some("loopback".to_owned()),
                 http_auth_mode: Some("none".to_owned()),
@@ -258,6 +409,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: "COE-303".to_owned(),
                 retry_count: 1,
                 blocked: false,
+                blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3003".to_owned()),
                 transport_target: Some("loopback".to_owned()),
                 http_auth_mode: Some("none".to_owned()),
@@ -284,6 +436,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 workspace_path_suffix: String::new(),
                 retry_count: 0,
                 blocked: true,
+                blocked_by: vec!["COE-300".to_owned()],
                 server_base_url: None,
                 transport_target: None,
                 http_auth_mode: None,
@@ -1216,8 +1369,10 @@ async fn gateway_serves_project_detail() {
 
 #[tokio::test]
 async fn gateway_serves_task_graph() {
-    let store = SnapshotStore::new(fixture_snapshot(0));
-    let server = GatewayServer::new(store.clone());
+    let snapshot = fixture_snapshot(0);
+    let store = SnapshotStore::new(snapshot.clone());
+    let server = GatewayServer::new(store.clone())
+        .with_linear_task_graph(Some(fake_linear_task_graph_client(&snapshot, &[])));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -1245,6 +1400,7 @@ async fn gateway_serves_task_graph() {
     assert_eq!(response.project_id, "default");
     assert_eq!(response.nodes.len(), 1);
     assert_eq!(response.nodes[0].identifier, "COE-255");
+    assert_eq!(response.root_ids, vec!["COE-255".to_owned()]);
     // Verify runtime overlay is present
     assert!(response.nodes[0].runtime_overlay.is_some());
     let overlay = response.nodes[0]
@@ -1254,6 +1410,34 @@ async fn gateway_serves_task_graph() {
     // Running issues are NOT eligible (only Idle issues are eligible).
     assert!(!overlay.eligible);
     assert_eq!(overlay.active_run_id, Some("COE-255".into()));
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_task_graph_requires_linear_reader() {
+    let store = SnapshotStore::new(fixture_snapshot(0));
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!(
+            "http://{address}/api/v1/projects/default/taskgraph"
+        ))
+        .send()
+        .await
+        .expect("fetch task graph");
+
+    assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
     server_task.abort();
 }
@@ -1788,6 +1972,21 @@ async fn gateway_serves_run_diffs_with_modified_files() {
     let second_hunk = response.hunks.get(1).expect("second hunk");
     assert_eq!(second_hunk.file_path, "COE-301/src/lib.rs");
 
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/diffs?file_path=./COE-301/src/main.rs"
+        ))
+        .send()
+        .await
+        .expect("fetch normalized run diff")
+        .json::<opensymphony::opensymphony_gateway_schema::run::FileDiffPage>()
+        .await
+        .expect("decode normalized run diff");
+
+    assert_eq!(response.file_path, "COE-301/src/main.rs");
+    assert_eq!(response.hunks.len(), 1);
+    assert_eq!(response.hunks[0].file_path, "COE-301/src/main.rs");
+
     server_task.abort();
 }
 
@@ -1873,7 +2072,9 @@ async fn gateway_serves_run_events_with_data() {
 
     let client = reqwest::Client::new();
     let response = client
-        .get(format!("http://{address}/api/v1/runs/COE-301/events"))
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/events?page_size=1"
+        ))
         .send()
         .await
         .expect("fetch run events with data")
@@ -1882,15 +2083,72 @@ async fn gateway_serves_run_events_with_data() {
         .expect("decode run events");
 
     assert_eq!(response.run_id, "COE-301");
-    assert_eq!(response.events.len(), 2);
+    assert_eq!(response.events.len(), 1);
+    assert_eq!(response.events[0].sequence, 1);
+    assert_eq!(
+        response
+            .next_cursor
+            .as_ref()
+            .map(|cursor| cursor.page_token.as_str()),
+        Some("2")
+    );
+
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/events?page_token=2&page_size=1"
+        ))
+        .send()
+        .await
+        .expect("fetch second run events page")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunEventPage>()
+        .await
+        .expect("decode second run events page");
+
+    assert_eq!(response.events.len(), 1);
+    assert_eq!(response.events[0].sequence, 2);
+    assert!(response.next_cursor.is_none());
+
+    let response = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/events?cursor=2&page_size=1"
+        ))
+        .send()
+        .await
+        .expect("fetch desktop cursor run events page")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunEventPage>()
+        .await
+        .expect("decode desktop cursor run events page");
+
+    assert_eq!(response.events.len(), 1);
+    assert_eq!(response.events[0].sequence, 2);
+
+    let invalid_response = client
+        .get(format!(
+            "http://{address}/api/v1/runs/COE-301/events?page_token=opaque"
+        ))
+        .send()
+        .await
+        .expect("fetch invalid run events page");
+    assert_eq!(invalid_response.status(), reqwest::StatusCode::BAD_REQUEST);
 
     server_task.abort();
 }
 
 #[tokio::test]
 async fn gateway_task_graph_eligible_for_idle_issue() {
-    let store = SnapshotStore::new(fixture_snapshot_rich(0));
-    let server = GatewayServer::new(store.clone());
+    let snapshot = fixture_snapshot_rich(0);
+    let store = SnapshotStore::new(snapshot.clone());
+    let server = GatewayServer::new(store.clone()).with_linear_task_graph(Some(
+        fake_linear_task_graph_client_with_hierarchy(
+            &snapshot,
+            &[("COE-304", vec!["COE-300", "COE-999"])],
+            &[
+                ("COE-304", "COE-300"),
+                ("COE-999", "COE-300"),
+                ("COE-302", "COE-999"),
+            ],
+        ),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -1925,6 +2183,27 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
     assert!(overlay.eligible);
     assert!(overlay.queued);
 
+    let blocked_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-304")
+        .expect("COE-304 node should exist");
+    assert_eq!(blocked_node.parent_id.as_deref(), Some("COE-300"));
+    assert_eq!(blocked_node.blocked_by, vec!["COE-300".to_owned()]);
+    let parent_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-300")
+        .expect("COE-300 node should exist");
+    assert_eq!(parent_node.children, vec!["COE-304".to_owned()]);
+
+    let external_parent_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-302")
+        .expect("COE-302 node should exist");
+    assert!(external_parent_node.parent_id.is_none());
+
     // Completed issue should NOT be eligible
     let done_node = response
         .nodes
@@ -1934,8 +2213,15 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
     let done_overlay = done_node.runtime_overlay.as_ref().expect("overlay present");
     assert!(!done_overlay.eligible);
 
-    // root_ids should be empty (no parent/child data available)
-    assert!(response.root_ids.is_empty());
+    assert_eq!(
+        response.root_ids,
+        vec![
+            "COE-300".to_owned(),
+            "COE-301".to_owned(),
+            "COE-302".to_owned(),
+            "COE-303".to_owned()
+        ]
+    );
 
     server_task.abort();
 }
@@ -2016,8 +2302,10 @@ async fn gateway_run_detail_completed_state() {
 
 #[tokio::test]
 async fn gateway_task_graph_queued_vs_eligible() {
-    let store = SnapshotStore::new(fixture_snapshot_rich(0));
-    let server = GatewayServer::new(store.clone());
+    let snapshot = fixture_snapshot_rich(0);
+    let store = SnapshotStore::new(snapshot.clone());
+    let server = GatewayServer::new(store.clone())
+        .with_linear_task_graph(Some(fake_linear_task_graph_client(&snapshot, &[])));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");

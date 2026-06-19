@@ -233,9 +233,6 @@ async function openRun(root: HTMLElement): Promise<void> {
   await flushUntil(() => root.querySelector("[data-node-id='issue-1']") !== null);
   const node = root.querySelector("[data-node-id='issue-1']") as HTMLElement;
   node.click();
-  await flushAsync();
-  const openRun = root.querySelector("[data-open-run='issue-1']") as HTMLElement;
-  openRun.click();
   await flushUntil(() => root.querySelector("[data-testid='run-action-bar']") !== null && root.querySelector(".os-run-head strong") !== null);
 }
 

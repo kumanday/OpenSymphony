@@ -954,18 +954,75 @@ pub async fn run_detail(
     .await
 }
 
+/// Get changed files for a run.
+#[command]
+pub async fn run_files(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+) -> CommandResult<serde_json::Value> {
+    gateway_get_json(
+        state,
+        &format!("/api/v1/runs/{}/files", urlencoding::encode(&run_id)),
+    )
+    .await
+}
+
+/// Get a diff page for a run.
+#[command]
+pub async fn run_diffs(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+    file_path: Option<String>,
+) -> CommandResult<serde_json::Value> {
+    let mut path = format!("/api/v1/runs/{}/diffs", urlencoding::encode(&run_id));
+    if let Some(file_path) = file_path.filter(|path| !path.is_empty()) {
+        path.push_str("?file_path=");
+        path.push_str(&urlencoding::encode(&file_path));
+    }
+    gateway_get_json(state, &path).await
+}
+
+/// Get run validation summary.
+#[command]
+pub async fn run_validation(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+) -> CommandResult<serde_json::Value> {
+    gateway_get_json(
+        state,
+        &format!("/api/v1/runs/{}/validation", urlencoding::encode(&run_id)),
+    )
+    .await
+}
+
+/// Get pending run approvals.
+#[command]
+pub async fn run_approvals(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    run_id: String,
+) -> CommandResult<serde_json::Value> {
+    gateway_get_json(
+        state,
+        &format!("/api/v1/runs/{}/approvals", urlencoding::encode(&run_id)),
+    )
+    .await
+}
+
 /// Get run events with cursor support.
 #[command]
 pub async fn run_events(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     run_id: String,
-    cursor: Option<u64>,
+    page_token: Option<String>,
     page_size: Option<u64>,
 ) -> CommandResult<serde_json::Value> {
     let mut path = format!("/api/v1/runs/{}/events", urlencoding::encode(&run_id));
     let mut params = Vec::new();
-    if let Some(cursor) = cursor {
-        params.push(format!("cursor={cursor}"));
+    if let Some(page_token) = page_token {
+        params.push(format!(
+            "page_token={}",
+            urlencoding::encode(&page_token)
+        ));
     }
     if let Some(page_size) = page_size {
         params.push(format!("page_size={page_size}"));

@@ -201,7 +201,9 @@ impl IssueSessionObserver for SchedulerObserver {
     }
 }
 
-fn build_linear_client(workflow: &ResolvedWorkflow) -> Result<LinearClient, LinearError> {
+pub(super) fn build_linear_client(
+    workflow: &ResolvedWorkflow,
+) -> Result<LinearClient, LinearError> {
     let tracker = &workflow.config.tracker;
     let mut config = LinearConfig::new(tracker.api_key.clone(), tracker.project_slug.clone());
     config.base_url = tracker.endpoint.clone();
@@ -1057,7 +1059,7 @@ mod tests {
 
     use crate::opensymphony_domain::{
         ConversationId, IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt,
-        WorkerId, WorkspaceKey,
+        TrackerIssueStateKind, WorkerId, WorkspaceKey,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
     use tempfile::TempDir;
@@ -1544,6 +1546,7 @@ Run the scheduler.
             description: issue.description.clone(),
             priority: issue.priority,
             state: issue.state.name.clone(),
+            state_kind: tracker_issue_state_kind_from_category(&issue.state.category),
             labels: issue.labels.clone(),
             parent_id: issue.parent_id.as_ref().map(ToString::to_string),
             parent: None,
@@ -1552,6 +1555,16 @@ Run the scheduler.
             sub_issues: Vec::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn tracker_issue_state_kind_from_category(
+        category: &IssueStateCategory,
+    ) -> TrackerIssueStateKind {
+        match category {
+            IssueStateCategory::Active => TrackerIssueStateKind::Started,
+            IssueStateCategory::NonActive => TrackerIssueStateKind::Unstarted,
+            IssueStateCategory::Terminal => TrackerIssueStateKind::Completed,
         }
     }
 

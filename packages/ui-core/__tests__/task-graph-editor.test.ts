@@ -194,7 +194,7 @@ describe("TaskGraphEditor", () => {
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport: buildTransport(),
     });
 
@@ -220,7 +220,7 @@ describe("TaskGraphEditor", () => {
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport: buildTransport(),
     });
 
@@ -250,7 +250,7 @@ describe("TaskGraphEditor", () => {
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport: buildTransport(),
     });
 
@@ -273,7 +273,7 @@ describe("TaskGraphEditor", () => {
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport: buildTransport(),
     });
 
@@ -299,7 +299,7 @@ describe("TaskGraphEditor", () => {
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport: buildTransport(),
     });
 
@@ -334,7 +334,7 @@ describe("TaskGraphEditor", () => {
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport: buildTransport(),
     });
 
@@ -356,7 +356,7 @@ describe("TaskGraphEditor", () => {
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport: buildTransport(),
     });
 
@@ -383,7 +383,7 @@ describe("TaskGraphEditor", () => {
     const transport = buildTransport();
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport,
     });
 
@@ -416,7 +416,7 @@ describe("TaskGraphEditor", () => {
     const transport = buildTransport();
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport,
     });
 
@@ -444,7 +444,7 @@ describe("TaskGraphEditor", () => {
     const transport = buildTransport();
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport,
     });
 
@@ -476,7 +476,7 @@ describe("TaskGraphEditor", () => {
     const transport = buildTransport();
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport,
     });
 
@@ -503,7 +503,7 @@ describe("TaskGraphEditor", () => {
     const transport = buildTransport();
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport,
     });
 
@@ -543,7 +543,7 @@ describe("TaskGraphEditor", () => {
 
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport,
     });
 
@@ -588,7 +588,7 @@ describe("TaskGraphEditor", () => {
       transport.dispatchAction = rejectDispatchAction("Title is not allowed");
       const handle = renderOpenSymphonyApp({
         root,
-        mode: "desktop",
+        mode: "web",
         transport,
       });
 
@@ -617,7 +617,7 @@ describe("TaskGraphEditor", () => {
       transport.dispatchAction = rejectDispatchAction("Create is not allowed");
       const handle = renderOpenSymphonyApp({
         root,
-        mode: "desktop",
+        mode: "web",
         transport,
       });
 
@@ -644,7 +644,7 @@ describe("TaskGraphEditor", () => {
       transport.dispatchAction = rejectDispatchAction("Dependencies are not allowed");
       const handle = renderOpenSymphonyApp({
         root,
-        mode: "desktop",
+        mode: "web",
         transport,
       });
 
@@ -674,7 +674,7 @@ describe("TaskGraphEditor", () => {
       transport.dispatchAction = rejectDispatchAction("Comment is not allowed");
       const handle = renderOpenSymphonyApp({
         root,
-        mode: "desktop",
+        mode: "web",
         transport,
       });
 
@@ -706,7 +706,7 @@ describe("TaskGraphEditor", () => {
       };
       const handle = renderOpenSymphonyApp({
         root,
-        mode: "desktop",
+        mode: "web",
         transport,
       });
 
@@ -752,7 +752,7 @@ describe("TaskGraphEditor", () => {
     (transport as any).mockTaskGraph = graph;
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport,
     });
 
@@ -778,7 +778,7 @@ describe("TaskGraphEditor", () => {
     const transport = buildTransport();
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport,
     });
 
@@ -806,7 +806,7 @@ describe("TaskGraphEditor", () => {
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
       root,
-      mode: "desktop",
+      mode: "web",
       transport: buildTransport(),
     });
 

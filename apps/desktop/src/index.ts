@@ -1,6 +1,5 @@
 import {
   HttpGatewayTransport,
-  TransportFactory,
   type ActionCapableTransport,
   type ActionDispatch,
   type ActionReceipt,
@@ -56,26 +55,34 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
   }
 
   health(): ReturnType<GatewayTransport["health"]> {
-    return this.inner.health();
+    return this.invokeOrHttp("gateway_capabilities", {}, () => this.inner.health());
   }
 
   snapshot(): ReturnType<GatewayTransport["snapshot"]> {
-    return this.inner.snapshot();
+    return this.invokeOrHttp("dashboard_snapshot", {}, () => this.inner.snapshot());
   }
 
   taskGraph(projectId: string): ReturnType<GatewayTransport["taskGraph"]> {
-    return this.inner.taskGraph(projectId);
+    return this.invokeOrHttp("task_graph", { project_id: projectId }, () => this.inner.taskGraph(projectId));
   }
 
   runDetail(runId: string): ReturnType<GatewayTransport["runDetail"]> {
-    return this.inner.runDetail(runId);
+    return this.invokeOrHttp("run_detail", { run_id: runId }, () => this.inner.runDetail(runId));
   }
 
   runEvents(
     runId: string,
     cursor?: Parameters<GatewayTransport["runEvents"]>[1],
   ): ReturnType<GatewayTransport["runEvents"]> {
-    return this.inner.runEvents(runId, cursor);
+    return this.invokeOrHttp(
+      "run_events",
+      {
+        run_id: runId,
+        page_token: cursor?.page_token ?? null,
+        page_size: cursor?.page_size ?? null,
+      },
+      () => this.inner.runEvents(runId, cursor),
+    );
   }
 
   runTimeline(runId: string): ReturnType<GatewayTransport["runTimeline"]> {
@@ -115,19 +122,29 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
   }
 
   runFiles(runId: string): ReturnType<GatewayTransport["runFiles"]> {
-    return this.inner.runFiles(runId);
+    return this.invokeOrHttp<{ files?: Awaited<ReturnType<GatewayTransport["runFiles"]>> }>(
+      "run_files",
+      { run_id: runId },
+      async () => ({ files: await this.inner.runFiles(runId) }),
+    ).then((response) => response.files ?? []);
   }
 
   runDiffs(runId: string, filePath?: string): ReturnType<GatewayTransport["runDiffs"]> {
-    return this.inner.runDiffs(runId, filePath);
+    return this.invokeOrHttp("run_diffs", { run_id: runId, file_path: filePath ?? null }, () =>
+      this.inner.runDiffs(runId, filePath),
+    );
   }
 
   runApprovals(runId: string): ReturnType<GatewayTransport["runApprovals"]> {
-    return this.inner.runApprovals(runId);
+    return this.invokeOrHttp<{ approvals?: Awaited<ReturnType<GatewayTransport["runApprovals"]>> }>(
+      "run_approvals",
+      { run_id: runId },
+      async () => ({ approvals: await this.inner.runApprovals(runId) }),
+    ).then((response) => response.approvals ?? []);
   }
 
   runValidation(runId: string): ReturnType<GatewayTransport["runValidation"]> {
-    return this.inner.runValidation(runId);
+    return this.invokeOrHttp("run_validation", { run_id: runId }, () => this.inner.runValidation(runId));
   }
 
   events(
@@ -202,6 +219,22 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
       },
     }).catch(() => undefined);
   }
+
+  private async invokeOrHttp<T>(
+    command: string,
+    args: Record<string, unknown>,
+    fallback: () => Promise<T>,
+  ): Promise<T> {
+    const invoke = getTauriInvoke();
+    if (!invoke) {
+      return fallback();
+    }
+    try {
+      return await invoke<T>(command, args);
+    } catch {
+      return fallback();
+    }
+  }
 }
 
 export function createDesktopTransport(
@@ -243,7 +276,7 @@ export function createDesktopProfileController(): ProfileController | undefined 
 
     async setActiveProfile(profileId: string) {
       const active = await invoke<NativeProfileResponse>("set_active_profile", {
-        profileId,
+        profile_id: profileId,
       });
       return toConnectionProfile(active);
     },
@@ -341,22 +374,9 @@ function isManagedKind(kind: string): boolean {
 
 async function createTransportForGateway(gatewayUrl: string): Promise<TauriTransportAdapter> {
   const base = gatewayUrl || DEFAULT_GATEWAY_URL;
-  const fallback = () => createDesktopTransport(base);
-  const capabilities = await new HttpGatewayTransport({
-    baseUri: base,
-    transport: "loopback_http",
-  }).health().catch(() => undefined);
-  if (!capabilities) {
-    return fallback();
-  }
-  const transport = await TransportFactory.create(
-    { baseUri: base, transport: "loopback_http" },
-    capabilities,
-  ).catch(() => undefined);
-  if (!transport) {
-    return fallback();
-  }
-  return new DesktopTransportAdapter(transport, base);
+  const transport = createDesktopTransport(base);
+  await transport.attach();
+  return transport;
 }
 
 const root = document.getElementById("root");

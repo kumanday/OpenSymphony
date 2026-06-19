@@ -209,6 +209,19 @@ Restart recovery should rely on managed workspace metadata only:
 - workspace introspection
 - authoritative ownership check for non-injective sanitized workspace keys
 
+Gateway run-detail reads use the same workspace ownership boundary. Changed-file
+lists come from the control-plane issue snapshot, and per-file diffs are read
+from the issue workspace path recorded for that issue. These reads must stay
+inside the issue workspace and are exposed through the gateway/Tauri contract
+only; rich clients do not inspect workspace paths directly. Tracked-file diffs
+come from the workspace Git history using the first available comparison base
+from `main`, `origin/main`, `master`, `origin/master`, `origin/HEAD`, or `HEAD`.
+Untracked created-file diffs are generated in-process so the gateway does not
+depend on platform-specific null device paths.
+Gateway file and diff endpoints run Git workspace inspection on a blocking
+worker thread; if that task fails or is aborted, the endpoint surfaces a server
+error instead of returning an empty file list.
+
 Current repository implementation:
 
 - the scheduler recovery path consumes manifest-derived records that include the normalized issue identity plus the attached workspace record

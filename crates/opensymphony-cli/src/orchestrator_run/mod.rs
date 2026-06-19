@@ -11,7 +11,7 @@ use std::{
 
 use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
 use crate::opensymphony_domain::TimestampMs;
-use crate::opensymphony_gateway::GatewayServer;
+use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::OpenHandsError;
 use crate::opensymphony_orchestrator::{
@@ -29,8 +29,9 @@ use tracing::{info, warn};
 
 use self::{
     backends::{
-        RuntimeWorkerBackend, RuntimeWorkspaceBackend, build_runtime_transport,
-        build_tracker_backend, build_workspace_manager_config, prepare_active_conversation_store,
+        RuntimeWorkerBackend, RuntimeWorkspaceBackend, build_linear_client,
+        build_runtime_transport, build_tracker_backend, build_workspace_manager_config,
+        prepare_active_conversation_store,
     },
     config::{RunRuntimeConfig, resolve_runtime_config},
     snapshot::{
@@ -243,7 +244,8 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let listener = TcpListener::bind(runtime.bind)
         .await
         .map_err(RunCommandError::BindListener)?;
-    let server = GatewayServer::new(store.clone());
+    let server = GatewayServer::new(store.clone())
+        .with_linear_task_graph(build_optional_task_graph_client(&runtime.workflow));
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
 
     let bootstrap_snapshot = tokio::select! {
@@ -518,6 +520,27 @@ fn record_auto_capture_recent_event(
     }
 }
 
+fn build_optional_task_graph_client(
+    workflow: &crate::opensymphony_workflow::ResolvedWorkflow,
+) -> Option<Arc<dyn LinearTaskGraphClient>> {
+    optional_task_graph_client(build_linear_client(workflow))
+}
+
+fn optional_task_graph_client(
+    client: Result<crate::opensymphony_linear::LinearClient, LinearError>,
+) -> Option<Arc<dyn LinearTaskGraphClient>> {
+    match client {
+        Ok(client) => Some(Arc::new(client) as Arc<dyn LinearTaskGraphClient>),
+        Err(error) => {
+            warn!(
+                %error,
+                "Linear task graph reader unavailable; task graph endpoint will return 503"
+            );
+            None
+        }
+    }
+}
+
 fn terminal_issue_identifiers(snapshot: &OrchestratorSnapshot) -> BTreeSet<String> {
     snapshot
         .issues
@@ -578,6 +601,18 @@ mod tests {
 
     fn issue_set(keys: &[&str]) -> BTreeSet<String> {
         keys.iter().map(|key| key.to_string()).collect()
+    }
+
+    #[test]
+    fn optional_task_graph_client_returns_none_when_linear_reader_is_unavailable() {
+        let client = optional_task_graph_client(Err(LinearError::InvalidConfiguration(
+            "missing task graph config".to_owned(),
+        )));
+
+        assert!(
+            client.is_none(),
+            "gateway task graph reader should fail closed instead of aborting run startup",
+        );
     }
 
     #[test]

@@ -19,8 +19,11 @@ export interface TaskGraphNode {
   state: string;
   state_category: TaskGraphStateCategory;
   priority?: number;
+  /** Parent node identifier when the parent is present in this task graph snapshot. */
   parent_id?: string;
+  /** Child node identifiers that are present in this task graph snapshot. */
   children: string[];
+  /** Blocker node identifiers that are present in this task graph snapshot. */
   blocked_by: string[];
   url?: string;
   branch_name?: string;

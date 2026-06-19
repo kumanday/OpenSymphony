@@ -10,6 +10,7 @@ use super::graphql::{
 };
 
 pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, LinearError> {
+    let state = normalize_state(node.state);
     Ok(TrackerIssue {
         id: node.id,
         identifier: node.identifier,
@@ -17,7 +18,8 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         title: node.title,
         description: node.description,
         priority: normalize_priority(node.priority)?,
-        state: node.state.name,
+        state: state.name,
+        state_kind: state.kind,
         labels: normalize_labels(node.labels.nodes),
         parent_id: normalize_parent_id(node.parent.as_ref()),
         parent: normalize_parent(node.parent),

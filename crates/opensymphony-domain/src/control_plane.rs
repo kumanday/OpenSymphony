@@ -94,6 +94,8 @@ pub struct ControlPlaneIssueSnapshot {
     pub workspace_path_suffix: String,
     pub retry_count: u32,
     pub blocked: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

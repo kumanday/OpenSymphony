@@ -22,7 +22,7 @@ import type {
   GatewayReader,
   OpenSymphonyAppHandle,
 } from "@opensymphony/ui-core";
-import { createDesktopProfileController } from "../src/index";
+import { createDesktopProfileController, createDesktopTransport } from "../src/index";
 
 interface TauriInvokeCall {
   command: string;
@@ -39,10 +39,9 @@ describe("desktop app shell render", () => {
     document.body.innerHTML = `<div id="root"></div>`;
     const root = document.getElementById("root") as HTMLElement;
 
-    // Fake reader that always rejects so the app shell falls back to its
-    // built-in alpha-fixture flow. We are intentionally exercising the
-    // fallback render path because that's what users will see when the
-    // gateway daemon is offline during cold launch.
+    // Fake reader that always rejects so the app shell renders the real
+    // offline/error state users see when the gateway daemon is unavailable
+    // during cold launch.
     const reader: GatewayReader = {
       baseUri: "http://127.0.0.1:2468",
       async health() {
@@ -87,7 +86,7 @@ describe("desktop app shell render", () => {
     await handle.destroy();
   });
 
-  it("selects active profiles with Tauri's camelCase command argument", async () => {
+  it("selects active profiles with Tauri's snake_case command argument", async () => {
     const calls: TauriInvokeCall[] = [];
     (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
       core: {
@@ -114,9 +113,113 @@ describe("desktop app shell render", () => {
     expect(calls).toEqual([
       {
         command: "set_active_profile",
-        args: { profileId: "local-daemon" },
+        args: { profile_id: "local-daemon" },
       },
     ]);
     expect(profile.gatewayUrl).toBe("http://127.0.0.1:2468");
+  });
+
+  it("uses native Tauri commands for desktop gateway reads", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          switch (command) {
+            case "gateway_capabilities":
+              return {
+                schema_version: { major: 1, minor: 0, patch: 0 },
+                gateway_version: "test",
+                supported_api_versions: ["1.0.0"],
+                transports: [],
+                features: [],
+                auth_modes: [],
+              };
+            case "dashboard_snapshot":
+              return { projects: [] };
+            case "task_graph":
+              return { project_id: args?.project_id, nodes: [], edges: [], root_ids: [] };
+            case "run_detail":
+              return { run_id: args?.run_id, status: "running" };
+            case "run_events":
+              return { run_id: args?.run_id, events: [] };
+            case "run_files":
+              return { files: [{ path: "src/config.ts", status: "modified" }] };
+            case "run_diffs":
+              return { file_path: args?.file_path, hunks: [] };
+            case "run_validation":
+              return { status: "passed", checks: [] };
+            case "run_approvals":
+              return { approvals: [] };
+            default:
+              throw new Error(`unexpected command ${command}`);
+          }
+        },
+      },
+    };
+
+    const transport = createDesktopTransport("http://127.0.0.1:2468");
+
+    await transport.health();
+    await transport.snapshot();
+    await transport.taskGraph("opensymphony");
+    await transport.runDetail("run-1");
+    await transport.runEvents("run-1", { page_token: "opaque-token", page_size: 25 });
+    await transport.runFiles("run-1");
+    await transport.runDiffs("run-1", "src/config.ts");
+    await transport.runValidation("run-1");
+    await transport.runApprovals("run-1");
+
+    expect(calls).toEqual([
+      { command: "gateway_capabilities", args: {} },
+      { command: "dashboard_snapshot", args: {} },
+      { command: "task_graph", args: { project_id: "opensymphony" } },
+      { command: "run_detail", args: { run_id: "run-1" } },
+      { command: "run_events", args: { run_id: "run-1", page_token: "opaque-token", page_size: 25 } },
+      { command: "run_files", args: { run_id: "run-1" } },
+      { command: "run_diffs", args: { run_id: "run-1", file_path: "src/config.ts" } },
+      { command: "run_validation", args: { run_id: "run-1" } },
+      { command: "run_approvals", args: { run_id: "run-1" } },
+    ]);
+  });
+
+  it("falls back to loopback HTTP when a native desktop command fails", async () => {
+    const calls: TauriInvokeCall[] = [];
+    const fetchCalls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          throw new Error("native command unavailable");
+        },
+      },
+    };
+    globalThis.fetch = jest.fn(async (input: RequestInfo | URL) => {
+      fetchCalls.push(String(input));
+      return {
+        ok: true,
+        async json() {
+          return {
+            schema_version: { major: 1, minor: 0, patch: 0 },
+            gateway_version: "test",
+            supported_api_versions: ["1.0.0"],
+            transports: [],
+            features: [],
+            auth_modes: [],
+          };
+        },
+      } as Response;
+    });
+
+    try {
+      const transport = createDesktopTransport("http://127.0.0.1:2468");
+      await transport.health();
+
+      expect(calls).toEqual([{ command: "gateway_capabilities", args: {} }]);
+      expect(fetchCalls).toEqual(["http://127.0.0.1:2468/api/v1/capabilities"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

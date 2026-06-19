@@ -13,7 +13,9 @@ import type {
 } from "../src/app-shell.js";
 import type {
   ConnectionProfile,
+  ChangedFileEntry,
   DashboardSnapshot,
+  FileDiffPage,
   GatewayCapabilities,
   RunDetail,
   TaskGraphSnapshot,
@@ -71,6 +73,24 @@ const dashboard: DashboardSnapshot = {
       issue_identifier: "COE-449",
       summary: "App shell mounted under test",
     },
+    {
+      happened_at: "2025-09-01T00:00:01Z",
+      kind: "snapshot_published",
+      issue_identifier: "COE-450",
+      summary: "published dependency-aware snapshot",
+    },
+    {
+      happened_at: "2025-09-01T00:00:02Z",
+      kind: "run_event",
+      issue_identifier: "COE-451",
+      summary: "captured runtime event",
+    },
+    {
+      happened_at: "2025-09-01T00:00:03Z",
+      kind: "hidden_event",
+      issue_identifier: "COE-452",
+      summary: "should not render in compact status",
+    },
   ],
 };
 
@@ -88,7 +108,7 @@ const taskGraph: TaskGraphSnapshot = {
       title: "Shared Client and Desktop Alpha",
       state: "In Progress",
       state_category: "in_progress",
-      children: ["app-shell", "desktop-alpha"],
+      children: ["app-shell", "desktop-alpha", "hosted-auth", "follow-up"],
       blocked_by: [],
       labels: ["desktop"],
     },
@@ -96,13 +116,13 @@ const taskGraph: TaskGraphSnapshot = {
       schema_version: schemaVersionV1(),
       node_id: "app-shell",
       kind: "issue",
-      identifier: "DESKTOP-ALPHA",
-      title: "Desktop alpha recovery",
-      state: "Backlog",
-      state_category: "backlog",
+      identifier: "COE-450",
+      title: "Desktop follow-on review",
+      state: "Todo",
+      state_category: "todo",
       parent_id: "m7-milestone",
       children: [],
-      blocked_by: [],
+      blocked_by: ["COE-449"],
       labels: ["desktop", "recovery"],
     },
     {
@@ -111,6 +131,45 @@ const taskGraph: TaskGraphSnapshot = {
       kind: "issue",
       identifier: "COE-449",
       title: "Replace stubs with functional app",
+      state: "In Progress",
+      state_category: "in_progress",
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: [],
+      labels: ["transport"],
+    },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "hosted-auth",
+      kind: "issue",
+      identifier: "COE-452",
+      title: "Hosted auth placeholders",
+      state: "Todo",
+      state_category: "todo",
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: ["COE-449"],
+      labels: ["hosted"],
+    },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "follow-up",
+      kind: "issue",
+      identifier: "COE-451",
+      title: "Released prerequisite detail",
+      state: "Todo",
+      state_category: "todo",
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: ["completed-prereq"],
+      labels: ["transport"],
+    },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "completed-prereq",
+      kind: "issue",
+      identifier: "COE-448",
+      title: "Completed prerequisite",
       state: "Done",
       state_category: "done",
       parent_id: "m7-milestone",
@@ -145,6 +204,33 @@ const runDetail: RunDetail = {
   },
 };
 
+const changedFiles: ChangedFileEntry[] = [
+  {
+    path: "src/config.ts",
+    change_kind: "modified",
+    lines_added: 12,
+    lines_removed: 3,
+  },
+];
+
+const fileDiff: FileDiffPage = {
+  schema_version: schemaVersionV1(),
+  run_id: "COE-449",
+  file_path: "src/config.ts",
+  hunks: [
+    {
+      file_path: "src/config.ts",
+      header: "@@ -1 +1 @@",
+      start_line: 1,
+      old_line_count: 1,
+      new_line_count: 1,
+      lines: [{ type: "addition", line: "export const gateway = true;" }],
+    },
+  ],
+  total_lines_added: 12,
+  total_lines_removed: 3,
+};
+
 function buildTransport(opts?: { failHealth?: boolean }): MockGatewayTransport {
   if (opts?.failHealth) {
     class AlwaysFailHealthTransport extends MockGatewayTransport {
@@ -170,6 +256,14 @@ function buildTransport(opts?: { failHealth?: boolean }): MockGatewayTransport {
     runDetails: [
       runDetail,
       { ...runDetail, run_id: "desktop-alpha", issue_id: "desktop-alpha" },
+    ],
+    runFiles: [
+      { runId: "COE-449", files: changedFiles },
+      { runId: "desktop-alpha", files: changedFiles },
+    ],
+    runDiffs: [
+      { runId: "COE-449", filePath: "src/config.ts", diff: fileDiff },
+      { runId: "desktop-alpha", filePath: "src/config.ts", diff: { ...fileDiff, run_id: "desktop-alpha" } },
     ],
   });
 }
@@ -226,7 +320,34 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.children.length).toBe(0);
   });
 
-  it("wires dashboard to task graph to run detail navigation against the mock gateway", async () => {
+  it("keeps dark-mode tabs and changed-file rows readable", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      title: "OpenSymphony Desktop",
+      transport: buildTransport(),
+    });
+
+    await flushUntil(
+      () =>
+        root.querySelector(".os-app[data-opensymphony-app-shell='mounted']") !==
+        null,
+    );
+
+    const styleText = root.querySelector("style")?.textContent ?? "";
+    expect(styleText).toContain("@media (prefers-color-scheme: dark)");
+    expect(styleText).toContain(
+      ".os-view-tab, .os-plan-tab, .os-changed-file",
+    );
+    expect(styleText).toContain(".os-changed-file .os-file-path");
+    expect(styleText).toContain(".os-changed-file .os-file-stats");
+
+    await handle.destroy();
+  });
+
+  it("lays out status, task graph, run detail, and activity panels", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
@@ -236,45 +357,66 @@ describe("OpenSymphonyApp mount", () => {
     });
 
     await flushUntil(
-      () => root.querySelector("[data-project-id='proj-alpha']") !== null,
+      () => root.querySelector("[data-node-id='desktop-alpha']") !== null,
     );
 
-    const projectButton = root.querySelector(
-      "[data-project-id='proj-alpha']",
-    ) as HTMLButtonElement;
-    expect(projectButton).not.toBeNull();
+    expect(root.querySelector(".os-status-panel h2")?.textContent).toBe("Status");
+    expect(root.querySelector(".os-profile-panel h2")?.textContent).toBe("Connection");
+    expect(root.querySelector(".os-task-graph-panel h2")?.textContent).toBe("Task Graph");
+    expect(root.querySelector(".os-run-detail-panel h2")?.textContent).toBe("Run Detail");
+    expect(root.querySelector(".os-run-evidence-panel h2")?.textContent).toBe("Inspector");
+    expect(root.querySelector("[data-profile-label]")).toBeNull();
     expect(root.querySelector(".os-metrics")).not.toBeNull();
+    expect(root.querySelector("[data-project-id='proj-alpha']")).toBeNull();
+    expect(root.querySelectorAll(".os-events li")).toHaveLength(3);
+    expect(root.querySelector(".os-event-time")).not.toBeNull();
+    expect(root.textContent).not.toContain("should not render in compact status");
+    expect(root.textContent).not.toContain("1 running, 2 done, 1 failed");
+    expect(root.querySelector("[data-tg-create='milestone']")).toBeNull();
+    expect(root.querySelector("[data-tg-create='issue']")).toBeNull();
+    expect(root.querySelector("[data-tg-edit]")).toBeNull();
+    expect(root.querySelector("[data-tg-deps]")).toBeNull();
+    expect(root.querySelector("[data-tg-comment]")).toBeNull();
+    expect(root.querySelector("[data-tg-create-child]")).toBeNull();
+    expect(root.querySelector("[data-testid='task-graph-visualization']")).not.toBeNull();
+    expect(root.querySelector("[data-testid='task-graph-link']")).not.toBeNull();
+    expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
+    expect(root.querySelector("[data-node-id='desktop-alpha'] [data-testid='dependency-suffix']")?.textContent).toContain("blocks COE-450, COE-452");
+    expect(root.querySelector("[data-node-id='app-shell'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by COE-449");
+    expect(root.textContent).not.toContain("blocked by COE-448");
+    await flushUntil(() => root.querySelector(".os-run-head strong")?.textContent === "COE-449");
 
     taskGraph.root_ids.forEach((rootId) => {
       expect(root.querySelector(`[data-node-id='${rootId}']`)).not.toBeNull();
     });
 
-    const targetNode = root.querySelector(
-      "[data-node-id='desktop-alpha']",
-    ) as HTMLButtonElement;
-    expect(targetNode).not.toBeNull();
-    targetNode.click();
-    await flushAsync();
-
-    const openRunButton = root.querySelector(
-      "[data-open-run='desktop-alpha']",
-    ) as HTMLButtonElement;
-    expect(openRunButton).not.toBeNull();
-    openRunButton.click();
     await flushUntil(() => root.querySelector(".os-run-grid") !== null);
+    await flushUntil(() => root.querySelector("[data-testid='changed-file-item']") !== null);
 
     const runSection = root.querySelector(".os-run-grid");
     expect(runSection).not.toBeNull();
     // The issue identifier is rendered in the .os-run-head strip, not
     // inside the .os-run-grid metrics block. Verify the run detail
-    // panel reflects the navigation event with the mocked fixture.
+    // panel reflects the navigation event with the mock gateway response.
     expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
     expect(root.querySelector(".os-pill")?.textContent).toBe("running");
+    expect(root.querySelector("[data-testid='dependency-detail']")?.textContent).toContain("blocks COE-450, COE-452");
+    expect(root.querySelector(".os-run-detail-panel [data-testid='changed-file-list']")).not.toBeNull();
+    expect(root.querySelector(".os-run-evidence-panel [data-testid='evidence-toggle']")).not.toBeNull();
+    expect(root.querySelector(".os-run-evidence-panel [data-testid='file-diff']")).not.toBeNull();
+
+    (root.querySelector("[data-evidence-view='activity']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='run-activity']") !== null);
+    expect(root.querySelector(".os-run-evidence-panel [data-testid='run-activity']")).not.toBeNull();
+
+    (root.querySelector("[data-testid='changed-file-item']") as HTMLButtonElement).click();
+    await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='file-diff']") !== null);
+    expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
 
     await handle.destroy();
   });
 
-  it("enables loopback fallback fixtures when the gateway health probe fails", async () => {
+  it("reports a failed connection instead of falling back to fixture data", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const handle = renderOpenSymphonyApp({
@@ -288,14 +430,12 @@ describe("OpenSymphonyApp mount", () => {
         root.querySelector("[data-opensymphony-app-shell='mounted']") !== null,
     );
 
-    // The first render happens before loadGatewayState resolves with the
-    // connection state. Wait for the catch path to flip the connection
-    // mode to "fixture" and re-render.
-    await flushUntil(() => root.querySelector(".os-status-fixture") !== null);
+    await flushUntil(() => root.querySelector(".os-status-failed") !== null);
 
-    expect(root.querySelector(".os-status-fixture")).not.toBeNull();
-    expect(root.textContent).toContain("Fixture");
-    expect(root.textContent).toContain("desktop-alpha");
+    expect(root.querySelector(".os-status-failed")).not.toBeNull();
+    expect(root.textContent).toContain("Failed");
+    expect(root.textContent).toContain("Gateway unavailable");
+    expect(root.textContent).not.toContain("desktop-alpha");
 
     await handle.destroy();
   });
@@ -364,15 +504,11 @@ describe("OpenSymphonyApp mount", () => {
 
     await flushUntil(() => root.querySelector("[data-save-profile]") !== null);
 
-    const labelInput = root.querySelector(
-      "[data-profile-label]",
-    ) as HTMLInputElement;
     const gatewayInput = root.querySelector(
       "[data-profile-gateway]",
     ) as HTMLInputElement;
     const save = root.querySelector("[data-save-profile]") as HTMLButtonElement;
 
-    labelInput.value = "Saved Gateway";
     gatewayInput.value = newUrl;
     save.click();
 
