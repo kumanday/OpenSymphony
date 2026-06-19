@@ -275,9 +275,34 @@ Enforcement points:
   the connection is accepted; a valid `?token=` (or header) is required in
   hosted mode and the stream-subscription `Read` permission is evaluated so
   every stream subscription carries an authenticated user/tenant context.
+- HTTP read enforcement is single-layer: the read-RBAC middleware classifies
+  and gates protected reads. Any `/api/v1/*` route that is not explicitly
+  exempted (public routes, action dispatch, auth sub-routes, the WebSocket
+  event stream, and `/api/v1/taskgraph/*` mutations) defaults to an
+  authenticated-viewer floor, so a future `/api/v1/*` endpoint cannot silently
+  bypass RBAC by simply being unlisted.
+- Action dispatch derives the project scope from the action target first
+  (`target_entity.entity_kind == Project` uses `target_entity.entity_id` as the
+  project id) and falls back to the payload `project_id`/`projectId`, so an
+  action targeting a project directly is subject to the project-access check.
 
 Capabilities (`GET /api/v1/capabilities`) advertise `auth_modes` including
 `bearer_token` and `hosted_session` when hosted auth is configured.
+
+#### Alpha limitations (must fix before production)
+
+The following are known alpha limitations of COE-420's hosted auth/RBAC surface
+that are explicitly out of scope for this issue and tracked as follow-ups. They
+must be resolved before a hosted deployment is considered production-ready:
+
+- **Stream tenant isolation is not enforced.** The WebSocket/JSON-RPC stream
+  authenticates the upgrade and captures the connection `AuthContext` (user +
+  tenant) for audit, but the broker then forwards every event to all connected
+  clients. Hosted tenants are not isolated from each other on the event stream:
+  a client in tenant A can receive events produced for tenant B. This is the
+  "Hosted workspace isolation" deliverable, tracked as COE-474, which will
+  filter outgoing stream events by `organization_id`/`user_id` (or route
+  subscribers to per-tenant channels) with an isolation test matrix.
 
 ## 7.4 Client auth placeholder states
 

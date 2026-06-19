@@ -518,6 +518,116 @@ async fn hosted_action_denied_when_unauthenticated() {
     assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
+/// Build an action that targets a project directly via `target_entity`, so the
+/// project id is carried on the target (not the payload). Used to verify the
+/// project-access check derives the project id from the target entity.
+fn project_target_action(project_id: &str) -> ActionDispatch {
+    ActionDispatch {
+        schema_version: Default::default(),
+        correlation_id: format!("corr-{}", uuid::Uuid::new_v4()),
+        // Comment is read-level against a project target (Viewer-satisfiable),
+        // so a denial is attributable to project access, not role.
+        action_kind: ActionKind::Comment,
+        target_entity: ActionTarget {
+            entity_kind: EntityKind::Project,
+            entity_id: project_id.into(),
+        },
+        payload: None,
+        idempotency_key: None,
+        actor: None,
+    }
+}
+
+#[tokio::test]
+async fn hosted_action_targeting_project_enforces_project_access() {
+    let base = hosted_gateway().await;
+    // The restricted viewer is scoped to the "default" project only.
+    let token = login(&base, "restricted@example.com", "pw-restricted").await;
+    let client = authed_client(&token);
+
+    // Targeting the project the viewer may access is permitted (role Viewer
+    // satisfies the read-level capability for a project Comment).
+    let allowed = client
+        .post(format!("{base}/api/v1/actions/dispatch"))
+        .json(&project_target_action("default"))
+        .send()
+        .await
+        .expect("dispatch should send");
+    assert_ne!(
+        allowed.status(),
+        reqwest::StatusCode::FORBIDDEN,
+        "project the viewer may access must not be denied"
+    );
+
+    // Targeting a project the viewer cannot access is denied for project-access
+    // reasons, even though the viewer's role satisfies the capability.
+    let denied = client
+        .post(format!("{base}/api/v1/actions/dispatch"))
+        .json(&project_target_action("other"))
+        .send()
+        .await
+        .expect("dispatch should send");
+    assert_eq!(denied.status(), reqwest::StatusCode::FORBIDDEN);
+    let body: ActionReceipt = denied.json().await.expect("decode receipt");
+    assert_eq!(body.status, ActionStatus::Rejected);
+    let reason = body
+        .reason
+        .as_ref()
+        .expect("rejected receipt carries a reason");
+    assert!(
+        reason.contains("no access to project other"),
+        "rejection reason explains the project-access denial: {reason}"
+    );
+    assert_eq!(
+        body.permission
+            .as_ref()
+            .and_then(|p| p.denied_code.clone())
+            .as_deref(),
+        Some("permission_denied"),
+        "denied code reflects a project-access denial"
+    );
+}
+
+// ── Default-route authentication floor (no unclassified API bypass) ──────────
+
+#[tokio::test]
+async fn hosted_unclassified_api_route_requires_authentication() {
+    let base = hosted_gateway().await;
+    // `/api/v1/projects` (the project list) and any unclassified `/api/v1/*`
+    // route default to an authenticated-viewer floor, so a request without a
+    // token is rejected rather than passing through ungated.
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{base}/api/v1/projects"))
+        .send()
+        .await
+        .expect("project list should send");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "project list must require authentication in hosted mode"
+    );
+}
+
+#[tokio::test]
+async fn hosted_unknown_api_route_requires_authentication_not_passthrough() {
+    let base = hosted_gateway().await;
+    // An unclassified `/api/v1/*` path that is not explicitly exempted hits the
+    // authenticated floor before the 404 fallback, so it is 401 (not 404 and not
+    // an ungated pass-through). This guards against future routes bypassing RBAC.
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{base}/api/v1/some-future-endpoint"))
+        .send()
+        .await
+        .expect("unknown route should send");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "unclassified /api/v1/* routes must hit the authenticated floor, not pass through"
+    );
+}
+
 // ── WebSocket auth gating ─────────────────────────────────────────────────────
 
 #[tokio::test]

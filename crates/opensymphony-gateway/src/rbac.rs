@@ -259,9 +259,17 @@ impl PermissionEvaluator {
     }
 }
 
-/// Extract a project_id from an action payload when present (task graph
-/// mutations carry project scoping in their payload).
+/// Resolve the project id that scopes an action's permission decision.
+///
+/// A project id is taken from the action target first when the action targets
+/// a project directly (`target_entity.entity_kind == Project`, where
+/// `entity_id` is the project id), then falls back to the payload's
+/// `project_id`/`projectId` field (task graph mutations carry project scoping
+/// in their payload). Returns `None` for actions that are not project-scoped.
 fn action_project_id(action: &ActionDispatch) -> Option<String> {
+    if action.target_entity.entity_kind == EntityKind::Project {
+        return Some(action.target_entity.entity_id.clone());
+    }
     let payload = action.payload.as_ref()?;
     let obj = payload.as_object()?;
     if let Some(pid) = obj.get("project_id").and_then(|v| v.as_str()) {
@@ -532,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn action_project_access_is_enforced_from_payload() {
+    fn action_project_access_is_enforced_from_target_then_payload() {
         // Promote the restricted viewer to Member so the role floor passes and
         // only the project-access rule can deny.
         let store_member = HostedIdentityStore::new();
@@ -562,22 +570,47 @@ mod tests {
             }],
         );
         let evaluator = PermissionEvaluator::new(store_member);
+
+        // The project id is derived from the action target first when the
+        // action targets a project directly. The payload project_id is ignored
+        // in favor of the target's entity_id (target takes precedence).
         let mut allowed_action = dispatch(EntityKind::Project, ActionKind::TaskGraphIssue);
-        allowed_action.payload = Some(serde_json::json!({"project_id": "allowed"}));
+        allowed_action.target_entity.entity_id = "allowed".into();
+        allowed_action.payload = Some(serde_json::json!({"project_id": "other"}));
         let allowed = evaluator.evaluate_action(&ctx(Role::Member, false), &allowed_action);
         assert!(
             allowed.allowed,
-            "task-graph action on permitted project allowed"
+            "task-graph action targeting a permitted project is allowed (target wins over payload)"
         );
 
         let mut denied_action = dispatch(EntityKind::Project, ActionKind::TaskGraphIssue);
-        denied_action.payload = Some(serde_json::json!({"project_id": "other"}));
+        denied_action.target_entity.entity_id = "other".into();
+        denied_action.payload = Some(serde_json::json!({"project_id": "allowed"}));
         let denied = evaluator.evaluate_action(&ctx(Role::Member, false), &denied_action);
         assert!(
             !denied.allowed,
-            "task-graph action on non-permitted project denied"
+            "task-graph action targeting a non-permitted project is denied (target wins over payload)"
         );
         assert_eq!(denied.denied_code.as_deref(), Some("permission_denied"));
+
+        // When the action does not target a project directly, the project id
+        // falls back to the payload's `project_id`/`projectId` field.
+        let mut payload_allowed = dispatch(EntityKind::Run, ActionKind::TaskGraphIssue);
+        payload_allowed.payload = Some(serde_json::json!({"project_id": "allowed"}));
+        let payload_ok = evaluator.evaluate_action(&ctx(Role::Member, false), &payload_allowed);
+        assert!(
+            payload_ok.allowed,
+            "non-project-targeted action uses the payload project_id fallback"
+        );
+
+        let mut payload_denied = dispatch(EntityKind::Run, ActionKind::TaskGraphIssue);
+        payload_denied.payload = Some(serde_json::json!({"projectId": "other"}));
+        let payload_no = evaluator.evaluate_action(&ctx(Role::Member, false), &payload_denied);
+        assert!(
+            !payload_no.allowed,
+            "non-project-targeted action is denied when the payload project is not permitted"
+        );
+        assert_eq!(payload_no.denied_code.as_deref(), Some("permission_denied"));
     }
 
     #[test]

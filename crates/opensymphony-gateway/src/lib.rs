@@ -859,34 +859,6 @@ async fn dashboard_snapshot(State(state): State<GatewayState>) -> Json<Dashboard
     Json(control_plane_to_dashboard_snapshot(&envelope))
 }
 
-/// Enforce a hosted read-permission check for a protected resource.
-///
-/// Returns `Ok(())` when access is allowed (or auth is disabled), or
-/// `Err(response)` with a 403 body carrying the `error_code` the client
-/// classifier maps to `unauthorized`. Protected resources: project, run,
-/// planning session, secret, and action access (acceptance criterion).
-fn enforce_read_access(
-    state: &GatewayState,
-    auth_ctx: Option<&AuthContext>,
-    resource: ProtectedResource,
-    project_id: Option<&str>,
-) -> Result<(), Box<Response>> {
-    let Some(evaluator) = &state.permission_evaluator else {
-        return Ok(());
-    };
-    let Some(ctx) = auth_ctx else {
-        return Err(Box::new(unauthenticated_response(
-            "authenticated context required for hosted read access",
-        )));
-    };
-    let permission = evaluator.evaluate_read(ctx, resource, project_id);
-    if !permission.allowed {
-        Err(Box::new(permission_denied_response(&permission)))
-    } else {
-        Ok(())
-    }
-}
-
 /// POST /api/v1/actions/dispatch
 ///
 /// Validates the action against the current snapshot state, publishes an audit
@@ -1510,6 +1482,16 @@ async fn event_stream_ws(
             };
             event_stream.set_last_sequence(last_backlog_sequence);
 
+            // ALPHA LIMITATION (must fix before production): the live event
+            // stream forwards every broker event to this connection without
+            // filtering by the authenticated principal's organization_id/
+            // user_id. The upgrade was authenticated and `connection_auth_ctx`
+            // captured the tenant context for audit, but per-tenant stream
+            // isolation is out of scope for COE-420 (the "Hosted workspace
+            // isolation" deliverable) and is tracked as COE-474. Until that
+            // lands, hosted tenants are NOT isolated from each other on the
+            // event stream. See docs/deployment-modes.md 7.3.1 "Alpha
+            // limitations".
             forward_ws_live_events(&mut socket, &journal, &mut event_stream, &partition).await;
             broker.unregister_connection(&connection_id).await;
         }
@@ -2237,18 +2219,8 @@ async fn list_projects(State(store): State<SnapshotStore>) -> Json<ProjectList> 
 
 async fn get_project(
     State(state): State<GatewayState>,
-    AuthPrincipal(auth_ctx): AuthPrincipal,
     AxumPath(project_id): AxumPath<String>,
 ) -> Response {
-    // Hosted RBAC: protect project read access (acceptance criterion).
-    if let Err(denied) = enforce_read_access(
-        &state,
-        auth_ctx.as_ref(),
-        ProtectedResource::Project,
-        Some(&project_id),
-    ) {
-        return *denied;
-    }
     let store = &state.store;
     // Only the "default" project is supported; reject unknown project IDs.
     if project_id != "default" {
@@ -2311,20 +2283,9 @@ async fn get_project(
 
 async fn get_task_graph(
     State(state): State<GatewayState>,
-    AuthPrincipal(auth_ctx): AuthPrincipal,
     AxumPath(project_id): AxumPath<String>,
 ) -> Response {
     let generated_at = Utc::now();
-
-    // Hosted RBAC: protect project task-graph read access.
-    if let Err(denied) = enforce_read_access(
-        &state,
-        auth_ctx.as_ref(),
-        ProtectedResource::Project,
-        Some(&project_id),
-    ) {
-        return *denied;
-    }
 
     // Only the "default" project is supported; reject unknown project IDs.
     if project_id != "default" {
@@ -2597,15 +2558,8 @@ fn build_runtime_overlay(issue: &ControlPlaneIssueSnapshot) -> TaskGraphRuntimeO
 
 async fn get_run_detail(
     State(state): State<GatewayState>,
-    AuthPrincipal(auth_ctx): AuthPrincipal,
     AxumPath(run_id): AxumPath<String>,
 ) -> Response {
-    // Hosted RBAC: protect run read access (acceptance criterion).
-    if let Err(denied) =
-        enforce_read_access(&state, auth_ctx.as_ref(), ProtectedResource::Run, None)
-    {
-        return *denied;
-    }
     let store = &state.store;
     let envelope = store.current().await;
     let issue = match find_issue_snapshot(&envelope, &run_id) {

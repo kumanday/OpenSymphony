@@ -313,11 +313,26 @@ pub struct RbacMiddlewareState {
 /// optional project id for project-scoped access checks.
 ///
 /// Returns `None` for routes the read-RBAC layer does not gate (public routes,
-/// the action dispatch endpoint, auth routes, and web assets) so they pass
-/// through unchanged. Action dispatch is gated per-handler because it needs
-/// the parsed `ActionDispatch` to classify the targeted resource.
+/// the action dispatch endpoint, auth routes, web assets, the WebSocket event
+/// stream, and `/api/v1/taskgraph/*` mutations) so they pass through unchanged.
+///
+/// For every other `/api/v1/*` route, classification defaults to an
+/// authenticated-viewer floor (`Project` with no project id) instead of passing
+/// through ungated. This prevents a future `/api/v1/*` endpoint from silently
+/// bypassing RBAC: any new sensitive route is authenticated by default, and an
+/// explicit passthrough must be added here for routes that handle their own
+/// auth/RBAC. Action dispatch is gated per-handler because it needs the parsed
+/// `ActionDispatch` to classify the targeted resource.
 fn classify_read_route(path: &str) -> Option<(ProtectedResource, Option<String>)> {
     if is_public_route(path) || path == "/api/v1/actions/dispatch" {
+        return None;
+    }
+    // Explicit passthrough: routes that handle their own auth/RBAC and must not
+    // be gated by this read layer.
+    if path == "/api/v1/streams/events"
+        || path.starts_with("/api/v1/auth/")
+        || path.starts_with("/api/v1/taskgraph/")
+    {
         return None;
     }
     // Project-scoped reads: /api/v1/projects/{id} and the task graph view.
@@ -332,18 +347,23 @@ fn classify_read_route(path: &str) -> Option<(ProtectedResource, Option<String>)
     if path.starts_with("/api/v1/runs/") {
         return Some((ProtectedResource::Run, None));
     }
-    // Org-wide reads: snapshots, dashboard, event journal, and the control /
-    // event stream read endpoints. These require an authenticated viewer but
-    // are not project-scoped.
+    // Org-wide reads: the project list, snapshots, dashboard, event journal,
+    // and the control / event stream read endpoints. These require an
+    // authenticated viewer but are not project-scoped.
     match path {
-        "/api/v1/snapshot"
+        "/api/v1/projects"
+        | "/api/v1/snapshot"
         | "/api/v1/dashboard/snapshot"
         | "/api/v1/events"
         | "/api/v1/event-journal"
         | "/api/v1/control/events" => Some((ProtectedResource::Project, None)),
-        // Task graph mutation routes (`/api/v1/taskgraph/*`) are action-like
-        // and require the parsed payload to classify the targeted resource, so
-        // they are not gated by this read layer; their RBAC is a follow-on.
+        // Default: any other `/api/v1/*` route is gated to an authenticated
+        // viewer floor so unclassified API routes cannot bypass RBAC. Routes
+        // that must pass through (e.g. action dispatch, auth, WS streams,
+        // taskgraph mutations) are exempted above.
+        _ if path.starts_with("/api/v1/") => Some((ProtectedResource::Project, None)),
+        // Non-API paths (web assets under /app, healthz, etc.) are not gated
+        // here; public assets are already exempted via `is_public_route`.
         _ => None,
     }
 }
