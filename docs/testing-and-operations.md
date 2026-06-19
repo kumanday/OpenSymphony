@@ -239,6 +239,81 @@ Current implemented checks:
 - `opensymphony run` startup coverage that verifies the configured bind address exposes both health and gateway dashboard routes in `opensymphony-cli/tests/run.rs`
 - TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, disconnect retention, and reconnect-to-live recovery coverage in `opensymphony-tui`
 
+## 3.6 Shared client shell (web and desktop remote)
+
+The web and desktop clients both mount the shared `OpenSymphonyApp` shell from `@opensymphony/ui-core` against the same `GatewayTransport` interface, so remote parity is structural. Implemented checks:
+
+- app-shell mount smoke (`packages/ui-core/__tests__/app-shell.test.ts`): status, task graph, run detail, evidence, profile, and failed-connection rendering
+- auth-aware placeholder states (`packages/ui-core/__tests__/auth-states.test.ts`): unauthenticated (sign-in), unauthorized (access denied), forbidden (access forbidden), organization/project selection placeholders, and local `auth_modes:["none"]` gateways rendering the dashboard with no login gate; recovery when the gateway later permits a read
+- remote web/desktop parity (`packages/ui-core/__tests__/remote-parity.test.ts`): the shell renders the same core dashboard metrics, task graph nodes, run detail, planning workspace, and stream events in both `mode:"web"` and `mode:"desktop"` against an identical fixture transport
+- gateway error classification (`packages/api-client/__tests__/gateway-errors.test.ts`): `HttpGatewayTransport` maps HTTP 401/403 (including a 403 with an explicit `error_code:"unauthorized"` body signal) to a classified `GatewayRequestError`, and `authStateFromError` maps it to an `AuthState` from `@opensymphony/gateway-schema`
+
+### Evidence for UI/shell changes
+
+The shell is pure DOM rendered by `renderOpenSymphonyApp` into a `jsdom` document, so the jest suites assert the rendered DOM directly (not mock return values). For the COE-419 auth placeholder states this means concrete runtime evidence of the rendered output:
+
+- `data-opensymphony-app-shell="mounted"` root carries `data-auth-state` set to `unauthenticated` / `unauthorized` / `forbidden` / `open` for each scenario.
+- `[data-testid="auth-placeholder"]` is present only in non-open states and carries the matching `data-auth-state`; `textContent` contains "Sign in required" (unauthenticated), "Access denied" plus "do not have permission" (unauthorized), and "Access forbidden" (forbidden).
+- `[data-testid="auth-sign-in"]` appears only for `unauthenticated`; `[data-testid="auth-refresh"]` appears for `forbidden`/`unauthorized`; `[data-testid="auth-org"]`/`[data-testid="auth-project"]` render the organization/project selection surface.
+- For local `auth_modes:["none"]` gateways, `[data-testid="auth-placeholder"]` is absent and `.os-task-graph-panel` renders with `data-auth-state="open"`.
+
+These DOM assertions are the runtime evidence for the new user-facing states. A screenshot/video capture is not produced in this headless unattended environment; the assertions above exercise the real `renderAuthPlaceholder` / `renderViewContent` code paths end-to-end through the shared shell.
+
+### Captured rendered DOM (real shell, jsdom)
+
+The following is actual captured output from mounting the real shared shell (`renderOpenSymphonyApp`, `mode:"web"`) against a `MockGatewayTransport` that simulates a hosted gateway rejecting the snapshot, plus a local `auth_modes:["none"]` gateway. Reproduce with `npx jest packages/ui-core/__tests__/auth-states.test.ts` (and a temporary DOM-dump harness over `renderOpenSymphonyApp`).
+
+LOCAL `auth_modes:["none"]` gateway (snapshot succeeds):
+```
+data-auth-state = open
+auth-placeholder present = false
+task-graph-panel present = true
+<section class="os-panel os-task-graph-panel">...<div class="os-empty">No task graph loaded</div></section>
+```
+
+Hosted gateway, snapshot rejected with HTTP 401 (`unauthenticated`):
+```
+data-auth-state = unauthenticated
+auth-placeholder present = true   (data-auth-state="unauthenticated")
+auth-sign-in present = true  auth-refresh present = true  auth-org/project present = true
+task-graph-panel present = false
+<section class="os-panel os-auth-panel" data-testid="auth-placeholder" data-auth-state="unauthenticated">
+  <div class="os-section-head"><h2>Sign in</h2><span>hosted</span></div>
+  <p class="os-auth-message" data-testid="auth-message">Sign in required to view this OpenSymphony workspace.</p>
+  <div class="os-auth-actions">
+    <button data-auth-action="sign-in" data-testid="auth-sign-in">Sign in</button>
+    <button data-auth-action="refresh" data-testid="auth-refresh">Retry</button>
+  </div>
+  <div class="os-auth-scope" data-testid="auth-scope">... Organization / Project selects ...</div>
+</section>
+```
+
+Hosted gateway, snapshot rejected with HTTP 403 hard deny (`forbidden`):
+```
+data-auth-state = forbidden
+auth-placeholder present = true   (data-auth-state="forbidden")
+auth-sign-in present = false  auth-refresh present = true  auth-org/project present = true
+<section class="os-panel os-auth-panel os-auth-denied" data-testid="auth-placeholder" data-auth-state="forbidden">
+  <h2>Access forbidden</h2>
+  <p class="os-auth-message">Access to this workspace is forbidden.</p>
+  <button data-testid="auth-refresh">Retry</button>
+  <div class="os-auth-scope" data-testid="auth-scope">... Organization / Project selects ...</div>
+</section>
+```
+
+Hosted gateway, snapshot rejected with HTTP 403 carrying `error_code:"unauthorized"` (`unauthorized` permission denial):
+```
+data-auth-state = unauthorized
+auth-placeholder present = true   (data-auth-state="unauthorized")
+auth-sign-in present = false  auth-refresh present = true  auth-org/project present = true
+<section class="os-panel os-auth-panel os-auth-denied" data-testid="auth-placeholder" data-auth-state="unauthorized">
+  <h2>Access denied</h2>
+  <p class="os-auth-message">You are signed in but do not have permission to view this workspace.</p>
+  <button data-testid="auth-refresh">Retry</button>
+  <div class="os-auth-scope" data-testid="auth-scope">... Organization / Project selects ...</div>
+</section>
+```
+
 ## 4. Fake OpenHands server requirements
 
 The fake server in `opensymphony-testkit` should emulate the minimum runtime contract:

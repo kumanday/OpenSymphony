@@ -22,9 +22,11 @@ import type {
   FileDiffPage,
   RunValidationSummary,
   ApprovalRequest,
+  AuthErrorCode,
 } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, ActionCapableTransport } from "./index.js";
 import { stableHash, stableHashJson } from "./util.js";
+import { GatewayRequestError } from "./errors.js";
 
 /** Deterministic mock transport for tests. */
 export class MockGatewayTransport implements GatewayTransport, ActionCapableTransport {
@@ -44,6 +46,10 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
   private mockTerminalFrames: Map<string, GatewayEnvelope[]> = new Map();
   private mockActionReceipts: Map<string, ActionReceipt> = new Map();
   private closedFlag = false;
+
+  // Auth failure simulation for placeholder-state tests.
+  private authFailureCode: AuthErrorCode | null = null;
+  private authFailureMethods: Set<"health" | "snapshot"> = new Set();
 
   // Stream health simulation.
   private streamHealthyFlag = true;
@@ -67,6 +73,16 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     terminalFrames?: { runId: string; frames: GatewayEnvelope[] }[];
     actionReceipts?: { correlationId: string; receipt: ActionReceipt }[];
     streamHealthy?: boolean;
+    /**
+     * Simulate a classified auth failure for one or more read methods.
+     * `methods: ["snapshot"]` simulates a gateway that advertises auth
+     * (health succeeds) but rejects the dashboard snapshot because the
+     * caller is not signed in / lacks access.
+     */
+    authFailure?: {
+      code: AuthErrorCode;
+      methods?: Array<"health" | "snapshot">;
+    };
   }) {
     this.baseUri = opts?.baseUri ?? "http://mock-gateway.local";
 
@@ -162,16 +178,45 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     }
 
     this.streamHealthyFlag = opts?.streamHealthy ?? true;
+
+    if (opts?.authFailure) {
+      this.authFailureCode = opts.authFailure.code;
+      this.authFailureMethods = new Set(opts.authFailure.methods ?? ["snapshot"]);
+    }
   }
 
   // -- REST reads --
 
   async health(): Promise<GatewayCapabilities> {
+    this.throwIfAuthFailure("health");
     return this.mockHealth;
   }
 
   async snapshot(): Promise<DashboardSnapshot> {
+    this.throwIfAuthFailure("snapshot");
     return this.mockSnapshot;
+  }
+
+  /**
+   * Remove the simulated auth failure so a refresh can succeed.
+   *
+   * Test/simulation-only: `MockGatewayTransport` is not used in production, so
+   * this clears the injected failure, not a real gateway failure.
+   */
+  clearAuthFailure(): void {
+    this.authFailureCode = null;
+    this.authFailureMethods = new Set();
+  }
+
+  private throwIfAuthFailure(method: "health" | "snapshot"): void {
+    if (this.authFailureCode && this.authFailureMethods.has(method)) {
+      const status = this.authFailureCode === "unauthenticated" ? 401 : 403;
+      throw new GatewayRequestError(
+        this.authFailureCode,
+        `Simulated ${this.authFailureCode} for ${method}`,
+        status,
+      );
+    }
   }
 
   async taskGraph(_projectId: string): Promise<TaskGraphSnapshot> {

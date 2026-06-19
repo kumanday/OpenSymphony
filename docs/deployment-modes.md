@@ -211,6 +211,17 @@ Requirements:
 
 The MVP code should already expose the auth configuration hooks needed later.
 
+## 7.4 Client auth placeholder states
+
+The shared client shell (web and desktop remote) renders auth-aware placeholder states when a hosted gateway rejects a read for auth reasons, so both clients show the same user-facing outcome:
+
+- `unauthenticated` (HTTP 401): a sign-in placeholder with a placeholder "Sign in" action and "Retry". Real hosted auth provider integration arrives in a follow-on (OSYM-750).
+- `unauthorized` (HTTP 403 with an explicit `error_code`/`code` body signal such as `unauthorized` or `permission_denied`): an access-denied placeholder with organization/project selection placeholders.
+- `forbidden` (HTTP 403 hard deny, no permission body signal): an access-forbidden placeholder with "Retry".
+- `open`: no placeholder. Local unauthenticated gateways that advertise only `auth_modes: ["none"]` render the dashboard, task graph, run, stream, and planning views directly with no login gate.
+
+Transport adapters throw a classified `GatewayRequestError` (code `unauthenticated`/`unauthorized`/`forbidden`/`unavailable`); the shell maps it to an `AuthState` from `@opensymphony/gateway-schema` and renders the matching placeholder. A plain HTTP 403 maps to `forbidden`; a 403 whose body carries a permission-denial code maps to `unauthorized`. These are placeholders that reduce churn when hosted auth arrives; the gateway data model and APIs are already designed for hosted mode (see PRD 4.10).
+
 ## 8. What the code should abstract now
 
 The runtime adapter should separate:

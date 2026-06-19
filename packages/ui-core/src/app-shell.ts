@@ -17,7 +17,9 @@ import type {
   TaskGraphNode,
   TaskGraphNodeKind,
   TaskGraphSnapshot,
+  AuthState,
 } from "@opensymphony/gateway-schema";
+import { authStateFromError } from "@opensymphony/gateway-schema";
 import { renderChangedFileList, renderFileDiff } from "./diff.js";
 import { renderValidationSummary } from "./validation.js";
 import { renderApprovalList, type ApprovalDecision } from "./approval.js";
@@ -137,6 +139,7 @@ type ConnectionMode = "connecting" | "connected" | "failed";
 interface AppState {
   connectionMode: ConnectionMode;
   connectionMessage: string;
+  authState: AuthState;
   capabilities: GatewayCapabilities | null;
   snapshot: DashboardSnapshot | null;
   taskGraph: TaskGraphSnapshot | null;
@@ -205,6 +208,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state = {
       connectionMode: "connecting",
       connectionMessage: "Connecting",
+      authState: "open",
       capabilities: null,
       snapshot: null,
       taskGraph: null,
@@ -334,14 +338,34 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async loadGatewayState(): Promise<void> {
+    // Fetch capabilities first so an auth failure on the dashboard snapshot
+    // still tells us whether the gateway advertises auth (hosted mode). A
+    // gateway that requires auth typically succeeds on /capabilities but
+    // rejects the snapshot with 401/403 until the client authenticates.
+    let capabilities: GatewayCapabilities | null = null;
     try {
-      const [capabilities, snapshot] = await Promise.all([
-        this.transport.health(),
-        this.transport.snapshot(),
-      ]);
+      capabilities = await this.transport.health();
+    } catch (error) {
+      this.state.capabilities = null;
+      this.state.authState = this.resolveAuthState(error);
+      if (this.state.authState !== "open") {
+        this.state.connectionMode = "connected";
+        this.state.connectionMessage = this.authMessage(this.state.authState);
+        this.clearGatewayData();
+        return;
+      }
+      this.state.connectionMode = "failed";
+      this.state.connectionMessage = `Gateway unavailable: ${errorMessage(error)}`;
+      this.clearGatewayData();
+      return;
+    }
+
+    try {
+      const snapshot = await this.transport.snapshot();
       this.state.capabilities = capabilities;
       this.state.snapshot = snapshot;
       this.state.connectionMode = "connected";
+      this.state.authState = this.resolveAuthState(null);
       this.state.connectionMessage = `Connected to ${this.transport.baseUri || "same-origin gateway"}`;
       this.state.selectedProjectId = snapshot.projects[0]?.project_id ?? "default";
       await this.loadTaskGraph(this.state.selectedProjectId);
@@ -351,20 +375,61 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         project_id: this.state.selectedProjectId,
       };
     } catch (error) {
-      this.state.capabilities = null;
-      this.state.snapshot = null;
-      this.state.taskGraph = null;
-      this.state.selectedProjectId = null;
-      this.state.selectedNodeId = null;
-      this.state.runDetail = null;
-      this.state.runFiles = null;
-      this.state.runDiff = null;
-      this.state.evidenceView = "diff";
-      this.state.runEvents = null;
-      this.state.runValidation = null;
-      this.state.runApprovals = null;
-      this.state.connectionMode = "failed";
-      this.state.connectionMessage = `Gateway unavailable: ${errorMessage(error)}`;
+      this.state.capabilities = capabilities;
+      this.state.authState = this.resolveAuthState(error);
+      if (this.state.authState !== "open") {
+        // Capabilities resolved, but the protected resource rejected us.
+        // Treat the connection as established so the auth placeholder renders
+        // instead of a generic offline banner.
+        this.state.connectionMode = "connected";
+        this.state.connectionMessage = this.authMessage(this.state.authState);
+      } else {
+        this.state.connectionMode = "failed";
+        this.state.connectionMessage = `Gateway unavailable: ${errorMessage(error)}`;
+      }
+      this.clearGatewayData();
+    }
+  }
+
+  private clearGatewayData(): void {
+    this.state.snapshot = null;
+    this.state.taskGraph = null;
+    this.state.selectedProjectId = null;
+    this.state.selectedNodeId = null;
+    this.state.runDetail = null;
+    this.state.runFiles = null;
+    this.state.runDiff = null;
+    this.state.evidenceView = "diff";
+    this.state.runEvents = null;
+    this.state.runValidation = null;
+    this.state.runApprovals = null;
+  }
+
+  /**
+   * Resolve the auth-facing state from a thrown error.
+   *
+   * The shell only gates on auth when a protected read fails: a classified
+   * auth error (`unauthenticated`/`unauthorized`/`forbidden`) wins, and any
+   * successful load (authenticated caller or local no-auth gateway) is
+   * `open`. Advertised `auth_modes` are not consulted here; capabilities are
+   * fetched separately so a snapshot that 401s still reports the gateway's
+   * auth modes, but they do not change the gate decision.
+   */
+  private resolveAuthState(error: unknown): AuthState {
+    return authStateFromError(error);
+  }
+
+  private authMessage(state: AuthState): string {
+    switch (state) {
+      case "unauthenticated":
+        return "Sign in required";
+      case "unauthorized":
+        return "Access denied: insufficient permission";
+      case "forbidden":
+        return "Access forbidden";
+      case "open":
+      default:
+        return "";
     }
   }
 
@@ -668,7 +733,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const title = this.options.title ?? "OpenSymphony";
     this.options.root.innerHTML = `
       <style>${appShellStyles()}</style>
-      <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}">
+      <main class="os-app" data-opensymphony-app-shell="mounted" data-mode="${this.options.mode}" data-auth-state="${this.state.authState}">
         <header class="os-topbar">
           <div>
             <h1>${escapeHtml(title)}</h1>
@@ -691,6 +756,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private renderViewContent(): string {
+    if (this.state.authState !== "open") {
+      return this.renderAuthPlaceholder();
+    }
     if (this.state.activeView === "planning") {
       return `
         ${this.renderProfiles()}
@@ -703,6 +771,105 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       ${this.renderTaskGraph()}
       ${this.renderRunDetail()}
       ${this.renderRunEvidence()}
+    `;
+  }
+
+  /**
+   * Render the auth-aware placeholder shell.
+   *
+   * Hosted auth integration arrives in a follow-on task; these placeholders
+   * keep the user-facing states stable so the real provider can slot in with
+   * minimal UI churn. Local unauthenticated gateways (`auth_modes:["none"]`)
+   * never reach this path because their reads succeed and `authState` stays
+   * `"open"`.
+   */
+  private renderAuthPlaceholder(): string {
+    const state = this.state.authState;
+    // Org/project selection is only meaningful when the caller can still act
+    // on it (sign in / switch workspace). A hard 403 `forbidden` deny means
+    // the gateway refused the workspace outright, so tenant selectors would
+    // be misleading there.
+    const orgProject = state === "forbidden" ? "" : this.renderOrgProjectPlaceholder();
+    if (state === "unauthenticated") {
+      return `
+        ${this.renderProfiles()}
+        <section class="os-panel os-auth-panel" data-testid="auth-placeholder" data-auth-state="unauthenticated">
+          <div class="os-section-head"><h2>Sign in</h2><span>hosted</span></div>
+          <div class="os-auth-body">
+            <p class="os-auth-message" data-testid="auth-message">Sign in required to view this OpenSymphony workspace.</p>
+            <div class="os-auth-actions">
+              <button type="button" data-auth-action="sign-in" data-testid="auth-sign-in">Sign in</button>
+              <button type="button" data-auth-action="refresh" data-testid="auth-refresh">Retry</button>
+            </div>
+            <p class="os-auth-note" data-testid="auth-note">Hosted authentication is configured by your administrator. Local development gateways do not require sign-in.</p>
+          </div>
+          ${orgProject}
+        </section>
+      `;
+    }
+    if (state === "unauthorized") {
+      return `
+        ${this.renderProfiles()}
+        <section class="os-panel os-auth-panel os-auth-denied" data-testid="auth-placeholder" data-auth-state="unauthorized">
+          <div class="os-section-head"><h2>Access denied</h2><span>hosted</span></div>
+          <div class="os-auth-body">
+            <p class="os-auth-message" data-testid="auth-message">You are signed in but do not have permission to view this workspace.</p>
+            <div class="os-auth-actions">
+              <button type="button" data-auth-action="refresh" data-testid="auth-refresh">Retry</button>
+            </div>
+            <p class="os-auth-note" data-testid="auth-note">Request access from your organization administrator, or switch to a workspace you can access.</p>
+          </div>
+          ${orgProject}
+        </section>
+      `;
+    }
+    // forbidden
+    return `
+      ${this.renderProfiles()}
+      <section class="os-panel os-auth-panel os-auth-denied" data-testid="auth-placeholder" data-auth-state="forbidden">
+        <div class="os-section-head"><h2>Access forbidden</h2><span>hosted</span></div>
+        <div class="os-auth-body">
+          <p class="os-auth-message" data-testid="auth-message">Access to this workspace is forbidden.</p>
+          <div class="os-auth-actions">
+            <button type="button" data-auth-action="refresh" data-testid="auth-refresh">Retry</button>
+          </div>
+          <p class="os-auth-note" data-testid="auth-note">The gateway refused the request. If this is unexpected, contact your administrator.</p>
+        </div>
+        ${orgProject}
+      </section>
+    `;
+  }
+
+  /**
+   * Organization/project selection placeholder for hosted contexts.
+   *
+   * Real tenant/org selection arrives with hosted auth; this surface keeps the
+   * selector present so the data model and UI layout are stable. Rendered only
+   * for `unauthenticated` and `unauthorized` auth states (see
+   * `renderAuthPlaceholder`), where the caller can still act on a workspace
+   * choice. It is intentionally omitted for `forbidden`, where the gateway has
+   * hard-denied the workspace.
+   */
+  private renderOrgProjectPlaceholder(): string {
+    return `
+      <div class="os-auth-scope" data-testid="auth-scope">
+        <div class="os-section-head"><h3>Workspace</h3></div>
+        <div class="os-inline-fields">
+          <label class="os-field">
+            <span>Organization</span>
+            <select data-auth-org data-testid="auth-org" disabled>
+              <option value="">Select organization</option>
+            </select>
+          </label>
+          <label class="os-field">
+            <span>Project</span>
+            <select data-auth-project data-testid="auth-project" disabled>
+              <option value="">Select project</option>
+            </select>
+          </label>
+        </div>
+        <p class="os-auth-note">Organization and project selection is available after you sign in.</p>
+      </div>
     `;
   }
 
@@ -969,6 +1136,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private bindEvents(): void {
     this.options.root.querySelector("[data-save-profile]")?.addEventListener("click", () => {
       void this.saveProfile();
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-auth-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const action = button.dataset.authAction;
+        if (action === "sign-in") {
+          // Hosted auth provider integration is a follow-on task; the
+          // placeholder triggers a refresh so an operator-supplied session
+          // (or a newly-permitted gateway) is re-evaluated.
+          void this.refresh();
+        } else if (action === "refresh") {
+          void this.refresh();
+        }
+      });
     });
     this.options.root.querySelector("[data-profile-select]")?.addEventListener("change", (event) => {
       const target = event.target as HTMLSelectElement;
@@ -2393,6 +2573,16 @@ function appShellStyles(): string {
     .os-inline-state { width: 120px; }
     pre { margin: 0; padding: 10px; border-radius: 6px; background: #17202a; color: #d7e4ee; overflow: auto; font-size: 12px; }
     .os-empty { color: #667788; font-size: 13px; border: 1px dashed #cbd5df; border-radius: 6px; padding: 14px; }
+    .os-auth-panel { display: flex; flex-direction: column; gap: 14px; grid-column: 1 / -1; }
+    .os-auth-panel .os-section-head span { text-transform: uppercase; font-size: 11px; letter-spacing: 0.04em; color: #667788; }
+    .os-auth-body { display: flex; flex-direction: column; gap: 10px; }
+    .os-auth-message { margin: 0; font-size: 14px; }
+    .os-auth-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .os-auth-note { margin: 0; font-size: 12px; color: #667788; }
+    .os-auth-denied .os-auth-message { color: #991b1b; }
+    .os-auth-scope { border: 1px solid #d8dee4; border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px; background: #f8fafc; }
+    .os-auth-scope .os-section-head h3 { margin: 0; font-size: 13px; }
+    .os-auth-scope .os-auth-note { margin: 0; }
     .os-view-tabs { display: inline-flex; gap: 6px; }
     .os-view-tab { min-height: 32px; padding: 6px 12px; font-size: 13px; border-radius: 6px; background: #f8fafc; border: 1px solid #cad3dd; }
     .os-view-tab-active { background: #e7f1f5; border-color: #39708f; font-weight: 600; }
@@ -2456,6 +2646,10 @@ function appShellStyles(): string {
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
       .os-topbar p, .os-section-head span, .os-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-auth-panel .os-auth-message { color: #d9e2ea; }
+      .os-auth-denied .os-auth-message { color: #fca5a5; }
+      .os-auth-note { color: #94a3b3; }
+      .os-auth-scope { background: #111820; border-color: #2a3440; }
       .os-segmented { background: #111820; border-color: #2a3440; }
       .os-segmented button.is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-field input, .os-field select, .os-inline-input, .os-dialog textarea { background: #0f151b; color: #d9e2ea; border-color: #344454; }

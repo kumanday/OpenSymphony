@@ -23,6 +23,17 @@ import type {
 import { pageCursorFirst } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, GatewayTransportConfig, ActionCapableTransport } from "./index.js";
 import { stableHash, stableHashJson } from "./util.js";
+import { GatewayRequestError, authErrorCodeForStatus } from "./errors.js";
+
+/** Best-effort parse of a response body as JSON; returns the raw string on failure. */
+function tryParseJson(raw: string): unknown {
+  if (!raw) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
 
 /**
  * HTTP-based transport adapter using fetch().
@@ -488,6 +499,14 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
     return init;
   }
 
+  /**
+   * Fetch `url` and return the parsed JSON body.
+   *
+   * On a non-2xx response the body is consumed once with `response.text()`
+   * (for diagnostics and auth-code classification). `Response` bodies can only
+   * be read a single time, so callers/interceptors must not re-consume the
+   * response body after this method returns or throws.
+   */
   private async fetchJson(url: string, init?: RequestInit): Promise<unknown> {
     const method = init?.method ?? "GET";
     const headers: Record<string, string> = {
@@ -510,9 +529,17 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
     const response = await fetch(url, requestInit);
 
     if (!response.ok) {
-      const body = await response.text().catch(() => "");
+      const rawBody = await response.text().catch(() => "");
+      const authCode = authErrorCodeForStatus(response.status, tryParseJson(rawBody));
+      if (authCode) {
+        throw new GatewayRequestError(
+          authCode,
+          `HTTP ${response.status} ${response.statusText}: ${rawBody}`,
+          response.status,
+        );
+      }
       throw new Error(
-        `HTTP ${response.status} ${response.statusText}: ${body}`,
+        `HTTP ${response.status} ${response.statusText}: ${rawBody}`,
       );
     }
 
@@ -585,6 +612,14 @@ export class WebSocketTransport implements GatewayTransport {
     return headers;
   }
 
+  /**
+   * Issue a GET against `path` and return the parsed JSON body.
+   *
+   * On a non-2xx response the body is consumed once with `response.text()`
+   * (for diagnostics and auth-code classification). `Response` bodies can only
+   * be read a single time, so callers/interceptors must not re-consume the
+   * response body after this method returns or throws.
+   */
   private async get<T>(path: string): Promise<T> {
     const url = `${this.baseUri}${path}`;
     const response = await fetch(url, {
@@ -592,8 +627,17 @@ export class WebSocketTransport implements GatewayTransport {
       headers: this.headers(),
     });
     if (!response.ok) {
+      const rawBody = await response.text().catch(() => "");
+      const authCode = authErrorCodeForStatus(response.status, tryParseJson(rawBody));
+      if (authCode) {
+        throw new GatewayRequestError(
+          authCode,
+          `HTTP ${response.status} from ${url}: ${response.statusText}: ${rawBody}`,
+          response.status,
+        );
+      }
       throw new Error(
-        `HTTP ${response.status} from ${url}: ${response.statusText}`,
+        `HTTP ${response.status} from ${url}: ${response.statusText}: ${rawBody}`,
       );
     }
     return (await response.json()) as T;
