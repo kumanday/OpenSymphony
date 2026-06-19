@@ -17,14 +17,25 @@ export type GatewayErrorCode =
   | "unauthenticated"
   /**
    * Authenticated but lacking permission for this resource. Reached when a
-   * 403 response carries an explicit `error_code: "unauthorized"` (or
-   * `code: "unauthorized"`) body signal indicating a permission denial.
+   * 403 response carries an explicit permission-denial body signal. The body
+   * is read from an `error_code` (or `code`) string field, and the following
+   * values are recognized as permission denials: `"unauthorized"`,
+   * `"permission_denied"`, and `"forbidden_resource"`. A 403 without one of
+   * these signals is treated as a hard deny (`forbidden`).
    */
   | "unauthorized"
   /** Server hard-denies the request (HTTP 403 without a permission signal). */
   | "forbidden"
   /** Gateway unreachable or returned a non-auth error. */
   | "unavailable";
+
+/**
+ * Error codes that represent an auth/authz rejection only. `unavailable` is
+ * excluded because it models a generic connectivity failure rather than a
+ * credentials/access decision. Used by auth-failure simulation that should
+ * only ever inject a sign-in/access outcome.
+ */
+export type AuthErrorCode = Exclude<GatewayErrorCode, "unavailable">;
 
 /** Error thrown by transport adapters for classified gateway failures. */
 export class GatewayRequestError extends Error {

@@ -616,12 +616,12 @@ export class WebSocketTransport implements GatewayTransport {
       if (authCode) {
         throw new GatewayRequestError(
           authCode,
-          `HTTP ${response.status} from ${url}: ${response.statusText}`,
+          `HTTP ${response.status} from ${url}: ${response.statusText}: ${rawBody}`,
           response.status,
         );
       }
       throw new Error(
-        `HTTP ${response.status} from ${url}: ${response.statusText}`,
+        `HTTP ${response.status} from ${url}: ${response.statusText}: ${rawBody}`,
       );
     }
     return (await response.json()) as T;

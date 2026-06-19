@@ -25,7 +25,7 @@ import type {
 } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, ActionCapableTransport } from "./index.js";
 import { stableHash, stableHashJson } from "./util.js";
-import { GatewayRequestError, type GatewayErrorCode } from "./errors.js";
+import { GatewayRequestError, type AuthErrorCode } from "./errors.js";
 
 /** Deterministic mock transport for tests. */
 export class MockGatewayTransport implements GatewayTransport, ActionCapableTransport {
@@ -47,7 +47,7 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
   private closedFlag = false;
 
   // Auth failure simulation for placeholder-state tests.
-  private authFailureCode: GatewayErrorCode | null = null;
+  private authFailureCode: AuthErrorCode | null = null;
   private authFailureMethods: Set<"health" | "snapshot"> = new Set();
 
   // Stream health simulation.
@@ -79,7 +79,7 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
      * caller is not signed in / lacks access.
      */
     authFailure?: {
-      code: GatewayErrorCode;
+      code: AuthErrorCode;
       methods?: Array<"health" | "snapshot">;
     };
   }) {

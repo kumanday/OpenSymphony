@@ -52,6 +52,7 @@ describe("GatewayRequestError classification", () => {
     it("maps a 403 with an explicit unauthorized body code to unauthorized", () => {
       expect(authErrorCodeForStatus(403, { error_code: "unauthorized" })).toBe("unauthorized");
       expect(authErrorCodeForStatus(403, { code: "permission_denied" })).toBe("unauthorized");
+      expect(authErrorCodeForStatus(403, { error_code: "forbidden_resource" })).toBe("unauthorized");
     });
     it("maps a 403 with an unrelated body code to forbidden", () => {
       expect(authErrorCodeForStatus(403, { error_code: "rate_limited" })).toBe("forbidden");
@@ -139,6 +140,21 @@ describe("GatewayRequestError classification", () => {
         status: 401,
         name: "GatewayRequestError",
       });
+    });
+
+    it("includes the raw response body in the WebSocketTransport error message", async () => {
+      global.fetch = jest.fn(async () =>
+        mockResponse(401, "Unauthorized", '{"error":"missing token"}'),
+      ) as jest.MockedFunction<typeof global.fetch>;
+
+      const transport = new WebSocketTransport({ baseUri: "http://localhost:8080" });
+      try {
+        await transport.health();
+        throw new Error("expected health() to reject");
+      } catch (error) {
+        expect(isGatewayRequestError(error)).toBe(true);
+        expect((error as Error).message).toContain('{"error":"missing token"}');
+      }
     });
 
     it("throws a GatewayRequestError with forbidden code on a bare HTTP 403", async () => {
