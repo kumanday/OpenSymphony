@@ -209,6 +209,12 @@ Restart recovery should rely on managed workspace metadata only:
 - workspace introspection
 - authoritative ownership check for non-injective sanitized workspace keys
 
+Gateway run-detail reads use the same workspace ownership boundary. Changed-file
+lists come from the control-plane issue snapshot, and per-file diffs are read
+from the issue workspace path recorded for that issue. These reads must stay
+inside the issue workspace and are exposed through the gateway/Tauri contract
+only; rich clients do not inspect workspace paths directly.
+
 Current repository implementation:
 
 - the scheduler recovery path consumes manifest-derived records that include the normalized issue identity plus the attached workspace record

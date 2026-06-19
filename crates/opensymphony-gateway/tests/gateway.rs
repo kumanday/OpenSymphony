@@ -11,7 +11,8 @@ use opensymphony::opensymphony_domain::{
     ControlPlaneIssueRuntimeState as IssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
     ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
     ControlPlaneRecentEventKind as RecentEventKind, ControlPlaneWorkerOutcome as WorkerOutcome,
-    SnapshotEnvelope, TrackerIssue, TrackerIssueBlocker, TrackerIssueState, TrackerIssueStateKind,
+    SnapshotEnvelope, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
+    TrackerIssueStateKind,
 };
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, LinearTaskGraphClient, control_plane_to_dashboard_snapshot,
@@ -52,13 +53,53 @@ fn fake_linear_task_graph_client(
     snapshot: &DaemonSnapshot,
     blocker_overrides: &[(&str, Vec<&str>)],
 ) -> std::sync::Arc<dyn LinearTaskGraphClient> {
-    std::sync::Arc::new(FakeLinearTaskGraphClient {
-        issues: snapshot
-            .issues
+    fake_linear_task_graph_client_with_hierarchy(snapshot, blocker_overrides, &[])
+}
+
+fn fake_linear_task_graph_client_with_hierarchy(
+    snapshot: &DaemonSnapshot,
+    blocker_overrides: &[(&str, Vec<&str>)],
+    parent_overrides: &[(&str, &str)],
+) -> std::sync::Arc<dyn LinearTaskGraphClient> {
+    let mut issues = snapshot
+        .issues
+        .iter()
+        .map(|issue| tracker_issue_from_snapshot(issue, blocker_overrides))
+        .collect::<Vec<_>>();
+
+    for (child_identifier, parent_identifier) in parent_overrides {
+        let Some(parent_ref) = issues
             .iter()
-            .map(|issue| tracker_issue_from_snapshot(issue, blocker_overrides))
-            .collect(),
-    })
+            .find(|issue| issue.identifier == *parent_identifier)
+            .map(tracker_issue_ref_from_tracker)
+        else {
+            continue;
+        };
+        let Some(child_ref) = issues
+            .iter()
+            .find(|issue| issue.identifier == *child_identifier)
+            .map(tracker_issue_ref_from_tracker)
+        else {
+            continue;
+        };
+
+        if let Some(child_issue) = issues
+            .iter_mut()
+            .find(|issue| issue.identifier == *child_identifier)
+        {
+            child_issue.parent_id = Some(parent_ref.identifier.clone());
+            child_issue.parent = Some(parent_ref);
+        }
+
+        if let Some(parent_issue) = issues
+            .iter_mut()
+            .find(|issue| issue.identifier == *parent_identifier)
+        {
+            parent_issue.sub_issues.push(child_ref);
+        }
+    }
+
+    std::sync::Arc::new(FakeLinearTaskGraphClient { issues })
 }
 
 fn tracker_issue_from_snapshot(
@@ -99,6 +140,16 @@ fn tracker_issue_from_snapshot(
         sub_issues: Vec::new(),
         created_at: issue.last_event_at,
         updated_at: issue.last_event_at,
+    }
+}
+
+fn tracker_issue_ref_from_tracker(issue: &TrackerIssue) -> TrackerIssueRef {
+    TrackerIssueRef {
+        id: issue.id.clone(),
+        identifier: issue.identifier.clone(),
+        title: Some(issue.title.clone()),
+        url: Some(issue.url.clone()),
+        state: issue.state.clone(),
     }
 }
 
@@ -1331,6 +1382,7 @@ async fn gateway_serves_task_graph() {
     assert_eq!(response.project_id, "default");
     assert_eq!(response.nodes.len(), 1);
     assert_eq!(response.nodes[0].identifier, "COE-255");
+    assert_eq!(response.root_ids, vec!["COE-255".to_owned()]);
     // Verify runtime overlay is present
     assert!(response.nodes[0].runtime_overlay.is_some());
     let overlay = response.nodes[0]
@@ -2045,7 +2097,11 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
     let snapshot = fixture_snapshot_rich(0);
     let store = SnapshotStore::new(snapshot.clone());
     let server = GatewayServer::new(store.clone()).with_linear_task_graph(Some(
-        fake_linear_task_graph_client(&snapshot, &[("COE-304", vec!["COE-300"])]),
+        fake_linear_task_graph_client_with_hierarchy(
+            &snapshot,
+            &[("COE-304", vec!["COE-300"])],
+            &[("COE-304", "COE-300")],
+        ),
     ));
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -2086,7 +2142,14 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
         .iter()
         .find(|n| n.identifier == "COE-304")
         .expect("COE-304 node should exist");
+    assert_eq!(blocked_node.parent_id.as_deref(), Some("COE-300"));
     assert_eq!(blocked_node.blocked_by, vec!["COE-300".to_owned()]);
+    let parent_node = response
+        .nodes
+        .iter()
+        .find(|n| n.identifier == "COE-300")
+        .expect("COE-300 node should exist");
+    assert_eq!(parent_node.children, vec!["COE-304".to_owned()]);
 
     // Completed issue should NOT be eligible
     let done_node = response
@@ -2097,8 +2160,15 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
     let done_overlay = done_node.runtime_overlay.as_ref().expect("overlay present");
     assert!(!done_overlay.eligible);
 
-    // root_ids should be empty (no parent/child data available)
-    assert!(response.root_ids.is_empty());
+    assert_eq!(
+        response.root_ids,
+        vec![
+            "COE-300".to_owned(),
+            "COE-301".to_owned(),
+            "COE-302".to_owned(),
+            "COE-303".to_owned()
+        ]
+    );
 
     server_task.abort();
 }

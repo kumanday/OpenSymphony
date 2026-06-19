@@ -132,7 +132,8 @@ This keeps one canonical Linear API surface for the agent path.
 - `opensymphony_control`
   - control-plane snapshot store and compatibility API
 - `opensymphony_gateway`
-  - operator gateway API, dashboard snapshots, event journal, and web assets
+  - operator gateway API, dashboard snapshots, Linear-backed task graph reads,
+    run detail/file/diff endpoints, event journal, and web assets
 - `opensymphony_cli`
   - user-facing entrypoints
 - `opensymphony_tui`
@@ -178,6 +179,21 @@ Other processes:
 - OpenHands-managed tool execution inside the agent runtime
 
 There is no separate agent-side Linear bridge process in 1.0.0.
+
+## 5.1 Gateway and rich clients
+
+The web and desktop clients consume the gateway contract rather than reaching
+into orchestrator internals. Dashboard and run state come from the
+control-plane snapshot, while the task graph read endpoint asks the
+orchestrator-side Linear adapter for tracker hierarchy and dependency
+relationships, then overlays live runtime details from the latest snapshot.
+The gateway emits `root_ids` from the returned Linear parent/child graph so
+clients can render the same forest without inventing hierarchy locally.
+
+Native desktop builds may call the same operations through Tauri IPC instead
+of loopback HTTP, but the data contract is identical. Tauri command arguments
+use the Rust command parameter names exactly, including snake_case keys such as
+`run_id`, `project_id`, `page_size`, and `file_path`.
 
 ## 6. Failure boundaries
 

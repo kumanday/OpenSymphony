@@ -22,6 +22,8 @@ It is responsible for:
 - refreshing current state for already-running issues
 - reading terminal issues for startup cleanup
 - normalizing GraphQL payloads into stable domain models
+- serving gateway task graph reads with Linear-native parent, child, and
+  blocker relationships
 
 Current workflow contract:
 
@@ -34,9 +36,14 @@ Important normalization rules:
 - `blocked_by` is derived from `inverseRelations` entries whose relation type is
   `blocks`
 - `parent_id` comes from `parent.id`
+- `parent` retains the parent identifier when Linear returns it, and gateway
+  task graph nodes use that identifier as the client-facing `parent_id`
 - `sub_issues` comes from `children.nodes`
 - `state` remains the workflow-facing state name string used by
   `WORKFLOW.md`
+- gateway task graph `root_ids` are the returned node identifiers whose Linear
+  parent is absent or outside the returned node set; clients must not infer
+  tracker hierarchy from fixture data or local fallbacks
 
 ## 3. Agent-side Linear access
 

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     ffi::OsStr,
     path::{Path as StdPath, PathBuf},
@@ -2128,10 +2128,20 @@ async fn get_task_graph(
         })
         .collect();
 
-    // Parent/child relationship data is not yet available from the control-plane
-    // snapshot, so every node is treated as a standalone leaf. Returning an empty
-    // root_ids prevents clients from building an incorrect flat-forest layout.
-    let root_ids: Vec<String> = Vec::new();
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect::<HashSet<_>>();
+    let root_ids = nodes
+        .iter()
+        .filter(|node| {
+            node.parent_id
+                .as_deref()
+                .map(|parent_id| !node_ids.contains(parent_id))
+                .unwrap_or(true)
+        })
+        .map(|node| node.node_id.clone())
+        .collect();
 
     (
         StatusCode::OK,
