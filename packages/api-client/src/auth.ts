@@ -45,7 +45,11 @@ export class HostedAuthClient {
   constructor(config: HostedAuthClientConfig) {
     this.baseUri = config.baseUri.replace(/\/+$/, "");
     this.sessionToken = config.sessionToken;
-    this.fetchImpl = config.fetchImpl ?? fetch;
+    // Bind the global `fetch` to `globalThis` so the captured reference keeps
+    // the correct receiver when invoked later as `this.fetchImpl(url, init)`.
+    // Calling a detached `fetch` throws "Illegal invocation" in browsers
+    // (fetch requires `this === window`), which broke the hosted web login.
+    this.fetchImpl = config.fetchImpl ?? fetch.bind(globalThis);
   }
 
   /** The currently held session token (updated by {@link login}). */

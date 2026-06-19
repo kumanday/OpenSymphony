@@ -1313,7 +1313,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       void this.submitSignIn({
         email: String(data.get("email") ?? ""),
         password: String(data.get("password") ?? ""),
-        organizationSlug: (data.get("organization_slug") as string | null) ?? undefined,
+        // The organization slug is optional; a blank field is treated as
+        // "not specified" so the gateway resolves the user's default
+        // membership instead of receiving an empty slug.
+        organizationSlug:
+          (data.get("organization_slug") as string | null)?.trim() || undefined,
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-auth-action]").forEach((button) => {

@@ -352,14 +352,22 @@ impl HostedIdentityStore {
         let user = stored.user.clone();
 
         // Resolve the target organization: explicit slug, else the user's
-        // first membership.
-        let organization = if let Some(slug) = &request.organization_slug {
+        // first membership. An empty/whitespace slug is treated as "not
+        // specified" so a caller that submits a blank optional field (the web
+        // sign-in form leaves Organization empty) resolves to the user's
+        // default membership instead of being rejected as an unknown org.
+        let organization = if let Some(slug) = request
+            .organization_slug
+            .as_deref()
+            .map(str::trim)
+            .filter(|slug| !slug.is_empty())
+        {
             state
                 .orgs_by_slug
                 .get(slug)
                 .and_then(|id| state.orgs.get(id))
                 .cloned()
-                .ok_or(IdentityError::UnknownOrganization(slug.clone()))?
+                .ok_or(IdentityError::UnknownOrganization(slug.to_string()))?
         } else {
             let membership = state
                 .memberships

@@ -272,6 +272,78 @@ async fn hosted_login_returns_session_token_and_user_context() {
 }
 
 #[tokio::test]
+async fn hosted_login_treats_blank_organization_slug_as_default_membership() {
+    // The web sign-in form leaves the optional Organization field blank, which
+    // serializes to `organization_slug: ""`. A blank slug must resolve to the
+    // user's default membership instead of being rejected as an unknown org.
+    let base = hosted_gateway().await;
+    let client = reqwest::Client::new();
+
+    // Empty string slug -> default membership (acme for the seeded viewer).
+    let response = client
+        .post(format!("{base}/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "viewer@example.com",
+            "password": "pw-viewer",
+            "organization_slug": "",
+        }))
+        .send()
+        .await
+        .expect("login request should send");
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::OK,
+        "blank organization_slug should resolve to the default membership"
+    );
+    let body: serde_json::Value = response.json().await.expect("decode login response");
+    assert_eq!(body["user"]["email"], "viewer@example.com");
+    assert_eq!(body["organization"]["slug"], "acme");
+    assert_eq!(body["role"], "viewer");
+    let token = body["session_token"]
+        .as_str()
+        .expect("login response carries a session_token")
+        .to_string();
+
+    // A whitespace-only slug is also treated as "not specified".
+    let ws = client
+        .post(format!("{base}/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "viewer@example.com",
+            "password": "pw-viewer",
+            "organization_slug": "   ",
+        }))
+        .send()
+        .await
+        .expect("login request should send");
+    assert_eq!(
+        ws.status(),
+        reqwest::StatusCode::OK,
+        "whitespace-only organization_slug should resolve to the default membership"
+    );
+
+    // The session token from the blank-slug login is valid and carries context.
+    let me = authed_client(&token)
+        .get(format!("{base}/api/v1/auth/session"))
+        .send()
+        .await
+        .expect("session probe should send");
+    assert_eq!(me.status(), reqwest::StatusCode::OK);
+
+    // An explicit, unknown slug is still rejected.
+    let unknown = client
+        .post(format!("{base}/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "viewer@example.com",
+            "password": "pw-viewer",
+            "organization_slug": "does-not-exist",
+        }))
+        .send()
+        .await
+        .expect("login request should send");
+    assert_eq!(unknown.status(), reqwest::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn hosted_login_rejects_invalid_credentials() {
     let base = hosted_gateway().await;
     let client = reqwest::Client::new();
