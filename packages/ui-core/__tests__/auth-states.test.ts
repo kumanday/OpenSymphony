@@ -114,7 +114,10 @@ async function flushUntil(predicate: () => boolean, maxIterations = 40): Promise
   throw new Error(`flushUntil timed out after ${maxIterations} iterations`);
 }
 
-function mount(authFailure: { code: "unauthenticated" | "unauthorized" | "forbidden" }) {
+function mount(authFailure: {
+  code: "unauthenticated" | "unauthorized" | "forbidden";
+  methods?: Array<"health" | "snapshot">;
+}) {
   const root = document.createElement("div");
   document.body.appendChild(root);
   const transport = new MockGatewayTransport({
@@ -123,7 +126,7 @@ function mount(authFailure: { code: "unauthenticated" | "unauthorized" | "forbid
     snapshot: dashboard,
     taskGraph,
     runDetails: [runDetail],
-    authFailure: { code: authFailure.code, methods: ["snapshot"] },
+    authFailure: { code: authFailure.code, methods: authFailure.methods ?? ["snapshot"] },
   });
   const handle = renderOpenSymphonyApp({
     root,
@@ -154,6 +157,27 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
     expect(root.querySelector(".os-run-detail-panel")).toBeNull();
 
     await handle.destroy();
+    root.remove();
+  });
+
+  it("renders an unauthenticated placeholder when the gateway rejects capabilities (health) with 401", async () => {
+    // Exercises the separate `loadGatewayState` code path where `health()`
+    // itself rejects with an auth error (capabilities never resolve).
+    const { root, handle } = mount({ code: "unauthenticated", methods: ["health"] });
+
+    await flushUntil(() => root.querySelector("[data-testid='auth-placeholder']") !== null);
+
+    const shell = root.querySelector("[data-opensymphony-app-shell='mounted']");
+    expect(shell?.getAttribute("data-auth-state")).toBe("unauthenticated");
+    const placeholder = root.querySelector("[data-testid='auth-placeholder']");
+    expect(placeholder?.getAttribute("data-auth-state")).toBe("unauthenticated");
+    expect(root.querySelector("[data-testid='auth-sign-in']")).not.toBeNull();
+    expect(root.textContent).toContain("Sign in required");
+    // Core panels are not rendered behind the auth gate.
+    expect(root.querySelector(".os-task-graph-panel")).toBeNull();
+
+    await handle.destroy();
+    root.remove();
   });
 
   it("renders a forbidden placeholder when the hosted gateway denies the snapshot with 403 forbidden", async () => {
@@ -170,6 +194,7 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
     expect(root.querySelector("[data-testid='auth-refresh']")).not.toBeNull();
 
     await handle.destroy();
+    root.remove();
   });
 
   it("renders an unauthorized placeholder when the gateway returns an explicit unauthorized code", async () => {
@@ -197,6 +222,7 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
     expect(root.textContent).toContain("do not have permission");
 
     await handle.destroy();
+    root.remove();
   });
 
   it("renders the org/project selection placeholder surface for hosted auth states", async () => {
@@ -209,6 +235,7 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
     expect(root.querySelector("[data-testid='auth-project']")).not.toBeNull();
 
     await handle.destroy();
+    root.remove();
   });
 
   it("keeps local unauthenticated (auth_modes:none) gateway straightforward with no login gate", async () => {
@@ -232,6 +259,7 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
     expect(root.textContent).not.toContain("Sign in required");
 
     await handle.destroy();
+    root.remove();
   });
 
   it("recovers from the unauthenticated placeholder when the gateway later permits the snapshot", async () => {
@@ -248,5 +276,6 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
     expect(root.querySelector("[data-opensymphony-app-shell='mounted']")?.getAttribute("data-auth-state")).toBe("open");
 
     await handle.destroy();
+    root.remove();
   });
 });

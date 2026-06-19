@@ -29,14 +29,6 @@ export type GatewayErrorCode =
   /** Gateway unreachable or returned a non-auth error. */
   | "unavailable";
 
-/**
- * Error codes that represent an auth/authz rejection only. `unavailable` is
- * excluded because it models a generic connectivity failure rather than a
- * credentials/access decision. Used by auth-failure simulation that should
- * only ever inject a sign-in/access outcome.
- */
-export type AuthErrorCode = Exclude<GatewayErrorCode, "unavailable">;
-
 /** Error thrown by transport adapters for classified gateway failures. */
 export class GatewayRequestError extends Error {
   readonly code: GatewayErrorCode;

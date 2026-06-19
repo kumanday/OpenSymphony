@@ -22,10 +22,11 @@ import type {
   FileDiffPage,
   RunValidationSummary,
   ApprovalRequest,
+  AuthErrorCode,
 } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, ActionCapableTransport } from "./index.js";
 import { stableHash, stableHashJson } from "./util.js";
-import { GatewayRequestError, type AuthErrorCode } from "./errors.js";
+import { GatewayRequestError } from "./errors.js";
 
 /** Deterministic mock transport for tests. */
 export class MockGatewayTransport implements GatewayTransport, ActionCapableTransport {

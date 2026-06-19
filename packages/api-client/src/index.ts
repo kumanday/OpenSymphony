@@ -75,7 +75,7 @@ export {
   isGatewayRequestError,
   authErrorCodeForStatus,
 } from "./errors.js";
-export type { GatewayErrorCode, AuthErrorCode } from "./errors.js";
+export type { GatewayErrorCode } from "./errors.js";
 
 /** Transport adapter interface for all gateway communication. */
 export interface GatewayTransport {
