@@ -24,6 +24,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use percent_encoding::percent_decode_str;
 
 use crate::opensymphony_gateway::identity_store::{HostedIdentityStore, IdentityError};
 use crate::opensymphony_gateway::rbac::{PermissionEvaluator, ProtectedResource};
@@ -379,16 +380,26 @@ pub fn unauthorized_response(code: AuthErrorCode, message: impl Into<String>) ->
         .into_response()
 }
 
+/// Build a 503 response signaling that hosted auth is not enabled in this
+/// gateway configuration (local trusted `Disabled` mode). Used by the
+/// login/logout/session handlers so the auth endpoints do not fabricate a
+/// success response with an empty token; local trusted mode requires no
+/// session, and clients receive a clear, classifiable `auth_disabled` signal.
+fn auth_disabled_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(AuthErrorBody {
+            error_code: AuthErrorCode::AuthDisabled,
+            message: "hosted auth is disabled in this configuration; local trusted mode requires no session"
+                .into(),
+        }),
+    )
+        .into_response()
+}
+
 /// Extractor for the authenticated context from request extensions.
 pub fn auth_context_from_request(request: &Request) -> Option<AuthContext> {
     request.extensions().get::<AuthContext>().cloned()
-}
-
-/// Query params for WebSocket auth via `?token=`.
-#[derive(Debug, serde::Deserialize)]
-pub struct WsAuthQuery {
-    #[serde(default)]
-    pub token: Option<String>,
 }
 
 /// True when the request is a WebSocket upgrade (carries an
@@ -404,14 +415,20 @@ pub fn is_websocket_upgrade(headers: &axum::http::HeaderMap) -> bool {
 }
 
 /// Extract a `?token=` query parameter from a URI, for the browser WebSocket
-/// auth fallback. Returns the parsed token when present, `None` otherwise.
+/// auth fallback. The value is percent-decoded so a token containing reserved
+/// characters survives the query string. Returns the parsed token when present,
+/// `None` otherwise. A value that is not valid UTF-8 after decoding is treated
+/// as absent.
 pub fn ws_query_token(uri: &axum::http::Uri) -> Option<String> {
     let query = uri.query()?;
     for pair in query.split('&') {
         if let Some((k, v)) = pair.split_once('=')
             && k == "token"
         {
-            return Some(v.to_string());
+            return percent_decode_str(v)
+                .decode_utf8()
+                .ok()
+                .map(|s| s.into_owned());
         }
     }
     None
@@ -465,19 +482,7 @@ async fn login_handler(
     Json(request): Json<LoginRequest>,
 ) -> Response {
     let Some(provider) = state.provider.as_ref() else {
-        return (
-            StatusCode::OK,
-            Json(LoginResponse {
-                schema_version: crate::opensymphony_gateway_schema::version::SchemaVersion::default(
-                ),
-                session_token: String::new(),
-                user: dev_user(),
-                organization: dev_org(),
-                role: crate::opensymphony_gateway_schema::identity::Role::Owner,
-                expires_at: chrono::Utc::now().to_rfc3339(),
-            }),
-        )
-            .into_response();
+        return auth_disabled_response();
     };
     match provider.login(&request) {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
@@ -502,11 +507,7 @@ async fn login_handler(
 
 async fn logout_handler(State(state): State<AuthRouterState>, request: Request) -> Response {
     let Some(provider) = state.provider.as_ref() else {
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({"logged_out": true})),
-        )
-            .into_response();
+        return auth_disabled_response();
     };
     let token = bearer_token_from_header(
         request
@@ -527,18 +528,7 @@ async fn logout_handler(State(state): State<AuthRouterState>, request: Request) 
 
 async fn session_handler(State(state): State<AuthRouterState>, request: Request) -> Response {
     let Some(provider) = state.provider.as_ref() else {
-        return (
-            StatusCode::OK,
-            Json(SessionResponse {
-                schema_version: crate::opensymphony_gateway_schema::version::SchemaVersion::default(
-                ),
-                user: dev_user(),
-                organization: dev_org(),
-                role: crate::opensymphony_gateway_schema::identity::Role::Owner,
-                expires_at: chrono::Utc::now().to_rfc3339(),
-            }),
-        )
-            .into_response();
+        return auth_disabled_response();
     };
     let token = bearer_token_from_header(
         request
@@ -552,28 +542,5 @@ async fn session_handler(State(state): State<AuthRouterState>, request: Request)
     match provider.session_response(token) {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(_) => unauthenticated_response("invalid or expired session token"),
-    }
-}
-
-fn dev_user() -> crate::opensymphony_gateway_schema::identity::HostedUser {
-    use crate::opensymphony_gateway_schema::identity::HostedUser;
-    use crate::opensymphony_gateway_schema::version::SchemaVersion;
-    HostedUser {
-        schema_version: SchemaVersion::default(),
-        user_id: "dev-user".into(),
-        email: "dev@local".into(),
-        display_name: "Dev User".into(),
-        handle: "dev-user".into(),
-    }
-}
-
-fn dev_org() -> crate::opensymphony_gateway_schema::identity::Organization {
-    use crate::opensymphony_gateway_schema::identity::Organization;
-    use crate::opensymphony_gateway_schema::version::SchemaVersion;
-    Organization {
-        schema_version: SchemaVersion::default(),
-        organization_id: "dev-org".into(),
-        slug: "dev-org".into(),
-        display_name: "Dev Organization".into(),
     }
 }

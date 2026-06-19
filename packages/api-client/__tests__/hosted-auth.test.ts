@@ -204,6 +204,10 @@ describe("authStateFromError expanded code set (COE-420)", () => {
     expect(authStateFromError({ code: "forbidden" })).toBe("forbidden");
   });
 
+  it("maps auth_disabled (disabled-mode auth endpoints) to forbidden", () => {
+    expect(authStateFromError({ code: "auth_disabled" })).toBe("forbidden");
+  });
+
   it("maps unauthenticated to unauthenticated and leaves unrelated errors open", () => {
     expect(authStateFromError({ code: "unauthenticated" })).toBe("unauthenticated");
     expect(authStateFromError({ code: "unavailable" })).toBe("open");

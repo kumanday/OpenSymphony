@@ -565,6 +565,45 @@ async fn hosted_websocket_accepts_token_query_param() {
     );
 }
 
+#[tokio::test]
+async fn disabled_mode_auth_endpoints_report_auth_disabled_not_a_fake_session() {
+    let base = disabled_gateway().await;
+    let client = reqwest::Client::new();
+
+    // Login must not fabricate a 200 with an empty token + dev user in disabled
+    // mode; it reports `auth_disabled` so the contract stays honest.
+    let login = client
+        .post(format!("{base}/api/v1/auth/login"))
+        .json(&serde_json::json!({
+            "email": "anyone@example.com",
+            "password": "anything",
+            "organization_slug": "acme",
+        }))
+        .send()
+        .await
+        .expect("login request should send");
+    assert_eq!(
+        login.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "disabled-mode login should not fabricate a session"
+    );
+    let body: serde_json::Value = login.json().await.expect("decode login error body");
+    assert_eq!(body["error_code"], "auth_disabled");
+
+    // Session probe likewise reports `auth_disabled`, not a fabricated dev session.
+    let session = client
+        .get(format!("{base}/api/v1/auth/session"))
+        .send()
+        .await
+        .expect("session request should send");
+    assert_eq!(
+        session.status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE,
+        "disabled-mode session should not fabricate a session"
+    );
+    let body: serde_json::Value = session.json().await.expect("decode session error body");
+    assert_eq!(body["error_code"], "auth_disabled");
+}
 // ── Local development auth bypass is explicit and unavailable in production ──
 
 #[tokio::test]

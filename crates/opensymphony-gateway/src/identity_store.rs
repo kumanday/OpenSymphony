@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 use chrono::{Duration, Utc};
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 use crate::opensymphony_gateway_schema::identity::{
@@ -172,20 +173,8 @@ impl Credentials {
     /// Verify a plain-text password against the stored hash in constant time.
     fn verify(&self, password: &str) -> bool {
         let candidate = Self::derive(&self.salt, password, self.iterations);
-        constant_time_eq(&candidate, &self.hash)
+        candidate.ct_eq(&self.hash).into()
     }
-}
-
-/// Constant-time equality comparison for two equal-length byte slices.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 impl HostedIdentityStore {

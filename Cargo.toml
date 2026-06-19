@@ -37,12 +37,14 @@ ftui.workspace = true
 futures-util.workspace = true
 liquid.workspace = true
 pbkdf2.workspace = true
+percent-encoding.workspace = true
 reqwest.workspace = true
 reqwest-eventsource.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 time.workspace = true
@@ -94,6 +96,8 @@ futures-util = "0.3"
 libc = "0.2"
 liquid = "0.26"
 pbkdf2 = { version = "0.12", default-features = false, features = ["simple"] }
+percent-encoding = "2"
+subtle = "2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 reqwest-eventsource = "0.6"
 rustix = { version = "1", features = ["process"] }

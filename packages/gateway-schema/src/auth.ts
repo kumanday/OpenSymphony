@@ -33,7 +33,8 @@ export type AuthErrorCode =
   | "permission_denied"
   | "forbidden_resource"
   | "forbidden"
-  | "dev_bypass_disabled";
+  | "dev_bypass_disabled"
+  | "auth_disabled";
 
 const AUTH_ERROR_CODES: ReadonlySet<AuthErrorCode> = new Set([
   "unauthenticated",
@@ -42,6 +43,7 @@ const AUTH_ERROR_CODES: ReadonlySet<AuthErrorCode> = new Set([
   "forbidden_resource",
   "forbidden",
   "dev_bypass_disabled",
+  "auth_disabled",
 ]);
 
 /** Permission-denial body signals the client classifies as `unauthorized`. */
@@ -70,9 +72,10 @@ function readErrorCode(error: unknown): AuthErrorCode | undefined {
  *
  * Permission-denial body codes (`unauthorized`, `permission_denied`,
  * `forbidden_resource`) collapse to the `unauthorized` state; a hard 403
- * (`forbidden`, `dev_bypass_disabled`) maps to `forbidden`. Returns `"open"`
- * when the error is not auth-related, so callers fall back to the normal
- * connection-failure path.
+ * (`forbidden`, `dev_bypass_disabled`) and the `auth_disabled` signal map to
+ * `forbidden` (hosted auth is not available; do not retry login). Returns
+ * `"open"` when the error is not auth-related, so callers fall back to the
+ * normal connection-failure path.
  */
 export function authStateFromError(error: unknown): AuthState {
   const code = readErrorCode(error);

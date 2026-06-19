@@ -245,6 +245,10 @@ pub enum AuthErrorCode {
     Forbidden,
     /// Dev bypass attempted where it is not allowed.
     DevBypassDisabled,
+    /// Hosted auth is not enabled in this gateway configuration (e.g. local
+    /// trusted `Disabled` mode). The login/session endpoints are unavailable;
+    /// local trusted mode requires no session token.
+    AuthDisabled,
 }
 
 impl AuthErrorCode {
@@ -256,6 +260,7 @@ impl AuthErrorCode {
             AuthErrorCode::ForbiddenResource => "forbidden_resource",
             AuthErrorCode::Forbidden => "forbidden",
             AuthErrorCode::DevBypassDisabled => "dev_bypass_disabled",
+            AuthErrorCode::AuthDisabled => "auth_disabled",
         }
     }
 }
