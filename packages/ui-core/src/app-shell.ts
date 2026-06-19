@@ -127,6 +127,42 @@ export interface OpenSymphonyAppOptions {
   profileController?: ProfileController;
   initialProfiles?: ConnectionProfile[];
   onGatewayUrlChanged?: (gatewayUrl: string) => Promise<GatewayReader>;
+  /**
+   * Hosted auth integration (COE-420). When present, the unauthenticated
+   * placeholder renders a sign-in form that calls `login`, then rebuilds the
+   * transport with the resolved session token via `applySession`; an
+   * authenticated shell renders a sign-out control. When absent, the shell
+   * keeps the placeholder-only behavior (a sign-in button that triggers a
+   * refresh), preserving the local/no-auth contract.
+   */
+  authIntegration?: AppAuthIntegration;
+}
+
+/**
+ * Credentials submitted through the hosted sign-in form.
+ */
+export interface AppLoginCredentials {
+  email: string;
+  password: string;
+  organizationSlug?: string;
+}
+
+/**
+ * Hosted auth integration surface consumed by the shell.
+ *
+ * The shell never imports `@opensymphony/api-client` (it must stay
+ * transport-agnostic), so the web app supplies a concrete adapter that wraps
+ * `HostedAuthClient` plus a token store and a transport factory. Errors thrown
+ * by `login` carry a classified `code` so `authStateFromError` maps them to a
+ * shell state.
+ */
+export interface AppAuthIntegration {
+  /** Sign in and resolve the session token, or throw a classified error. */
+  login(credentials: AppLoginCredentials): Promise<string>;
+  /** Invalidate the current session on the gateway. */
+  logout(): Promise<void>;
+  /** Rebuild the gateway reader carrying `token` (undefined clears it). */
+  applySession(token: string | undefined): Promise<GatewayReader>;
 }
 
 export interface OpenSymphonyAppHandle {
@@ -140,6 +176,10 @@ interface AppState {
   connectionMode: ConnectionMode;
   connectionMessage: string;
   authState: AuthState;
+  /** Human-readable error from the last sign-in attempt, surfaced in the form. */
+  authError: string | null;
+  /** True while a sign-in request is in flight (disables the form). */
+  authSigningIn: boolean;
   capabilities: GatewayCapabilities | null;
   snapshot: DashboardSnapshot | null;
   taskGraph: TaskGraphSnapshot | null;
@@ -209,6 +249,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       connectionMode: "connecting",
       connectionMessage: "Connecting",
       authState: "open",
+      authError: null,
+      authSigningIn: false,
       capabilities: null,
       snapshot: null,
       taskGraph: null,
@@ -307,6 +349,63 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     await this.loadGatewayState();
     this.state.loading = false;
     this.render();
+  }
+
+  /**
+   * Submit the hosted sign-in form (COE-420).
+   *
+   * Calls `authIntegration.login`, rebuilds the transport with the resolved
+   * session token via `applySession`, and reloads the dashboard. On success
+   * the auth placeholder is replaced by the authenticated dashboard. A login
+   * failure is surfaced inline on the form and the shell stays on the
+   * unauthenticated placeholder. The form is disabled while the request is in
+   * flight.
+   */
+  private async submitSignIn(credentials: AppLoginCredentials): Promise<void> {
+    const integration = this.options.authIntegration;
+    if (!integration || this.state.authSigningIn) {
+      return;
+    }
+    this.state.authError = null;
+    this.state.authSigningIn = true;
+    this.render();
+    try {
+      const token = await integration.login(credentials);
+      this.transport = await integration.applySession(token);
+      this.state.authSigningIn = false;
+      await this.refresh();
+    } catch (error) {
+      this.state.authSigningIn = false;
+      const state = authStateFromError(error);
+      this.state.authError =
+        state === "open"
+          ? `Sign in failed: ${errorMessage(error)}`
+          : this.authMessage(state);
+      this.render();
+    }
+  }
+
+  /**
+   * Sign out the current session (COE-420).
+   *
+   * Invalidates the session on the gateway via `authIntegration.logout`,
+   * rebuilds the transport without a token, and reloads so the shell returns
+   * to the unauthenticated placeholder.
+   */
+  private async signOut(): Promise<void> {
+    const integration = this.options.authIntegration;
+    if (!integration) {
+      return;
+    }
+    try {
+      await integration.logout();
+    } catch {
+      // Even if the gateway logout call fails, clear the local session so the
+      // shell returns to the unauthenticated state.
+    }
+    this.transport = await integration.applySession(undefined);
+    this.state.authError = null;
+    await this.refresh();
   }
 
   async destroy(): Promise<void> {
@@ -746,6 +845,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <div class="os-status os-status-${this.state.connectionMode}">
             <span></span>${escapeHtml(statusLabel(this.state.connectionMode))}
           </div>
+          ${this.renderAuthControl()}
         </header>
         <section class="os-grid">
           ${this.renderViewContent()}
@@ -797,10 +897,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <div class="os-section-head"><h2>Sign in</h2><span>hosted</span></div>
           <div class="os-auth-body">
             <p class="os-auth-message" data-testid="auth-message">Sign in required to view this OpenSymphony workspace.</p>
-            <div class="os-auth-actions">
-              <button type="button" data-auth-action="sign-in" data-testid="auth-sign-in">Sign in</button>
-              <button type="button" data-auth-action="refresh" data-testid="auth-refresh">Retry</button>
-            </div>
+            ${this.renderSignInForm()}
             <p class="os-auth-note" data-testid="auth-note">Hosted authentication is configured by your administrator. Local development gateways do not require sign-in.</p>
           </div>
           ${orgProject}
@@ -871,6 +968,73 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <p class="os-auth-note">Organization and project selection is available after you sign in.</p>
       </div>
     `;
+  }
+
+  /**
+   * Render the hosted sign-in surface (COE-420).
+   *
+   * When an `authIntegration` is wired, the unauthenticated placeholder
+   * renders an email/password sign-in form (with an optional organization
+   * slug) whose submit handler authenticates, rebuilds the transport with the
+   * session token, and reloads the dashboard. A login failure is surfaced
+   * inline and the shell stays on the unauthenticated placeholder.
+   *
+   * When no `authIntegration` is present (local/no-auth or a shell that has not
+   * yet wired a provider), the original button-only surface is preserved: a
+   * "Sign in" button triggers a refresh and a "Retry" button re-evaluates the
+   * gateway, so existing local/no-auth behavior and tests are unchanged.
+   */
+  private renderSignInForm(): string {
+    const integration = this.options.authIntegration;
+    if (!integration) {
+      return `
+        <div class="os-auth-actions">
+          <button type="button" data-auth-action="sign-in" data-testid="auth-sign-in">Sign in</button>
+          <button type="button" data-auth-action="refresh" data-testid="auth-refresh">Retry</button>
+        </div>
+      `;
+    }
+    const errorLine = this.state.authError
+      ? `<p class="os-auth-error" data-testid="auth-error">${escapeHtml(this.state.authError)}</p>`
+      : "";
+    const disabled = this.state.authSigningIn ? " disabled" : "";
+    const submitLabel = this.state.authSigningIn ? "Signing in..." : "Sign in";
+    return `
+      <form class="os-auth-form" data-testid="auth-form" data-auth-form>
+        <div class="os-inline-fields">
+          <label class="os-field">
+            <span>Email</span>
+            <input type="email" name="email" data-testid="auth-email" autocomplete="username" required${disabled} />
+          </label>
+          <label class="os-field">
+            <span>Password</span>
+            <input type="password" name="password" data-testid="auth-password" autocomplete="current-password" required${disabled} />
+          </label>
+        </div>
+        <label class="os-field">
+          <span>Organization</span>
+          <input type="text" name="organization_slug" data-testid="auth-org-slug" autocomplete="organization"${disabled} />
+        </label>
+        ${errorLine}
+        <div class="os-auth-actions">
+          <button type="submit" data-auth-action="sign-in" data-testid="auth-sign-in"${disabled}>${escapeHtml(submitLabel)}</button>
+          <button type="button" data-auth-action="refresh" data-testid="auth-refresh"${disabled}>Retry</button>
+        </div>
+      </form>
+    `;
+  }
+
+  /**
+   * Render the topbar auth control (COE-420). A signed-in shell (authState
+   * `open` with a wired `authIntegration`) shows a sign-out button so an
+   * authenticated user can end the session and return to the sign-in
+   * placeholder. Hidden otherwise (no integration or not authenticated).
+   */
+  private renderAuthControl(): string {
+    if (!this.options.authIntegration || this.state.authState !== "open") {
+      return "";
+    }
+    return `<button type="button" class="os-sign-out" data-auth-action="sign-out" data-testid="auth-sign-out">Sign out</button>`;
   }
 
   private renderProfiles(): string {
@@ -1137,14 +1301,32 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelector("[data-save-profile]")?.addEventListener("click", () => {
       void this.saveProfile();
     });
+    // Hosted sign-in form submit (COE-420). When an `authIntegration` is
+    // wired the unauthenticated placeholder renders a real form; submitting it
+    // authenticates, rebuilds the transport with the session token, and
+    // reloads the dashboard. The button-only fallback (no integration) keeps
+    // the legacy click-to-refresh behavior below.
+    this.options.root.querySelector<HTMLFormElement>("[data-auth-form]")?.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const form = event.target as HTMLFormElement;
+      const data = new FormData(form);
+      void this.submitSignIn({
+        email: String(data.get("email") ?? ""),
+        password: String(data.get("password") ?? ""),
+        organizationSlug: (data.get("organization_slug") as string | null) ?? undefined,
+      });
+    });
     this.options.root.querySelectorAll<HTMLElement>("[data-auth-action]").forEach((button) => {
       button.addEventListener("click", () => {
         const action = button.dataset.authAction;
         if (action === "sign-in") {
-          // Hosted auth provider integration is a follow-on task; the
-          // placeholder triggers a refresh so an operator-supplied session
-          // (or a newly-permitted gateway) is re-evaluated.
+          // Button-only fallback (no authIntegration): trigger a refresh so
+          // an operator-supplied session or a newly-permitted gateway is
+          // re-evaluated. When a form is present, the submit handler above
+          // performs the real login.
           void this.refresh();
+        } else if (action === "sign-out") {
+          void this.signOut();
         } else if (action === "refresh") {
           void this.refresh();
         }
@@ -2580,6 +2762,9 @@ function appShellStyles(): string {
     .os-auth-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .os-auth-note { margin: 0; font-size: 12px; color: #667788; }
     .os-auth-denied .os-auth-message { color: #991b1b; }
+    .os-auth-form { display: flex; flex-direction: column; gap: 10px; }
+    .os-auth-error { margin: 0; font-size: 13px; color: #991b1b; }
+    .os-sign-out { min-height: 32px; padding: 6px 12px; font-size: 13px; border-radius: 6px; background: #f8fafc; border: 1px solid #cad3dd; cursor: pointer; }
     .os-auth-scope { border: 1px solid #d8dee4; border-radius: 6px; padding: 12px; display: flex; flex-direction: column; gap: 8px; background: #f8fafc; }
     .os-auth-scope .os-section-head h3 { margin: 0; font-size: 13px; }
     .os-auth-scope .os-auth-note { margin: 0; }

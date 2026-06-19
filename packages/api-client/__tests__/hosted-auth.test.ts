@@ -75,7 +75,7 @@ describe("HostedAuthClient login flow (COE-420)", () => {
     const fetchImpl = jest.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       calls.push(init ?? {});
       return mockResponse(200, "OK", loginResponse("sess-123"));
-    }) as jest.MockedFunction<typeof fetch>;
+    }) as jest.MockedFunction<typeof global.fetch>;
 
     const client = new HostedAuthClient({
       baseUri: "https://hosted.opensymphony.example/",
@@ -110,7 +110,7 @@ describe("HostedAuthClient login flow (COE-420)", () => {
     const fetchImpl = jest.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       calls.push(init ?? {});
       return mockResponse(200, "OK", sessionResponse());
-    }) as jest.MockedFunction<typeof fetch>;
+    }) as jest.MockedFunction<typeof global.fetch>;
 
     const client = new HostedAuthClient({
       baseUri: "https://hosted.opensymphony.example",
@@ -134,7 +134,7 @@ describe("HostedAuthClient login flow (COE-420)", () => {
     const fetchImpl = jest.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       calls.push(init ?? {});
       return mockResponse(204, "No Content", "");
-    }) as jest.MockedFunction<typeof fetch>;
+    }) as jest.MockedFunction<typeof global.fetch>;
 
     const client = new HostedAuthClient({
       baseUri: "https://hosted.opensymphony.example",
@@ -153,7 +153,7 @@ describe("HostedAuthClient login flow (COE-420)", () => {
   it("classifies a 401 login as unauthenticated", async () => {
     const fetchImpl = jest.fn(async () =>
       mockResponse(401, "Unauthorized", '{"error_code":"unauthenticated","message":"bad creds"}'),
-    ) as jest.MockedFunction<typeof fetch>;
+    ) as jest.MockedFunction<typeof global.fetch>;
 
     const client = new HostedAuthClient({
       baseUri: "https://hosted.opensymphony.example",
@@ -176,7 +176,7 @@ describe("HostedAuthClient login flow (COE-420)", () => {
         "Forbidden",
         '{"error_code":"permission_denied","message":"no access to project"}',
       ),
-    ) as jest.MockedFunction<typeof fetch>;
+    ) as jest.MockedFunction<typeof global.fetch>;
 
     const client = new HostedAuthClient({
       baseUri: "https://hosted.opensymphony.example",

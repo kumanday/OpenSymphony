@@ -9,6 +9,8 @@
  * on the transport package.
  */
 
+import type { SchemaVersion } from "./version.js";
+
 /** Auth-facing state rendered by the client shell. */
 export type AuthState =
   /** Gateway requires no auth (local unauthenticated development mode). */
@@ -87,7 +89,7 @@ export type Role = "owner" | "admin" | "member" | "viewer";
 
 /** A hosted user identity. */
 export interface HostedUser {
-  schema_version: string;
+  schema_version: SchemaVersion;
   user_id: string;
   email: string;
   display_name: string;
@@ -96,7 +98,7 @@ export interface HostedUser {
 
 /** A hosted organization / tenant. */
 export interface Organization {
-  schema_version: string;
+  schema_version: SchemaVersion;
   organization_id: string;
   slug: string;
   display_name: string;
@@ -112,7 +114,7 @@ export interface LoginRequest {
 
 /** Response body returned after successful authentication. */
 export interface LoginResponse {
-  schema_version: string;
+  schema_version: SchemaVersion;
   /** Session token; persisted by the client and presented as a bearer token. */
   session_token: string;
   user: HostedUser;
@@ -124,7 +126,7 @@ export interface LoginResponse {
 
 /** Response body for `GET /api/v1/auth/session` (token probe). */
 export interface SessionResponse {
-  schema_version: string;
+  schema_version: SchemaVersion;
   user: HostedUser;
   organization: Organization;
   role: Role;

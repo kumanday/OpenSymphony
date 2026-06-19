@@ -222,6 +222,16 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     this.authFailureMethods = new Set();
   }
 
+  /**
+   * Restore a simulated auth failure (test/simulation-only), for example to
+   * model a gateway that rejects the snapshot again after the client signs
+   * out. Mirrors the constructor `authFailure` shape.
+   */
+  setAuthFailure(failure: { code: AuthErrorCode; methods?: Array<"health" | "snapshot"> }): void {
+    this.authFailureCode = failure.code;
+    this.authFailureMethods = new Set(failure.methods ?? ["snapshot"]);
+  }
+
   private throwIfAuthFailure(method: "health" | "snapshot"): void {
     if (this.authFailureCode && this.authFailureMethods.has(method)) {
       const status = this.authFailureCode === "unauthenticated" ? 401 : 403;

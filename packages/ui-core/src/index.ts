@@ -62,6 +62,8 @@ export type {
   OpenSymphonyAppHandle,
   OpenSymphonyAppOptions,
   ProfileController,
+  AppAuthIntegration,
+  AppLoginCredentials,
 } from "./app-shell.js";
 
 export {
