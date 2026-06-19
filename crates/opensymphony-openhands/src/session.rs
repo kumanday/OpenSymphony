@@ -3084,7 +3084,7 @@ where
         Some(event.id.clone()),
         Some(event.kind.clone()),
         Some(summarize_event(event)),
-        runtime_event_payload(event),
+        Some(runtime_event_payload(event)),
     );
 }
 
@@ -3211,7 +3211,7 @@ fn summarize_event(event: &EventEnvelope) -> String {
     }
 }
 
-fn runtime_event_payload(event: &EventEnvelope) -> Option<Value> {
+fn runtime_event_payload(event: &EventEnvelope) -> Value {
     match KnownEvent::from_envelope(event) {
         KnownEvent::Action(action) => {
             let mut body = json!({
@@ -3225,9 +3225,9 @@ fn runtime_event_payload(event: &EventEnvelope) -> Option<Value> {
                     body.entry(key.clone()).or_insert_with(|| value.clone());
                 }
             }
-            Some(body)
+            body
         }
-        KnownEvent::Observation(observation) => Some(json!({
+        KnownEvent::Observation(observation) => json!({
             "observation_id": observation.observation_id,
             "tool_name": observation.tool_name,
             "exit_code": observation.exit_code,
@@ -3238,21 +3238,21 @@ fn runtime_event_payload(event: &EventEnvelope) -> Option<Value> {
                 .and_then(|value| value.get("content"))
                 .cloned()
                 .unwrap_or(Value::Null),
-        })),
-        KnownEvent::ConversationStateUpdate(payload) => Some(json!({
+        }),
+        KnownEvent::ConversationStateUpdate(payload) => json!({
             "execution_status": payload.execution_status,
-        })),
-        KnownEvent::ConversationError(error) => Some(error.payload),
-        KnownEvent::LlmCompletionLog(log) => Some(log.payload),
-        KnownEvent::Message(message) => Some(json!({
+        }),
+        KnownEvent::ConversationError(error) => error.payload,
+        KnownEvent::LlmCompletionLog(log) => log.payload,
+        KnownEvent::Message(message) => json!({
             "role": message.role,
             "preview": message.text_preview,
             "content": event.payload.get("content").cloned().unwrap_or(Value::Null),
-        })),
-        KnownEvent::Unknown(unknown) => Some(json!({
+        }),
+        KnownEvent::Unknown(unknown) => json!({
             "kind": unknown.kind,
             "payload": unknown.payload,
-        })),
+        }),
     }
 }
 
@@ -3456,7 +3456,7 @@ mod tests {
             summarize_event(&event),
             "terminal: npm test -- apps/desktop"
         );
-        let payload = runtime_event_payload(&event).expect("action payload");
+        let payload = runtime_event_payload(&event);
         assert_eq!(
             payload.get("tool_name").and_then(Value::as_str),
             Some("terminal")

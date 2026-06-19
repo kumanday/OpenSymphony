@@ -2,7 +2,7 @@
 
 OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) for issue tracking and uses [OpenHands](https://github.com/OpenHands/OpenHands) as the agent runtime.
 
-![OpenSymphony TUI showing issue state, recent events, workspace details, and conversation activity](docs/images/opensymphony-diffs.png)
+![OpenSymphony desktop app showing the task graph, run detail, changed files, and diff inspector](docs/images/opensymphony-app.png)
 
 ## What is OpenSymphony?
 
