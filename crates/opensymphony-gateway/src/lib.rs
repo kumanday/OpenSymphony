@@ -66,9 +66,9 @@ pub use task_graph_mutations::{
 // `opensymphony::opensymphony_gateway::GatewayAuthConfig` etc.
 pub use auth::{
     AuthMiddlewareState, AuthPrincipal, AuthRouterState, AuthSetupError, GatewayAuthConfig,
-    HostedAuthProvider, SessionTokenAuthProvider, auth_context_from_request, auth_middleware,
-    auth_router, bearer_token_from_header, build_auth_provider, is_public_route,
-    unauthenticated_response, unauthorized_response, ws_auth_context,
+    HostedAuthProvider, RbacMiddlewareState, SessionTokenAuthProvider, auth_context_from_request,
+    auth_middleware, auth_router, bearer_token_from_header, build_auth_provider, is_public_route,
+    read_rbac_middleware, unauthenticated_response, unauthorized_response, ws_auth_context,
 };
 pub use identity_store::{
     HostedIdentityStore, IdentityError, SeedMembership, SeedOrganization, SeedProjectAccess,
@@ -581,10 +581,22 @@ impl GatewayServer {
         };
         router = router.nest("/api/v1/auth", auth_router::<GatewayState>(auth_state));
 
-        // Apply the hosted auth middleware to all routes. Public routes
+        // Apply the hosted read-RBAC middleware (inner) and the auth middleware
+        // (outer). Layering order makes `auth_middleware` the outermost layer so
+        // it runs first: it authenticates and injects an `AuthContext` into
+        // request extensions. `read_rbac_middleware` then runs on the
+        // authenticated request and enforces a hosted permission decision for
+        // classified read routes using that context. Both pass through in
+        // local trusted mode (no provider / no evaluator). Public routes
         // (healthz, capabilities, auth/login, /app assets) are exempt inside
-        // the middleware. The middleware injects an `AuthContext` into
-        // request extensions for protected handlers.
+        // both middlewares.
+        let rbac_state = RbacMiddlewareState {
+            evaluator: self.permission_evaluator.clone(),
+        };
+        router = router.layer(axum::middleware::from_fn_with_state(
+            rbac_state,
+            read_rbac_middleware,
+        ));
         let mw_state = AuthMiddlewareState {
             provider: self.auth_provider.clone(),
             config: self.auth_config.clone(),
@@ -915,26 +927,36 @@ async fn dispatch_action(
 
     // Hosted RBAC: evaluate the permission decision before dispatch when an
     // evaluator is configured. Denials short-circuit with a receipt carrying
-    // the rejection reason (acceptance criterion / test plan).
-    if let (Some(evaluator), Some(ctx)) = (&state.permission_evaluator, &auth_ctx) {
-        let permission = evaluator.evaluate_action(ctx, &action);
-        if !permission.allowed {
-            let mut receipt = ActionReceipt::rejected(
-                uuid::Uuid::new_v4().to_string(),
-                action.correlation_id.clone(),
-                action.action_kind,
-                permission
-                    .denied_reason
-                    .clone()
-                    .unwrap_or_else(|| "permission denied".into()),
-            );
-            receipt = receipt.with_permission(permission);
-            return (StatusCode::FORBIDDEN, Json(receipt)).into_response();
+    // the rejection reason (acceptance criterion / test plan). When allowed,
+    // the evaluated decision is attached to the returned receipt so accepted
+    // receipts also carry an audit-ready permission result.
+    let evaluated_permission = match (&state.permission_evaluator, &auth_ctx) {
+        (Some(evaluator), Some(ctx)) => {
+            let permission = evaluator.evaluate_action(ctx, &action);
+            if !permission.allowed {
+                let mut receipt = ActionReceipt::rejected(
+                    uuid::Uuid::new_v4().to_string(),
+                    action.correlation_id.clone(),
+                    action.action_kind,
+                    permission
+                        .denied_reason
+                        .clone()
+                        .unwrap_or_else(|| "permission denied".into()),
+                );
+                receipt = receipt.with_permission(permission);
+                return (StatusCode::FORBIDDEN, Json(receipt)).into_response();
+            }
+            Some(permission)
         }
-    }
+        _ => None,
+    };
 
     let envelope = state.store.current().await;
     let receipt = state.action_handler.dispatch(action, &envelope).await;
+    let receipt = match evaluated_permission {
+        Some(permission) => receipt.with_permission(permission),
+        None => receipt,
+    };
 
     match receipt.status {
         ActionStatus::Accepted => (StatusCode::OK, Json(receipt)).into_response(),
@@ -1458,22 +1480,7 @@ async fn event_stream_ws(
         if let Some(evaluator) = &state.permission_evaluator {
             let permission = evaluator.evaluate_read(&auth_ctx, ProtectedResource::Stream, None);
             if !permission.allowed {
-                let code = permission
-                    .denied_code
-                    .as_deref()
-                    .map(|c| match c {
-                        "permission_denied" => crate::opensymphony_gateway_schema::identity::AuthErrorCode::PermissionDenied,
-                        "forbidden_resource" => crate::opensymphony_gateway_schema::identity::AuthErrorCode::ForbiddenResource,
-                        _ => crate::opensymphony_gateway_schema::identity::AuthErrorCode::Unauthorized,
-                    })
-                    .unwrap_or(crate::opensymphony_gateway_schema::identity::AuthErrorCode::Unauthorized);
-                return unauthorized_response(
-                    code,
-                    permission
-                        .denied_reason
-                        .clone()
-                        .unwrap_or_else(|| "permission denied for stream subscription".into()),
-                );
+                return auth::permission_denied_response(&permission);
             }
         }
         ws_auth_ctx = Some(auth_ctx);

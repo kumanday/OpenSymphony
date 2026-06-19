@@ -277,3 +277,259 @@ fn action_kind_label(kind: ActionKind) -> &'static str {
         ActionKind::TaskGraphEvidence => "task_graph_evidence",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::opensymphony_gateway::identity_store::{
+        HostedIdentityStore, SeedMembership, SeedOrganization, SeedProjectAccess, SeedUser,
+    };
+    use crate::opensymphony_gateway_schema::action::ActionTarget;
+
+    fn ctx(role: Role, dev_bypass: bool) -> AuthContext {
+        AuthContext {
+            schema_version: Default::default(),
+            user_id: "u".into(),
+            organization_id: "org-1".into(),
+            role,
+            user_handle: "u".into(),
+            organization_slug: "acme".into(),
+            dev_bypass,
+        }
+    }
+
+    fn store_with_restricted_viewer() -> HostedIdentityStore {
+        let store = HostedIdentityStore::new();
+        store.seed(
+            vec![SeedUser {
+                user_id: "u".into(),
+                email: "u@example.com".into(),
+                display_name: "U".into(),
+                handle: "u".into(),
+                password: "pw".into(),
+            }],
+            vec![SeedOrganization {
+                organization_id: "org-1".into(),
+                slug: "acme".into(),
+                display_name: "Acme".into(),
+            }],
+            vec![SeedMembership {
+                user_id: "u".into(),
+                organization_id: "org-1".into(),
+                role: Role::Viewer,
+            }],
+            vec![SeedProjectAccess {
+                user_id: "u".into(),
+                organization_id: "org-1".into(),
+                all_projects: false,
+                projects: vec![("allowed".into(), Role::Viewer)],
+            }],
+        );
+        store
+    }
+
+    #[test]
+    fn read_requires_viewer_floor_for_all_resources() {
+        let store = HostedIdentityStore::new();
+        let evaluator = PermissionEvaluator::new(store);
+        // A user with no role gap: viewer can read project/run/planning/secret.
+        for resource in [
+            ProtectedResource::Project,
+            ProtectedResource::Run,
+            ProtectedResource::PlanningSession,
+            ProtectedResource::Stream,
+        ] {
+            let permission = evaluator.evaluate_read(&ctx(Role::Viewer, false), resource, None);
+            assert!(permission.allowed, "viewer may read {resource:?}");
+            assert!(permission.evaluated);
+        }
+        // Secret reads require Admin regardless of the read capability default.
+        let secret = evaluator.evaluate_read(&ctx(Role::Viewer, false), ProtectedResource::Secret, None);
+        assert!(!secret.allowed, "viewer cannot read secrets");
+        assert_eq!(secret.denied_code.as_deref(), Some("unauthorized"));
+        let admin_secret =
+            evaluator.evaluate_read(&ctx(Role::Admin, false), ProtectedResource::Secret, None);
+        assert!(admin_secret.allowed, "admin may read secrets");
+    }
+
+    #[test]
+    fn read_denies_below_viewer_floor() {
+        // Member satisfies Viewer, Admin satisfies Viewer, Owner satisfies Viewer.
+        let store = HostedIdentityStore::new();
+        let evaluator = PermissionEvaluator::new(store);
+        for role in [Role::Member, Role::Admin, Role::Owner] {
+            let permission =
+                evaluator.evaluate_read(&ctx(role, false), ProtectedResource::Run, None);
+            assert!(permission.allowed, "{role} may read runs");
+        }
+    }
+
+    #[test]
+    fn read_enforces_project_access_rules() {
+        let store = store_with_restricted_viewer();
+        let evaluator = PermissionEvaluator::new(store);
+        let allowed = evaluator.evaluate_read(
+            &ctx(Role::Viewer, false),
+            ProtectedResource::Project,
+            Some("allowed"),
+        );
+        assert!(allowed.allowed, "permitted project is readable");
+        let denied = evaluator.evaluate_read(
+            &ctx(Role::Viewer, false),
+            ProtectedResource::Project,
+            Some("other"),
+        );
+        assert!(!denied.allowed, "non-permitted project is denied");
+        assert_eq!(denied.denied_code.as_deref(), Some("permission_denied"));
+    }
+
+    fn dispatch(entity: EntityKind, kind: ActionKind) -> ActionDispatch {
+        ActionDispatch {
+            schema_version: Default::default(),
+            correlation_id: "c".into(),
+            action_kind: kind,
+            target_entity: ActionTarget {
+                entity_kind: entity,
+                entity_id: "id".into(),
+            },
+            payload: None,
+            idempotency_key: None,
+            actor: None,
+        }
+    }
+
+    #[test]
+    fn action_operate_requires_member_for_runs() {
+        let store = HostedIdentityStore::new();
+        let evaluator = PermissionEvaluator::new(store);
+        let viewer = evaluator.evaluate_action(
+            &ctx(Role::Viewer, false),
+            &dispatch(EntityKind::Run, ActionKind::Retry),
+        );
+        assert!(!viewer.allowed, "viewer cannot retry a run");
+        assert_eq!(viewer.denied_code.as_deref(), Some("unauthorized"));
+        let member = evaluator.evaluate_action(
+            &ctx(Role::Member, false),
+            &dispatch(EntityKind::Run, ActionKind::Retry),
+        );
+        assert!(member.allowed, "member may retry a run");
+    }
+
+    #[test]
+    fn action_admin_actions_require_admin_role() {
+        let store = HostedIdentityStore::new();
+        let evaluator = PermissionEvaluator::new(store);
+        // ApprovalDecision / TransitionIssue / PublishPlan on an Action resource
+        // require Admin.
+        for kind in [
+            ActionKind::ApprovalDecision,
+            ActionKind::TransitionIssue,
+            ActionKind::PublishPlan,
+        ] {
+            let member = evaluator.evaluate_action(
+                &ctx(Role::Member, false),
+                &dispatch(EntityKind::Unknown, kind),
+            );
+            assert!(!member.allowed, "member cannot perform admin action {kind:?}");
+            let admin = evaluator.evaluate_action(
+                &ctx(Role::Admin, false),
+                &dispatch(EntityKind::Unknown, kind),
+            );
+            assert!(admin.allowed, "admin may perform admin action {kind:?}");
+        }
+    }
+
+    #[test]
+    fn planning_session_publish_requires_admin() {
+        let store = HostedIdentityStore::new();
+        let evaluator = PermissionEvaluator::new(store);
+        let member = evaluator.evaluate_action(
+            &ctx(Role::Member, false),
+            &dispatch(EntityKind::PlanningSession, ActionKind::PublishPlan),
+        );
+        assert!(!member.allowed, "member cannot publish a plan from a planning session");
+        let admin = evaluator.evaluate_action(
+            &ctx(Role::Admin, false),
+            &dispatch(EntityKind::PlanningSession, ActionKind::PublishPlan),
+        );
+        assert!(admin.allowed, "admin may publish a plan");
+        // Non-publish planning-session actions require Operate (Member).
+        let viewer = evaluator.evaluate_action(
+            &ctx(Role::Viewer, false),
+            &dispatch(EntityKind::PlanningSession, ActionKind::Comment),
+        );
+        assert!(!viewer.allowed, "viewer cannot operate on a planning session");
+        let member_operate = evaluator.evaluate_action(
+            &ctx(Role::Member, false),
+            &dispatch(EntityKind::PlanningSession, ActionKind::Comment),
+        );
+        assert!(member_operate.allowed, "member may operate on a planning session");
+    }
+
+    #[test]
+    fn dev_bypass_grants_all_resources() {
+        let store = HostedIdentityStore::new();
+        let evaluator = PermissionEvaluator::new(store);
+        // Dev bypass short-circuits to an evaluated Owner decision for every
+        // resource, including secrets and admin actions.
+        for resource in [
+            ProtectedResource::Project,
+            ProtectedResource::Run,
+            ProtectedResource::PlanningSession,
+            ProtectedResource::Secret,
+            ProtectedResource::Stream,
+            ProtectedResource::Action,
+        ] {
+            let permission = evaluator.evaluate_read(&ctx(Role::Viewer, true), resource, None);
+            assert!(permission.allowed, "dev bypass grants read on {resource:?}");
+        }
+        let admin_action = evaluator.evaluate_action(
+            &ctx(Role::Viewer, true),
+            &dispatch(EntityKind::Unknown, ActionKind::PublishPlan),
+        );
+        assert!(admin_action.allowed, "dev bypass grants admin actions");
+    }
+
+    #[test]
+    fn action_project_access_is_enforced_from_payload() {
+        // Promote the restricted viewer to Member so the role floor passes and
+        // only the project-access rule can deny.
+        let store_member = HostedIdentityStore::new();
+        store_member.seed(
+            vec![SeedUser {
+                user_id: "u".into(),
+                email: "u@example.com".into(),
+                display_name: "U".into(),
+                handle: "u".into(),
+                password: "pw".into(),
+            }],
+            vec![SeedOrganization {
+                organization_id: "org-1".into(),
+                slug: "acme".into(),
+                display_name: "Acme".into(),
+            }],
+            vec![SeedMembership {
+                user_id: "u".into(),
+                organization_id: "org-1".into(),
+                role: Role::Member,
+            }],
+            vec![SeedProjectAccess {
+                user_id: "u".into(),
+                organization_id: "org-1".into(),
+                all_projects: false,
+                projects: vec![("allowed".into(), Role::Member)],
+            }],
+        );
+        let evaluator = PermissionEvaluator::new(store_member);
+        let mut allowed_action = dispatch(EntityKind::Project, ActionKind::TaskGraphIssue);
+        allowed_action.payload = Some(serde_json::json!({"project_id": "allowed"}));
+        let allowed = evaluator.evaluate_action(&ctx(Role::Member, false), &allowed_action);
+        assert!(allowed.allowed, "task-graph action on permitted project allowed");
+
+        let mut denied_action = dispatch(EntityKind::Project, ActionKind::TaskGraphIssue);
+        denied_action.payload = Some(serde_json::json!({"project_id": "other"}));
+        let denied = evaluator.evaluate_action(&ctx(Role::Member, false), &denied_action);
+        assert!(!denied.allowed, "task-graph action on non-permitted project denied");
+        assert_eq!(denied.denied_code.as_deref(), Some("permission_denied"));
+    }
+}

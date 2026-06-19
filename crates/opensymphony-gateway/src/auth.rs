@@ -26,9 +26,39 @@ use axum::{
 };
 
 use crate::opensymphony_gateway::identity_store::{HostedIdentityStore, IdentityError};
+use crate::opensymphony_gateway::rbac::{PermissionEvaluator, ProtectedResource};
 use crate::opensymphony_gateway_schema::identity::{
     AuthContext, AuthErrorBody, AuthErrorCode, LoginRequest, LoginResponse, SessionResponse,
 };
+
+/// Map a denied-code string from a `PermissionResult` into the wire
+/// `AuthErrorCode` the client classifier recognizes.
+fn denied_code_to_auth_error(code: &str) -> AuthErrorCode {
+    match code {
+        "permission_denied" => AuthErrorCode::PermissionDenied,
+        "forbidden_resource" => AuthErrorCode::ForbiddenResource,
+        _ => AuthErrorCode::Unauthorized,
+    }
+}
+
+/// Build a 403 response from a denied `PermissionResult`, carrying the
+/// `error_code` the client maps to `unauthorized` and the denial reason.
+pub(crate) fn permission_denied_response(
+    permission: &crate::opensymphony_gateway_schema::action::PermissionResult,
+) -> Response {
+    let code = permission
+        .denied_code
+        .as_deref()
+        .map(denied_code_to_auth_error)
+        .unwrap_or(AuthErrorCode::Unauthorized);
+    unauthorized_response(
+        code,
+        permission
+            .denied_reason
+            .clone()
+            .unwrap_or_else(|| "permission denied".into()),
+    )
+}
 
 /// Axum extractor for the authenticated principal, pulled from request
 /// extensions (injected by `auth_middleware`). Implements `FromRequestParts`
@@ -223,19 +253,98 @@ pub async fn auth_middleware(
         return next.run(request).await;
     }
 
-    let token = bearer_token_from_header(
+    let header_token = bearer_token_from_header(
         request
             .headers()
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok()),
     );
-    let Some(token) = token else {
-        return unauthenticated_response("missing or malformed Authorization bearer token");
+    // Browser fallback: browsers cannot set headers on a WebSocket upgrade, so
+    // accept a `?token=` query parameter as an equivalent bearer credential.
+    // This is required for the WS/JSON-RPC-over-WS auth path; the same fallback
+    // is harmless for ordinary HTTP because the token is still validated by the
+    // provider below.
+    let query_token = ws_query_token(request.uri());
+    let token: &str = match header_token.or(query_token.as_deref()) {
+        Some(token) => token,
+        None => return unauthenticated_response("missing or malformed Authorization bearer token"),
     };
     let Some(ctx) = provider.auth_context_for_token(token) else {
         return unauthenticated_response("invalid or expired session token");
     };
     request.extensions_mut().insert(ctx);
+    next.run(request).await
+}
+
+/// State shared with the read-RBAC middleware layer.
+#[derive(Clone)]
+pub struct RbacMiddlewareState {
+    /// `None` in local trusted mode (no enforcement); `Some` in hosted/dev-bypass.
+    pub evaluator: Option<PermissionEvaluator>,
+}
+
+/// Classify a protected read route into the resource it exposes and an
+/// optional project id for project-scoped access checks.
+///
+/// Returns `None` for routes the read-RBAC layer does not gate (public routes,
+/// the action dispatch endpoint, auth routes, and web assets) so they pass
+/// through unchanged. Action dispatch is gated per-handler because it needs
+/// the parsed `ActionDispatch` to classify the targeted resource.
+fn classify_read_route(path: &str) -> Option<(ProtectedResource, Option<String>)> {
+    if is_public_route(path) || path == "/api/v1/actions/dispatch" {
+        return None;
+    }
+    // Project-scoped reads: /api/v1/projects/{id} and the task graph view.
+    if let Some(rest) = path.strip_prefix("/api/v1/projects/") {
+        let project_id = rest.split('/').next().filter(|s| !s.is_empty());
+        return Some((ProtectedResource::Project, project_id.map(str::to_owned)));
+    }
+    // Run-scoped reads: the run detail and every sub-resource (events, files,
+    // diffs, validation, approvals, timeline, logs, terminal). Runs are
+    // tenant-scoped issue identifiers; project isolation of run data is out of
+    // scope for the alpha, so the check is an authenticated-viewer floor.
+    if path.starts_with("/api/v1/runs/") {
+        return Some((ProtectedResource::Run, None));
+    }
+    // Org-wide reads: snapshots, dashboard, event journal, and the control /
+    // event stream read endpoints. These require an authenticated viewer but
+    // are not project-scoped.
+    match path {
+        "/api/v1/snapshot"
+        | "/api/v1/dashboard/snapshot"
+        | "/api/v1/events"
+        | "/api/v1/event-journal"
+        | "/api/v1/control/events" => Some((ProtectedResource::Project, None)),
+        // Task graph mutation routes (`/api/v1/taskgraph/*`) are action-like
+        // and require the parsed payload to classify the targeted resource, so
+        // they are not gated by this read layer; their RBAC is a follow-on.
+        _ => None,
+    }
+}
+
+/// Read-RBAC middleware. Runs after `auth_middleware` and enforces a hosted
+/// permission decision for classified read routes using the `AuthContext`
+/// injected into request extensions. Passes through when no evaluator is
+/// configured (local trusted mode) or the route is not classified.
+pub async fn read_rbac_middleware(
+    State(state): State<RbacMiddlewareState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(evaluator) = &state.evaluator else {
+        return next.run(request).await;
+    };
+    let path = request.uri().path();
+    let Some((resource, project_id)) = classify_read_route(path) else {
+        return next.run(request).await;
+    };
+    let Some(ctx) = request.extensions().get::<AuthContext>().cloned() else {
+        return unauthenticated_response("authenticated context required for hosted read access");
+    };
+    let permission = evaluator.evaluate_read(&ctx, resource, project_id.as_deref());
+    if !permission.allowed {
+        return permission_denied_response(&permission);
+    }
     next.run(request).await
 }
 
@@ -274,6 +383,20 @@ pub fn auth_context_from_request(request: &Request) -> Option<AuthContext> {
 pub struct WsAuthQuery {
     #[serde(default)]
     pub token: Option<String>,
+}
+
+/// Extract a `?token=` query parameter from a URI, for the browser WebSocket
+/// auth fallback. Returns the parsed token when present, `None` otherwise.
+pub fn ws_query_token(uri: &axum::http::Uri) -> Option<String> {
+    let query = uri.query()?;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=')
+            && k == "token"
+        {
+            return Some(v.to_string());
+        }
+    }
+    None
 }
 
 /// Resolve an auth context for a WebSocket upgrade request.
