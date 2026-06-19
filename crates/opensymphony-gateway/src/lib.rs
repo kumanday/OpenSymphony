@@ -68,8 +68,10 @@ pub use auth::{
     AuthMiddlewareState, AuthPrincipal, AuthRouterState, AuthSetupError, GatewayAuthConfig,
     HostedAuthProvider, RbacMiddlewareState, SessionTokenAuthProvider, auth_context_from_request,
     auth_middleware, auth_router, bearer_token_from_header, build_auth_provider, is_public_route,
-    read_rbac_middleware, unauthenticated_response, unauthorized_response, ws_auth_context,
+    read_rbac_middleware, unauthenticated_response, ws_auth_context,
 };
+// `pub(crate)` helper used internally for permission-denial responses.
+use auth::permission_denied_response;
 pub use identity_store::{
     HostedIdentityStore, IdentityError, SeedMembership, SeedOrganization, SeedProjectAccess,
     SeedUser,
@@ -879,26 +881,7 @@ fn enforce_read_access(
     };
     let permission = evaluator.evaluate_read(ctx, resource, project_id);
     if !permission.allowed {
-        let code = permission
-            .denied_code
-            .as_deref()
-            .map(|c| match c {
-                "permission_denied" => {
-                    crate::opensymphony_gateway_schema::identity::AuthErrorCode::PermissionDenied
-                }
-                "forbidden_resource" => {
-                    crate::opensymphony_gateway_schema::identity::AuthErrorCode::ForbiddenResource
-                }
-                _ => crate::opensymphony_gateway_schema::identity::AuthErrorCode::Unauthorized,
-            })
-            .unwrap_or(crate::opensymphony_gateway_schema::identity::AuthErrorCode::Unauthorized);
-        Err(Box::new(unauthorized_response(
-            code,
-            permission
-                .denied_reason
-                .clone()
-                .unwrap_or_else(|| "permission denied".into()),
-        )))
+        Err(Box::new(permission_denied_response(&permission)))
     } else {
         Ok(())
     }
@@ -1472,7 +1455,7 @@ async fn event_stream_ws(
         if let Some(evaluator) = &state.permission_evaluator {
             let permission = evaluator.evaluate_read(&auth_ctx, ProtectedResource::Stream, None);
             if !permission.allowed {
-                return auth::permission_denied_response(&permission);
+                return permission_denied_response(&permission);
             }
         }
         ws_auth_ctx = Some(auth_ctx);

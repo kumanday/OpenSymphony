@@ -230,6 +230,25 @@ pub struct AuthMiddlewareState {
     pub config: GatewayAuthConfig,
 }
 
+/// Extract the bearer token from a request's `Authorization` header, mapping a
+/// missing/malformed header to a 401 response. Shared by the logout and session
+/// handlers so token parsing and the unauthenticated error stay consistent.
+/// The `Err` variant is boxed to keep the `Result` small (`Response` is large).
+fn require_bearer_token(request: &Request) -> Result<String, Box<Response>> {
+    bearer_token_from_header(
+        request
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok()),
+    )
+    .map(|t| t.to_string())
+    .ok_or_else(|| {
+        Box::new(unauthenticated_response(
+            "missing Authorization bearer token",
+        ))
+    })
+}
+
 /// Axum middleware that authenticates protected requests and injects an
 /// `AuthContext` into request extensions. Public routes pass through.
 pub async fn auth_middleware(
@@ -509,16 +528,11 @@ async fn logout_handler(State(state): State<AuthRouterState>, request: Request) 
     let Some(provider) = state.provider.as_ref() else {
         return auth_disabled_response();
     };
-    let token = bearer_token_from_header(
-        request
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok()),
-    );
-    let Some(token) = token else {
-        return unauthenticated_response("missing Authorization bearer token");
+    let token = match require_bearer_token(&request) {
+        Ok(token) => token,
+        Err(response) => return *response,
     };
-    let _ = provider.logout(token);
+    let _ = provider.logout(&token);
     (
         StatusCode::OK,
         Json(serde_json::json!({"logged_out": true})),
@@ -530,16 +544,11 @@ async fn session_handler(State(state): State<AuthRouterState>, request: Request)
     let Some(provider) = state.provider.as_ref() else {
         return auth_disabled_response();
     };
-    let token = bearer_token_from_header(
-        request
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok()),
-    );
-    let Some(token) = token else {
-        return unauthenticated_response("missing Authorization bearer token");
+    let token = match require_bearer_token(&request) {
+        Ok(token) => token,
+        Err(response) => return *response,
     };
-    match provider.session_response(token) {
+    match provider.session_response(&token) {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(_) => unauthenticated_response("invalid or expired session token"),
     }
