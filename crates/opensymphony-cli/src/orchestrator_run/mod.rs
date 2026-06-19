@@ -11,7 +11,7 @@ use std::{
 
 use crate::opensymphony_control::{RecentEvent, RecentEventKind, SnapshotStore};
 use crate::opensymphony_domain::TimestampMs;
-use crate::opensymphony_gateway::GatewayServer;
+use crate::opensymphony_gateway::{GatewayServer, LinearTaskGraphClient};
 use crate::opensymphony_linear::LinearError;
 use crate::opensymphony_openhands::OpenHandsError;
 use crate::opensymphony_orchestrator::{
@@ -29,8 +29,9 @@ use tracing::{info, warn};
 
 use self::{
     backends::{
-        RuntimeWorkerBackend, RuntimeWorkspaceBackend, build_runtime_transport,
-        build_tracker_backend, build_workspace_manager_config, prepare_active_conversation_store,
+        RuntimeWorkerBackend, RuntimeWorkspaceBackend, build_linear_client,
+        build_runtime_transport, build_tracker_backend, build_workspace_manager_config,
+        prepare_active_conversation_store,
     },
     config::{RunRuntimeConfig, resolve_runtime_config},
     snapshot::{
@@ -243,7 +244,9 @@ async fn run_orchestrator(args: RunArgs) -> Result<(), RunCommandError> {
     let listener = TcpListener::bind(runtime.bind)
         .await
         .map_err(RunCommandError::BindListener)?;
-    let server = GatewayServer::new(store.clone());
+    let task_graph_client =
+        Arc::new(build_linear_client(&runtime.workflow)?) as Arc<dyn LinearTaskGraphClient>;
+    let server = GatewayServer::new(store.clone()).with_linear_task_graph(Some(task_graph_client));
     let mut server_task = tokio::spawn(async move { server.serve(listener).await });
 
     let bootstrap_snapshot = tokio::select! {

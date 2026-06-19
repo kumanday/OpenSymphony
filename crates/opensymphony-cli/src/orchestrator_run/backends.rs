@@ -201,7 +201,9 @@ impl IssueSessionObserver for SchedulerObserver {
     }
 }
 
-fn build_linear_client(workflow: &ResolvedWorkflow) -> Result<LinearClient, LinearError> {
+pub(super) fn build_linear_client(
+    workflow: &ResolvedWorkflow,
+) -> Result<LinearClient, LinearError> {
     let tracker = &workflow.config.tracker;
     let mut config = LinearConfig::new(tracker.api_key.clone(), tracker.project_slug.clone());
     config.base_url = tracker.endpoint.clone();

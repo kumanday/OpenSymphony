@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     convert::Infallible,
     ffi::OsStr,
     path::{Path as StdPath, PathBuf},
@@ -11,6 +12,7 @@ use chrono::{DateTime, Utc};
 use serde_json::json;
 
 use async_stream::stream;
+use async_trait::async_trait;
 use axum::{
     Json, Router,
     body::Body,
@@ -28,7 +30,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::opensymphony_domain::{
     EventStream, InMemoryEventJournal, StreamBroker, TerminalLogStore, TimelineBuilder,
-    belongs_to_run,
+    TrackerIssue, belongs_to_run,
 };
 use crate::opensymphony_gateway_schema::{
     cursor::StreamCursor,
@@ -94,6 +96,26 @@ const GATEWAY_JOURNAL_CAPACITY: usize = 10_000;
 const GATEWAY_SUBSCRIBER_CAPACITY: usize = 256;
 const GATEWAY_EVENT_PAGE_LIMIT: usize = 100;
 const GATEWAY_WS_INIT_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[async_trait]
+pub trait LinearTaskGraphClient: Send + Sync + 'static {
+    async fn issues_by_identifiers(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String>;
+}
+
+#[async_trait]
+impl LinearTaskGraphClient for crate::opensymphony_linear::LinearClient {
+    async fn issues_by_identifiers(
+        &self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, String> {
+        self.issues_by_identifiers(identifiers)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
 
 fn stream_error_from_journal_error(err: &JournalError, cursor_sequence: u64) -> StreamError {
     match err {
@@ -221,6 +243,7 @@ pub struct GatewayState {
     pub web_assets_dir: Option<String>,
     pub action_handler: ActionHandler,
     pub linear_mutations: Option<Arc<dyn LinearMutationClient>>,
+    pub linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
 }
 
 impl Clone for GatewayState {
@@ -233,6 +256,7 @@ impl Clone for GatewayState {
             web_assets_dir: self.web_assets_dir.clone(),
             action_handler: self.action_handler.clone(),
             linear_mutations: self.linear_mutations.clone(),
+            linear_task_graph: self.linear_task_graph.clone(),
         }
     }
 }
@@ -251,6 +275,7 @@ pub struct GatewayServer {
     broker: StreamBroker,
     web_assets_dir: Option<String>,
     linear_mutations: Option<Arc<dyn LinearMutationClient>>,
+    linear_task_graph: Option<Arc<dyn LinearTaskGraphClient>>,
     terminal_ingest_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -262,6 +287,7 @@ impl Clone for GatewayServer {
             broker: self.broker.clone(),
             web_assets_dir: self.web_assets_dir.clone(),
             linear_mutations: self.linear_mutations.clone(),
+            linear_task_graph: self.linear_task_graph.clone(),
             // Each cloned server owns its own ingest handle. The task is tied
             // to the specific server instance that spawned it, so Drop aborts
             // reliably without depending on Arc uniqueness.
@@ -280,6 +306,10 @@ impl std::fmt::Debug for GatewayServer {
             .field(
                 "linear_mutations",
                 &self.linear_mutations.as_ref().map(|_| "..."),
+            )
+            .field(
+                "linear_task_graph",
+                &self.linear_task_graph.as_ref().map(|_| "..."),
             )
             .field("terminal_ingest_handle", &"<handle>")
             .finish()
@@ -309,6 +339,7 @@ impl GatewayServer {
             store,
             web_assets_dir: None,
             linear_mutations: None,
+            linear_task_graph: None,
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -325,6 +356,7 @@ impl GatewayServer {
             broker,
             web_assets_dir: None,
             linear_mutations: None,
+            linear_task_graph: None,
             terminal_ingest_handle: Mutex::new(None),
         }
     }
@@ -345,6 +377,19 @@ impl GatewayServer {
         self
     }
 
+    /// Install a Linear GraphQL read client for the project task graph.
+    ///
+    /// The task graph read endpoint intentionally requires Linear relation
+    /// data. Without this client it returns 503 instead of synthesizing or
+    /// omitting dependency edges from stale control-plane snapshots.
+    pub fn with_linear_task_graph(
+        mut self,
+        client: Option<Arc<dyn LinearTaskGraphClient>>,
+    ) -> Self {
+        self.linear_task_graph = client;
+        self
+    }
+
     /// Extract clones of the journal and broker so the caller can keep them for testing.
     pub fn journal_and_broker(self) -> (InMemoryEventJournal, StreamBroker) {
         (self.journal.clone(), self.broker.clone())
@@ -360,6 +405,7 @@ impl GatewayServer {
             web_assets_dir: self.web_assets_dir.clone(),
             action_handler: ActionHandler::new(self.journal.clone()),
             linear_mutations: self.linear_mutations.clone(),
+            linear_task_graph: self.linear_task_graph.clone(),
         };
 
         // Abort any previous terminal ingest task associated with this server
@@ -1938,9 +1984,11 @@ async fn get_project(
 // ── Task Graph endpoint ───────────────────────────────────────────────────────
 
 async fn get_task_graph(
-    State(store): State<SnapshotStore>,
+    State(state): State<GatewayState>,
     AxumPath(project_id): AxumPath<String>,
-) -> impl IntoResponse {
+) -> Response {
+    let generated_at = Utc::now();
+
     // Only the "default" project is supported; reject unknown project IDs.
     if project_id != "default" {
         return (
@@ -1948,23 +1996,84 @@ async fn get_task_graph(
             Json(TaskGraphSnapshot {
                 schema_version: SchemaVersion::v1(),
                 project_id,
-                generated_at: Utc::now(),
+                generated_at,
                 nodes: Vec::new(),
                 root_ids: Vec::new(),
             }),
-        );
+        )
+            .into_response();
     }
 
-    let envelope = store.current().await;
+    let envelope = state.store.current().await;
     let snapshot = &envelope.snapshot;
-    let generated_at = Utc::now();
-
-    let nodes: Vec<_> = snapshot
+    let identifiers = snapshot
         .issues
         .iter()
+        .map(|issue| issue.identifier.clone())
+        .collect::<Vec<_>>();
+
+    if identifiers.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(TaskGraphSnapshot {
+                schema_version: SchemaVersion::v1(),
+                project_id,
+                generated_at,
+                nodes: Vec::new(),
+                root_ids: Vec::new(),
+            }),
+        )
+            .into_response();
+    }
+
+    let Some(linear_task_graph) = state.linear_task_graph.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(TaskGraphSnapshot {
+                schema_version: SchemaVersion::v1(),
+                project_id,
+                generated_at,
+                nodes: Vec::new(),
+                root_ids: Vec::new(),
+            }),
+        )
+            .into_response();
+    };
+
+    let linear_issues = match linear_task_graph.issues_by_identifiers(&identifiers).await {
+        Ok(issues) => issues,
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load task graph dependencies from Linear");
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(TaskGraphSnapshot {
+                    schema_version: SchemaVersion::v1(),
+                    project_id,
+                    generated_at,
+                    nodes: Vec::new(),
+                    root_ids: Vec::new(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let snapshot_by_identifier = snapshot
+        .issues
+        .iter()
+        .map(|issue| (issue.identifier.as_str(), issue))
+        .collect::<HashMap<_, _>>();
+
+    let nodes: Vec<_> = linear_issues
+        .into_iter()
         .map(|issue| {
-            let state_category = map_runtime_state_to_graph_category(&issue.runtime_state);
-            let runtime_overlay = build_runtime_overlay(issue);
+            let snapshot_issue = snapshot_by_identifier
+                .get(issue.identifier.as_str())
+                .copied();
+            let state_category = snapshot_issue
+                .map(|issue| map_runtime_state_to_graph_category(&issue.runtime_state))
+                .unwrap_or_else(|| map_tracker_state_to_graph_category(&issue.state));
+            let runtime_overlay = snapshot_issue.map(build_runtime_overlay);
 
             crate::opensymphony_gateway_schema::task_graph::TaskGraphNode {
                 schema_version: SchemaVersion::v1(),
@@ -1972,19 +2081,31 @@ async fn get_task_graph(
                 kind: crate::opensymphony_gateway_schema::task_graph::TaskGraphNodeKind::Issue,
                 identifier: issue.identifier.clone(),
                 title: issue.title.clone(),
-                state: issue.tracker_state.clone(),
+                state: issue.state.clone(),
                 state_category,
-                priority: None,
-                parent_id: None,
-                children: Vec::new(),
-                blocked_by: issue.blocked_by.clone(),
-                url: None,
+                priority: issue.priority,
+                parent_id: issue
+                    .parent
+                    .as_ref()
+                    .map(|parent| parent.identifier.clone())
+                    .or_else(|| issue.parent_id.clone()),
+                children: issue
+                    .sub_issues
+                    .iter()
+                    .map(|sub_issue| sub_issue.identifier.clone())
+                    .collect(),
+                blocked_by: issue
+                    .blocked_by
+                    .iter()
+                    .map(|blocker| blocker.identifier.clone())
+                    .collect(),
+                url: Some(issue.url.clone()).filter(|url| !url.is_empty()),
                 branch_name: None,
-                labels: Vec::new(),
-                created_at: None,
-                updated_at: None,
+                labels: issue.labels.clone(),
+                created_at: Some(issue.created_at),
+                updated_at: Some(issue.updated_at),
                 estimate_minutes: None,
-                runtime_overlay: Some(runtime_overlay),
+                runtime_overlay,
             }
         })
         .collect();
@@ -2004,6 +2125,7 @@ async fn get_task_graph(
             root_ids,
         }),
     )
+        .into_response()
 }
 
 fn map_runtime_state_to_graph_category(
@@ -2017,6 +2139,17 @@ fn map_runtime_state_to_graph_category(
         ControlPlaneIssueRuntimeState::Releasing => TaskGraphStateCategory::InProgress,
         ControlPlaneIssueRuntimeState::Completed => TaskGraphStateCategory::Done,
         ControlPlaneIssueRuntimeState::Failed => TaskGraphStateCategory::Done,
+    }
+}
+
+fn map_tracker_state_to_graph_category(state: &str) -> TaskGraphStateCategory {
+    match state.trim().to_ascii_lowercase().as_str() {
+        "backlog" => TaskGraphStateCategory::Backlog,
+        "todo" | "unstarted" => TaskGraphStateCategory::Todo,
+        "in progress" | "started" | "human review" | "review" => TaskGraphStateCategory::InProgress,
+        "done" | "completed" | "closed" => TaskGraphStateCategory::Done,
+        "canceled" | "cancelled" => TaskGraphStateCategory::Canceled,
+        _ => TaskGraphStateCategory::Todo,
     }
 }
 

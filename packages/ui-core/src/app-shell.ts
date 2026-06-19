@@ -348,8 +348,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       const taskGraph = await this.transport.taskGraph(projectId);
       this.state.taskGraph = taskGraph;
-      this.state.selectedNodeId =
-        taskGraph.root_ids[0] ?? taskGraph.nodes[0]?.node_id ?? null;
+      const initialNode = initialSelectedTaskNode(taskGraph.nodes, taskGraph.root_ids);
+      this.state.selectedNodeId = initialNode?.node_id ?? null;
       this.state.runDetail = null;
       this.state.runFiles = null;
       this.state.runDiff = null;
@@ -359,6 +359,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runApprovals = null;
       this.state.selectedDiffPath = null;
       await this.loadRunOverlays(taskGraph);
+      if (initialNode) {
+        await this.openRun(initialNode);
+      }
     } catch (error) {
       this.state.taskGraph = null;
       this.state.selectedNodeId = null;
@@ -1576,9 +1579,9 @@ function renderTaskGraphVisualization(
   }
   const models = buildTaskGraphRenderModels(nodes, signals);
   const links = buildTaskGraphLinks(models);
-  const rowHeight = 76;
-  const rowGap = 10;
-  const laneWidth = 46;
+  const rowHeight = 62;
+  const rowGap = 8;
+  const laneWidth = 34;
   const railX = 20;
   const graphHeight = models.length * rowHeight + Math.max(0, models.length - 1) * rowGap;
   const maxLane = models.reduce((max, model) => Math.max(max, model.lane), 0);
@@ -1667,25 +1670,24 @@ function dependencySuffix(
 ): string {
   const parts: string[] = [];
   if (upstreamVisible.length > 0) {
-    parts.push(`<- ${nodeLabel(upstreamVisible[0])}`);
-    if (upstreamVisible.length > 1) {
-      parts.push(`+${upstreamVisible.length - 1}`);
+    parts.push(`blocked by ${upstreamVisible.slice(0, 2).map(nodeLabel).join(", ")}`);
+    if (upstreamVisible.length > 2) {
+      parts.push(`+${upstreamVisible.length - 2}`);
     }
   } else if (upstreamHiddenCount > 0) {
-    parts.push(`<- ${upstreamHiddenCount} hidden`);
+    parts.push(`blocked by ${upstreamHiddenCount} hidden`);
   }
 
   if (downstreamVisible.length > 0) {
-    const chain = downstreamVisible.slice(0, 2).map(nodeLabel).join(" -> ");
-    parts.push(`-> ${chain}`);
-    if (downstreamVisible.length > 2) {
-      parts.push(`+${downstreamVisible.length - 2}`);
+    parts.push(`blocks ${downstreamVisible.slice(0, 3).map(nodeLabel).join(", ")}`);
+    if (downstreamVisible.length > 3) {
+      parts.push(`+${downstreamVisible.length - 3}`);
     }
   } else if (downstreamHiddenCount > 0) {
-    parts.push(`-> ${downstreamHiddenCount} hidden`);
+    parts.push(`blocks ${downstreamHiddenCount} hidden`);
   }
 
-  return parts.join(" ");
+  return parts.join(" | ");
 }
 
 function renderReadOnlyTaskGraphNode(
@@ -1705,10 +1707,17 @@ function renderReadOnlyTaskGraphNode(
   const dependencyMeta = signal.suffix
     ? `<span class="os-node-dependency" data-testid="dependency-suffix">${escapeHtml(signal.suffix)}</span>`
     : "";
+  const dependencyGlyph = hasUpstream && hasDownstream
+    ? "<>"
+    : hasUpstream
+      ? "<"
+      : hasDownstream
+        ? ">"
+        : "";
 
   return `
     <button type="button" class="os-node os-node-readonly ${isSelected ? "is-selected" : ""} ${hasUpstream ? "os-node-has-upstream" : ""} ${hasDownstream ? "os-node-has-downstream" : ""}" data-node-id="${escapeAttr(node.node_id)}" style="--os-lane: ${model.lane};">
-      <span class="os-node-gutter" aria-hidden="true">${escapeHtml(signal.gutter)}</span>
+      <span class="os-node-gutter" aria-hidden="true">${escapeHtml(dependencyGlyph)}</span>
       <span class="os-node-main">
         <span class="os-node-line">
           <strong>${escapeHtml(node.identifier)}</strong>
@@ -1785,6 +1794,18 @@ function normalizeNodeRef(ref: string): string {
   return ref.trim().toLowerCase();
 }
 
+function initialSelectedTaskNode(nodes: TaskGraphNode[], rootIds: string[]): TaskGraphNode | null {
+  const ordered = [
+    ...rootIds.map((id) => findNodeByRef(nodes, id)).filter((node): node is TaskGraphNode => Boolean(node)),
+    ...nodes,
+  ];
+  return ordered.find((node) => node.kind !== "milestone" && node.state_category === "in_progress")
+    ?? ordered.find((node) => node.kind !== "milestone" && node.run_id)
+    ?? ordered.find((node) => node.kind !== "milestone")
+    ?? ordered[0]
+    ?? null;
+}
+
 function stateToneForTaskNode(node: TaskGraphNode): string {
   const value = `${node.state} ${node.state_category ?? ""}`.toLowerCase();
   if (value.includes("human review") || value.includes("review")) return "review";
@@ -1831,19 +1852,23 @@ function appShellStyles(): string {
     .os-list, .os-node-list { display: grid; gap: 8px; }
     .os-list-item, .os-node { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px; background: #ffffff; }
     .os-task-graph-stage { position: relative; min-width: min(100%, var(--os-graph-width)); overflow-x: auto; padding: 2px 0; }
-    .os-task-graph-links { position: absolute; inset: 0 auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
-    .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; opacity: 0.78; marker-end: url(#os-task-arrow); }
+    .os-task-graph-links { position: absolute; z-index: 3; inset: 0 auto auto 0; width: var(--os-graph-width); height: var(--os-graph-height); pointer-events: none; overflow: visible; }
+    .os-task-graph-link { fill: none; stroke: #39708f; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; opacity: 0.9; marker-end: url(#os-task-arrow); }
     .os-task-graph-links marker path { fill: #39708f; }
-    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 10px; }
-    .os-node-readonly { grid-template-columns: 34px minmax(0, 1fr); align-items: center; min-height: 76px; margin-left: calc(var(--os-lane, 0) * 46px); margin-right: 10px; border-radius: 8px; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
+    .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; }
+    .os-node-readonly { grid-template-columns: 28px minmax(0, 1fr); align-items: center; min-height: 62px; margin-left: calc(var(--os-lane, 0) * 34px); margin-right: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
     .os-node-readonly:active { transform: scale(0.996); }
-    .os-node-gutter { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #39708f; font-size: 12px; font-weight: 700; white-space: pre; background: #e7f1f5; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.22); }
+    .os-node-gutter { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #39708f; font-size: 11px; font-weight: 800; white-space: pre; background: #e7f1f5; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.28); }
+    .os-node-gutter:empty { background: transparent; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.18); }
+    .os-node-has-upstream .os-node-gutter { background: #fff7ed; color: #92400e; box-shadow: 0 0 0 1px rgba(146, 64, 14, 0.32); }
+    .os-node-has-downstream .os-node-gutter { background: #e7f1f5; color: #23566f; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.34); }
+    .os-node-has-upstream.os-node-has-downstream .os-node-gutter { background: #fef3c7; color: #78350f; box-shadow: 0 0 0 1px rgba(146, 64, 14, 0.38); }
     .os-node-main, .os-node-line, .os-node-subline { min-width: 0; }
     .os-node-line { display: flex; gap: 8px; align-items: baseline; flex-wrap: nowrap; }
     .os-node-line > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .os-node-line strong { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-    .os-node-dependency { color: #92400e; font-size: 12px; white-space: nowrap; }
-    .os-node-subline { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 5px; }
+    .os-node-line strong { flex: 0 0 auto; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .os-node-dependency { flex: 0 1 auto; color: #92400e; font-size: 11px; white-space: nowrap; }
+    .os-node-subline { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
     .os-list-item span, .os-node span, .os-node em { color: #667788; font-size: 12px; font-style: normal; }
     .os-node .os-node-gutter { color: #39708f; }
     .os-node .os-node-dependency { color: #92400e; }
@@ -1865,7 +1890,15 @@ function appShellStyles(): string {
     .os-event-time { color: #667788; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; margin-right: 6px; }
     .os-pill, .os-actions span { border-radius: 999px; background: #e7f1f5; color: #23566f; padding: 5px 9px; font-size: 12px; }
     .os-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
-    .os-run-action-bar { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+    .os-run-detail-panel { font-size: 12px; }
+    .os-run-detail-panel .os-section-head h2 { font-size: 14px; }
+    .os-run-detail-panel button { min-height: 30px; padding: 5px 8px; font-size: 12px; }
+    .os-run-detail-panel .os-run-head { padding: 8px 10px; margin-bottom: 8px; }
+    .os-run-detail-panel .os-run-head strong { font-size: 14px; }
+    .os-run-detail-panel .os-run-grid { gap: 8px; margin-bottom: 8px; }
+    .os-run-detail-panel .os-run-grid div { padding: 8px; }
+    .os-run-detail-panel .os-run-grid strong { font-size: 15px; }
+    .os-run-action-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
     .os-action-item { display: flex; align-items: center; gap: 8px; }
     .os-action-warning { color: #b45309; font-size: 12px; }
     .os-action-receipt { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 12px; margin: 10px 0; padding: 8px; border: 1px solid #d8dee4; border-radius: 6px; background: #f8fafc; }
@@ -1885,10 +1918,10 @@ function appShellStyles(): string {
     .os-activity-entry strong { color: #39708f; white-space: nowrap; }
     .os-activity-entry p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
     .os-changed-file-list { display: grid; gap: 6px; }
-    .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 8px; background: #ffffff; }
+    .os-changed-file { width: 100%; text-align: left; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 7px 8px; background: #ffffff; font-size: 12px; line-height: 1.2; }
     .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
     .os-file-path { min-width: 0; overflow-wrap: anywhere; }
-    .os-file-stats { white-space: nowrap; }
+    .os-file-stats { white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
     .os-change-kind { text-transform: uppercase; font-size: 10px; padding: 2px 5px; border-radius: 4px; }
     .os-change-kind-created { background: #dcfce7; color: #166534; }
     .os-change-kind-modified { background: #e0f2fe; color: #0c4a6e; }
@@ -2013,6 +2046,10 @@ function appShellStyles(): string {
       .os-task-graph-link { stroke: #5ca0b8; opacity: 0.82; }
       .os-task-graph-links marker path { fill: #5ca0b8; }
       .os-node-gutter { background: #10232c; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.3); }
+      .os-node-gutter:empty { background: transparent; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.22); }
+      .os-node-has-upstream .os-node-gutter { background: #3a2414; color: #fbbf24; box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.34); }
+      .os-node-has-downstream .os-node-gutter { background: #102c34; color: #8bd0e6; box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.38); }
+      .os-node-has-upstream.os-node-has-downstream .os-node-gutter { background: #3f3215; color: #fde68a; box-shadow: 0 0 0 1px rgba(251, 191, 36, 0.42); }
       .os-node-readonly.is-selected { box-shadow: 0 0 0 1px rgba(92, 160, 184, 0.36), 0 14px 28px rgba(0, 0, 0, 0.18); }
       .os-view-tab, .os-plan-tab, .os-changed-file { background: #111820; color: #d9e2ea; border-color: #3b4c5e; }
       .os-view-tab-active, .os-plan-tab-active, .os-changed-file.os-selected { background: #18303a; color: #f2f7fb; border-color: #5ca0b8; }
@@ -2027,7 +2064,7 @@ function appShellStyles(): string {
       .os-diff-line-context { color: #94a3b3; }
       .os-action-receipt { background: #111820; border-color: #2a3440; }
       .os-dependency-detail { background: #111820; border-color: #2a3440; color: #cbd5e1; }
-      .os-node .os-node-gutter, .os-node .os-node-dependency { color: #fbbf24; }
+      .os-node .os-node-dependency { color: #fbbf24; }
 
       button:hover:not(:disabled), .os-list-item:hover, .os-node:hover, .is-selected { background: #18303a; border-color: #5ca0b8; }
       .os-node-state-review { background: #451a03; color: #fcd34d; }

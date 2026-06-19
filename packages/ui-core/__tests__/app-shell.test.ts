@@ -108,7 +108,7 @@ const taskGraph: TaskGraphSnapshot = {
       title: "Shared Client and Desktop Alpha",
       state: "In Progress",
       state_category: "in_progress",
-      children: ["app-shell", "desktop-alpha", "follow-up"],
+      children: ["app-shell", "desktop-alpha", "hosted-auth", "follow-up"],
       blocked_by: [],
       labels: ["desktop"],
     },
@@ -137,6 +137,19 @@ const taskGraph: TaskGraphSnapshot = {
       children: [],
       blocked_by: [],
       labels: ["transport"],
+    },
+    {
+      schema_version: schemaVersionV1(),
+      node_id: "hosted-auth",
+      kind: "issue",
+      identifier: "COE-452",
+      title: "Hosted auth placeholders",
+      state: "Todo",
+      state_category: "todo",
+      parent_id: "m7-milestone",
+      children: [],
+      blocked_by: ["COE-449"],
+      labels: ["hosted"],
     },
     {
       schema_version: schemaVersionV1(),
@@ -368,19 +381,17 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-testid='task-graph-visualization']")).not.toBeNull();
     expect(root.querySelector("[data-testid='task-graph-link']")).not.toBeNull();
     expect((root.querySelector("[data-node-id='app-shell']") as HTMLElement).style.getPropertyValue("--os-lane")).toBe("1");
-    expect(root.querySelector("[data-node-id='desktop-alpha'] [data-testid='dependency-suffix']")?.textContent).toContain("-> COE-450");
-    expect(root.textContent).not.toContain("<- COE-448");
+    expect(root.querySelector("[data-node-id='desktop-alpha'] [data-testid='dependency-suffix']")?.textContent).toContain("blocks COE-450, COE-452");
+    expect(root.querySelector("[data-node-id='app-shell'] [data-testid='dependency-suffix']")?.textContent).toContain("blocked by COE-449");
+    expect(root.textContent).not.toContain("blocked by COE-448");
+    await flushUntil(() => root.querySelector(".os-run-head strong")?.textContent === "COE-449");
 
     taskGraph.root_ids.forEach((rootId) => {
       expect(root.querySelector(`[data-node-id='${rootId}']`)).not.toBeNull();
     });
 
-    const targetNode = root.querySelector(
-      "[data-node-id='desktop-alpha']",
-    ) as HTMLButtonElement;
-    expect(targetNode).not.toBeNull();
-    targetNode.click();
     await flushUntil(() => root.querySelector(".os-run-grid") !== null);
+    await flushUntil(() => root.querySelector("[data-testid='changed-file-item']") !== null);
 
     const runSection = root.querySelector(".os-run-grid");
     expect(runSection).not.toBeNull();
@@ -389,7 +400,7 @@ describe("OpenSymphonyApp mount", () => {
     // panel reflects the navigation event with the mock gateway response.
     expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
     expect(root.querySelector(".os-pill")?.textContent).toBe("running");
-    expect(root.querySelector("[data-testid='dependency-detail']")?.textContent).toContain("blocks COE-450");
+    expect(root.querySelector("[data-testid='dependency-detail']")?.textContent).toContain("blocks COE-450, COE-452");
     expect(root.querySelector(".os-run-detail-panel [data-testid='changed-file-list']")).not.toBeNull();
     expect(root.querySelector(".os-run-evidence-panel [data-testid='evidence-toggle']")).not.toBeNull();
     expect(root.querySelector(".os-run-evidence-panel [data-testid='file-diff']")).not.toBeNull();
