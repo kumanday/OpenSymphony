@@ -197,7 +197,12 @@ export class MockGatewayTransport implements GatewayTransport, ActionCapableTran
     return this.mockSnapshot;
   }
 
-  /** Remove the simulated auth failure so a refresh can succeed. */
+  /**
+   * Remove the simulated auth failure so a refresh can succeed.
+   *
+   * Test/simulation-only: `MockGatewayTransport` is not used in production, so
+   * this clears the injected failure, not a real gateway failure.
+   */
   clearAuthFailure(): void {
     this.authFailureCode = null;
     this.authFailureMethods = new Set();

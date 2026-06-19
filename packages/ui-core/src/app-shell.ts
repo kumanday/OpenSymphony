@@ -785,7 +785,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
    */
   private renderAuthPlaceholder(): string {
     const state = this.state.authState;
-    const orgProject = this.renderOrgProjectPlaceholder();
+    // Org/project selection is only meaningful when the caller can still act
+    // on it (sign in / switch workspace). A hard 403 `forbidden` deny means
+    // the gateway refused the workspace outright, so tenant selectors would
+    // be misleading there.
+    const orgProject = state === "forbidden" ? "" : this.renderOrgProjectPlaceholder();
     if (state === "unauthenticated") {
       return `
         ${this.renderProfiles()}
@@ -840,9 +844,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
    * Organization/project selection placeholder for hosted contexts.
    *
    * Real tenant/org selection arrives with hosted auth; this surface keeps the
-   * selector present so the data model and UI layout are stable. Only rendered
-   * for non-open auth states (see `renderAuthPlaceholder`), which all imply a
-   * hosted/auth-requiring gateway.
+   * selector present so the data model and UI layout are stable. Rendered only
+   * for `unauthenticated` and `unauthorized` auth states (see
+   * `renderAuthPlaceholder`), where the caller can still act on a workspace
+   * choice. It is intentionally omitted for `forbidden`, where the gateway has
+   * hard-denied the workspace.
    */
   private renderOrgProjectPlaceholder(): string {
     return `

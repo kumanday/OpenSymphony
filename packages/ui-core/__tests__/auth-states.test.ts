@@ -192,6 +192,8 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
     // Forbidden has no sign-in CTA (caller is presumed authenticated).
     expect(root.querySelector("[data-testid='auth-sign-in']")).toBeNull();
     expect(root.querySelector("[data-testid='auth-refresh']")).not.toBeNull();
+    // A hard 403 deny of the workspace does not offer org/project selectors.
+    expect(root.querySelector("[data-testid='auth-scope']")).toBeNull();
 
     await handle.destroy();
     root.remove();
@@ -220,6 +222,8 @@ describe("Auth-aware shell placeholder states (COE-419)", () => {
     expect(root.querySelector("[data-testid='auth-placeholder']")?.getAttribute("data-auth-state")).toBe("unauthorized");
     expect(root.textContent).toContain("Access denied");
     expect(root.textContent).toContain("do not have permission");
+    // Unauthorized (permission denial) still offers org/project switching.
+    expect(root.querySelector("[data-testid='auth-scope']")).not.toBeNull();
 
     await handle.destroy();
     root.remove();

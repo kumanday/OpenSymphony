@@ -499,6 +499,14 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
     return init;
   }
 
+  /**
+   * Fetch `url` and return the parsed JSON body.
+   *
+   * On a non-2xx response the body is consumed once with `response.text()`
+   * (for diagnostics and auth-code classification). `Response` bodies can only
+   * be read a single time, so callers/interceptors must not re-consume the
+   * response body after this method returns or throws.
+   */
   private async fetchJson(url: string, init?: RequestInit): Promise<unknown> {
     const method = init?.method ?? "GET";
     const headers: Record<string, string> = {
@@ -604,6 +612,14 @@ export class WebSocketTransport implements GatewayTransport {
     return headers;
   }
 
+  /**
+   * Issue a GET against `path` and return the parsed JSON body.
+   *
+   * On a non-2xx response the body is consumed once with `response.text()`
+   * (for diagnostics and auth-code classification). `Response` bodies can only
+   * be read a single time, so callers/interceptors must not re-consume the
+   * response body after this method returns or throws.
+   */
   private async get<T>(path: string): Promise<T> {
     const url = `${this.baseUri}${path}`;
     const response = await fetch(url, {
