@@ -239,6 +239,15 @@ Current implemented checks:
 - `opensymphony run` startup coverage that verifies the configured bind address exposes both health and gateway dashboard routes in `opensymphony-cli/tests/run.rs`
 - TUI reducer, visible-focus rendering, selection preservation across reorder, long-list selection windowing, narrow-layout detail budgeting, snapshot coalescing, stale snapshot rejection, post-restart snapshot reset recovery, disconnect retention, and reconnect-to-live recovery coverage in `opensymphony-tui`
 
+## 3.6 Shared client shell (web and desktop remote)
+
+The web and desktop clients both mount the shared `OpenSymphonyApp` shell from `@opensymphony/ui-core` against the same `GatewayTransport` interface, so remote parity is structural. Implemented checks:
+
+- app-shell mount smoke (`packages/ui-core/__tests__/app-shell.test.ts`): status, task graph, run detail, evidence, profile, and failed-connection rendering
+- auth-aware placeholder states (`packages/ui-core/__tests__/auth-states.test.ts`): unauthenticated (sign-in), unauthorized (access denied), forbidden (access forbidden), organization/project selection placeholders, and local `auth_modes:["none"]` gateways rendering the dashboard with no login gate; recovery when the gateway later permits a read
+- remote web/desktop parity (`packages/ui-core/__tests__/remote-parity.test.ts`): the shell renders the same core dashboard metrics, task graph nodes, run detail, planning workspace, and stream events in both `mode:"web"` and `mode:"desktop"` against an identical fixture transport
+- gateway error classification (`packages/api-client/__tests__/gateway-errors.test.ts`): `HttpGatewayTransport` maps HTTP 401/403 to a classified `GatewayRequestError`, and `authStateFromError` maps it to an `AuthState` from `@opensymphony/gateway-schema`
+
 ## 4. Fake OpenHands server requirements
 
 The fake server in `opensymphony-testkit` should emulate the minimum runtime contract:

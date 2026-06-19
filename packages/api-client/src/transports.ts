@@ -23,6 +23,7 @@ import type {
 import { pageCursorFirst } from "@opensymphony/gateway-schema";
 import type { GatewayTransport, GatewayTransportConfig, ActionCapableTransport } from "./index.js";
 import { stableHash, stableHashJson } from "./util.js";
+import { GatewayRequestError, authErrorCodeForStatus } from "./errors.js";
 
 /**
  * HTTP-based transport adapter using fetch().
@@ -511,6 +512,14 @@ export class HttpGatewayTransport implements GatewayTransport, ActionCapableTran
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
+      const authCode = authErrorCodeForStatus(response.status);
+      if (authCode) {
+        throw new GatewayRequestError(
+          authCode,
+          `HTTP ${response.status} ${response.statusText}: ${body}`,
+          response.status,
+        );
+      }
       throw new Error(
         `HTTP ${response.status} ${response.statusText}: ${body}`,
       );
@@ -592,6 +601,14 @@ export class WebSocketTransport implements GatewayTransport {
       headers: this.headers(),
     });
     if (!response.ok) {
+      const authCode = authErrorCodeForStatus(response.status);
+      if (authCode) {
+        throw new GatewayRequestError(
+          authCode,
+          `HTTP ${response.status} from ${url}: ${response.statusText}`,
+          response.status,
+        );
+      }
       throw new Error(
         `HTTP ${response.status} from ${url}: ${response.statusText}`,
       );
