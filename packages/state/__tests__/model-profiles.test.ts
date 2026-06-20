@@ -2,6 +2,7 @@ import { describe, expect, it } from "@jest/globals";
 import {
   createModelProfile,
   defaultModelProfiles,
+  type ModelConfigurationProfile,
 } from "@opensymphony/gateway-schema";
 import {
   createAsyncModelProfileStore,
@@ -167,6 +168,8 @@ describe("createModelProfileStore", () => {
       model: "provider/safe",
       apiKeyRef: "local_keychain:safe-api-key",
       active: true,
+      routingPolicy: { tier: "fast" },
+      rawTokenMetadata: "should-not-survive",
     };
     storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
       profiles: [
@@ -196,11 +199,33 @@ describe("createModelProfileStore", () => {
 
     expect(profiles.map((profile) => profile.id)).toEqual(["safe-api"]);
     expect(profiles[0].active).toBe(true);
+    expect((profiles[0] as ModelConfigurationProfile & { routingPolicy?: unknown }).routingPolicy).toEqual({
+      tier: "fast",
+    });
+    expect((profiles[0] as ModelConfigurationProfile & { rawTokenMetadata?: unknown }).rawTokenMetadata).toBeUndefined();
     expect(quarantineReasons).toEqual(expect.arrayContaining([
       expect.stringContaining("raw-secret"),
       expect.stringContaining("wrong-storage"),
       "Dropped malformed model profile from durable storage",
     ]));
+  });
+
+  it("warns when the durable profile list is not an array", async () => {
+    const quarantineReasons: string[] = [];
+    const store = createAsyncModelProfileStore({
+      async load() {
+        return JSON.stringify({ profiles: { bad: true }, activeProfileId: null });
+      },
+      async save() {
+        return undefined;
+      },
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+
+    const profiles = await store.listProfiles();
+
+    expect(profiles.length).toBeGreaterThan(0);
+    expect(quarantineReasons).toContain("Dropped malformed model profile list from durable storage");
   });
 
   it("uses the same CRUD path for async durable storage", async () => {

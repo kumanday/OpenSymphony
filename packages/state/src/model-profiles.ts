@@ -160,6 +160,20 @@ const authMethods = new Set<SubscriptionCredentialAuthMethod>([
   "cached",
 ]);
 
+const modelProfileKnownFields = new Set([
+  "id",
+  "label",
+  "active",
+  "mode",
+  "owner",
+  "baseUrl",
+  "model",
+  "apiKeyRef",
+  "subscriptionCredential",
+  "credentialStorage",
+  "harnesses",
+]);
+
 export function createModelProfileStore(
   options: ModelProfileStoreOptions = {},
 ): ModelProfileStore {
@@ -259,13 +273,13 @@ function createModelProfileStoreFromStateAccess(access: {
   read(): ModelProfileState | Promise<ModelProfileState>;
   write(state: ModelProfileState): ModelProfileState | Promise<ModelProfileState>;
 }): ModelProfileStore {
+  let writeQueue: Promise<unknown> = Promise.resolve();
+
   function serialize<T>(operation: () => T): Promise<T> {
     const next = writeQueue.then(operation, operation);
     writeQueue = next.catch(() => undefined);
     return next;
   }
-
-  let writeQueue: Promise<unknown> = Promise.resolve();
 
   return {
     async listProfiles() {
@@ -335,6 +349,9 @@ export function sanitizeModelProfiles(
   onQuarantine?: (reason: string) => void,
 ): ModelConfigurationProfile[] {
   if (!Array.isArray(value)) {
+    if (value !== undefined) {
+      onQuarantine?.("Dropped malformed model profile list from durable storage");
+    }
     return [];
   }
   return value.flatMap((profile) => {
@@ -367,8 +384,12 @@ function sanitizeModelProfile(value: unknown): ModelConfigurationProfile | null 
     return null;
   }
   const credentialStorage =
-    stringUnion(record.credentialStorage, credentialStorages)
-    ?? template.credentialStorage;
+    record.credentialStorage === undefined
+      ? template.credentialStorage
+      : stringUnion(record.credentialStorage, credentialStorages);
+  if (!credentialStorage) {
+    return null;
+  }
   const subscriptionCredential = mode === "subscription"
     ? sanitizeSubscriptionCredential(record.subscriptionCredential)
       ?? template.subscriptionCredential
@@ -377,8 +398,10 @@ function sanitizeModelProfile(value: unknown): ModelConfigurationProfile | null 
   const apiKeyRef = mode === "api_key"
     ? nullableString(record.apiKeyRef)
     : null;
+  const extraMetadata = safeExtraMetadata(record);
 
   return {
+    ...extraMetadata,
     id,
     label: stringField(record, "label") ?? template.label,
     active: typeof record.active === "boolean" ? record.active : false,
@@ -390,7 +413,7 @@ function sanitizeModelProfile(value: unknown): ModelConfigurationProfile | null 
     subscriptionCredential,
     credentialStorage,
     harnesses: stringList(record.harnesses) ?? [...template.harnesses],
-  };
+  } as ModelConfigurationProfile;
 }
 
 function sanitizeSubscriptionCredential(
@@ -454,6 +477,21 @@ function stringList(value: unknown): ModelHarnessKind[] | null {
     .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     .map((item) => item.trim() as ModelHarnessKind);
   return items.length > 0 ? items : null;
+}
+
+function safeExtraMetadata(record: Record<string, unknown>): Record<string, unknown> {
+  const extra: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (modelProfileKnownFields.has(key) || looksSecretBearingKey(key)) {
+      continue;
+    }
+    extra[key] = value;
+  }
+  return extra;
+}
+
+function looksSecretBearingKey(key: string): boolean {
+  return /(?:api[_-]?key|secret|token|oauth|password|credential)/i.test(key);
 }
 
 function errorMessage(error: unknown): string {
