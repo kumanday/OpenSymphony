@@ -34,7 +34,7 @@ use opensymphony::opensymphony_gateway_schema::{
     transport::{TransportProfile, TransportRecommendation},
     version::{GATEWAY_SCHEMA_VERSION, SchemaVersion},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn must_serialize<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("must serialize")
@@ -42,6 +42,32 @@ fn must_serialize<T: serde::Serialize>(value: &T) -> String {
 
 fn must_deserialize<T: serde::de::DeserializeOwned>(json: &str) -> T {
     serde_json::from_str(json).expect("must deserialize")
+}
+
+fn assert_no_raw_secret_field_names(value: &Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, nested) in map {
+                let key = key.to_ascii_lowercase();
+                assert_ne!(key, "value", "raw value field must not be serialized");
+                assert!(
+                    !key.contains("token"),
+                    "token-bearing field must not be serialized"
+                );
+                assert!(
+                    !key.contains("secret"),
+                    "secret-bearing field must not be serialized"
+                );
+                assert_no_raw_secret_field_names(nested);
+            }
+        }
+        Value::Array(values) => {
+            for nested in values {
+                assert_no_raw_secret_field_names(nested);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
+    }
 }
 
 fn sample_schema_version() -> SchemaVersion {
@@ -91,6 +117,9 @@ fn model_settings_roundtrip_and_redact_secret_material() {
             && profile.credential_reference.redacted
             && profile.compatible_harnesses == vec!["codex_app_server"]
     }));
+    assert_no_raw_secret_field_names(
+        &serde_json::to_value(&back.profiles).expect("profiles serialize as JSON value"),
+    );
     assert!(
         back.supported_credential_statuses
             .contains(&CredentialStatusKind::Installed)

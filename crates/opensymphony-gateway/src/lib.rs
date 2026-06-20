@@ -741,8 +741,14 @@ async fn capabilities() -> Json<GatewayCapabilities> {
     Json(build_capabilities())
 }
 
+pub fn model_settings_for_llm_api_key_installed(
+    llm_api_key_installed: bool,
+) -> ModelSettingsResponse {
+    ModelSettingsResponse::local_default(llm_api_key_installed)
+}
+
 fn build_model_settings() -> ModelSettingsResponse {
-    ModelSettingsResponse::local_default(std::env::var_os("LLM_API_KEY").is_some())
+    model_settings_for_llm_api_key_installed(std::env::var_os("LLM_API_KEY").is_some())
 }
 
 async fn model_settings() -> Json<ModelSettingsResponse> {

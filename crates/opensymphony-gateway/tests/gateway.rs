@@ -16,6 +16,7 @@ use opensymphony::opensymphony_domain::{
 };
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, LinearTaskGraphClient, control_plane_to_dashboard_snapshot,
+    model_settings_for_llm_api_key_installed,
 };
 use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
@@ -557,6 +558,38 @@ fn gateway_capabilities_json_fixture_roundtrips() {
     assert_eq!(back.auth_modes.len(), 2);
     assert_eq!(back.max_event_page_size, 1000);
     assert_eq!(back.harnesses[0].kind, "openhands_agent_server");
+}
+
+#[test]
+fn gateway_model_settings_status_reflects_api_key_presence() {
+    let installed_settings = model_settings_for_llm_api_key_installed(true);
+    let installed_profile = installed_settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == "openhands-env-api-key")
+        .expect("OpenHands env profile should exist");
+    assert_eq!(installed_profile.status, CredentialStatusKind::Installed);
+    assert!(installed_settings.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:env:LLM_API_KEY"
+            && status.status == CredentialStatusKind::Installed
+    }));
+
+    let logged_out_settings = model_settings_for_llm_api_key_installed(false);
+    let logged_out_profile = logged_out_settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == "openhands-env-api-key")
+        .expect("OpenHands env profile should exist");
+    assert_eq!(logged_out_profile.status, CredentialStatusKind::LoggedOut);
+    assert!(
+        logged_out_settings
+            .credential_statuses
+            .iter()
+            .any(|status| {
+                status.credential_reference_id == "credential:env:LLM_API_KEY"
+                    && status.status == CredentialStatusKind::LoggedOut
+            })
+    );
 }
 
 #[test]
