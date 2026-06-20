@@ -13,18 +13,21 @@ use super::{
         DEFAULT_OPENHANDS_AGENT_KIND, DEFAULT_OPENHANDS_AGENT_TOOLS, DEFAULT_OPENHANDS_AUTH_MODE,
         DEFAULT_OPENHANDS_BASE_URL, DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST,
         DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE, DEFAULT_OPENHANDS_CONFIRMATION_POLICY_KIND,
-        DEFAULT_OPENHANDS_LLM_MODEL, DEFAULT_OPENHANDS_MAX_ITERATIONS,
-        DEFAULT_OPENHANDS_PERSISTENCE_DIR, DEFAULT_OPENHANDS_QUERY_PARAM_NAME,
-        DEFAULT_OPENHANDS_READINESS_PROBE_PATH, DEFAULT_OPENHANDS_READY_TIMEOUT_MS,
-        DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS, DEFAULT_OPENHANDS_RECONNECT_MAX_MS,
-        DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS,
-        DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
-        OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
+        DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE, DEFAULT_OPENHANDS_LLM_MODEL,
+        DEFAULT_OPENHANDS_MAX_ITERATIONS, DEFAULT_OPENHANDS_PERSISTENCE_DIR,
+        DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
+        DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
+        DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
+        DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, Environment,
+        HooksConfig, HooksFrontMatter, IntegerLike, OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY,
+        OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION, OpenHandsConfig,
+        OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
         OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
         OpenHandsConversationCondenserConfig, OpenHandsConversationCondenserFrontMatter,
         OpenHandsConversationConfig, OpenHandsConversationFrontMatter,
         OpenHandsConversationToolConfig, OpenHandsFrontMatter, OpenHandsLlmConfig,
         OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
+        OpenHandsSubscriptionCredentialConfig, OpenHandsSubscriptionCredentialFrontMatter,
         OpenHandsTransportConfig, OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter,
         PollingConfig, PollingFrontMatter, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter,
         TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkspaceConfig,
@@ -683,6 +686,8 @@ fn default_openhands_llm_config() -> OpenHandsLlmConfig {
         model: Some(DEFAULT_OPENHANDS_LLM_MODEL.to_owned()),
         api_key_env: None,
         base_url_env: None,
+        credential_mode: OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY.to_owned(),
+        subscription: None,
         options: BTreeMap::new(),
     }
 }
@@ -782,11 +787,177 @@ fn resolve_openhands_llm<E: Environment>(
         });
     }
 
+    let credential_mode = resolve_string_or_default(
+        llm.credential_mode.as_deref(),
+        env,
+        "openhands.conversation.agent.llm.credential_mode",
+        DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE,
+    )?;
+    let credential_mode = normalize_openhands_llm_credential_mode(&credential_mode)?;
+    let subscription = match credential_mode.as_str() {
+        OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY => {
+            if llm.subscription.is_some() {
+                return Err(WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent.llm.subscription",
+                    message: "is only valid when credential_mode is `openai_subscription`"
+                        .to_owned(),
+                });
+            }
+            None
+        }
+        OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION => Some(
+            resolve_openhands_subscription_credential(llm.subscription.as_ref(), env)?,
+        ),
+        _ => unreachable!("credential mode was normalized"),
+    };
+
+    if subscription.is_some() && (llm.api_key_env.is_some() || llm.base_url_env.is_some()) {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm",
+            message:
+                "`api_key_env` and `base_url_env` are API-key settings; use `subscription.access_token_env` for subscription credentials"
+                    .to_owned(),
+        });
+    }
+
     Ok(OpenHandsLlmConfig {
         model: Some(model),
         api_key_env: normalize_optional_literal(&llm.api_key_env),
         base_url_env: normalize_optional_literal(&llm.base_url_env),
+        credential_mode,
+        subscription,
         options: llm.options.clone(),
+    })
+}
+
+fn normalize_openhands_llm_credential_mode(value: &str) -> Result<String, WorkflowConfigError> {
+    let normalized = normalize_optional(value)
+        .ok_or(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm.credential_mode",
+            message: "must not be empty".to_owned(),
+        })?
+        .to_ascii_lowercase();
+
+    match normalized.as_str() {
+        OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY => {
+            Ok(OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY.to_owned())
+        }
+        "subscription" | "openai" | OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION => {
+            #[cfg(not(feature = "openhands-subscription-credentials"))]
+            {
+                Err(WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent.llm.credential_mode",
+                    message:
+                        "`openai_subscription` requires the `openhands-subscription-credentials` feature"
+                            .to_owned(),
+                })
+            }
+            #[cfg(feature = "openhands-subscription-credentials")]
+            {
+                Ok(OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION.to_owned())
+            }
+        }
+        other => Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm.credential_mode",
+            message: format!(
+                "unsupported credential mode `{other}`; supported values are `api_key` and `openai_subscription`"
+            ),
+        }),
+    }
+}
+
+#[cfg(feature = "openhands-subscription-credentials")]
+fn resolve_openhands_subscription_credential<E: Environment>(
+    subscription: Option<&OpenHandsSubscriptionCredentialFrontMatter>,
+    env: &E,
+) -> Result<OpenHandsSubscriptionCredentialConfig, WorkflowConfigError> {
+    let subscription = subscription.ok_or(WorkflowConfigError::MissingRequiredField {
+        field: "openhands.conversation.agent.llm.subscription",
+    })?;
+    let vendor = resolve_string_or_default(
+        subscription.vendor.as_deref(),
+        env,
+        "openhands.conversation.agent.llm.subscription.vendor",
+        "openai",
+    )?;
+    let vendor = normalize_optional(&vendor)
+        .ok_or(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm.subscription.vendor",
+            message: "must not be empty".to_owned(),
+        })?
+        .to_ascii_lowercase();
+    if vendor != "openai" {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm.subscription.vendor",
+            message: "only `openai` subscription credentials are supported".to_owned(),
+        });
+    }
+
+    let access_token_env = normalize_optional_literal(&subscription.access_token_env).ok_or(
+        WorkflowConfigError::MissingRequiredField {
+            field: "openhands.conversation.agent.llm.subscription.access_token_env",
+        },
+    )?;
+    validate_environment_name(
+        &access_token_env,
+        "openhands.conversation.agent.llm.subscription.access_token_env",
+    )?;
+
+    let account_id_env = normalize_optional_literal(&subscription.account_id_env);
+    if let Some(env_name) = &account_id_env {
+        validate_environment_name(
+            env_name,
+            "openhands.conversation.agent.llm.subscription.account_id_env",
+        )?;
+    }
+
+    let auth_directory_env = normalize_optional_literal(&subscription.auth_directory_env);
+    if let Some(env_name) = &auth_directory_env {
+        validate_environment_name(
+            env_name,
+            "openhands.conversation.agent.llm.subscription.auth_directory_env",
+        )?;
+    }
+
+    let auth_method = resolve_string_or_default(
+        subscription.auth_method.as_deref(),
+        env,
+        "openhands.conversation.agent.llm.subscription.auth_method",
+        "browser",
+    )?;
+    let auth_method = normalize_optional(&auth_method)
+        .ok_or(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm.subscription.auth_method",
+            message: "must not be empty".to_owned(),
+        })?
+        .to_ascii_lowercase();
+    if !matches!(auth_method.as_str(), "browser" | "device_code" | "cached") {
+        return Err(WorkflowConfigError::InvalidField {
+            field: "openhands.conversation.agent.llm.subscription.auth_method",
+            message: "must be `browser`, `device_code`, or `cached`".to_owned(),
+        });
+    }
+
+    Ok(OpenHandsSubscriptionCredentialConfig {
+        vendor,
+        access_token_env,
+        account_id_env,
+        auth_directory_env,
+        auth_method,
+        open_browser: subscription.open_browser.unwrap_or(true),
+        force_login: subscription.force_login.unwrap_or(false),
+    })
+}
+
+#[cfg(not(feature = "openhands-subscription-credentials"))]
+fn resolve_openhands_subscription_credential<E: Environment>(
+    _subscription: Option<&OpenHandsSubscriptionCredentialFrontMatter>,
+    _env: &E,
+) -> Result<OpenHandsSubscriptionCredentialConfig, WorkflowConfigError> {
+    Err(WorkflowConfigError::InvalidField {
+        field: "openhands.conversation.agent.llm.credential_mode",
+        message: "`openai_subscription` requires the `openhands-subscription-credentials` feature"
+            .to_owned(),
     })
 }
 
@@ -968,6 +1139,22 @@ fn require_literal(
     value
         .and_then(normalize_optional)
         .ok_or(WorkflowConfigError::MissingRequiredField { field })
+}
+
+#[cfg(feature = "openhands-subscription-credentials")]
+fn validate_environment_name(value: &str, field: &'static str) -> Result<(), WorkflowConfigError> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|character| character == '_' || character.is_ascii_alphanumeric())
+    {
+        return Err(WorkflowConfigError::InvalidField {
+            field,
+            message: "must be an environment variable name".to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn resolve_positive_u64(

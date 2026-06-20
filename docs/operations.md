@@ -220,6 +220,32 @@ When the configured transport uses managed local OpenHands, `doctor` can
 bootstrap the pinned tooling into the configured `openhands.tool_dir` before
 continuing the rest of its checks.
 
+## 4.1 Subscription Credential Operations
+
+OpenAI ChatGPT/Codex subscription mode is explicit and feature-gated. Build or
+install OpenSymphony with `--features openhands-subscription-credentials`, then
+configure the target repo workflow with
+`openhands.conversation.agent.llm.credential_mode: openai_subscription`.
+
+Credential establishment belongs to the documented OpenHands SDK flow or to a
+future hosted credential broker. For local or self-hosted use, run the
+OpenHands SDK browser or device-code login in the environment that owns the
+credential store, keep refresh material in the selected auth directory, and
+export only the short-lived access-token reference expected by the workflow
+before starting `opensymphony run`. Do not place OAuth JSON files, access
+tokens, or refresh tokens inside issue workspaces or repository files.
+`auth_directory_env`, `auth_method`, `open_browser`, and `force_login` are
+operator/bootstrap metadata for that credential setup step; they are preserved
+for status and diagnostics, while the runtime conversation request resolves only
+the short-lived access token and optional account identity header.
+
+Validation for subscription mode should include:
+
+- mocked subscription request construction tests
+- redaction checks for manifests, diagnostics, and debug output
+- live integration only when a valid subscription credential and pinned SDK
+  support are available
+
 ## 5. Linear operational model
 
 OpenSymphony 1.0.0 is GraphQL-only for agent-side Linear operations.

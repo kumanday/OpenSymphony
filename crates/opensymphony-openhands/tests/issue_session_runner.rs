@@ -245,6 +245,54 @@ Issue: {{{{ issue.identifier }}}}
         .expect("workflow should resolve")
 }
 
+#[cfg(feature = "openhands-subscription-credentials")]
+fn workflow_with_openai_subscription(workspace_root: &Path, base_url: &str) -> ResolvedWorkflow {
+    let workflow = WorkflowDefinition::parse(&format!(
+        r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: {}
+openhands:
+  transport:
+    base_url: {}
+  conversation:
+    agent:
+      llm:
+        model: gpt-5.9-codex
+        credential_mode: openai_subscription
+        subscription:
+          vendor: openai
+          access_token_env: WORKFLOW_OPENHANDS_SUBSCRIPTION_ACCESS_TOKEN
+          account_id_env: WORKFLOW_OPENHANDS_SUBSCRIPTION_ACCOUNT_ID
+          auth_directory_env: WORKFLOW_OPENHANDS_AUTH_DIR
+          auth_method: device_code
+          open_browser: false
+          force_login: false
+---
+
+# Assignment
+
+Issue: {{{{ issue.identifier }}}}
+"#,
+        workspace_root.display(),
+        base_url,
+    ))
+    .expect("workflow should parse");
+
+    workflow
+        .resolve(
+            workspace_root,
+            &BTreeMap::from([("LINEAR_API_KEY".to_string(), "linear-token".to_string())]),
+        )
+        .expect("workflow should resolve")
+}
+
 fn workflow_for_with_agent_block(
     workspace_root: &Path,
     base_url: &str,
@@ -1822,6 +1870,137 @@ async fn issue_session_runner_forwards_workflow_owned_llm_provider_overrides() {
             .and_then(|fingerprint| fingerprint.api_key_hash.as_deref()),
         Some("provider-secret")
     );
+}
+
+#[cfg(feature = "openhands-subscription-credentials")]
+#[tokio::test]
+async fn issue_session_runner_forwards_openai_subscription_llm_to_fake_server() {
+    let server = FakeOpenHandsServer::start()
+        .await
+        .expect("fake server should start");
+    let temp_dir = TempDir::new().expect("temp dir should exist");
+    let workspace_root = temp_dir.path().join("workspaces");
+    let manager = workspace_manager(&workspace_root, HookConfig::default());
+    let workflow = workflow_with_openai_subscription(&workspace_root, server.base_url());
+    let issue = sample_issue("COE-425-subscription");
+    let ensured = manager
+        .ensure(&issue_descriptor(&issue))
+        .await
+        .expect("workspace should exist");
+    let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+    let runner = IssueSessionRunner::with_environment(
+        client.clone(),
+        runner_config(&workflow),
+        BTreeMap::from([
+            (
+                "WORKFLOW_OPENHANDS_SUBSCRIPTION_ACCESS_TOKEN".to_string(),
+                "subscription-access-token".to_string(),
+            ),
+            (
+                "WORKFLOW_OPENHANDS_SUBSCRIPTION_ACCOUNT_ID".to_string(),
+                "account-456".to_string(),
+            ),
+            (
+                "WORKFLOW_OPENHANDS_AUTH_DIR".to_string(),
+                "/Users/test/.cache/openhands/auth".to_string(),
+            ),
+        ]),
+    );
+    let max_turns = u32::try_from(workflow.config.agent.max_turns).expect("max_turns should fit");
+
+    let mut run_manifest = manager
+        .start_run(&ensured.handle, &RunDescriptor::new("subscription-run", 1))
+        .await
+        .expect("run manifest should prepare");
+    let run = run_attempt(
+        &issue,
+        ensured.handle.workspace_path(),
+        "worker-subscription",
+        None,
+        max_turns,
+    );
+    let result = runner
+        .run(
+            &manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+        )
+        .await
+        .expect("subscription-backed session run should succeed");
+
+    assert_eq!(
+        result.run_status,
+        crate::opensymphony_workspace::RunStatus::Succeeded
+    );
+    let create_request = read_create_conversation_request(&manager, &ensured.handle).await;
+    assert_eq!(create_request.agent.llm.model, "openai/gpt-5.9-codex");
+    assert_eq!(
+        create_request.agent.llm.api_key.as_deref(),
+        Some("subscription-access-token")
+    );
+    assert_eq!(
+        create_request.agent.llm.base_url.as_deref(),
+        Some("https://chatgpt.com/backend-api/codex")
+    );
+    assert_eq!(
+        create_request
+            .agent
+            .llm
+            .extra_headers
+            .as_ref()
+            .and_then(|headers| headers.get("chatgpt-account-id"))
+            .map(String::as_str),
+        Some("account-456")
+    );
+    assert_eq!(create_request.agent.llm.stream, Some(true));
+    assert_eq!(
+        create_request
+            .agent
+            .llm
+            .litellm_extra_body
+            .as_ref()
+            .and_then(|body| body.get("store")),
+        Some(&serde_json::json!(false))
+    );
+
+    let conversation_id = uuid::Uuid::parse_str(
+        result
+            .conversation
+            .as_ref()
+            .expect("conversation metadata should exist")
+            .conversation_id
+            .as_str(),
+    )
+    .expect("conversation ID should parse");
+    let fake_server_conversation = client
+        .get_conversation(conversation_id)
+        .await
+        .expect("conversation should be fetchable from fake server");
+    assert_eq!(fake_server_conversation.agent.llm, create_request.agent.llm);
+
+    let manifest = read_conversation_manifest(&manager, &ensured.handle).await;
+    let launch_profile = manifest
+        .launch_profile
+        .as_ref()
+        .expect("launch profile should be persisted");
+    let subscription = launch_profile
+        .llm_subscription
+        .as_ref()
+        .expect("subscription profile should be persisted");
+    assert_eq!(
+        subscription.auth_directory_env.as_deref(),
+        Some("WORKFLOW_OPENHANDS_AUTH_DIR")
+    );
+    assert_eq!(subscription.auth_method, "device_code");
+    assert!(!subscription.open_browser);
+    assert!(!subscription.force_login);
+    let manifest_json = serde_json::to_string(&manifest).expect("manifest should serialize");
+    assert!(!manifest_json.contains("subscription-access-token"));
+    assert!(!manifest_json.contains("account-456"));
+    assert!(!manifest_json.contains("/Users/test/.cache/openhands/auth"));
 }
 
 #[tokio::test]

@@ -24,6 +24,7 @@ default = ["duckdb-bundled"]
 codex-app-server-prototype = []
 duckdb-bundled = ["duckdb/bundled"]
 duckdb-prebuilt = []
+openhands-subscription-credentials = []
 
 [dependencies]
 async-stream.workspace = true

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -40,6 +40,8 @@ use super::{
 };
 
 pub const RUNTIME_CONTRACT_VERSION: &str = "openhands-sdk-agent-server-v1";
+const OPENAI_SUBSCRIPTION_CREDENTIAL_MODE: &str = "openai_subscription";
+const OPENAI_CODEX_SUBSCRIPTION_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_REUSE_POLICY: &str = "per_issue";
 const FRESH_EACH_RUN_REUSE_POLICY: &str = "fresh_each_run";
 
@@ -366,10 +368,14 @@ pub struct ConversationLaunchProfile {
     pub confirmation_policy_kind: String,
     pub agent_kind: String,
     pub llm_model: String,
+    #[serde(default = "default_llm_credential_mode")]
+    pub llm_credential_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_api_key_env: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_base_url_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_subscription: Option<ConversationLaunchSubscriptionProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub condenser: Option<ConversationLaunchCondenserProfile>,
     pub agent_tools: Option<Vec<ToolConfig>>,
@@ -383,6 +389,19 @@ pub struct ConversationLaunchProfile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationLaunchSubscriptionProfile {
+    pub vendor: String,
+    pub access_token_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id_env: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_directory_env: Option<String>,
+    pub auth_method: String,
+    pub open_browser: bool,
+    pub force_login: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationLaunchCondenserProfile {
     pub max_size: u64,
     pub keep_first: u64,
@@ -392,11 +411,16 @@ impl ConversationLaunchProfile {
     /// Compute a fingerprint of the current API key from the environment.
     /// This is used to detect when the API key has changed.
     pub fn api_key_fingerprint(&self, env: &dyn Environment) -> Option<String> {
-        let api_key = self
-            .llm_api_key_env
-            .as_deref()
-            .and_then(|env_name| env.get(env_name))
-            .or_else(|| env.get("LLM_API_KEY"))?;
+        let api_key = if self.llm_credential_mode == OPENAI_SUBSCRIPTION_CREDENTIAL_MODE {
+            self.llm_subscription
+                .as_ref()
+                .and_then(|subscription| env.get(&subscription.access_token_env))
+        } else {
+            self.llm_api_key_env
+                .as_deref()
+                .and_then(|env_name| env.get(env_name))
+                .or_else(|| env.get("LLM_API_KEY"))
+        }?;
 
         // Simple hash - hex-encoded SHA256 of API key
         use sha2::{Digest, Sha256};
@@ -431,6 +455,12 @@ impl ConversationLaunchProfile {
             confirmation_policy_kind: conversation.confirmation_policy.kind.clone(),
             agent_kind: conversation.agent.kind.clone(),
             llm_model,
+            llm_credential_mode: conversation
+                .agent
+                .llm
+                .as_ref()
+                .map(|llm| llm.credential_mode.clone())
+                .unwrap_or_else(default_llm_credential_mode),
             llm_api_key_env: conversation
                 .agent
                 .llm
@@ -441,6 +471,20 @@ impl ConversationLaunchProfile {
                 .llm
                 .as_ref()
                 .and_then(|llm| llm.base_url_env.clone()),
+            llm_subscription: conversation
+                .agent
+                .llm
+                .as_ref()
+                .and_then(|llm| llm.subscription.as_ref())
+                .map(|subscription| ConversationLaunchSubscriptionProfile {
+                    vendor: subscription.vendor.clone(),
+                    access_token_env: subscription.access_token_env.clone(),
+                    account_id_env: subscription.account_id_env.clone(),
+                    auth_directory_env: subscription.auth_directory_env.clone(),
+                    auth_method: subscription.auth_method.clone(),
+                    open_browser: subscription.open_browser,
+                    force_login: subscription.force_login,
+                }),
             condenser: conversation.agent.condenser.as_ref().map(|condenser| {
                 ConversationLaunchCondenserProfile {
                     max_size: condenser.max_size,
@@ -466,25 +510,7 @@ impl ConversationLaunchProfile {
         persistence_dir: &Path,
         conversation_id: Option<Uuid>,
     ) -> Result<ConversationCreateRequest, String> {
-        let api_key = resolve_provider_override(
-            env,
-            "openhands.conversation.agent.llm.api_key_env",
-            self.llm_api_key_env.as_deref(),
-        )?
-        .or_else(|| normalize_environment_value(env.get("LLM_API_KEY")));
-        let base_url = resolve_provider_override(
-            env,
-            "openhands.conversation.agent.llm.base_url_env",
-            self.llm_base_url_env.as_deref(),
-        )?
-        .or_else(|| normalize_environment_value(env.get("LLM_BASE_URL")));
-
-        let llm = LlmConfig {
-            model: self.llm_model.clone(),
-            api_key,
-            base_url,
-            usage_id: None,
-        };
+        let llm = self.to_llm_config(env)?;
 
         Ok(ConversationCreateRequest {
             conversation_id: conversation_id.unwrap_or_else(Uuid::new_v4),
@@ -513,6 +539,114 @@ impl ConversationLaunchProfile {
             },
         })
     }
+
+    fn to_llm_config(&self, env: &dyn Environment) -> Result<LlmConfig, String> {
+        if self.llm_credential_mode == OPENAI_SUBSCRIPTION_CREDENTIAL_MODE {
+            return self.to_openai_subscription_llm_config(env);
+        }
+
+        let api_key = resolve_provider_override(
+            env,
+            "openhands.conversation.agent.llm.api_key_env",
+            self.llm_api_key_env.as_deref(),
+        )?
+        .or_else(|| normalize_environment_value(env.get("LLM_API_KEY")));
+        let base_url = resolve_provider_override(
+            env,
+            "openhands.conversation.agent.llm.base_url_env",
+            self.llm_base_url_env.as_deref(),
+        )?
+        .or_else(|| normalize_environment_value(env.get("LLM_BASE_URL")));
+
+        Ok(LlmConfig {
+            model: self.llm_model.clone(),
+            api_key,
+            base_url,
+            usage_id: None,
+            extra_headers: None,
+            litellm_extra_body: None,
+            stream: None,
+        })
+    }
+
+    fn to_openai_subscription_llm_config(
+        &self,
+        env: &dyn Environment,
+    ) -> Result<LlmConfig, String> {
+        let subscription = self.llm_subscription.as_ref().ok_or_else(|| {
+            "openhands.conversation.agent.llm.subscription is required for openai_subscription mode"
+                .to_string()
+        })?;
+        if subscription.vendor != "openai" {
+            return Err(format!(
+                "unsupported OpenHands subscription vendor `{}`",
+                subscription.vendor
+            ));
+        }
+        let access_token = resolve_provider_override(
+            env,
+            "openhands.conversation.agent.llm.subscription.access_token_env",
+            Some(&subscription.access_token_env),
+        )?;
+        let account_id = subscription
+            .account_id_env
+            .as_deref()
+            .and_then(|env_name| normalize_environment_value(env.get(env_name)));
+
+        let mut extra_headers = BTreeMap::from([
+            (
+                "OpenAI-Beta".to_string(),
+                "responses=experimental".to_string(),
+            ),
+            (
+                "User-Agent".to_string(),
+                format!(
+                    "openhands-sdk (OpenSymphony; {}; {})",
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                ),
+            ),
+            ("originator".to_string(), "codex_cli_rs".to_string()),
+        ]);
+        if let Some(account_id) = account_id {
+            extra_headers.insert("chatgpt-account-id".to_string(), account_id);
+        }
+
+        Ok(LlmConfig {
+            model: normalize_openai_subscription_model(&self.llm_model)?,
+            api_key: access_token,
+            base_url: Some(OPENAI_CODEX_SUBSCRIPTION_BASE_URL.to_string()),
+            usage_id: None,
+            extra_headers: Some(extra_headers),
+            litellm_extra_body: Some(BTreeMap::from([("store".to_string(), json!(false))])),
+            stream: Some(true),
+        })
+    }
+}
+
+fn default_llm_credential_mode() -> String {
+    "api_key".to_string()
+}
+
+fn normalize_openai_subscription_model(model: &str) -> Result<String, String> {
+    let normalized = model.trim();
+    if normalized.is_empty() {
+        return Err("OpenHands SDK OpenAI subscription model must not be blank".to_string());
+    }
+
+    if let Some((provider, bare)) = normalized.split_once('/') {
+        if provider != "openai" {
+            return Err(format!(
+                "OpenHands SDK OpenAI subscription model `{normalized}` must use the openai/ provider prefix"
+            ));
+        }
+        if bare.trim().is_empty() {
+            return Err("OpenHands SDK OpenAI subscription model must not be blank".to_string());
+        }
+        return Ok(normalized.to_string());
+    }
+
+    Ok(format!("openai/{normalized}"))
 }
 
 fn resolve_provider_override(
@@ -3430,7 +3564,11 @@ fn finished_stream_error_is_tolerable(error: &OpenHandsError) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, sync::Arc};
+    use std::{
+        collections::{BTreeMap, HashSet},
+        path::Path,
+        sync::Arc,
+    };
 
     use crate::opensymphony_domain::{
         BlockerRef, IssueRef, IssueState, IssueStateCategory, WorkerOutcomeKind,
@@ -3447,6 +3585,123 @@ mod tests {
             Ok(value) => value,
             Err(error) => panic!("{error}"),
         }
+    }
+
+    #[test]
+    fn launch_profile_constructs_openai_subscription_llm_without_persisting_tokens() {
+        let profile = ConversationLaunchProfile {
+            workspace_kind: "LocalWorkspace".to_string(),
+            confirmation_policy_kind: "NeverConfirm".to_string(),
+            agent_kind: "Agent".to_string(),
+            llm_model: "gpt-5.2-codex".to_string(),
+            llm_credential_mode: "openai_subscription".to_string(),
+            llm_api_key_env: None,
+            llm_base_url_env: None,
+            llm_subscription: Some(ConversationLaunchSubscriptionProfile {
+                vendor: "openai".to_string(),
+                access_token_env: "OPENHANDS_OPENAI_SUBSCRIPTION_ACCESS_TOKEN".to_string(),
+                account_id_env: Some("OPENHANDS_OPENAI_SUBSCRIPTION_ACCOUNT_ID".to_string()),
+                auth_directory_env: Some("OPENHANDS_AUTH_DIR".to_string()),
+                auth_method: "device_code".to_string(),
+                open_browser: false,
+                force_login: false,
+            }),
+            condenser: None,
+            agent_tools: None,
+            agent_include_default_tools: None,
+            max_iterations: 12,
+            stuck_detection: true,
+            llm_api_key_fingerprint: None,
+        };
+        let env = BTreeMap::from([
+            (
+                "OPENHANDS_OPENAI_SUBSCRIPTION_ACCESS_TOKEN".to_string(),
+                "oauth-access-token".to_string(),
+            ),
+            (
+                "OPENHANDS_OPENAI_SUBSCRIPTION_ACCOUNT_ID".to_string(),
+                "account-123".to_string(),
+            ),
+            (
+                "OPENHANDS_AUTH_DIR".to_string(),
+                "/Users/test/.cache/openhands/auth".to_string(),
+            ),
+        ]);
+
+        let request = profile
+            .to_create_request(
+                &env,
+                Path::new("/tmp/workspace"),
+                Path::new("/tmp/workspace/.opensymphony/openhands"),
+                Some(Uuid::nil()),
+            )
+            .expect("subscription profile should construct a request");
+        let profile_json = serde_json::to_string(&profile).expect("profile should serialize");
+
+        assert_eq!(request.agent.llm.model, "openai/gpt-5.2-codex");
+        assert_eq!(
+            request.agent.llm.base_url.as_deref(),
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+        assert_eq!(
+            request.agent.llm.api_key.as_deref(),
+            Some("oauth-access-token")
+        );
+        assert_eq!(request.agent.llm.stream, Some(true));
+        assert_eq!(
+            profile
+                .llm_subscription
+                .as_ref()
+                .and_then(|subscription| subscription.auth_directory_env.as_deref()),
+            Some("OPENHANDS_AUTH_DIR")
+        );
+        assert_eq!(
+            env.get("OPENHANDS_AUTH_DIR").map(String::as_str),
+            Some("/Users/test/.cache/openhands/auth")
+        );
+        assert_eq!(
+            request
+                .agent
+                .llm
+                .extra_headers
+                .as_ref()
+                .and_then(|headers| headers.get("originator"))
+                .map(String::as_str),
+            Some("codex_cli_rs")
+        );
+        assert_eq!(
+            request
+                .agent
+                .llm
+                .litellm_extra_body
+                .as_ref()
+                .and_then(|body| body.get("store")),
+            Some(&json!(false))
+        );
+        assert!(!profile_json.contains("oauth-access-token"));
+        assert!(!profile_json.contains("account-123"));
+        assert!(!profile_json.contains("/Users/test/.cache/openhands/auth"));
+        assert!(profile_json.contains("OPENHANDS_AUTH_DIR"));
+        assert_eq!(
+            profile.api_key_fingerprint(&env).as_deref(),
+            Some("9e6b6d3f6b582838")
+        );
+    }
+
+    #[test]
+    fn openai_subscription_model_normalization_allows_future_openai_codex_models() {
+        assert_eq!(
+            must(normalize_openai_subscription_model("gpt-5.9-codex")),
+            "openai/gpt-5.9-codex"
+        );
+        assert_eq!(
+            must(normalize_openai_subscription_model("openai/gpt-5.9-codex")),
+            "openai/gpt-5.9-codex"
+        );
+        assert!(
+            normalize_openai_subscription_model("anthropic/claude-4").is_err(),
+            "subscription mode should remain scoped to OpenAI provider models"
+        );
     }
 
     #[test]

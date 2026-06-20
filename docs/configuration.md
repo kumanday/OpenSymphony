@@ -110,6 +110,7 @@ Important fields:
 | `tracker.project_slug` | Linear `Project.slugId` from the project URL | - | `my-project-5250e49b61f4` |
 | `workspace.root` | Where to store per-issue workspaces | - | `~/.opensymphony/workspaces` |
 | `openhands.conversation.agent.llm.model` | LLM model to use | `LLM_MODEL` | `openai/accounts/fireworks/models/glm-5p1` |
+| `openhands.conversation.agent.llm.credential_mode` | LLM credential adapter | - | `api_key` or `openai_subscription` |
 
 For Linear trackers, `tracker.project_slug` should store the project's
 `slugId`, not a `team/project` path.
@@ -138,6 +139,44 @@ Subscription-backed model profiles are represented as credential references for
 local keychain storage, isolated OpenHands auth-directory storage, and future
 hosted broker storage. Those references are safe to render in clients because
 they do not contain raw API keys, OAuth access tokens, or refresh tokens.
+
+OpenAI ChatGPT/Codex subscription credentials are available only when
+OpenSymphony is built with the `openhands-subscription-credentials` Cargo
+feature. The workflow stores environment-variable names and auth-directory
+references, not token values. The short-lived access token should be established
+through the documented OpenHands SDK login flow, such as browser login or
+device-code login, and exposed to the orchestrator through the configured
+environment reference:
+
+```yaml
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: gpt-5.2-codex
+        credential_mode: openai_subscription
+        subscription:
+          vendor: openai
+          access_token_env: OPENHANDS_OPENAI_SUBSCRIPTION_ACCESS_TOKEN
+          account_id_env: OPENHANDS_OPENAI_SUBSCRIPTION_ACCOUNT_ID
+          auth_directory_env: OPENHANDS_AUTH_DIR
+          auth_method: device_code
+          open_browser: false
+```
+
+In subscription mode, OpenSymphony constructs the same OpenAI/Codex LLM request
+shape documented by the pinned OpenHands SDK: `openai/<model>`,
+`https://chatgpt.com/backend-api/codex`, official Codex headers,
+`litellm_extra_body.store=false`, and streaming enabled. Refresh tokens remain
+in the selected credential store and must not be copied into workspaces,
+workflow files, logs, Linear comments, or browser payloads.
+
+The `auth_directory_env`, `auth_method`, `open_browser`, and `force_login`
+fields describe how the subscription credential was established by the SDK or a
+future broker. They are retained in the launch profile for diagnostics and UI
+status, but OpenSymphony does not forward them as undocumented agent-server
+conversation fields. Only the short-lived access token reference is resolved
+when building the OpenHands conversation request.
 
 The workflow supports `${VAR}` syntax for environment variable substitution in
 the front matter:

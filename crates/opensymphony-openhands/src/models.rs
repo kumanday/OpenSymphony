@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fmt};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
@@ -23,7 +23,7 @@ pub struct ConfirmationPolicy {
     pub kind: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LlmConfig {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -32,6 +32,12 @@ pub struct LlmConfig {
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub litellm_extra_body: Option<BTreeMap<String, Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
 }
 
 impl LlmConfig {
@@ -39,6 +45,23 @@ impl LlmConfig {
         let mut cloned = self.clone();
         cloned.usage_id = Some(usage_id.into());
         cloned
+    }
+}
+
+impl fmt::Debug for LlmConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("LlmConfig");
+        debug.field("model", &self.model);
+        debug.field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"));
+        debug.field("base_url", &self.base_url);
+        debug.field("usage_id", &self.usage_id);
+        debug.field(
+            "extra_headers",
+            &self.extra_headers.as_ref().map(|_| "<redacted>"),
+        );
+        debug.field("litellm_extra_body", &self.litellm_extra_body);
+        debug.field("stream", &self.stream);
+        debug.finish()
     }
 }
 
@@ -159,6 +182,9 @@ impl ConversationCreateRequest {
                     api_key: config.api_key,
                     base_url: config.base_url,
                     usage_id: None,
+                    extra_headers: None,
+                    litellm_extra_body: None,
+                    stream: None,
                 },
                 condenser: None,
                 tools: None,
@@ -438,6 +464,9 @@ mod tests {
                     api_key: Some("fake-key".to_string()),
                     base_url: None,
                     usage_id: None,
+                    extra_headers: None,
+                    litellm_extra_body: None,
+                    stream: None,
                 },
                 condenser: None,
                 tools: None,
@@ -473,6 +502,89 @@ mod tests {
     }
 
     #[test]
+    fn llm_config_debug_redacts_api_key() {
+        let llm = LlmConfig {
+            model: "openai/gpt-5.2-codex".to_string(),
+            api_key: Some("oauth-access-token".to_string()),
+            base_url: Some("https://chatgpt.com/backend-api/codex".to_string()),
+            usage_id: None,
+            extra_headers: Some(BTreeMap::from([
+                ("chatgpt-account-id".to_string(), "account-123".to_string()),
+                ("originator".to_string(), "codex_cli_rs".to_string()),
+            ])),
+            litellm_extra_body: Some(BTreeMap::from([("store".to_string(), json!(false))])),
+            stream: Some(true),
+        };
+
+        let rendered = format!("{llm:?}");
+
+        assert!(rendered.contains("<redacted>"));
+        assert!(!rendered.contains("oauth-access-token"));
+        assert!(!rendered.contains("account-123"));
+        assert!(!rendered.contains("chatgpt-account-id"));
+        assert!(!rendered.contains("codex_cli_rs"));
+    }
+
+    #[test]
+    fn conversation_create_request_serializes_subscription_llm_contract() {
+        let request = ConversationCreateRequest {
+            conversation_id: Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+                .expect("uuid should parse"),
+            workspace: WorkspaceConfig {
+                working_dir: "/tmp/workspace".to_string(),
+                kind: "LocalWorkspace".to_string(),
+            },
+            persistence_dir: "/tmp/workspace/.opensymphony/openhands".to_string(),
+            max_iterations: 7,
+            stuck_detection: true,
+            confirmation_policy: ConfirmationPolicy {
+                kind: "NeverConfirm".to_string(),
+            },
+            agent: AgentConfig {
+                kind: "Agent".to_string(),
+                llm: LlmConfig {
+                    model: "openai/gpt-5.2-codex".to_string(),
+                    api_key: Some("oauth-access-token".to_string()),
+                    base_url: Some("https://chatgpt.com/backend-api/codex".to_string()),
+                    usage_id: None,
+                    extra_headers: Some(BTreeMap::from([
+                        (
+                            "OpenAI-Beta".to_string(),
+                            "responses=experimental".to_string(),
+                        ),
+                        ("chatgpt-account-id".to_string(), "account-123".to_string()),
+                        ("originator".to_string(), "codex_cli_rs".to_string()),
+                    ])),
+                    litellm_extra_body: Some(BTreeMap::from([("store".to_string(), json!(false))])),
+                    stream: Some(true),
+                },
+                condenser: None,
+                tools: None,
+                include_default_tools: None,
+            },
+        };
+
+        let value = serde_json::to_value(&request).expect("request should serialize");
+
+        assert_eq!(value["agent"]["llm"]["model"], "openai/gpt-5.2-codex");
+        assert_eq!(
+            value["agent"]["llm"]["base_url"],
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(value["agent"]["llm"]["api_key"], "oauth-access-token");
+        assert_eq!(value["agent"]["llm"]["stream"], true);
+        assert_eq!(
+            value["agent"]["llm"]["extra_headers"]["originator"],
+            "codex_cli_rs"
+        );
+        assert_eq!(
+            value["agent"]["llm"]["extra_headers"]["OpenAI-Beta"],
+            "responses=experimental"
+        );
+        assert_eq!(value["agent"]["llm"]["litellm_extra_body"]["store"], false);
+    }
+
+    #[test]
     fn conversation_run_request_serializes_to_empty_object() {
         let value = serde_json::to_value(ConversationRunRequest::default())
             .expect("request should serialize");
@@ -502,6 +614,9 @@ mod tests {
                     api_key: Some("fake-key".to_string()),
                     base_url: Some("https://example.com/v1".to_string()),
                     usage_id: None,
+                    extra_headers: None,
+                    litellm_extra_body: None,
+                    stream: None,
                 },
                 condenser: Some(CondenserConfig::llm_summarizing(
                     LlmConfig {
@@ -509,6 +624,9 @@ mod tests {
                         api_key: Some("fake-key".to_string()),
                         base_url: Some("https://example.com/v1".to_string()),
                         usage_id: None,
+                        extra_headers: None,
+                        litellm_extra_body: None,
+                        stream: None,
                     },
                     240,
                     2,
@@ -558,6 +676,9 @@ mod tests {
                     api_key: Some("fake-key".to_string()),
                     base_url: Some("https://example.com/v1".to_string()),
                     usage_id: None,
+                    extra_headers: None,
+                    litellm_extra_body: None,
+                    stream: None,
                 },
                 condenser: None,
                 tools: Some(vec![

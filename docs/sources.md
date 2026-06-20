@@ -134,6 +134,16 @@ The current local supervisor assumptions validated against this pin are:
   query parameter when an API key is present
 - the server also accepts WebSocket header auth, with query-param auth taking
   precedence when both are present
+- `openhands-sdk==1.24.0` exposes
+  `LLM.subscription_login(vendor, model, force_login, open_browser, auth_method,
+  **llm_kwargs)` for OpenAI ChatGPT/Codex subscription login. Its OpenAI path
+  constructs an `LLM` with `model="openai/<codex-model>"`,
+  `base_url="https://chatgpt.com/backend-api/codex"`, the OAuth access token as
+  the LLM API key, Codex headers, `litellm_extra_body.store=false`, and
+  streaming enabled.
+- OpenSymphony accepts any non-empty bare model name or `openai/...` model name
+  in subscription mode so newer pinned SDK releases can add Codex-capable models
+  without a Rust whitelist change. Non-OpenAI provider prefixes remain rejected.
 
 When bumping this version, re-validate the launch surface, readiness probe, HTTP
 contract assumptions, and WebSocket notes before changing the repo pin.
