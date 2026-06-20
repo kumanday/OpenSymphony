@@ -655,11 +655,12 @@ describe("OpenSymphonyApp mount", () => {
     );
     await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
     expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("text");
+    expect((root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value).toBe("openhands_auth_directory");
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "codex-subscription-preview";
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "OPENHANDS_AUTH_DIR";
     (root.querySelector("[data-model-subscription-provider]") as HTMLInputElement).value = "openai";
-    (root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value = "openhands_auth_directory";
+    (root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value = "local_keychain";
     (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, codex_app_server";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
 

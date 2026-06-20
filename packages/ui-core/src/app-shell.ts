@@ -823,7 +823,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
 
     const credentialInput = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
-    const credentialStorage = credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]"));
+    const selectedCredentialStorage = credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]"));
+    const credentialStorage = mode === "subscription"
+      ? "openhands_auth_directory"
+      : selectedCredentialStorage;
     const subscriptionCredentialDefaults = defaultModelProfiles()
       .find((profile) => profile.mode === "subscription")!
       .subscriptionCredential!;
@@ -1150,6 +1153,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       : active.apiKeyRef;
     const credentialLabel = active.mode === "subscription" ? "Auth Directory Env" : "Credential Ref";
     const credentialInputType = active.mode === "subscription" ? "text" : "password";
+    const credentialStorage = active.mode === "subscription"
+      ? "openhands_auth_directory"
+      : active.credentialStorage;
     const modelProfileError = this.state.modelProfileError
       ? `<div class="os-model-error" role="alert" data-testid="model-profile-error">${escapeHtml(this.state.modelProfileError)}</div>`
       : "";
@@ -1203,9 +1209,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <label class="os-field">
             <span>Credential Storage</span>
             <select data-model-credential-storage>
-              ${option("local_keychain", "Local keychain", active.credentialStorage)}
-              ${option("openhands_auth_directory", "OpenHands auth directory", active.credentialStorage)}
-              ${option("hosted_secret_store", "Hosted secret store", active.credentialStorage)}
+              ${option("local_keychain", "Local keychain", credentialStorage)}
+              ${option("openhands_auth_directory", "OpenHands auth directory", credentialStorage)}
+              ${option("hosted_secret_store", "Hosted secret store", credentialStorage)}
             </select>
           </label>
           <label class="os-field">

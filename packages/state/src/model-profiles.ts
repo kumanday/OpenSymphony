@@ -114,7 +114,7 @@ export function normalizeModelProfileState(
   };
 }
 
-/** Persistent CRUD service used by browser and desktop clients. */
+/** CRUD service that persists only when a storage backend is supplied. */
 export interface ModelProfileStore {
   listProfiles(): Promise<ModelConfigurationProfile[]>;
   storeProfile(profile: ModelConfigurationProfile): Promise<ModelConfigurationProfile>;
