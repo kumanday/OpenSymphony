@@ -669,7 +669,9 @@ async function runWebSocketProbe(secureExposure) {
     const stderrTrimmed = stderr.trim();
     const output = `${stdout}\n${stderr}`;
     const configuredListener = `ws://127.0.0.1:${port}`;
-    const observedListener = output.match(/\blistening on:\s*(ws:\/\/[^\s]+)/)?.[1] ?? configuredListener;
+    const listenerMatch = output.match(/\blistening on:\s*(ws:\/\/[^\s]+)/);
+    const observedListener = listenerMatch?.[1] ?? configuredListener;
+    const observedListenerSource = listenerMatch ? "observed" : "configured_fallback";
     let listenerHost = null;
     try {
       listenerHost = new URL(observedListener).hostname;
@@ -698,9 +700,13 @@ async function runWebSocketProbe(secureExposure) {
       stderrPreview: stderrTrimmed ? [...stderrTrimmed].slice(-1000).join("") : null,
       exposure: {
         listener: observedListener,
+        observedListenerSource,
         listenerHost,
         localhostOnly,
-        localhostOnlyEvidence: ["configured_loopback_listener", "parsed_listener_address"],
+        localhostOnlyEvidence: [
+          "configured_loopback_listener",
+          ...(listenerMatch ? ["parsed_listener_address"] : ["configured_listener_fallback"]),
+        ],
         authEvidence: "advertised_in_help",
         runtimeAuthProbe: "not_measured_by_loopback_smoke",
         authModesAdvertisedInHelp: [

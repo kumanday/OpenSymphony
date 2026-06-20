@@ -32,6 +32,11 @@ pub enum CodexAppServerTransport {
 /// therefore limited to paths that can be passed losslessly as UTF-8; non-UTF-8
 /// local paths are out of scope until a production adapter carries `OsString`
 /// arguments or constructs a `std::process::Command` directly.
+///
+/// Auth file paths and token hashes are passed as command-line arguments by the
+/// current Codex CLI contract, so they may be visible through process-list
+/// inspection on shared hosts. Do not use this prototype with real shared-host
+/// secrets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexWebSocketAuth {
     CapabilityToken {
@@ -95,6 +100,10 @@ impl CodexAppServerLaunch {
     /// helper returns `Vec<String>`. Use UTF-8 paths with the prototype; a
     /// production harness should preserve native path bytes with `OsString` or
     /// `std::process::Command` arguments.
+    ///
+    /// Auth-related CLI arguments may be visible in process listings. Keep
+    /// prototype runs to local trusted environments and avoid real shared-host
+    /// secrets.
     pub fn command_args(&self) -> Vec<String> {
         let mut args = vec!["app-server".into()];
         args.extend(self.extra_args.clone());

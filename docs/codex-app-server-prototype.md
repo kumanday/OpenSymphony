@@ -85,6 +85,8 @@ implementations and therefore requires Node.js 22 or newer. Use
 `--skip-websocket` for stdio-only evidence on older Node runtimes.
 Use `--codex-path <path>` to benchmark a specific Codex CLI binary instead of
 the first `codex` on `PATH`.
+Use `--request-timeout-ms <ms>` for single-request probes and
+`--batch-timeout-ms <ms>` for the queued WebSocket request batch.
 
 The script performs:
 
@@ -103,6 +105,10 @@ the flag is presence-based and does not take a value.
 Queued WebSocket requests use `--batch-timeout-ms`, which defaults to
 `min(300000, --request-timeout-ms + --iterations * 100)`, so the timeout remains
 an explicit duration even for high-iteration runs.
+
+Do not point this prototype at real shared-environment secrets. Codex WebSocket
+auth file paths and token hashes are passed as process arguments, so they can be
+visible to local process-list inspection on some systems.
 
 ## Local Benchmark Result
 
@@ -155,6 +161,7 @@ WebSocket probes are supported. A 10-request local run produced:
     "stderrPreview": "codex app-server (WebSockets)\n  listening on: ws://127.0.0.1:18779\n  readyz: http://127.0.0.1:18779/readyz\n  healthz: http://127.0.0.1:18779/healthz\n  note: binds localhost only (use SSH port-forwarding for remote access)",
     "exposure": {
       "listener": "ws://127.0.0.1:18779",
+      "observedListenerSource": "observed",
       "listenerHost": "127.0.0.1",
       "localhostOnly": true,
       "localhostOnlyEvidence": [
