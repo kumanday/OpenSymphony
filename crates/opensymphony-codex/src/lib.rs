@@ -1,3 +1,10 @@
+//! Feature-gated Codex app-server prototype helpers.
+//!
+//! OpenSymphony-generated JSON-RPC requests intentionally use monotonic numeric
+//! IDs in this prototype. The session owns outgoing request allocation and
+//! response correlation; benchmark tooling still compares IDs by string so it
+//! can report future Codex response-shape changes cleanly.
+
 use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};

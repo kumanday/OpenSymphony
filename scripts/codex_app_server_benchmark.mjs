@@ -501,31 +501,35 @@ async function runWebSocketProbe(secureExposure) {
   let ws2 = null;
   let client = null;
   let reconnectClient = null;
-  try {
-    const exitedBeforeReadyz = once(child, "exit").then(([code, signal]) => {
+  let shuttingDown = false;
+  const childFailure = new Promise((_, reject) => {
+    child.once("error", (error) => {
+      reject(new Error(`codex app-server failed during WebSocket probe: ${error.message}`));
+    });
+    child.once("exit", (code, signal) => {
+      if (shuttingDown) return;
       const { stdout, stderr } = decodeOutput();
       const suffix = signal ? `signal ${signal}` : `code ${code}`;
-      throw new Error(
-        `codex app-server exited before readyz with ${suffix}; stdout=${JSON.stringify(stdout.trim())}; stderr=${JSON.stringify(stderr.trim())}`,
+      reject(
+        new Error(
+          `codex app-server exited unexpectedly during WebSocket probe with ${suffix}; stdout=${JSON.stringify(stdout.trim())}; stderr=${JSON.stringify(stderr.trim())}`,
+        ),
       );
     });
-    exitedBeforeReadyz.catch(() => {});
-    const failedBeforeReadyz = once(child, "error").then(([error]) => {
-      throw new Error(`codex app-server failed to start before readyz: ${error.message}`);
-    });
-    failedBeforeReadyz.catch(() => {});
-    await Promise.race([
-      waitForReadyz(`http://127.0.0.1:${port}/readyz`, requestTimeoutMs),
-      exitedBeforeReadyz,
-      failedBeforeReadyz,
-    ]);
+  });
+  childFailure.catch(() => {});
+  const withChildFailure = (promise) => Promise.race([promise, childFailure]);
+  try {
+    await withChildFailure(waitForReadyz(`http://127.0.0.1:${port}/readyz`, requestTimeoutMs));
 
-    ws = await openSocket(`ws://127.0.0.1:${port}`);
+    ws = await withChildFailure(openSocket(`ws://127.0.0.1:${port}`));
     client = new WebSocketJsonRpcClient(ws);
-    const initialize = await client.request(1, "initialize", {
-      clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
-      capabilities: {},
-    });
+    const initialize = await withChildFailure(
+      client.request(1, "initialize", {
+        clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
+        capabilities: {},
+      }),
+    );
     assertJsonRpcResult("websocket initialize", initialize.response);
 
     const batchStartedAt = performance.now();
@@ -533,7 +537,11 @@ async function runWebSocketProbe(secureExposure) {
     let nextRequestId = 2;
     const batchTimeoutMs = websocketBatchTimeoutMs();
     for (let i = 0; i < iterations; i += 1) {
-      requests.push(client.request(nextRequestId, "thread/loaded/list", { limit: 1 }, batchTimeoutMs));
+      requests.push(
+        withChildFailure(
+          client.request(nextRequestId, "thread/loaded/list", { limit: 1 }, batchTimeoutMs),
+        ),
+      );
       nextRequestId += 1;
     }
     const responses = await Promise.all(requests);
@@ -549,15 +557,17 @@ async function runWebSocketProbe(secureExposure) {
     client.dispose();
     client = null;
     ws.close();
-    await closed;
+    await withChildFailure(closed);
     ws = null;
     const reconnectStartedAt = performance.now();
-    ws2 = await openSocket(`ws://127.0.0.1:${port}`);
+    ws2 = await withChildFailure(openSocket(`ws://127.0.0.1:${port}`));
     reconnectClient = new WebSocketJsonRpcClient(ws2);
-    const reconnectInitialize = await reconnectClient.request(nextRequestId, "initialize", {
-      clientInfo: { name: "opensymphony-codex-benchmark-reconnect", version: "0.0.0" },
-      capabilities: {},
-    });
+    const reconnectInitialize = await withChildFailure(
+      reconnectClient.request(nextRequestId, "initialize", {
+        clientInfo: { name: "opensymphony-codex-benchmark-reconnect", version: "0.0.0" },
+        capabilities: {},
+      }),
+    );
     assertJsonRpcResult("websocket reconnect initialize", reconnectInitialize.response);
     const reconnectMs = performance.now() - reconnectStartedAt;
     const { stdout, stderr } = decodeOutput();
@@ -584,13 +594,14 @@ async function runWebSocketProbe(secureExposure) {
       exposure: {
         listener: `ws://127.0.0.1:${port}`,
         localhostOnly: /binds localhost only/.test(`${stdout}\n${stderr}`),
-        authModesFromHelp: [
+        authModesAdvertisedInHelp: [
           ...(secureExposure.hasCapabilityTokenMode ? ["capability-token"] : []),
           ...(secureExposure.hasSignedBearerMode ? ["signed-bearer-token"] : []),
         ],
       },
     };
   } finally {
+    shuttingDown = true;
     if (client) client.dispose();
     if (reconnectClient) reconnectClient.dispose();
     if (ws && ws.readyState < WebSocket.CLOSING) ws.close();

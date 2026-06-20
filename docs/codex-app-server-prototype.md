@@ -89,7 +89,7 @@ The script performs:
 - WebSocket `initialize` latency,
 - queued `thread/loaded/list` request throughput and p50/p95 latency,
 - reconnect by closing the socket, opening a new socket, and initializing again,
-- secure exposure checks for runtime localhost-only listener output and
+- secure exposure checks for runtime localhost-only listener output and static
   capability-token/signed-bearer WebSocket auth flags advertised by
   `codex app-server --help`.
 
@@ -150,7 +150,7 @@ WebSocket probes are supported. A 10-request local run produced:
     "exposure": {
       "listener": "ws://127.0.0.1:18779",
       "localhostOnly": true,
-      "authModesFromHelp": [
+      "authModesAdvertisedInHelp": [
         "capability-token",
         "signed-bearer-token"
       ]
