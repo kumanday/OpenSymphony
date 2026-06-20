@@ -76,7 +76,10 @@ pub use crate::opensymphony_gateway_schema::{
     },
     cursor::PageCursor,
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
-    model_settings::{CredentialStatusResponse, ModelSettingsResponse},
+    model_settings::{
+        CodexCliProbe, CodexLocalReadiness, CredentialStatusResponse, ModelSettingsResponse,
+        ProbeCommandResult,
+    },
     run::{
         ChangedFileEntry, DiffHunk, DiffLine, FileChangeKind, FileDiffPage, ReleaseReason,
         RunAction, RunDetail, RunDiagnostics, RunEvent, RunEventPage, RunFilesPage,
@@ -745,9 +748,54 @@ pub fn model_settings_for_llm_api_key(llm_api_key: Option<&str>) -> ModelSetting
     ModelSettingsResponse::local_default(llm_api_key.is_some_and(|value| !value.trim().is_empty()))
 }
 
+pub fn model_settings_for_llm_api_key_and_codex_readiness(
+    llm_api_key: Option<&str>,
+    codex_readiness: CodexLocalReadiness,
+) -> ModelSettingsResponse {
+    ModelSettingsResponse::local_with_codex_readiness(
+        llm_api_key.is_some_and(|value| !value.trim().is_empty()),
+        codex_readiness,
+    )
+}
+
 fn build_model_settings() -> ModelSettingsResponse {
     let llm_api_key = std::env::var("LLM_API_KEY").ok();
-    model_settings_for_llm_api_key(llm_api_key.as_deref())
+    model_settings_for_llm_api_key_and_codex_readiness(
+        llm_api_key.as_deref(),
+        detect_codex_local_readiness("codex"),
+    )
+}
+
+fn detect_codex_local_readiness(command: &str) -> CodexLocalReadiness {
+    CodexLocalReadiness::from_probe(CodexCliProbe {
+        command: command.into(),
+        version: run_codex_probe(command, ["--version"]),
+        app_server_help: run_codex_probe(command, ["app-server", "--help"]),
+        login_status: run_codex_probe(command, ["login", "status"]),
+    })
+}
+
+fn run_codex_probe<const N: usize>(command: &str, args: [&str; N]) -> ProbeCommandResult {
+    match Command::new(command).args(args).output() {
+        Ok(output) if output.status.success() => ProbeCommandResult::Success {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
+        Ok(output) => ProbeCommandResult::Failure {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProbeCommandResult::NotFound,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            ProbeCommandResult::PermissionDenied {
+                detail: error.to_string(),
+            }
+        }
+        Err(error) => ProbeCommandResult::Failure {
+            stdout: String::new(),
+            stderr: error.to_string(),
+        },
+    }
 }
 
 async fn model_settings() -> Json<ModelSettingsResponse> {

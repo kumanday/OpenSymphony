@@ -140,6 +140,29 @@ local keychain storage, isolated OpenHands auth-directory storage, and future
 hosted broker storage. Those references are safe to render in clients because
 they do not contain raw API keys, OAuth access tokens, or refresh tokens.
 
+For the Codex app-server harness, OpenSymphony represents the local ChatGPT
+subscription as a Codex CLI login reference:
+
+- `credential_reference.kind`: `codex_cli_login`
+- `credential_reference.reference`: `codex-cli:chatgpt-login`
+- `storage_mode`: `codex_cli_home`
+
+This reference tells clients and operators that readiness is owned by the
+installed Codex CLI. OpenSymphony checks readiness with `codex --version`,
+`codex app-server --help`, and `codex login status`; it does not read private
+Codex credential files and does not copy OAuth access or refresh material into
+workspaces, workflow files, logs, Linear comments, or browser payloads.
+
+The `codex_local_readiness` field on `GET /api/v1/model-settings` reports:
+
+- whether the Codex CLI command is installed and runnable,
+- whether the app-server surface is available,
+- whether `codex login status` reports `Logged in using ChatGPT`,
+- explicit logged-out, expired, unsupported, permission-denied, or unknown
+  states,
+- safe operator commands for login (`codex login --device-auth`), status
+  (`codex login status`), and logout (`codex logout`).
+
 OpenAI ChatGPT/Codex subscription credentials are available only when
 OpenSymphony is built with the `openhands-subscription-credentials` Cargo
 feature. The workflow stores environment-variable names and auth-directory

@@ -55,7 +55,8 @@ Confirm the local Codex CLI is signed in with ChatGPT:
 codex login status
 ```
 
-If the CLI is not logged in, use device-code auth:
+If the CLI is not logged in, use the current Codex-supported device-code auth
+path:
 
 ```bash
 codex login --device-auth
@@ -78,6 +79,28 @@ codex --ask-for-approval never exec \
 
 Expected output includes `Logged in using ChatGPT` from `codex login status`,
 then the model reply `CODEX_LOGIN_OK` from the smoke test.
+
+OpenSymphony reports Codex subscription readiness through
+`GET /api/v1/model-settings` and
+`GET /api/v1/model-settings/credential-status`. The gateway probes only
+supported Codex CLI surfaces:
+
+- `codex --version`
+- `codex app-server --help`
+- `codex login status`
+
+The model-settings response includes a `codex_local_readiness` summary with the
+detected CLI version, app-server support, ChatGPT login state, and the safe
+operator commands for login/status/logout. It also exposes the Codex profile as
+a `codex_cli_login` credential reference. That reference identifies the
+operator-owned Codex CLI login state; it is not a copied access token, refresh
+credential, or parsed private Codex credential payload.
+
+Logout and revocation stay owned by Codex and ChatGPT. Run `codex logout` to
+remove the local Codex login, and revoke account/device access from ChatGPT
+settings when needed. If `codex login status` reports logged out, expired, an
+unrecognized state, or permission denial, OpenSymphony surfaces that state
+without attempting to read Codex credential files.
 
 Run the loopback benchmark with the installed Codex binary:
 
@@ -292,7 +315,7 @@ pinned Codex version.
 Codex must reuse the gateway model settings shape instead of owning
 subscription credentials. The current mapping is:
 
-- `codex-chatgpt-local-keychain`: local subscription credential reference for
+- `codex-chatgpt-cli-login`: local Codex CLI ChatGPT login reference for
   future desktop/local Codex app-server use.
 - `hosted-openai-subscription-broker`: hosted broker reference for future
   hosted Codex app-server or OpenHands subscription use.

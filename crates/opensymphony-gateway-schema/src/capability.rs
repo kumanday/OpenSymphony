@@ -228,7 +228,7 @@ impl HarnessCapability {
                 per_run_overrides: true,
                 credential_reference_kinds: vec![
                     "model_settings_ref".into(),
-                    "inherited_subscription_login".into(),
+                    "codex_cli_login".into(),
                     "capability_token".into(),
                     "signed_bearer".into(),
                 ],
