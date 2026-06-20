@@ -746,9 +746,43 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("normalizes an empty API-key secret reference to null", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const profiles = defaultModelProfiles();
+    profiles[0] = {
+      ...profiles[0],
+      apiKeyRef: "local_keychain:openai-api-key",
+    };
+    const modelProfileController = buildModelProfileController(profiles);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+      initialModelProfiles: profiles,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
+    const profileId = (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).value;
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.id === profileId && profile.apiKeyRef === null),
+    );
+    const saved = modelProfileController.saved.find((profile) => profile.id === profileId);
+    expect(saved?.apiKeyRef).toBeNull();
+
+    await handle.destroy();
+  });
+
   it("creates and removes model profiles from the panel", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
+    const confirmSpy = jest.spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
     const modelProfileController = buildModelProfileController();
     const handle = renderOpenSymphonyApp({
       root,
@@ -768,11 +802,17 @@ describe("OpenSymphonyApp mount", () => {
     expect(modelProfileController.saved.some((profile) => profile.id === createdId)).toBe(true);
 
     (root.querySelector("[data-remove-model-profile]") as HTMLButtonElement).click();
+    await flushAsync();
+    expect(modelProfileController.saved.some((profile) => profile.id === createdId)).toBe(true);
+
+    (root.querySelector("[data-remove-model-profile]") as HTMLButtonElement).click();
     await flushUntil(() =>
       !modelProfileController.saved.some((profile) => profile.id === createdId),
     );
     expect(root.querySelectorAll("[data-model-profile-select] option")).toHaveLength(startingCount);
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
 
+    confirmSpy.mockRestore();
     await handle.destroy();
   });
 
@@ -986,6 +1026,9 @@ describe("OpenSymphonyApp mount", () => {
   it("creates and deletes connection profiles from the panel", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
+    const confirmSpy = jest.spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
 
     const profiles: ConnectionProfile[] = [
       {
@@ -1059,9 +1102,15 @@ describe("OpenSymphonyApp mount", () => {
     expect(profiles.some((profile) => profile.id === "created")).toBe(true);
 
     (root.querySelector("[data-remove-profile]") as HTMLButtonElement).click();
+    await flushAsync();
+    expect(profiles.some((profile) => profile.id === "created")).toBe(true);
+
+    (root.querySelector("[data-remove-profile]") as HTMLButtonElement).click();
     await flushUntil(() => !profiles.some((profile) => profile.id === "created"));
     expect(root.querySelectorAll("[data-profile-select] option")).toHaveLength(1);
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
 
+    confirmSpy.mockRestore();
     await handle.destroy();
   });
 

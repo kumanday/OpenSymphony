@@ -844,6 +844,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!activeProfileId) {
       return;
     }
+    const profile = this.state.profiles.find((candidate) => candidate.id === activeProfileId);
+    if (!this.confirmProfileRemoval(profile?.label ?? "this connection profile")) {
+      return;
+    }
     try {
       const profiles = await controller.removeProfile(activeProfileId);
       const active = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
@@ -889,6 +893,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
 
     const credentialInput = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
+    const apiKeyRef = credentialInput || null;
     const credentialStorage = mode === "subscription"
       ? "openhands_auth_directory"
       : baseProfile.credentialStorage;
@@ -921,7 +926,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       owner: modelOwnerFromValue(this.valueOf<HTMLSelectElement>("[data-model-owner]")),
       baseUrl: this.valueOf<HTMLInputElement>("[data-model-base-url]").trim(),
       model,
-      apiKeyRef: mode === "api_key" ? credentialInput : null,
+      apiKeyRef: mode === "api_key" ? apiKeyRef : null,
       subscriptionCredential,
       credentialStorage,
       harnesses: splitList(this.valueOf<HTMLInputElement>("[data-model-harnesses]")),
@@ -963,6 +968,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
   }
 
+  private confirmProfileRemoval(label: string): boolean {
+    const view = this.options.root.ownerDocument.defaultView;
+    if (!view?.confirm) {
+      return true;
+    }
+    return view.confirm(`Delete profile "${label}"?`);
+  }
+
   private async createModelProfileDraft(): Promise<void> {
     const controller = this.options.modelProfileController;
     if (!controller) {
@@ -992,6 +1005,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     const active = activeModelProfile(this.state.modelProfiles, this.state.activeModelProfileId);
     if (!active) {
+      return;
+    }
+    if (!this.confirmProfileRemoval(active.label)) {
       return;
     }
     try {
