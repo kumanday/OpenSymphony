@@ -156,6 +156,7 @@ function waitForStreamProgress(stream, timeoutMs) {
     const onClose = () => complete("close");
     const onError = (error) => {
       cleanup();
+      ws.close();
       reject(error);
     };
     const timeout = setTimeout(() => complete("timeout"), timeoutMs);
@@ -634,6 +635,16 @@ async function runWebSocketProbe(secureExposure) {
     const reconnectMs = performance.now() - reconnectStartedAt;
     const { stdout, stderr } = decodeOutput();
     const stderrTrimmed = stderr.trim();
+    const output = `${stdout}\n${stderr}`;
+    const configuredListener = `ws://127.0.0.1:${port}`;
+    const observedListener = output.match(/\blistening on:\s*(ws:\/\/[^\s]+)/)?.[1] ?? configuredListener;
+    let listenerHost = null;
+    try {
+      listenerHost = new URL(observedListener).hostname;
+    } catch {
+      listenerHost = null;
+    }
+    const localhostOnly = ["127.0.0.1", "localhost", "[::1]", "::1"].includes(listenerHost ?? "");
 
     return {
       transport: "websocket_loopback",
@@ -654,11 +665,11 @@ async function runWebSocketProbe(secureExposure) {
       stderrBytes: Buffer.byteLength(stderr, "utf8"),
       stderrPreview: stderrTrimmed ? [...stderrTrimmed].slice(-1000).join("") : null,
       exposure: {
-        listener: `ws://127.0.0.1:${port}`,
-        listenerHost: "127.0.0.1",
-        localhostOnly: /binds localhost only/.test(`${stdout}\n${stderr}`),
-        localhostOnlyEvidence: ["configured_loopback_listener", "startup_banner"],
-        authEvidence: "advertised_in_help_only",
+        listener: observedListener,
+        listenerHost,
+        localhostOnly,
+        localhostOnlyEvidence: ["configured_loopback_listener", "parsed_listener_address"],
+        authEvidence: "advertised_in_help",
         runtimeAuthProbe: "not_measured_by_loopback_smoke",
         authModesAdvertisedInHelp: [
           ...(secureExposure.hasCapabilityTokenMode ? ["capability-token"] : []),

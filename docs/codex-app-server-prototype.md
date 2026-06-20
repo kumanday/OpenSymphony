@@ -159,9 +159,9 @@ WebSocket probes are supported. A 10-request local run produced:
       "localhostOnly": true,
       "localhostOnlyEvidence": [
         "configured_loopback_listener",
-        "startup_banner"
+        "parsed_listener_address"
       ],
-      "authEvidence": "advertised_in_help_only",
+      "authEvidence": "advertised_in_help",
       "runtimeAuthProbe": "not_measured_by_loopback_smoke",
       "authModesAdvertisedInHelp": [
         "capability-token",
