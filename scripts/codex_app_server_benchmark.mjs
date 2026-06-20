@@ -32,6 +32,8 @@ const iterations = parseIntegerOption("--iterations", 50, 1, 100000);
 const port = parseIntegerOption("--port", 18765, 1, 65535);
 const runWebSocket = args.get("--skip-websocket") !== "true";
 const requestTimeoutMs = parseIntegerOption("--request-timeout-ms", 5000, 1, 300000);
+const activeChildren = new Set();
+const activeSockets = new Set();
 
 function assertWebSocketRuntime() {
   const nodeVersion = process.versions?.node ?? "unknown";
@@ -60,6 +62,32 @@ async function terminateChild(child, graceMs = 1000) {
   if (await Promise.race([exited, sleep(graceMs).then(() => false)])) return;
   child.kill("SIGKILL");
   await Promise.race([exited, sleep(graceMs)]);
+}
+
+function trackChild(child) {
+  activeChildren.add(child);
+  child.once("exit", () => activeChildren.delete(child));
+  return child;
+}
+
+function trackSocket(ws) {
+  activeSockets.add(ws);
+  ws.addEventListener("close", () => activeSockets.delete(ws), { once: true });
+  return ws;
+}
+
+async function cleanupActiveResources() {
+  for (const ws of activeSockets) {
+    if (ws.readyState < WebSocket.CLOSING) ws.close();
+  }
+  await Promise.all([...activeChildren].map((child) => terminateChild(child)));
+}
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    const exitCode = signal === "SIGINT" ? 130 : 143;
+    cleanupActiveResources().finally(() => process.exit(exitCode));
+  });
 }
 
 function assertJsonRpcResult(label, response) {
@@ -184,9 +212,11 @@ async function collectChildOutput(child, label, timeoutMs = requestTimeoutMs) {
 }
 
 async function runStdioProbe() {
-  const child = spawn("codex", ["app-server", "--stdio"], {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
+  const child = trackChild(
+    spawn("codex", ["app-server", "--stdio"], {
+      stdio: ["pipe", "pipe", "pipe"],
+    }),
+  );
   try {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
@@ -243,7 +273,7 @@ async function waitForReadyz(url, timeoutMs = 5000) {
 }
 
 async function openSocket(url, timeoutMs = requestTimeoutMs) {
-  const ws = new WebSocket(url);
+  const ws = trackSocket(new WebSocket(url));
   setMaxListeners(0, ws);
   await new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -296,6 +326,7 @@ function requestOverSocket(ws, id, method, params = {}, timeoutMs = requestTimeo
       clearTimeout(timeout);
       ws.removeEventListener("message", onMessage);
       ws.removeEventListener("error", onError);
+      ws.removeEventListener("close", onClose);
     };
     const onMessage = (event) => {
       let parsed;
@@ -314,21 +345,32 @@ function requestOverSocket(ws, id, method, params = {}, timeoutMs = requestTimeo
       cleanup();
       reject(error);
     };
+    const onClose = () => {
+      cleanup();
+      reject(new Error(`${method} request ${id} closed before response`));
+    };
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error(`${method} request ${id} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     ws.addEventListener("message", onMessage);
     ws.addEventListener("error", onError);
+    ws.addEventListener("close", onClose);
     ws.send(request(id, method, params));
   });
 }
 
 async function runWebSocketProbe(secureExposure) {
-  const child = spawn("codex", ["app-server", "--listen", `ws://127.0.0.1:${port}`], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = trackChild(
+    spawn("codex", ["app-server", "--listen", `ws://127.0.0.1:${port}`], {
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  );
+  let stdoutBytes = 0;
   let stderr = "";
+  child.stdout.on("data", (chunk) => {
+    stdoutBytes += chunk.length;
+  });
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString("utf8");
   });
@@ -387,6 +429,7 @@ async function runWebSocketProbe(secureExposure) {
       },
       reconnectLatencyMs: Number(reconnectMs.toFixed(3)),
       reconnectResponse: "ok",
+      stdoutBytes,
       exposure: {
         listener: `ws://127.0.0.1:${port}`,
         localhostOnly: /binds localhost only/.test(stderr),
@@ -404,9 +447,11 @@ async function runWebSocketProbe(secureExposure) {
 }
 
 async function runHelpProbe() {
-  const child = spawn("codex", ["app-server", "--help"], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = trackChild(
+    spawn("codex", ["app-server", "--help"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  );
   const help = await collectChildOutput(child, "codex app-server --help");
   return {
     transport: "websocket_secure_exposure",
@@ -427,7 +472,7 @@ const report = {
 };
 
 try {
-  const version = spawn("codex", ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+  const version = trackChild(spawn("codex", ["--version"], { stdio: ["ignore", "pipe", "pipe"] }));
   report.codexVersion = (await collectChildOutput(version, "codex --version")).trim();
   report.stdio = await runStdioProbe();
   report.secureExposure = await runHelpProbe();

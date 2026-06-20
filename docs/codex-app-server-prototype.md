@@ -67,7 +67,7 @@ approval request shapes.
 Run:
 
 ```bash
-node scripts/codex_app_server_benchmark.mjs --iterations 50 --port 18765
+node scripts/codex_app_server_benchmark.mjs --iterations 10 --port 18778
 ```
 
 The loopback WebSocket probe uses Node's global `WebSocket` and `fetch`
@@ -93,11 +93,11 @@ WebSocket probes are supported. A 10-request local run produced:
 
 ```json
 {
-  "generatedAt": "2026-06-20T06:34:40.884Z",
+  "generatedAt": "2026-06-20T06:41:49.453Z",
   "codexVersion": "codex-cli 0.138.0",
   "stdio": {
     "transport": "stdio",
-    "initializeLatencyMs": 117.115,
+    "initializeLatencyMs": 115.315,
     "response": {
       "id": 1,
       "result": {
@@ -111,21 +111,22 @@ WebSocket probes are supported. A 10-request local run produced:
   },
   "websocket": {
     "transport": "websocket_loopback",
-    "port": 18777,
-    "initializeLatencyMs": 1.103,
+    "port": 18778,
+    "initializeLatencyMs": 1.299,
     "queuedRequests": 10,
     "queuedResponses": 10,
-    "queueElapsedMs": 0.905,
-    "requestsPerSecond": 11049.22,
+    "queueElapsedMs": 0.779,
+    "requestsPerSecond": 12838.35,
     "latencyMs": {
-      "p50": 0.558,
-      "p95": 0.67,
-      "max": 0.67
+      "p50": 0.476,
+      "p95": 0.507,
+      "max": 0.507
     },
-    "reconnectLatencyMs": 1.027,
+    "reconnectLatencyMs": 0.959,
     "reconnectResponse": "ok",
+    "stdoutBytes": 0,
     "exposure": {
-      "listener": "ws://127.0.0.1:18777",
+      "listener": "ws://127.0.0.1:18778",
       "localhostOnly": true,
       "authModesFromHelp": [
         "capability-token",
