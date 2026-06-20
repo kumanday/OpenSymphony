@@ -100,9 +100,9 @@ The script performs:
 
 Use `--skip-websocket` when the installed Codex version lacks WebSocket support;
 the flag is presence-based and does not take a value.
-Queued WebSocket requests use a derived per-request deadline of
-`--request-timeout-ms + --iterations`, so the documented high-iteration range
-does not inherit the default 5s timeout as an accidental whole-batch deadline.
+Queued WebSocket requests use `--batch-timeout-ms`, which defaults to
+`min(300000, --request-timeout-ms + --iterations * 100)`, so the timeout remains
+an explicit duration even for high-iteration runs.
 
 ## Local Benchmark Result
 

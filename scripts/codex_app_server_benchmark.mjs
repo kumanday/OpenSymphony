@@ -6,7 +6,13 @@ import { once, setMaxListeners } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const booleanFlags = new Set(["--skip-websocket"]);
-const valueFlags = new Set(["--codex-path", "--iterations", "--port", "--request-timeout-ms"]);
+const valueFlags = new Set([
+  "--batch-timeout-ms",
+  "--codex-path",
+  "--iterations",
+  "--port",
+  "--request-timeout-ms",
+]);
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 1) {
   const rawArg = process.argv[i];
@@ -57,6 +63,12 @@ const iterations = parseIntegerOption("--iterations", 50, 1, 100000);
 const port = parseIntegerOption("--port", 18765, 1, 65535);
 const runWebSocket = !args.has("--skip-websocket");
 const requestTimeoutMs = parseIntegerOption("--request-timeout-ms", 5000, 1, 300000);
+const batchTimeoutMs = parseIntegerOption(
+  "--batch-timeout-ms",
+  Math.min(300000, requestTimeoutMs + iterations * 100),
+  1,
+  300000,
+);
 const codexPath = args.get("--codex-path") ?? "codex";
 const activeChildren = new Set();
 const activeSockets = new Set();
@@ -82,7 +94,7 @@ function request(id, method, params = {}) {
 }
 
 function websocketBatchTimeoutMs() {
-  return requestTimeoutMs + iterations;
+  return batchTimeoutMs;
 }
 
 async function terminateChild(child, graceMs = 1000) {
@@ -279,12 +291,14 @@ async function collectChildOutput(child, label, timeoutMs = requestTimeoutMs) {
   child.stdout?.on("data", (chunk) => stdout.push(chunk));
   child.stderr?.on("data", (chunk) => stderr.push(chunk));
 
-  const exitPromise =
-    child.exitCode !== null || child.signalCode !== null
+  const closePromise =
+    child.exitCode !== null &&
+    child.stdout?.readableEnded !== false &&
+    child.stderr?.readableEnded !== false
       ? Promise.resolve({ code: child.exitCode, signal: child.signalCode, timedOut: false })
-      : once(child, "exit").then(([code, signal]) => ({ code, signal, timedOut: false }));
+      : once(child, "close").then(([code, signal]) => ({ code, signal, timedOut: false }));
   const result = await Promise.race([
-    exitPromise,
+    closePromise,
     once(child, "error").then(([error]) => ({ error, timedOut: false })),
     sleep(timeoutMs).then(() => ({ code: null, signal: null, timedOut: true })),
   ]);
@@ -321,20 +335,29 @@ async function runStdioProbe() {
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
     });
-    const childFailure = new Promise((_, reject) => {
-      child.once("error", (error) => {
-        reject(new Error(`${codexPath} app-server --stdio failed to start: ${error.message}`));
-      });
-      child.once("exit", (code, signal) => {
-        if (shuttingDown) return;
-        const suffix = signal ? `signal ${signal}` : `code ${code}`;
-        reject(
-          new Error(
-            `${codexPath} app-server --stdio exited before initialize completed with ${suffix}${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
-          ),
-        );
-      });
-    });
+    const childFailure =
+      child.exitCode !== null || child.signalCode !== null
+        ? Promise.reject(
+            new Error(
+              `${codexPath} app-server --stdio exited before initialize completed with ${
+                child.signalCode ? `signal ${child.signalCode}` : `code ${child.exitCode}`
+              }${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
+            ),
+          )
+        : new Promise((_, reject) => {
+            child.once("error", (error) => {
+              reject(new Error(`${codexPath} app-server --stdio failed to start: ${error.message}`));
+            });
+            child.once("exit", (code, signal) => {
+              if (shuttingDown) return;
+              const suffix = signal ? `signal ${signal}` : `code ${code}`;
+              reject(
+                new Error(
+                  `${codexPath} app-server --stdio exited before initialize completed with ${suffix}${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
+                ),
+              );
+            });
+          });
     childFailure.catch(() => {});
     const withChildFailure = (promise) => {
       promise.catch(() => {});
@@ -552,21 +575,30 @@ async function runWebSocketProbe(secureExposure) {
   let client = null;
   let reconnectClient = null;
   let shuttingDown = false;
-  const childFailure = new Promise((_, reject) => {
-    child.once("error", (error) => {
-      reject(new Error(`${codexPath} app-server failed during WebSocket probe: ${error.message}`));
-    });
-    child.once("exit", (code, signal) => {
-      if (shuttingDown) return;
-      const { stdout, stderr } = decodeOutput();
-      const suffix = signal ? `signal ${signal}` : `code ${code}`;
-      reject(
-        new Error(
-          `${codexPath} app-server exited unexpectedly during WebSocket probe with ${suffix}; stdout=${JSON.stringify(stdout.trim())}; stderr=${JSON.stringify(stderr.trim())}`,
-        ),
-      );
-    });
-  });
+  const childFailure =
+    child.exitCode !== null || child.signalCode !== null
+      ? Promise.reject(
+          new Error(
+            `${codexPath} app-server exited unexpectedly during WebSocket probe with ${
+              child.signalCode ? `signal ${child.signalCode}` : `code ${child.exitCode}`
+            }; stdout=${JSON.stringify(decodeOutput().stdout.trim())}; stderr=${JSON.stringify(decodeOutput().stderr.trim())}`,
+          ),
+        )
+      : new Promise((_, reject) => {
+          child.once("error", (error) => {
+            reject(new Error(`${codexPath} app-server failed during WebSocket probe: ${error.message}`));
+          });
+          child.once("exit", (code, signal) => {
+            if (shuttingDown) return;
+            const { stdout, stderr } = decodeOutput();
+            const suffix = signal ? `signal ${signal}` : `code ${code}`;
+            reject(
+              new Error(
+                `${codexPath} app-server exited unexpectedly during WebSocket probe with ${suffix}; stdout=${JSON.stringify(stdout.trim())}; stderr=${JSON.stringify(stderr.trim())}`,
+              ),
+            );
+          });
+        });
   childFailure.catch(() => {});
   const withChildFailure = (promise) => {
     promise.catch(() => {});
