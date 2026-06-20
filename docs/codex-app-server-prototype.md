@@ -82,6 +82,8 @@ node scripts/codex_app_server_benchmark.mjs --iterations 10 --port 18779
 The loopback WebSocket probe uses Node's global `WebSocket` and `fetch`
 implementations and therefore requires Node.js 22 or newer. Use
 `--skip-websocket` for stdio-only evidence on older Node runtimes.
+Use `--codex-path <path>` to benchmark a specific Codex CLI binary instead of
+the first `codex` on `PATH`.
 
 The script performs:
 
@@ -149,15 +151,15 @@ WebSocket probes are supported. A 10-request local run produced:
     "stdoutBytes": 0,
     "stderrBytes": 222,
     "stderrPreview": "codex app-server (WebSockets)\n  listening on: ws://127.0.0.1:18779\n  readyz: http://127.0.0.1:18779/readyz\n  healthz: http://127.0.0.1:18779/healthz\n  note: binds localhost only (use SSH port-forwarding for remote access)",
-	    "exposure": {
-	      "listener": "ws://127.0.0.1:18779",
-	      "listenerHost": "127.0.0.1",
-	      "localhostOnly": true,
-	      "localhostOnlyEvidence": [
-	        "configured_loopback_listener",
-	        "startup_banner"
-	      ],
-	      "authModesAdvertisedInHelp": [
+    "exposure": {
+      "listener": "ws://127.0.0.1:18779",
+      "listenerHost": "127.0.0.1",
+      "localhostOnly": true,
+      "localhostOnlyEvidence": [
+        "configured_loopback_listener",
+        "startup_banner"
+      ],
+      "authModesAdvertisedInHelp": [
         "capability-token",
         "signed-bearer-token"
       ]

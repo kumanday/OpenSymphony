@@ -36,6 +36,7 @@ const iterations = parseIntegerOption("--iterations", 50, 1, 100000);
 const port = parseIntegerOption("--port", 18765, 1, 65535);
 const runWebSocket = !args.has("--skip-websocket");
 const requestTimeoutMs = parseIntegerOption("--request-timeout-ms", 5000, 1, 300000);
+const codexPath = args.get("--codex-path") ?? "codex";
 const activeChildren = new Set();
 const activeSockets = new Set();
 
@@ -283,7 +284,7 @@ async function collectChildOutput(child, label, timeoutMs = requestTimeoutMs) {
 
 async function runStdioProbe() {
   const child = trackChild(
-    spawn("codex", ["app-server", "--stdio"], {
+    spawn(codexPath, ["app-server", "--stdio"], {
       stdio: ["pipe", "pipe", "pipe"],
     }),
   );
@@ -297,14 +298,14 @@ async function runStdioProbe() {
     });
     const childFailure = new Promise((_, reject) => {
       child.once("error", (error) => {
-        reject(new Error(`codex app-server --stdio failed to start: ${error.message}`));
+        reject(new Error(`${codexPath} app-server --stdio failed to start: ${error.message}`));
       });
       child.once("exit", (code, signal) => {
         if (shuttingDown) return;
         const suffix = signal ? `signal ${signal}` : `code ${code}`;
         reject(
           new Error(
-            `codex app-server --stdio exited before initialize completed with ${suffix}${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
+            `${codexPath} app-server --stdio exited before initialize completed with ${suffix}${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
           ),
         );
       });
@@ -499,7 +500,7 @@ class WebSocketJsonRpcClient {
 
 async function runWebSocketProbe(secureExposure) {
   const child = trackChild(
-    spawn("codex", ["app-server", "--listen", `ws://127.0.0.1:${port}`], {
+    spawn(codexPath, ["app-server", "--listen", `ws://127.0.0.1:${port}`], {
       stdio: ["ignore", "pipe", "pipe"],
     }),
   );
@@ -523,7 +524,7 @@ async function runWebSocketProbe(secureExposure) {
   let shuttingDown = false;
   const childFailure = new Promise((_, reject) => {
     child.once("error", (error) => {
-      reject(new Error(`codex app-server failed during WebSocket probe: ${error.message}`));
+      reject(new Error(`${codexPath} app-server failed during WebSocket probe: ${error.message}`));
     });
     child.once("exit", (code, signal) => {
       if (shuttingDown) return;
@@ -531,7 +532,7 @@ async function runWebSocketProbe(secureExposure) {
       const suffix = signal ? `signal ${signal}` : `code ${code}`;
       reject(
         new Error(
-          `codex app-server exited unexpectedly during WebSocket probe with ${suffix}; stdout=${JSON.stringify(stdout.trim())}; stderr=${JSON.stringify(stderr.trim())}`,
+          `${codexPath} app-server exited unexpectedly during WebSocket probe with ${suffix}; stdout=${JSON.stringify(stdout.trim())}; stderr=${JSON.stringify(stderr.trim())}`,
         ),
       );
     });
@@ -646,11 +647,11 @@ async function runWebSocketProbe(secureExposure) {
 
 async function runHelpProbe() {
   const child = trackChild(
-    spawn("codex", ["app-server", "--help"], {
+    spawn(codexPath, ["app-server", "--help"], {
       stdio: ["ignore", "pipe", "pipe"],
     }),
   );
-  const help = await collectChildOutput(child, "codex app-server --help");
+  const help = await collectChildOutput(child, `${codexPath} app-server --help`);
   return {
     transport: "websocket_secure_exposure",
     authEvidence: "advertised_in_help",
@@ -675,8 +676,8 @@ const report = {
 };
 
 try {
-  const version = trackChild(spawn("codex", ["--version"], { stdio: ["ignore", "pipe", "pipe"] }));
-  report.codexVersion = (await collectChildOutput(version, "codex --version")).trim();
+  const version = trackChild(spawn(codexPath, ["--version"], { stdio: ["ignore", "pipe", "pipe"] }));
+  report.codexVersion = (await collectChildOutput(version, `${codexPath} --version`)).trim();
   report.stdio = await runStdioProbe();
   report.secureExposure = await runHelpProbe();
   if (runWebSocket) {
@@ -686,5 +687,9 @@ try {
   console.log(JSON.stringify(report, null, 2));
 } catch (error) {
   console.error(error.stack || String(error));
+  if (report.codexVersion || report.stdio || report.websocket || report.secureExposure) {
+    console.error("Partial benchmark report:");
+    console.error(JSON.stringify(report, null, 2));
+  }
   process.exit(1);
 }
