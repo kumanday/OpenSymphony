@@ -115,8 +115,8 @@ pub struct CodexModelCredentialReuse {
     pub model_source: CodexConfiguredValueSource,
     pub model_reference: String,
     pub credential_reference_id: String,
-    pub credential_reference_kind: String,
-    pub storage_mode: String,
+    pub credential_reference_kind: CredentialReferenceKind,
+    pub storage_mode: CredentialStorageMode,
     pub can_supply_subscription_credentials: bool,
     pub config_overrides: BTreeMap<String, String>,
 }
@@ -152,31 +152,12 @@ impl CodexModelCredentialReuse {
             },
             model_reference: profile.model.reference.clone(),
             credential_reference_id: profile.credential_reference.id.clone(),
-            credential_reference_kind: credential_reference_kind_name(profile),
-            storage_mode: storage_mode_name(profile.storage_mode).into(),
+            credential_reference_kind: profile.credential_reference.kind,
+            storage_mode: profile.storage_mode,
             can_supply_subscription_credentials: profile.credential_mode
                 == CredentialMode::Subscription,
             config_overrides,
         })
-    }
-}
-
-fn credential_reference_kind_name(profile: &ModelSettingsProfile) -> String {
-    match profile.credential_reference.kind {
-        CredentialReferenceKind::EnvironmentVariable => "environment_variable",
-        CredentialReferenceKind::LocalKeychainServiceAccount => "local_keychain_service_account",
-        CredentialReferenceKind::OpenHandsAuthDirectory => "openhands_auth_directory",
-        CredentialReferenceKind::HostedBrokerReference => "hosted_broker_reference",
-    }
-    .into()
-}
-
-fn storage_mode_name(storage_mode: CredentialStorageMode) -> &'static str {
-    match storage_mode {
-        CredentialStorageMode::Environment => "environment",
-        CredentialStorageMode::LocalKeychain => "local_keychain",
-        CredentialStorageMode::OpenHandsAuthDirectory => "openhands_auth_directory",
-        CredentialStorageMode::HostedBroker => "hosted_broker",
     }
 }
 

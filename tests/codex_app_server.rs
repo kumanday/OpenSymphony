@@ -5,7 +5,9 @@ use opensymphony::opensymphony_codex::{
     CodexUserInput, CodexWebSocketAuth, NormalizedCodexEventKind, normalize_server_notification,
     websocket_benchmark_requirements,
 };
-use opensymphony::opensymphony_gateway_schema::model_settings::ModelSettingsResponse;
+use opensymphony::opensymphony_gateway_schema::model_settings::{
+    CredentialReferenceKind, CredentialStorageMode, ModelSettingsResponse,
+};
 use serde_json::json;
 
 #[test]
@@ -109,11 +111,14 @@ fn codex_model_and_credential_reuse_maps_existing_settings_profiles() {
     assert!(codex_profiles.iter().any(|profile| {
         profile.profile_id == "codex-chatgpt-local-keychain"
             && profile.can_supply_subscription_credentials
-            && profile.storage_mode == "local_keychain"
+            && profile.credential_reference_kind
+                == CredentialReferenceKind::LocalKeychainServiceAccount
+            && profile.storage_mode == CredentialStorageMode::LocalKeychain
     }));
     assert!(codex_profiles.iter().any(|profile| {
         profile.profile_id == "hosted-openai-subscription-broker"
-            && profile.storage_mode == "hosted_broker"
+            && profile.credential_reference_kind == CredentialReferenceKind::HostedBrokerReference
+            && profile.storage_mode == CredentialStorageMode::HostedBroker
     }));
     assert!(
         codex_profiles

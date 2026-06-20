@@ -29,13 +29,16 @@ mode numbers would be significantly higher.
 2. **Native IPC** (Unix domain sockets / named pipes) — separate process, still loopback.
 3. **Tauri channels** — from Rust backend into webview for high-volume frames.
 4. **Loopback HTTP/WebSocket** — compatibility path and baseline contract test path.
-5. **Codex app-server loopback WebSocket** — feature-gated future harness path;
-   benchmark with `scripts/codex_app_server_benchmark.mjs` before production
-   exposure.
 
 All four paths expose the same gateway DTOs, event envelopes, cursors, and action
 receipts. Local native transport is a performance optimization; it must not bypass
 the event journal, permission checks, or orchestrator-owned state transitions.
+
+Codex app-server loopback WebSocket is a feature-gated future harness transport,
+not an OpenSymphony gateway transport. It speaks the Codex JSON-RPC contract
+rather than gateway DTOs, so production exposure must be justified with
+`scripts/codex_app_server_benchmark.mjs` evidence for throughput, queue behavior,
+reconnect, and secure exposure.
 
 ### Remote hosted transport strategy
 
