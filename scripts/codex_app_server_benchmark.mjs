@@ -6,6 +6,7 @@ import { once, setMaxListeners } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const booleanFlags = new Set(["--skip-websocket"]);
+const valueFlags = new Set(["--codex-path", "--iterations", "--port", "--request-timeout-ms"]);
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 1) {
   const rawArg = process.argv[i];
@@ -17,17 +18,25 @@ for (let i = 2; i < process.argv.length; i += 1) {
     args.set(arg, "true");
     continue;
   }
+  if (!valueFlags.has(arg)) {
+    console.error(`unknown option ${arg}`);
+    process.exit(1);
+  }
   if (inlineValue != null) {
+    if (inlineValue.length === 0) {
+      console.error(`${arg} requires a non-empty value`);
+      process.exit(1);
+    }
     args.set(arg, inlineValue);
     continue;
   }
   const next = process.argv[i + 1];
-  if (next && !next.startsWith("--")) {
-    args.set(arg, next);
-    i += 1;
-  } else {
-    args.set(arg, "true");
+  if (!next || next.startsWith("--")) {
+    console.error(`${arg} requires a value`);
+    process.exit(1);
   }
+  args.set(arg, next);
+  i += 1;
 }
 
 function parseIntegerOption(flag, defaultValue, min, max) {
@@ -484,6 +493,10 @@ class WebSocketJsonRpcClient {
     const pending = this.pending.get(String(parsed.id));
     if (!pending) return;
     this.pending.delete(String(parsed.id));
+    if (!Object.hasOwn(parsed, "result") && !Object.hasOwn(parsed, "error")) {
+      pending.reject(new Error(`malformed JSON-RPC response for ${pending.method}: ${JSON.stringify(parsed)}`));
+      return;
+    }
     pending.resolve(parsed);
   }
 
