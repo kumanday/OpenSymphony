@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use crate::opensymphony_domain::{
-    ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
+    ConversationMetadata, HarnessAdapter, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
     NormalizedIssue, RetryAttempt, RunAttempt, TimestampMs, WorkerId, WorkerOutcomeKind,
 };
 use crate::opensymphony_openhands::{
@@ -296,6 +296,24 @@ fn runner_config(workflow: &ResolvedWorkflow) -> IssueSessionRunnerConfig {
     config.terminal_wait_timeout = Duration::from_secs(2);
     config.finished_drain_timeout = Duration::from_millis(200);
     config
+}
+
+#[test]
+fn issue_session_runner_reports_harness_adapter_capabilities() {
+    let client = OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1"));
+    let runner = IssueSessionRunner::new(client, IssueSessionRunnerConfig::default());
+
+    assert_eq!(
+        HarnessAdapter::harness_kind(&runner),
+        "openhands_agent_server"
+    );
+    let capabilities = HarnessAdapter::capabilities(&runner);
+    assert_eq!(capabilities.kind, "openhands_agent_server");
+    assert!(capabilities.available);
+    assert!(capabilities.actions.start_run);
+    assert!(capabilities.event_streams.replay_from_cursor);
+    assert!(capabilities.history.reconcile_after_ready);
+    assert!(!capabilities.pause_resume.pause);
 }
 
 fn run_attempt(

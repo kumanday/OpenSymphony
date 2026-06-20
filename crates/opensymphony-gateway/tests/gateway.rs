@@ -527,6 +527,9 @@ fn gateway_capabilities_json_fixture_roundtrips() {
                 bidirectional: false,
             },
         ],
+        harnesses: vec![
+            opensymphony::opensymphony_gateway_schema::capability::HarnessCapability::openhands_agent_server(),
+        ],
         features: vec![
             opensymphony::opensymphony_gateway_schema::capability::FeatureCapability {
                 feature: "planning".into(),
@@ -550,6 +553,7 @@ fn gateway_capabilities_json_fixture_roundtrips() {
     assert_eq!(back.supported_api_versions, vec!["1.0.0"]);
     assert_eq!(back.auth_modes.len(), 2);
     assert_eq!(back.max_event_page_size, 1000);
+    assert_eq!(back.harnesses[0].kind, "openhands_agent_server");
 }
 
 #[test]
@@ -606,7 +610,7 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
     assert_eq!(control_snapshot_response.sequence, 1);
 
     let caps_url = format!("http://{address}/api/v1/capabilities");
-    let _caps_response = client
+    let caps_response = client
         .get(&caps_url)
         .send()
         .await
@@ -615,7 +619,18 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
         .await
         .expect("decode capabilities");
 
-    // capabilities assertions verified in dedicated round-trip test
+    assert!(
+        caps_response
+            .harnesses
+            .iter()
+            .any(|harness| harness.kind == "openhands_agent_server" && harness.available)
+    );
+    assert!(
+        caps_response
+            .harnesses
+            .iter()
+            .any(|harness| harness.kind == "codex_app_server" && !harness.available)
+    );
 
     let snapshot_url = format!("http://{address}/api/v1/dashboard/snapshot");
     let snapshot_response = client

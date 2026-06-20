@@ -6,11 +6,13 @@ use std::{
 };
 
 use crate::opensymphony_domain::{
-    ConversationId, ConversationMetadata, DurationMs, IssueId, IssueIdentifier, NormalizedIssue,
-    RunAttempt, RuntimeStreamState, TimestampMs, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord,
+    ConversationId, ConversationMetadata, DurationMs, HarnessAdapter, IssueId, IssueIdentifier,
+    NormalizedIssue, RunAttempt, RuntimeStreamState, TimestampMs, WorkerId, WorkerOutcomeKind,
+    WorkerOutcomeRecord,
 };
 #[cfg(test)]
 use crate::opensymphony_domain::{RuntimeLivenessPhase, RuntimeProgressSnapshot};
+use crate::opensymphony_gateway_schema::capability::HarnessCapability;
 use crate::opensymphony_memory::{
     IssueEvidence, IssueLinkEvidence, MemoryConfig, MemoryContextOptions, SourceFile,
     context_for_issue_with_options,
@@ -2808,6 +2810,16 @@ impl IssueSessionRunner {
             worker_outcome,
             run_status,
         })
+    }
+}
+
+impl HarnessAdapter for IssueSessionRunner {
+    fn harness_kind(&self) -> &'static str {
+        "openhands_agent_server"
+    }
+
+    fn capabilities(&self) -> HarnessCapability {
+        HarnessCapability::openhands_agent_server()
     }
 }
 

@@ -1,4 +1,5 @@
 mod control_plane;
+mod harness;
 mod identifiers;
 mod issue;
 mod journal;
@@ -19,6 +20,7 @@ pub use control_plane::{
     ControlPlaneMemoryServerStatus, ControlPlaneMetricsSnapshot, ControlPlaneRecentEvent,
     ControlPlaneRecentEventKind, ControlPlaneWorkerOutcome, SnapshotEnvelope,
 };
+pub use harness::HarnessAdapter;
 pub use identifiers::{
     ConversationId, IdentifierError, IssueId, IssueIdentifier, TrackerStateId, WorkerId,
     WorkspaceKey,
