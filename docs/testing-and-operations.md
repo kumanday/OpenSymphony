@@ -469,6 +469,11 @@ That document covers:
 ## Current model
 
 - COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
+- COE-476 promoted the local stdio Codex app-server path to a supported
+  harness capability. Use `cargo test-system-duckdb --test codex_app_server`
+  for adapter lifecycle and event-normalization coverage; add
+  `--features codex-app-server-prototype` only for legacy benchmark workflows
+  that still request that compatibility flag.
 
 ## Important invariants
 

@@ -40,23 +40,23 @@ Known gaps:
 
 ## Codex App Server
 
-Codex app-server fits the same contract as a future JSON-RPC adapter. Requests
-map to start thread/turn, send input, approve/reject, and cancel operations.
-Notifications map to OpenSymphony runtime events with raw payload retention,
-cursor replay, and correlation IDs at the gateway layer.
+Codex app-server now has a supported local JSON-RPC adapter path over stdio.
+Requests map to start thread/turn, resume with user input, approve/reject, and
+cancel operations. Notifications map to OpenSymphony runtime and approval
+events with raw payload retention so run details, timelines, and event replay
+can render Codex activity through the same surfaces used by other harnesses.
 
-COE-426 adds a feature-gated local prototype under
-`codex-app-server-prototype`. The prototype can construct stdio launch
-arguments, build `initialize`, `thread/start`, and `turn/start` JSON-RPC
-requests, normalize basic thread/turn/item notifications, and map the existing
-model credential settings profiles to future Codex use. Production routing
-remains disabled; `codex_app_server` is still advertised as unavailable through
-capability discovery.
+COE-426 added the benchmark/prototype evidence. COE-476 promotes the local
+stdio path into capability discovery: `codex_app_server` is advertised as
+available with runtime contract `codex-app-server-json-rpc-v2`,
+`json_rpc_2_0` transport, and `stdio` mode. The
+`codex-app-server-prototype` feature remains as a compatibility switch for
+older benchmark workflows; it is not required for the local adapter tests.
 
-Codex ChatGPT subscription readiness is now advertised as a Codex CLI login
+Codex ChatGPT subscription readiness is advertised as a Codex CLI login
 reference rather than an OpenSymphony-owned secret. Capability discovery lists
 `codex_cli_login` alongside the existing `inherited_subscription_login` as a
-supported credential reference kind for the future Codex adapter. The gateway
+supported credential reference kind for the local Codex adapter. The gateway
 model-settings response probes `codex --version`,
 `codex app-server --help`, and `codex login status` to render installed,
 logged-out, expired, unsupported, permission-denied, or unknown states without
@@ -70,17 +70,14 @@ flags against the installed Codex CLI.
 
 Known gaps:
 
-- Production adapter implementation is out of scope for COE-426.
 - Pause/resume semantics need protocol confirmation before being advertised as
   available.
-- WebSocket transport remains experimental until benchmarked and secured; stdio
-  is the preferred local integration mode.
+- WebSocket transport remains experimental; stdio is the supported local
+  integration mode.
 - Codex subscription readiness uses the local Codex CLI login reference and can
   later compose with hosted broker references without requiring raw subscription
   tokens in OpenSymphony workspaces or browser payloads.
-- Production routing still needs a dedicated adapter that consumes the
-  `codex_cli_login` reference only through supported Codex CLI/app-server
-  behavior.
+- Hosted Codex worker pools and remote routing remain future work.
 
 ## Rust-Native Harness
 

@@ -663,7 +663,7 @@ fn build_capabilities() -> GatewayCapabilities {
         ],
         harnesses: vec![
             HarnessCapability::openhands_agent_server(),
-            HarnessCapability::codex_app_server_future(),
+            HarnessCapability::codex_app_server_local(),
             HarnessCapability::rust_native_future(),
         ],
         features: vec![
@@ -741,7 +741,7 @@ fn build_capabilities() -> GatewayCapabilities {
             },
             FeatureCapability {
                 feature: "codex_harness".into(),
-                available: false,
+                available: true,
                 requires_auth: false,
                 requires_plan: None,
             },

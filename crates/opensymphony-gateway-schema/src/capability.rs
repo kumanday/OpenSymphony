@@ -192,13 +192,13 @@ impl HarnessCapability {
         }
     }
 
-    pub fn codex_app_server_future() -> Self {
+    pub fn codex_app_server_local() -> Self {
         Self {
             kind: "codex_app_server".into(),
             display_name: "Codex app-server".into(),
-            available: false,
+            available: true,
             adapter_contract_version: "harness-adapter-v1".into(),
-            runtime_contract_version: None,
+            runtime_contract_version: Some("codex-app-server-json-rpc-v2".into()),
             actions: HarnessActionCapability {
                 start_run: true,
                 send_user_message: true,
@@ -236,9 +236,9 @@ impl HarnessCapability {
             },
             transport: HarnessTransportCapability {
                 protocol: "json_rpc_2_0".into(),
-                modes: vec!["stdio".into(), "websocket_experimental".into()],
+                modes: vec!["stdio".into()],
                 local: true,
-                remote: true,
+                remote: false,
             },
             cancellation: HarnessCancellationCapability {
                 cancel_run: true,
@@ -255,13 +255,33 @@ impl HarnessCapability {
                 reconnect_and_replay: true,
                 preserve_unknown_events: true,
             },
-            notes: vec!["Future adapter shaped around JSON-RPC requests and notifications.".into()],
+            notes: vec![
+                "Supported local adapter path using `codex app-server --stdio`.".into(),
+                "Requires a compatible Codex CLI with ChatGPT login available to the operator-owned Codex home.".into(),
+            ],
             feature_gaps: vec![
-                "Production adapter implementation is out of scope for COE-426.".into(),
                 "Pause/resume semantics need protocol confirmation before being advertised as available."
+                    .into(),
+                "Hosted Codex worker pools and remote transport remain out of scope for the local adapter."
+                    .into(),
+                "Loopback WebSocket mode remains benchmark-only until exposure and auth policy are hardened."
                     .into(),
             ],
         }
+    }
+
+    pub fn codex_app_server_future() -> Self {
+        let mut capability = Self::codex_app_server_local();
+        capability.available = false;
+        capability.runtime_contract_version = None;
+        capability.transport.modes = vec!["stdio".into(), "websocket_experimental".into()];
+        capability.transport.remote = true;
+        capability.notes = vec!["Future hosted/remote adapter shape for Codex app-server.".into()];
+        capability.feature_gaps.insert(
+            0,
+            "Production hosted or remote Codex routing is not implemented.".into(),
+        );
+        capability
     }
 
     pub fn rust_native_future() -> Self {

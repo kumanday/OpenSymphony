@@ -74,10 +74,10 @@ package, not standalone published crates.
 
 ### `opensymphony_codex`
 
-- feature-gated Codex app-server launch argument builder
-- Codex JSON-RPC request and notification normalization helpers
+- local Codex app-server stdio adapter
+- Codex JSON-RPC lifecycle request and notification normalization helpers
 - model credential reuse mapping from gateway model settings
-- prototype benchmark requirement descriptors
+- benchmark requirement descriptors for experimental transports
 
 ### `opensymphony_orchestrator`
 

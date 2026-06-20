@@ -1,10 +1,12 @@
-#![cfg(feature = "codex-app-server-prototype")]
-
 use opensymphony::opensymphony_codex::{
-    CodexAppServerLaunch, CodexJsonRpcSession, CodexThreadStartParams, CodexTurnStartParams,
-    CodexUserInput, CodexWebSocketAuth, NormalizedCodexEventKind, normalize_server_notification,
+    CodexAppServerAdapter, CodexAppServerLaunch, CodexApprovalDecision, CodexContractArtifact,
+    CodexContractGeneration, CodexJsonRpcSession, CodexLifecycleRequest, CodexThreadStartParams,
+    CodexTurnStartParams, CodexUserInput, CodexWebSocketAuth, NormalizedCodexEventKind,
+    normalize_server_notification, normalized_event_to_journal_record,
     websocket_benchmark_requirements,
 };
+use opensymphony::opensymphony_domain::HarnessAdapter;
+use opensymphony::opensymphony_gateway_schema::event_journal::EventKind;
 use opensymphony::opensymphony_gateway_schema::model_settings::{
     CredentialReferenceKind, CredentialStorageMode, ModelSettingsResponse,
 };
@@ -101,6 +103,166 @@ fn codex_notification_normalization_preserves_thread_turn_and_raw_payload() {
         }))
         .is_none()
     );
+}
+
+#[test]
+fn codex_adapter_exposes_supported_local_harness_capabilities() {
+    let adapter = CodexAppServerAdapter::local_stdio("codex-test", "opensymphony-test", "1.10.1");
+    assert_eq!(adapter.harness_kind(), "codex_app_server");
+    assert_eq!(
+        adapter.launch().command_args(),
+        vec!["app-server", "--stdio"]
+    );
+
+    let capabilities = adapter.capabilities();
+    assert!(capabilities.available);
+    assert_eq!(
+        capabilities.runtime_contract_version.as_deref(),
+        Some("codex-app-server-json-rpc-v2")
+    );
+    assert_eq!(capabilities.transport.modes, vec!["stdio"]);
+    assert!(capabilities.actions.start_run);
+    assert!(capabilities.actions.cancel);
+    assert!(capabilities.actions.approve);
+    assert!(capabilities.approvals.tool_approval);
+    assert!(capabilities.history.preserve_unknown_events);
+    assert!(!capabilities.transport.remote);
+}
+
+#[test]
+fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
+    let adapter = CodexAppServerAdapter::local_stdio("codex-test", "opensymphony-test", "1.10.1");
+    let mut session = adapter.session();
+
+    let start = adapter
+        .start_issue_request(
+            &mut session,
+            "/tmp/issue-workspace",
+            "gpt-5-codex",
+            "workflow prompt",
+            json!({ "approvalPolicy": "on-request" }),
+        )
+        .expect("start request serializes");
+    assert_eq!(start.lifecycle, CodexLifecycleRequest::Start);
+    assert_eq!(start.request.method, "thread/start");
+    assert_eq!(start.request.params["cwd"], "/tmp/issue-workspace");
+    assert_eq!(start.request.params["baseInstructions"], "workflow prompt");
+
+    let resume = adapter
+        .resume_issue_request(&mut session, "thread-1", "/tmp/issue-workspace", "continue")
+        .expect("resume request serializes");
+    assert_eq!(resume.lifecycle, CodexLifecycleRequest::Resume);
+    assert_eq!(resume.request.method, "turn/start");
+    assert_eq!(resume.request.params["threadId"], "thread-1");
+
+    let cancel = adapter.cancel_turn_request(&mut session, "turn-1");
+    assert_eq!(cancel.lifecycle, CodexLifecycleRequest::Cancel);
+    assert_eq!(cancel.request.method, "turn/cancel");
+    assert_eq!(cancel.request.params["turnId"], "turn-1");
+
+    let approve = adapter.approval_request(
+        &mut session,
+        "approval-1",
+        CodexApprovalDecision::Approve,
+        Some("operator approved".into()),
+    );
+    assert_eq!(approve.lifecycle, CodexLifecycleRequest::Approval);
+    assert_eq!(approve.request.method, "approval/respond");
+    assert_eq!(approve.request.params["decision"], "approve");
+
+    let reject = adapter.approval_request(
+        &mut session,
+        "approval-2",
+        CodexApprovalDecision::Reject,
+        None,
+    );
+    assert_eq!(reject.request.params["decision"], "reject");
+}
+
+#[test]
+fn codex_contract_generation_commands_are_explicit() {
+    let schema = CodexContractGeneration::json_schema_with_program(
+        "codex-test",
+        std::env::temp_dir().join("opensymphony-codex-schema"),
+    );
+    let (program, schema_args) = schema.to_command();
+    assert_eq!(program, "codex-test");
+    assert_eq!(schema.artifact(), CodexContractArtifact::JsonSchema);
+    assert_eq!(schema_args[0], "app-server");
+    assert_eq!(schema_args[1], "generate-json-schema");
+    assert_eq!(schema_args[2], "--out");
+
+    let ts = CodexContractGeneration::typescript_with_program(
+        "codex-test",
+        std::env::temp_dir().join("opensymphony-codex-ts"),
+    );
+    let (_, ts_args) = ts.to_command();
+    assert_eq!(ts.artifact(), CodexContractArtifact::TypeScript);
+    assert_eq!(ts_args[1], "generate-ts");
+}
+
+#[test]
+fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
+    let approval_raw = json!({
+        "jsonrpc": "2.0",
+        "method": "item/permissions/requestApproval",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-1",
+            "title": "Run shell command"
+        }
+    });
+    let approval =
+        normalize_server_notification(approval_raw).expect("approval notification normalizes");
+    assert_eq!(approval.kind, NormalizedCodexEventKind::ApprovalRequested);
+
+    let approval_record = normalized_event_to_journal_record("COE-476", 7, &approval);
+    assert_eq!(approval_record.kind, EventKind::ApprovalRequested);
+    assert_eq!(approval_record.actor.actor_id(), "codex_app_server");
+    assert_eq!(
+        approval_record.raw_payload_ref.as_deref(),
+        Some("codex:COE-476:7")
+    );
+    assert!(approval_record.summary.contains("Codex requested approval"));
+
+    let completed = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1"
+        }
+    }))
+    .expect("completion normalizes");
+    let completed_record = normalized_event_to_journal_record("COE-476", 8, &completed);
+    assert_eq!(completed_record.kind, EventKind::RunCompleted);
+
+    let failed = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "error",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "message": "missing login"
+        }
+    }))
+    .expect("error normalizes");
+    let failed_record = normalized_event_to_journal_record("COE-476", 9, &failed);
+    assert_eq!(failed_record.kind, EventKind::RunFailed);
+    assert!(failed_record.summary.contains("missing login"));
+
+    let canceled = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "turn/cancelled",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1"
+        }
+    }))
+    .expect("cancel notification normalizes");
+    let canceled_record = normalized_event_to_journal_record("COE-476", 10, &canceled);
+    assert_eq!(canceled_record.kind, EventKind::RunCancelled);
 }
 
 #[test]

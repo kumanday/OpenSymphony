@@ -623,7 +623,7 @@ fn gateway_capabilities_roundtrips() {
 fn harness_capability_roundtrips_future_adapters() {
     let caps = vec![
         HarnessCapability::openhands_agent_server(),
-        HarnessCapability::codex_app_server_future(),
+        HarnessCapability::codex_app_server_local(),
         HarnessCapability::rust_native_future(),
     ];
 
@@ -647,17 +647,18 @@ fn harness_capability_roundtrips_future_adapters() {
             .credential_reference_kinds
             .contains(&"codex_cli_login".to_string())
     );
+    assert!(back[1].available);
+    assert_eq!(
+        back[1].runtime_contract_version.as_deref(),
+        Some("codex-app-server-json-rpc-v2")
+    );
+    assert_eq!(back[1].transport.modes, vec!["stdio"]);
+    assert!(!back[1].transport.remote);
     assert!(
         back[1]
             .feature_gaps
             .iter()
-            .any(|gap| gap.contains("COE-426"))
-    );
-    assert!(
-        !back[1]
-            .feature_gaps
-            .iter()
-            .any(|gap| gap.contains("COE-408"))
+            .any(|gap| gap.contains("Hosted Codex worker pools"))
     );
     assert_eq!(back[2].kind, "rust_native");
     assert!(back[2].pause_resume.pause);
