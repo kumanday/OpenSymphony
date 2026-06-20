@@ -7,6 +7,10 @@ use opensymphony::opensymphony_gateway_schema::{
     },
     cursor::{PageCursor, StreamCursor},
     envelope::{EntityKind, EntityRef, GatewayEnvelope},
+    model_settings::{
+        CredentialStatusKind, CredentialStatusResponse, CredentialStorageMode,
+        ModelSettingsResponse,
+    },
     planning::{
         ArtifactDiff, ArtifactRevision, ConversationTurn, LinearPublishReceipt, PlanningArtifact,
         PlanningArtifactKind, PlanningSession, PlanningSessionStatus, PlanningSessionSummary,
@@ -57,6 +61,81 @@ fn schema_version_roundtrips() {
 #[test]
 fn gateway_schema_version_constant_matches() {
     assert_eq!(GATEWAY_SCHEMA_VERSION, "1.0.0");
+}
+
+#[test]
+fn model_settings_roundtrip_and_redact_secret_material() {
+    let settings = ModelSettingsResponse::local_default(false);
+    let json = must_serialize(&settings);
+    let back: ModelSettingsResponse = must_deserialize(&json);
+
+    assert_eq!(back.schema_version, sample_schema_version());
+    assert!(back.profiles.iter().any(|profile| {
+        profile.id == "openhands-env-api-key"
+            && profile.credential_reference.reference == "LLM_API_KEY"
+            && profile.model.reference == "LLM_MODEL"
+            && profile
+                .base_url
+                .as_ref()
+                .is_some_and(|base_url| base_url.reference == "LLM_BASE_URL")
+            && profile.compatible_harnesses == vec!["openhands_agent_server"]
+            && profile.status == CredentialStatusKind::LoggedOut
+    }));
+    assert!(back.profiles.iter().any(|profile| {
+        profile.storage_mode == CredentialStorageMode::HostedBroker
+            && profile.credential_reference.redacted
+            && profile.status == CredentialStatusKind::Unsupported
+    }));
+    assert!(back.profiles.iter().any(|profile| {
+        profile.storage_mode == CredentialStorageMode::LocalKeychain
+            && profile.credential_reference.redacted
+            && profile.compatible_harnesses == vec!["codex_app_server"]
+    }));
+    assert!(
+        back.supported_credential_statuses
+            .contains(&CredentialStatusKind::Installed)
+    );
+    assert!(
+        back.supported_credential_statuses
+            .contains(&CredentialStatusKind::Expired)
+    );
+    assert!(
+        back.supported_credential_statuses
+            .contains(&CredentialStatusKind::PermissionDenied)
+    );
+    assert!(!json.contains("sk-live-secret"));
+    assert!(!json.contains("refresh_token"));
+}
+
+#[test]
+fn credential_status_response_supports_ui_status_states() {
+    let settings = ModelSettingsResponse::local_default(true);
+    let statuses = CredentialStatusResponse::from_model_settings(&settings);
+    let json = must_serialize(&statuses);
+    let back: CredentialStatusResponse = must_deserialize(&json);
+
+    assert_eq!(back.schema_version, sample_schema_version());
+    assert!(
+        back.statuses
+            .iter()
+            .any(
+                |status| status.credential_reference_id == "credential:env:LLM_API_KEY"
+                    && status.status == CredentialStatusKind::Installed
+            )
+    );
+    assert_eq!(
+        back.supported_statuses,
+        vec![
+            CredentialStatusKind::Installed,
+            CredentialStatusKind::LoggedOut,
+            CredentialStatusKind::Expired,
+            CredentialStatusKind::Unsupported,
+            CredentialStatusKind::PermissionDenied,
+            CredentialStatusKind::Unknown,
+        ]
+    );
+    assert!(json.contains("\"installed\""));
+    assert!(json.contains("\"permission_denied\""));
 }
 
 #[test]

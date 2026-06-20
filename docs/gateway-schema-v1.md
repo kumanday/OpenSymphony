@@ -38,6 +38,7 @@ be forward-compatible, versioned, and transport-agnostic.
 | `approval` | Human-in-the-loop | `ApprovalRequest`, `ActionReceipt` |
 | `planning` | Planning artifacts | `PlanningArtifact`, `PlanningSessionSummary` |
 | `capability` | Discovery | `GatewayCapabilities`, `TransportCapability`, `HarnessCapability` |
+| `model_settings` | Model profile and credential references | `ModelSettingsResponse`, `ModelSettingsProfile`, `CredentialStatusResponse` |
 | `action` | Mutation dispatch | `ActionDispatch`, `ActionKind` |
 | `transport` | Benchmark metadata | `TransportRecommendation`, `TransportProfile` |
 
@@ -52,6 +53,25 @@ The harness list deliberately uses stable strings such as
 `openhands_agent_server`, `codex_app_server`, and `rust_native` rather than
 private adapter class names. Clients should use the advertised booleans and
 feature gaps instead of special-casing adapter internals.
+
+## Model And Credential Settings
+
+`GET /api/v1/model-settings` returns the local model profile and credential
+reference catalog. The response preserves the current OpenHands-compatible
+environment profile by describing `LLM_MODEL`, `LLM_API_KEY`, and
+`LLM_BASE_URL` as references, not values. Subscription-backed entries use the
+same public profile shape for local keychain references, isolated OpenHands auth
+directory references, and future hosted broker references.
+
+`GET /api/v1/model-settings/credential-status` returns the status rows that UI
+clients can render for those references. Supported status values are
+`installed`, `logged_out`, `expired`, `unsupported`, `permission_denied`, and
+`unknown`.
+
+Credential references deliberately avoid raw secret material. API keys, OAuth
+refresh tokens, access tokens, and hosted broker payloads must stay in their
+backing storage and must not appear in gateway DTOs, logs, workspaces, browser
+payloads, or Linear comments.
 
 ## Event envelope example
 

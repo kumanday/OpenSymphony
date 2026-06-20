@@ -21,6 +21,9 @@ use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
 };
 use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
+use opensymphony::opensymphony_gateway_schema::model_settings::{
+    CredentialStatusKind, CredentialStatusResponse, ModelSettingsResponse,
+};
 use opensymphony::opensymphony_gateway_schema::run::DiffLine;
 use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
 use tokio::net::TcpListener;
@@ -630,6 +633,51 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
             .harnesses
             .iter()
             .any(|harness| harness.kind == "codex_app_server" && !harness.available)
+    );
+    assert!(
+        caps_response
+            .features
+            .iter()
+            .any(|feature| feature.feature == "model_settings" && feature.available)
+    );
+
+    let model_settings_url = format!("http://{address}/api/v1/model-settings");
+    let model_settings_response = client
+        .get(&model_settings_url)
+        .send()
+        .await
+        .expect("fetch model settings")
+        .json::<ModelSettingsResponse>()
+        .await
+        .expect("decode model settings");
+    assert!(model_settings_response.profiles.iter().any(|profile| {
+        profile.id == "openhands-env-api-key"
+            && profile.compatible_harnesses == vec!["openhands_agent_server"]
+            && profile.credential_reference.redacted
+    }));
+    assert!(model_settings_response.profiles.iter().any(|profile| {
+        profile.id == "hosted-openai-subscription-broker"
+            && profile.status == CredentialStatusKind::Unsupported
+    }));
+
+    let credential_status_url = format!("http://{address}/api/v1/model-settings/credential-status");
+    let credential_status_response = client
+        .get(&credential_status_url)
+        .send()
+        .await
+        .expect("fetch credential statuses")
+        .json::<CredentialStatusResponse>()
+        .await
+        .expect("decode credential statuses");
+    assert!(
+        credential_status_response
+            .supported_statuses
+            .contains(&CredentialStatusKind::Expired)
+    );
+    assert!(
+        credential_status_response
+            .supported_statuses
+            .contains(&CredentialStatusKind::PermissionDenied)
     );
 
     let snapshot_url = format!("http://{address}/api/v1/dashboard/snapshot");

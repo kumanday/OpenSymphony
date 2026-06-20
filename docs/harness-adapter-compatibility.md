@@ -33,7 +33,10 @@ Known gaps:
 - Pause/resume is not exposed by the current OpenHands agent-server contract.
 - Approval-center normalization is not yet available through the gateway DTOs.
 - Subscription credentials are separate future work; API-compatible env-backed
-  model settings are the current supported path.
+  model settings are the current supported execution path.
+- The model settings endpoint can represent isolated OpenHands auth-directory
+  references for ChatGPT/Codex subscription credentials, but the adapter that
+  consumes those references is follow-up work.
 
 ## Codex App Server
 
@@ -49,6 +52,9 @@ Known gaps:
   available.
 - WebSocket transport remains experimental until benchmarked and secured; stdio
   is the preferred local integration mode.
+- Codex subscription readiness can build on the local keychain and hosted broker
+  credential reference shapes without requiring raw subscription tokens in
+  OpenSymphony workspaces or browser payloads.
 
 ## Rust-Native Harness
 
