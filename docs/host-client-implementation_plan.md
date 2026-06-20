@@ -1751,7 +1751,8 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 
 ## Current model
 
-- COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
+- COE-428 contributed: PR #133: Add alpha model configuration UI (merge `6f6b94e`)
+- COE-475 contributed: PR #134: Expose Codex ChatGPT login readiness (merge `124ac40`)
 
 ## Important invariants
 
@@ -1768,10 +1769,12 @@ This cut produces a useful rich-client alpha while validating the gateway and st
 
 ## Recent changes
 
-- COE-426: Codex App-Server Prototype And Benchmarks
+- COE-428: Model Configuration UI And Routing Metadata
+- COE-475: ChatGPT OAuth For Codex Harness
 
 ## Source refs
 
-- COE-426
+- COE-428
+- COE-475
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
