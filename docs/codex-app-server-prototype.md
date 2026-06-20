@@ -49,6 +49,36 @@ codex --version
 codex app-server --help
 ```
 
+Confirm the local Codex CLI is signed in with ChatGPT:
+
+```bash
+codex login status
+```
+
+If the CLI is not logged in, use device-code auth:
+
+```bash
+codex login --device-auth
+```
+
+For ChatGPT accounts that have not previously allowed Codex device-code sign-in,
+open ChatGPT settings and enable **Security and login -> Enable device code
+authorization for Codex** before retrying the login:
+
+![ChatGPT setting for enabling Codex device-code authorization](images/enable-device-code-authorization-for-codex.png)
+
+After login, run a tiny real Codex model smoke test. Global Codex approval flags
+go before the `exec` subcommand:
+
+```bash
+codex --ask-for-approval never exec \
+  --sandbox read-only \
+  "Reply with exactly: CODEX_LOGIN_OK"
+```
+
+Expected output includes `Logged in using ChatGPT` from `codex login status`,
+then the model reply `CODEX_LOGIN_OK` from the smoke test.
+
 Run the loopback benchmark with the installed Codex binary:
 
 ```bash

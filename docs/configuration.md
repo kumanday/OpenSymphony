@@ -224,6 +224,71 @@ and run `opensymphony run` with the feature-enabled binary. Do not store OAuth
 JSON files, refresh tokens, or access tokens in the repository, issue
 workspaces, Linear comments, or browser-visible payloads.
 
+For manual verification of the pinned OpenHands SDK OAuth behavior, run the SDK
+login flow in the managed OpenHands virtual environment. Use a temporary `HOME`
+when you want the probe to keep OAuth credentials out of your normal
+`~/.openhands/auth` directory:
+
+```bash
+cat > /tmp/openhands_subscription_probe.py <<'PY'
+import os
+from openhands.sdk import LLM
+
+llm = LLM.subscription_login(
+    vendor="openai",
+    model=os.environ.get("OH_SUBSCRIPTION_MODEL", "gpt-5.2-codex"),
+    auth_method=os.environ.get("OH_AUTH_METHOD", "device_code"),
+    open_browser=False,
+    force_login=os.environ.get("OH_FORCE_LOGIN", "0") == "1",
+)
+
+headers = llm.extra_headers or {}
+
+print("subscription:", getattr(llm, "_is_subscription", False))
+print("model:", llm.model)
+print("base_url:", llm.base_url)
+print("stream:", llm.stream)
+print("has_api_key:", bool(llm.api_key))
+print("header_keys:", sorted(headers.keys()))
+print("has_chatgpt_account_id:", "chatgpt-account-id" in headers)
+print("litellm_extra_body:", llm.litellm_extra_body)
+PY
+
+cd ~/.opensymphony/openhands-server
+export OH_SPIKE_HOME=/tmp/opensymphony-openhands-subscription-spike
+rm -rf "$OH_SPIKE_HOME"
+mkdir -p "$OH_SPIKE_HOME"
+
+OPENHANDS_SUPPRESS_BANNER=1 \
+HOME="$OH_SPIKE_HOME" \
+OH_FORCE_LOGIN=1 \
+OH_AUTH_METHOD=device_code \
+uv run python /tmp/openhands_subscription_probe.py
+```
+
+The device-code flow may require enabling **Security and login -> Enable device
+code authorization for Codex** in ChatGPT settings:
+
+![ChatGPT setting for enabling Codex device-code authorization](images/enable-device-code-authorization-for-codex.png)
+
+Successful output should show `subscription: True`, model
+`openai/gpt-5.2-codex`, base URL `https://chatgpt.com/backend-api/codex`,
+`has_api_key: True`, `has_chatgpt_account_id: True`, and
+`litellm_extra_body: {'store': False}`. The cached OAuth file for this isolated
+probe is written to:
+
+```text
+/tmp/opensymphony-openhands-subscription-spike/.openhands/auth/openai_oauth.json
+```
+
+This SDK credential cache is not the same thing as
+`~/.opensymphony/openhands-server`. The latter is OpenSymphony's managed
+OpenHands tool installation and conversation workspace. The SDK auth cache is
+where OpenHands stores ChatGPT OAuth credentials by default. Current
+OpenSymphony subscription support validates and forwards a subscription-shaped
+LLM configuration, but it does not yet provide an operator-facing command that
+logs in, refreshes, and injects those credentials automatically.
+
 The workflow supports `${VAR}` syntax for environment variable substitution in
 the front matter:
 
