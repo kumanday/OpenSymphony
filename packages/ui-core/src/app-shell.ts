@@ -26,6 +26,8 @@ import {
   createModelProfile,
   defaultModelProfiles,
   redactCredentialRef,
+  validateStoredCredentialRef,
+  validateSubscriptionCredential,
 } from "@opensymphony/gateway-schema";
 import { renderChangedFileList, renderFileDiff } from "./diff.js";
 import { renderValidationSummary } from "./validation.js";
@@ -793,15 +795,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     this.state.activeModelProfileId = profileId;
-    this.state.modelProfiles = this.state.modelProfiles.map((candidate) => ({
-      ...candidate,
-      active: candidate.id === profileId,
-    }));
-    if (this.options.modelProfileController) {
-      await this.options.modelProfileController.setActiveProfile(profileId).catch((error) => {
-        this.state.connectionMessage = `Model profile selection failed: ${errorMessage(error)}`;
-      });
-    }
     this.render();
   }
 
@@ -820,18 +813,28 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
 
-    const credentialRef = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
-    const credentialError = validateCredentialReference(
-      credentialRef,
-      credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]")),
-    );
+    const credentialInput = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
+    const credentialStorage = credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]"));
+    const subscriptionCredential = mode === "subscription"
+      ? {
+          provider: this.valueOf<HTMLInputElement>("[data-model-subscription-provider]").trim(),
+          authDirectoryEnv: credentialInput || null,
+          authMethod: "device_code" as const,
+          openBrowser: false,
+          forceLogin: false,
+          accountIdentityHeader: null,
+        }
+      : null;
+    const credentialError = mode === "api_key"
+      ? validateStoredCredentialRef(credentialInput, credentialStorage)
+      : validateSubscriptionCredential(subscriptionCredential);
     if (credentialError) {
       this.state.connectionMessage = credentialError;
       this.render();
       return;
     }
     const baseProfile = active ?? createModelProfile(mode);
-    const activeFlag = baseProfile.active;
+    const activeFlag = this.options.root.querySelector<HTMLInputElement>("[data-model-active]")?.checked ?? baseProfile.active;
     const profile: ModelConfigurationProfile = {
       ...baseProfile,
       id: baseProfile.id,
@@ -840,10 +843,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       owner: modelOwnerFromValue(this.valueOf<HTMLSelectElement>("[data-model-owner]")),
       baseUrl: this.valueOf<HTMLInputElement>("[data-model-base-url]").trim(),
       model,
-      apiKeyRef: mode === "api_key" ? credentialRef : null,
-      subscriptionCredentialRef: mode === "subscription" ? credentialRef : null,
-      subscriptionProvider: this.valueOf<HTMLInputElement>("[data-model-subscription-provider]").trim(),
-      credentialStorage: credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]")),
+      apiKeyRef: mode === "api_key" ? credentialInput : null,
+      subscriptionCredential,
+      credentialStorage,
       harnesses: splitList(this.valueOf<HTMLInputElement>("[data-model-harnesses]")),
       active: activeFlag,
       metadata: {
@@ -864,7 +866,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         saved,
       ].map((profile) => ({
         ...profile,
-        active: profile.id === saved.id,
+        active: saved.active ? profile.id === saved.id : profile.active,
       }));
       this.state.activeModelProfileId = saved.id;
       this.render();
@@ -1090,8 +1092,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       })
       .join("");
     const credentialRef = active.mode === "subscription"
-      ? active.subscriptionCredentialRef
+      ? active.subscriptionCredential?.authDirectoryEnv
       : active.apiKeyRef;
+    const credentialLabel = active.mode === "subscription" ? "Auth Directory Env" : "Credential Ref";
     return `
       <section class="os-panel os-model-panel" data-testid="model-profile-panel">
         <div class="os-section-head">
@@ -1131,12 +1134,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             <input data-model-name value="${escapeAttr(active.model)}" />
           </label>
           <label class="os-field">
-            <span>Credential Ref</span>
+            <span>${credentialLabel}</span>
             <input data-model-credential-ref type="password" autocomplete="off" value="${escapeAttr(credentialRef ?? "")}" />
           </label>
           <label class="os-field">
             <span>Subscription Provider</span>
-            <input data-model-subscription-provider value="${escapeAttr(active.subscriptionProvider ?? "")}" />
+            <input data-model-subscription-provider value="${escapeAttr(active.subscriptionCredential?.provider ?? "")}" />
           </label>
           <label class="os-field">
             <span>Credential Storage</span>
@@ -1165,6 +1168,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <label class="os-field">
             <span>Recommended For</span>
             <input data-model-recommended-for value="${escapeAttr(active.metadata.recommendedFor.join(", "))}" />
+          </label>
+          <label class="os-check-field">
+            <input data-model-active type="checkbox" ${active.active ? "checked" : ""} />
+            <span>Active</span>
           </label>
           <button type="button" data-save-model-profile ${this.options.modelProfileController ? "" : "disabled"}>Save</button>
         </div>
@@ -2452,41 +2459,6 @@ function credentialStorageFromValue(
   }
 }
 
-function validateCredentialReference(
-  value: string,
-  storage: ModelConfigurationProfile["credentialStorage"],
-): string | null {
-  if (!value) {
-    return null;
-  }
-  if (looksLikeRawSecret(value)) {
-    return "Credential ref must point to stored credentials, not contain a raw secret";
-  }
-  const expectedPrefix = credentialReferencePrefix(storage);
-  if (!value.startsWith(expectedPrefix)) {
-    return `Credential ref must start with ${expectedPrefix}`;
-  }
-  return null;
-}
-
-function credentialReferencePrefix(
-  storage: ModelConfigurationProfile["credentialStorage"],
-): string {
-  switch (storage) {
-    case "openhands_auth_directory":
-      return "openhands_auth:";
-    case "hosted_secret_store":
-      return "hosted_secret:";
-    case "local_keychain":
-    default:
-      return "local_keychain:";
-  }
-}
-
-function looksLikeRawSecret(value: string): boolean {
-  return /(^sk-[A-Za-z0-9_-]{8,})|(^github_pat_)|(^gh[pousr]_)|(^xox[baprs]-)|(^AKIA[0-9A-Z]{16})/.test(value);
-}
-
 function splitList(value: string): string[] {
   return value
     .split(",")
@@ -3012,6 +2984,8 @@ function appShellStyles(): string {
     .os-model-layout { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; align-items: end; }
     .os-model-layout button { align-self: end; }
     .os-model-meta { margin-top: 10px; color: #667788; font-size: 12px; }
+    .os-check-field { min-height: 34px; display: inline-flex; align-items: center; gap: 8px; color: #536170; font-size: 12px; }
+    .os-check-field input { width: 16px; height: 16px; }
     .os-task-graph-panel { grid-column: span 2; }
     .os-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .os-section-head h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
@@ -3228,7 +3202,7 @@ function appShellStyles(): string {
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #d9e2ea; }
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
-      .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
+      .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
       .os-auth-panel .os-auth-message { color: #d9e2ea; }
       .os-auth-denied .os-auth-message { color: #fca5a5; }

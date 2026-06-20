@@ -122,11 +122,17 @@ export type {
   ModelReasoningEffort,
   ModelRoutingMetadata,
   ModelTaskRecommendation,
+  SubscriptionCredentialAuthMethod,
+  SubscriptionCredentialBootstrap,
 } from "./model_config.js";
 export {
+  credentialReferencePrefix,
   createModelProfile,
   defaultModelProfiles,
   redactCredentialRef,
+  validateModelProfileCredentials,
+  validateStoredCredentialRef,
+  validateSubscriptionCredential,
 } from "./model_config.js";
 
 // validation

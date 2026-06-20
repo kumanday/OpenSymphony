@@ -41,6 +41,24 @@ export type ModelReasoningEffort =
   | "high"
   | (string & {});
 
+/** Supported subscription credential bootstrap methods. */
+export type SubscriptionCredentialAuthMethod =
+  | "browser"
+  | "device_code"
+  | "cached";
+
+/** Bootstrap metadata for subscription-backed model access. */
+export interface SubscriptionCredentialBootstrap {
+  provider: string;
+  /** Environment variable that points at an auth directory, never a raw token. */
+  authDirectoryEnv: string | null;
+  authMethod: SubscriptionCredentialAuthMethod;
+  openBrowser: boolean;
+  forceLogin: boolean;
+  /** Optional account identity header name, not the resolved account value. */
+  accountIdentityHeader?: string | null;
+}
+
 /** Operator-supplied metadata used as future routing inputs. */
 export interface ModelRoutingMetadata {
   /** Optional context window size in tokens. */
@@ -66,10 +84,8 @@ export interface ModelConfigurationProfile {
   model: string;
   /** Reference to a stored API key, never the raw key. */
   apiKeyRef?: string | null;
-  /** Reference to a stored subscription credential, never raw OAuth material. */
-  subscriptionCredentialRef?: string | null;
-  /** Provider for subscription profiles, for example "openai". */
-  subscriptionProvider?: string | null;
+  /** Structured subscription bootstrap metadata, never raw OAuth material. */
+  subscriptionCredential?: SubscriptionCredentialBootstrap | null;
   credentialStorage: CredentialStorage;
   harnesses: ModelHarnessKind[];
   metadata: ModelRoutingMetadata;
@@ -89,8 +105,7 @@ export function defaultModelProfiles(): ModelConfigurationProfile[] {
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4.1",
       apiKeyRef: null,
-      subscriptionCredentialRef: null,
-      subscriptionProvider: null,
+      subscriptionCredential: null,
       credentialStorage: "local_keychain",
       harnesses: ["openhands_agent_server"],
       metadata: {
@@ -109,8 +124,14 @@ export function defaultModelProfiles(): ModelConfigurationProfile[] {
       baseUrl: "",
       model: "codex",
       apiKeyRef: null,
-      subscriptionCredentialRef: null,
-      subscriptionProvider: "openai",
+      subscriptionCredential: {
+        provider: "openai",
+        authDirectoryEnv: "OPENHANDS_AUTH_DIR",
+        authMethod: "device_code",
+        openBrowser: false,
+        forceLogin: false,
+        accountIdentityHeader: null,
+      },
       credentialStorage: "openhands_auth_directory",
       harnesses: ["openhands_agent_server", "codex_app_server"],
       metadata: {
@@ -150,4 +171,67 @@ export function redactCredentialRef(value: string | null | undefined): string {
     return "Not configured";
   }
   return "Configured";
+}
+
+/** Return the required stored-reference prefix for a credential backend. */
+export function credentialReferencePrefix(storage: CredentialStorage): string {
+  switch (storage) {
+    case "openhands_auth_directory":
+      return "openhands_auth:";
+    case "hosted_secret_store":
+      return "hosted_secret:";
+    case "local_keychain":
+    default:
+      return "local_keychain:";
+  }
+}
+
+/** Validate an API-key credential reference without accepting raw secrets. */
+export function validateStoredCredentialRef(
+  value: string | null | undefined,
+  storage: CredentialStorage,
+): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const prefix = credentialReferencePrefix(storage);
+  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const referencePattern = new RegExp(`^${escapedPrefix}[A-Za-z0-9._/@-]{1,128}$`);
+  if (!referencePattern.test(trimmed)) {
+    return `Credential ref must match ${prefix}<stored-reference-id>`;
+  }
+  return null;
+}
+
+/** Validate subscription bootstrap metadata. */
+export function validateSubscriptionCredential(
+  value: SubscriptionCredentialBootstrap | null | undefined,
+): string | null {
+  if (!value) {
+    return null;
+  }
+  if (!value.provider.trim()) {
+    return "Subscription provider is required";
+  }
+  if (
+    value.authDirectoryEnv
+    && !/^[A-Z_][A-Z0-9_]{0,127}$/.test(value.authDirectoryEnv)
+  ) {
+    return "Subscription auth directory env must be an environment variable name";
+  }
+  return null;
+}
+
+/** Validate credential-bearing portions of a model profile for all callers. */
+export function validateModelProfileCredentials(
+  profile: ModelConfigurationProfile,
+): string | null {
+  if (profile.mode === "api_key") {
+    return validateStoredCredentialRef(profile.apiKeyRef, profile.credentialStorage);
+  }
+  if (profile.apiKeyRef) {
+    return "Subscription profiles must not store API key references";
+  }
+  return validateSubscriptionCredential(profile.subscriptionCredential);
 }

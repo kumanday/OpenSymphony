@@ -591,12 +591,12 @@ describe("OpenSymphonyApp mount", () => {
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "sk-secret-value-123456789";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
-    await flushUntil(() => root.textContent?.includes("Credential ref must point to stored credentials") ?? false);
+    await flushUntil(() => root.textContent?.includes("Credential ref must match local_keychain:") ?? false);
 
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "openhands_auth:openai";
     (root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value = "local_keychain";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
-    await flushUntil(() => root.textContent?.includes("Credential ref must start with local_keychain:") ?? false);
+    await flushUntil(() => root.textContent?.includes("Credential ref must match local_keychain:") ?? false);
 
     expect(modelProfileController.saved.some((profile) => profile.model === "provider/custom-model-name")).toBe(false);
 
@@ -623,7 +623,7 @@ describe("OpenSymphonyApp mount", () => {
     await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "codex-subscription-preview";
-    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "openhands_auth:openai-user";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "OPENHANDS_AUTH_DIR";
     (root.querySelector("[data-model-subscription-provider]") as HTMLInputElement).value = "openai";
     (root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value = "openhands_auth_directory";
     (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, codex_app_server";
@@ -636,8 +636,9 @@ describe("OpenSymphonyApp mount", () => {
     const saved = modelProfileController.saved.find((profile) => profile.model === "codex-subscription-preview");
     expect(saved?.mode).toBe("subscription");
     expect(saved?.apiKeyRef).toBeNull();
-    expect(saved?.subscriptionCredentialRef).toBe("openhands_auth:openai-user");
-    expect(saved?.subscriptionProvider).toBe("openai");
+    expect(saved?.subscriptionCredential?.authDirectoryEnv).toBe("OPENHANDS_AUTH_DIR");
+    expect(saved?.subscriptionCredential?.provider).toBe("openai");
+    expect(saved?.subscriptionCredential?.authMethod).toBe("device_code");
     expect(saved?.credentialStorage).toBe("openhands_auth_directory");
     expect(saved?.harnesses).toEqual(["openhands_agent_server", "codex_app_server"]);
 

@@ -2,6 +2,7 @@
 
 import {
   defaultModelProfiles,
+  validateModelProfileCredentials,
   type ModelConfigurationProfile,
 } from "@opensymphony/gateway-schema";
 
@@ -179,6 +180,10 @@ export function createModelProfileStore(
     },
     async storeProfile(profile) {
       return serialize(() => {
+        const validationError = validateModelProfileCredentials(profile);
+        if (validationError) {
+          throw new Error(validationError);
+        }
         const current = read();
         const next = write({
           profiles: [

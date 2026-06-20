@@ -127,4 +127,14 @@ describe("createModelProfileStore", () => {
     expect(profiles.some((profile) => profile.id === first.id)).toBe(true);
     expect(profiles.some((profile) => profile.id === second.id)).toBe(true);
   });
+
+  it("rejects invalid credential references for all store callers", async () => {
+    const store = createModelProfileStore({ storage: new MemoryStorage() });
+    const profile = {
+      ...createModelProfile("api_key"),
+      apiKeyRef: "sk-secret-value-123456789",
+    };
+
+    await expect(store.storeProfile(profile)).rejects.toThrow("Credential ref");
+  });
 });

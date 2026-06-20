@@ -3,6 +3,8 @@ import {
   createModelProfile,
   defaultModelProfiles,
   redactCredentialRef,
+  validateModelProfileCredentials,
+  validateStoredCredentialRef,
   type ModelConfigurationProfile,
 } from "@opensymphony/gateway-schema";
 
@@ -16,7 +18,8 @@ describe("model configuration profiles", () => {
     ]);
     expect(profiles[0].baseUrl).toBe("https://api.openai.com/v1");
     expect(profiles[0].apiKeyRef).toBeNull();
-    expect(profiles[1].subscriptionCredentialRef).toBeNull();
+    expect(profiles[1].subscriptionCredential?.provider).toBe("openai");
+    expect(profiles[1].subscriptionCredential?.authDirectoryEnv).toBe("OPENHANDS_AUTH_DIR");
     expect(profiles[1].harnesses).toEqual([
       "openhands_agent_server",
       "codex_app_server",
@@ -46,5 +49,38 @@ describe("model configuration profiles", () => {
     expect(redactCredentialRef("local_keychain:openai-api-key")).toBe("Configured");
     expect(redactCredentialRef("short")).toBe("Configured");
     expect(redactCredentialRef(null)).toBe("Not configured");
+  });
+
+  it("validates stored credential references with strict backend prefixes", () => {
+    expect(validateStoredCredentialRef("local_keychain:openai-api-key", "local_keychain")).toBeNull();
+    expect(validateStoredCredentialRef("sk-secret-value-123456789", "local_keychain")).toContain("local_keychain:");
+    expect(validateStoredCredentialRef("openhands_auth:openai", "local_keychain")).toContain("local_keychain:");
+  });
+
+  it("validates credential-bearing profile fields for all callers", () => {
+    const apiProfile = {
+      ...createModelProfile("api_key"),
+      apiKeyRef: "local_keychain:custom-secret",
+    };
+    const subscriptionProfile = {
+      ...createModelProfile("subscription"),
+      subscriptionCredential: {
+        provider: "openai",
+        authDirectoryEnv: "OPENHANDS_AUTH_DIR",
+        authMethod: "device_code" as const,
+        openBrowser: false,
+        forceLogin: false,
+      },
+    };
+
+    expect(validateModelProfileCredentials(apiProfile)).toBeNull();
+    expect(validateModelProfileCredentials(subscriptionProfile)).toBeNull();
+    expect(validateModelProfileCredentials({
+      ...subscriptionProfile,
+      subscriptionCredential: {
+        ...subscriptionProfile.subscriptionCredential,
+        authDirectoryEnv: "not-valid",
+      },
+    })).toContain("environment variable");
   });
 });
