@@ -5,10 +5,15 @@ import { createHash } from "node:crypto";
 import { once, setMaxListeners } from "node:events";
 import { setTimeout as sleep } from "node:timers/promises";
 
+const booleanFlags = new Set(["--skip-websocket"]);
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 1) {
   const arg = process.argv[i];
   if (!arg.startsWith("--")) continue;
+  if (booleanFlags.has(arg)) {
+    args.set(arg, "true");
+    continue;
+  }
   const next = process.argv[i + 1];
   if (next && !next.startsWith("--")) {
     args.set(arg, next);
