@@ -392,45 +392,86 @@ function waitForSocketClose(ws, timeoutMs = requestTimeoutMs) {
   });
 }
 
-function requestOverSocket(ws, id, method, params = {}, timeoutMs = requestTimeoutMs) {
-  const startedAt = performance.now();
-  return new Promise((resolve, reject) => {
-    const cleanup = () => {
-      clearTimeout(timeout);
-      ws.removeEventListener("message", onMessage);
-      ws.removeEventListener("error", onError);
-      ws.removeEventListener("close", onClose);
-    };
-    const onMessage = (event) => {
-      let parsed;
+class WebSocketJsonRpcClient {
+  constructor(ws) {
+    this.ws = ws;
+    this.pending = new Map();
+    this.onMessage = this.onMessage.bind(this);
+    this.onError = this.onError.bind(this);
+    this.onClose = this.onClose.bind(this);
+    ws.addEventListener("message", this.onMessage);
+    ws.addEventListener("error", this.onError);
+    ws.addEventListener("close", this.onClose);
+  }
+
+  request(id, method, params = {}, timeoutMs = requestTimeoutMs) {
+    const startedAt = performance.now();
+    const key = String(id);
+    if (this.pending.has(key)) {
+      throw new Error(`duplicate JSON-RPC request id ${key}`);
+    }
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pending.delete(key);
+        reject(new Error(`${method} request ${id} timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pending.set(key, {
+        method,
+        resolve: (response) => {
+          clearTimeout(timeout);
+          resolve({ latencyMs: performance.now() - startedAt, response });
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
       try {
-        parsed = JSON.parse(event.data);
+        this.ws.send(request(id, method, params));
       } catch (error) {
-        cleanup();
+        this.pending.delete(key);
+        clearTimeout(timeout);
         reject(error);
-        return;
       }
-      if (String(parsed.id) !== String(id)) return;
-      cleanup();
-      resolve({ latencyMs: performance.now() - startedAt, response: parsed });
-    };
-    const onError = (error) => {
-      cleanup();
-      reject(error);
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error(`${method} request ${id} closed before response`));
-    };
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`${method} request ${id} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    ws.addEventListener("message", onMessage);
-    ws.addEventListener("error", onError);
-    ws.addEventListener("close", onClose);
-    ws.send(request(id, method, params));
-  });
+    });
+  }
+
+  onMessage(event) {
+    let parsed;
+    try {
+      parsed = JSON.parse(event.data);
+    } catch (error) {
+      this.rejectAll(error);
+      return;
+    }
+    if (parsed == null || typeof parsed !== "object" || !Object.hasOwn(parsed, "id")) return;
+    const pending = this.pending.get(String(parsed.id));
+    if (!pending) return;
+    this.pending.delete(String(parsed.id));
+    pending.resolve(parsed);
+  }
+
+  onError(error) {
+    this.rejectAll(error);
+  }
+
+  onClose() {
+    this.rejectAll(new Error("WebSocket closed before all pending JSON-RPC responses arrived"));
+  }
+
+  rejectAll(error) {
+    for (const [key, pending] of this.pending) {
+      this.pending.delete(key);
+      pending.reject(error);
+    }
+  }
+
+  dispose() {
+    this.ws.removeEventListener("message", this.onMessage);
+    this.ws.removeEventListener("error", this.onError);
+    this.ws.removeEventListener("close", this.onClose);
+    this.rejectAll(new Error("WebSocket JSON-RPC client disposed"));
+  }
 }
 
 async function runWebSocketProbe(secureExposure) {
@@ -454,6 +495,8 @@ async function runWebSocketProbe(secureExposure) {
 
   let ws = null;
   let ws2 = null;
+  let client = null;
+  let reconnectClient = null;
   try {
     const exitedBeforeReadyz = once(child, "exit").then(([code, signal]) => {
       const { stdout, stderr } = decodeOutput();
@@ -463,13 +506,19 @@ async function runWebSocketProbe(secureExposure) {
       );
     });
     exitedBeforeReadyz.catch(() => {});
+    const failedBeforeReadyz = once(child, "error").then(([error]) => {
+      throw new Error(`codex app-server failed to start before readyz: ${error.message}`);
+    });
+    failedBeforeReadyz.catch(() => {});
     await Promise.race([
       waitForReadyz(`http://127.0.0.1:${port}/readyz`, requestTimeoutMs),
       exitedBeforeReadyz,
+      failedBeforeReadyz,
     ]);
 
     ws = await openSocket(`ws://127.0.0.1:${port}`);
-    const initialize = await requestOverSocket(ws, 1, "initialize", {
+    client = new WebSocketJsonRpcClient(ws);
+    const initialize = await client.request(1, "initialize", {
       clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
       capabilities: {},
     });
@@ -479,7 +528,7 @@ async function runWebSocketProbe(secureExposure) {
     const requests = [];
     let nextRequestId = 2;
     for (let i = 0; i < iterations; i += 1) {
-      requests.push(requestOverSocket(ws, nextRequestId, "thread/loaded/list", { limit: 1 }));
+      requests.push(client.request(nextRequestId, "thread/loaded/list", { limit: 1 }));
       nextRequestId += 1;
     }
     const responses = await Promise.all(requests);
@@ -492,12 +541,15 @@ async function runWebSocketProbe(secureExposure) {
       elapsedMs > 0 ? Number(((responses.length / elapsedMs) * 1000).toFixed(2)) : 0;
 
     const closed = waitForSocketClose(ws);
+    client.dispose();
+    client = null;
     ws.close();
     await closed;
     ws = null;
     const reconnectStartedAt = performance.now();
     ws2 = await openSocket(`ws://127.0.0.1:${port}`);
-    const reconnectInitialize = await requestOverSocket(ws2, nextRequestId, "initialize", {
+    reconnectClient = new WebSocketJsonRpcClient(ws2);
+    const reconnectInitialize = await reconnectClient.request(nextRequestId, "initialize", {
       clientInfo: { name: "opensymphony-codex-benchmark-reconnect", version: "0.0.0" },
       capabilities: {},
     });
@@ -534,6 +586,8 @@ async function runWebSocketProbe(secureExposure) {
       },
     };
   } finally {
+    if (client) client.dispose();
+    if (reconnectClient) reconnectClient.dispose();
     if (ws && ws.readyState < WebSocket.CLOSING) ws.close();
     if (ws2 && ws2.readyState < WebSocket.CLOSING) ws2.close();
     await terminateChild(child);
