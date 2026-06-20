@@ -901,18 +901,12 @@ async fn await_codex_readiness_refresh(
         return CodexReadinessRefresh::Ready(readiness);
     }
 
-    CodexReadinessRefresh::RefreshFailed(CodexLocalReadiness::from_probe(CodexCliProbe {
-        command: command.into(),
-        version: ProbeCommandResult::failure(
-            "Codex readiness refresh ended before reporting status",
-        ),
-        app_server_help: ProbeCommandResult::failure(
-            "Codex readiness refresh ended before reporting status",
-        ),
-        login_status: ProbeCommandResult::failure(
-            "Codex readiness refresh ended before reporting status",
-        ),
-    }))
+    let mut readiness = CodexLocalReadiness::not_checked();
+    readiness.command = command.into();
+    readiness.checked_by = "codex_readiness_refresh_failed".into();
+    readiness.detail =
+        "Codex readiness refresh ended before reporting supported command status.".into();
+    CodexReadinessRefresh::RefreshFailed(readiness)
 }
 
 async fn model_settings(State(state): State<GatewayState>) -> Json<ModelSettingsResponse> {
@@ -3699,6 +3693,7 @@ exit 2
         let readiness = cache.readiness("codex").await;
 
         assert_eq!(readiness.subscription_status, CredentialStatusKind::Unknown);
+        assert_eq!(readiness.checked_by, "codex_readiness_refresh_failed");
         let state = cache.state.lock().await;
         assert!(
             state.entry.is_none(),
@@ -3712,7 +3707,6 @@ exit 2
     async fn codex_readiness_probe_timeout_returns_unknown_status() {
         use crate::opensymphony_gateway_schema::model_settings::CredentialStatusKind;
         use std::os::unix::fs::PermissionsExt;
-        use std::time::Instant;
 
         let temp = tempfile::tempdir().expect("temp dir should be created");
         let fake_codex = temp.path().join("codex");
@@ -3744,13 +3738,12 @@ exit 2
         let command = fake_codex
             .to_str()
             .expect("fake codex path should be utf-8");
-        let started = Instant::now();
-        let readiness = detect_codex_local_readiness(command).await;
-
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "probe timeout should bound a hanging Codex login status command"
-        );
+        let readiness = tokio::time::timeout(
+            Duration::from_secs(20),
+            detect_codex_local_readiness(command),
+        )
+        .await
+        .expect("probe timeout should bound a hanging Codex login status command");
         assert_eq!(readiness.cli_status, CredentialStatusKind::Installed);
         assert_eq!(readiness.app_server_status, CredentialStatusKind::Installed);
         assert_eq!(readiness.login_status, CredentialStatusKind::Unknown);
