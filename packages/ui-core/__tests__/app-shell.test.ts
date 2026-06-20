@@ -546,7 +546,8 @@ describe("OpenSymphonyApp mount", () => {
     await flushUntil(() => root.querySelector("[data-testid='model-profile-panel']") !== null);
 
     expect(root.querySelector(".os-model-panel h2")?.textContent).toBe("Model Configuration");
-    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("loca...-key");
+    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("Not configured");
+    expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("password");
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
     (root.querySelector("[data-model-base-url]") as HTMLInputElement).value = "https://models.example.test/v1";
@@ -567,6 +568,37 @@ describe("OpenSymphonyApp mount", () => {
     expect(saved?.harnesses).toContain("custom_harness");
     expect(saved?.metadata.reasoningEffort).toBe("provider-ultra");
     expect(saved?.metadata.recommendedFor).toContain("validation");
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-redacted-credential']")?.textContent?.includes("Configured") ?? false,
+    );
+
+    await handle.destroy();
+  });
+
+  it("rejects raw secrets and mismatched credential reference prefixes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() => root.querySelector("[data-model-credential-ref]") !== null);
+
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "sk-secret-value-123456789";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+    await flushUntil(() => root.textContent?.includes("Credential ref must point to stored credentials") ?? false);
+
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "openhands_auth:openai";
+    (root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value = "local_keychain";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+    await flushUntil(() => root.textContent?.includes("Credential ref must start with local_keychain:") ?? false);
+
+    expect(modelProfileController.saved.some((profile) => profile.model === "provider/custom-model-name")).toBe(false);
 
     await handle.destroy();
   });

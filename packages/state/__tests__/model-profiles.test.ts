@@ -67,6 +67,17 @@ describe("modelProfileReducer", () => {
     });
     expect(state.profiles.some((profile) => profile.id === subscriptionProfile.id)).toBe(false);
   });
+
+  it("falls back to the first remaining profile after removing the active profile", () => {
+    const first = { ...createModelProfile("api_key"), id: "first", active: false };
+    const second = { ...createModelProfile("subscription"), id: "second", active: true };
+    const state = modelProfileReducer(
+      { profiles: [first, second], activeProfileId: "second" },
+      { type: "MODEL_PROFILE_REMOVE", profileId: "second" },
+    );
+
+    expect(getActiveModelProfile(state)?.id).toBe("first");
+  });
 });
 
 describe("createModelProfileStore", () => {
@@ -99,5 +110,21 @@ describe("createModelProfileStore", () => {
     expect(saved?.harnesses).toContain("custom_harness");
     expect(saved?.metadata.reasoningEffort).toBe("provider-ultra");
     expect(profiles.find((candidate) => candidate.id === profile.id)?.active).toBe(true);
+  });
+
+  it("serializes concurrent profile writes", async () => {
+    const storage = new MemoryStorage();
+    const store = createModelProfileStore({ storage });
+    const first = { ...createModelProfile("api_key"), id: "first-concurrent" };
+    const second = { ...createModelProfile("subscription"), id: "second-concurrent" };
+
+    await Promise.all([
+      store.storeProfile(first),
+      store.storeProfile(second),
+    ]);
+
+    const profiles = await store.listProfiles();
+    expect(profiles.some((profile) => profile.id === first.id)).toBe(true);
+    expect(profiles.some((profile) => profile.id === second.id)).toBe(true);
   });
 });

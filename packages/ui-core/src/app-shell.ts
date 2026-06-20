@@ -821,7 +821,17 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
 
     const credentialRef = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
+    const credentialError = validateCredentialReference(
+      credentialRef,
+      credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]")),
+    );
+    if (credentialError) {
+      this.state.connectionMessage = credentialError;
+      this.render();
+      return;
+    }
     const baseProfile = active ?? createModelProfile(mode);
+    const activeFlag = baseProfile.active;
     const profile: ModelConfigurationProfile = {
       ...baseProfile,
       id: baseProfile.id,
@@ -835,7 +845,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       subscriptionProvider: this.valueOf<HTMLInputElement>("[data-model-subscription-provider]").trim(),
       credentialStorage: credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]")),
       harnesses: splitList(this.valueOf<HTMLInputElement>("[data-model-harnesses]")),
-      active: true,
+      active: activeFlag,
       metadata: {
         contextWindowTokens: optionalPositiveInteger(this.valueOf<HTMLInputElement>("[data-model-context-window]")),
         reasoningEffort: this.valueOf<HTMLInputElement>("[data-model-reasoning-effort]").trim() || null,
@@ -846,7 +856,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     try {
       const saved = await controller.storeProfile(profile);
-      await controller.setActiveProfile(saved.id);
+      if (saved.active) {
+        await controller.setActiveProfile(saved.id);
+      }
       this.state.modelProfiles = [
         ...this.state.modelProfiles.filter((profile) => profile.id !== saved.id),
         saved,
@@ -1120,7 +1132,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           </label>
           <label class="os-field">
             <span>Credential Ref</span>
-            <input data-model-credential-ref value="${escapeAttr(credentialRef ?? "")}" />
+            <input data-model-credential-ref type="password" autocomplete="off" value="${escapeAttr(credentialRef ?? "")}" />
           </label>
           <label class="os-field">
             <span>Subscription Provider</span>
@@ -2438,6 +2450,41 @@ function credentialStorageFromValue(
     default:
       return "local_keychain";
   }
+}
+
+function validateCredentialReference(
+  value: string,
+  storage: ModelConfigurationProfile["credentialStorage"],
+): string | null {
+  if (!value) {
+    return null;
+  }
+  if (looksLikeRawSecret(value)) {
+    return "Credential ref must point to stored credentials, not contain a raw secret";
+  }
+  const expectedPrefix = credentialReferencePrefix(storage);
+  if (!value.startsWith(expectedPrefix)) {
+    return `Credential ref must start with ${expectedPrefix}`;
+  }
+  return null;
+}
+
+function credentialReferencePrefix(
+  storage: ModelConfigurationProfile["credentialStorage"],
+): string {
+  switch (storage) {
+    case "openhands_auth_directory":
+      return "openhands_auth:";
+    case "hosted_secret_store":
+      return "hosted_secret:";
+    case "local_keychain":
+    default:
+      return "local_keychain:";
+  }
+}
+
+function looksLikeRawSecret(value: string): boolean {
+  return /(^sk-[A-Za-z0-9_-]{8,})|(^github_pat_)|(^gh[pousr]_)|(^xox[baprs]-)|(^AKIA[0-9A-Z]{16})/.test(value);
 }
 
 function splitList(value: string): string[] {

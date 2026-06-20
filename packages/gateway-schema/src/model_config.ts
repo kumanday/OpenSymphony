@@ -88,7 +88,7 @@ export function defaultModelProfiles(): ModelConfigurationProfile[] {
       owner: "user",
       baseUrl: "https://api.openai.com/v1",
       model: "gpt-4.1",
-      apiKeyRef: "local_keychain:openai-api-key",
+      apiKeyRef: null,
       subscriptionCredentialRef: null,
       subscriptionProvider: null,
       credentialStorage: "local_keychain",
@@ -109,7 +109,7 @@ export function defaultModelProfiles(): ModelConfigurationProfile[] {
       baseUrl: "",
       model: "codex",
       apiKeyRef: null,
-      subscriptionCredentialRef: "openhands_auth:openai",
+      subscriptionCredentialRef: null,
       subscriptionProvider: "openai",
       credentialStorage: "openhands_auth_directory",
       harnesses: ["openhands_agent_server", "codex_app_server"],
@@ -149,8 +149,5 @@ export function redactCredentialRef(value: string | null | undefined): string {
   if (!trimmed) {
     return "Not configured";
   }
-  if (trimmed.length <= 8) {
-    return "****";
-  }
-  return `${trimmed.slice(0, 4)}...${trimmed.slice(-4)}`;
+  return "Configured";
 }

@@ -137,6 +137,7 @@ export function createModelProfileStore(
     profiles: options.defaults ?? defaultModelProfiles(),
     activeProfileId: null,
   });
+  let writeQueue: Promise<unknown> = Promise.resolve();
 
   function read(): ModelProfileState {
     if (!storage) {
@@ -166,31 +167,41 @@ export function createModelProfileStore(
     return normalized;
   }
 
+  function serialize<T>(operation: () => T): Promise<T> {
+    const next = writeQueue.then(operation, operation);
+    writeQueue = next.catch(() => undefined);
+    return next;
+  }
+
   return {
     async listProfiles() {
       return read().profiles;
     },
     async storeProfile(profile) {
-      const current = read();
-      const next = write({
-        profiles: [
-          ...current.profiles.filter((candidate) => candidate.id !== profile.id),
-          profile,
-        ],
-        activeProfileId: profile.active ? profile.id : current.activeProfileId,
+      return serialize(() => {
+        const current = read();
+        const next = write({
+          profiles: [
+            ...current.profiles.filter((candidate) => candidate.id !== profile.id),
+            profile,
+          ],
+          activeProfileId: profile.active ? profile.id : current.activeProfileId,
+        });
+        return next.profiles.find((candidate) => candidate.id === profile.id)!;
       });
-      return next.profiles.find((candidate) => candidate.id === profile.id)!;
     },
     async setActiveProfile(profileId) {
-      const current = read();
-      if (!current.profiles.some((profile) => profile.id === profileId)) {
-        throw new Error(`Unknown model profile: ${profileId}`);
-      }
-      const next = write({
-        profiles: current.profiles,
-        activeProfileId: profileId,
+      return serialize(() => {
+        const current = read();
+        if (!current.profiles.some((profile) => profile.id === profileId)) {
+          throw new Error(`Unknown model profile: ${profileId}`);
+        }
+        const next = write({
+          profiles: current.profiles,
+          activeProfileId: profileId,
+        });
+        return next.profiles.find((profile) => profile.id === profileId)!;
       });
-      return next.profiles.find((profile) => profile.id === profileId)!;
     },
   };
 }

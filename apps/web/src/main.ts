@@ -30,7 +30,7 @@ if (root) {
     title: "OpenSymphony Web",
     transport: createWebTransport(),
     profileController: createWebProfileController({ defaultGatewayUrl }),
-    modelProfileController: createModelProfileStore({ storage: browserStorage() }),
+    modelProfileController: createModelProfileStore(),
     onGatewayUrlChanged: async (gatewayUrl) =>
       new HttpGatewayTransport({
         baseUri: gatewayUrl,
@@ -40,11 +40,3 @@ if (root) {
 }
 
 export { config as webConfig };
-
-function browserStorage(): Storage | null {
-  try {
-    return typeof window !== "undefined" ? window.localStorage : null;
-  } catch {
-    return null;
-  }
-}
