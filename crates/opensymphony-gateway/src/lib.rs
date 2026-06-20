@@ -808,35 +808,72 @@ async fn detect_codex_local_readiness(command: &str) -> CodexLocalReadiness {
 
 async fn run_codex_probe<const N: usize>(command: &str, args: [&str; N]) -> ProbeCommandResult {
     let mut process = TokioCommand::new(command);
+    let args_display = args.join(" ");
     process.kill_on_drop(true).args(args);
     match tokio::time::timeout(CODEX_READINESS_PROBE_TIMEOUT, process.output()).await {
-        Err(_) => ProbeCommandResult::Failure {
-            stdout: String::new(),
-            stderr: format!(
-                "codex readiness probe timed out after {}ms",
-                CODEX_READINESS_PROBE_TIMEOUT.as_millis()
-            ),
-        },
+        Err(_) => {
+            tracing::warn!(
+                command,
+                args = %args_display,
+                timeout_ms = CODEX_READINESS_PROBE_TIMEOUT.as_millis(),
+                "codex readiness probe timed out"
+            );
+            ProbeCommandResult::Failure {
+                stdout: String::new(),
+                stderr: format!(
+                    "codex readiness probe timed out after {}ms",
+                    CODEX_READINESS_PROBE_TIMEOUT.as_millis()
+                ),
+            }
+        }
         Ok(Ok(output)) if output.status.success() => ProbeCommandResult::Success {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
-        Ok(Ok(output)) => ProbeCommandResult::Failure {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        },
+        Ok(Ok(output)) => {
+            tracing::warn!(
+                command,
+                args = %args_display,
+                status = ?output.status.code(),
+                "codex readiness probe exited unsuccessfully"
+            );
+            ProbeCommandResult::Failure {
+                stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            }
+        }
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                command,
+                args = %args_display,
+                error = %error,
+                "codex readiness probe command was not found"
+            );
             ProbeCommandResult::NotFound
         }
         Ok(Err(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            tracing::warn!(
+                command,
+                args = %args_display,
+                error = %error,
+                "codex readiness probe was blocked by local permission policy"
+            );
             ProbeCommandResult::PermissionDenied {
                 detail: error.to_string(),
             }
         }
-        Ok(Err(error)) => ProbeCommandResult::Failure {
-            stdout: String::new(),
-            stderr: error.to_string(),
-        },
+        Ok(Err(error)) => {
+            tracing::warn!(
+                command,
+                args = %args_display,
+                error = %error,
+                "codex readiness probe failed to execute"
+            );
+            ProbeCommandResult::Failure {
+                stdout: String::new(),
+                stderr: error.to_string(),
+            }
+        }
     }
 }
 
@@ -901,6 +938,10 @@ async fn await_codex_readiness_refresh(
         return CodexReadinessRefresh::Ready(readiness);
     }
 
+    tracing::error!(
+        command,
+        "codex readiness refresh ended before reporting status"
+    );
     let mut readiness = CodexLocalReadiness::not_checked();
     readiness.command = command.into();
     readiness.checked_by = "codex_readiness_refresh_failed".into();

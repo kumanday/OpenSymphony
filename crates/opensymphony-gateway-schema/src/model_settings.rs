@@ -459,6 +459,8 @@ fn command_status(result: &ProbeCommandResult) -> CredentialStatusKind {
 fn login_status_from_probe(result: &ProbeCommandResult) -> CredentialStatusKind {
     match result {
         ProbeCommandResult::Success { stdout, stderr } => {
+            // Recognized English status strings were verified with
+            // `codex-cli 0.138.0`; update these fixtures when bumping Codex.
             let text = format!("{stdout}\n{stderr}").to_ascii_lowercase();
             if text.contains("logged in using chatgpt") || text.contains("logged in with chatgpt") {
                 CredentialStatusKind::Installed
