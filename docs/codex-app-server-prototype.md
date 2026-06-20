@@ -47,7 +47,7 @@ A local stdio probe successfully started a JSON-RPC session:
 $ codex app-server --stdio
 request: {"jsonrpc":"2.0","id":1,"method":"initialize",...}
 response: {"id":1,"result":{"userAgent":"opensymphony-probe/0.138.0 ...",
-"codexHome":"/Users/magos/.codex","platformFamily":"unix","platformOs":"macos"}}
+"codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}
 ```
 
 Schema generation is supported:
@@ -89,13 +89,13 @@ WebSocket probes are supported. A 10-request local run produced:
 
 ```json
 {
-  "stdioInitializeLatencyMs": 126.222,
-  "websocketInitializeLatencyMs": 1.247,
+  "stdioInitializeLatencyMs": 126.372,
+  "websocketInitializeLatencyMs": 1.363,
   "websocketQueuedRequests": 10,
   "websocketQueuedResponses": 10,
-  "websocketRequestsPerSecond": 11511.35,
-  "websocketLatencyMs": { "p50": 0.526, "p95": 0.603, "max": 0.603 },
-  "websocketReconnectLatencyMs": 6.024,
+  "websocketRequestsPerSecond": 10822.99,
+  "websocketLatencyMs": { "p50": 0.526, "p95": 0.554, "max": 0.554 },
+  "websocketReconnectLatencyMs": 1.571,
   "websocketReconnectResponse": "ok",
   "websocketLocalhostOnly": true,
   "capabilityTokenModeAdvertised": true,

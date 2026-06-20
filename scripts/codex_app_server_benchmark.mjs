@@ -47,7 +47,7 @@ function assertJsonRpcResult(label, response) {
   if (response.error) {
     throw new Error(`${label} returned JSON-RPC error: ${JSON.stringify(response.error)}`);
   }
-  if (!response.result) {
+  if (!Object.hasOwn(response, "result")) {
     throw new Error(`${label} did not include a JSON-RPC result`);
   }
 }
@@ -179,7 +179,7 @@ function requestOverSocket(ws, id, method, params = {}, timeoutMs = requestTimeo
   });
 }
 
-async function runWebSocketProbe() {
+async function runWebSocketProbe(secureExposure) {
   const child = spawn("codex", ["app-server", "--listen", `ws://127.0.0.1:${port}`], {
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -241,7 +241,10 @@ async function runWebSocketProbe() {
       exposure: {
         listener: `ws://127.0.0.1:${port}`,
         localhostOnly: /binds localhost only/.test(stderr),
-        authModesFromHelp: ["capability-token", "signed-bearer-token"],
+        authModesFromHelp: [
+          ...(secureExposure.hasCapabilityTokenMode ? ["capability-token"] : []),
+          ...(secureExposure.hasSignedBearerMode ? ["signed-bearer-token"] : []),
+        ],
       },
     };
   } finally {
@@ -257,7 +260,10 @@ async function runHelpProbe() {
   });
   const chunks = [];
   child.stdout.on("data", (chunk) => chunks.push(chunk));
-  await once(child, "exit");
+  const [code] = await once(child, "exit");
+  if (code !== 0) {
+    throw new Error(`codex app-server --help exited with code ${code}`);
+  }
   const help = Buffer.concat(chunks).toString("utf8");
   return {
     transport: "websocket_secure_exposure",
@@ -286,7 +292,7 @@ try {
   report.stdio = await runStdioProbe();
   report.secureExposure = await runHelpProbe();
   if (runWebSocket) {
-    report.websocket = await runWebSocketProbe();
+    report.websocket = await runWebSocketProbe(report.secureExposure);
   }
   console.log(JSON.stringify(report, null, 2));
 } catch (error) {
