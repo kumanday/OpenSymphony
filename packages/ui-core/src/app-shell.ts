@@ -1187,14 +1187,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const summary = activeProfile
       ? `${activeProfile.label} • ${activeProfile.gatewayUrl}`
       : this.transport.baseUri;
-    const toggleLabel = this.state.profilePanelExpanded ? "Collapse" : "Edit";
+    const toggleLabel = this.state.profilePanelExpanded ? "Collapse" : "Expand";
     const header = `
       <div class="os-section-head">
         <div>
           <h2>Connection</h2>
           <span>${escapeHtml(summary)}</span>
         </div>
-        <button type="button" class="os-secondary-button" data-toggle-settings="connection">${toggleLabel}</button>
+        <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="connection" aria-expanded="${this.state.profilePanelExpanded ? "true" : "false"}" aria-label="${toggleLabel} Connection settings" title="${toggleLabel} Connection settings">
+          <span aria-hidden="true">${this.state.profilePanelExpanded ? "v" : ">"}</span>
+        </button>
       </div>
     `;
     if (!this.state.profilePanelExpanded) {
@@ -1260,14 +1262,16 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       : "";
     const canRemoveProfile = profiles.length > 1;
     const summary = `${active.label} • ${active.model || "No model"}${active.baseUrl ? ` • ${active.baseUrl}` : ""}`;
-    const toggleLabel = this.state.modelPanelExpanded ? "Collapse" : "Edit";
+    const toggleLabel = this.state.modelPanelExpanded ? "Collapse" : "Expand";
     const header = `
       <div class="os-section-head">
         <div>
           <h2>Model Configuration</h2>
           <span>${escapeHtml(summary)}</span>
         </div>
-        <button type="button" class="os-secondary-button" data-toggle-settings="model">${toggleLabel}</button>
+        <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="model" aria-expanded="${this.state.modelPanelExpanded ? "true" : "false"}" aria-label="${toggleLabel} Model Configuration settings" title="${toggleLabel} Model Configuration settings">
+          <span aria-hidden="true">${this.state.modelPanelExpanded ? "v" : ">"}</span>
+        </button>
       </div>
     `;
     if (!this.state.modelPanelExpanded) {
@@ -3155,6 +3159,8 @@ function appShellStyles(): string {
     .os-panel-collapsed { padding-bottom: 12px; }
     .os-section-head > div { min-width: 0; }
     .os-section-head > div span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-panel-toggle { flex: 0 0 auto; }
+    .os-section-head .os-panel-toggle span { color: inherit; font-size: inherit; }
     .os-secondary-button { min-height: 30px; padding: 4px 10px; }
     .os-model-layout { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; align-items: end; }
     .os-model-layout button { align-self: end; }

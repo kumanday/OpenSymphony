@@ -580,9 +580,21 @@ describe("OpenSymphonyApp mount", () => {
     await flushUntil(() => root.querySelector("[data-testid='model-profile-panel']") !== null);
 
     expect(root.querySelector(".os-model-panel h2")?.textContent).toBe("Model Configuration");
+    const collapsedToggle = root.querySelector("[data-toggle-settings='model']") as HTMLButtonElement;
+    expect(collapsedToggle).not.toBeNull();
+    expect(collapsedToggle.classList.contains("os-activity-toggle")).toBe(true);
+    expect(collapsedToggle.textContent?.trim()).toBe(">");
+    expect(collapsedToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(collapsedToggle.textContent).not.toContain("Collapse");
+    expect(collapsedToggle.textContent).not.toContain("Edit");
     expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("Not configured");
     expect(root.querySelector("[data-model-credential-ref]")).toBeNull();
     await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
+    const expandedToggle = root.querySelector("[data-toggle-settings='model']") as HTMLButtonElement;
+    expect(expandedToggle.textContent?.trim()).toBe("v");
+    expect(expandedToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(expandedToggle.textContent).not.toContain("Collapse");
+    expect(expandedToggle.textContent).not.toContain("Edit");
     expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("password");
     expect(root.textContent).not.toContain("Cost Profile");
     expect(root.textContent).not.toContain("Context Window");
@@ -1029,7 +1041,19 @@ describe("OpenSymphonyApp mount", () => {
 
     await flushUntil(() => root.querySelector(".os-profile-panel") !== null);
     expect(root.querySelector("[data-profile-select]")).toBeNull();
+    const collapsedToggle = root.querySelector("[data-toggle-settings='connection']") as HTMLButtonElement;
+    expect(collapsedToggle).not.toBeNull();
+    expect(collapsedToggle.classList.contains("os-activity-toggle")).toBe(true);
+    expect(collapsedToggle.textContent?.trim()).toBe(">");
+    expect(collapsedToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(collapsedToggle.textContent).not.toContain("Collapse");
+    expect(collapsedToggle.textContent).not.toContain("Edit");
     await expandSettingsPanel(root, "connection", "[data-profile-select]");
+    const expandedToggle = root.querySelector("[data-toggle-settings='connection']") as HTMLButtonElement;
+    expect(expandedToggle.textContent?.trim()).toBe("v");
+    expect(expandedToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(expandedToggle.textContent).not.toContain("Collapse");
+    expect(expandedToggle.textContent).not.toContain("Edit");
     const select = root.querySelector(
       "[data-profile-select]",
     ) as HTMLSelectElement;
