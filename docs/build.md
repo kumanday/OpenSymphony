@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-14T22:09:16.647206+00:00
 
 ## Current model
 
-- COE-423 contributed: PR #130: feat(gateway): add model credential settings seam (merge `07274f4`)
+- COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-14T22:09:16.647206+00:00
 
 ## Recent changes
 
-- COE-423: Model And Credential Settings
+- COE-426: Codex App-Server Prototype And Benchmarks
 
 ## Source refs
 
-- COE-423
+- COE-426
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

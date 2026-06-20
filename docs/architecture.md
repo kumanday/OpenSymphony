@@ -229,7 +229,7 @@ Notable removals:
 
 ## Current model
 
-- COE-423 contributed: PR #130: feat(gateway): add model credential settings seam (merge `07274f4`)
+- COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
 
 ## Important invariants
 
@@ -246,10 +246,10 @@ Notable removals:
 
 ## Recent changes
 
-- COE-423: Model And Credential Settings
+- COE-426: Codex App-Server Prototype And Benchmarks
 
 ## Source refs
 
-- COE-423
+- COE-426
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

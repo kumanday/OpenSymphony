@@ -397,7 +397,7 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Current model
 
-- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
+- COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
 
 ## Important invariants
 
@@ -414,10 +414,10 @@ repo-local GraphQL helper assets copied by `opensymphony init`.
 
 ## Recent changes
 
-- COE-419: Hosted Auth Placeholders And Web Parity
+- COE-426: Codex App-Server Prototype And Benchmarks
 
 ## Source refs
 
-- COE-419
+- COE-426
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

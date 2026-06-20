@@ -88,6 +88,23 @@ areas:
       - cli
       linear_milestones:
       - 'M9.5: Developer Build Acceleration'
+  codex-app-server:
+    title: Codex App-Server Prototype
+    docs_target: docs/codex-app-server-prototype.md
+    visibility: public
+    status: stable
+    confidence: 90
+    aliases:
+    - codex app server
+    - codex app-server
+    - codex app-server prototype
+    - codex-app-server
+    - codex_app_server
+    source_refs:
+      docs:
+      - docs/codex-app-server-prototype.md
+      linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
   configuration:
     title: Configuration
     docs_target: docs/configuration.md
@@ -357,6 +374,7 @@ areas:
       - area:operations
       - operations
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -393,6 +411,7 @@ areas:
       linear_labels:
       - repository-layout
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
       - 'M9.5: Developer Build Acceleration'
   sources:
     title: Sources and Trust Notes

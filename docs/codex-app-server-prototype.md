@@ -27,6 +27,56 @@ The prototype adds a small Rust module for:
 The companion benchmark script issues `thread/loaded/list` requests directly so
 throughput can be measured without starting model-backed turns.
 
+## Local Feature-Gated Testing
+
+Codex app-server support is available only when OpenSymphony is built with the
+`codex-app-server-prototype` Cargo feature. The feature exposes contract tests
+and benchmark helpers; it does not make Codex the production issue-execution
+harness.
+
+Use the system DuckDB developer aliases for quick local verification:
+
+```bash
+cargo check-system-duckdb --features codex-app-server-prototype
+cargo test-system-duckdb --features codex-app-server-prototype --test codex_app_server
+```
+
+Install or select the Codex CLI that should be tested, then confirm the
+app-server surface exists:
+
+```bash
+codex --version
+codex app-server --help
+```
+
+Run the loopback benchmark with the installed Codex binary:
+
+```bash
+node scripts/codex_app_server_benchmark.mjs \
+  --iterations=10 \
+  --port=18779 \
+  --batch-timeout-ms=6000
+```
+
+Use `--codex-path <path>` to test a specific Codex binary. Use
+`--skip-websocket` when the local Node runtime lacks global WebSocket support or
+when you only need stdio evidence. The benchmark intentionally avoids
+model-backed turns, so it should not consume subscription/API quota.
+
+If you want to build one local OpenSymphony binary that includes both Codex
+app-server and OpenHands ChatGPT/Codex subscription credential support, combine
+the feature gates:
+
+```bash
+cargo install --path . --no-default-features \
+  --features duckdb-prebuilt,codex-app-server-prototype,openhands-subscription-credentials
+```
+
+The subscription credential path is still owned by the model settings and
+OpenHands adapter flow. Codex app-server reuses those credential-reference
+profiles; it must not read or persist raw ChatGPT OAuth access or refresh tokens
+inside OpenSymphony workspaces.
+
 ## Installed Codex Evidence
 
 Captured on 2026-06-20 from this checkout:
@@ -238,3 +288,32 @@ test path. Production enablement should wait for:
 - subscription credential adapter completion,
 - security review of non-loopback WebSocket exposure with capability-token and
   signed-bearer modes.
+
+<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Current model
+
+- COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
+
+## Important invariants
+
+- Preserve the behavior described in the recent captured changes unless current code and tests show it has changed.
+- Use capsule source refs to inspect the original PR or Linear issue when context is ambiguous.
+
+## Operational flow
+
+- No generated diagram requested for this sync.
+
+## Known gotchas
+
+- No area-specific gotchas were inferred from the selected memory.
+
+## Recent changes
+
+- COE-426: Codex App-Server Prototype And Benchmarks
+
+## Source refs
+
+- COE-426
+
+<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

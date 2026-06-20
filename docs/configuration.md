@@ -178,6 +178,52 @@ status, but OpenSymphony does not forward them as undocumented agent-server
 conversation fields. Only the short-lived access token reference is resolved
 when building the OpenHands conversation request.
 
+### Feature-Gated Local Testing
+
+The Codex app-server prototype and OpenHands ChatGPT/Codex subscription adapter
+are compile-time opt-in features. Local test binaries must include the feature
+you are exercising:
+
+```bash
+cargo check-system-duckdb \
+  --features openhands-subscription-credentials,codex-app-server-prototype
+
+cargo test-system-duckdb \
+  --features openhands-subscription-credentials \
+  subscription -- --nocapture
+
+cargo test-system-duckdb \
+  --features codex-app-server-prototype \
+  --test codex_app_server
+```
+
+To install a local `opensymphony` binary with both gates enabled while using the
+system DuckDB development path:
+
+```bash
+export DUCKDB_LIB_DIR="/opt/homebrew/opt/duckdb/lib"
+export DUCKDB_INCLUDE_DIR="/opt/homebrew/opt/duckdb/include"
+export DYLD_LIBRARY_PATH="$DUCKDB_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+cargo install --path . --no-default-features \
+  --features duckdb-prebuilt,openhands-subscription-credentials,codex-app-server-prototype
+```
+
+For a local subscription-auth smoke test, establish the OpenAI ChatGPT/Codex
+subscription credential with the documented OpenHands SDK browser or device-code
+login flow, then export only the short-lived token and optional account identity
+that your workflow references:
+
+```bash
+export OPENHANDS_OPENAI_SUBSCRIPTION_ACCESS_TOKEN="<short-lived-access-token>"
+export OPENHANDS_OPENAI_SUBSCRIPTION_ACCOUNT_ID="<optional-account-id>"
+export OPENHANDS_AUTH_DIR="$HOME/.openhands/auth"
+```
+
+Then set `credential_mode: openai_subscription` in `WORKFLOW.md` as shown above
+and run `opensymphony run` with the feature-enabled binary. Do not store OAuth
+JSON files, refresh tokens, or access tokens in the repository, issue
+workspaces, Linear comments, or browser-visible payloads.
+
 The workflow supports `${VAR}` syntax for environment variable substitution in
 the front matter:
 
@@ -374,7 +420,7 @@ copy that guide into the target repository.
 
 ## Current model
 
-- COE-423 contributed: PR #130: feat(gateway): add model credential settings seam (merge `07274f4`)
+- COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
 
 ## Important invariants
 
@@ -391,10 +437,10 @@ copy that guide into the target repository.
 
 ## Recent changes
 
-- COE-423: Model And Credential Settings
+- COE-426: Codex App-Server Prototype And Benchmarks
 
 ## Source refs
 
-- COE-423
+- COE-426
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
