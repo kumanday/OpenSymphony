@@ -866,31 +866,42 @@ impl CodexReadinessCache {
             }
         };
 
-        let readiness = await_codex_readiness_refresh(receiver, command).await;
+        let refresh = await_codex_readiness_refresh(receiver, command).await;
         let mut state = self.state.lock().await;
-        state.entry = Some(CachedCodexReadiness {
-            checked_at: Instant::now(),
-            readiness: readiness.clone(),
-        });
         state.in_flight = None;
-        readiness
+        match refresh {
+            CodexReadinessRefresh::Ready(readiness) => {
+                state.entry = Some(CachedCodexReadiness {
+                    checked_at: Instant::now(),
+                    readiness: readiness.clone(),
+                });
+                readiness
+            }
+            CodexReadinessRefresh::RefreshFailed(readiness) => readiness,
+        }
     }
+}
+
+#[derive(Debug)]
+enum CodexReadinessRefresh {
+    Ready(CodexLocalReadiness),
+    RefreshFailed(CodexLocalReadiness),
 }
 
 async fn await_codex_readiness_refresh(
     mut receiver: tokio::sync::watch::Receiver<Option<CodexLocalReadiness>>,
     command: &str,
-) -> CodexLocalReadiness {
+) -> CodexReadinessRefresh {
     if let Some(readiness) = receiver.borrow().clone() {
-        return readiness;
+        return CodexReadinessRefresh::Ready(readiness);
     }
     if receiver.changed().await.is_ok()
         && let Some(readiness) = receiver.borrow().clone()
     {
-        return readiness;
+        return CodexReadinessRefresh::Ready(readiness);
     }
 
-    CodexLocalReadiness::from_probe(CodexCliProbe {
+    CodexReadinessRefresh::RefreshFailed(CodexLocalReadiness::from_probe(CodexCliProbe {
         command: command.into(),
         version: ProbeCommandResult::failure(
             "Codex readiness refresh ended before reporting status",
@@ -901,7 +912,7 @@ async fn await_codex_readiness_refresh(
         login_status: ProbeCommandResult::failure(
             "Codex readiness refresh ended before reporting status",
         ),
-    })
+    }))
 }
 
 async fn model_settings(State(state): State<GatewayState>) -> Json<ModelSettingsResponse> {
@@ -3622,7 +3633,6 @@ exit 2
     async fn codex_readiness_concurrent_cache_misses_share_refresh() {
         use crate::opensymphony_gateway_schema::model_settings::CredentialStatusKind;
         use std::os::unix::fs::PermissionsExt;
-        use std::time::Instant;
 
         let temp = tempfile::tempdir().expect("temp dir should be created");
         let count_file = temp.path().join("count.txt");
@@ -3662,13 +3672,8 @@ exit 2
         let command = fake_codex
             .to_str()
             .expect("fake codex path should be utf-8");
-        let started = Instant::now();
         let (first, second) = tokio::join!(cache.readiness(command), cache.readiness(command));
 
-        assert!(
-            started.elapsed() < Duration::from_secs(3),
-            "concurrent cache misses should share one aggregate refresh"
-        );
         assert_eq!(first.subscription_status, CredentialStatusKind::Installed);
         assert_eq!(second, first);
         let runs = std::fs::read_to_string(&count_file).expect("count file should exist");
@@ -3677,6 +3682,29 @@ exit 2
             3,
             "concurrent cache misses should run one shared set of probes"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_readiness_refresh_failure_is_not_cached() {
+        use crate::opensymphony_gateway_schema::model_settings::CredentialStatusKind;
+
+        let cache = CodexReadinessCache::default();
+        let (sender, receiver) = tokio::sync::watch::channel(None);
+        drop(sender);
+        {
+            let mut state = cache.state.lock().await;
+            state.in_flight = Some(receiver);
+        }
+
+        let readiness = cache.readiness("codex").await;
+
+        assert_eq!(readiness.subscription_status, CredentialStatusKind::Unknown);
+        let state = cache.state.lock().await;
+        assert!(
+            state.entry.is_none(),
+            "fallback readiness from a failed refresh should not be cached"
+        );
+        assert!(state.in_flight.is_none());
     }
 
     #[cfg(unix)]
