@@ -777,6 +777,15 @@ CodexHarnessAdapter
 
 Initial implementation should prepare the interfaces and settings. Production enablement should come after a benchmark and contract-test phase. Codex app-server must reuse model and credential settings rather than becoming the owner of subscription credentials.
 
+COE-426 adds the first feature-gated local prototype for this shape. The
+prototype is intentionally limited to stdio/WebSocket launch metadata,
+JSON-RPC request construction for `initialize`, `thread/start`, and
+`turn/start`, basic notification normalization with raw payload retention, and
+model/credential reference reuse. The Codex harness remains unavailable in
+gateway capability discovery until the benchmark, approval, credential, and
+history gaps are closed. See `docs/codex-app-server-prototype.md` for the
+current contract evidence and benchmark procedure.
+
 ## 9. Hosted mode architecture
 
 ### 9.1 Hosted components

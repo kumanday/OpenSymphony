@@ -72,6 +72,13 @@ package, not standalone published crates.
 - WebSocket event stream
 - issue session runner
 
+### `opensymphony_codex`
+
+- feature-gated Codex app-server launch argument builder
+- Codex JSON-RPC request and notification normalization helpers
+- model credential reuse mapping from gateway model settings
+- prototype benchmark requirement descriptors
+
 ### `opensymphony_orchestrator`
 
 - scheduler loop

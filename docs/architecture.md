@@ -34,6 +34,7 @@ OpenSymphony is split into five layers:
    - workspace manager
    - OpenHands REST client
    - OpenHands WebSocket runtime stream
+   - feature-gated Codex app-server prototype adapter
    - issue session runner
 5. Observability layer
    - structured logs
@@ -127,6 +128,9 @@ This keeps one canonical Linear API surface for the agent path.
   - issue capsules, DuckDB memory index, docs sync, and archive eligibility
 - `opensymphony_openhands`
   - OpenHands transport and session runner
+- `opensymphony_codex`
+  - feature-gated Codex app-server launch, JSON-RPC, credential reuse, and
+    benchmark prototype helpers
 - `opensymphony_orchestrator`
   - scheduler loop and reconciliation
 - `opensymphony_control`

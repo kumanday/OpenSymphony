@@ -544,6 +544,18 @@ fn harness_capability_roundtrips_future_adapters() {
     assert_eq!(back[1].kind, "codex_app_server");
     assert_eq!(back[1].transport.protocol, "json_rpc_2_0");
     assert!(back[1].approvals.tool_approval);
+    assert!(
+        back[1]
+            .feature_gaps
+            .iter()
+            .any(|gap| gap.contains("COE-426"))
+    );
+    assert!(
+        !back[1]
+            .feature_gaps
+            .iter()
+            .any(|gap| gap.contains("COE-408"))
+    );
     assert_eq!(back[2].kind, "rust_native");
     assert!(back[2].pause_resume.pause);
 }

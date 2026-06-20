@@ -34,6 +34,12 @@ All four paths expose the same gateway DTOs, event envelopes, cursors, and actio
 receipts. Local native transport is a performance optimization; it must not bypass
 the event journal, permission checks, or orchestrator-owned state transitions.
 
+Codex app-server loopback WebSocket is a feature-gated future harness transport,
+not an OpenSymphony gateway transport. It speaks the Codex JSON-RPC contract
+rather than gateway DTOs, so production exposure must be justified with
+`scripts/codex_app_server_benchmark.mjs` evidence for throughput, queue behavior,
+reconnect, and secure exposure.
+
 ### Remote hosted transport strategy
 
 - **Primary**: WebSocket with JSON text frames for control events and detail reads.
@@ -45,6 +51,12 @@ the event journal, permission checks, or orchestrator-owned state transitions.
     explicit.
   - A standard envelope simplifies client SDK generation.
 - **Fallback**: SSE for simple snapshot streams where WebSocket is unavailable.
+
+For Codex app-server specifically, stdio remains the preferred local prototype
+transport. Loopback WebSocket is experimental and must keep secure exposure
+controls enabled before any non-local use: localhost-only by default,
+capability-token or signed-bearer authentication for exposed listeners, and
+repeatable reconnect/queue throughput evidence for the pinned Codex version.
 
 ### Stream split
 

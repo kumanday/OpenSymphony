@@ -77,6 +77,7 @@ Preferred crate and trait boundaries:
 - `opensymphony-workspace`
 - `opensymphony-linear`
 - `opensymphony-openhands`
+- `opensymphony-codex`
 - `opensymphony-orchestrator`
 - `opensymphony-control`
 - `opensymphony-cli`
@@ -119,6 +120,12 @@ The runtime client must:
 - Concrete harness adapters should implement the domain `HarnessAdapter` capability boundary and keep OpenHands, Codex, or future in-process protocol details inside their adapter modules.
 - Future or experimental harnesses may be advertised as unavailable capability entries, but their feature gaps must be explicit.
 - When changing harness capability discovery, update gateway schema round-trip tests, the gateway capabilities endpoint test, adapter-boundary tests, and `docs/harness-adapter-compatibility.md`.
+
+The feature-gated Codex app-server prototype uses the `codex-app-server-prototype`
+feature and the `opensymphony_codex` internal module boundary. Keep Codex
+app-server launch, JSON-RPC, and benchmark evidence documented in
+`docs/codex-app-server-prototype.md`; do not enable production routing while
+`codex_app_server` is advertised as unavailable.
 
 ### Preserve forward compatibility
 
@@ -271,6 +278,8 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/architecture.md`: runtime architecture
 - `docs/symphony-spec-alignment.md`: upstream spec mapping
 - `docs/openhands-agent-server.md`: agent-server integration choices
+- `docs/codex-app-server-prototype.md`: feature-gated Codex app-server
+  prototype, launch contract, JSON-RPC evidence, and benchmark results
 - `docs/websocket-runtime.md`: wire contract and recovery behavior
 - `docs/workspace-and-lifecycle.md`: workspace ownership and hooks
 - `docs/linear-and-tools.md`: Linear integration and GraphQL helper assets

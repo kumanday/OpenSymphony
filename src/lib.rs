@@ -1,5 +1,8 @@
 #[path = "../crates/opensymphony-cli/src/lib.rs"]
 pub mod opensymphony_cli;
+#[cfg(feature = "codex-app-server-prototype")]
+#[path = "../crates/opensymphony-codex/src/lib.rs"]
+pub mod opensymphony_codex;
 #[path = "../crates/opensymphony-control/src/lib.rs"]
 pub mod opensymphony_control;
 #[path = "../crates/opensymphony-domain/src/lib.rs"]

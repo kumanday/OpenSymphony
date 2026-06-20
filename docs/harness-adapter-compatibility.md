@@ -45,9 +45,23 @@ map to start thread/turn, send input, approve/reject, and cancel operations.
 Notifications map to OpenSymphony runtime events with raw payload retention,
 cursor replay, and correlation IDs at the gateway layer.
 
+COE-426 adds a feature-gated local prototype under
+`codex-app-server-prototype`. The prototype can construct stdio launch
+arguments, build `initialize`, `thread/start`, and `turn/start` JSON-RPC
+requests, normalize basic thread/turn/item notifications, and map the existing
+model credential settings profiles to future Codex use. Production routing
+remains disabled; `codex_app_server` is still advertised as unavailable through
+capability discovery.
+
+Benchmark and contract evidence lives in
+`docs/codex-app-server-prototype.md`. The companion script
+`scripts/codex_app_server_benchmark.mjs` exercises stdio initialize, loopback
+WebSocket throughput, queued request behavior, reconnect, and secure exposure
+flags against the installed Codex CLI.
+
 Known gaps:
 
-- Production adapter implementation is out of scope for COE-408.
+- Production adapter implementation is out of scope for COE-426.
 - Pause/resume semantics need protocol confirmation before being advertised as
   available.
 - WebSocket transport remains experimental until benchmarked and secured; stdio
