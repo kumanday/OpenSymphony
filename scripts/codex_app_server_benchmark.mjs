@@ -97,6 +97,9 @@ function assertJsonRpcResult(label, response) {
   if (response.error) {
     throw new Error(`${label} returned JSON-RPC error: ${JSON.stringify(response.error)}`);
   }
+  if (Object.hasOwn(response, "jsonrpc") && response.jsonrpc !== "2.0") {
+    throw new Error(`${label} returned unsupported JSON-RPC version: ${JSON.stringify(response.jsonrpc)}`);
+  }
   if (!Object.hasOwn(response, "result")) {
     throw new Error(`${label} did not include a JSON-RPC result`);
   }
@@ -460,6 +463,9 @@ async function runHelpProbe() {
     hasSignedBearerMode: help.includes("signed-bearer-token"),
     hasTokenFileFlag: help.includes("--ws-token-file"),
     hasSharedSecretFlag: help.includes("--ws-shared-secret-file"),
+    hasIssuerFlag: help.includes("--ws-issuer"),
+    hasAudienceFlag: help.includes("--ws-audience"),
+    hasClockSkewFlag: help.includes("--ws-max-clock-skew-seconds"),
   };
 }
 

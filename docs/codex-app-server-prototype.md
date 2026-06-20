@@ -50,6 +50,10 @@ response: {"id":1,"result":{"userAgent":"opensymphony-probe/0.138.0 ...",
 "codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}
 ```
 
+Codex CLI `0.138.0` omits the `jsonrpc` field in successful responses. The
+benchmark rejects unsupported `jsonrpc` values when the field is present and
+otherwise validates the observed `id` plus `result` response shape.
+
 Schema generation is supported:
 
 ```text
@@ -67,7 +71,7 @@ approval request shapes.
 Run:
 
 ```bash
-node scripts/codex_app_server_benchmark.mjs --iterations 10 --port 18778
+node scripts/codex_app_server_benchmark.mjs --iterations 10 --port 18779
 ```
 
 The loopback WebSocket probe uses Node's global `WebSocket` and `fetch`
@@ -93,11 +97,11 @@ WebSocket probes are supported. A 10-request local run produced:
 
 ```json
 {
-  "generatedAt": "2026-06-20T06:41:49.453Z",
+  "generatedAt": "2026-06-20T06:50:07.988Z",
   "codexVersion": "codex-cli 0.138.0",
   "stdio": {
     "transport": "stdio",
-    "initializeLatencyMs": 115.315,
+    "initializeLatencyMs": 120.332,
     "response": {
       "id": 1,
       "result": {
@@ -111,22 +115,22 @@ WebSocket probes are supported. A 10-request local run produced:
   },
   "websocket": {
     "transport": "websocket_loopback",
-    "port": 18778,
-    "initializeLatencyMs": 1.299,
+    "port": 18779,
+    "initializeLatencyMs": 1.252,
     "queuedRequests": 10,
     "queuedResponses": 10,
-    "queueElapsedMs": 0.779,
-    "requestsPerSecond": 12838.35,
+    "queueElapsedMs": 0.856,
+    "requestsPerSecond": 11678.26,
     "latencyMs": {
-      "p50": 0.476,
-      "p95": 0.507,
-      "max": 0.507
+      "p50": 0.475,
+      "p95": 0.569,
+      "max": 0.569
     },
-    "reconnectLatencyMs": 0.959,
+    "reconnectLatencyMs": 0.853,
     "reconnectResponse": "ok",
     "stdoutBytes": 0,
     "exposure": {
-      "listener": "ws://127.0.0.1:18778",
+      "listener": "ws://127.0.0.1:18779",
       "localhostOnly": true,
       "authModesFromHelp": [
         "capability-token",
@@ -140,7 +144,10 @@ WebSocket probes are supported. A 10-request local run produced:
     "hasCapabilityTokenMode": true,
     "hasSignedBearerMode": true,
     "hasTokenFileFlag": true,
-    "hasSharedSecretFlag": true
+    "hasSharedSecretFlag": true,
+    "hasIssuerFlag": true,
+    "hasAudienceFlag": true,
+    "hasClockSkewFlag": true
   }
 }
 ```
