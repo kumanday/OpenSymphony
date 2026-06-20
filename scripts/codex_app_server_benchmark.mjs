@@ -235,7 +235,6 @@ function writeToStream(stream, data, label, timeoutMs) {
     };
     const onError = (error) => {
       cleanup();
-      ws.close();
       reject(error);
     };
     const timeout = setTimeout(() => {
@@ -410,6 +409,7 @@ async function openSocket(url, timeoutMs = requestTimeoutMs) {
     };
     const onError = (error) => {
       cleanup();
+      ws.close();
       reject(error);
     };
     const timeout = setTimeout(() => {
