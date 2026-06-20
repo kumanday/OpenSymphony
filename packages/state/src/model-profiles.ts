@@ -55,12 +55,18 @@ export function modelProfileReducer(
           profile.id === action.profile.id ? action.profile : profile,
         ),
       });
-    case "MODEL_PROFILE_REMOVE":
+    case "MODEL_PROFILE_REMOVE": {
+      const remainingProfiles = state.profiles.filter((profile) => profile.id !== action.profileId);
       return normalizeModelProfileState({
-        profiles: state.profiles.filter((profile) => profile.id !== action.profileId),
+        profiles: remainingProfiles,
         activeProfileId:
-          state.activeProfileId === action.profileId ? null : state.activeProfileId,
+          state.activeProfileId === action.profileId
+            ? remainingProfiles.find((profile) => profile.active)?.id
+              ?? remainingProfiles[0]?.id
+              ?? null
+            : state.activeProfileId,
       });
+    }
     case "MODEL_PROFILE_SET_ACTIVE":
       if (!state.profiles.some((profile) => profile.id === action.profileId)) {
         return state;
@@ -95,11 +101,10 @@ export function normalizeModelProfileState(
   const profiles = state.profiles.length > 0
     ? state.profiles
     : defaultModelProfiles();
-  const activeProfileId =
-    state.activeProfileId
-    ?? profiles.find((profile) => profile.active)?.id
-    ?? profiles[0]?.id
-    ?? null;
+  const activeProfileId = state.activeProfileId
+    && profiles.some((profile) => profile.id === state.activeProfileId)
+    ? state.activeProfileId
+    : profiles.find((profile) => profile.active)?.id ?? null;
   return {
     profiles: profiles.map((profile) => ({
       ...profile,
@@ -191,7 +196,9 @@ export function createModelProfileStore(
             ...current.profiles.filter((candidate) => candidate.id !== profile.id),
             profile,
           ],
-          activeProfileId: profile.active ? profile.id : current.activeProfileId,
+          activeProfileId: profile.active
+            ? profile.id
+            : current.activeProfileId === profile.id ? null : current.activeProfileId,
         });
         return next.profiles.find((candidate) => candidate.id === profile.id)!;
       });
@@ -218,10 +225,13 @@ export function createModelProfileStore(
         if (current.profiles.length <= 1) {
           throw new Error("Cannot remove the last model profile");
         }
+        const profiles = current.profiles.filter((profile) => profile.id !== profileId);
         const next = write({
-          profiles: current.profiles.filter((profile) => profile.id !== profileId),
+          profiles,
           activeProfileId:
-            current.activeProfileId === profileId ? null : current.activeProfileId,
+            current.activeProfileId === profileId
+              ? profiles.find((profile) => profile.active)?.id ?? profiles[0]?.id ?? null
+              : current.activeProfileId,
         });
         return next.profiles;
       });

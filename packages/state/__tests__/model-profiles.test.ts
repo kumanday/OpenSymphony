@@ -143,6 +143,20 @@ describe("createModelProfileStore", () => {
     await expect(store.storeProfile(profile)).rejects.toThrow("Credential ref");
   });
 
+  it("allows the active model profile to be deactivated", async () => {
+    const store = createModelProfileStore({ storage: new MemoryStorage() });
+    const [active] = await store.listProfiles();
+
+    await store.storeProfile({ ...active, active: false });
+
+    const state = {
+      profiles: await store.listProfiles(),
+      activeProfileId: null,
+    };
+    expect(state.profiles.find((profile) => profile.id === active.id)?.active).toBe(false);
+    expect(getActiveModelProfile(state)).toBeNull();
+  });
+
   it("rejects removing an unknown or final model profile", async () => {
     const profile = { ...createModelProfile("api_key"), id: "only-profile" };
     const store = createModelProfileStore({ defaults: [profile] });

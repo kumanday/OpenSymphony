@@ -713,6 +713,31 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("deactivates the active model profile with the explicit Active checkbox", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() => root.querySelector("[data-model-active]") !== null);
+    expect((root.querySelector("[data-model-active]") as HTMLInputElement).checked).toBe(true);
+
+    (root.querySelector("[data-model-active]") as HTMLInputElement).checked = false;
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.find((profile) => profile.id === "openai-api-compatible")?.active === false,
+    );
+    expect((root.querySelector("[data-model-active]") as HTMLInputElement).checked).toBe(false);
+
+    await handle.destroy();
+  });
+
   it("keeps model profile save failures separate from gateway connection health", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
