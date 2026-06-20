@@ -16,7 +16,7 @@ use opensymphony::opensymphony_domain::{
 };
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, LinearTaskGraphClient, control_plane_to_dashboard_snapshot,
-    model_settings_for_llm_api_key_installed,
+    model_settings_for_llm_api_key,
 };
 use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
@@ -562,7 +562,7 @@ fn gateway_capabilities_json_fixture_roundtrips() {
 
 #[test]
 fn gateway_model_settings_status_reflects_api_key_presence() {
-    let installed_settings = model_settings_for_llm_api_key_installed(true);
+    let installed_settings = model_settings_for_llm_api_key(Some("provider-secret"));
     let installed_profile = installed_settings
         .profiles
         .iter()
@@ -574,22 +574,29 @@ fn gateway_model_settings_status_reflects_api_key_presence() {
             && status.status == CredentialStatusKind::Installed
     }));
 
-    let logged_out_settings = model_settings_for_llm_api_key_installed(false);
-    let logged_out_profile = logged_out_settings
+    let missing_settings = model_settings_for_llm_api_key(None);
+    let missing_profile = missing_settings
         .profiles
         .iter()
         .find(|profile| profile.id == "openhands-env-api-key")
         .expect("OpenHands env profile should exist");
-    assert_eq!(logged_out_profile.status, CredentialStatusKind::LoggedOut);
-    assert!(
-        logged_out_settings
-            .credential_statuses
-            .iter()
-            .any(|status| {
-                status.credential_reference_id == "credential:env:LLM_API_KEY"
-                    && status.status == CredentialStatusKind::LoggedOut
-            })
-    );
+    assert_eq!(missing_profile.status, CredentialStatusKind::LoggedOut);
+    assert!(missing_settings.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:env:LLM_API_KEY"
+            && status.status == CredentialStatusKind::LoggedOut
+    }));
+
+    let blank_settings = model_settings_for_llm_api_key(Some("   "));
+    let blank_profile = blank_settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == "openhands-env-api-key")
+        .expect("OpenHands env profile should exist");
+    assert_eq!(blank_profile.status, CredentialStatusKind::LoggedOut);
+    assert!(blank_settings.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:env:LLM_API_KEY"
+            && status.status == CredentialStatusKind::LoggedOut
+    }));
 }
 
 #[test]
@@ -683,6 +690,10 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
         .json::<ModelSettingsResponse>()
         .await
         .expect("decode model settings");
+    // The endpoint derives API-key status from process environment. To avoid
+    // mutating global env in an async integration test, installed, missing, and
+    // blank-key cases are covered by
+    // `gateway_model_settings_status_reflects_api_key_presence`.
     assert!(model_settings_response.profiles.iter().any(|profile| {
         profile.id == "openhands-env-api-key"
             && profile.compatible_harnesses == vec!["openhands_agent_server"]
