@@ -44,12 +44,43 @@ async function terminateChild(child, graceMs = 1000) {
 }
 
 function assertJsonRpcResult(label, response) {
+  if (response == null || typeof response !== "object") {
+    throw new Error(`${label} returned non-object JSON-RPC response: ${JSON.stringify(response)}`);
+  }
   if (response.error) {
     throw new Error(`${label} returned JSON-RPC error: ${JSON.stringify(response.error)}`);
   }
   if (!Object.hasOwn(response, "result")) {
     throw new Error(`${label} did not include a JSON-RPC result`);
   }
+}
+
+function waitForStreamProgress(stream, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      stream.removeListener("readable", onReadable);
+      stream.removeListener("end", onEnd);
+      stream.removeListener("close", onClose);
+      stream.removeListener("error", onError);
+    };
+    const complete = (event) => {
+      cleanup();
+      resolve(event);
+    };
+    const onReadable = () => complete("readable");
+    const onEnd = () => complete("end");
+    const onClose = () => complete("close");
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const timeout = setTimeout(() => complete("timeout"), timeoutMs);
+    stream.once("readable", onReadable);
+    stream.once("end", onEnd);
+    stream.once("close", onClose);
+    stream.once("error", onError);
+  });
 }
 
 async function readLine(stream, timeoutMs) {
@@ -63,8 +94,38 @@ async function readLine(stream, timeoutMs) {
       if (newline >= 0) return buffer.slice(0, newline);
     }
     if (performance.now() > deadline) throw new Error("timed out waiting for line");
-    await once(stream, "readable");
+    const remainingMs = Math.max(1, deadline - performance.now());
+    const event = await waitForStreamProgress(stream, remainingMs);
+    if (event === "timeout") throw new Error("timed out waiting for line");
+    if (event === "end" || event === "close") {
+      throw new Error(`stream ${event} before a complete line`);
+    }
   }
+}
+
+async function collectChildOutput(child, label, timeoutMs = requestTimeoutMs) {
+  const stdout = [];
+  const stderr = [];
+  child.stdout?.on("data", (chunk) => stdout.push(chunk));
+  child.stderr?.on("data", (chunk) => stderr.push(chunk));
+
+  const result = await Promise.race([
+    once(child, "exit").then(([code, signal]) => ({ code, signal, timedOut: false })),
+    sleep(timeoutMs).then(() => ({ code: null, signal: null, timedOut: true })),
+  ]);
+
+  if (result.timedOut) {
+    await terminateChild(child);
+    throw new Error(`${label} timed out after ${timeoutMs}ms`);
+  }
+
+  if (result.code !== 0) {
+    const suffix = result.signal ? ` signal ${result.signal}` : ` code ${result.code}`;
+    const stderrText = Buffer.concat(stderr).toString("utf8").trim();
+    throw new Error(`${label} exited with${suffix}${stderrText ? `: ${stderrText}` : ""}`);
+  }
+
+  return Buffer.concat(stdout).toString("utf8");
 }
 
 async function runStdioProbe() {
@@ -258,13 +319,7 @@ async function runHelpProbe() {
   const child = spawn("codex", ["app-server", "--help"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
-  const chunks = [];
-  child.stdout.on("data", (chunk) => chunks.push(chunk));
-  const [code] = await once(child, "exit");
-  if (code !== 0) {
-    throw new Error(`codex app-server --help exited with code ${code}`);
-  }
-  const help = Buffer.concat(chunks).toString("utf8");
+  const help = await collectChildOutput(child, "codex app-server --help");
   return {
     transport: "websocket_secure_exposure",
     helpSha256: createHash("sha256").update(help).digest("hex"),
@@ -285,10 +340,7 @@ const report = {
 
 try {
   const version = spawn("codex", ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
-  const chunks = [];
-  version.stdout.on("data", (chunk) => chunks.push(chunk));
-  await once(version, "exit");
-  report.codexVersion = Buffer.concat(chunks).toString("utf8").trim();
+  report.codexVersion = (await collectChildOutput(version, "codex --version")).trim();
   report.stdio = await runStdioProbe();
   report.secureExposure = await runHelpProbe();
   if (runWebSocket) {
