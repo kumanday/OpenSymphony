@@ -53,6 +53,7 @@ pub fn run() {
             commands::store_profile,
             commands::list_profiles,
             commands::set_active_profile,
+            commands::remove_profile,
             commands::probe_gateway,
             commands::discover_default_gateway,
             commands::start_daemon,

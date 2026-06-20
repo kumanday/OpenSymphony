@@ -6,6 +6,7 @@ import {
   type GatewayTransport,
 } from "@opensymphony/api-client";
 import type { ConnectionProfile } from "@opensymphony/gateway-schema";
+import { createModelProfileStore } from "@opensymphony/state";
 import {
   renderOpenSymphonyApp,
   type EditableProfileInput,
@@ -276,6 +277,13 @@ export function createDesktopProfileController(): ProfileController | undefined 
       });
       return toConnectionProfile(active);
     },
+
+    async removeProfile(profileId: string) {
+      const profiles = await invoke<NativeProfileResponse[]>("remove_profile", {
+        profileId,
+      });
+      return profiles.map(toConnectionProfile);
+    },
   };
 }
 
@@ -396,6 +404,7 @@ if (root) {
         managed: false,
       },
     ],
+    modelProfileController: createModelProfileStore(),
     onGatewayUrlChanged: createTransportForGateway,
   });
 }

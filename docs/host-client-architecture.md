@@ -753,14 +753,17 @@ ModelConfigurationProfile
 ├─ base_url
 ├─ model
 ├─ credential_ref
-├─ harnesses: openhands_agent_server | codex_app_server | other
-├─ context_window
-├─ reasoning_effort
-├─ cost_profile
-└─ recommended_for
+└─ harnesses: openhands_agent_server | codex_app_server | other
 ```
 
-The configuration profile records settings and optional operator-supplied metadata for dynamic routing. API-compatible model profiles use the configured base URL, model string, credential reference, and harness capability.
+The configuration profile records settings that are directly meaningful to the
+current model wiring. API-compatible model profiles use the configured base URL,
+model string, credential reference, and harness capability. Context window,
+pricing tiers, task recommendations, and provider-specific reasoning controls
+must not be accepted as opaque operator-entered profile fields until a runtime
+adapter or routing policy consumes them. Later routing work should derive those
+signals from provider capability discovery, benchmark data, or explicit policy
+configuration rather than asking users to guess values.
 
 ### 8.4 Codex app-server harness shape
 

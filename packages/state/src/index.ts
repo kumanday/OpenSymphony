@@ -44,6 +44,22 @@ export {
   isLocalProfile,
 } from "./profiles.js";
 
+// Model profile state management
+export type {
+  ModelProfileAction,
+  ModelProfileState,
+  ModelProfileStorage,
+  ModelProfileStore,
+  ModelProfileStoreOptions,
+} from "./model-profiles.js";
+export {
+  createModelProfileStore,
+  getActiveModelProfile,
+  initialModelProfileState,
+  modelProfileReducer,
+  normalizeModelProfileState,
+} from "./model-profiles.js";
+
 // -- Connection state --
 
 export type ConnectionState =

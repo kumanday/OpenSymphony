@@ -266,6 +266,15 @@ workspaces, logs, workflow files, Linear comments, or browser payloads. Gateway
 readiness checks are cached briefly and have bounded per-command timeouts so
 operator UI polling cannot hang on a stalled local Codex command.
 
+The alpha model configuration panel exposed by the web and desktop shells uses
+the shared model profile state store, but those entrypoints currently construct
+it without durable storage. Treat profile edits as session-local until a
+desktop secure-settings backend or hosted settings service is wired in. The UI
+may keep model strings, routing hints, subscription bootstrap metadata, and
+stored credential references in memory, but raw provider keys and OAuth refresh
+material must stay in the selected keychain, OpenHands auth directory, or
+hosted secret store.
+
 ## 5. Linear operational model
 
 OpenSymphony 1.0.0 is GraphQL-only for agent-side Linear operations.
