@@ -18,8 +18,15 @@ import type {
   TaskGraphNodeKind,
   TaskGraphSnapshot,
   AuthState,
+  ModelConfigurationProfile,
+  ModelCredentialMode,
 } from "@opensymphony/gateway-schema";
-import { authStateFromError } from "@opensymphony/gateway-schema";
+import {
+  authStateFromError,
+  createModelProfile,
+  defaultModelProfiles,
+  redactCredentialRef,
+} from "@opensymphony/gateway-schema";
 import { renderChangedFileList, renderFileDiff } from "./diff.js";
 import { renderValidationSummary } from "./validation.js";
 import { renderApprovalList, type ApprovalDecision } from "./approval.js";
@@ -112,6 +119,12 @@ export interface ProfileController {
   setActiveProfile(profileId: string): Promise<ConnectionProfile>;
 }
 
+export interface ModelProfileController {
+  listProfiles(): Promise<ModelConfigurationProfile[]>;
+  storeProfile(profile: ModelConfigurationProfile): Promise<ModelConfigurationProfile>;
+  setActiveProfile(profileId: string): Promise<ModelConfigurationProfile>;
+}
+
 export interface EditableProfileInput {
   id?: string;
   label: string;
@@ -125,7 +138,9 @@ export interface OpenSymphonyAppOptions {
   transport: GatewayReader;
   title?: string;
   profileController?: ProfileController;
+  modelProfileController?: ModelProfileController;
   initialProfiles?: ConnectionProfile[];
+  initialModelProfiles?: ModelConfigurationProfile[];
   onGatewayUrlChanged?: (gatewayUrl: string) => Promise<GatewayReader>;
 }
 
@@ -159,6 +174,8 @@ interface AppState {
   profiles: ConnectionProfile[];
   activeProfileId: string | null;
   gatewayDraft: string;
+  modelProfiles: ModelConfigurationProfile[];
+  activeModelProfileId: string | null;
   loading: boolean;
   activeView: "dashboard" | "planning";
   // Task graph editor state
@@ -206,6 +223,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.transport = options.transport;
     const profiles = options.initialProfiles ?? [];
     const activeProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
+    const modelProfiles = options.initialModelProfiles ?? defaultModelProfiles();
+    const activeModelProfile = modelProfiles.find((profile) => profile.active)
+      ?? modelProfiles[0]
+      ?? null;
     this.state = {
       connectionMode: "connecting",
       connectionMessage: "Connecting",
@@ -229,6 +250,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       profiles,
       activeProfileId: activeProfile?.id ?? null,
       gatewayDraft: activeProfile?.gatewayUrl ?? this.transport.baseUri,
+      modelProfiles,
+      activeModelProfileId: activeModelProfile?.id ?? null,
       loading: true,
       activeView: "dashboard",
       taskGraphFilter: { ...defaultTaskGraphFilter },
@@ -307,6 +330,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
 
     await this.loadProfiles();
+    await this.loadModelProfiles();
     await this.loadGatewayState();
     this.state.loading = false;
     this.render();
@@ -337,6 +361,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       }
     } catch (error) {
       this.state.connectionMessage = `Profiles unavailable: ${errorMessage(error)}`;
+    }
+  }
+
+  private async loadModelProfiles(): Promise<void> {
+    if (!this.options.modelProfileController) {
+      return;
+    }
+    try {
+      const profiles = await this.options.modelProfileController.listProfiles();
+      this.state.modelProfiles = profiles.length > 0 ? profiles : defaultModelProfiles();
+      const active = this.state.modelProfiles.find((profile) => profile.active)
+        ?? this.state.modelProfiles[0]
+        ?? null;
+      this.state.activeModelProfileId = active?.id ?? null;
+    } catch (error) {
+      this.state.connectionMessage = `Model profiles unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -747,6 +787,86 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
+  private async selectModelProfile(profileId: string): Promise<void> {
+    const profile = this.state.modelProfiles.find((candidate) => candidate.id === profileId);
+    if (!profile) {
+      return;
+    }
+    this.state.activeModelProfileId = profileId;
+    this.state.modelProfiles = this.state.modelProfiles.map((candidate) => ({
+      ...candidate,
+      active: candidate.id === profileId,
+    }));
+    if (this.options.modelProfileController) {
+      await this.options.modelProfileController.setActiveProfile(profileId).catch((error) => {
+        this.state.connectionMessage = `Model profile selection failed: ${errorMessage(error)}`;
+      });
+    }
+    this.render();
+  }
+
+  private async saveModelProfile(): Promise<void> {
+    const controller = this.options.modelProfileController;
+    if (!controller) {
+      return;
+    }
+    const active = activeModelProfile(this.state.modelProfiles, this.state.activeModelProfileId);
+    const mode = modelModeFromValue(this.valueOf<HTMLSelectElement>("[data-model-mode]"));
+    const label = this.valueOf<HTMLInputElement>("[data-model-label]").trim() || active?.label || "Model profile";
+    const model = this.valueOf<HTMLInputElement>("[data-model-name]").trim();
+    if (!model) {
+      this.state.connectionMessage = "Model string is required";
+      this.render();
+      return;
+    }
+
+    const credentialRef = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
+    const baseProfile = active ?? createModelProfile(mode);
+    const profile: ModelConfigurationProfile = {
+      ...baseProfile,
+      id: baseProfile.id,
+      label,
+      mode,
+      owner: modelOwnerFromValue(this.valueOf<HTMLSelectElement>("[data-model-owner]")),
+      baseUrl: this.valueOf<HTMLInputElement>("[data-model-base-url]").trim(),
+      model,
+      apiKeyRef: mode === "api_key" ? credentialRef : null,
+      subscriptionCredentialRef: mode === "subscription" ? credentialRef : null,
+      subscriptionProvider: this.valueOf<HTMLInputElement>("[data-model-subscription-provider]").trim(),
+      credentialStorage: credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]")),
+      harnesses: splitList(this.valueOf<HTMLInputElement>("[data-model-harnesses]")),
+      active: true,
+      metadata: {
+        contextWindowTokens: optionalPositiveInteger(this.valueOf<HTMLInputElement>("[data-model-context-window]")),
+        reasoningEffort: this.valueOf<HTMLInputElement>("[data-model-reasoning-effort]").trim() || null,
+        costProfile: this.valueOf<HTMLInputElement>("[data-model-cost-profile]").trim() || null,
+        recommendedFor: splitList(this.valueOf<HTMLInputElement>("[data-model-recommended-for]")),
+      },
+    };
+
+    try {
+      const saved = await controller.storeProfile(profile);
+      await controller.setActiveProfile(saved.id);
+      this.state.modelProfiles = [
+        ...this.state.modelProfiles.filter((profile) => profile.id !== saved.id),
+        saved,
+      ].map((profile) => ({
+        ...profile,
+        active: profile.id === saved.id,
+      }));
+      this.state.activeModelProfileId = saved.id;
+      this.render();
+    } catch (error) {
+      this.state.connectionMode = "failed";
+      this.state.connectionMessage = `Model profile save failed: ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private valueOf<T extends HTMLInputElement | HTMLSelectElement>(selector: string): string {
+    return this.options.root.querySelector<T>(selector)?.value ?? "";
+  }
+
   private render(): void {
     if (this.destroyed) {
       return;
@@ -783,12 +903,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (this.state.activeView === "planning") {
       return `
         ${this.renderProfiles()}
+        ${this.renderModelProfiles()}
         ${renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit)}
       `;
     }
     return `
       ${this.renderStatus()}
       ${this.renderProfiles()}
+      ${this.renderModelProfiles()}
       ${this.renderTaskGraph()}
       ${this.renderRunDetail()}
       ${this.renderRunEvidence()}
@@ -938,6 +1060,105 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <button type="button" data-save-profile ${this.options.profileController ? "" : "disabled"}>Save</button>
         </div>
         <div class="os-meta">Transport: ${escapeHtml(capabilities)}</div>
+      </section>
+    `;
+  }
+
+  private renderModelProfiles(): string {
+    const profiles = this.state.modelProfiles.length > 0
+      ? this.state.modelProfiles
+      : defaultModelProfiles();
+    const active = activeModelProfile(profiles, this.state.activeModelProfileId)
+      ?? profiles[0]
+      ?? createModelProfile("api_key");
+    const options = profiles
+      .map((profile) => {
+        const selected = profile.id === active.id ? "selected" : "";
+        return `<option value="${escapeAttr(profile.id)}" ${selected}>${escapeHtml(profile.label)}</option>`;
+      })
+      .join("");
+    const credentialRef = active.mode === "subscription"
+      ? active.subscriptionCredentialRef
+      : active.apiKeyRef;
+    return `
+      <section class="os-panel os-model-panel" data-testid="model-profile-panel">
+        <div class="os-section-head">
+          <h2>Model Configuration</h2>
+          <span>${escapeHtml(active.mode === "subscription" ? "subscription" : "api key")}</span>
+        </div>
+        <div class="os-model-layout">
+          <label class="os-field">
+            <span>Profile</span>
+            <select data-model-profile-select>${options}</select>
+          </label>
+          <label class="os-field">
+            <span>Label</span>
+            <input data-model-label value="${escapeAttr(active.label)}" />
+          </label>
+          <label class="os-field">
+            <span>Mode</span>
+            <select data-model-mode>
+              ${option("api_key", "API-compatible key", active.mode)}
+              ${option("subscription", "Subscription", active.mode)}
+            </select>
+          </label>
+          <label class="os-field">
+            <span>Owner</span>
+            <select data-model-owner>
+              ${option("user", "User", active.owner)}
+              ${option("organization", "Organization", active.owner)}
+              ${option("project", "Project", active.owner)}
+            </select>
+          </label>
+          <label class="os-field">
+            <span>Base URL</span>
+            <input data-model-base-url value="${escapeAttr(active.baseUrl)}" placeholder="Provider default or API-compatible URL" />
+          </label>
+          <label class="os-field">
+            <span>Model</span>
+            <input data-model-name value="${escapeAttr(active.model)}" />
+          </label>
+          <label class="os-field">
+            <span>Credential Ref</span>
+            <input data-model-credential-ref value="${escapeAttr(credentialRef ?? "")}" />
+          </label>
+          <label class="os-field">
+            <span>Subscription Provider</span>
+            <input data-model-subscription-provider value="${escapeAttr(active.subscriptionProvider ?? "")}" />
+          </label>
+          <label class="os-field">
+            <span>Credential Storage</span>
+            <select data-model-credential-storage>
+              ${option("local_keychain", "Local keychain", active.credentialStorage)}
+              ${option("openhands_auth_directory", "OpenHands auth directory", active.credentialStorage)}
+              ${option("hosted_secret_store", "Hosted secret store", active.credentialStorage)}
+            </select>
+          </label>
+          <label class="os-field">
+            <span>Harnesses</span>
+            <input data-model-harnesses value="${escapeAttr(active.harnesses.join(", "))}" />
+          </label>
+          <label class="os-field">
+            <span>Context Window</span>
+            <input data-model-context-window type="number" min="1" value="${escapeAttr(active.metadata.contextWindowTokens?.toString() ?? "")}" />
+          </label>
+          <label class="os-field">
+            <span>Reasoning Effort</span>
+            <input data-model-reasoning-effort value="${escapeAttr(active.metadata.reasoningEffort ?? "")}" />
+          </label>
+          <label class="os-field">
+            <span>Cost Profile</span>
+            <input data-model-cost-profile value="${escapeAttr(active.metadata.costProfile ?? "")}" />
+          </label>
+          <label class="os-field">
+            <span>Recommended For</span>
+            <input data-model-recommended-for value="${escapeAttr(active.metadata.recommendedFor.join(", "))}" />
+          </label>
+          <button type="button" data-save-model-profile ${this.options.modelProfileController ? "" : "disabled"}>Save</button>
+        </div>
+        <div class="os-model-meta" data-testid="model-redacted-credential">
+          Credential: ${escapeHtml(redactCredentialRef(credentialRef))}
+        </div>
       </section>
     `;
   }
@@ -1163,6 +1384,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelector("[data-save-profile]")?.addEventListener("click", () => {
       void this.saveProfile();
     });
+    this.options.root.querySelector("[data-save-model-profile]")?.addEventListener("click", () => {
+      void this.saveModelProfile();
+    });
     this.options.root.querySelectorAll<HTMLElement>("[data-auth-action]").forEach((button) => {
       button.addEventListener("click", () => {
         const action = button.dataset.authAction;
@@ -1179,6 +1403,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelector("[data-profile-select]")?.addEventListener("change", (event) => {
       const target = event.target as HTMLSelectElement;
       void this.selectProfile(target.value);
+    });
+    this.options.root.querySelector("[data-model-profile-select]")?.addEventListener("change", (event) => {
+      const target = event.target as HTMLSelectElement;
+      void this.selectModelProfile(target.value);
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-project-id]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -2170,6 +2398,60 @@ function formatEventTime(value: string): string {
   });
 }
 
+function option(value: string, label: string, selectedValue: string | null | undefined): string {
+  const selected = value === selectedValue ? "selected" : "";
+  return `<option value="${escapeAttr(value)}" ${selected}>${escapeHtml(label)}</option>`;
+}
+
+function activeModelProfile(
+  profiles: ModelConfigurationProfile[],
+  profileId: string | null,
+): ModelConfigurationProfile | null {
+  return profiles.find((profile) => profile.id === profileId)
+    ?? profiles.find((profile) => profile.active)
+    ?? null;
+}
+
+function modelModeFromValue(value: string): ModelCredentialMode {
+  return value === "subscription" ? "subscription" : "api_key";
+}
+
+function modelOwnerFromValue(value: string): ModelConfigurationProfile["owner"] {
+  switch (value) {
+    case "organization":
+    case "project":
+      return value;
+    case "user":
+    default:
+      return "user";
+  }
+}
+
+function credentialStorageFromValue(
+  value: string,
+): ModelConfigurationProfile["credentialStorage"] {
+  switch (value) {
+    case "openhands_auth_directory":
+    case "hosted_secret_store":
+      return value;
+    case "local_keychain":
+    default:
+      return "local_keychain";
+  }
+}
+
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+function optionalPositiveInteger(value: string): number | null {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
 const editableProfileKindOptions: Array<{
   value: ConnectionProfile["kind"];
   label: string;
@@ -2679,6 +2961,10 @@ function appShellStyles(): string {
     .os-panel { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 14px; min-width: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
     .os-status-panel, .os-run-detail-panel, .os-run-evidence-panel { grid-column: span 1; }
     .os-profile-panel { grid-column: span 3; }
+    .os-model-panel { grid-column: 1 / -1; }
+    .os-model-layout { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; align-items: end; }
+    .os-model-layout button { align-self: end; }
+    .os-model-meta { margin-top: 10px; color: #667788; font-size: 12px; }
     .os-task-graph-panel { grid-column: span 2; }
     .os-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .os-section-head h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
@@ -2888,14 +3174,14 @@ function appShellStyles(): string {
     .os-plan-graph-node-selected rect { fill: #e7f1f5; stroke: #39708f; }
     @media (max-width: 980px) {
       .os-grid { grid-template-columns: 1fr; }
-      .os-status-panel, .os-profile-panel, .os-task-graph-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
-      .os-inline-fields, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
+      .os-status-panel, .os-profile-panel, .os-model-panel, .os-task-graph-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
+      .os-inline-fields, .os-model-layout, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
       .os-topbar { align-items: flex-start; flex-direction: column; }
     }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #d9e2ea; }
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
-      .os-topbar p, .os-section-head span, .os-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
+      .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
       .os-auth-panel .os-auth-message { color: #d9e2ea; }
       .os-auth-denied .os-auth-message { color: #fca5a5; }

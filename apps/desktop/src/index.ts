@@ -6,6 +6,7 @@ import {
   type GatewayTransport,
 } from "@opensymphony/api-client";
 import type { ConnectionProfile } from "@opensymphony/gateway-schema";
+import { createModelProfileStore } from "@opensymphony/state";
 import {
   renderOpenSymphonyApp,
   type EditableProfileInput,
@@ -396,6 +397,15 @@ if (root) {
         managed: false,
       },
     ],
+    modelProfileController: createModelProfileStore({ storage: browserStorage() }),
     onGatewayUrlChanged: createTransportForGateway,
   });
+}
+
+function browserStorage(): Storage | null {
+  try {
+    return typeof window !== "undefined" ? window.localStorage : null;
+  } catch {
+    return null;
+  }
 }

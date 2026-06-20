@@ -112,6 +112,23 @@ export {
   createProfile,
 } from "./profile.js";
 
+// model configuration
+export type {
+  CredentialStorage,
+  ModelConfigurationProfile,
+  ModelCredentialMode,
+  ModelHarnessKind,
+  ModelProfileOwner,
+  ModelReasoningEffort,
+  ModelRoutingMetadata,
+  ModelTaskRecommendation,
+} from "./model_config.js";
+export {
+  createModelProfile,
+  defaultModelProfiles,
+  redactCredentialRef,
+} from "./model_config.js";
+
 // validation
 export {
   isValidSchemaVersion,

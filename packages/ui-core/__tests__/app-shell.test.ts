@@ -9,6 +9,7 @@ import { MockGatewayTransport } from "@opensymphony/api-client";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import type {
   EditableProfileInput,
+  ModelProfileController,
   ProfileController,
 } from "../src/app-shell.js";
 import type {
@@ -17,10 +18,12 @@ import type {
   DashboardSnapshot,
   FileDiffPage,
   GatewayCapabilities,
+  ModelConfigurationProfile,
   RunDetail,
   RunEventPage,
   TaskGraphSnapshot,
 } from "@opensymphony/gateway-schema";
+import { defaultModelProfiles } from "@opensymphony/gateway-schema";
 
 const capabilities: GatewayCapabilities = {
   schema_version: schemaVersionV1(),
@@ -322,6 +325,44 @@ function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?:
   });
 }
 
+function buildModelProfileController(
+  initial = defaultModelProfiles(),
+): ModelProfileController & { saved: ModelConfigurationProfile[] } {
+  const saved = initial.map((profile) => ({
+    ...profile,
+    harnesses: [...profile.harnesses],
+    metadata: {
+      ...profile.metadata,
+      recommendedFor: [...profile.metadata.recommendedFor],
+    },
+  }));
+  return {
+    saved,
+    async listProfiles() {
+      return saved;
+    },
+    async storeProfile(profile) {
+      const index = saved.findIndex((candidate) => candidate.id === profile.id);
+      if (index >= 0) {
+        saved[index] = profile;
+      } else {
+        saved.push(profile);
+      }
+      return profile;
+    },
+    async setActiveProfile(profileId) {
+      const active = saved.find((profile) => profile.id === profileId);
+      if (!active) {
+        throw new Error(`Unknown model profile: ${profileId}`);
+      }
+      saved.forEach((profile) => {
+        profile.active = profile.id === profileId;
+      });
+      return active;
+    },
+  };
+}
+
 function flushAsync(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -487,6 +528,86 @@ describe("OpenSymphonyApp mount", () => {
     (root.querySelector("[data-testid='changed-file-item']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='file-diff']") !== null);
     expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
+
+    await handle.destroy();
+  });
+
+  it("edits an API-compatible model profile and shows a redacted credential reference", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() => root.querySelector("[data-testid='model-profile-panel']") !== null);
+
+    expect(root.querySelector(".os-model-panel h2")?.textContent).toBe("Model Configuration");
+    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("loca...-key");
+
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
+    (root.querySelector("[data-model-base-url]") as HTMLInputElement).value = "https://models.example.test/v1";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:custom-api-key";
+    (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, custom_harness";
+    (root.querySelector("[data-model-reasoning-effort]") as HTMLInputElement).value = "provider-ultra";
+    (root.querySelector("[data-model-recommended-for]") as HTMLInputElement).value = "implementation, validation";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.model === "provider/custom-model-name"),
+    );
+
+    const saved = modelProfileController.saved.find((profile) => profile.model === "provider/custom-model-name");
+    expect(saved?.mode).toBe("api_key");
+    expect(saved?.baseUrl).toBe("https://models.example.test/v1");
+    expect(saved?.apiKeyRef).toBe("local_keychain:custom-api-key");
+    expect(saved?.harnesses).toContain("custom_harness");
+    expect(saved?.metadata.reasoningEffort).toBe("provider-ultra");
+    expect(saved?.metadata.recommendedFor).toContain("validation");
+
+    await handle.destroy();
+  });
+
+  it("edits a subscription-backed model profile", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() => root.querySelector("[data-model-profile-select]") !== null);
+
+    (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).value = "openai-subscription";
+    (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).dispatchEvent(
+      new Event("change", { bubbles: true }),
+    );
+    await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
+
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "codex-subscription-preview";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "openhands_auth:openai-user";
+    (root.querySelector("[data-model-subscription-provider]") as HTMLInputElement).value = "openai";
+    (root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value = "openhands_auth_directory";
+    (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, codex_app_server";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.model === "codex-subscription-preview"),
+    );
+
+    const saved = modelProfileController.saved.find((profile) => profile.model === "codex-subscription-preview");
+    expect(saved?.mode).toBe("subscription");
+    expect(saved?.apiKeyRef).toBeNull();
+    expect(saved?.subscriptionCredentialRef).toBe("openhands_auth:openai-user");
+    expect(saved?.subscriptionProvider).toBe("openai");
+    expect(saved?.credentialStorage).toBe("openhands_auth_directory");
+    expect(saved?.harnesses).toEqual(["openhands_agent_server", "codex_app_server"]);
 
     await handle.destroy();
   });
