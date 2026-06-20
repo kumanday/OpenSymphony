@@ -96,6 +96,14 @@ a `codex_cli_login` credential reference. That reference identifies the
 operator-owned Codex CLI login state; it is not a copied access token, refresh
 credential, or parsed private Codex credential payload.
 
+The gateway caches the Codex readiness probe for a short in-process TTL so
+repeated `model-settings` reads do not spawn new Codex subprocesses on every
+request. The readiness classifier uses command success/failure plus the current
+Codex CLI status text. It treats `Logged in using ChatGPT` and
+`Logged in with ChatGPT` as subscription-ready ChatGPT login signals; logged-out,
+expired, unsupported, and permission-denied text are rendered as explicit
+non-ready states.
+
 Logout and revocation stay owned by Codex and ChatGPT. Run `codex logout` to
 remove the local Codex login, and revoke account/device access from ChatGPT
 settings when needed. If `codex login status` reports logged out, expired, an

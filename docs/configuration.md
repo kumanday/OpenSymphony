@@ -151,7 +151,9 @@ This reference tells clients and operators that readiness is owned by the
 installed Codex CLI. OpenSymphony checks readiness with `codex --version`,
 `codex app-server --help`, and `codex login status`; it does not read private
 Codex credential files and does not copy OAuth access or refresh material into
-workspaces, workflow files, logs, Linear comments, or browser payloads.
+workspaces, workflow files, logs, Linear comments, or browser payloads. Gateway
+checks are cached briefly in process to avoid spawning Codex subprocesses for
+every client poll.
 
 The `codex_local_readiness` field on `GET /api/v1/model-settings` reports:
 
@@ -162,6 +164,12 @@ The `codex_local_readiness` field on `GET /api/v1/model-settings` reports:
   states,
 - safe operator commands for login (`codex login --device-auth`), status
   (`codex login status`), and logout (`codex logout`).
+
+The current classifier treats `Logged in using ChatGPT` and
+`Logged in with ChatGPT` from `codex login status` as ready. It renders
+logged-out, expired, unsupported, permission-denied, and unknown outputs as
+non-ready status states rather than guessing or reading private credential
+files.
 
 OpenAI ChatGPT/Codex subscription credentials are available only when
 OpenSymphony is built with the `openhands-subscription-credentials` Cargo

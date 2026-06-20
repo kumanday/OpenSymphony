@@ -55,8 +55,9 @@ capability discovery.
 
 Codex ChatGPT subscription readiness is now advertised as a Codex CLI login
 reference rather than an OpenSymphony-owned secret. Capability discovery lists
-`codex_cli_login` as a supported credential reference kind for the future Codex
-adapter. The gateway model-settings response probes `codex --version`,
+`codex_cli_login` alongside the existing `inherited_subscription_login` as a
+supported credential reference kind for the future Codex adapter. The gateway
+model-settings response probes `codex --version`,
 `codex app-server --help`, and `codex login status` to render installed,
 logged-out, expired, unsupported, permission-denied, or unknown states without
 reading private Codex credential files.

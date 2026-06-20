@@ -632,6 +632,18 @@ fn harness_capability_roundtrips_future_adapters() {
     assert!(back[1].approvals.tool_approval);
     assert!(
         back[1]
+            .model_settings
+            .credential_reference_kinds
+            .contains(&"inherited_subscription_login".to_string())
+    );
+    assert!(
+        back[1]
+            .model_settings
+            .credential_reference_kinds
+            .contains(&"codex_cli_login".to_string())
+    );
+    assert!(
+        back[1]
             .feature_gaps
             .iter()
             .any(|gap| gap.contains("COE-426"))
