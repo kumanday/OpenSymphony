@@ -156,7 +156,6 @@ function waitForStreamProgress(stream, timeoutMs) {
     const onClose = () => complete("close");
     const onError = (error) => {
       cleanup();
-      ws.close();
       reject(error);
     };
     const timeout = setTimeout(() => complete("timeout"), timeoutMs);
@@ -236,6 +235,7 @@ function writeToStream(stream, data, label, timeoutMs) {
     };
     const onError = (error) => {
       cleanup();
+      ws.close();
       reject(error);
     };
     const timeout = setTimeout(() => {
