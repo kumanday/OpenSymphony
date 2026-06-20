@@ -135,6 +135,24 @@ fn codex_websocket_auth_and_benchmark_dimensions_are_explicit() {
     assert!(args.contains(&"--ws-auth".to_owned()));
     assert!(args.contains(&"capability-token".to_owned()));
 
+    let mut signed_bearer = CodexAppServerLaunch::loopback_websocket(18766);
+    signed_bearer.websocket_auth = Some(CodexWebSocketAuth::SignedBearerToken {
+        shared_secret_file: std::env::temp_dir().join("opensymphony-codex-jwt-secret"),
+        issuer: "opensymphony".into(),
+        audience: "codex-app-server".into(),
+        max_clock_skew_seconds: Some(30),
+    });
+    let signed_bearer_args = signed_bearer.command_args();
+    assert!(signed_bearer_args.contains(&"--ws-auth".to_owned()));
+    assert!(signed_bearer_args.contains(&"signed-bearer-token".to_owned()));
+    assert!(signed_bearer_args.contains(&"--ws-shared-secret-file".to_owned()));
+    assert!(signed_bearer_args.contains(&"--ws-issuer".to_owned()));
+    assert!(signed_bearer_args.contains(&"opensymphony".to_owned()));
+    assert!(signed_bearer_args.contains(&"--ws-audience".to_owned()));
+    assert!(signed_bearer_args.contains(&"codex-app-server".to_owned()));
+    assert!(signed_bearer_args.contains(&"--ws-max-clock-skew-seconds".to_owned()));
+    assert!(signed_bearer_args.contains(&"30".to_owned()));
+
     let dimensions = websocket_benchmark_requirements()
         .into_iter()
         .map(|requirement| requirement.dimension)

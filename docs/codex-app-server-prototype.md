@@ -18,6 +18,8 @@ The prototype adds a small Rust module for:
 - launch argument construction for stdio and loopback WebSocket,
 - JSON-RPC request construction for `initialize`, `thread/start`, and
   `turn/start`,
+- `thread/loaded/list` request use in the benchmark loop so throughput can be
+  measured without starting model-backed turns,
 - normalization of basic thread, turn, item, plan, error, and unknown
   notifications while preserving the raw payload,
 - mapping existing OpenSymphony model and credential setting profiles to future
@@ -87,13 +89,13 @@ WebSocket probes are supported. A 10-request local run produced:
 
 ```json
 {
-  "stdioInitializeLatencyMs": 233.467,
-  "websocketInitializeLatencyMs": 1.446,
+  "stdioInitializeLatencyMs": 126.222,
+  "websocketInitializeLatencyMs": 1.247,
   "websocketQueuedRequests": 10,
   "websocketQueuedResponses": 10,
-  "websocketRequestsPerSecond": 5196.27,
-  "websocketLatencyMs": { "p50": 1.606, "p95": 1.811, "max": 1.811 },
-  "websocketReconnectLatencyMs": 1.33,
+  "websocketRequestsPerSecond": 11511.35,
+  "websocketLatencyMs": { "p50": 0.526, "p95": 0.603, "max": 0.603 },
+  "websocketReconnectLatencyMs": 6.024,
   "websocketReconnectResponse": "ok",
   "websocketLocalhostOnly": true,
   "capabilityTokenModeAdvertised": true,

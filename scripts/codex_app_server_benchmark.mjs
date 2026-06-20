@@ -99,24 +99,47 @@ async function waitForReadyz(url, timeoutMs = 5000) {
   const deadline = performance.now() + timeoutMs;
   let lastError = null;
   while (performance.now() < deadline) {
+    const controller = new AbortController();
+    const remainingMs = Math.max(1, deadline - performance.now());
+    const abort = setTimeout(() => controller.abort(), Math.min(remainingMs, 500));
     try {
-      const response = await fetch(url);
+      const response = await fetch(url, { signal: controller.signal });
       if (response.ok) return true;
       lastError = new Error(`readyz returned ${response.status}`);
     } catch (error) {
       lastError = error;
+    } finally {
+      clearTimeout(abort);
     }
     await sleep(100);
   }
   throw lastError ?? new Error("readyz timed out");
 }
 
-async function openSocket(url) {
+async function openSocket(url, timeoutMs = requestTimeoutMs) {
   const ws = new WebSocket(url);
   setMaxListeners(0, ws);
   await new Promise((resolve, reject) => {
-    ws.addEventListener("open", resolve, { once: true });
-    ws.addEventListener("error", reject, { once: true });
+    const cleanup = () => {
+      clearTimeout(timeout);
+      ws.removeEventListener("open", onOpen);
+      ws.removeEventListener("error", onError);
+    };
+    const onOpen = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      ws.close();
+      reject(new Error(`WebSocket connection to ${url} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    ws.addEventListener("open", onOpen);
+    ws.addEventListener("error", onError);
   });
   return ws;
 }
@@ -130,7 +153,14 @@ function requestOverSocket(ws, id, method, params = {}, timeoutMs = requestTimeo
       ws.removeEventListener("error", onError);
     };
     const onMessage = (event) => {
-      const parsed = JSON.parse(event.data);
+      let parsed;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch (error) {
+        cleanup();
+        reject(error);
+        return;
+      }
       if (parsed.id !== id) return;
       cleanup();
       resolve({ latencyMs: performance.now() - startedAt, response: parsed });
