@@ -1400,10 +1400,14 @@ Output:
 #### P9.4 Implement model configuration metadata
 
 - Add model configuration profiles based on base URL, model string, credential reference, and harness capability.
-- Add optional operator-supplied metadata for context window, reasoning effort, cost profile, and recommended task types.
+- Keep the profile contract limited to values the current UI and model-settings
+  surface can represent directly.
 - Add model configuration UI.
 - Support dynamic routing from configured model settings and harness capabilities.
 - Preserve arbitrary configured model strings for API-compatible OpenHands usage.
+- Derive or consume context window, cost profile, reasoning controls, and task
+  recommendations only in later routing work with provider capability discovery,
+  benchmark/policy data, or runtime adapter support.
 
 Depends on: P9.2, P9.3.
 

@@ -331,10 +331,6 @@ function buildModelProfileController(
   const saved = initial.map((profile) => ({
     ...profile,
     harnesses: [...profile.harnesses],
-    metadata: {
-      ...profile.metadata,
-      recommendedFor: [...profile.metadata.recommendedFor],
-    },
   }));
   return {
     saved,
@@ -563,11 +559,6 @@ describe("OpenSymphonyApp mount", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
     const profiles = defaultModelProfiles();
-    profiles[0].metadata = {
-      ...profiles[0].metadata,
-      recommendedFor: ["implementation", "validation"],
-      providerFamily: "future-router-hint",
-    } as typeof profiles[0]["metadata"];
     const modelProfileController = buildModelProfileController(profiles);
     const handle = renderOpenSymphonyApp({
       root,
@@ -599,6 +590,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.textContent).not.toContain("Cost Profile");
     expect(root.textContent).not.toContain("Context Window");
     expect(root.textContent).not.toContain("Recommended For");
+    expect(root.textContent).not.toContain("Reasoning");
     expect(root.textContent).not.toContain("Subscription Provider");
     expect(root.textContent).not.toContain("Credential Storage");
 
@@ -606,7 +598,6 @@ describe("OpenSymphonyApp mount", () => {
     (root.querySelector("[data-model-base-url]") as HTMLInputElement).value = "https://models.example.test/v1";
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:custom-api-key";
     (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, custom_harness";
-    (root.querySelector("[data-model-reasoning-effort]") as HTMLInputElement).value = "provider-ultra";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
 
     await flushUntil(() =>
@@ -618,9 +609,6 @@ describe("OpenSymphonyApp mount", () => {
     expect(saved?.baseUrl).toBe("https://models.example.test/v1");
     expect(saved?.apiKeyRef).toBe("local_keychain:custom-api-key");
     expect(saved?.harnesses).toContain("custom_harness");
-    expect(saved?.metadata.reasoningEffort).toBe("provider-ultra");
-    expect(saved?.metadata.recommendedFor).toContain("validation");
-    expect((saved?.metadata as { providerFamily?: string }).providerFamily).toBe("future-router-hint");
     await flushUntil(() =>
       root.querySelector("[data-testid='model-redacted-credential']")?.textContent?.includes("Configured") ?? false,
     );

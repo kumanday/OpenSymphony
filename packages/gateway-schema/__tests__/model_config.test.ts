@@ -26,23 +26,15 @@ describe("model configuration profiles", () => {
     ]);
   });
 
-  it("preserves arbitrary provider model and routing metadata strings", () => {
+  it("preserves arbitrary provider model strings and harness compatibility", () => {
     const profile: ModelConfigurationProfile = {
       ...createModelProfile("api_key"),
       model: "vendor/custom-model-2026-06-20",
       harnesses: ["openhands_agent_server", "custom_harness"],
-      metadata: {
-        contextWindowTokens: 123456,
-        reasoningEffort: "provider-specific-ultra",
-        costProfile: "enterprise-tier",
-        recommendedFor: ["implementation", "specialized-audit"],
-      },
     };
 
     expect(profile.model).toBe("vendor/custom-model-2026-06-20");
     expect(profile.harnesses).toContain("custom_harness");
-    expect(profile.metadata.reasoningEffort).toBe("provider-specific-ultra");
-    expect(profile.metadata.recommendedFor).toContain("specialized-audit");
   });
 
   it("redacts credential references for display", () => {

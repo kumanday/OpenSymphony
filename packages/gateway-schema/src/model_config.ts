@@ -19,28 +19,6 @@ export type ModelHarnessKind =
   | "rust_native"
   | (string & {});
 
-/** Optional task-shape recommendations for routing policy inputs. */
-export type ModelTaskRecommendation =
-  | "planning"
-  | "implementation"
-  | "refactor"
-  | "debugging"
-  | "testing"
-  | "validation"
-  | "documentation"
-  | "browser_verification"
-  | "code_review"
-  | (string & {});
-
-/** Optional reasoning effort hint. Provider-specific values remain allowed. */
-export type ModelReasoningEffort =
-  | "provider_default"
-  | "none"
-  | "low"
-  | "medium"
-  | "high"
-  | (string & {});
-
 /** Supported subscription credential bootstrap methods. */
 export type SubscriptionCredentialAuthMethod =
   | "browser"
@@ -59,19 +37,7 @@ export interface SubscriptionCredentialBootstrap {
   accountIdentityHeader?: string | null;
 }
 
-/** Operator-supplied metadata used as future routing inputs. */
-export interface ModelRoutingMetadata {
-  /** Optional context window size in tokens. */
-  contextWindowTokens?: number | null;
-  /** Optional reasoning effort hint, not constrained to one provider enum. */
-  reasoningEffort?: ModelReasoningEffort | null;
-  /** Optional human-readable cost profile such as "low", "premium", or "$/1M". */
-  costProfile?: string | null;
-  /** Optional task types where this profile is a good default. */
-  recommendedFor: ModelTaskRecommendation[];
-}
-
-/** Model settings and routing metadata saved by operators. */
+/** Model settings saved by operators. */
 export interface ModelConfigurationProfile {
   id: string;
   label: string;
@@ -88,7 +54,6 @@ export interface ModelConfigurationProfile {
   subscriptionCredential?: SubscriptionCredentialBootstrap | null;
   credentialStorage: CredentialStorage;
   harnesses: ModelHarnessKind[];
-  metadata: ModelRoutingMetadata;
 }
 
 let _modelProfileIdCounter = 0;
@@ -108,12 +73,6 @@ export function defaultModelProfiles(): ModelConfigurationProfile[] {
       subscriptionCredential: null,
       credentialStorage: "local_keychain",
       harnesses: ["openhands_agent_server"],
-      metadata: {
-        contextWindowTokens: null,
-        reasoningEffort: "provider_default",
-        costProfile: null,
-        recommendedFor: ["implementation", "debugging", "testing"],
-      },
     },
     {
       id: "openai-subscription",
@@ -134,12 +93,6 @@ export function defaultModelProfiles(): ModelConfigurationProfile[] {
       },
       credentialStorage: "openhands_auth_directory",
       harnesses: ["openhands_agent_server", "codex_app_server"],
-      metadata: {
-        contextWindowTokens: null,
-        reasoningEffort: "provider_default",
-        costProfile: null,
-        recommendedFor: ["implementation", "code_review"],
-      },
     },
   ];
 }
@@ -156,10 +109,6 @@ export function createModelProfile(
     id: `${mode}-model-${Date.now()}-${_modelProfileIdCounter}`,
     label: mode === "subscription" ? "Subscription model" : "API-compatible model",
     active: false,
-    metadata: {
-      ...template.metadata,
-      recommendedFor: [...template.metadata.recommendedFor],
-    },
     harnesses: [...template.harnesses],
   };
 }

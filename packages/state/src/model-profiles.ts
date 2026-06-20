@@ -110,10 +110,6 @@ export function normalizeModelProfileState(
       ...profile,
       active: profile.id === activeProfileId,
       harnesses: [...profile.harnesses],
-      metadata: {
-        ...profile.metadata,
-        recommendedFor: [...profile.metadata.recommendedFor],
-      },
     })),
     activeProfileId,
   };

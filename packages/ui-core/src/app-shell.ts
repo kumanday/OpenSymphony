@@ -927,11 +927,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       credentialStorage,
       harnesses: splitList(this.valueOf<HTMLInputElement>("[data-model-harnesses]")),
       active: activeFlag,
-      metadata: {
-        ...baseProfile.metadata,
-        reasoningEffort: this.valueOf<HTMLInputElement>("[data-model-reasoning-effort]").trim() || null,
-        recommendedFor: [...baseProfile.metadata.recommendedFor],
-      },
     };
 
     try {
@@ -1386,10 +1381,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
               <label class="os-field">
                 <span>Usable Harnesses</span>
                 <input data-model-harnesses value="${escapeAttr(active.harnesses.join(", "))}" />
-              </label>
-              <label class="os-field">
-                <span>Reasoning</span>
-                <input data-model-reasoning-effort value="${escapeAttr(active.metadata.reasoningEffort ?? "")}" />
               </label>
             </div>
           </details>

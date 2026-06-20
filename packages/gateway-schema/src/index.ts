@@ -119,9 +119,6 @@ export type {
   ModelCredentialMode,
   ModelHarnessKind,
   ModelProfileOwner,
-  ModelReasoningEffort,
-  ModelRoutingMetadata,
-  ModelTaskRecommendation,
   SubscriptionCredentialAuthMethod,
   SubscriptionCredentialBootstrap,
 } from "./model_config.js";

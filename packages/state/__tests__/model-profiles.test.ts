@@ -91,12 +91,6 @@ describe("createModelProfileStore", () => {
       model: "provider/freeform-model",
       apiKeyRef: "local_keychain:custom-secret",
       harnesses: ["openhands_agent_server", "custom_harness"],
-      metadata: {
-        contextWindowTokens: 200000,
-        reasoningEffort: "provider-ultra",
-        costProfile: "premium",
-        recommendedFor: ["implementation", "validation"],
-      },
     };
 
     await store.storeProfile(profile);
@@ -108,7 +102,6 @@ describe("createModelProfileStore", () => {
 
     expect(saved?.model).toBe("provider/freeform-model");
     expect(saved?.harnesses).toContain("custom_harness");
-    expect(saved?.metadata.reasoningEffort).toBe("provider-ultra");
     expect(profiles.find((candidate) => candidate.id === profile.id)?.active).toBe(true);
 
     await reloaded.removeProfile(profile.id);
