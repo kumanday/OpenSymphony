@@ -164,6 +164,9 @@ class LineReader {
       }
 
       if (performance.now() > deadline) throw new Error("timed out waiting for line");
+      if (this.stream.readableEnded || this.stream.destroyed) {
+        throw new Error("stream ended before a complete line");
+      }
       const remainingMs = Math.max(1, deadline - performance.now());
       const event = await waitForStreamProgress(this.stream, remainingMs);
       if (event === "timeout") throw new Error("timed out waiting for line");
@@ -304,9 +307,13 @@ async function runStdioProbe() {
       });
     });
     childFailure.catch(() => {});
+    const withChildFailure = (promise) => {
+      promise.catch(() => {});
+      return Promise.race([promise, childFailure]);
+    };
     const stdout = new LineReader(child.stdout);
     const startedAt = performance.now();
-    await Promise.race([
+    await withChildFailure(
       writeToStream(
         child.stdin,
         `${request(1, "initialize", {
@@ -316,18 +323,13 @@ async function runStdioProbe() {
         "stdio initialize",
         requestTimeoutMs,
       ),
-      childFailure,
-    ]);
-    const response = await Promise.race([
+    );
+    const response = await withChildFailure(
       readJsonRpcResponse(stdout, "stdio initialize", 1, requestTimeoutMs),
-      childFailure,
-    ]);
+    );
     const latencyMs = performance.now() - startedAt;
     assertJsonRpcResult("stdio initialize", response);
-    await Promise.race([
-      endStream(child.stdin, "stdio initialize", requestTimeoutMs),
-      childFailure,
-    ]);
+    await withChildFailure(endStream(child.stdin, "stdio initialize", requestTimeoutMs));
     return {
       transport: "stdio",
       initializeLatencyMs: Number(latencyMs.toFixed(3)),

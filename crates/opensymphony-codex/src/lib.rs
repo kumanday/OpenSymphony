@@ -315,6 +315,8 @@ pub struct NormalizedCodexEvent {
     pub raw: Value,
 }
 
+/// Normalize a server notification after the transport layer has accepted the
+/// JSON-RPC envelope version.
 pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent> {
     if raw.get("id").is_some() {
         return None;
