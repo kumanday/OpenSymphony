@@ -154,6 +154,7 @@ fn codex_websocket_auth_and_benchmark_dimensions_are_explicit() {
     assert!(args.contains(&"ws://127.0.0.1:18765".to_owned()));
     assert!(args.contains(&"--ws-auth".to_owned()));
     assert!(args.contains(&"capability-token".to_owned()));
+    assert!(args.contains(&"--ws-token-file".to_owned()));
     assert!(args.contains(&"--ws-token-sha256".to_owned()));
     let extra_stdio = args
         .iter()

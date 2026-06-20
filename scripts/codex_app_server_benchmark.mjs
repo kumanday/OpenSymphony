@@ -60,7 +60,7 @@ function request(id, method, params = {}) {
 }
 
 function websocketBatchTimeoutMs() {
-  return Math.max(requestTimeoutMs, requestTimeoutMs + iterations);
+  return requestTimeoutMs + iterations;
 }
 
 async function terminateChild(child, graceMs = 1000) {
