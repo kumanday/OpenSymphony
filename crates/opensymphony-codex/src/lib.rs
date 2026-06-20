@@ -99,7 +99,7 @@ impl CodexAppServerLaunch {
                                 "--ws-auth".into(),
                                 "capability-token".into(),
                                 "--ws-token-file".into(),
-                                token_file.display().to_string(),
+                                token_file.to_string_lossy().to_string(),
                                 "--ws-token-sha256".into(),
                                 token_sha256.clone(),
                             ]);
@@ -114,7 +114,7 @@ impl CodexAppServerLaunch {
                                 "--ws-auth".into(),
                                 "signed-bearer-token".into(),
                                 "--ws-shared-secret-file".into(),
-                                shared_secret_file.display().to_string(),
+                                shared_secret_file.to_string_lossy().to_string(),
                                 "--ws-issuer".into(),
                                 issuer.clone(),
                                 "--ws-audience".into(),

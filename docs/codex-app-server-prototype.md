@@ -19,12 +19,13 @@ The prototype adds a small Rust module for:
 - launch argument construction for stdio and loopback WebSocket,
 - JSON-RPC request construction for `initialize`, `thread/start`, and
   `turn/start`,
-- `thread/loaded/list` request use in the benchmark loop so throughput can be
-  measured without starting model-backed turns,
 - normalization of basic thread, turn, item, plan, error, and unknown
   notifications while preserving the raw payload,
 - mapping existing OpenSymphony model and credential setting profiles to future
   Codex app-server use.
+
+The companion benchmark script issues `thread/loaded/list` requests directly so
+throughput can be measured without starting model-backed turns.
 
 ## Installed Codex Evidence
 
@@ -93,8 +94,9 @@ The script performs:
 - queued `thread/loaded/list` request throughput and p50/p95 latency,
 - reconnect by closing the socket, opening a new socket, and initializing again,
 - secure exposure checks for runtime localhost-only listener output and static
-  capability-token/signed-bearer WebSocket auth flags advertised by
-  `codex app-server --help`.
+  capability-token/signed-bearer WebSocket auth flags advertised by anchored
+  `codex app-server --help` option lines. The loopback benchmark does not
+  perform a runtime authenticated-listener probe.
 
 Use `--skip-websocket` when the installed Codex version lacks WebSocket support;
 the flag is presence-based and does not take a value.
@@ -159,6 +161,8 @@ WebSocket probes are supported. A 10-request local run produced:
         "configured_loopback_listener",
         "startup_banner"
       ],
+      "authEvidence": "advertised_in_help_only",
+      "runtimeAuthProbe": "not_measured_by_loopback_smoke",
       "authModesAdvertisedInHelp": [
         "capability-token",
         "signed-bearer-token"

@@ -279,8 +279,12 @@ async function collectChildOutput(child, label, timeoutMs = requestTimeoutMs) {
   child.stdout?.on("data", (chunk) => stdout.push(chunk));
   child.stderr?.on("data", (chunk) => stderr.push(chunk));
 
+  const exitPromise =
+    child.exitCode !== null || child.signalCode !== null
+      ? Promise.resolve({ code: child.exitCode, signal: child.signalCode, timedOut: false })
+      : once(child, "exit").then(([code, signal]) => ({ code, signal, timedOut: false }));
   const result = await Promise.race([
-    once(child, "exit").then(([code, signal]) => ({ code, signal, timedOut: false })),
+    exitPromise,
     once(child, "error").then(([error]) => ({ error, timedOut: false })),
     sleep(timeoutMs).then(() => ({ code: null, signal: null, timedOut: true })),
   ]);
@@ -654,6 +658,8 @@ async function runWebSocketProbe(secureExposure) {
         listenerHost: "127.0.0.1",
         localhostOnly: /binds localhost only/.test(`${stdout}\n${stderr}`),
         localhostOnlyEvidence: ["configured_loopback_listener", "startup_banner"],
+        authEvidence: "advertised_in_help_only",
+        runtimeAuthProbe: "not_measured_by_loopback_smoke",
         authModesAdvertisedInHelp: [
           ...(secureExposure.hasCapabilityTokenMode ? ["capability-token"] : []),
           ...(secureExposure.hasSignedBearerMode ? ["signed-bearer-token"] : []),
@@ -677,18 +683,33 @@ async function runHelpProbe() {
     }),
   );
   const help = await collectChildOutput(child, `${codexPath} app-server --help`);
+  const optionLinePattern = (flag) => new RegExp(`^\\s*(?:-\\w,\\s*)?${flag}\\b`);
+  const optionHeaderPattern = /^\s*(?:-\w,\s*)?--[\w-]+\b/;
+  const optionBlock = (flag) => {
+    const lines = help.split(/\r?\n/);
+    const start = lines.findIndex((line) => optionLinePattern(flag).test(line));
+    if (start < 0) return "";
+    const block = [];
+    for (let i = start; i < lines.length; i += 1) {
+      if (i > start && optionHeaderPattern.test(lines[i])) break;
+      block.push(lines[i]);
+    }
+    return block.join("\n");
+  };
+  const optionLine = (flag) => optionBlock(flag).length > 0;
+  const wsAuthBlock = optionBlock("--ws-auth");
   return {
     transport: "websocket_secure_exposure",
     authEvidence: "advertised_in_help",
     helpSha256: createHash("sha256").update(help).digest("hex"),
-    hasCapabilityTokenMode: help.includes("capability-token"),
-    hasSignedBearerMode: help.includes("signed-bearer-token"),
-    hasTokenFileFlag: help.includes("--ws-token-file"),
-    hasTokenSha256Flag: help.includes("--ws-token-sha256"),
-    hasSharedSecretFlag: help.includes("--ws-shared-secret-file"),
-    hasIssuerFlag: help.includes("--ws-issuer"),
-    hasAudienceFlag: help.includes("--ws-audience"),
-    hasClockSkewFlag: help.includes("--ws-max-clock-skew-seconds"),
+    hasCapabilityTokenMode: /\bcapability-token\b/.test(wsAuthBlock),
+    hasSignedBearerMode: /\bsigned-bearer-token\b/.test(wsAuthBlock),
+    hasTokenFileFlag: optionLine("--ws-token-file"),
+    hasTokenSha256Flag: optionLine("--ws-token-sha256"),
+    hasSharedSecretFlag: optionLine("--ws-shared-secret-file"),
+    hasIssuerFlag: optionLine("--ws-issuer"),
+    hasAudienceFlag: optionLine("--ws-audience"),
+    hasClockSkewFlag: optionLine("--ws-max-clock-skew-seconds"),
   };
 }
 
