@@ -964,6 +964,29 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("surfaces model profile quarantine warnings in the panel", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    modelProfileController.quarantineMessages = [
+      "Dropped invalid model profile raw-secret: API key secret must use local_keychain:<name>",
+    ];
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-profile-error']")?.textContent?.includes("Dropped invalid model profile raw-secret") ?? false,
+    );
+
+    expect(root.querySelector("[data-testid='model-profile-error']")?.textContent).toContain("Model profile storage warning");
+
+    await handle.destroy();
+  });
+
   it("reports a failed connection instead of falling back to fixture data", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

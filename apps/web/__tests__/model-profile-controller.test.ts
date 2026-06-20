@@ -68,4 +68,25 @@ describe("web model profile controller", () => {
     expect(first.persistence?.label).toContain("session-only");
     expect(profiles.some((candidate) => candidate.id === "session-api")).toBe(false);
   });
+
+  it("records quarantine warnings for malformed durable profiles", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("opensymphony.web.modelProfiles.v1", JSON.stringify({
+      profiles: [
+        {
+          ...createModelProfile("api_key"),
+          id: "raw-secret",
+          apiKeyRef: "sk-secret-value-123456789",
+        },
+      ],
+      activeProfileId: "raw-secret",
+    }));
+    const controller = createWebModelProfileController({ storage });
+
+    await controller.listProfiles();
+
+    expect(controller.quarantineMessages).toEqual([
+      expect.stringContaining("raw-secret"),
+    ]);
+  });
 });

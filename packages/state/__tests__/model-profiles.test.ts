@@ -4,6 +4,7 @@ import {
   defaultModelProfiles,
 } from "@opensymphony/gateway-schema";
 import {
+  createAsyncModelProfileStore,
   createModelProfileStore,
   getActiveModelProfile,
   initialModelProfileState,
@@ -200,6 +201,51 @@ describe("createModelProfileStore", () => {
       expect.stringContaining("wrong-storage"),
       "Dropped malformed model profile from durable storage",
     ]));
+  });
+
+  it("uses the same CRUD path for async durable storage", async () => {
+    let stored: string | null = null;
+    const quarantineReasons: string[] = [];
+    const store = createAsyncModelProfileStore({
+      async load() {
+        return stored;
+      },
+      async save(value) {
+        stored = value;
+      },
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+    const profile = {
+      ...createModelProfile("subscription"),
+      id: "async-subscription",
+      active: true,
+      model: "codex-async",
+      baseUrl: "https://subscription.example/v1",
+      harnesses: ["openhands_agent_server", "codex_app_server"],
+    };
+
+    await store.storeProfile(profile);
+    await store.setActiveProfile(profile.id);
+
+    const restored = createAsyncModelProfileStore({
+      async load() {
+        return stored;
+      },
+      async save(value) {
+        stored = value;
+      },
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+    const profiles = await restored.listProfiles();
+    const saved = profiles.find((candidate) => candidate.id === profile.id);
+
+    expect(saved).toMatchObject({
+      active: true,
+      model: "codex-async",
+      baseUrl: "https://subscription.example/v1",
+    });
+    expect(saved?.harnesses).toEqual(["openhands_agent_server", "codex_app_server"]);
+    expect(quarantineReasons).toEqual([]);
   });
 
   it("allows the active model profile to be deactivated", async () => {

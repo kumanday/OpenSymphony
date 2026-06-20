@@ -211,6 +211,46 @@ describe("desktop app shell render", () => {
     expect(calls.some((call) => call.command === "set_setting")).toBe(true);
   });
 
+  it("records quarantine warnings from persisted desktop model settings", async () => {
+    const settings = new Map<string, unknown>();
+    settings.set("opensymphony.desktop.modelProfiles.v1", {
+      type: "Text",
+      value: JSON.stringify({
+        profiles: [
+          {
+            ...createModelProfile("api_key"),
+            id: "desktop-raw-secret",
+            apiKeyRef: "sk-secret-value-123456789",
+          },
+        ],
+        activeProfileId: "desktop-raw-secret",
+      }),
+    });
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          if (command === "get_setting") {
+            const req = args?.req as { key: string };
+            return { value: settings.get(req.key) ?? null };
+          }
+          if (command === "set_setting") {
+            const req = args?.req as { key: string; value: unknown };
+            settings.set(req.key, req.value);
+            return { persisted: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+
+    const controller = createDesktopModelProfileController();
+    await controller!.listProfiles();
+
+    expect(controller?.quarantineMessages).toEqual([
+      expect.stringContaining("desktop-raw-secret"),
+    ]);
+  });
+
   it("uses native Tauri commands for desktop gateway reads", async () => {
     const calls: TauriInvokeCall[] = [];
     (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {

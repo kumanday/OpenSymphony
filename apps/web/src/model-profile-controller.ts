@@ -21,11 +21,16 @@ export function createWebModelProfileController(
     ? hostModelProfileStorage() ?? browserStorage()
     : options.storage;
   const durable = storage !== null;
+  const quarantineMessages: string[] = [];
   return {
     ...createModelProfileStore({
       storage,
       storageKey: STORAGE_KEY,
+      onQuarantine: (reason) => {
+        quarantineMessages.push(reason);
+      },
     }),
+    quarantineMessages,
     persistence: durable
       ? {
           kind: "durable",

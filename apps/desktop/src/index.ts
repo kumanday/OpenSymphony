@@ -6,15 +6,9 @@ import {
   type GatewayTransport,
 } from "@opensymphony/api-client";
 import type { ConnectionProfile } from "@opensymphony/gateway-schema";
+import { defaultModelProfiles } from "@opensymphony/gateway-schema";
 import {
-  defaultModelProfiles,
-  validateModelProfileCredentials,
-  type ModelConfigurationProfile,
-} from "@opensymphony/gateway-schema";
-import {
-  normalizeModelProfileState,
-  sanitizeModelProfiles,
-  type ModelProfileState,
+  createAsyncModelProfileStore,
 } from "@opensymphony/state";
 import {
   renderOpenSymphonyApp,
@@ -315,118 +309,38 @@ export function createDesktopModelProfileController(): ModelProfileController | 
   }
   const tauriInvoke = invoke;
 
-  let fallback = normalizeModelProfileState({
-    profiles: defaultModelProfiles(),
-    activeProfileId: null,
-  });
-  let writeQueue: Promise<unknown> = Promise.resolve();
-
-  async function read(): Promise<ModelProfileState> {
-    try {
+  const quarantineMessages: string[] = [];
+  const store = createAsyncModelProfileStore({
+    defaults: defaultModelProfiles(),
+    onQuarantine: (reason) => {
+      quarantineMessages.push(reason);
+    },
+    async load() {
       const response = await tauriInvoke<NativeSettingResponse>("get_setting", {
         req: { key: MODEL_PROFILE_SETTINGS_KEY },
       });
       const value = response.value;
-      if (!value || value.type !== "Text") {
-        return fallback;
-      }
-      const parsed = JSON.parse(value.value) as Partial<ModelProfileState>;
-      const profiles = sanitizeModelProfiles(parsed.profiles);
-      const state = normalizeModelProfileState({
-        profiles: profiles.length > 0 ? profiles : fallback.profiles,
-        activeProfileId: parsed.activeProfileId ?? null,
-      });
-      fallback = state;
-      return state;
-    } catch {
-      return fallback;
-    }
-  }
-
-  async function write(state: ModelProfileState): Promise<ModelProfileState> {
-    const normalized = normalizeModelProfileState(state);
-    fallback = normalized;
-    await tauriInvoke("set_setting", {
-      req: {
-        key: MODEL_PROFILE_SETTINGS_KEY,
-        value: {
-          type: "Text",
-          value: JSON.stringify(normalized),
+      return value?.type === "Text" ? value.value : null;
+    },
+    async save(value) {
+      await tauriInvoke("set_setting", {
+        req: {
+          key: MODEL_PROFILE_SETTINGS_KEY,
+          value: {
+            type: "Text",
+            value,
+          },
         },
-      },
-    });
-    return normalized;
-  }
-
-  function serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const next = writeQueue.then(operation, operation);
-    writeQueue = next.catch(() => undefined);
-    return next;
-  }
+      });
+    },
+  });
 
   return {
+    ...store,
+    quarantineMessages,
     persistence: {
       kind: "durable",
       label: "Model profiles persist in desktop settings.",
-    },
-    async listProfiles() {
-      return (await read()).profiles;
-    },
-    async storeProfile(profile: ModelConfigurationProfile) {
-      return serialize(async () => {
-        const validationError = validateModelProfileCredentials(profile);
-        if (validationError) {
-          throw new Error(validationError);
-        }
-        const current = await read();
-        const index = current.profiles.findIndex((candidate) => candidate.id === profile.id);
-        const profiles = [...current.profiles];
-        if (index >= 0) {
-          profiles[index] = profile;
-        } else {
-          profiles.push(profile);
-        }
-        const next = await write({
-          profiles,
-          activeProfileId: profile.active
-            ? profile.id
-            : current.activeProfileId === profile.id ? null : current.activeProfileId,
-        });
-        return next.profiles.find((candidate) => candidate.id === profile.id)!;
-      });
-    },
-    async setActiveProfile(profileId: string) {
-      return serialize(async () => {
-        const current = await read();
-        if (!current.profiles.some((profile) => profile.id === profileId)) {
-          throw new Error(`Unknown model profile: ${profileId}`);
-        }
-        const next = await write({
-          profiles: current.profiles,
-          activeProfileId: profileId,
-        });
-        return next.profiles.find((profile) => profile.id === profileId)!;
-      });
-    },
-    async removeProfile(profileId: string) {
-      return serialize(async () => {
-        const current = await read();
-        if (!current.profiles.some((profile) => profile.id === profileId)) {
-          throw new Error(`Unknown model profile: ${profileId}`);
-        }
-        if (current.profiles.length <= 1) {
-          throw new Error("Cannot remove the last model profile");
-        }
-        const profiles = current.profiles.filter((profile) => profile.id !== profileId);
-        const next = await write({
-          profiles,
-          activeProfileId:
-            current.activeProfileId === profileId
-              ? profiles.find((profile) => profile.active)?.id ?? profiles[0]?.id ?? null
-              : current.activeProfileId,
-        });
-        return next.profiles;
-      });
     },
   };
 }

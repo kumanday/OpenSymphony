@@ -137,6 +137,13 @@ export interface ModelProfileStoreOptions {
   onQuarantine?: (reason: string) => void;
 }
 
+export interface AsyncModelProfileStoreOptions {
+  load(): Promise<string | null>;
+  save(value: string): Promise<void>;
+  defaults?: ModelConfigurationProfile[];
+  onQuarantine?: (reason: string) => void;
+}
+
 const DEFAULT_STORAGE_KEY = "opensymphony.modelProfiles.v1";
 
 const credentialStorages = new Set<CredentialStorage>([
@@ -166,7 +173,6 @@ export function createModelProfileStore(
     profiles: defaults,
     activeProfileId: null,
   });
-  let writeQueue: Promise<unknown> = Promise.resolve();
 
   function read(): ModelProfileState {
     if (!storage) {
@@ -198,23 +204,80 @@ export function createModelProfileStore(
     return normalized;
   }
 
+  return createModelProfileStoreFromStateAccess({
+    read,
+    write,
+  });
+}
+
+export function createAsyncModelProfileStore(
+  options: AsyncModelProfileStoreOptions,
+): ModelProfileStore {
+  const defaults = sanitizeModelProfiles(
+    options.defaults ?? defaultModelProfiles(),
+    options.onQuarantine,
+  );
+  let fallback = normalizeModelProfileState({
+    profiles: defaults,
+    activeProfileId: null,
+  });
+
+  async function read(): Promise<ModelProfileState> {
+    try {
+      const raw = await options.load();
+      if (!raw) {
+        return fallback;
+      }
+      const parsed = JSON.parse(raw) as Partial<ModelProfileState>;
+      const profiles = sanitizeModelProfiles(parsed.profiles, options.onQuarantine);
+      const state = normalizeModelProfileState({
+        profiles: profiles.length > 0 ? profiles : fallback.profiles,
+        activeProfileId: parsed.activeProfileId ?? null,
+      });
+      fallback = state;
+      return state;
+    } catch (error) {
+      options.onQuarantine?.(`Failed to read stored model profiles: ${errorMessage(error)}`);
+      return fallback;
+    }
+  }
+
+  async function write(state: ModelProfileState): Promise<ModelProfileState> {
+    const normalized = normalizeModelProfileState(state);
+    fallback = normalized;
+    await options.save(JSON.stringify(normalized));
+    return normalized;
+  }
+
+  return createModelProfileStoreFromStateAccess({
+    read,
+    write,
+  });
+}
+
+function createModelProfileStoreFromStateAccess(access: {
+  read(): ModelProfileState | Promise<ModelProfileState>;
+  write(state: ModelProfileState): ModelProfileState | Promise<ModelProfileState>;
+}): ModelProfileStore {
   function serialize<T>(operation: () => T): Promise<T> {
     const next = writeQueue.then(operation, operation);
     writeQueue = next.catch(() => undefined);
     return next;
   }
 
+  let writeQueue: Promise<unknown> = Promise.resolve();
+
   return {
     async listProfiles() {
-      return read().profiles;
+      return (await access.read()).profiles;
     },
     async storeProfile(profile) {
-      return serialize(() => {
+      return serialize(async () => {
         const validationError = validateModelProfileCredentials(profile);
         if (validationError) {
           throw new Error(validationError);
         }
-        const current = read();
+        const current = await access.read();
         const index = current.profiles.findIndex((candidate) => candidate.id === profile.id);
         const profiles = [...current.profiles];
         if (index >= 0) {
@@ -222,7 +285,7 @@ export function createModelProfileStore(
         } else {
           profiles.push(profile);
         }
-        const next = write({
+        const next = await access.write({
           profiles,
           activeProfileId: profile.active
             ? profile.id
@@ -232,12 +295,12 @@ export function createModelProfileStore(
       });
     },
     async setActiveProfile(profileId) {
-      return serialize(() => {
-        const current = read();
+      return serialize(async () => {
+        const current = await access.read();
         if (!current.profiles.some((profile) => profile.id === profileId)) {
           throw new Error(`Unknown model profile: ${profileId}`);
         }
-        const next = write({
+        const next = await access.write({
           profiles: current.profiles,
           activeProfileId: profileId,
         });
@@ -245,8 +308,8 @@ export function createModelProfileStore(
       });
     },
     async removeProfile(profileId) {
-      return serialize(() => {
-        const current = read();
+      return serialize(async () => {
+        const current = await access.read();
         if (!current.profiles.some((profile) => profile.id === profileId)) {
           throw new Error(`Unknown model profile: ${profileId}`);
         }
@@ -254,7 +317,7 @@ export function createModelProfileStore(
           throw new Error("Cannot remove the last model profile");
         }
         const profiles = current.profiles.filter((profile) => profile.id !== profileId);
-        const next = write({
+        const next = await access.write({
           profiles,
           activeProfileId:
             current.activeProfileId === profileId
