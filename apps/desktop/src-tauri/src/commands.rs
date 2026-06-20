@@ -1219,7 +1219,11 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
             supported_encodings: vec!["utf-8".to_string()],
             bidirectional: false,
         }],
-        harnesses: vec![HarnessCapability::openhands_agent_server()],
+        harnesses: vec![
+            HarnessCapability::openhands_agent_server(),
+            HarnessCapability::codex_app_server_future(),
+            HarnessCapability::rust_native_future(),
+        ],
         features: vec![
             GatewayFeatureCapability {
                 feature: "task_graph".to_string(),
@@ -1393,6 +1397,21 @@ mod tests {
             .collect();
 
         assert_eq!(transports, vec!["loopback_http"]);
+
+        let harnesses: Vec<(&str, bool)> = capabilities
+            .harnesses
+            .iter()
+            .map(|harness| (harness.kind.as_str(), harness.available))
+            .collect();
+
+        assert_eq!(
+            harnesses,
+            vec![
+                ("openhands_agent_server", true),
+                ("codex_app_server", false),
+                ("rust_native", false),
+            ]
+        );
     }
 
     #[test]
