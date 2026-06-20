@@ -28,6 +28,9 @@ pub const DEFAULT_OPENHANDS_RECONNECT_MAX_MS: u64 = 30_000;
 pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 pub const DEFAULT_OPENHANDS_LLM_MODEL: &str = "openai/gpt-5.4";
+pub const DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE: &str = "api_key";
+pub const OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY: &str = "api_key";
+pub const OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION: &str = "openai_subscription";
 pub const DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE: u64 = 240;
 pub const DEFAULT_OPENHANDS_CONDENSER_KEEP_FIRST: u64 = 2;
 
@@ -191,8 +194,22 @@ pub struct OpenHandsLlmFrontMatter {
     pub model: Option<String>,
     pub api_key_env: Option<String>,
     pub base_url_env: Option<String>,
+    pub credential_mode: Option<String>,
+    pub subscription: Option<OpenHandsSubscriptionCredentialFrontMatter>,
     #[serde(flatten)]
     pub options: BTreeMap<String, serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct OpenHandsSubscriptionCredentialFrontMatter {
+    pub vendor: Option<String>,
+    pub access_token_env: Option<String>,
+    pub account_id_env: Option<String>,
+    pub auth_directory_env: Option<String>,
+    pub auth_method: Option<String>,
+    pub open_browser: Option<bool>,
+    pub force_login: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -338,7 +355,20 @@ pub struct OpenHandsLlmConfig {
     pub model: Option<String>,
     pub api_key_env: Option<String>,
     pub base_url_env: Option<String>,
+    pub credential_mode: String,
+    pub subscription: Option<OpenHandsSubscriptionCredentialConfig>,
     pub options: BTreeMap<String, serde_yaml::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenHandsSubscriptionCredentialConfig {
+    pub vendor: String,
+    pub access_token_env: String,
+    pub account_id_env: Option<String>,
+    pub auth_directory_env: Option<String>,
+    pub auth_method: String,
+    pub open_browser: bool,
+    pub force_login: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -18,6 +18,7 @@ pub use model::{
     OpenHandsConversationFrontMatter, OpenHandsConversationToolConfig,
     OpenHandsConversationToolFrontMatter, OpenHandsFrontMatter, OpenHandsLlmConfig,
     OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
+    OpenHandsSubscriptionCredentialConfig, OpenHandsSubscriptionCredentialFrontMatter,
     OpenHandsTransportConfig, OpenHandsTransportFrontMatter, OpenHandsWebSocketConfig,
     OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter, ProcessEnvironment,
     PromptContext, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind,
@@ -1871,6 +1872,112 @@ openhands:
                 .and_then(|llm| llm.base_url_env.as_deref()),
             Some("OPENHANDS_BASE_URL")
         );
+    }
+
+    #[cfg(feature = "openhands-subscription-credentials")]
+    #[test]
+    fn resolves_feature_gated_openhands_subscription_credential_reference() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: gpt-5.2-codex
+        credential_mode: openai_subscription
+        subscription:
+          vendor: openai
+          access_token_env: OPENHANDS_OPENAI_SUBSCRIPTION_ACCESS_TOKEN
+          account_id_env: OPENHANDS_OPENAI_SUBSCRIPTION_ACCOUNT_ID
+          auth_directory_env: OPENHANDS_AUTH_DIR
+          auth_method: device_code
+          open_browser: false
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("subscription credential references should resolve");
+        let llm = resolved
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .llm
+            .as_ref()
+            .expect("llm config should exist");
+        let subscription = llm
+            .subscription
+            .as_ref()
+            .expect("subscription config should resolve");
+
+        assert_eq!(llm.credential_mode, "openai_subscription");
+        assert_eq!(
+            subscription.access_token_env,
+            "OPENHANDS_OPENAI_SUBSCRIPTION_ACCESS_TOKEN"
+        );
+        assert_eq!(
+            subscription.account_id_env.as_deref(),
+            Some("OPENHANDS_OPENAI_SUBSCRIPTION_ACCOUNT_ID")
+        );
+        assert_eq!(subscription.auth_method, "device_code");
+        assert!(!subscription.open_browser);
+        assert!(!subscription.force_login);
+    }
+
+    #[test]
+    fn gates_openhands_subscription_credential_mode_by_feature() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: gpt-5.2-codex
+        credential_mode: openai_subscription
+        subscription:
+          vendor: openai
+          access_token_env: OPENHANDS_OPENAI_SUBSCRIPTION_ACCESS_TOKEN
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let result = workflow.resolve(Path::new("/repo"), &env);
+
+        #[cfg(feature = "openhands-subscription-credentials")]
+        assert!(result.is_ok());
+        #[cfg(not(feature = "openhands-subscription-credentials"))]
+        {
+            let error = result.expect_err("subscription mode should require feature flag");
+            assert!(matches!(
+                error,
+                WorkflowConfigError::InvalidField {
+                    field: "openhands.conversation.agent.llm.credential_mode",
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

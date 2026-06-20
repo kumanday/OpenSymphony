@@ -146,6 +146,27 @@ conversation only reveals its active prior turn later through a `/run`
 
 The orchestration layer should not need to know OpenHands wire details.
 
+### Subscription credential adapter
+
+The pinned `openhands-sdk==1.24.0` exposes
+`LLM.subscription_login(vendor="openai", model=..., auth_method=...)` for
+ChatGPT/Codex subscription use. OpenSymphony's feature-gated
+`openai_subscription` workflow mode does not implement an undocumented OAuth
+flow itself. It expects the documented SDK browser or device-code login path, or
+a hosted credential broker, to own refresh credentials and provide a short-lived
+access token through the configured environment reference.
+
+When that reference is present, OpenSymphony constructs the documented Codex LLM
+shape for conversation creation: `model` normalized to `openai/<codex-model>`,
+the ChatGPT Codex backend base URL, Codex headers, `store=false`, and streaming
+enabled. The launch profile and manifests persist only environment-variable
+names, auth-directory references, and credential hashes; raw access tokens and
+refresh material are not persisted.
+
+API-key OpenHands configuration remains independent. Existing workflows that use
+`LLM_MODEL`, `LLM_API_KEY`, and `LLM_BASE_URL` continue through the default
+`api_key` credential mode and do not need the subscription feature.
+
 ## 8. Tooling note
 
 OpenSymphony no longer forwards workflow-owned Linear bridge configuration into

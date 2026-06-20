@@ -332,6 +332,9 @@ fn long_history_request(workspace_root: &Path, model: &str) -> ConversationCreat
         api_key: env::var("LLM_API_KEY").ok(),
         base_url: env::var("LLM_BASE_URL").ok(),
         usage_id: None,
+        extra_headers: None,
+        litellm_extra_body: None,
+        stream: None,
     };
 
     ConversationCreateRequest {

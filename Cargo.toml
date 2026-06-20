@@ -23,6 +23,7 @@ resolver = "2"
 default = ["duckdb-bundled"]
 duckdb-bundled = ["duckdb/bundled"]
 duckdb-prebuilt = []
+openhands-subscription-credentials = []
 
 [dependencies]
 async-stream.workspace = true
