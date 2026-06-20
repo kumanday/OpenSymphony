@@ -323,7 +323,7 @@ async function runStdioProbe() {
   }
 }
 
-async function waitForReadyz(url, timeoutMs = 5000) {
+async function waitForReadyz(url, timeoutMs = requestTimeoutMs) {
   const deadline = performance.now() + timeoutMs;
   let lastError = null;
   while (performance.now() < deadline) {
@@ -523,7 +523,7 @@ async function runWebSocketProbe(secureExposure) {
       reconnectResponse: reconnectInitialize.response,
       stdoutBytes: Buffer.byteLength(stdout, "utf8"),
       stderrBytes: Buffer.byteLength(stderr, "utf8"),
-      stderrPreview: stderrTrimmed ? stderrTrimmed.slice(-1000) : null,
+      stderrPreview: stderrTrimmed ? [...stderrTrimmed].slice(-1000).join("") : null,
       exposure: {
         listener: `ws://127.0.0.1:${port}`,
         localhostOnly: /binds localhost only/.test(`${stdout}\n${stderr}`),
