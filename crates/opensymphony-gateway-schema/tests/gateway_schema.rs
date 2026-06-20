@@ -8,8 +8,8 @@ use opensymphony::opensymphony_gateway_schema::{
     cursor::{PageCursor, StreamCursor},
     envelope::{EntityKind, EntityRef, GatewayEnvelope},
     model_settings::{
-        CredentialStatusKind, CredentialStatusResponse, CredentialStorageMode,
-        ModelSettingsResponse,
+        CodexCliProbe, CodexLocalReadiness, CredentialReferenceKind, CredentialStatusKind,
+        CredentialStatusResponse, CredentialStorageMode, ModelSettingsResponse, ProbeCommandResult,
     },
     planning::{
         ArtifactDiff, ArtifactRevision, ConversationTurn, LinearPublishReceipt, PlanningArtifact,
@@ -113,9 +113,20 @@ fn model_settings_roundtrip_and_redact_secret_material() {
             && profile.status == CredentialStatusKind::Unsupported
     }));
     assert!(back.profiles.iter().any(|profile| {
-        profile.storage_mode == CredentialStorageMode::LocalKeychain
+        profile.id == "codex-chatgpt-local-keychain"
+            && profile.storage_mode == CredentialStorageMode::CodexCliHome
             && profile.credential_reference.redacted
+            && profile.credential_reference.kind == CredentialReferenceKind::CodexCliLogin
             && profile.compatible_harnesses == vec!["codex_app_server"]
+    }));
+    assert_eq!(
+        back.codex_local_readiness.subscription_status,
+        CredentialStatusKind::Unknown
+    );
+    assert!(back.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:codex-cli:chatgpt-login"
+            && status.status == CredentialStatusKind::Unknown
+            && status.checked_by == "gateway_static_settings"
     }));
     assert_no_raw_secret_field_names(
         &serde_json::to_value(&back.profiles).expect("profiles serialize as JSON value"),
@@ -165,6 +176,86 @@ fn credential_status_response_supports_ui_status_states() {
     );
     assert!(json.contains("\"installed\""));
     assert!(json.contains("\"permission_denied\""));
+}
+
+#[test]
+fn codex_local_readiness_maps_supported_command_output() {
+    let readiness = CodexLocalReadiness::from_probe(CodexCliProbe {
+        command: "codex".into(),
+        version: ProbeCommandResult::success("codex-cli 0.138.0\n"),
+        app_server_help: ProbeCommandResult::success(
+            "Usage: codex app-server [OPTIONS] [COMMAND]\n",
+        ),
+        login_status: ProbeCommandResult::success("Logged in using ChatGPT\n"),
+    });
+    let settings = ModelSettingsResponse::local_with_codex_readiness(false, readiness.clone());
+
+    assert_eq!(readiness.version.as_deref(), Some("codex-cli 0.138.0"));
+    assert_eq!(readiness.cli_status, CredentialStatusKind::Installed);
+    assert_eq!(readiness.app_server_status, CredentialStatusKind::Installed);
+    assert_eq!(readiness.login_status, CredentialStatusKind::Installed);
+    assert_eq!(
+        readiness.subscription_status,
+        CredentialStatusKind::Installed
+    );
+    assert!(readiness.detail.contains("ready"));
+    assert!(settings.profiles.iter().any(|profile| {
+        profile.id == "codex-chatgpt-local-keychain"
+            && profile.status == CredentialStatusKind::Installed
+            && profile.credential_reference.reference == "codex-cli:chatgpt-login"
+    }));
+    assert!(settings.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:codex-cli:chatgpt-login"
+            && status.status == CredentialStatusKind::Installed
+            && status.checked_by == "codex_cli_supported_commands"
+    }));
+}
+
+#[test]
+fn codex_local_readiness_renders_failure_states_without_secret_fields() {
+    let logged_out = CodexLocalReadiness::from_probe(CodexCliProbe {
+        command: "codex".into(),
+        version: ProbeCommandResult::success("codex-cli 0.138.0\n"),
+        app_server_help: ProbeCommandResult::success("Usage: codex app-server\n"),
+        login_status: ProbeCommandResult::failure("Not logged in. Run codex login."),
+    });
+    assert_eq!(logged_out.login_status, CredentialStatusKind::LoggedOut);
+    assert_eq!(
+        logged_out.subscription_status,
+        CredentialStatusKind::LoggedOut
+    );
+    assert!(logged_out.detail.contains("codex login --device-auth"));
+
+    let unsupported = CodexLocalReadiness::from_probe(CodexCliProbe {
+        command: "codex".into(),
+        version: ProbeCommandResult::NotFound,
+        app_server_help: ProbeCommandResult::NotFound,
+        login_status: ProbeCommandResult::NotFound,
+    });
+    assert_eq!(
+        unsupported.subscription_status,
+        CredentialStatusKind::Unsupported
+    );
+    assert!(unsupported.detail.contains("not installed"));
+
+    let denied = CodexLocalReadiness::from_probe(CodexCliProbe {
+        command: "codex".into(),
+        version: ProbeCommandResult::PermissionDenied {
+            detail: "permission denied".into(),
+        },
+        app_server_help: ProbeCommandResult::success("Usage: codex app-server\n"),
+        login_status: ProbeCommandResult::success("Logged in using ChatGPT\n"),
+    });
+    assert_eq!(
+        denied.subscription_status,
+        CredentialStatusKind::PermissionDenied
+    );
+
+    let json = must_serialize(&vec![logged_out, unsupported, denied]);
+    let value: Value = serde_json::from_str(&json).expect("readiness serializes as JSON");
+    assert_no_raw_secret_field_names(&value);
+    assert!(!json.contains("refresh_token"));
+    assert!(!json.contains("access_token"));
 }
 
 #[test]
@@ -544,6 +635,18 @@ fn harness_capability_roundtrips_future_adapters() {
     assert_eq!(back[1].kind, "codex_app_server");
     assert_eq!(back[1].transport.protocol, "json_rpc_2_0");
     assert!(back[1].approvals.tool_approval);
+    assert!(
+        back[1]
+            .model_settings
+            .credential_reference_kinds
+            .contains(&"inherited_subscription_login".to_string())
+    );
+    assert!(
+        back[1]
+            .model_settings
+            .credential_reference_kinds
+            .contains(&"codex_cli_login".to_string())
+    );
     assert!(
         back[1]
             .feature_gaps

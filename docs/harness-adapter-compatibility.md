@@ -53,6 +53,15 @@ model credential settings profiles to future Codex use. Production routing
 remains disabled; `codex_app_server` is still advertised as unavailable through
 capability discovery.
 
+Codex ChatGPT subscription readiness is now advertised as a Codex CLI login
+reference rather than an OpenSymphony-owned secret. Capability discovery lists
+`codex_cli_login` alongside the existing `inherited_subscription_login` as a
+supported credential reference kind for the future Codex adapter. The gateway
+model-settings response probes `codex --version`,
+`codex app-server --help`, and `codex login status` to render installed,
+logged-out, expired, unsupported, permission-denied, or unknown states without
+reading private Codex credential files.
+
 Benchmark and contract evidence lives in
 `docs/codex-app-server-prototype.md`. The companion script
 `scripts/codex_app_server_benchmark.mjs` exercises stdio initialize, loopback
@@ -66,9 +75,12 @@ Known gaps:
   available.
 - WebSocket transport remains experimental until benchmarked and secured; stdio
   is the preferred local integration mode.
-- Codex subscription readiness can build on the local keychain and hosted broker
-  credential reference shapes without requiring raw subscription tokens in
-  OpenSymphony workspaces or browser payloads.
+- Codex subscription readiness uses the local Codex CLI login reference and can
+  later compose with hosted broker references without requiring raw subscription
+  tokens in OpenSymphony workspaces or browser payloads.
+- Production routing still needs a dedicated adapter that consumes the
+  `codex_cli_login` reference only through supported Codex CLI/app-server
+  behavior.
 
 ## Rust-Native Harness
 

@@ -16,14 +16,15 @@ use opensymphony::opensymphony_domain::{
 };
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, LinearTaskGraphClient, control_plane_to_dashboard_snapshot,
-    model_settings_for_llm_api_key,
+    model_settings_for_llm_api_key, model_settings_for_llm_api_key_and_codex_readiness,
 };
 use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
 };
 use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
 use opensymphony::opensymphony_gateway_schema::model_settings::{
-    CredentialStatusKind, CredentialStatusResponse, ModelSettingsResponse,
+    CodexCliProbe, CodexLocalReadiness, CredentialStatusKind, CredentialStatusResponse,
+    ModelSettingsResponse, ProbeCommandResult,
 };
 use opensymphony::opensymphony_gateway_schema::run::DiffLine;
 use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
@@ -600,6 +601,48 @@ fn gateway_model_settings_status_reflects_api_key_presence() {
 }
 
 #[test]
+fn gateway_model_settings_reflects_codex_cli_readiness() {
+    let ready = CodexLocalReadiness::from_probe(CodexCliProbe {
+        command: "codex".into(),
+        version: ProbeCommandResult::success("codex-cli 0.138.0\n"),
+        app_server_help: ProbeCommandResult::success("Usage: codex app-server\n"),
+        login_status: ProbeCommandResult::success("Logged in using ChatGPT\n"),
+    });
+    let settings =
+        model_settings_for_llm_api_key_and_codex_readiness(Some("provider-secret"), ready);
+
+    assert_eq!(
+        settings.codex_local_readiness.subscription_status,
+        CredentialStatusKind::Installed
+    );
+    assert!(settings.profiles.iter().any(|profile| {
+        profile.id == "codex-chatgpt-local-keychain"
+            && profile.status == CredentialStatusKind::Installed
+    }));
+    assert!(settings.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:codex-cli:chatgpt-login"
+            && status.status == CredentialStatusKind::Installed
+            && status.checked_by == "codex_cli_supported_commands"
+    }));
+
+    let logged_out = CodexLocalReadiness::from_probe(CodexCliProbe {
+        command: "codex".into(),
+        version: ProbeCommandResult::success("codex-cli 0.138.0\n"),
+        app_server_help: ProbeCommandResult::success("Usage: codex app-server\n"),
+        login_status: ProbeCommandResult::failure("Not logged in"),
+    });
+    let settings = model_settings_for_llm_api_key_and_codex_readiness(None, logged_out);
+    assert_eq!(
+        settings.codex_local_readiness.subscription_status,
+        CredentialStatusKind::LoggedOut
+    );
+    assert!(settings.profiles.iter().any(|profile| {
+        profile.id == "codex-chatgpt-local-keychain"
+            && profile.status == CredentialStatusKind::LoggedOut
+    }));
+}
+
+#[test]
 fn dashboard_snapshot_json_fixture_roundtrips() {
     let envelope = fixture_envelope(7);
     let dashboard = control_plane_to_dashboard_snapshot(&envelope);
@@ -703,6 +746,12 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
         profile.id == "hosted-openai-subscription-broker"
             && profile.status == CredentialStatusKind::Unsupported
     }));
+    assert!(
+        model_settings_response
+            .codex_local_readiness
+            .status_command
+            .contains("codex login status")
+    );
 
     let credential_status_url = format!("http://{address}/api/v1/model-settings/credential-status");
     let credential_status_response = client

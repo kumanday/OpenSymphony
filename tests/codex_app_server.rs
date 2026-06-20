@@ -115,9 +115,8 @@ fn codex_model_and_credential_reuse_maps_existing_settings_profiles() {
     assert!(codex_profiles.iter().any(|profile| {
         profile.profile_id == "codex-chatgpt-local-keychain"
             && profile.can_supply_subscription_credentials
-            && profile.credential_reference_kind
-                == CredentialReferenceKind::LocalKeychainServiceAccount
-            && profile.storage_mode == CredentialStorageMode::LocalKeychain
+            && profile.credential_reference_kind == CredentialReferenceKind::CodexCliLogin
+            && profile.storage_mode == CredentialStorageMode::CodexCliHome
     }));
     assert!(codex_profiles.iter().any(|profile| {
         profile.profile_id == "hosted-openai-subscription-broker"

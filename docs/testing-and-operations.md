@@ -97,6 +97,28 @@ Current implementation:
 - `tests/supervisor.rs` now covers startup rejection when a foreign ready server is already bound to the supervised target port
 - `tests/update.rs` covers the new `opensymphony update` maintenance flow: skipping `cargo install opensymphony` when the running CLI already matches the newest published release, running the install when a newer release exists, refreshing template-managed skill files in place for an existing target repo, and skipping that skill refresh outside a repo that lacks `WORKFLOW.md` plus `config.yaml`
 - `tests/memory.rs` covers the first memory workflow: capture dry runs, capsule writes, DuckDB indexing, compact briefs, search, docs-sync dry-run diffs, public/private link handling, and Linear archive eligibility gating
+- `opensymphony-gateway-schema/tests/gateway_schema.rs` and
+  `opensymphony-gateway/tests/gateway.rs` cover Codex local readiness rendering
+  with fake command outputs for installed, logged-out, unsupported, and
+  permission-denied states. These tests assert that the gateway exposes only
+  safe status metadata and `codex_cli_login` references, never raw OAuth access
+  or refresh material.
+
+Codex ChatGPT subscription smoke testing remains opt-in on trusted local
+machines because the final exec probe can consume account quota. The supported
+operator sequence is:
+
+```bash
+codex --version
+codex app-server --help
+codex login status
+codex --ask-for-approval never exec --sandbox read-only \
+  "Reply with exactly: CODEX_LOGIN_OK"
+```
+
+If login is missing or expired, use `codex login --device-auth`; if the account
+has not enabled device-code authorization, enable ChatGPT Settings -> Security
+and login -> Enable device code authorization for Codex before retrying.
 
 ## 3. Minimum required test coverage by subsystem
 

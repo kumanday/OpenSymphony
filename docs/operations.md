@@ -246,6 +246,26 @@ Validation for subscription mode should include:
 - live integration only when a valid subscription credential and pinned SDK
   support are available
 
+Codex app-server subscription readiness is separate from the OpenHands SDK auth
+directory. The gateway reports local Codex readiness through model settings by
+running supported Codex CLI checks only:
+
+```bash
+codex --version
+codex app-server --help
+codex login status
+```
+
+When `codex login status` is logged out or expired, run
+`codex login --device-auth`. Some ChatGPT accounts require enabling
+**Security and login -> Enable device code authorization for Codex** before the
+device-code flow succeeds. To revoke local Codex access, run `codex logout` and
+use ChatGPT account settings for account-side revocation. OpenSymphony must not
+read private Codex credential files or copy access/refresh material into
+workspaces, logs, workflow files, Linear comments, or browser payloads. Gateway
+readiness checks are cached briefly and have bounded per-command timeouts so
+operator UI polling cannot hang on a stalled local Codex command.
+
 The alpha model configuration panel exposed by the web and desktop shells uses
 the shared model profile state store, but those entrypoints currently construct
 it without durable storage. Treat profile edits as session-local until a
