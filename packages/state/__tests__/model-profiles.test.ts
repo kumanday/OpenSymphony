@@ -133,6 +133,18 @@ describe("createModelProfileStore", () => {
     expect(profiles.some((profile) => profile.id === second.id)).toBe(true);
   });
 
+  it("preserves profile order when updating an existing profile", async () => {
+    const store = createModelProfileStore({ storage: new MemoryStorage() });
+    const before = (await store.listProfiles()).map((profile) => profile.id);
+    const [first] = await store.listProfiles();
+
+    await store.storeProfile({ ...first, model: "provider/order-preserved" });
+
+    const profiles = await store.listProfiles();
+    expect(profiles.map((profile) => profile.id)).toEqual(before);
+    expect(profiles[0].model).toBe("provider/order-preserved");
+  });
+
   it("rejects invalid credential references for all store callers", async () => {
     const store = createModelProfileStore({ storage: new MemoryStorage() });
     const profile = {

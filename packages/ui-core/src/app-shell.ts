@@ -231,9 +231,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const profiles = options.initialProfiles ?? [];
     const activeProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
     const modelProfiles = options.initialModelProfiles ?? defaultModelProfiles();
-    const activeModelProfile = modelProfiles.find((profile) => profile.active)
-      ?? modelProfiles[0]
-      ?? null;
+    const activeModelProfile = modelProfiles.find((profile) => profile.active) ?? null;
     this.state = {
       connectionMode: "connecting",
       connectionMessage: "Connecting",
@@ -381,10 +379,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       const profiles = await this.options.modelProfileController.listProfiles();
       this.state.modelProfiles = profiles.length > 0 ? profiles : defaultModelProfiles();
-      const active = this.state.modelProfiles.find((profile) => profile.id === this.state.activeModelProfileId)
-        ?? this.state.modelProfiles.find((profile) => profile.active)
-        ?? this.state.modelProfiles[0]
-        ?? null;
+      const active = this.state.modelProfiles.find((profile) => profile.active) ?? null;
       this.state.activeModelProfileId = active?.id ?? null;
       this.state.modelProfileError = null;
     } catch (error) {
@@ -879,9 +874,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!controller) {
       return;
     }
+    const profiles = modelProfilesWithDefaults(this.state.modelProfiles);
     const selectedProfileId = this.valueOf<HTMLSelectElement>("[data-model-profile-select]")
       || this.state.activeModelProfileId;
-    const active = activeModelProfile(this.state.modelProfiles, selectedProfileId);
+    const active = activeModelProfile(profiles, selectedProfileId) ?? profiles[0] ?? null;
     const mode = modelModeFromValue(this.valueOf<HTMLSelectElement>("[data-model-mode]"));
     const baseProfile = active ?? createModelProfile(mode);
     const label = this.valueOf<HTMLInputElement>("[data-model-label]").trim() || active?.label || "Model profile";
@@ -943,14 +939,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       if (saved.active) {
         await controller.setActiveProfile(saved.id);
       }
-      this.state.modelProfiles = [
-        ...this.state.modelProfiles.filter((profile) => profile.id !== saved.id),
-        saved,
-      ].map((profile) => ({
-        ...profile,
-        active: saved.active ? profile.id === saved.id : profile.active,
-      }));
-      this.state.activeModelProfileId = saved.id;
+      this.state.modelProfiles = upsertModelProfile(profiles, saved).map((profile) => {
+        if (saved.active) {
+          return { ...profile, active: profile.id === saved.id };
+        }
+        return profile.id === saved.id ? saved : profile;
+      });
+      this.state.activeModelProfileId = saved.active
+        ? saved.id
+        : this.state.modelProfiles.find((profile) => profile.active)?.id ?? null;
       this.state.modelProfileError = null;
       this.render();
     } catch (error) {
@@ -965,6 +962,37 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     } else {
       this.state.modelPanelExpanded = !this.state.modelPanelExpanded;
     }
+    this.render();
+  }
+
+  private changeModelProfileMode(mode: ModelCredentialMode): void {
+    const profiles = modelProfilesWithDefaults(this.state.modelProfiles);
+    const selectedProfileId = this.valueOf<HTMLSelectElement>("[data-model-profile-select]")
+      || this.state.activeModelProfileId;
+    const current = activeModelProfile(profiles, selectedProfileId)
+      ?? profiles[0]
+      ?? createModelProfile(mode);
+    const subscriptionCredentialDefaults = defaultModelProfiles()
+      .find((profile) => profile.mode === "subscription")!
+      .subscriptionCredential!;
+    const nextProfile: ModelConfigurationProfile = {
+      ...current,
+      mode,
+      apiKeyRef: null,
+      subscriptionCredential: mode === "subscription"
+        ? {
+            ...subscriptionCredentialDefaults,
+            ...current.subscriptionCredential,
+            authDirectoryEnv: null,
+          }
+        : null,
+      credentialStorage: mode === "subscription"
+        ? "openhands_auth_directory"
+        : current.credentialStorage,
+    };
+    this.state.modelProfiles = upsertModelProfile(profiles, nextProfile);
+    this.state.activeModelProfileId = nextProfile.id;
+    this.state.modelProfileError = null;
     this.render();
   }
 
@@ -1254,12 +1282,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private renderModelProfiles(): string {
-    const profiles = this.state.modelProfiles.length > 0
-      ? this.state.modelProfiles
-      : defaultModelProfiles();
+    const profiles = modelProfilesWithDefaults(this.state.modelProfiles);
     const active = activeModelProfile(profiles, this.state.activeModelProfileId)
       ?? profiles[0]
-      ?? createModelProfile("api_key");
+      ?? null;
+    if (!active) {
+      return `
+        <section class="os-panel os-model-panel os-panel-collapsed" data-testid="model-profile-panel">
+          <div class="os-section-head">
+            <div>
+              <h2>Model Configuration</h2>
+              <span>No model profiles</span>
+            </div>
+          </div>
+        </section>
+      `;
+    }
     const options = profiles
       .map((profile) => {
         const selected = profile.id === active.id ? "selected" : "";
@@ -1633,6 +1671,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelector("[data-model-profile-select]")?.addEventListener("change", (event) => {
       const target = event.target as HTMLSelectElement;
       void this.selectModelProfile(target.value);
+    });
+    this.options.root.querySelector("[data-model-mode]")?.addEventListener("change", (event) => {
+      const target = event.target as HTMLSelectElement;
+      this.changeModelProfileMode(modelModeFromValue(target.value));
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-project-id]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -2636,6 +2678,25 @@ function activeModelProfile(
   return profiles.find((profile) => profile.id === profileId)
     ?? profiles.find((profile) => profile.active)
     ?? null;
+}
+
+function modelProfilesWithDefaults(
+  profiles: ModelConfigurationProfile[],
+): ModelConfigurationProfile[] {
+  return profiles.length > 0 ? profiles : defaultModelProfiles();
+}
+
+function upsertModelProfile(
+  profiles: ModelConfigurationProfile[],
+  profile: ModelConfigurationProfile,
+): ModelConfigurationProfile[] {
+  const index = profiles.findIndex((candidate) => candidate.id === profile.id);
+  if (index < 0) {
+    return [...profiles, profile];
+  }
+  const next = [...profiles];
+  next[index] = profile;
+  return next;
 }
 
 function modelModeFromValue(value: string): ModelCredentialMode {

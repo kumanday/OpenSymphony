@@ -777,6 +777,59 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("preserves model profile order when editing", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-profile-select]");
+    const before = Array.from(root.querySelectorAll<HTMLOptionElement>("[data-model-profile-select] option"))
+      .map((option) => option.value);
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/order-preserved";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.model === "provider/order-preserved"),
+    );
+    const after = Array.from(root.querySelectorAll<HTMLOptionElement>("[data-model-profile-select] option"))
+      .map((option) => option.value);
+    expect(after).toEqual(before);
+
+    await handle.destroy();
+  });
+
+  it("rerenders model credential fields when mode changes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-mode]");
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:openai-api-key";
+    const modeSelect = root.querySelector("[data-model-mode]") as HTMLSelectElement;
+    modeSelect.value = "subscription";
+    modeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
+    expect(root.textContent).toContain("OpenHands Auth Directory Env");
+    const credentialInput = root.querySelector("[data-model-credential-ref]") as HTMLInputElement;
+    expect(credentialInput.type).toBe("text");
+    expect(credentialInput.value).toBe("");
+
+    await handle.destroy();
+  });
+
   it("creates and removes model profiles from the panel", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

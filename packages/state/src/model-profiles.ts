@@ -191,11 +191,15 @@ export function createModelProfileStore(
           throw new Error(validationError);
         }
         const current = read();
+        const index = current.profiles.findIndex((candidate) => candidate.id === profile.id);
+        const profiles = [...current.profiles];
+        if (index >= 0) {
+          profiles[index] = profile;
+        } else {
+          profiles.push(profile);
+        }
         const next = write({
-          profiles: [
-            ...current.profiles.filter((candidate) => candidate.id !== profile.id),
-            profile,
-          ],
+          profiles,
           activeProfileId: profile.active
             ? profile.id
             : current.activeProfileId === profile.id ? null : current.activeProfileId,
