@@ -178,6 +178,7 @@ interface AppState {
   gatewayDraft: string;
   modelProfiles: ModelConfigurationProfile[];
   activeModelProfileId: string | null;
+  modelProfileError: string | null;
   loading: boolean;
   activeView: "dashboard" | "planning";
   // Task graph editor state
@@ -254,6 +255,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       gatewayDraft: activeProfile?.gatewayUrl ?? this.transport.baseUri,
       modelProfiles,
       activeModelProfileId: activeModelProfile?.id ?? null,
+      modelProfileError: null,
       loading: true,
       activeView: "dashboard",
       taskGraphFilter: { ...defaultTaskGraphFilter },
@@ -795,6 +797,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       return;
     }
     this.state.activeModelProfileId = profileId;
+    this.state.modelProfileError = null;
     this.render();
   }
 
@@ -808,7 +811,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const label = this.valueOf<HTMLInputElement>("[data-model-label]").trim() || active?.label || "Model profile";
     const model = this.valueOf<HTMLInputElement>("[data-model-name]").trim();
     if (!model) {
-      this.state.connectionMessage = "Model string is required";
+      this.state.modelProfileError = "Model string is required";
       this.render();
       return;
     }
@@ -829,7 +832,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       ? validateStoredCredentialRef(credentialInput, credentialStorage)
       : validateSubscriptionCredential(subscriptionCredential);
     if (credentialError) {
-      this.state.connectionMessage = credentialError;
+      this.state.modelProfileError = credentialError;
       this.render();
       return;
     }
@@ -870,9 +873,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         active: saved.active ? profile.id === saved.id : profile.active,
       }));
       this.state.activeModelProfileId = saved.id;
+      this.state.modelProfileError = null;
       this.render();
     } catch (error) {
-      this.state.connectionMessage = `Model profile save failed: ${errorMessage(error)}`;
+      this.state.modelProfileError = `Model profile save failed: ${errorMessage(error)}`;
       this.render();
     }
   }
@@ -1096,6 +1100,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       : active.apiKeyRef;
     const credentialLabel = active.mode === "subscription" ? "Auth Directory Env" : "Credential Ref";
     const credentialInputType = active.mode === "subscription" ? "text" : "password";
+    const modelProfileError = this.state.modelProfileError
+      ? `<div class="os-model-error" role="alert" data-testid="model-profile-error">${escapeHtml(this.state.modelProfileError)}</div>`
+      : "";
     return `
       <section class="os-panel os-model-panel" data-testid="model-profile-panel">
         <div class="os-section-head">
@@ -1179,6 +1186,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <div class="os-model-meta" data-testid="model-redacted-credential">
           Credential: ${escapeHtml(redactCredentialRef(credentialRef))}
         </div>
+        ${modelProfileError}
       </section>
     `;
   }
@@ -2985,6 +2993,7 @@ function appShellStyles(): string {
     .os-model-layout { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; align-items: end; }
     .os-model-layout button { align-self: end; }
     .os-model-meta { margin-top: 10px; color: #667788; font-size: 12px; }
+    .os-model-error { margin-top: 10px; border: 1px solid #f0b88e; border-radius: 6px; padding: 8px 10px; background: #fff7ed; color: #9a3412; font-size: 12px; }
     .os-check-field { min-height: 34px; display: inline-flex; align-items: center; gap: 8px; color: #536170; font-size: 12px; }
     .os-check-field input { width: 16px; height: 16px; }
     .os-task-graph-panel { grid-column: span 2; }
@@ -3205,6 +3214,7 @@ function appShellStyles(): string {
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
       .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-model-error { background: #32180d; border-color: #7c2d12; color: #fed7aa; }
       .os-auth-panel .os-auth-message { color: #d9e2ea; }
       .os-auth-denied .os-auth-message { color: #fca5a5; }
       .os-auth-note { color: #94a3b3; }

@@ -676,7 +676,10 @@ describe("OpenSymphonyApp mount", () => {
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:custom-api-key";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
 
-    await flushUntil(() => root.textContent?.includes("Model profile save failed: secure settings unavailable") ?? false);
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-profile-error']")?.textContent?.includes("Model profile save failed: secure settings unavailable") ?? false,
+    );
+    expect(root.querySelector(".os-topbar p")?.textContent).not.toContain("Model profile save failed");
     expect(root.querySelector(".os-status-connected")).not.toBeNull();
     expect(root.querySelector(".os-status-failed")).toBeNull();
 
