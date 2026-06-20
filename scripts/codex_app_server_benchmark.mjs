@@ -329,7 +329,8 @@ async function runStdioProbe() {
     );
     const latencyMs = performance.now() - startedAt;
     assertJsonRpcResult("stdio initialize", response);
-    await withChildFailure(endStream(child.stdin, "stdio initialize", requestTimeoutMs));
+    shuttingDown = true;
+    await endStream(child.stdin, "stdio initialize", requestTimeoutMs).catch(() => {});
     return {
       transport: "stdio",
       initializeLatencyMs: Number(latencyMs.toFixed(3)),
