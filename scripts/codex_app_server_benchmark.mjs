@@ -445,8 +445,10 @@ async function runWebSocketProbe(secureExposure) {
 
     const batchStartedAt = performance.now();
     const requests = [];
+    let nextRequestId = 2;
     for (let i = 0; i < iterations; i += 1) {
-      requests.push(requestOverSocket(ws, i + 2, "thread/loaded/list", { limit: 1 }));
+      requests.push(requestOverSocket(ws, nextRequestId, "thread/loaded/list", { limit: 1 }));
+      nextRequestId += 1;
     }
     const responses = await Promise.all(requests);
     for (const response of responses) {
@@ -463,7 +465,7 @@ async function runWebSocketProbe(secureExposure) {
     ws = null;
     const reconnectStartedAt = performance.now();
     ws2 = await openSocket(`ws://127.0.0.1:${port}`);
-    const reconnectInitialize = await requestOverSocket(ws2, iterations + 2, "initialize", {
+    const reconnectInitialize = await requestOverSocket(ws2, nextRequestId, "initialize", {
       clientInfo: { name: "opensymphony-codex-benchmark-reconnect", version: "0.0.0" },
       capabilities: {},
     });

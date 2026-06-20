@@ -34,7 +34,7 @@ pub enum CodexWebSocketAuth {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexAppServerLaunch {
-    pub program: String,
+    program: String,
     pub transport: CodexAppServerTransport,
     pub extra_args: Vec<String>,
     pub websocket_auth: Option<CodexWebSocketAuth>,
@@ -42,8 +42,12 @@ pub struct CodexAppServerLaunch {
 
 impl CodexAppServerLaunch {
     pub fn stdio() -> Self {
+        Self::stdio_with_program("codex")
+    }
+
+    pub fn stdio_with_program(program: impl Into<String>) -> Self {
         Self {
-            program: "codex".into(),
+            program: program.into(),
             transport: CodexAppServerTransport::Stdio,
             extra_args: Vec::new(),
             websocket_auth: None,
@@ -51,16 +55,24 @@ impl CodexAppServerLaunch {
     }
 
     pub fn loopback_websocket(port: u16) -> Self {
+        Self::loopback_websocket_with_program("codex", port)
+    }
+
+    pub fn loopback_websocket_with_program(program: impl Into<String>, port: u16) -> Self {
         Self {
-            program: "codex".into(),
+            program: program.into(),
             transport: CodexAppServerTransport::WebSocketLoopback { port },
             extra_args: Vec::new(),
             websocket_auth: None,
         }
     }
 
-    pub fn command(&self) -> (&str, Vec<String>) {
-        (&self.program, self.command_args())
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    pub fn to_command(&self) -> (String, Vec<String>) {
+        (self.program.clone(), self.command_args())
     }
 
     pub fn command_args(&self) -> Vec<String> {

@@ -12,11 +12,11 @@ use serde_json::json;
 
 #[test]
 fn codex_stdio_launch_and_json_rpc_request_shape_are_stable() {
-    let mut launch = CodexAppServerLaunch::stdio();
-    launch.program = "codex-test".into();
-    let (program, args) = launch.command();
+    let launch = CodexAppServerLaunch::stdio_with_program("codex-test");
+    let (program, args) = launch.to_command();
     assert_eq!(program, "codex-test");
     assert_eq!(args, vec!["app-server", "--stdio"]);
+    assert_eq!(launch.program(), "codex-test");
     assert_eq!(launch.command_args(), vec!["app-server", "--stdio"]);
 
     let mut session = CodexJsonRpcSession::new("opensymphony-test", "0.0.0");

@@ -66,6 +66,10 @@ The generated protocol includes `initialize`, `thread/start`, `turn/start`,
 `item/agentMessage/delta`, `item/started`, `item/completed`, and server-side
 approval request shapes.
 
+The benchmark loop uses `thread/loaded/list` as its queued request probe because
+it exercises JSON-RPC request/response routing without starting model-backed
+turns or consuming subscription/API quota.
+
 ## Benchmark Script
 
 Run:
