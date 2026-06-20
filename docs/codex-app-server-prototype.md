@@ -9,7 +9,8 @@ to Codex.
 - Feature gate: `codex-app-server-prototype`.
 - Runtime kind: `codex_app_server`.
 - Local transport: `codex app-server --stdio`.
-- Experimental remote transport: `codex app-server --listen ws://127.0.0.1:<port>`.
+- Experimental loopback WebSocket transport:
+  `codex app-server --listen ws://127.0.0.1:<port>`.
 - Contract source: generated Codex app-server JSON Schema and TypeScript
   bindings from the installed Codex CLI.
 

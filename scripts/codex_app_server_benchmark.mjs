@@ -281,17 +281,29 @@ async function runStdioProbe() {
       stdio: ["pipe", "pipe", "pipe"],
     }),
   );
+  let shuttingDown = false;
   try {
-    const childError = once(child, "error").then(([error]) => {
-      throw new Error(`codex app-server --stdio failed to start: ${error.message}`);
-    });
-    childError.catch(() => {});
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     let stderr = "";
     child.stderr.on("data", (chunk) => {
       stderr += chunk.toString("utf8");
     });
+    const childFailure = new Promise((_, reject) => {
+      child.once("error", (error) => {
+        reject(new Error(`codex app-server --stdio failed to start: ${error.message}`));
+      });
+      child.once("exit", (code, signal) => {
+        if (shuttingDown) return;
+        const suffix = signal ? `signal ${signal}` : `code ${code}`;
+        reject(
+          new Error(
+            `codex app-server --stdio exited before initialize completed with ${suffix}${stderr.trim() ? `: ${stderr.trim()}` : ""}`,
+          ),
+        );
+      });
+    });
+    childFailure.catch(() => {});
     const stdout = new LineReader(child.stdout);
     const startedAt = performance.now();
     await Promise.race([
@@ -304,17 +316,17 @@ async function runStdioProbe() {
         "stdio initialize",
         requestTimeoutMs,
       ),
-      childError,
+      childFailure,
     ]);
     const response = await Promise.race([
       readJsonRpcResponse(stdout, "stdio initialize", 1, requestTimeoutMs),
-      childError,
+      childFailure,
     ]);
     const latencyMs = performance.now() - startedAt;
     assertJsonRpcResult("stdio initialize", response);
     await Promise.race([
       endStream(child.stdin, "stdio initialize", requestTimeoutMs),
-      childError,
+      childFailure,
     ]);
     return {
       transport: "stdio",
@@ -323,6 +335,7 @@ async function runStdioProbe() {
       stderrBytes: Buffer.byteLength(stderr, "utf8"),
     };
   } finally {
+    shuttingDown = true;
     await terminateChild(child);
   }
 }
