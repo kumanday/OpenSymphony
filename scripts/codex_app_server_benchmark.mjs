@@ -531,7 +531,10 @@ async function runWebSocketProbe(secureExposure) {
     });
   });
   childFailure.catch(() => {});
-  const withChildFailure = (promise) => Promise.race([promise, childFailure]);
+  const withChildFailure = (promise) => {
+    promise.catch(() => {});
+    return Promise.race([promise, childFailure]);
+  };
   try {
     await withChildFailure(waitForReadyz(`http://127.0.0.1:${port}/readyz`, requestTimeoutMs));
 
