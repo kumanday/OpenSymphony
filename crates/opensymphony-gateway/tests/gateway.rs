@@ -622,6 +622,7 @@ fn gateway_model_settings_reflects_codex_cli_readiness() {
     assert!(settings.credential_statuses.iter().any(|status| {
         status.credential_reference_id == "credential:codex-cli:chatgpt-login"
             && status.status == CredentialStatusKind::Installed
+            && status.checked_by == "codex_cli_supported_commands"
     }));
 
     let logged_out = CodexLocalReadiness::from_probe(CodexCliProbe {

@@ -202,7 +202,7 @@ fn codex_local_readiness_maps_supported_command_output() {
     assert!(settings.credential_statuses.iter().any(|status| {
         status.credential_reference_id == "credential:codex-cli:chatgpt-login"
             && status.status == CredentialStatusKind::Installed
-            && status.checked_by == "gateway_static_settings"
+            && status.checked_by == "codex_cli_supported_commands"
     }));
 }
 

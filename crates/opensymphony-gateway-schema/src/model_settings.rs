@@ -221,7 +221,7 @@ impl CredentialStatus {
             credential_reference_id: profile.credential_reference.id.clone(),
             provider: profile.provider,
             status: profile.status,
-            checked_by: "gateway_static_settings".into(),
+            checked_by: credential_status_checked_by(profile).into(),
             detail: status_detail(profile),
         }
     }
@@ -429,6 +429,14 @@ fn status_detail(profile: &ModelSettingsProfile) -> String {
             "Credential reference exists, but this process cannot read the backing storage.".into()
         }
         CredentialStatusKind::Unknown => "Credential reference has not been checked yet.".into(),
+    }
+}
+
+fn credential_status_checked_by(profile: &ModelSettingsProfile) -> &'static str {
+    if profile.credential_reference.kind == CredentialReferenceKind::CodexCliLogin {
+        "codex_cli_supported_commands"
+    } else {
+        "gateway_static_settings"
     }
 }
 
