@@ -1,7 +1,5 @@
 #![cfg(feature = "codex-app-server-prototype")]
 
-use std::path::PathBuf;
-
 use opensymphony::opensymphony_codex::{
     CodexAppServerLaunch, CodexJsonRpcSession, CodexThreadStartParams, CodexTurnStartParams,
     CodexUserInput, CodexWebSocketAuth, NormalizedCodexEventKind, normalize_server_notification,
@@ -21,30 +19,34 @@ fn codex_stdio_launch_and_json_rpc_request_shape_are_stable() {
     assert_eq!(initialize.method, "initialize");
     assert_eq!(initialize.params["clientInfo"]["name"], "opensymphony-test");
 
-    let thread = session.thread_start(CodexThreadStartParams {
-        cwd: Some("/tmp/issue-workspace".into()),
-        model: Some("gpt-5-codex".into()),
-        model_provider: Some("openai".into()),
-        base_instructions: Some("OpenSymphony workflow prompt".into()),
-        developer_instructions: None,
-        ephemeral: Some(true),
-        config: Some(json!({ "model": "gpt-5-codex" })),
-    });
+    let thread = session
+        .thread_start(CodexThreadStartParams {
+            cwd: Some("/tmp/issue-workspace".into()),
+            model: Some("gpt-5-codex".into()),
+            model_provider: Some("openai".into()),
+            base_instructions: Some("OpenSymphony workflow prompt".into()),
+            developer_instructions: None,
+            ephemeral: Some(true),
+            config: Some(json!({ "model": "gpt-5-codex" })),
+        })
+        .expect("serialize thread/start request");
     assert_eq!(thread.id, 2);
     assert_eq!(thread.method, "thread/start");
     assert_eq!(thread.params["cwd"], "/tmp/issue-workspace");
     assert_eq!(thread.params["model"], "gpt-5-codex");
 
-    let turn = session.turn_start(CodexTurnStartParams {
-        thread_id: "thread-1".into(),
-        input: vec![CodexUserInput::Text {
-            text: "continue".into(),
-            text_elements: Vec::new(),
-        }],
-        cwd: Some("/tmp/issue-workspace".into()),
-        model: Some("gpt-5-codex".into()),
-        client_user_message_id: Some("client-msg-1".into()),
-    });
+    let turn = session
+        .turn_start(CodexTurnStartParams {
+            thread_id: "thread-1".into(),
+            input: vec![CodexUserInput::Text {
+                text: "continue".into(),
+                text_elements: Vec::new(),
+            }],
+            cwd: Some("/tmp/issue-workspace".into()),
+            model: Some("gpt-5-codex".into()),
+            client_user_message_id: Some("client-msg-1".into()),
+        })
+        .expect("serialize turn/start request");
     assert_eq!(turn.id, 3);
     assert_eq!(turn.method, "turn/start");
     assert_eq!(turn.params["threadId"], "thread-1");
@@ -124,7 +126,7 @@ fn codex_model_and_credential_reuse_maps_existing_settings_profiles() {
 fn codex_websocket_auth_and_benchmark_dimensions_are_explicit() {
     let mut launch = CodexAppServerLaunch::loopback_websocket(18765);
     launch.websocket_auth = Some(CodexWebSocketAuth::CapabilityToken {
-        token_file: PathBuf::from("/tmp/codex-token"),
+        token_file: std::env::temp_dir().join("opensymphony-codex-token"),
         token_sha256: "0".repeat(64),
     });
     let args = launch.command_args();

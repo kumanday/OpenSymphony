@@ -21,6 +21,7 @@ for (let i = 2; i < process.argv.length; i += 1) {
 const iterations = Number(args.get("--iterations") ?? "50");
 const port = Number(args.get("--port") ?? "18765");
 const runWebSocket = args.get("--skip-websocket") !== "true";
+const requestTimeoutMs = Number(args.get("--request-timeout-ms") ?? "5000");
 
 function percentile(values, pct) {
   if (values.length === 0) return null;
@@ -31,6 +32,24 @@ function percentile(values, pct) {
 
 function request(id, method, params = {}) {
   return JSON.stringify({ jsonrpc: "2.0", id, method, params });
+}
+
+async function terminateChild(child, graceMs = 1000) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = once(child, "exit").then(() => true);
+  child.kill("SIGTERM");
+  if (await Promise.race([exited, sleep(graceMs).then(() => false)])) return;
+  child.kill("SIGKILL");
+  await Promise.race([exited, sleep(graceMs)]);
+}
+
+function assertJsonRpcResult(label, response) {
+  if (response.error) {
+    throw new Error(`${label} returned JSON-RPC error: ${JSON.stringify(response.error)}`);
+  }
+  if (!response.result) {
+    throw new Error(`${label} did not include a JSON-RPC result`);
+  }
 }
 
 async function readLine(stream, timeoutMs) {
@@ -52,24 +71,28 @@ async function runStdioProbe() {
   const child = spawn("codex", ["app-server", "--stdio"], {
     stdio: ["pipe", "pipe", "pipe"],
   });
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  const startedAt = performance.now();
-  child.stdin.write(
-    `${request(1, "initialize", {
-      clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
-      capabilities: {},
-    })}\n`,
-  );
-  const line = await readLine(child.stdout, 5000);
-  const latencyMs = performance.now() - startedAt;
-  child.kill("SIGTERM");
-  await Promise.race([once(child, "exit"), sleep(1000)]);
-  return {
-    transport: "stdio",
-    initializeLatencyMs: Number(latencyMs.toFixed(3)),
-    response: JSON.parse(line),
-  };
+  try {
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    const startedAt = performance.now();
+    child.stdin.write(
+      `${request(1, "initialize", {
+        clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
+        capabilities: {},
+      })}\n`,
+    );
+    const line = await readLine(child.stdout, requestTimeoutMs);
+    const latencyMs = performance.now() - startedAt;
+    const response = JSON.parse(line);
+    assertJsonRpcResult("stdio initialize", response);
+    return {
+      transport: "stdio",
+      initializeLatencyMs: Number(latencyMs.toFixed(3)),
+      response,
+    };
+  } finally {
+    await terminateChild(child);
+  }
 }
 
 async function waitForReadyz(url, timeoutMs = 5000) {
@@ -98,17 +121,30 @@ async function openSocket(url) {
   return ws;
 }
 
-function requestOverSocket(ws, id, method, params = {}) {
+function requestOverSocket(ws, id, method, params = {}, timeoutMs = requestTimeoutMs) {
   const startedAt = performance.now();
   return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      ws.removeEventListener("message", onMessage);
+      ws.removeEventListener("error", onError);
+    };
     const onMessage = (event) => {
       const parsed = JSON.parse(event.data);
       if (parsed.id !== id) return;
-      ws.removeEventListener("message", onMessage);
+      cleanup();
       resolve({ latencyMs: performance.now() - startedAt, response: parsed });
     };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${method} request ${id} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
     ws.addEventListener("message", onMessage);
-    ws.addEventListener("error", reject, { once: true });
+    ws.addEventListener("error", onError);
     ws.send(request(id, method, params));
   });
 }
@@ -122,58 +158,67 @@ async function runWebSocketProbe() {
     stderr += chunk.toString("utf8");
   });
 
-  await waitForReadyz(`http://127.0.0.1:${port}/readyz`);
+  let ws = null;
+  let ws2 = null;
+  try {
+    await waitForReadyz(`http://127.0.0.1:${port}/readyz`);
 
-  const ws = await openSocket(`ws://127.0.0.1:${port}`);
-  const initialize = await requestOverSocket(ws, 1, "initialize", {
-    clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
-    capabilities: {},
-  });
+    ws = await openSocket(`ws://127.0.0.1:${port}`);
+    const initialize = await requestOverSocket(ws, 1, "initialize", {
+      clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
+      capabilities: {},
+    });
+    assertJsonRpcResult("websocket initialize", initialize.response);
 
-  const batchStartedAt = performance.now();
-  const requests = [];
-  for (let i = 0; i < iterations; i += 1) {
-    requests.push(requestOverSocket(ws, i + 2, "thread/loaded/list", { limit: 1 }));
+    const batchStartedAt = performance.now();
+    const requests = [];
+    for (let i = 0; i < iterations; i += 1) {
+      requests.push(requestOverSocket(ws, i + 2, "thread/loaded/list", { limit: 1 }));
+    }
+    const responses = await Promise.all(requests);
+    for (const response of responses) {
+      assertJsonRpcResult("websocket queued request", response.response);
+    }
+    const elapsedMs = performance.now() - batchStartedAt;
+    const latencies = responses.map((response) => response.latencyMs);
+
+    ws.close();
+    await sleep(100);
+    const reconnectStartedAt = performance.now();
+    ws2 = await openSocket(`ws://127.0.0.1:${port}`);
+    const reconnectInitialize = await requestOverSocket(ws2, iterations + 2, "initialize", {
+      clientInfo: { name: "opensymphony-codex-benchmark-reconnect", version: "0.0.0" },
+      capabilities: {},
+    });
+    assertJsonRpcResult("websocket reconnect initialize", reconnectInitialize.response);
+    const reconnectMs = performance.now() - reconnectStartedAt;
+
+    return {
+      transport: "websocket_loopback",
+      port,
+      initializeLatencyMs: Number(initialize.latencyMs.toFixed(3)),
+      queuedRequests: iterations,
+      queuedResponses: responses.length,
+      queueElapsedMs: Number(elapsedMs.toFixed(3)),
+      requestsPerSecond: Number(((responses.length / elapsedMs) * 1000).toFixed(2)),
+      latencyMs: {
+        p50: percentile(latencies, 50),
+        p95: percentile(latencies, 95),
+        max: Number(Math.max(...latencies).toFixed(3)),
+      },
+      reconnectLatencyMs: Number(reconnectMs.toFixed(3)),
+      reconnectResponse: "ok",
+      exposure: {
+        listener: `ws://127.0.0.1:${port}`,
+        localhostOnly: /binds localhost only/.test(stderr),
+        authModesFromHelp: ["capability-token", "signed-bearer-token"],
+      },
+    };
+  } finally {
+    if (ws && ws.readyState < WebSocket.CLOSING) ws.close();
+    if (ws2 && ws2.readyState < WebSocket.CLOSING) ws2.close();
+    await terminateChild(child);
   }
-  const responses = await Promise.all(requests);
-  const elapsedMs = performance.now() - batchStartedAt;
-  const latencies = responses.map((response) => response.latencyMs);
-
-  ws.close();
-  await sleep(100);
-  const reconnectStartedAt = performance.now();
-  const ws2 = await openSocket(`ws://127.0.0.1:${port}`);
-  const reconnectInitialize = await requestOverSocket(ws2, iterations + 2, "initialize", {
-    clientInfo: { name: "opensymphony-codex-benchmark-reconnect", version: "0.0.0" },
-    capabilities: {},
-  });
-  const reconnectMs = performance.now() - reconnectStartedAt;
-  ws2.close();
-
-  child.kill("SIGTERM");
-  await Promise.race([once(child, "exit"), sleep(1000)]);
-
-  return {
-    transport: "websocket_loopback",
-    port,
-    initializeLatencyMs: Number(initialize.latencyMs.toFixed(3)),
-    queuedRequests: iterations,
-    queuedResponses: responses.length,
-    queueElapsedMs: Number(elapsedMs.toFixed(3)),
-    requestsPerSecond: Number(((responses.length / elapsedMs) * 1000).toFixed(2)),
-    latencyMs: {
-      p50: percentile(latencies, 50),
-      p95: percentile(latencies, 95),
-      max: Number(Math.max(...latencies).toFixed(3)),
-    },
-    reconnectLatencyMs: Number(reconnectMs.toFixed(3)),
-    reconnectResponse: reconnectInitialize.response.result ? "ok" : "missing_result",
-    exposure: {
-      listener: `ws://127.0.0.1:${port}`,
-      localhostOnly: /binds localhost only/.test(stderr),
-      authModesFromHelp: ["capability-token", "signed-bearer-token"],
-    },
-  };
 }
 
 async function runHelpProbe() {

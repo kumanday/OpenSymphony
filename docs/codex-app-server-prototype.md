@@ -87,13 +87,13 @@ WebSocket probes are supported. A 10-request local run produced:
 
 ```json
 {
-  "stdioInitializeLatencyMs": 261.716,
-  "websocketInitializeLatencyMs": 6.088,
+  "stdioInitializeLatencyMs": 233.467,
+  "websocketInitializeLatencyMs": 1.446,
   "websocketQueuedRequests": 10,
   "websocketQueuedResponses": 10,
-  "websocketRequestsPerSecond": 1459.77,
-  "websocketLatencyMs": { "p50": 6.263, "p95": 6.69, "max": 6.69 },
-  "websocketReconnectLatencyMs": 3.22,
+  "websocketRequestsPerSecond": 5196.27,
+  "websocketLatencyMs": { "p50": 1.606, "p95": 1.811, "max": 1.811 },
+  "websocketReconnectLatencyMs": 1.33,
   "websocketReconnectResponse": "ok",
   "websocketLocalhostOnly": true,
   "capabilityTokenModeAdvertised": true,

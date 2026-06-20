@@ -218,18 +218,18 @@ impl CodexJsonRpcSession {
         )
     }
 
-    pub fn thread_start(&mut self, params: CodexThreadStartParams) -> JsonRpcRequestEnvelope {
-        self.request(
-            "thread/start",
-            serde_json::to_value(params).unwrap_or(Value::Null),
-        )
+    pub fn thread_start(
+        &mut self,
+        params: CodexThreadStartParams,
+    ) -> Result<JsonRpcRequestEnvelope, serde_json::Error> {
+        Ok(self.request("thread/start", serde_json::to_value(params)?))
     }
 
-    pub fn turn_start(&mut self, params: CodexTurnStartParams) -> JsonRpcRequestEnvelope {
-        self.request(
-            "turn/start",
-            serde_json::to_value(params).unwrap_or(Value::Null),
-        )
+    pub fn turn_start(
+        &mut self,
+        params: CodexTurnStartParams,
+    ) -> Result<JsonRpcRequestEnvelope, serde_json::Error> {
+        Ok(self.request("turn/start", serde_json::to_value(params)?))
     }
 
     pub fn request(&mut self, method: impl Into<String>, params: Value) -> JsonRpcRequestEnvelope {
