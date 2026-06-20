@@ -123,6 +123,11 @@ fn model_settings_roundtrip_and_redact_secret_material() {
         back.codex_local_readiness.subscription_status,
         CredentialStatusKind::Unknown
     );
+    assert!(back.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:codex-cli:chatgpt-login"
+            && status.status == CredentialStatusKind::Unknown
+            && status.checked_by == "gateway_static_settings"
+    }));
     assert_no_raw_secret_field_names(
         &serde_json::to_value(&back.profiles).expect("profiles serialize as JSON value"),
     );

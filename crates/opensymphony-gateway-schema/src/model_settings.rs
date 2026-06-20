@@ -186,7 +186,13 @@ impl ModelSettingsResponse {
         ];
         let credential_statuses = profiles
             .iter()
-            .map(CredentialStatus::from_profile)
+            .map(|profile| {
+                let mut status = CredentialStatus::from_profile(profile);
+                if profile.credential_reference.kind == CredentialReferenceKind::CodexCliLogin {
+                    status.checked_by = codex_local_readiness.checked_by.clone();
+                }
+                status
+            })
             .collect::<Vec<_>>();
 
         Self {
@@ -221,7 +227,7 @@ impl CredentialStatus {
             credential_reference_id: profile.credential_reference.id.clone(),
             provider: profile.provider,
             status: profile.status,
-            checked_by: credential_status_checked_by(profile).into(),
+            checked_by: "gateway_static_settings".into(),
             detail: status_detail(profile),
         }
     }
@@ -429,14 +435,6 @@ fn status_detail(profile: &ModelSettingsProfile) -> String {
             "Credential reference exists, but this process cannot read the backing storage.".into()
         }
         CredentialStatusKind::Unknown => "Credential reference has not been checked yet.".into(),
-    }
-}
-
-fn credential_status_checked_by(profile: &ModelSettingsProfile) -> &'static str {
-    if profile.credential_reference.kind == CredentialReferenceKind::CodexCliLogin {
-        "codex_cli_supported_commands"
-    } else {
-        "gateway_static_settings"
     }
 }
 

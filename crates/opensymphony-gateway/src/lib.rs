@@ -3694,6 +3694,12 @@ exit 2
 
         assert_eq!(readiness.subscription_status, CredentialStatusKind::Unknown);
         assert_eq!(readiness.checked_by, "codex_readiness_refresh_failed");
+        let settings = model_settings_for_llm_api_key_and_codex_readiness(None, readiness.clone());
+        assert!(settings.credential_statuses.iter().any(|status| {
+            status.credential_reference_id == "credential:codex-cli:chatgpt-login"
+                && status.status == CredentialStatusKind::Unknown
+                && status.checked_by == "codex_readiness_refresh_failed"
+        }));
         let state = cache.state.lock().await;
         assert!(
             state.entry.is_none(),
