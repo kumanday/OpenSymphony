@@ -428,7 +428,7 @@ async function runWebSocketProbe(secureExposure) {
       latencyMs: {
         p50: percentile(latencies, 50),
         p95: percentile(latencies, 95),
-        max: Number(Math.max(...latencies).toFixed(3)),
+        max: Number(latencies.reduce((max, latency) => Math.max(max, latency), 0).toFixed(3)),
       },
       reconnectLatencyMs: Number(reconnectMs.toFixed(3)),
       reconnectResponse: "ok",
