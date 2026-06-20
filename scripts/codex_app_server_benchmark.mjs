@@ -557,7 +557,16 @@ async function runWebSocketProbe(secureExposure) {
       );
       nextRequestId += 1;
     }
-    const responses = await Promise.all(requests);
+    const settledResponses = await Promise.allSettled(requests);
+    const failures = settledResponses.filter((response) => response.status === "rejected");
+    if (failures.length > 0) {
+      throw new Error(
+        `websocket queued request batch failed (${failures.length}/${requests.length}): ${failures
+          .map((failure) => failure.reason?.message ?? String(failure.reason))
+          .join("; ")}`,
+      );
+    }
+    const responses = settledResponses.map((response) => response.value);
     for (const response of responses) {
       assertJsonRpcResult("websocket queued request", response.response);
     }
