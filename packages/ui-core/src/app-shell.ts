@@ -891,9 +891,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const credentialInput = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
     const credentialStorage = mode === "subscription"
       ? "openhands_auth_directory"
-      : baseProfile.credentialStorage === "openhands_auth_directory"
-        ? "local_keychain"
-        : baseProfile.credentialStorage;
+      : baseProfile.credentialStorage;
     const subscriptionCredentialDefaults = defaultModelProfiles()
       .find((profile) => profile.mode === "subscription")!
       .subscriptionCredential!;

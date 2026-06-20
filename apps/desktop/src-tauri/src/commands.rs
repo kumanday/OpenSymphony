@@ -238,7 +238,7 @@ pub async fn list_profiles() -> CommandResult<Vec<ProfileResponse>> {
 }
 
 /// Set the active connection profile.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn set_active_profile(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     profile_id: String,
@@ -271,7 +271,7 @@ pub async fn set_active_profile(
 }
 
 /// Remove a stored connection profile.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn remove_profile(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     profile_id: String,

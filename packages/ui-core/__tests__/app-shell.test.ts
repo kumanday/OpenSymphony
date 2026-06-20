@@ -711,6 +711,41 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("preserves API-key credential storage when editing a profile", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const profiles = defaultModelProfiles();
+    profiles[0] = {
+      ...profiles[0],
+      credentialStorage: "openhands_auth_directory",
+      apiKeyRef: "openhands_auth:openai-api-key",
+    };
+    const modelProfileController = buildModelProfileController(profiles);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+      initialModelProfiles: profiles,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "openhands_auth:edited-api-key";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.model === "provider/custom-model-name"),
+    );
+
+    const saved = modelProfileController.saved.find((profile) => profile.model === "provider/custom-model-name");
+    expect(saved?.mode).toBe("api_key");
+    expect(saved?.credentialStorage).toBe("openhands_auth_directory");
+    expect(saved?.apiKeyRef).toBe("openhands_auth:edited-api-key");
+
+    await handle.destroy();
+  });
+
   it("creates and removes model profiles from the panel", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
