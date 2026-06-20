@@ -207,6 +207,12 @@ trait HarnessAdapter {
 
 The exact trait should be adapted to the Rust codebase, but the conceptual boundary should stay stable.
 
+The current Rust boundary is the `HarnessAdapter` capability interface in
+`opensymphony-domain`, backed by the public `HarnessCapability` DTO in
+`opensymphony-gateway-schema`. The gateway exposes those DTOs through
+`GET /api/v1/capabilities` so clients can discover harness support without
+depending on private OpenHands, Codex, or future in-process adapter types.
+
 #### OpenHands adapter
 
 Initial production adapter.

@@ -71,7 +71,9 @@ pub use crate::opensymphony_gateway_schema::{
         PermissionResult,
     },
     approval::ApprovalRequest,
-    capability::{AuthMode, FeatureCapability, GatewayCapabilities, TransportCapability},
+    capability::{
+        AuthMode, FeatureCapability, GatewayCapabilities, HarnessCapability, TransportCapability,
+    },
     cursor::PageCursor,
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
     run::{
@@ -625,6 +627,11 @@ fn build_capabilities() -> GatewayCapabilities {
                 supported_encodings: vec!["utf-8".into()],
                 bidirectional: false,
             },
+        ],
+        harnesses: vec![
+            HarnessCapability::openhands_agent_server(),
+            HarnessCapability::codex_app_server_future(),
+            HarnessCapability::rust_native_future(),
         ],
         features: vec![
             FeatureCapability {

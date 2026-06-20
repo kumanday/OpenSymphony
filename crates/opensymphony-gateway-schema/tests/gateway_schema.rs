@@ -2,7 +2,9 @@ use chrono::Utc;
 use opensymphony::opensymphony_gateway_schema::{
     action::{ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget},
     approval::{ApprovalKind, ApprovalRequest, ApprovalStatus},
-    capability::{AuthMode, FeatureCapability, GatewayCapabilities, TransportCapability},
+    capability::{
+        AuthMode, FeatureCapability, GatewayCapabilities, HarnessCapability, TransportCapability,
+    },
     cursor::{PageCursor, StreamCursor},
     envelope::{EntityKind, EntityRef, GatewayEnvelope},
     planning::{
@@ -398,6 +400,7 @@ fn gateway_capabilities_roundtrips() {
             supported_encodings: vec!["utf-8".into(), "base64".into()],
             bidirectional: true,
         }],
+        harnesses: vec![HarnessCapability::openhands_agent_server()],
         features: vec![FeatureCapability {
             feature: "task_graph".into(),
             available: true,
@@ -413,6 +416,53 @@ fn gateway_capabilities_roundtrips() {
     assert_eq!(back.gateway_version, "1.6.0");
     assert_eq!(back.max_event_page_size, 1000);
     assert_eq!(back.auth_modes.len(), 2);
+    assert_eq!(back.harnesses[0].kind, "openhands_agent_server");
+    assert!(back.harnesses[0].history.reconnect_and_replay);
+}
+
+#[test]
+fn harness_capability_roundtrips_future_adapters() {
+    let caps = vec![
+        HarnessCapability::openhands_agent_server(),
+        HarnessCapability::codex_app_server_future(),
+        HarnessCapability::rust_native_future(),
+    ];
+
+    let json = must_serialize(&caps);
+    let back: Vec<HarnessCapability> = must_deserialize(&json);
+
+    assert_eq!(back.len(), 3);
+    assert!(back[0].available);
+    assert_eq!(back[1].kind, "codex_app_server");
+    assert_eq!(back[1].transport.protocol, "json_rpc_2_0");
+    assert!(back[1].approvals.tool_approval);
+    assert_eq!(back[2].kind, "rust_native");
+    assert!(back[2].pause_resume.pause);
+}
+
+#[test]
+fn fake_harness_optional_capability_combinations_roundtrip() {
+    let mut fake = HarnessCapability::rust_native_future();
+    fake.kind = "fake_minimal".into();
+    fake.display_name = "Fake minimal harness".into();
+    fake.available = true;
+    fake.actions.pause = false;
+    fake.actions.resume = false;
+    fake.approvals.tool_approval = false;
+    fake.approvals.human_decision = false;
+    fake.model_settings.subscription_credentials = false;
+    fake.model_settings.credential_reference_kinds.clear();
+    fake.event_streams.delivery_modes = vec!["test_fixture".into()];
+    fake.feature_gaps = vec!["No approval or pause/resume support in this fake harness.".into()];
+
+    let json = must_serialize(&fake);
+    let back: HarnessCapability = must_deserialize(&json);
+
+    assert_eq!(back.kind, "fake_minimal");
+    assert!(!back.actions.pause);
+    assert!(!back.approvals.tool_approval);
+    assert!(back.history.preserve_unknown_events);
+    assert_eq!(back.event_streams.delivery_modes, vec!["test_fixture"]);
 }
 
 #[test]

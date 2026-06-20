@@ -37,9 +37,21 @@ be forward-compatible, versioned, and transport-agnostic.
 | `terminal` | Terminal/log frames | `TerminalFrame`, `TerminalSnapshot` |
 | `approval` | Human-in-the-loop | `ApprovalRequest`, `ActionReceipt` |
 | `planning` | Planning artifacts | `PlanningArtifact`, `PlanningSessionSummary` |
-| `capability` | Discovery | `GatewayCapabilities`, `TransportCapability` |
+| `capability` | Discovery | `GatewayCapabilities`, `TransportCapability`, `HarnessCapability` |
 | `action` | Mutation dispatch | `ActionDispatch`, `ActionKind` |
 | `transport` | Benchmark metadata | `TransportRecommendation`, `TransportProfile` |
+
+## Harness Capabilities
+
+`GET /api/v1/capabilities` includes a `harnesses` array. Each
+`HarnessCapability` describes a public harness kind, transport shape, supported
+run actions, event stream behavior, approval support, model-setting support,
+cancellation, pause/resume, and history/replay support.
+
+The harness list deliberately uses stable strings such as
+`openhands_agent_server`, `codex_app_server`, and `rust_native` rather than
+private adapter class names. Clients should use the advertised booleans and
+feature gaps instead of special-casing adapter internals.
 
 ## Event envelope example
 
