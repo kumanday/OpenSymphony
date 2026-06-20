@@ -112,6 +112,14 @@ The runtime client must:
 - reconnect with bounded exponential backoff
 - refresh cached state after reconnect
 
+### Keep harness capability discovery public
+
+- Public harness metadata belongs in `opensymphony-gateway-schema::capability::HarnessCapability` and the `/api/v1/capabilities` response.
+- Use stable harness kind strings such as `openhands_agent_server`, `codex_app_server`, and `rust_native`; do not expose private adapter type names to clients.
+- Concrete harness adapters should implement the domain `HarnessAdapter` capability boundary and keep OpenHands, Codex, or future in-process protocol details inside their adapter modules.
+- Future or experimental harnesses may be advertised as unavailable capability entries, but their feature gaps must be explicit.
+- When changing harness capability discovery, update gateway schema round-trip tests, the gateway capabilities endpoint test, adapter-boundary tests, and `docs/harness-adapter-compatibility.md`.
+
 ### Preserve forward compatibility
 
 OpenHands event schemas can evolve. Implement:
