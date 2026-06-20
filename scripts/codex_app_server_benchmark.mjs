@@ -8,10 +8,17 @@ import { setTimeout as sleep } from "node:timers/promises";
 const booleanFlags = new Set(["--skip-websocket"]);
 const args = new Map();
 for (let i = 2; i < process.argv.length; i += 1) {
-  const arg = process.argv[i];
-  if (!arg.startsWith("--")) continue;
+  const rawArg = process.argv[i];
+  if (!rawArg.startsWith("--")) continue;
+  const equalsIndex = rawArg.indexOf("=");
+  const arg = equalsIndex >= 0 ? rawArg.slice(0, equalsIndex) : rawArg;
+  const inlineValue = equalsIndex >= 0 ? rawArg.slice(equalsIndex + 1) : null;
   if (booleanFlags.has(arg)) {
     args.set(arg, "true");
+    continue;
+  }
+  if (inlineValue != null) {
+    args.set(arg, inlineValue);
     continue;
   }
   const next = process.argv[i + 1];
