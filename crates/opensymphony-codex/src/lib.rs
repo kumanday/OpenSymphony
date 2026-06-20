@@ -662,7 +662,7 @@ fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventK
             ),
         ),
         NormalizedCodexEventKind::ApprovalCompleted => (
-            EventKind::ApprovalGranted,
+            approval_completed_kind(event),
             format!(
                 "Codex approval completed{}",
                 id_suffix(event.item_id.as_deref())
@@ -703,6 +703,26 @@ fn error_summary(event: &NormalizedCodexEvent) -> Option<String> {
         .or_else(|| params.get("detail"))?
         .as_str()?;
     Some(format!("Codex app-server error: {message}"))
+}
+
+fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
+    let params = event.raw.get("params").unwrap_or(&Value::Null);
+    let decision = ["decision", "status", "outcome", "result"]
+        .into_iter()
+        .filter_map(|key| params.get(key)?.as_str())
+        .map(str::to_ascii_lowercase)
+        .next();
+    match decision.as_deref() {
+        Some("approve" | "approved" | "grant" | "granted" | "allow" | "allowed") => {
+            EventKind::ApprovalGranted
+        }
+        Some("reject" | "rejected" | "deny" | "denied" | "disallow" | "cancelled" | "canceled") => {
+            EventKind::ApprovalDenied
+        }
+        _ => EventKind::HarnessEventNormalized {
+            source_kind: event.method.clone(),
+        },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

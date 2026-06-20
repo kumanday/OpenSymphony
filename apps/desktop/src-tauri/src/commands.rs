@@ -1221,7 +1221,7 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
         }],
         harnesses: vec![
             HarnessCapability::openhands_agent_server(),
-            HarnessCapability::codex_app_server_future(),
+            HarnessCapability::codex_app_server_local(),
             HarnessCapability::rust_native_future(),
         ],
         features: vec![
@@ -1408,7 +1408,7 @@ mod tests {
             harnesses,
             vec![
                 ("openhands_agent_server", true),
-                ("codex_app_server", false),
+                ("codex_app_server", true),
                 ("rust_native", false),
             ]
         );

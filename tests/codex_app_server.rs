@@ -266,6 +266,55 @@ fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
 }
 
 #[test]
+fn codex_approval_completed_maps_decisions_without_guessing() {
+    let approved = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "approval/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-1",
+            "decision": "approved"
+        }
+    }))
+    .expect("approved completion normalizes");
+    let approved_record = normalized_event_to_journal_record("COE-476", 11, &approved);
+    assert_eq!(approved_record.kind, EventKind::ApprovalGranted);
+
+    let rejected = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "approval/responded",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-2",
+            "decision": "rejected"
+        }
+    }))
+    .expect("rejected completion normalizes");
+    let rejected_record = normalized_event_to_journal_record("COE-476", 12, &rejected);
+    assert_eq!(rejected_record.kind, EventKind::ApprovalDenied);
+
+    let unknown = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "approval/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-3"
+        }
+    }))
+    .expect("unknown completion normalizes");
+    let unknown_record = normalized_event_to_journal_record("COE-476", 13, &unknown);
+    assert_eq!(
+        unknown_record.kind,
+        EventKind::HarnessEventNormalized {
+            source_kind: "approval/completed".into()
+        }
+    );
+}
+
+#[test]
 fn codex_model_and_credential_reuse_maps_existing_settings_profiles() {
     let settings = ModelSettingsResponse::local_default(true);
     let codex_profiles = settings
