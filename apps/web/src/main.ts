@@ -7,9 +7,9 @@
  */
 
 import { HttpGatewayTransport } from "@opensymphony/api-client";
-import { createModelProfileStore } from "@opensymphony/state";
 import { renderOpenSymphonyApp } from "@opensymphony/ui-core";
 import { createWebAppConfig } from "./config.js";
+import { createWebModelProfileController } from "./model-profile-controller.js";
 import { createWebProfileController, defaultWebGatewayUrl } from "./profile-controller.js";
 
 const config = createWebAppConfig();
@@ -30,7 +30,7 @@ if (root) {
     title: "OpenSymphony Web",
     transport: createWebTransport(),
     profileController: createWebProfileController({ defaultGatewayUrl }),
-    modelProfileController: createModelProfileStore(),
+    modelProfileController: createWebModelProfileController(),
     onGatewayUrlChanged: async (gatewayUrl) =>
       new HttpGatewayTransport({
         baseUri: gatewayUrl,

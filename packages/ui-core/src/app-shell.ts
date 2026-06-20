@@ -123,10 +123,16 @@ export interface ProfileController {
 }
 
 export interface ModelProfileController {
+  persistence?: ModelProfilePersistenceInfo;
   listProfiles(): Promise<ModelConfigurationProfile[]>;
   storeProfile(profile: ModelConfigurationProfile): Promise<ModelConfigurationProfile>;
   setActiveProfile(profileId: string): Promise<ModelConfigurationProfile>;
   removeProfile(profileId: string): Promise<ModelConfigurationProfile[]>;
+}
+
+export interface ModelProfilePersistenceInfo {
+  kind: "durable" | "session";
+  label: string;
 }
 
 export interface EditableProfileInput {
@@ -1307,6 +1313,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const modelProfileError = this.state.modelProfileError
       ? `<div class="os-model-error" role="alert" data-testid="model-profile-error">${escapeHtml(this.state.modelProfileError)}</div>`
       : "";
+    const persistence = this.options.modelProfileController?.persistence;
+    const persistenceMeta = persistence
+      ? `<div class="os-model-persistence os-model-persistence-${escapeAttr(persistence.kind)}" data-testid="model-persistence-status">${escapeHtml(persistence.label)}</div>`
+      : "";
     const canRemoveProfile = profiles.length > 1;
     const summary = `${active.label} • ${active.model || "No model"}${active.baseUrl ? ` • ${active.baseUrl}` : ""}`;
     const toggleLabel = this.state.modelPanelExpanded ? "Collapse" : "Expand";
@@ -1328,6 +1338,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <div class="os-model-meta" data-testid="model-redacted-credential">
             Auth: ${escapeHtml(redactCredentialRef(credentialRef))}
           </div>
+          ${persistenceMeta}
           ${modelProfileError}
         </section>
       `;
@@ -1393,6 +1404,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <div class="os-model-meta" data-testid="model-redacted-credential">
           Auth: ${escapeHtml(redactCredentialRef(credentialRef))}
         </div>
+        ${persistenceMeta}
         ${modelProfileError}
       </section>
     `;

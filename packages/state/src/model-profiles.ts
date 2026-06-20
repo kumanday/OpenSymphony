@@ -1,9 +1,16 @@
 /** Reducer and storage helpers for model configuration profiles. */
 
 import {
+  createModelProfile,
   defaultModelProfiles,
   validateModelProfileCredentials,
+  type CredentialStorage,
   type ModelConfigurationProfile,
+  type ModelCredentialMode,
+  type ModelHarnessKind,
+  type ModelProfileOwner,
+  type SubscriptionCredentialAuthMethod,
+  type SubscriptionCredentialBootstrap,
 } from "@opensymphony/gateway-schema";
 
 /** Small storage surface shared by browser and desktop webviews. */
@@ -127,17 +134,36 @@ export interface ModelProfileStoreOptions {
   storage?: ModelProfileStorage | null;
   storageKey?: string;
   defaults?: ModelConfigurationProfile[];
+  onQuarantine?: (reason: string) => void;
 }
 
 const DEFAULT_STORAGE_KEY = "opensymphony.modelProfiles.v1";
+
+const credentialStorages = new Set<CredentialStorage>([
+  "local_keychain",
+  "openhands_auth_directory",
+  "hosted_secret_store",
+]);
+
+const credentialModes = new Set<ModelCredentialMode>(["api_key", "subscription"]);
+const owners = new Set<ModelProfileOwner>(["user", "organization", "project"]);
+const authMethods = new Set<SubscriptionCredentialAuthMethod>([
+  "browser",
+  "device_code",
+  "cached",
+]);
 
 export function createModelProfileStore(
   options: ModelProfileStoreOptions = {},
 ): ModelProfileStore {
   const storage = options.storage ?? null;
   const storageKey = options.storageKey ?? DEFAULT_STORAGE_KEY;
+  const defaults = sanitizeModelProfiles(
+    options.defaults ?? defaultModelProfiles(),
+    options.onQuarantine,
+  );
   let fallback = normalizeModelProfileState({
-    profiles: options.defaults ?? defaultModelProfiles(),
+    profiles: defaults,
     activeProfileId: null,
   });
   let writeQueue: Promise<unknown> = Promise.resolve();
@@ -152,11 +178,13 @@ export function createModelProfileStore(
         return fallback;
       }
       const parsed = JSON.parse(raw) as Partial<ModelProfileState>;
+      const profiles = sanitizeModelProfiles(parsed.profiles, options.onQuarantine);
       return normalizeModelProfileState({
-        profiles: Array.isArray(parsed.profiles) ? parsed.profiles : fallback.profiles,
+        profiles: profiles.length > 0 ? profiles : fallback.profiles,
         activeProfileId: parsed.activeProfileId ?? null,
       });
-    } catch {
+    } catch (error) {
+      options.onQuarantine?.(`Failed to read stored model profiles: ${errorMessage(error)}`);
       return fallback;
     }
   }
@@ -237,4 +265,134 @@ export function createModelProfileStore(
       });
     },
   };
+}
+
+export function sanitizeModelProfiles(
+  value: unknown,
+  onQuarantine?: (reason: string) => void,
+): ModelConfigurationProfile[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((profile) => {
+    const sanitized = sanitizeModelProfile(profile);
+    if (!sanitized) {
+      onQuarantine?.("Dropped malformed model profile from durable storage");
+      return [];
+    }
+    const validationError = validateModelProfileCredentials(sanitized);
+    if (validationError) {
+      onQuarantine?.(`Dropped invalid model profile ${sanitized.id}: ${validationError}`);
+      return [];
+    }
+    return [sanitized];
+  });
+}
+
+function sanitizeModelProfile(value: unknown): ModelConfigurationProfile | null {
+  const record = objectRecord(value);
+  if (!record) {
+    return null;
+  }
+  const mode = stringUnion(record.mode, credentialModes);
+  if (!mode) {
+    return null;
+  }
+  const template = createModelProfile(mode);
+  const id = stringField(record, "id");
+  if (!id) {
+    return null;
+  }
+  const credentialStorage =
+    stringUnion(record.credentialStorage, credentialStorages)
+    ?? template.credentialStorage;
+  const subscriptionCredential = mode === "subscription"
+    ? sanitizeSubscriptionCredential(record.subscriptionCredential)
+      ?? template.subscriptionCredential
+      ?? null
+    : null;
+  const apiKeyRef = mode === "api_key"
+    ? nullableString(record.apiKeyRef)
+    : null;
+
+  return {
+    id,
+    label: stringField(record, "label") ?? template.label,
+    active: typeof record.active === "boolean" ? record.active : false,
+    mode,
+    owner: stringUnion(record.owner, owners) ?? template.owner,
+    baseUrl: stringValue(record.baseUrl) ?? template.baseUrl,
+    model: stringValue(record.model) ?? template.model,
+    apiKeyRef,
+    subscriptionCredential,
+    credentialStorage,
+    harnesses: stringList(record.harnesses) ?? [...template.harnesses],
+  };
+}
+
+function sanitizeSubscriptionCredential(
+  value: unknown,
+): SubscriptionCredentialBootstrap | null {
+  const record = objectRecord(value);
+  if (!record) {
+    return null;
+  }
+  const provider = stringField(record, "provider");
+  if (!provider) {
+    return null;
+  }
+  return {
+    provider,
+    authDirectoryEnv: nullableString(record.authDirectoryEnv),
+    authMethod:
+      stringUnion(record.authMethod, authMethods) ?? "device_code",
+    openBrowser: typeof record.openBrowser === "boolean" ? record.openBrowser : false,
+    forceLogin: typeof record.forceLogin === "boolean" ? record.forceLogin : false,
+    accountIdentityHeader: nullableString(record.accountIdentityHeader),
+  };
+}
+
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function stringField(record: Record<string, unknown>, field: string): string | null {
+  const value = stringValue(record[field])?.trim();
+  return value ? value : null;
+}
+
+function nullableString(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return typeof value === "string" ? value.trim() || null : null;
+}
+
+function stringUnion<T extends string>(
+  value: unknown,
+  allowed: Set<T>,
+): T | null {
+  return typeof value === "string" && allowed.has(value as T)
+    ? value as T
+    : null;
+}
+
+function stringList(value: unknown): ModelHarnessKind[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const items = value
+    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    .map((item) => item.trim() as ModelHarnessKind);
+  return items.length > 0 ? items : null;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

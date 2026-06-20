@@ -58,6 +58,7 @@ export {
   initialModelProfileState,
   modelProfileReducer,
   normalizeModelProfileState,
+  sanitizeModelProfiles,
 } from "./model-profiles.js";
 
 // -- Connection state --

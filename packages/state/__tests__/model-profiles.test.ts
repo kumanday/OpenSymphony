@@ -148,6 +148,60 @@ describe("createModelProfileStore", () => {
     await expect(store.storeProfile(profile)).rejects.toThrow("API key secret");
   });
 
+  it("rejects mismatched subscription storage for all store callers", async () => {
+    const store = createModelProfileStore({ storage: new MemoryStorage() });
+    const profile = {
+      ...createModelProfile("subscription"),
+      credentialStorage: "local_keychain" as const,
+    };
+
+    await expect(store.storeProfile(profile)).rejects.toThrow("openhands_auth_directory");
+  });
+
+  it("quarantines malformed stored profiles before returning UI state", async () => {
+    const storage = new MemoryStorage();
+    const goodProfile = {
+      ...createModelProfile("api_key"),
+      id: "safe-api",
+      model: "provider/safe",
+      apiKeyRef: "local_keychain:safe-api-key",
+      active: true,
+    };
+    storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
+      profiles: [
+        goodProfile,
+        {
+          ...createModelProfile("api_key"),
+          id: "raw-secret",
+          apiKeyRef: "sk-secret-value-123456789",
+          active: true,
+        },
+        {
+          ...createModelProfile("subscription"),
+          id: "wrong-storage",
+          credentialStorage: "local_keychain",
+        },
+        { id: "missing-mode" },
+      ],
+      activeProfileId: "raw-secret",
+    }));
+    const quarantineReasons: string[] = [];
+    const store = createModelProfileStore({
+      storage,
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+
+    const profiles = await store.listProfiles();
+
+    expect(profiles.map((profile) => profile.id)).toEqual(["safe-api"]);
+    expect(profiles[0].active).toBe(true);
+    expect(quarantineReasons).toEqual(expect.arrayContaining([
+      expect.stringContaining("raw-secret"),
+      expect.stringContaining("wrong-storage"),
+      "Dropped malformed model profile from durable storage",
+    ]));
+  });
+
   it("allows the active model profile to be deactivated", async () => {
     const store = createModelProfileStore({ storage: new MemoryStorage() });
     const [active] = await store.listProfiles();

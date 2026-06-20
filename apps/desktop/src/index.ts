@@ -6,10 +6,20 @@ import {
   type GatewayTransport,
 } from "@opensymphony/api-client";
 import type { ConnectionProfile } from "@opensymphony/gateway-schema";
-import { createModelProfileStore } from "@opensymphony/state";
+import {
+  defaultModelProfiles,
+  validateModelProfileCredentials,
+  type ModelConfigurationProfile,
+} from "@opensymphony/gateway-schema";
+import {
+  normalizeModelProfileState,
+  sanitizeModelProfiles,
+  type ModelProfileState,
+} from "@opensymphony/state";
 import {
   renderOpenSymphonyApp,
   type EditableProfileInput,
+  type ModelProfileController,
   type ProfileController,
 } from "@opensymphony/ui-core";
 
@@ -36,6 +46,15 @@ interface NativeProfileResponse {
   daemonPath?: string | null;
   transport?: ConnectionProfile["transport"];
 }
+
+interface NativeSettingResponse {
+  value?: NativeSettingValue | null;
+}
+
+type NativeSettingValue =
+  | { type: "Text"; value: string }
+  | { type: "Flag"; value: boolean }
+  | { type: "Number"; value: number };
 
 export interface TauriTransportAdapter extends ActionCapableTransport {
   attach(): Promise<void>;
@@ -287,6 +306,131 @@ export function createDesktopProfileController(): ProfileController | undefined 
   };
 }
 
+const MODEL_PROFILE_SETTINGS_KEY = "opensymphony.desktop.modelProfiles.v1";
+
+export function createDesktopModelProfileController(): ModelProfileController | undefined {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    return undefined;
+  }
+  const tauriInvoke = invoke;
+
+  let fallback = normalizeModelProfileState({
+    profiles: defaultModelProfiles(),
+    activeProfileId: null,
+  });
+  let writeQueue: Promise<unknown> = Promise.resolve();
+
+  async function read(): Promise<ModelProfileState> {
+    try {
+      const response = await tauriInvoke<NativeSettingResponse>("get_setting", {
+        req: { key: MODEL_PROFILE_SETTINGS_KEY },
+      });
+      const value = response.value;
+      if (!value || value.type !== "Text") {
+        return fallback;
+      }
+      const parsed = JSON.parse(value.value) as Partial<ModelProfileState>;
+      const profiles = sanitizeModelProfiles(parsed.profiles);
+      const state = normalizeModelProfileState({
+        profiles: profiles.length > 0 ? profiles : fallback.profiles,
+        activeProfileId: parsed.activeProfileId ?? null,
+      });
+      fallback = state;
+      return state;
+    } catch {
+      return fallback;
+    }
+  }
+
+  async function write(state: ModelProfileState): Promise<ModelProfileState> {
+    const normalized = normalizeModelProfileState(state);
+    fallback = normalized;
+    await tauriInvoke("set_setting", {
+      req: {
+        key: MODEL_PROFILE_SETTINGS_KEY,
+        value: {
+          type: "Text",
+          value: JSON.stringify(normalized),
+        },
+      },
+    });
+    return normalized;
+  }
+
+  function serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const next = writeQueue.then(operation, operation);
+    writeQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  return {
+    persistence: {
+      kind: "durable",
+      label: "Model profiles persist in desktop settings.",
+    },
+    async listProfiles() {
+      return (await read()).profiles;
+    },
+    async storeProfile(profile: ModelConfigurationProfile) {
+      return serialize(async () => {
+        const validationError = validateModelProfileCredentials(profile);
+        if (validationError) {
+          throw new Error(validationError);
+        }
+        const current = await read();
+        const index = current.profiles.findIndex((candidate) => candidate.id === profile.id);
+        const profiles = [...current.profiles];
+        if (index >= 0) {
+          profiles[index] = profile;
+        } else {
+          profiles.push(profile);
+        }
+        const next = await write({
+          profiles,
+          activeProfileId: profile.active
+            ? profile.id
+            : current.activeProfileId === profile.id ? null : current.activeProfileId,
+        });
+        return next.profiles.find((candidate) => candidate.id === profile.id)!;
+      });
+    },
+    async setActiveProfile(profileId: string) {
+      return serialize(async () => {
+        const current = await read();
+        if (!current.profiles.some((profile) => profile.id === profileId)) {
+          throw new Error(`Unknown model profile: ${profileId}`);
+        }
+        const next = await write({
+          profiles: current.profiles,
+          activeProfileId: profileId,
+        });
+        return next.profiles.find((profile) => profile.id === profileId)!;
+      });
+    },
+    async removeProfile(profileId: string) {
+      return serialize(async () => {
+        const current = await read();
+        if (!current.profiles.some((profile) => profile.id === profileId)) {
+          throw new Error(`Unknown model profile: ${profileId}`);
+        }
+        if (current.profiles.length <= 1) {
+          throw new Error("Cannot remove the last model profile");
+        }
+        const profiles = current.profiles.filter((profile) => profile.id !== profileId);
+        const next = await write({
+          profiles,
+          activeProfileId:
+            current.activeProfileId === profileId
+              ? profiles.find((profile) => profile.active)?.id ?? profiles[0]?.id ?? null
+              : current.activeProfileId,
+        });
+        return next.profiles;
+      });
+    },
+  };
+}
+
 function asActionCapableTransport(
   transport: GatewayTransport,
   baseUrl: string,
@@ -404,7 +548,7 @@ if (root) {
         managed: false,
       },
     ],
-    modelProfileController: createModelProfileStore(),
+    modelProfileController: createDesktopModelProfileController(),
     onGatewayUrlChanged: createTransportForGateway,
   });
 }
