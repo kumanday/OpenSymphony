@@ -210,7 +210,7 @@ rich-client-hosted-mode wave.
 
 ## Current model
 
-- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
+- COE-408 contributed: PR #129: Add harness adapter capability discovery (merge `96345e3`)
 
 ## Important invariants
 
@@ -227,10 +227,10 @@ rich-client-hosted-mode wave.
 
 ## Recent changes
 
-- COE-419: Hosted Auth Placeholders And Web Parity
+- COE-408: Harness Adapter And Capability Model
 
 ## Source refs
 
-- COE-419
+- COE-408
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

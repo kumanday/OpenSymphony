@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-14T22:09:16.647206+00:00
 
 ## Current model
 
-- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
+- COE-408 contributed: PR #129: Add harness adapter capability discovery (merge `96345e3`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-14T22:09:16.647206+00:00
 
 ## Recent changes
 
-- COE-419: Hosted Auth Placeholders And Web Parity
+- COE-408: Harness Adapter And Capability Model
 
 ## Source refs
 
-- COE-419
+- COE-408
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
