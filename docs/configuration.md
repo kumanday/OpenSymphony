@@ -126,6 +126,19 @@ export LLM_API_KEY="fw-..."
 export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
 ```
 
+The gateway also exposes the local model settings seam through
+`GET /api/v1/model-settings`. The default API-compatible profile maps to the
+same three environment variables:
+
+- `LLM_MODEL` identifies the configured model string.
+- `LLM_API_KEY` is exposed only as a credential reference.
+- `LLM_BASE_URL` identifies the optional OpenAI-compatible base URL.
+
+Subscription-backed model profiles are represented as credential references for
+local keychain storage, isolated OpenHands auth-directory storage, and future
+hosted broker storage. Those references are safe to render in clients because
+they do not contain raw API keys, OAuth access tokens, or refresh tokens.
+
 The workflow supports `${VAR}` syntax for environment variable substitution in
 the front matter:
 

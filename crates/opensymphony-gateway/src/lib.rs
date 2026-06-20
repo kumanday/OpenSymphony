@@ -76,6 +76,7 @@ pub use crate::opensymphony_gateway_schema::{
     },
     cursor::PageCursor,
     event_journal::{EventPage as GatewayEventPage, JournalError as EventJournalError},
+    model_settings::{CredentialStatusResponse, ModelSettingsResponse},
     run::{
         ChangedFileEntry, DiffHunk, DiffLine, FileChangeKind, FileDiffPage, ReleaseReason,
         RunAction, RunDetail, RunDiagnostics, RunEvent, RunEventPage, RunFilesPage,
@@ -454,6 +455,11 @@ impl GatewayServer {
             .route("/api/v1/snapshot", get(control_snapshot))
             .route("/api/v1/control/events", get(control_events))
             .route("/api/v1/capabilities", get(capabilities))
+            .route("/api/v1/model-settings", get(model_settings))
+            .route(
+                "/api/v1/model-settings/credential-status",
+                get(model_credential_statuses),
+            )
             .route("/api/v1/dashboard/snapshot", get(dashboard_snapshot))
             .route("/api/v1/events", get(events))
             .route("/api/v1/event-journal", get(event_journal_query))
@@ -713,6 +719,12 @@ fn build_capabilities() -> GatewayCapabilities {
                 requires_plan: None,
             },
             FeatureCapability {
+                feature: "model_settings".into(),
+                available: true,
+                requires_auth: false,
+                requires_plan: None,
+            },
+            FeatureCapability {
                 feature: "hosted_mode".into(),
                 available: false,
                 requires_auth: true,
@@ -727,6 +739,25 @@ fn build_capabilities() -> GatewayCapabilities {
 
 async fn capabilities() -> Json<GatewayCapabilities> {
     Json(build_capabilities())
+}
+
+pub fn model_settings_for_llm_api_key(llm_api_key: Option<&str>) -> ModelSettingsResponse {
+    ModelSettingsResponse::local_default(llm_api_key.is_some_and(|value| !value.trim().is_empty()))
+}
+
+fn build_model_settings() -> ModelSettingsResponse {
+    let llm_api_key = std::env::var("LLM_API_KEY").ok();
+    model_settings_for_llm_api_key(llm_api_key.as_deref())
+}
+
+async fn model_settings() -> Json<ModelSettingsResponse> {
+    Json(build_model_settings())
+}
+
+async fn model_credential_statuses() -> Json<CredentialStatusResponse> {
+    Json(CredentialStatusResponse::from_model_settings(
+        &build_model_settings(),
+    ))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]

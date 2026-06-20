@@ -16,11 +16,15 @@ use opensymphony::opensymphony_domain::{
 };
 use opensymphony::opensymphony_gateway::{
     GatewayCapabilities, GatewayServer, LinearTaskGraphClient, control_plane_to_dashboard_snapshot,
+    model_settings_for_llm_api_key,
 };
 use opensymphony::opensymphony_gateway_schema::action::{
     ActionDispatch, ActionKind, ActionReceipt, ActionStatus, ActionTarget,
 };
 use opensymphony::opensymphony_gateway_schema::envelope::EntityKind;
+use opensymphony::opensymphony_gateway_schema::model_settings::{
+    CredentialStatusKind, CredentialStatusResponse, ModelSettingsResponse,
+};
 use opensymphony::opensymphony_gateway_schema::run::DiffLine;
 use opensymphony::opensymphony_gateway_schema::validation::ValidationStatus;
 use tokio::net::TcpListener;
@@ -557,6 +561,45 @@ fn gateway_capabilities_json_fixture_roundtrips() {
 }
 
 #[test]
+fn gateway_model_settings_status_reflects_api_key_presence() {
+    let installed_settings = model_settings_for_llm_api_key(Some("provider-secret"));
+    let installed_profile = installed_settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == "openhands-env-api-key")
+        .expect("OpenHands env profile should exist");
+    assert_eq!(installed_profile.status, CredentialStatusKind::Installed);
+    assert!(installed_settings.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:env:LLM_API_KEY"
+            && status.status == CredentialStatusKind::Installed
+    }));
+
+    let missing_settings = model_settings_for_llm_api_key(None);
+    let missing_profile = missing_settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == "openhands-env-api-key")
+        .expect("OpenHands env profile should exist");
+    assert_eq!(missing_profile.status, CredentialStatusKind::LoggedOut);
+    assert!(missing_settings.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:env:LLM_API_KEY"
+            && status.status == CredentialStatusKind::LoggedOut
+    }));
+
+    let blank_settings = model_settings_for_llm_api_key(Some("   "));
+    let blank_profile = blank_settings
+        .profiles
+        .iter()
+        .find(|profile| profile.id == "openhands-env-api-key")
+        .expect("OpenHands env profile should exist");
+    assert_eq!(blank_profile.status, CredentialStatusKind::LoggedOut);
+    assert!(blank_settings.credential_statuses.iter().any(|status| {
+        status.credential_reference_id == "credential:env:LLM_API_KEY"
+            && status.status == CredentialStatusKind::LoggedOut
+    }));
+}
+
+#[test]
 fn dashboard_snapshot_json_fixture_roundtrips() {
     let envelope = fixture_envelope(7);
     let dashboard = control_plane_to_dashboard_snapshot(&envelope);
@@ -630,6 +673,55 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
             .harnesses
             .iter()
             .any(|harness| harness.kind == "codex_app_server" && !harness.available)
+    );
+    assert!(
+        caps_response
+            .features
+            .iter()
+            .any(|feature| feature.feature == "model_settings" && feature.available)
+    );
+
+    let model_settings_url = format!("http://{address}/api/v1/model-settings");
+    let model_settings_response = client
+        .get(&model_settings_url)
+        .send()
+        .await
+        .expect("fetch model settings")
+        .json::<ModelSettingsResponse>()
+        .await
+        .expect("decode model settings");
+    // The endpoint derives API-key status from process environment. To avoid
+    // mutating global env in an async integration test, installed, missing, and
+    // blank-key cases are covered by
+    // `gateway_model_settings_status_reflects_api_key_presence`.
+    assert!(model_settings_response.profiles.iter().any(|profile| {
+        profile.id == "openhands-env-api-key"
+            && profile.compatible_harnesses == vec!["openhands_agent_server"]
+            && profile.credential_reference.redacted
+    }));
+    assert!(model_settings_response.profiles.iter().any(|profile| {
+        profile.id == "hosted-openai-subscription-broker"
+            && profile.status == CredentialStatusKind::Unsupported
+    }));
+
+    let credential_status_url = format!("http://{address}/api/v1/model-settings/credential-status");
+    let credential_status_response = client
+        .get(&credential_status_url)
+        .send()
+        .await
+        .expect("fetch credential statuses")
+        .json::<CredentialStatusResponse>()
+        .await
+        .expect("decode credential statuses");
+    assert!(
+        credential_status_response
+            .supported_statuses
+            .contains(&CredentialStatusKind::Expired)
+    );
+    assert!(
+        credential_status_response
+            .supported_statuses
+            .contains(&CredentialStatusKind::PermissionDenied)
     );
 
     let snapshot_url = format!("http://{address}/api/v1/dashboard/snapshot");
