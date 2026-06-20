@@ -131,8 +131,16 @@ WebSocket probes are supported. A 10-request local run produced:
       "p95": 0.569,
       "max": 0.569
     },
-    "reconnectLatencyMs": 0.853,
-    "reconnectResponse": "ok",
+    "reconnectLatencyMs": 0.867,
+    "reconnectResponse": {
+      "id": 12,
+      "result": {
+        "userAgent": "opensymphony-codex-benchmark/0.138.0 (Mac OS 26.4.0; arm64) dumb (opensymphony-codex-benchmark-reconnect; 0.0.0)",
+        "codexHome": "/home/user/.codex",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      }
+    },
     "stdoutBytes": 0,
     "stderrBytes": 222,
     "stderrPreview": "codex app-server (WebSockets)\n  listening on: ws://127.0.0.1:18779\n  readyz: http://127.0.0.1:18779/readyz\n  healthz: http://127.0.0.1:18779/healthz\n  note: binds localhost only (use SSH port-forwarding for remote access)",

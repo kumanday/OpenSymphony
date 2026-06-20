@@ -20,9 +20,13 @@ for (let i = 2; i < process.argv.length; i += 1) {
 
 function parseIntegerOption(flag, defaultValue, min, max) {
   const raw = args.get(flag) ?? String(defaultValue);
-  const value = Number(raw);
+  if (!/^\d+$/.test(raw)) {
+    console.error(`${flag} must be a base-10 integer from ${min} to ${max}; received ${JSON.stringify(raw)}`);
+    process.exit(1);
+  }
+  const value = Number.parseInt(raw, 10);
   if (!Number.isInteger(value) || value < min || value > max) {
-    console.error(`${flag} must be an integer from ${min} to ${max}; received ${JSON.stringify(raw)}`);
+    console.error(`${flag} must be a base-10 integer from ${min} to ${max}; received ${JSON.stringify(raw)}`);
     process.exit(1);
   }
   return value;
@@ -274,6 +278,10 @@ async function runStdioProbe() {
     }),
   );
   try {
+    const childError = once(child, "error").then(([error]) => {
+      throw new Error(`codex app-server --stdio failed to start: ${error.message}`);
+    });
+    childError.catch(() => {});
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     let stderr = "";
@@ -282,19 +290,28 @@ async function runStdioProbe() {
     });
     const stdout = new LineReader(child.stdout);
     const startedAt = performance.now();
-    await writeToStream(
-      child.stdin,
-      `${request(1, "initialize", {
-        clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
-        capabilities: {},
-      })}\n`,
-      "stdio initialize",
-      requestTimeoutMs,
-    );
-    const response = await readJsonRpcResponse(stdout, "stdio initialize", requestTimeoutMs);
+    await Promise.race([
+      writeToStream(
+        child.stdin,
+        `${request(1, "initialize", {
+          clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
+          capabilities: {},
+        })}\n`,
+        "stdio initialize",
+        requestTimeoutMs,
+      ),
+      childError,
+    ]);
+    const response = await Promise.race([
+      readJsonRpcResponse(stdout, "stdio initialize", requestTimeoutMs),
+      childError,
+    ]);
     const latencyMs = performance.now() - startedAt;
     assertJsonRpcResult("stdio initialize", response);
-    await endStream(child.stdin, "stdio initialize", requestTimeoutMs);
+    await Promise.race([
+      endStream(child.stdin, "stdio initialize", requestTimeoutMs),
+      childError,
+    ]);
     return {
       transport: "stdio",
       initializeLatencyMs: Number(latencyMs.toFixed(3)),
@@ -503,7 +520,7 @@ async function runWebSocketProbe(secureExposure) {
         max: Number(latencies.reduce((max, latency) => Math.max(max, latency), 0).toFixed(3)),
       },
       reconnectLatencyMs: Number(reconnectMs.toFixed(3)),
-      reconnectResponse: "ok",
+      reconnectResponse: reconnectInitialize.response,
       stdoutBytes: Buffer.byteLength(stdout, "utf8"),
       stderrBytes: Buffer.byteLength(stderr, "utf8"),
       stderrPreview: stderrTrimmed ? stderrTrimmed.slice(-1000) : null,
