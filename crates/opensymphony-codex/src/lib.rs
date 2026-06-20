@@ -66,41 +66,44 @@ impl CodexAppServerLaunch {
             CodexAppServerTransport::Stdio => args.push("--stdio".into()),
             CodexAppServerTransport::WebSocketLoopback { port } => {
                 args.extend(["--listen".into(), format!("ws://127.0.0.1:{port}")]);
-            }
-        }
-        if let Some(auth) = &self.websocket_auth {
-            match auth {
-                CodexWebSocketAuth::CapabilityToken {
-                    token_file,
-                    token_sha256,
-                } => {
-                    args.extend([
-                        "--ws-auth".into(),
-                        "capability-token".into(),
-                        "--ws-token-file".into(),
-                        token_file.display().to_string(),
-                        "--ws-token-sha256".into(),
-                        token_sha256.clone(),
-                    ]);
-                }
-                CodexWebSocketAuth::SignedBearerToken {
-                    shared_secret_file,
-                    issuer,
-                    audience,
-                    max_clock_skew_seconds,
-                } => {
-                    args.extend([
-                        "--ws-auth".into(),
-                        "signed-bearer-token".into(),
-                        "--ws-shared-secret-file".into(),
-                        shared_secret_file.display().to_string(),
-                        "--ws-issuer".into(),
-                        issuer.clone(),
-                        "--ws-audience".into(),
-                        audience.clone(),
-                    ]);
-                    if let Some(seconds) = max_clock_skew_seconds {
-                        args.extend(["--ws-max-clock-skew-seconds".into(), seconds.to_string()]);
+                if let Some(auth) = &self.websocket_auth {
+                    match auth {
+                        CodexWebSocketAuth::CapabilityToken {
+                            token_file,
+                            token_sha256,
+                        } => {
+                            args.extend([
+                                "--ws-auth".into(),
+                                "capability-token".into(),
+                                "--ws-token-file".into(),
+                                token_file.display().to_string(),
+                                "--ws-token-sha256".into(),
+                                token_sha256.clone(),
+                            ]);
+                        }
+                        CodexWebSocketAuth::SignedBearerToken {
+                            shared_secret_file,
+                            issuer,
+                            audience,
+                            max_clock_skew_seconds,
+                        } => {
+                            args.extend([
+                                "--ws-auth".into(),
+                                "signed-bearer-token".into(),
+                                "--ws-shared-secret-file".into(),
+                                shared_secret_file.display().to_string(),
+                                "--ws-issuer".into(),
+                                issuer.clone(),
+                                "--ws-audience".into(),
+                                audience.clone(),
+                            ]);
+                            if let Some(seconds) = max_clock_skew_seconds {
+                                args.extend([
+                                    "--ws-max-clock-skew-seconds".into(),
+                                    seconds.to_string(),
+                                ]);
+                            }
+                        }
                     }
                 }
             }

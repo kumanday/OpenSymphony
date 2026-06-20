@@ -166,6 +166,31 @@ class LineReader {
   }
 }
 
+async function readJsonRpcResponse(reader, label, timeoutMs) {
+  const deadline = performance.now() + timeoutMs;
+  for (;;) {
+    const remainingMs = Math.max(1, deadline - performance.now());
+    if (performance.now() > deadline) {
+      throw new Error(`${label} timed out waiting for JSON-RPC response`);
+    }
+    const line = await reader.readLine(remainingMs);
+    let response;
+    try {
+      response = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (
+      response != null &&
+      typeof response === "object" &&
+      Object.hasOwn(response, "id") &&
+      (Object.hasOwn(response, "result") || Object.hasOwn(response, "error"))
+    ) {
+      return response;
+    }
+  }
+}
+
 function writeToStream(stream, data, label, timeoutMs) {
   return new Promise((resolve, reject) => {
     const cleanup = () => {
@@ -238,9 +263,8 @@ async function runStdioProbe() {
       "stdio initialize",
       requestTimeoutMs,
     );
-    const line = await stdout.readLine(requestTimeoutMs);
+    const response = await readJsonRpcResponse(stdout, "stdio initialize", requestTimeoutMs);
     const latencyMs = performance.now() - startedAt;
-    const response = JSON.parse(line);
     assertJsonRpcResult("stdio initialize", response);
     return {
       transport: "stdio",
@@ -462,6 +486,7 @@ async function runHelpProbe() {
     hasCapabilityTokenMode: help.includes("capability-token"),
     hasSignedBearerMode: help.includes("signed-bearer-token"),
     hasTokenFileFlag: help.includes("--ws-token-file"),
+    hasTokenSha256Flag: help.includes("--ws-token-sha256"),
     hasSharedSecretFlag: help.includes("--ws-shared-secret-file"),
     hasIssuerFlag: help.includes("--ws-issuer"),
     hasAudienceFlag: help.includes("--ws-audience"),

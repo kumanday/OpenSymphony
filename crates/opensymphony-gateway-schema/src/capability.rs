@@ -256,7 +256,7 @@ impl HarnessCapability {
             },
             notes: vec!["Future adapter shaped around JSON-RPC requests and notifications.".into()],
             feature_gaps: vec![
-                "Production adapter implementation is out of scope for COE-408.".into(),
+                "Production adapter implementation is out of scope for COE-426.".into(),
                 "Pause/resume semantics need protocol confirmation before being advertised as available."
                     .into(),
             ],

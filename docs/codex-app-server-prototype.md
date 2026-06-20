@@ -144,6 +144,7 @@ WebSocket probes are supported. A 10-request local run produced:
     "hasCapabilityTokenMode": true,
     "hasSignedBearerMode": true,
     "hasTokenFileFlag": true,
+    "hasTokenSha256Flag": true,
     "hasSharedSecretFlag": true,
     "hasIssuerFlag": true,
     "hasAudienceFlag": true,
