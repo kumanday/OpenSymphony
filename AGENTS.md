@@ -46,6 +46,13 @@ Do not silently invent behavior when the upstream spec or chosen integration con
 - A fresh conversation gets the full workflow prompt. A resumed conversation gets continuation guidance only.
 - Local MVP uses one local agent-server subprocess shared across issues, not one server per issue.
 - Local MVP does not require Docker per workspace.
+- OpenHands subscription credentials are feature-gated behind
+  `openhands-subscription-credentials`. In `openai_subscription` mode, workflow
+  config stores environment-variable names and credential-bootstrap metadata
+  (`auth_directory_env`, `auth_method`, `open_browser`, `force_login`), while the
+  conversation request resolves only the short-lived access token reference and
+  optional account identity header. Do not persist raw OAuth tokens, refresh
+  material, or resolved account identifiers in manifests or debug output.
 
 ### Tracker contract
 

@@ -629,15 +629,24 @@ fn default_llm_credential_mode() -> String {
 }
 
 fn normalize_openai_subscription_model(model: &str) -> Result<String, String> {
-    let bare = model.strip_prefix("openai/").unwrap_or(model);
-    match bare {
-        "gpt-5.1-codex-max" | "gpt-5.1-codex-mini" | "gpt-5.2" | "gpt-5.2-codex" => {
-            Ok(format!("openai/{bare}"))
-        }
-        other => Err(format!(
-            "model `{other}` is not supported by OpenHands SDK OpenAI subscription login"
-        )),
+    let normalized = model.trim();
+    if normalized.is_empty() {
+        return Err("OpenHands SDK OpenAI subscription model must not be blank".to_string());
     }
+
+    if let Some((provider, bare)) = normalized.split_once('/') {
+        if provider != "openai" {
+            return Err(format!(
+                "OpenHands SDK OpenAI subscription model `{normalized}` must use the openai/ provider prefix"
+            ));
+        }
+        if bare.trim().is_empty() {
+            return Err("OpenHands SDK OpenAI subscription model must not be blank".to_string());
+        }
+        return Ok(normalized.to_string());
+    }
+
+    Ok(format!("openai/{normalized}"))
 }
 
 fn resolve_provider_override(
@@ -3613,6 +3622,10 @@ mod tests {
                 "OPENHANDS_OPENAI_SUBSCRIPTION_ACCOUNT_ID".to_string(),
                 "account-123".to_string(),
             ),
+            (
+                "OPENHANDS_AUTH_DIR".to_string(),
+                "/Users/test/.cache/openhands/auth".to_string(),
+            ),
         ]);
 
         let request = profile
@@ -3636,6 +3649,17 @@ mod tests {
         );
         assert_eq!(request.agent.llm.stream, Some(true));
         assert_eq!(
+            profile
+                .llm_subscription
+                .as_ref()
+                .and_then(|subscription| subscription.auth_directory_env.as_deref()),
+            Some("OPENHANDS_AUTH_DIR")
+        );
+        assert_eq!(
+            env.get("OPENHANDS_AUTH_DIR").map(String::as_str),
+            Some("/Users/test/.cache/openhands/auth")
+        );
+        assert_eq!(
             request
                 .agent
                 .llm
@@ -3656,9 +3680,27 @@ mod tests {
         );
         assert!(!profile_json.contains("oauth-access-token"));
         assert!(!profile_json.contains("account-123"));
+        assert!(!profile_json.contains("/Users/test/.cache/openhands/auth"));
+        assert!(profile_json.contains("OPENHANDS_AUTH_DIR"));
         assert_eq!(
             profile.api_key_fingerprint(&env).as_deref(),
             Some("9e6b6d3f6b582838")
+        );
+    }
+
+    #[test]
+    fn openai_subscription_model_normalization_allows_future_openai_codex_models() {
+        assert_eq!(
+            must(normalize_openai_subscription_model("gpt-5.9-codex")),
+            "openai/gpt-5.9-codex"
+        );
+        assert_eq!(
+            must(normalize_openai_subscription_model("openai/gpt-5.9-codex")),
+            "openai/gpt-5.9-codex"
+        );
+        assert!(
+            normalize_openai_subscription_model("anthropic/claude-4").is_err(),
+            "subscription mode should remain scoped to OpenAI provider models"
         );
     }
 

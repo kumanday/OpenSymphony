@@ -171,6 +171,13 @@ shape documented by the pinned OpenHands SDK: `openai/<model>`,
 in the selected credential store and must not be copied into workspaces,
 workflow files, logs, Linear comments, or browser payloads.
 
+The `auth_directory_env`, `auth_method`, `open_browser`, and `force_login`
+fields describe how the subscription credential was established by the SDK or a
+future broker. They are retained in the launch profile for diagnostics and UI
+status, but OpenSymphony does not forward them as undocumented agent-server
+conversation fields. Only the short-lived access token reference is resolved
+when building the OpenHands conversation request.
+
 The workflow supports `${VAR}` syntax for environment variable substitution in
 the front matter:
 

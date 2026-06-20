@@ -234,6 +234,10 @@ credential store, keep refresh material in the selected auth directory, and
 export only the short-lived access-token reference expected by the workflow
 before starting `opensymphony run`. Do not place OAuth JSON files, access
 tokens, or refresh tokens inside issue workspaces or repository files.
+`auth_directory_env`, `auth_method`, `open_browser`, and `force_login` are
+operator/bootstrap metadata for that credential setup step; they are preserved
+for status and diagnostics, while the runtime conversation request resolves only
+the short-lived access token and optional account identity header.
 
 Validation for subscription mode should include:
 

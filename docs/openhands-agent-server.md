@@ -163,6 +163,12 @@ enabled. The launch profile and manifests persist only environment-variable
 names, auth-directory references, and credential hashes; raw access tokens and
 refresh material are not persisted.
 
+Credential bootstrap controls such as `auth_directory_env`, `auth_method`,
+`open_browser`, and `force_login` are metadata for the SDK login step or a
+future hosted credential broker. They are intentionally not forwarded as
+agent-server conversation payload fields because the pinned SDK does not
+document such fields on the conversation creation contract.
+
 API-key OpenHands configuration remains independent. Existing workflows that use
 `LLM_MODEL`, `LLM_API_KEY`, and `LLM_BASE_URL` continue through the default
 `api_key` credential mode and do not need the subscription feature.

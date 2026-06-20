@@ -55,7 +55,10 @@ impl fmt::Debug for LlmConfig {
         debug.field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"));
         debug.field("base_url", &self.base_url);
         debug.field("usage_id", &self.usage_id);
-        debug.field("extra_headers", &self.extra_headers);
+        debug.field(
+            "extra_headers",
+            &self.extra_headers.as_ref().map(|_| "<redacted>"),
+        );
         debug.field("litellm_extra_body", &self.litellm_extra_body);
         debug.field("stream", &self.stream);
         debug.finish()
@@ -505,10 +508,10 @@ mod tests {
             api_key: Some("oauth-access-token".to_string()),
             base_url: Some("https://chatgpt.com/backend-api/codex".to_string()),
             usage_id: None,
-            extra_headers: Some(BTreeMap::from([(
-                "originator".to_string(),
-                "codex_cli_rs".to_string(),
-            )])),
+            extra_headers: Some(BTreeMap::from([
+                ("chatgpt-account-id".to_string(), "account-123".to_string()),
+                ("originator".to_string(), "codex_cli_rs".to_string()),
+            ])),
             litellm_extra_body: Some(BTreeMap::from([("store".to_string(), json!(false))])),
             stream: Some(true),
         };
@@ -517,6 +520,9 @@ mod tests {
 
         assert!(rendered.contains("<redacted>"));
         assert!(!rendered.contains("oauth-access-token"));
+        assert!(!rendered.contains("account-123"));
+        assert!(!rendered.contains("chatgpt-account-id"));
+        assert!(!rendered.contains("codex_cli_rs"));
     }
 
     #[test]
