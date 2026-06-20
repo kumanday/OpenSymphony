@@ -99,13 +99,15 @@ credential, or parsed private Codex credential payload.
 
 The gateway caches the Codex readiness probe for a short in-process TTL so
 repeated `model-settings` reads do not spawn new Codex subprocesses on every
-request. Concurrent cache misses share a single refresh path, and each Codex CLI
-probe has a bounded timeout so a stalled login-status command returns an
-explicit unknown/non-ready state instead of hanging the gateway request. The
-readiness classifier uses command success/failure plus the current Codex CLI
-status text. It treats `Logged in using ChatGPT` and `Logged in with ChatGPT` as
-subscription-ready ChatGPT login signals; logged-out, expired, unsupported, and
-permission-denied text are rendered as explicit non-ready states.
+request. Concurrent cache misses share one in-flight refresh result, and the
+three Codex CLI probes run concurrently with per-probe timeouts so aggregate
+readiness latency stays bounded when a local command hangs. A stalled
+login-status command returns an explicit unknown/non-ready state instead of
+hanging the gateway request. The readiness classifier uses command
+success/failure plus the current Codex CLI status text. It treats `Logged in
+using ChatGPT` and `Logged in with ChatGPT` as subscription-ready ChatGPT login
+signals; logged-out, expired, unsupported, and permission-denied text are
+rendered as explicit non-ready states.
 
 Logout and revocation stay owned by Codex and ChatGPT. Run `codex logout` to
 remove the local Codex login, and revoke account/device access from ChatGPT

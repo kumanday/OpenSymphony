@@ -275,8 +275,13 @@ impl Clone for GatewayState {
 
 #[derive(Debug, Default)]
 pub struct CodexReadinessCache {
-    entry: tokio::sync::RwLock<Option<CachedCodexReadiness>>,
-    refresh: tokio::sync::Mutex<()>,
+    state: tokio::sync::Mutex<CodexReadinessCacheState>,
+}
+
+#[derive(Debug, Default)]
+struct CodexReadinessCacheState {
+    entry: Option<CachedCodexReadiness>,
+    in_flight: Option<tokio::sync::watch::Receiver<Option<CodexLocalReadiness>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -787,11 +792,17 @@ async fn build_model_settings(state: &GatewayState) -> ModelSettingsResponse {
 }
 
 async fn detect_codex_local_readiness(command: &str) -> CodexLocalReadiness {
+    let (version, app_server_help, login_status) = tokio::join!(
+        run_codex_probe(command, ["--version"]),
+        run_codex_probe(command, ["app-server", "--help"]),
+        run_codex_probe(command, ["login", "status"])
+    );
+
     CodexLocalReadiness::from_probe(CodexCliProbe {
         command: command.into(),
-        version: run_codex_probe(command, ["--version"]).await,
-        app_server_help: run_codex_probe(command, ["app-server", "--help"]).await,
-        login_status: run_codex_probe(command, ["login", "status"]).await,
+        version,
+        app_server_help,
+        login_status,
     })
 }
 
@@ -833,26 +844,64 @@ impl CodexReadinessCache {
     /// Production readiness checks always use the hardcoded Codex CLI command.
     /// Tests pass a fake executable path here to exercise the subprocess path.
     async fn readiness(&self, command: &str) -> CodexLocalReadiness {
-        if let Some(cached) = self.entry.read().await.as_ref()
-            && cached.checked_at.elapsed() < CODEX_READINESS_CACHE_TTL
-        {
-            return cached.readiness.clone();
-        }
+        let receiver = {
+            let mut state = self.state.lock().await;
+            if let Some(cached) = state.entry.as_ref()
+                && cached.checked_at.elapsed() < CODEX_READINESS_CACHE_TTL
+            {
+                return cached.readiness.clone();
+            }
 
-        let _refresh = self.refresh.lock().await;
-        if let Some(cached) = self.entry.read().await.as_ref()
-            && cached.checked_at.elapsed() < CODEX_READINESS_CACHE_TTL
-        {
-            return cached.readiness.clone();
-        }
+            if let Some(receiver) = state.in_flight.as_ref() {
+                receiver.clone()
+            } else {
+                let (sender, receiver) = tokio::sync::watch::channel(None);
+                state.in_flight = Some(receiver.clone());
+                let command = command.to_owned();
+                tokio::spawn(async move {
+                    let readiness = detect_codex_local_readiness(&command).await;
+                    let _ = sender.send(Some(readiness));
+                });
+                receiver
+            }
+        };
 
-        let readiness = detect_codex_local_readiness(command).await;
-        *self.entry.write().await = Some(CachedCodexReadiness {
+        let readiness = await_codex_readiness_refresh(receiver, command).await;
+        let mut state = self.state.lock().await;
+        state.entry = Some(CachedCodexReadiness {
             checked_at: Instant::now(),
             readiness: readiness.clone(),
         });
+        state.in_flight = None;
         readiness
     }
+}
+
+async fn await_codex_readiness_refresh(
+    mut receiver: tokio::sync::watch::Receiver<Option<CodexLocalReadiness>>,
+    command: &str,
+) -> CodexLocalReadiness {
+    if let Some(readiness) = receiver.borrow().clone() {
+        return readiness;
+    }
+    if receiver.changed().await.is_ok()
+        && let Some(readiness) = receiver.borrow().clone()
+    {
+        return readiness;
+    }
+
+    CodexLocalReadiness::from_probe(CodexCliProbe {
+        command: command.into(),
+        version: ProbeCommandResult::failure(
+            "Codex readiness refresh ended before reporting status",
+        ),
+        app_server_help: ProbeCommandResult::failure(
+            "Codex readiness refresh ended before reporting status",
+        ),
+        login_status: ProbeCommandResult::failure(
+            "Codex readiness refresh ended before reporting status",
+        ),
+    })
 }
 
 async fn model_settings(State(state): State<GatewayState>) -> Json<ModelSettingsResponse> {
@@ -3568,6 +3617,69 @@ exit 2
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_readiness_concurrent_cache_misses_share_refresh() {
+        use crate::opensymphony_gateway_schema::model_settings::CredentialStatusKind;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let count_file = temp.path().join("count.txt");
+        let fake_codex = temp.path().join("codex");
+        std::fs::write(
+            &fake_codex,
+            format!(
+                r#"#!/bin/sh
+sleep 1
+echo run >> '{}'
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.138.0"
+  exit 0
+fi
+if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
+  echo "Usage: codex app-server"
+  exit 0
+fi
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  echo "Logged in using ChatGPT"
+  exit 0
+fi
+exit 2
+"#,
+                count_file.display()
+            ),
+        )
+        .expect("fake codex script should be written");
+        let mut permissions = std::fs::metadata(&fake_codex)
+            .expect("fake codex metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_codex, permissions)
+            .expect("fake codex script should be executable");
+
+        let cache = CodexReadinessCache::default();
+        let command = fake_codex
+            .to_str()
+            .expect("fake codex path should be utf-8");
+        let started = Instant::now();
+        let (first, second) = tokio::join!(cache.readiness(command), cache.readiness(command));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "concurrent cache misses should share one aggregate refresh"
+        );
+        assert_eq!(first.subscription_status, CredentialStatusKind::Installed);
+        assert_eq!(second, first);
+        let runs = std::fs::read_to_string(&count_file).expect("count file should exist");
+        assert_eq!(
+            runs.lines().count(),
+            3,
+            "concurrent cache misses should run one shared set of probes"
+        );
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn codex_readiness_probe_timeout_returns_unknown_status() {
         use crate::opensymphony_gateway_schema::model_settings::CredentialStatusKind;
