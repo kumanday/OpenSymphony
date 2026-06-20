@@ -446,7 +446,10 @@ async function runWebSocketProbe(secureExposure) {
       );
     });
     exitedBeforeReadyz.catch(() => {});
-    await Promise.race([waitForReadyz(`http://127.0.0.1:${port}/readyz`), exitedBeforeReadyz]);
+    await Promise.race([
+      waitForReadyz(`http://127.0.0.1:${port}/readyz`, requestTimeoutMs),
+      exitedBeforeReadyz,
+    ]);
 
     ws = await openSocket(`ws://127.0.0.1:${port}`);
     const initialize = await requestOverSocket(ws, 1, "initialize", {

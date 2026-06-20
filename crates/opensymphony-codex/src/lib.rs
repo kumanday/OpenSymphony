@@ -131,19 +131,13 @@ impl CodexAppServerLaunch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexModelCredentialReuse {
     pub profile_id: String,
-    pub model_source: CodexConfiguredValueSource,
+    pub model_source: ConfiguredValueSource,
     pub model_reference: String,
     pub credential_reference_id: String,
     pub credential_reference_kind: CredentialReferenceKind,
     pub storage_mode: CredentialStorageMode,
     pub can_supply_subscription_credentials: bool,
     pub config_overrides: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodexConfiguredValueSource {
-    EnvironmentVariable,
-    Literal,
 }
 
 impl CodexModelCredentialReuse {
@@ -163,12 +157,7 @@ impl CodexModelCredentialReuse {
 
         Some(Self {
             profile_id: profile.id.clone(),
-            model_source: match profile.model.source {
-                ConfiguredValueSource::EnvironmentVariable => {
-                    CodexConfiguredValueSource::EnvironmentVariable
-                }
-                ConfiguredValueSource::Literal => CodexConfiguredValueSource::Literal,
-            },
+            model_source: profile.model.source,
             model_reference: profile.model.reference.clone(),
             credential_reference_id: profile.credential_reference.id.clone(),
             credential_reference_kind: profile.credential_reference.kind,
@@ -183,6 +172,9 @@ impl CodexModelCredentialReuse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonRpcRequestEnvelope {
     pub jsonrpc: String,
+    /// OpenSymphony-generated prototype requests use numeric JSON-RPC IDs so a
+    /// session can allocate a monotonic sequence and correlate responses without
+    /// accepting client-supplied null IDs.
     pub id: u64,
     pub method: String,
     #[serde(default)]
