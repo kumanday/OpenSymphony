@@ -246,6 +246,15 @@ Validation for subscription mode should include:
 - live integration only when a valid subscription credential and pinned SDK
   support are available
 
+The alpha model configuration panel exposed by the web and desktop shells uses
+the shared model profile state store, but those entrypoints currently construct
+it without durable storage. Treat profile edits as session-local until a
+desktop secure-settings backend or hosted settings service is wired in. The UI
+may keep model strings, routing hints, subscription bootstrap metadata, and
+stored credential references in memory, but raw provider keys and OAuth refresh
+material must stay in the selected keychain, OpenHands auth directory, or
+hosted secret store.
+
 ## 5. Linear operational model
 
 OpenSymphony 1.0.0 is GraphQL-only for agent-side Linear operations.

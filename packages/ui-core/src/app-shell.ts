@@ -849,6 +849,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       harnesses: splitList(this.valueOf<HTMLInputElement>("[data-model-harnesses]")),
       active: activeFlag,
       metadata: {
+        ...baseProfile.metadata,
         contextWindowTokens: optionalPositiveInteger(this.valueOf<HTMLInputElement>("[data-model-context-window]")),
         reasoningEffort: this.valueOf<HTMLInputElement>("[data-model-reasoning-effort]").trim() || null,
         costProfile: this.valueOf<HTMLInputElement>("[data-model-cost-profile]").trim() || null,
@@ -871,7 +872,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.activeModelProfileId = saved.id;
       this.render();
     } catch (error) {
-      this.state.connectionMode = "failed";
       this.state.connectionMessage = `Model profile save failed: ${errorMessage(error)}`;
       this.render();
     }
@@ -1095,6 +1095,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       ? active.subscriptionCredential?.authDirectoryEnv
       : active.apiKeyRef;
     const credentialLabel = active.mode === "subscription" ? "Auth Directory Env" : "Credential Ref";
+    const credentialInputType = active.mode === "subscription" ? "text" : "password";
     return `
       <section class="os-panel os-model-panel" data-testid="model-profile-panel">
         <div class="os-section-head">
@@ -1135,7 +1136,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           </label>
           <label class="os-field">
             <span>${credentialLabel}</span>
-            <input data-model-credential-ref type="password" autocomplete="off" value="${escapeAttr(credentialRef ?? "")}" />
+            <input data-model-credential-ref type="${credentialInputType}" autocomplete="off" value="${escapeAttr(credentialRef ?? "")}" />
           </label>
           <label class="os-field">
             <span>Subscription Provider</span>

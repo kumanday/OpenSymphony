@@ -535,12 +535,18 @@ describe("OpenSymphonyApp mount", () => {
   it("edits an API-compatible model profile and shows a redacted credential reference", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    const modelProfileController = buildModelProfileController();
+    const profiles = defaultModelProfiles();
+    profiles[0].metadata = {
+      ...profiles[0].metadata,
+      providerFamily: "future-router-hint",
+    } as typeof profiles[0]["metadata"];
+    const modelProfileController = buildModelProfileController(profiles);
     const handle = renderOpenSymphonyApp({
       root,
       mode: "desktop",
       transport: buildTransport(),
       modelProfileController,
+      initialModelProfiles: profiles,
     });
 
     await flushUntil(() => root.querySelector("[data-testid='model-profile-panel']") !== null);
@@ -568,6 +574,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(saved?.harnesses).toContain("custom_harness");
     expect(saved?.metadata.reasoningEffort).toBe("provider-ultra");
     expect(saved?.metadata.recommendedFor).toContain("validation");
+    expect((saved?.metadata as { providerFamily?: string }).providerFamily).toBe("future-router-hint");
     await flushUntil(() =>
       root.querySelector("[data-testid='model-redacted-credential']")?.textContent?.includes("Configured") ?? false,
     );
@@ -621,6 +628,7 @@ describe("OpenSymphonyApp mount", () => {
       new Event("change", { bubbles: true }),
     );
     await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
+    expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("text");
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "codex-subscription-preview";
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "OPENHANDS_AUTH_DIR";
@@ -641,6 +649,36 @@ describe("OpenSymphonyApp mount", () => {
     expect(saved?.subscriptionCredential?.authMethod).toBe("device_code");
     expect(saved?.credentialStorage).toBe("openhands_auth_directory");
     expect(saved?.harnesses).toEqual(["openhands_agent_server", "codex_app_server"]);
+
+    await handle.destroy();
+  });
+
+  it("keeps model profile save failures separate from gateway connection health", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController: {
+        ...modelProfileController,
+        async storeProfile() {
+          throw new Error("secure settings unavailable");
+        },
+      },
+    });
+
+    await flushUntil(() => root.querySelector("[data-model-credential-ref]") !== null);
+    await flushUntil(() => root.querySelector(".os-status-connected") !== null);
+
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:custom-api-key";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() => root.textContent?.includes("Model profile save failed: secure settings unavailable") ?? false);
+    expect(root.querySelector(".os-status-connected")).not.toBeNull();
+    expect(root.querySelector(".os-status-failed")).toBeNull();
 
     await handle.destroy();
   });
