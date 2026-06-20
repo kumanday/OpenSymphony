@@ -89,11 +89,11 @@ WebSocket probes are supported. A 10-request local run produced:
 
 ```json
 {
-  "generatedAt": "2026-06-20T06:18:53.559Z",
+  "generatedAt": "2026-06-20T06:25:55.254Z",
   "codexVersion": "codex-cli 0.138.0",
   "stdio": {
     "transport": "stdio",
-    "initializeLatencyMs": 119.594,
+    "initializeLatencyMs": 123.147,
     "response": {
       "id": 1,
       "result": {
@@ -106,21 +106,21 @@ WebSocket probes are supported. A 10-request local run produced:
   },
   "websocket": {
     "transport": "websocket_loopback",
-    "port": 18772,
-    "initializeLatencyMs": 1.096,
+    "port": 18775,
+    "initializeLatencyMs": 1.131,
     "queuedRequests": 10,
     "queuedResponses": 10,
-    "queueElapsedMs": 0.934,
-    "requestsPerSecond": 10701.86,
+    "queueElapsedMs": 0.896,
+    "requestsPerSecond": 11164.34,
     "latencyMs": {
-      "p50": 0.488,
-      "p95": 0.586,
-      "max": 0.586
+      "p50": 0.494,
+      "p95": 0.567,
+      "max": 0.567
     },
-    "reconnectLatencyMs": 1.466,
+    "reconnectLatencyMs": 1.128,
     "reconnectResponse": "ok",
     "exposure": {
-      "listener": "ws://127.0.0.1:18772",
+      "listener": "ws://127.0.0.1:18775",
       "localhostOnly": true,
       "authModesFromHelp": [
         "capability-token",

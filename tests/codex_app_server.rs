@@ -125,6 +125,7 @@ fn codex_model_and_credential_reuse_maps_existing_settings_profiles() {
 #[test]
 fn codex_websocket_auth_and_benchmark_dimensions_are_explicit() {
     let mut launch = CodexAppServerLaunch::loopback_websocket(18765);
+    launch.extra_args = vec!["--stdio".into()];
     launch.websocket_auth = Some(CodexWebSocketAuth::CapabilityToken {
         token_file: std::env::temp_dir().join("opensymphony-codex-token"),
         token_sha256: "0".repeat(64),
@@ -134,6 +135,15 @@ fn codex_websocket_auth_and_benchmark_dimensions_are_explicit() {
     assert!(args.contains(&"ws://127.0.0.1:18765".to_owned()));
     assert!(args.contains(&"--ws-auth".to_owned()));
     assert!(args.contains(&"capability-token".to_owned()));
+    let extra_stdio = args
+        .iter()
+        .position(|arg| arg == "--stdio")
+        .expect("extra stdio arg is present");
+    let selected_transport = args
+        .iter()
+        .position(|arg| arg == "--listen")
+        .expect("selected websocket transport is present");
+    assert!(selected_transport > extra_stdio);
 
     let mut signed_bearer = CodexAppServerLaunch::loopback_websocket(18766);
     signed_bearer.websocket_auth = Some(CodexWebSocketAuth::SignedBearerToken {

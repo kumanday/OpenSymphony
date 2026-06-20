@@ -83,24 +83,60 @@ function waitForStreamProgress(stream, timeoutMs) {
   });
 }
 
-async function readLine(stream, timeoutMs) {
-  let buffer = "";
-  const deadline = performance.now() + timeoutMs;
-  for (;;) {
-    const chunk = stream.read();
-    if (chunk) {
-      buffer += chunk.toString("utf8");
-      const newline = buffer.indexOf("\n");
-      if (newline >= 0) return buffer.slice(0, newline);
-    }
-    if (performance.now() > deadline) throw new Error("timed out waiting for line");
-    const remainingMs = Math.max(1, deadline - performance.now());
-    const event = await waitForStreamProgress(stream, remainingMs);
-    if (event === "timeout") throw new Error("timed out waiting for line");
-    if (event === "end" || event === "close") {
-      throw new Error(`stream ${event} before a complete line`);
+class LineReader {
+  constructor(stream) {
+    this.stream = stream;
+    this.buffer = "";
+  }
+
+  async readLine(timeoutMs) {
+    const deadline = performance.now() + timeoutMs;
+    for (;;) {
+      const newline = this.buffer.indexOf("\n");
+      if (newline >= 0) {
+        const line = this.buffer.slice(0, newline);
+        this.buffer = this.buffer.slice(newline + 1);
+        return line;
+      }
+
+      const chunk = this.stream.read();
+      if (chunk) {
+        this.buffer += chunk.toString("utf8");
+        continue;
+      }
+
+      if (performance.now() > deadline) throw new Error("timed out waiting for line");
+      const remainingMs = Math.max(1, deadline - performance.now());
+      const event = await waitForStreamProgress(this.stream, remainingMs);
+      if (event === "timeout") throw new Error("timed out waiting for line");
+      if (event === "end" || event === "close") {
+        throw new Error(`stream ${event} before a complete line`);
+      }
     }
   }
+}
+
+function writeToStream(stream, data, label, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      stream.removeListener("error", onError);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${label} write timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    stream.once("error", onError);
+    stream.write(data, (error) => {
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    });
+  });
 }
 
 async function collectChildOutput(child, label, timeoutMs = requestTimeoutMs) {
@@ -135,14 +171,18 @@ async function runStdioProbe() {
   try {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    const stdout = new LineReader(child.stdout);
     const startedAt = performance.now();
-    child.stdin.write(
+    await writeToStream(
+      child.stdin,
       `${request(1, "initialize", {
         clientInfo: { name: "opensymphony-codex-benchmark", version: "0.0.0" },
         capabilities: {},
       })}\n`,
+      "stdio initialize",
+      requestTimeoutMs,
     );
-    const line = await readLine(child.stdout, requestTimeoutMs);
+    const line = await stdout.readLine(requestTimeoutMs);
     const latencyMs = performance.now() - startedAt;
     const response = JSON.parse(line);
     assertJsonRpcResult("stdio initialize", response);
@@ -204,6 +244,25 @@ async function openSocket(url, timeoutMs = requestTimeoutMs) {
     ws.addEventListener("error", onError);
   });
   return ws;
+}
+
+function waitForSocketClose(ws, timeoutMs = requestTimeoutMs) {
+  if (ws.readyState === WebSocket.CLOSED) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      ws.removeEventListener("close", onClose);
+    };
+    const onClose = () => {
+      cleanup();
+      resolve();
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`WebSocket close timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    ws.addEventListener("close", onClose);
+  });
 }
 
 function requestOverSocket(ws, id, method, params = {}, timeoutMs = requestTimeoutMs) {
@@ -273,9 +332,13 @@ async function runWebSocketProbe(secureExposure) {
     }
     const elapsedMs = performance.now() - batchStartedAt;
     const latencies = responses.map((response) => response.latencyMs);
+    const requestsPerSecond =
+      elapsedMs > 0 ? Number(((responses.length / elapsedMs) * 1000).toFixed(2)) : 0;
 
+    const closed = waitForSocketClose(ws);
     ws.close();
-    await sleep(100);
+    await closed;
+    ws = null;
     const reconnectStartedAt = performance.now();
     ws2 = await openSocket(`ws://127.0.0.1:${port}`);
     const reconnectInitialize = await requestOverSocket(ws2, iterations + 2, "initialize", {
@@ -292,7 +355,7 @@ async function runWebSocketProbe(secureExposure) {
       queuedRequests: iterations,
       queuedResponses: responses.length,
       queueElapsedMs: Number(elapsedMs.toFixed(3)),
-      requestsPerSecond: Number(((responses.length / elapsedMs) * 1000).toFixed(2)),
+      requestsPerSecond,
       latencyMs: {
         p50: percentile(latencies, 50),
         p95: percentile(latencies, 95),

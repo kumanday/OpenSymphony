@@ -61,6 +61,7 @@ impl CodexAppServerLaunch {
 
     pub fn command_args(&self) -> Vec<String> {
         let mut args = vec!["app-server".into()];
+        args.extend(self.extra_args.clone());
         match &self.transport {
             CodexAppServerTransport::Stdio => args.push("--stdio".into()),
             CodexAppServerTransport::WebSocketLoopback { port } => {
@@ -104,7 +105,6 @@ impl CodexAppServerLaunch {
                 }
             }
         }
-        args.extend(self.extra_args.clone());
         args
     }
 }
