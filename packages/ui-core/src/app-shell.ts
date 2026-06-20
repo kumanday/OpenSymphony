@@ -18,8 +18,17 @@ import type {
   TaskGraphNodeKind,
   TaskGraphSnapshot,
   AuthState,
+  ModelConfigurationProfile,
+  ModelCredentialMode,
 } from "@opensymphony/gateway-schema";
-import { authStateFromError } from "@opensymphony/gateway-schema";
+import {
+  authStateFromError,
+  createModelProfile,
+  defaultModelProfiles,
+  redactCredentialRef,
+  validateStoredCredentialRef,
+  validateSubscriptionCredential,
+} from "@opensymphony/gateway-schema";
 import { renderChangedFileList, renderFileDiff } from "./diff.js";
 import { renderValidationSummary } from "./validation.js";
 import { renderApprovalList, type ApprovalDecision } from "./approval.js";
@@ -110,6 +119,14 @@ export interface ProfileController {
   listProfiles(): Promise<ConnectionProfile[]>;
   storeProfile(profile: EditableProfileInput): Promise<ConnectionProfile>;
   setActiveProfile(profileId: string): Promise<ConnectionProfile>;
+  removeProfile(profileId: string): Promise<ConnectionProfile[]>;
+}
+
+export interface ModelProfileController {
+  listProfiles(): Promise<ModelConfigurationProfile[]>;
+  storeProfile(profile: ModelConfigurationProfile): Promise<ModelConfigurationProfile>;
+  setActiveProfile(profileId: string): Promise<ModelConfigurationProfile>;
+  removeProfile(profileId: string): Promise<ModelConfigurationProfile[]>;
 }
 
 export interface EditableProfileInput {
@@ -125,7 +142,9 @@ export interface OpenSymphonyAppOptions {
   transport: GatewayReader;
   title?: string;
   profileController?: ProfileController;
+  modelProfileController?: ModelProfileController;
   initialProfiles?: ConnectionProfile[];
+  initialModelProfiles?: ModelConfigurationProfile[];
   onGatewayUrlChanged?: (gatewayUrl: string) => Promise<GatewayReader>;
 }
 
@@ -159,6 +178,11 @@ interface AppState {
   profiles: ConnectionProfile[];
   activeProfileId: string | null;
   gatewayDraft: string;
+  profilePanelExpanded: boolean;
+  modelProfiles: ModelConfigurationProfile[];
+  activeModelProfileId: string | null;
+  modelProfileError: string | null;
+  modelPanelExpanded: boolean;
   loading: boolean;
   activeView: "dashboard" | "planning";
   // Task graph editor state
@@ -206,6 +230,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.transport = options.transport;
     const profiles = options.initialProfiles ?? [];
     const activeProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
+    const modelProfiles = options.initialModelProfiles ?? defaultModelProfiles();
+    const activeModelProfile = modelProfiles.find((profile) => profile.active) ?? null;
     this.state = {
       connectionMode: "connecting",
       connectionMessage: "Connecting",
@@ -229,6 +255,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       profiles,
       activeProfileId: activeProfile?.id ?? null,
       gatewayDraft: activeProfile?.gatewayUrl ?? this.transport.baseUri,
+      profilePanelExpanded: false,
+      modelProfiles,
+      activeModelProfileId: activeModelProfile?.id ?? null,
+      modelProfileError: null,
+      modelPanelExpanded: false,
       loading: true,
       activeView: "dashboard",
       taskGraphFilter: { ...defaultTaskGraphFilter },
@@ -307,6 +338,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.render();
 
     await this.loadProfiles();
+    await this.loadModelProfiles();
     await this.loadGatewayState();
     this.state.loading = false;
     this.render();
@@ -337,6 +369,21 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       }
     } catch (error) {
       this.state.connectionMessage = `Profiles unavailable: ${errorMessage(error)}`;
+    }
+  }
+
+  private async loadModelProfiles(): Promise<void> {
+    if (!this.options.modelProfileController) {
+      return;
+    }
+    try {
+      const profiles = await this.options.modelProfileController.listProfiles();
+      this.state.modelProfiles = profiles.length > 0 ? profiles : defaultModelProfiles();
+      const active = this.state.modelProfiles.find((profile) => profile.active) ?? null;
+      this.state.activeModelProfileId = active?.id ?? null;
+      this.state.modelProfileError = null;
+    } catch (error) {
+      this.state.modelProfileError = `Model profiles unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -718,9 +765,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
     const gatewayInput = this.options.root.querySelector<HTMLInputElement>("[data-profile-gateway]");
     const kindInput = this.options.root.querySelector<HTMLSelectElement>("[data-profile-kind]");
+    const labelInput = this.options.root.querySelector<HTMLInputElement>("[data-profile-label]");
+    const selectedProfileId = this.valueOf<HTMLSelectElement>("[data-profile-select]")
+      || this.state.activeProfileId
+      || undefined;
     const gatewayUrl = (gatewayInput?.value ?? "").trim();
-    const activeProfile = this.state.profiles.find((profile) => profile.id === this.state.activeProfileId);
-    const label = activeProfile?.label ?? "Local Gateway";
+    const activeProfile = this.state.profiles.find((profile) => profile.id === selectedProfileId);
+    const label = (labelInput?.value ?? "").trim() || activeProfile?.label || "Local Gateway";
     const kind = editableProfileKindFromValue(kindInput?.value, this.options.mode);
     if (!gatewayUrl) {
       this.state.connectionMessage = "Profile URL is required";
@@ -730,7 +781,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     try {
       const saved = await controller.storeProfile({
-        id: this.state.activeProfileId ?? undefined,
+        id: selectedProfileId,
         label,
         kind,
         gatewayUrl,
@@ -745,6 +796,258 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.connectionMessage = `Profile save failed: ${errorMessage(error)}`;
       this.render();
     }
+  }
+
+  private async createProfileDraft(): Promise<void> {
+    const controller = this.options.profileController;
+    if (!controller) {
+      return;
+    }
+    const activeProfile = this.state.profiles.find((profile) => profile.id === this.state.activeProfileId)
+      ?? defaultUiProfiles(this.transport.baseUri)[0];
+    try {
+      const saved = await controller.storeProfile({
+        label: "New gateway",
+        kind: activeProfile.kind,
+        gatewayUrl: activeProfile.gatewayUrl || this.transport.baseUri,
+      });
+      const active = await controller.setActiveProfile(saved.id).catch(() => saved);
+      this.state.profiles = [
+        ...this.state.profiles.filter((profile) => profile.id !== active.id),
+        active,
+      ].map((profile) => ({
+        ...profile,
+        active: profile.id === active.id,
+      }));
+      this.state.activeProfileId = active.id;
+      this.state.gatewayDraft = active.gatewayUrl;
+      this.state.profilePanelExpanded = true;
+      this.render();
+    } catch (error) {
+      this.state.connectionMessage = `Profile create failed: ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private async removeProfile(): Promise<void> {
+    const controller = this.options.profileController;
+    if (!controller) {
+      return;
+    }
+    const activeProfileId = this.valueOf<HTMLSelectElement>("[data-profile-select]")
+      || this.state.activeProfileId;
+    if (!activeProfileId) {
+      return;
+    }
+    const profile = this.state.profiles.find((candidate) => candidate.id === activeProfileId);
+    if (!this.confirmProfileRemoval(profile?.label ?? "this connection profile")) {
+      return;
+    }
+    try {
+      const profiles = await controller.removeProfile(activeProfileId);
+      const active = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
+      this.state.profiles = profiles;
+      this.state.activeProfileId = active?.id ?? null;
+      this.state.gatewayDraft = active?.gatewayUrl ?? this.transport.baseUri;
+      if (active && this.options.onGatewayUrlChanged) {
+        this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
+      }
+      this.render();
+    } catch (error) {
+      this.state.connectionMessage = `Profile delete failed: ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private async selectModelProfile(profileId: string): Promise<void> {
+    const profile = this.state.modelProfiles.find((candidate) => candidate.id === profileId);
+    if (!profile) {
+      return;
+    }
+    this.state.activeModelProfileId = profileId;
+    this.state.modelProfileError = null;
+    this.render();
+  }
+
+  private async saveModelProfile(): Promise<void> {
+    const controller = this.options.modelProfileController;
+    if (!controller) {
+      return;
+    }
+    const profiles = modelProfilesWithDefaults(this.state.modelProfiles);
+    const selectedProfileId = this.valueOf<HTMLSelectElement>("[data-model-profile-select]")
+      || this.state.activeModelProfileId;
+    const active = activeModelProfile(profiles, selectedProfileId) ?? profiles[0] ?? null;
+    const mode = modelModeFromValue(this.valueOf<HTMLSelectElement>("[data-model-mode]"));
+    const baseProfile = active ?? createModelProfile(mode);
+    const label = this.valueOf<HTMLInputElement>("[data-model-label]").trim() || active?.label || "Model profile";
+    const model = this.valueOf<HTMLInputElement>("[data-model-name]").trim();
+    if (!model) {
+      this.state.modelProfileError = "Model string is required";
+      this.render();
+      return;
+    }
+
+    const credentialInput = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
+    const apiKeyRef = credentialInput || null;
+    const credentialStorage = mode === "subscription"
+      ? "openhands_auth_directory"
+      : baseProfile.credentialStorage;
+    const subscriptionCredentialDefaults = defaultModelProfiles()
+      .find((profile) => profile.mode === "subscription")!
+      .subscriptionCredential!;
+    const subscriptionCredential = mode === "subscription"
+      ? {
+          ...subscriptionCredentialDefaults,
+          ...baseProfile.subscriptionCredential,
+          provider: baseProfile.subscriptionCredential?.provider
+            || subscriptionCredentialDefaults.provider,
+          authDirectoryEnv: credentialInput || null,
+        }
+      : null;
+    const credentialError = mode === "api_key"
+      ? validateStoredCredentialRef(credentialInput, credentialStorage)
+      : validateSubscriptionCredential(subscriptionCredential);
+    if (credentialError) {
+      this.state.modelProfileError = credentialError;
+      this.render();
+      return;
+    }
+    const activeFlag = this.options.root.querySelector<HTMLInputElement>("[data-model-active]")?.checked ?? baseProfile.active;
+    const profile: ModelConfigurationProfile = {
+      ...baseProfile,
+      id: baseProfile.id,
+      label,
+      mode,
+      owner: modelOwnerFromValue(this.valueOf<HTMLSelectElement>("[data-model-owner]")),
+      baseUrl: this.valueOf<HTMLInputElement>("[data-model-base-url]").trim(),
+      model,
+      apiKeyRef: mode === "api_key" ? apiKeyRef : null,
+      subscriptionCredential,
+      credentialStorage,
+      harnesses: splitList(this.valueOf<HTMLInputElement>("[data-model-harnesses]")),
+      active: activeFlag,
+    };
+
+    try {
+      const saved = await controller.storeProfile(profile);
+      if (saved.active) {
+        await controller.setActiveProfile(saved.id);
+      }
+      this.state.modelProfiles = upsertModelProfile(profiles, saved).map((profile) => {
+        if (saved.active) {
+          return { ...profile, active: profile.id === saved.id };
+        }
+        return profile.id === saved.id ? saved : profile;
+      });
+      this.state.activeModelProfileId = saved.active
+        ? saved.id
+        : this.state.modelProfiles.find((profile) => profile.active)?.id ?? null;
+      this.state.modelProfileError = null;
+      this.render();
+    } catch (error) {
+      this.state.modelProfileError = `Model profile save failed: ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private toggleSettingsPanel(panel: "connection" | "model"): void {
+    if (panel === "connection") {
+      this.state.profilePanelExpanded = !this.state.profilePanelExpanded;
+    } else {
+      this.state.modelPanelExpanded = !this.state.modelPanelExpanded;
+    }
+    this.render();
+  }
+
+  private changeModelProfileMode(mode: ModelCredentialMode): void {
+    const profiles = modelProfilesWithDefaults(this.state.modelProfiles);
+    const selectedProfileId = this.valueOf<HTMLSelectElement>("[data-model-profile-select]")
+      || this.state.activeModelProfileId;
+    const current = activeModelProfile(profiles, selectedProfileId)
+      ?? profiles[0]
+      ?? createModelProfile(mode);
+    const subscriptionCredentialDefaults = defaultModelProfiles()
+      .find((profile) => profile.mode === "subscription")!
+      .subscriptionCredential!;
+    const nextProfile: ModelConfigurationProfile = {
+      ...current,
+      mode,
+      apiKeyRef: null,
+      subscriptionCredential: mode === "subscription"
+        ? {
+            ...subscriptionCredentialDefaults,
+            ...current.subscriptionCredential,
+            authDirectoryEnv: null,
+          }
+        : null,
+      credentialStorage: mode === "subscription"
+        ? "openhands_auth_directory"
+        : current.credentialStorage,
+    };
+    this.state.modelProfiles = upsertModelProfile(profiles, nextProfile);
+    this.state.activeModelProfileId = nextProfile.id;
+    this.state.modelProfileError = null;
+    this.render();
+  }
+
+  private confirmProfileRemoval(label: string): boolean {
+    const view = this.options.root.ownerDocument.defaultView;
+    if (!view?.confirm) {
+      return true;
+    }
+    return view.confirm(`Delete profile "${label}"?`);
+  }
+
+  private async createModelProfileDraft(): Promise<void> {
+    const controller = this.options.modelProfileController;
+    if (!controller) {
+      return;
+    }
+    const active = activeModelProfile(this.state.modelProfiles, this.state.activeModelProfileId);
+    const draft = createModelProfile(active?.mode ?? "api_key");
+    try {
+      const saved = await controller.storeProfile(draft);
+      this.state.modelProfiles = [
+        ...this.state.modelProfiles.filter((profile) => profile.id !== saved.id),
+        saved,
+      ];
+      this.state.activeModelProfileId = saved.id;
+      this.state.modelProfileError = null;
+      this.render();
+    } catch (error) {
+      this.state.modelProfileError = `Model profile create failed: ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private async removeModelProfile(): Promise<void> {
+    const controller = this.options.modelProfileController;
+    if (!controller) {
+      return;
+    }
+    const active = activeModelProfile(this.state.modelProfiles, this.state.activeModelProfileId);
+    if (!active) {
+      return;
+    }
+    if (!this.confirmProfileRemoval(active.label)) {
+      return;
+    }
+    try {
+      const profiles = await controller.removeProfile(active.id);
+      const nextActive = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
+      this.state.modelProfiles = profiles;
+      this.state.activeModelProfileId = nextActive?.id ?? null;
+      this.state.modelProfileError = null;
+      this.render();
+    } catch (error) {
+      this.state.modelProfileError = `Model profile remove failed: ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private valueOf<T extends HTMLInputElement | HTMLSelectElement>(selector: string): string {
+    return this.options.root.querySelector<T>(selector)?.value ?? "";
   }
 
   private render(): void {
@@ -783,12 +1086,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (this.state.activeView === "planning") {
       return `
         ${this.renderProfiles()}
+        ${this.renderModelProfiles()}
         ${renderPlanningWorkspace(this.state.planningWorkspace, this.state.planningEdit)}
       `;
     }
     return `
       ${this.renderStatus()}
       ${this.renderProfiles()}
+      ${this.renderModelProfiles()}
       ${this.renderTaskGraph()}
       ${this.renderRunDetail()}
       ${this.renderRunEvidence()}
@@ -916,17 +1221,42 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const capabilities = this.state.capabilities?.transports
       .map((transport) => transport.transport)
       .join(", ") ?? "unknown";
+    const summary = activeProfile
+      ? `${activeProfile.label} • ${activeProfile.gatewayUrl}`
+      : this.transport.baseUri;
+    const toggleLabel = this.state.profilePanelExpanded ? "Collapse" : "Expand";
+    const header = `
+      <div class="os-section-head">
+        <div>
+          <h2>Connection</h2>
+          <span>${escapeHtml(summary)}</span>
+        </div>
+        <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="connection" aria-expanded="${this.state.profilePanelExpanded ? "true" : "false"}" aria-label="${toggleLabel} Connection settings" title="${toggleLabel} Connection settings">
+          <span aria-hidden="true">${this.state.profilePanelExpanded ? "v" : ">"}</span>
+        </button>
+      </div>
+    `;
+    if (!this.state.profilePanelExpanded) {
+      return `
+        <section class="os-panel os-profile-panel os-panel-collapsed">
+          ${header}
+          <div class="os-meta">Transport: ${escapeHtml(capabilities)}</div>
+        </section>
+      `;
+    }
+    const canRemoveProfile = profiles.length > 1;
     return `
       <section class="os-panel os-profile-panel">
-        <div class="os-section-head">
-          <h2>Connection</h2>
-          <span>${escapeHtml(this.options.mode)}</span>
-        </div>
+        ${header}
         <label class="os-field">
           <span>Profile</span>
           <select data-profile-select>${options}</select>
         </label>
         <div class="os-inline-fields">
+          <label class="os-field">
+            <span>Label</span>
+            <input data-profile-label value="${escapeAttr(activeProfile?.label ?? "Local Gateway")}" />
+          </label>
           <label class="os-field">
             <span>Kind</span>
             <select data-profile-kind>${kindOptions}</select>
@@ -935,9 +1265,135 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             <span>Gateway URL</span>
             <input data-profile-gateway value="${escapeAttr(this.state.gatewayDraft)}" />
           </label>
-          <button type="button" data-save-profile ${this.options.profileController ? "" : "disabled"}>Save</button>
+          <div class="os-model-actions">
+            <button type="button" data-save-profile ${this.options.profileController ? "" : "disabled"}>Save</button>
+            <button type="button" data-new-profile ${this.options.profileController ? "" : "disabled"}>New</button>
+            <button type="button" data-remove-profile ${this.options.profileController && canRemoveProfile ? "" : "disabled"}>Delete</button>
+          </div>
         </div>
         <div class="os-meta">Transport: ${escapeHtml(capabilities)}</div>
+      </section>
+    `;
+  }
+
+  private renderModelProfiles(): string {
+    const profiles = modelProfilesWithDefaults(this.state.modelProfiles);
+    const active = activeModelProfile(profiles, this.state.activeModelProfileId)
+      ?? profiles[0]
+      ?? null;
+    if (!active) {
+      return `
+        <section class="os-panel os-model-panel os-panel-collapsed" data-testid="model-profile-panel">
+          <div class="os-section-head">
+            <div>
+              <h2>Model Configuration</h2>
+              <span>No model profiles</span>
+            </div>
+          </div>
+        </section>
+      `;
+    }
+    const options = profiles
+      .map((profile) => {
+        const selected = profile.id === active.id ? "selected" : "";
+        return `<option value="${escapeAttr(profile.id)}" ${selected}>${escapeHtml(profile.label)}</option>`;
+      })
+      .join("");
+    const credentialRef = active.mode === "subscription"
+      ? active.subscriptionCredential?.authDirectoryEnv
+      : active.apiKeyRef;
+    const credentialLabel = active.mode === "subscription" ? "OpenHands Auth Directory Env" : "API Key Secret";
+    const credentialInputType = active.mode === "subscription" ? "text" : "password";
+    const modelProfileError = this.state.modelProfileError
+      ? `<div class="os-model-error" role="alert" data-testid="model-profile-error">${escapeHtml(this.state.modelProfileError)}</div>`
+      : "";
+    const canRemoveProfile = profiles.length > 1;
+    const summary = `${active.label} • ${active.model || "No model"}${active.baseUrl ? ` • ${active.baseUrl}` : ""}`;
+    const toggleLabel = this.state.modelPanelExpanded ? "Collapse" : "Expand";
+    const header = `
+      <div class="os-section-head">
+        <div>
+          <h2>Model Configuration</h2>
+          <span>${escapeHtml(summary)}</span>
+        </div>
+        <button type="button" class="os-activity-toggle os-panel-toggle" data-toggle-settings="model" aria-expanded="${this.state.modelPanelExpanded ? "true" : "false"}" aria-label="${toggleLabel} Model Configuration settings" title="${toggleLabel} Model Configuration settings">
+          <span aria-hidden="true">${this.state.modelPanelExpanded ? "v" : ">"}</span>
+        </button>
+      </div>
+    `;
+    if (!this.state.modelPanelExpanded) {
+      return `
+        <section class="os-panel os-model-panel os-panel-collapsed" data-testid="model-profile-panel">
+          ${header}
+          <div class="os-model-meta" data-testid="model-redacted-credential">
+            Auth: ${escapeHtml(redactCredentialRef(credentialRef))}
+          </div>
+          ${modelProfileError}
+        </section>
+      `;
+    }
+    return `
+      <section class="os-panel os-model-panel" data-testid="model-profile-panel">
+        ${header}
+        <div class="os-model-layout">
+          <label class="os-field">
+            <span>Profile</span>
+            <select data-model-profile-select>${options}</select>
+          </label>
+          <label class="os-field">
+            <span>Label</span>
+            <input data-model-label value="${escapeAttr(active.label)}" />
+          </label>
+          <label class="os-field">
+            <span>Mode</span>
+            <select data-model-mode>
+              ${option("api_key", "API-compatible key", active.mode)}
+              ${option("subscription", "Subscription", active.mode)}
+            </select>
+          </label>
+          <label class="os-field">
+            <span>Base URL</span>
+            <input data-model-base-url value="${escapeAttr(active.baseUrl)}" placeholder="Provider default or API-compatible URL" />
+          </label>
+          <label class="os-field">
+            <span>Model ID</span>
+            <input data-model-name value="${escapeAttr(active.model)}" />
+          </label>
+          <label class="os-field">
+            <span>${credentialLabel}</span>
+            <input data-model-credential-ref type="${credentialInputType}" autocomplete="off" value="${escapeAttr(credentialRef ?? "")}" />
+          </label>
+          <label class="os-check-field">
+            <input data-model-active type="checkbox" ${active.active ? "checked" : ""} />
+            <span>Active</span>
+          </label>
+          <details class="os-advanced-settings">
+            <summary>Advanced</summary>
+            <div class="os-advanced-grid">
+              <label class="os-field">
+                <span>Scope</span>
+                <select data-model-owner>
+                  ${option("user", "User", active.owner)}
+                  ${option("organization", "Organization", active.owner)}
+                  ${option("project", "Project", active.owner)}
+                </select>
+              </label>
+              <label class="os-field">
+                <span>Usable Harnesses</span>
+                <input data-model-harnesses value="${escapeAttr(active.harnesses.join(", "))}" />
+              </label>
+            </div>
+          </details>
+          <div class="os-model-actions">
+            <button type="button" data-save-model-profile ${this.options.modelProfileController ? "" : "disabled"}>Save</button>
+            <button type="button" data-new-model-profile ${this.options.modelProfileController ? "" : "disabled"}>New</button>
+            <button type="button" data-remove-model-profile ${this.options.modelProfileController && canRemoveProfile ? "" : "disabled"}>Delete</button>
+          </div>
+        </div>
+        <div class="os-model-meta" data-testid="model-redacted-credential">
+          Auth: ${escapeHtml(redactCredentialRef(credentialRef))}
+        </div>
+        ${modelProfileError}
       </section>
     `;
   }
@@ -1163,6 +1619,29 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelector("[data-save-profile]")?.addEventListener("click", () => {
       void this.saveProfile();
     });
+    this.options.root.querySelector("[data-new-profile]")?.addEventListener("click", () => {
+      void this.createProfileDraft();
+    });
+    this.options.root.querySelector("[data-remove-profile]")?.addEventListener("click", () => {
+      void this.removeProfile();
+    });
+    this.options.root.querySelector("[data-save-model-profile]")?.addEventListener("click", () => {
+      void this.saveModelProfile();
+    });
+    this.options.root.querySelector("[data-new-model-profile]")?.addEventListener("click", () => {
+      void this.createModelProfileDraft();
+    });
+    this.options.root.querySelector("[data-remove-model-profile]")?.addEventListener("click", () => {
+      void this.removeModelProfile();
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-toggle-settings]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const panel = button.dataset.toggleSettings;
+        if (panel === "connection" || panel === "model") {
+          this.toggleSettingsPanel(panel);
+        }
+      });
+    });
     this.options.root.querySelectorAll<HTMLElement>("[data-auth-action]").forEach((button) => {
       button.addEventListener("click", () => {
         const action = button.dataset.authAction;
@@ -1179,6 +1658,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.options.root.querySelector("[data-profile-select]")?.addEventListener("change", (event) => {
       const target = event.target as HTMLSelectElement;
       void this.selectProfile(target.value);
+    });
+    this.options.root.querySelector("[data-model-profile-select]")?.addEventListener("change", (event) => {
+      const target = event.target as HTMLSelectElement;
+      void this.selectModelProfile(target.value);
+    });
+    this.options.root.querySelector("[data-model-mode]")?.addEventListener("change", (event) => {
+      const target = event.target as HTMLSelectElement;
+      this.changeModelProfileMode(modelModeFromValue(target.value));
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-project-id]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -2170,6 +2657,61 @@ function formatEventTime(value: string): string {
   });
 }
 
+function option(value: string, label: string, selectedValue: string | null | undefined): string {
+  const selected = value === selectedValue ? "selected" : "";
+  return `<option value="${escapeAttr(value)}" ${selected}>${escapeHtml(label)}</option>`;
+}
+
+function activeModelProfile(
+  profiles: ModelConfigurationProfile[],
+  profileId: string | null,
+): ModelConfigurationProfile | null {
+  return profiles.find((profile) => profile.id === profileId)
+    ?? profiles.find((profile) => profile.active)
+    ?? null;
+}
+
+function modelProfilesWithDefaults(
+  profiles: ModelConfigurationProfile[],
+): ModelConfigurationProfile[] {
+  return profiles.length > 0 ? profiles : defaultModelProfiles();
+}
+
+function upsertModelProfile(
+  profiles: ModelConfigurationProfile[],
+  profile: ModelConfigurationProfile,
+): ModelConfigurationProfile[] {
+  const index = profiles.findIndex((candidate) => candidate.id === profile.id);
+  if (index < 0) {
+    return [...profiles, profile];
+  }
+  const next = [...profiles];
+  next[index] = profile;
+  return next;
+}
+
+function modelModeFromValue(value: string): ModelCredentialMode {
+  return value === "subscription" ? "subscription" : "api_key";
+}
+
+function modelOwnerFromValue(value: string): ModelConfigurationProfile["owner"] {
+  switch (value) {
+    case "organization":
+    case "project":
+      return value;
+    case "user":
+    default:
+      return "user";
+  }
+}
+
+function splitList(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 const editableProfileKindOptions: Array<{
   value: ConnectionProfile["kind"];
   label: string;
@@ -2679,11 +3221,28 @@ function appShellStyles(): string {
     .os-panel { background: #ffffff; border: 1px solid #d8dee4; border-radius: 8px; padding: 14px; min-width: 0; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.05); }
     .os-status-panel, .os-run-detail-panel, .os-run-evidence-panel { grid-column: span 1; }
     .os-profile-panel { grid-column: span 3; }
+    .os-model-panel { grid-column: 1 / -1; }
+    .os-panel-collapsed { padding-bottom: 12px; }
+    .os-section-head > div { min-width: 0; }
+    .os-section-head > div span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-panel-toggle { flex: 0 0 auto; }
+    .os-section-head .os-panel-toggle span { color: inherit; font-size: inherit; }
+    .os-secondary-button { min-height: 30px; padding: 4px 10px; }
+    .os-model-layout { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; align-items: end; }
+    .os-model-layout button { align-self: end; }
+    .os-model-actions { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
+    .os-model-meta { margin-top: 10px; color: #667788; font-size: 12px; }
+    .os-model-error { margin-top: 10px; border: 1px solid #f0b88e; border-radius: 6px; padding: 8px 10px; background: #fff7ed; color: #9a3412; font-size: 12px; }
+    .os-advanced-settings { grid-column: 1 / -1; border-top: 1px solid #e5ebf0; padding-top: 8px; }
+    .os-advanced-settings summary { cursor: pointer; color: #536170; font-size: 12px; }
+    .os-advanced-grid { display: grid; grid-template-columns: repeat(3, minmax(160px, 1fr)); gap: 10px; margin-top: 8px; align-items: end; }
+    .os-check-field { min-height: 34px; display: inline-flex; align-items: center; gap: 8px; color: #536170; font-size: 12px; }
+    .os-check-field input { width: 16px; height: 16px; }
     .os-task-graph-panel { grid-column: span 2; }
     .os-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
     .os-section-head h2 { margin: 0; font-size: 15px; letter-spacing: 0; }
     .os-section-head span, .os-meta { color: #667788; font-size: 12px; }
-    .os-inline-fields { display: grid; grid-template-columns: minmax(150px, 0.7fr) minmax(260px, 1.3fr) auto; gap: 10px; align-items: end; }
+    .os-inline-fields { display: grid; grid-template-columns: minmax(150px, 0.7fr) minmax(160px, 0.8fr) minmax(260px, 1.3fr) auto; gap: 10px; align-items: end; }
     .os-field { display: grid; gap: 5px; font-size: 12px; color: #536170; }
     .os-field input, .os-field select { min-height: 34px; border: 1px solid #cbd5df; border-radius: 6px; padding: 6px 8px; background: #ffffff; color: #17202a; font: inherit; }
     button { min-height: 34px; border: 1px solid #afbac5; border-radius: 6px; background: #eef3f8; color: #17202a; font: inherit; cursor: pointer; }
@@ -2888,15 +3447,16 @@ function appShellStyles(): string {
     .os-plan-graph-node-selected rect { fill: #e7f1f5; stroke: #39708f; }
     @media (max-width: 980px) {
       .os-grid { grid-template-columns: 1fr; }
-      .os-status-panel, .os-profile-panel, .os-task-graph-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
-      .os-inline-fields, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
+      .os-status-panel, .os-profile-panel, .os-model-panel, .os-task-graph-panel, .os-run-detail-panel, .os-run-evidence-panel, .os-planning-panel { grid-column: 1 / -1; }
+      .os-inline-fields, .os-model-layout, .os-advanced-grid, .os-metrics, .os-run-grid { grid-template-columns: 1fr; }
       .os-topbar { align-items: flex-start; flex-direction: column; }
     }
     @media (prefers-color-scheme: dark) {
       body { background: #101418; color: #d9e2ea; }
       .os-topbar, .os-panel, .os-list-item, .os-node, .os-dialog { background: #171d23; border-color: #2a3440; }
-      .os-topbar p, .os-section-head span, .os-meta, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
+      .os-topbar p, .os-section-head span, .os-meta, .os-model-meta, .os-check-field, .os-list-item span, .os-node span, .os-node em, .os-empty, .os-metrics span, .os-run-grid span, .os-run-meta, .os-event-time { color: #94a3b3; }
       .os-status, .os-metrics div, .os-run-grid div, .os-detail-strip, .os-run-head, .os-filter-bar, .os-pending-banner { background: #111820; border-color: #2a3440; }
+      .os-model-error { background: #32180d; border-color: #7c2d12; color: #fed7aa; }
       .os-auth-panel .os-auth-message { color: #d9e2ea; }
       .os-auth-denied .os-auth-message { color: #fca5a5; }
       .os-auth-note { color: #94a3b3; }

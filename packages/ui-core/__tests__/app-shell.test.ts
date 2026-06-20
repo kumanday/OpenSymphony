@@ -9,6 +9,7 @@ import { MockGatewayTransport } from "@opensymphony/api-client";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
 import type {
   EditableProfileInput,
+  ModelProfileController,
   ProfileController,
 } from "../src/app-shell.js";
 import type {
@@ -17,10 +18,12 @@ import type {
   DashboardSnapshot,
   FileDiffPage,
   GatewayCapabilities,
+  ModelConfigurationProfile,
   RunDetail,
   RunEventPage,
   TaskGraphSnapshot,
 } from "@opensymphony/gateway-schema";
+import { defaultModelProfiles } from "@opensymphony/gateway-schema";
 
 const capabilities: GatewayCapabilities = {
   schema_version: schemaVersionV1(),
@@ -322,6 +325,54 @@ function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?:
   });
 }
 
+function buildModelProfileController(
+  initial = defaultModelProfiles(),
+): ModelProfileController & { saved: ModelConfigurationProfile[] } {
+  const saved = initial.map((profile) => ({
+    ...profile,
+    harnesses: [...profile.harnesses],
+  }));
+  return {
+    saved,
+    async listProfiles() {
+      return saved;
+    },
+    async storeProfile(profile) {
+      const index = saved.findIndex((candidate) => candidate.id === profile.id);
+      if (index >= 0) {
+        saved[index] = profile;
+      } else {
+        saved.push(profile);
+      }
+      return profile;
+    },
+    async setActiveProfile(profileId) {
+      const active = saved.find((profile) => profile.id === profileId);
+      if (!active) {
+        throw new Error(`Unknown model profile: ${profileId}`);
+      }
+      saved.forEach((profile) => {
+        profile.active = profile.id === profileId;
+      });
+      return active;
+    },
+    async removeProfile(profileId) {
+      const index = saved.findIndex((profile) => profile.id === profileId);
+      if (index < 0) {
+        throw new Error(`Unknown model profile: ${profileId}`);
+      }
+      if (saved.length <= 1) {
+        throw new Error("Cannot remove the last model profile");
+      }
+      saved.splice(index, 1);
+      if (!saved.some((profile) => profile.active) && saved[0]) {
+        saved[0].active = true;
+      }
+      return saved;
+    },
+  };
+}
+
 function flushAsync(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -337,6 +388,19 @@ async function flushUntil(
   throw new Error(
     `flushUntil timed out after ${maxIterations} iterations waiting for predicate`,
   );
+}
+
+async function expandSettingsPanel(
+  root: HTMLElement,
+  panel: "connection" | "model",
+  readySelector: string,
+): Promise<void> {
+  const toggle = root.querySelector(
+    `[data-toggle-settings='${panel}']`,
+  ) as HTMLButtonElement;
+  expect(toggle).not.toBeNull();
+  toggle.click();
+  await flushUntil(() => root.querySelector(readySelector) !== null);
 }
 
 describe("OpenSymphonyApp mount", () => {
@@ -491,6 +555,392 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("edits an API-compatible model profile and shows a redacted credential reference", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const profiles = defaultModelProfiles();
+    const modelProfileController = buildModelProfileController(profiles);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+      initialModelProfiles: profiles,
+    });
+
+    await flushUntil(() => root.querySelector("[data-testid='model-profile-panel']") !== null);
+
+    expect(root.querySelector(".os-model-panel h2")?.textContent).toBe("Model Configuration");
+    const collapsedToggle = root.querySelector("[data-toggle-settings='model']") as HTMLButtonElement;
+    expect(collapsedToggle).not.toBeNull();
+    expect(collapsedToggle.classList.contains("os-activity-toggle")).toBe(true);
+    expect(collapsedToggle.textContent?.trim()).toBe(">");
+    expect(collapsedToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(collapsedToggle.textContent).not.toContain("Collapse");
+    expect(collapsedToggle.textContent).not.toContain("Edit");
+    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("Not configured");
+    expect(root.querySelector("[data-model-credential-ref]")).toBeNull();
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
+    const expandedToggle = root.querySelector("[data-toggle-settings='model']") as HTMLButtonElement;
+    expect(expandedToggle.textContent?.trim()).toBe("v");
+    expect(expandedToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(expandedToggle.textContent).not.toContain("Collapse");
+    expect(expandedToggle.textContent).not.toContain("Edit");
+    expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("password");
+    expect(root.textContent).not.toContain("Cost Profile");
+    expect(root.textContent).not.toContain("Context Window");
+    expect(root.textContent).not.toContain("Recommended For");
+    expect(root.textContent).not.toContain("Reasoning");
+    expect(root.textContent).not.toContain("Subscription Provider");
+    expect(root.textContent).not.toContain("Credential Storage");
+
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
+    (root.querySelector("[data-model-base-url]") as HTMLInputElement).value = "https://models.example.test/v1";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:custom-api-key";
+    (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, custom_harness";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.model === "provider/custom-model-name"),
+    );
+
+    const saved = modelProfileController.saved.find((profile) => profile.model === "provider/custom-model-name");
+    expect(saved?.mode).toBe("api_key");
+    expect(saved?.baseUrl).toBe("https://models.example.test/v1");
+    expect(saved?.apiKeyRef).toBe("local_keychain:custom-api-key");
+    expect(saved?.harnesses).toContain("custom_harness");
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-redacted-credential']")?.textContent?.includes("Configured") ?? false,
+    );
+
+    await handle.destroy();
+  });
+
+  it("rejects raw secrets and mismatched credential reference prefixes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
+
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "sk-secret-value-123456789";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+    await flushUntil(() => root.textContent?.includes("API key secret must use local_keychain:") ?? false);
+
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "openhands_auth:openai";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+    await flushUntil(() => root.textContent?.includes("API key secret must use local_keychain:") ?? false);
+
+    expect(modelProfileController.saved.some((profile) => profile.model === "provider/custom-model-name")).toBe(false);
+
+    await handle.destroy();
+  });
+
+  it("edits a subscription-backed model profile", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const profiles = defaultModelProfiles();
+    profiles[1] = {
+      ...profiles[1],
+      subscriptionCredential: {
+        ...profiles[1].subscriptionCredential!,
+        authMethod: "browser",
+        openBrowser: true,
+        forceLogin: true,
+        accountIdentityHeader: "X-OpenSymphony-Account",
+      },
+    };
+    const modelProfileController = buildModelProfileController(profiles);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(),
+      modelProfileController,
+      initialModelProfiles: profiles,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-profile-select]");
+
+    (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).value = "openai-subscription";
+    (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).dispatchEvent(
+      new Event("change", { bubbles: true }),
+    );
+    await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
+    expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("text");
+
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "codex-subscription-preview";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "OPENHANDS_AUTH_DIR";
+    (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, codex_app_server";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.model === "codex-subscription-preview"),
+    );
+
+    const saved = modelProfileController.saved.find((profile) => profile.model === "codex-subscription-preview");
+    expect(saved?.mode).toBe("subscription");
+    expect(saved?.apiKeyRef).toBeNull();
+    expect(saved?.subscriptionCredential?.authDirectoryEnv).toBe("OPENHANDS_AUTH_DIR");
+    expect(saved?.subscriptionCredential?.provider).toBe("openai");
+    expect(saved?.subscriptionCredential?.authMethod).toBe("browser");
+    expect(saved?.subscriptionCredential?.openBrowser).toBe(true);
+    expect(saved?.subscriptionCredential?.forceLogin).toBe(true);
+    expect(saved?.subscriptionCredential?.accountIdentityHeader).toBe("X-OpenSymphony-Account");
+    expect(saved?.credentialStorage).toBe("openhands_auth_directory");
+    expect(saved?.harnesses).toEqual(["openhands_agent_server", "codex_app_server"]);
+
+    await handle.destroy();
+  });
+
+  it("preserves API-key credential storage when editing a profile", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const profiles = defaultModelProfiles();
+    profiles[0] = {
+      ...profiles[0],
+      credentialStorage: "openhands_auth_directory",
+      apiKeyRef: "openhands_auth:openai-api-key",
+    };
+    const modelProfileController = buildModelProfileController(profiles);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+      initialModelProfiles: profiles,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "openhands_auth:edited-api-key";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.model === "provider/custom-model-name"),
+    );
+
+    const saved = modelProfileController.saved.find((profile) => profile.model === "provider/custom-model-name");
+    expect(saved?.mode).toBe("api_key");
+    expect(saved?.credentialStorage).toBe("openhands_auth_directory");
+    expect(saved?.apiKeyRef).toBe("openhands_auth:edited-api-key");
+
+    await handle.destroy();
+  });
+
+  it("normalizes an empty API-key secret reference to null", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const profiles = defaultModelProfiles();
+    profiles[0] = {
+      ...profiles[0],
+      apiKeyRef: "local_keychain:openai-api-key",
+    };
+    const modelProfileController = buildModelProfileController(profiles);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+      initialModelProfiles: profiles,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
+    const profileId = (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).value;
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.id === profileId && profile.apiKeyRef === null),
+    );
+    const saved = modelProfileController.saved.find((profile) => profile.id === profileId);
+    expect(saved?.apiKeyRef).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("preserves model profile order when editing", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-profile-select]");
+    const before = Array.from(root.querySelectorAll<HTMLOptionElement>("[data-model-profile-select] option"))
+      .map((option) => option.value);
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/order-preserved";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.some((profile) => profile.model === "provider/order-preserved"),
+    );
+    const after = Array.from(root.querySelectorAll<HTMLOptionElement>("[data-model-profile-select] option"))
+      .map((option) => option.value);
+    expect(after).toEqual(before);
+
+    await handle.destroy();
+  });
+
+  it("rerenders model credential fields when mode changes", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-mode]");
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:openai-api-key";
+    const modeSelect = root.querySelector("[data-model-mode]") as HTMLSelectElement;
+    modeSelect.value = "subscription";
+    modeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+
+    await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
+    expect(root.textContent).toContain("OpenHands Auth Directory Env");
+    const credentialInput = root.querySelector("[data-model-credential-ref]") as HTMLInputElement;
+    expect(credentialInput.type).toBe("text");
+    expect(credentialInput.value).toBe("");
+
+    await handle.destroy();
+  });
+
+  it("creates and removes model profiles from the panel", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const confirmSpy = jest.spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-new-model-profile]");
+    const startingCount = root.querySelectorAll("[data-model-profile-select] option").length;
+    (root.querySelector("[data-new-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      root.querySelectorAll("[data-model-profile-select] option").length === startingCount + 1,
+    );
+    const createdId = (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).value;
+    expect(modelProfileController.saved.some((profile) => profile.id === createdId)).toBe(true);
+
+    (root.querySelector("[data-remove-model-profile]") as HTMLButtonElement).click();
+    await flushAsync();
+    expect(modelProfileController.saved.some((profile) => profile.id === createdId)).toBe(true);
+
+    (root.querySelector("[data-remove-model-profile]") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      !modelProfileController.saved.some((profile) => profile.id === createdId),
+    );
+    expect(root.querySelectorAll("[data-model-profile-select] option")).toHaveLength(startingCount);
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+
+    confirmSpy.mockRestore();
+    await handle.destroy();
+  });
+
+  it("deactivates the active model profile with the explicit Active checkbox", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-active]");
+    expect((root.querySelector("[data-model-active]") as HTMLInputElement).checked).toBe(true);
+
+    (root.querySelector("[data-model-active]") as HTMLInputElement).checked = false;
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      modelProfileController.saved.find((profile) => profile.id === "openai-api-compatible")?.active === false,
+    );
+    expect((root.querySelector("[data-model-active]") as HTMLInputElement).checked).toBe(false);
+
+    await handle.destroy();
+  });
+
+  it("keeps model profile save failures separate from gateway connection health", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController: {
+        ...modelProfileController,
+        async storeProfile() {
+          throw new Error("secure settings unavailable");
+        },
+      },
+    });
+
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
+    await flushUntil(() => root.querySelector(".os-status-connected") !== null);
+
+    (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
+    (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:custom-api-key";
+    (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-profile-error']")?.textContent?.includes("Model profile save failed: secure settings unavailable") ?? false,
+    );
+    expect(root.querySelector(".os-topbar p")?.textContent).not.toContain("Model profile save failed");
+    expect(root.querySelector(".os-status-connected")).not.toBeNull();
+    expect(root.querySelector(".os-status-failed")).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("keeps model profile load failures separate from gateway connection health", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController: {
+        ...modelProfileController,
+        async listProfiles() {
+          throw new Error("settings store unavailable");
+        },
+      },
+    });
+
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-profile-error']")?.textContent?.includes("Model profiles unavailable: settings store unavailable") ?? false,
+    );
+    await flushUntil(() => root.querySelector(".os-status-connected") !== null);
+    expect(root.querySelector(".os-topbar p")?.textContent).not.toContain("Model profiles unavailable");
+    expect(root.querySelector(".os-status-failed")).toBeNull();
+
+    await handle.destroy();
+  });
+
   it("reports a failed connection instead of falling back to fixture data", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -541,7 +991,7 @@ describe("OpenSymphonyApp mount", () => {
       transport: buildTransport(),
     });
 
-    await flushUntil(() => root.querySelector("[data-save-profile]") !== null);
+    await expandSettingsPanel(root, "connection", "[data-save-profile]");
     const save = root.querySelector("[data-save-profile]") as HTMLButtonElement;
     expect(save).not.toBeNull();
     expect(save.disabled).toBe(true);
@@ -581,6 +1031,9 @@ describe("OpenSymphonyApp mount", () => {
           managed: false,
         };
       },
+      async removeProfile(): Promise<ConnectionProfile[]> {
+        return [];
+      },
     };
 
     const handle = renderOpenSymphonyApp({
@@ -594,7 +1047,7 @@ describe("OpenSymphonyApp mount", () => {
       },
     });
 
-    await flushUntil(() => root.querySelector("[data-save-profile]") !== null);
+    await expandSettingsPanel(root, "connection", "[data-save-profile]");
 
     const gatewayInput = root.querySelector(
       "[data-profile-gateway]",
@@ -611,6 +1064,97 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("creates and deletes connection profiles from the panel", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const confirmSpy = jest.spyOn(window, "confirm")
+      .mockReturnValueOnce(false)
+      .mockReturnValueOnce(true);
+
+    const profiles: ConnectionProfile[] = [
+      {
+        id: "local",
+        label: "Local",
+        kind: "local_daemon",
+        active: true,
+        gatewayUrl: "http://127.0.0.1:2468",
+        transport: "loopback_http",
+        managed: false,
+      },
+    ];
+    const controller: ProfileController = {
+      async listProfiles() {
+        return profiles;
+      },
+      async storeProfile(profile) {
+        const saved: ConnectionProfile = {
+          id: profile.id ?? "created",
+          label: profile.label,
+          kind: profile.kind,
+          active: true,
+          gatewayUrl: profile.gatewayUrl,
+          transport: "loopback_http",
+          managed: false,
+        };
+        const index = profiles.findIndex((candidate) => candidate.id === saved.id);
+        if (index >= 0) {
+          profiles[index] = saved;
+        } else {
+          profiles.push(saved);
+        }
+        return saved;
+      },
+      async setActiveProfile(profileId) {
+        const active = profiles.find((profile) => profile.id === profileId);
+        if (!active) {
+          throw new Error(`Unknown profile: ${profileId}`);
+        }
+        profiles.forEach((profile) => {
+          profile.active = profile.id === profileId;
+        });
+        return active;
+      },
+      async removeProfile(profileId) {
+        const index = profiles.findIndex((profile) => profile.id === profileId);
+        if (index < 0) {
+          throw new Error(`Unknown profile: ${profileId}`);
+        }
+        profiles.splice(index, 1);
+        if (profiles[0]) {
+          profiles[0].active = true;
+        }
+        return profiles;
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      profileController: controller,
+    });
+
+    await expandSettingsPanel(root, "connection", "[data-new-profile]");
+    (root.querySelector("[data-new-profile]") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      Array.from(root.querySelectorAll("[data-profile-select] option")).some((option) =>
+        option.getAttribute("value") === "created"
+      ),
+    );
+    expect(profiles.some((profile) => profile.id === "created")).toBe(true);
+
+    (root.querySelector("[data-remove-profile]") as HTMLButtonElement).click();
+    await flushAsync();
+    expect(profiles.some((profile) => profile.id === "created")).toBe(true);
+
+    (root.querySelector("[data-remove-profile]") as HTMLButtonElement).click();
+    await flushUntil(() => !profiles.some((profile) => profile.id === "created"));
+    expect(root.querySelectorAll("[data-profile-select] option")).toHaveLength(1);
+    expect(confirmSpy).toHaveBeenCalledTimes(2);
+
+    confirmSpy.mockRestore();
+    await handle.destroy();
+  });
+
   it("renders the profile panel and provided initial profile when no controller is set", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -621,6 +1165,20 @@ describe("OpenSymphonyApp mount", () => {
     });
 
     await flushUntil(() => root.querySelector(".os-profile-panel") !== null);
+    expect(root.querySelector("[data-profile-select]")).toBeNull();
+    const collapsedToggle = root.querySelector("[data-toggle-settings='connection']") as HTMLButtonElement;
+    expect(collapsedToggle).not.toBeNull();
+    expect(collapsedToggle.classList.contains("os-activity-toggle")).toBe(true);
+    expect(collapsedToggle.textContent?.trim()).toBe(">");
+    expect(collapsedToggle.getAttribute("aria-expanded")).toBe("false");
+    expect(collapsedToggle.textContent).not.toContain("Collapse");
+    expect(collapsedToggle.textContent).not.toContain("Edit");
+    await expandSettingsPanel(root, "connection", "[data-profile-select]");
+    const expandedToggle = root.querySelector("[data-toggle-settings='connection']") as HTMLButtonElement;
+    expect(expandedToggle.textContent?.trim()).toBe("v");
+    expect(expandedToggle.getAttribute("aria-expanded")).toBe("true");
+    expect(expandedToggle.textContent).not.toContain("Collapse");
+    expect(expandedToggle.textContent).not.toContain("Edit");
     const select = root.querySelector(
       "[data-profile-select]",
     ) as HTMLSelectElement;

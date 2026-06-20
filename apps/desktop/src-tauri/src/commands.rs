@@ -238,7 +238,7 @@ pub async fn list_profiles() -> CommandResult<Vec<ProfileResponse>> {
 }
 
 /// Set the active connection profile.
-#[command]
+#[command(rename_all = "camelCase")]
 pub async fn set_active_profile(
     state: tauri::State<'_, RwLock<GatewayConnection>>,
     profile_id: String,
@@ -268,6 +268,56 @@ pub async fn set_active_profile(
     update_gateway_connection(&state, active_profile.gateway_url.clone(), None).await;
 
     Ok(active_profile)
+}
+
+/// Remove a stored connection profile.
+#[command(rename_all = "camelCase")]
+pub async fn remove_profile(
+    state: tauri::State<'_, RwLock<GatewayConnection>>,
+    profile_id: String,
+) -> CommandResult<Vec<ProfileResponse>> {
+    let (profiles, next_active_url) = {
+        let _guard = profile_store_lock().lock().await;
+        let path = profile_store_path()?;
+        let mut store = load_profile_store_async(path.clone()).await?;
+        normalize_profile_store(&mut store);
+
+        if !store.profiles.iter().any(|profile| profile.id == profile_id) {
+            return Err(DesktopError::NotFound);
+        }
+        if store.profiles.len() <= 1 {
+            return Err(DesktopError::Settings {
+                message: "cannot remove the last profile".to_string(),
+            });
+        }
+
+        let removed_active = store
+            .active_profile_id
+            .as_ref()
+            .is_some_and(|active_id| active_id == &profile_id);
+        store.profiles.retain(|profile| profile.id != profile_id);
+        if removed_active {
+            store.active_profile_id = store.profiles.first().map(|profile| profile.id.clone());
+        }
+        normalize_profile_store(&mut store);
+        let profiles = profiles_with_active(&store);
+        let next_active_url = if removed_active {
+            profiles
+                .iter()
+                .find(|profile| profile.active)
+                .map(|profile| profile.gateway_url.clone())
+        } else {
+            None
+        };
+        save_profile_store_async(path, store).await?;
+        (profiles, next_active_url)
+    };
+
+    if let Some(url) = next_active_url {
+        update_gateway_connection(&state, url, None).await;
+    }
+
+    Ok(profiles)
 }
 
 fn new_profile_id() -> String {
@@ -1111,6 +1161,7 @@ fn profile_is_current_gateway_available(
 use crate::opensymphony_gateway_schema::{
     capability::{
         AuthMode, FeatureCapability as GatewayFeatureCapability, GatewayCapabilities,
+        HarnessCapability,
         TransportCapability as GatewayTransportCapability,
     },
     envelope::GatewayEnvelope,
@@ -1168,6 +1219,11 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
             supported_encodings: vec!["utf-8".to_string()],
             bidirectional: false,
         }],
+        harnesses: vec![
+            HarnessCapability::openhands_agent_server(),
+            HarnessCapability::codex_app_server_future(),
+            HarnessCapability::rust_native_future(),
+        ],
         features: vec![
             GatewayFeatureCapability {
                 feature: "task_graph".to_string(),
@@ -1341,6 +1397,21 @@ mod tests {
             .collect();
 
         assert_eq!(transports, vec!["loopback_http"]);
+
+        let harnesses: Vec<(&str, bool)> = capabilities
+            .harnesses
+            .iter()
+            .map(|harness| (harness.kind.as_str(), harness.available))
+            .collect();
+
+        assert_eq!(
+            harnesses,
+            vec![
+                ("openhands_agent_server", true),
+                ("codex_app_server", false),
+                ("rust_native", false),
+            ]
+        );
     }
 
     #[test]

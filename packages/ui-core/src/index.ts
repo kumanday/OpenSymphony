@@ -59,6 +59,7 @@ export {
 export type {
   EditableProfileInput,
   GatewayReader,
+  ModelProfileController,
   OpenSymphonyAppHandle,
   OpenSymphonyAppOptions,
   ProfileController,

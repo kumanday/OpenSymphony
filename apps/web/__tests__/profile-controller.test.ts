@@ -67,4 +67,28 @@ describe("web profile controller", () => {
       gatewayUrl: "http://localhost:2468",
     });
   });
+
+  it("creates and removes stored profiles", async () => {
+    const storage = new MemoryStorage();
+    const controller = createWebProfileController({
+      defaultGatewayUrl: "http://127.0.0.1:5173",
+      storage,
+    });
+
+    const created = await controller.storeProfile({
+      label: "Hosted Gateway",
+      kind: "hosted_gateway",
+      gatewayUrl: "https://gateway.example",
+    });
+    await controller.setActiveProfile(created.id);
+
+    let profiles = await controller.listProfiles();
+    expect(profiles).toHaveLength(2);
+    expect(profiles.find((profile) => profile.id === created.id)?.active).toBe(true);
+
+    profiles = await controller.removeProfile(created.id);
+    expect(profiles).toHaveLength(1);
+    expect(profiles.some((profile) => profile.id === created.id)).toBe(false);
+    expect(profiles[0].active).toBe(true);
+  });
 });
