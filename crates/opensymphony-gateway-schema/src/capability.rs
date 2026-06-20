@@ -205,7 +205,7 @@ impl HarnessCapability {
                 retry: true,
                 cancel: true,
                 pause: false,
-                resume: true,
+                resume: false,
                 approve: true,
                 reject: true,
                 comment: true,
@@ -246,7 +246,7 @@ impl HarnessCapability {
             },
             pause_resume: HarnessPauseResumeCapability {
                 pause: false,
-                resume: true,
+                resume: false,
             },
             history: HarnessHistoryCapability {
                 fetch_history: true,
@@ -257,7 +257,7 @@ impl HarnessCapability {
             notes: vec!["Future adapter shaped around JSON-RPC requests and notifications.".into()],
             feature_gaps: vec![
                 "Production adapter implementation is out of scope for COE-408.".into(),
-                "Pause semantics need protocol confirmation before being advertised as available."
+                "Pause/resume semantics need protocol confirmation before being advertised as available."
                     .into(),
             ],
         }

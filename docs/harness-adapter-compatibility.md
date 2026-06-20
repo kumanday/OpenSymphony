@@ -38,14 +38,14 @@ Known gaps:
 ## Codex App Server
 
 Codex app-server fits the same contract as a future JSON-RPC adapter. Requests
-map to start thread/turn, send input, approve/reject, cancel, and resume
-operations. Notifications map to OpenSymphony runtime events with raw payload
-retention, cursor replay, and correlation IDs at the gateway layer.
+map to start thread/turn, send input, approve/reject, and cancel operations.
+Notifications map to OpenSymphony runtime events with raw payload retention,
+cursor replay, and correlation IDs at the gateway layer.
 
 Known gaps:
 
 - Production adapter implementation is out of scope for COE-408.
-- Pause semantics need protocol confirmation before being advertised as
+- Pause/resume semantics need protocol confirmation before being advertised as
   available.
 - WebSocket transport remains experimental until benchmarked and secured; stdio
   is the preferred local integration mode.
