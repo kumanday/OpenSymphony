@@ -102,6 +102,7 @@ areas:
       linear_labels:
       - configuration
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -234,6 +235,7 @@ areas:
       docs:
       - docs/hosted-client-PRD.md
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'

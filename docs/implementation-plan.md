@@ -210,7 +210,7 @@ rich-client-hosted-mode wave.
 
 ## Current model
 
-- COE-408 contributed: PR #129: Add harness adapter capability discovery (merge `96345e3`)
+- COE-423 contributed: PR #130: feat(gateway): add model credential settings seam (merge `07274f4`)
 
 ## Important invariants
 
@@ -227,10 +227,10 @@ rich-client-hosted-mode wave.
 
 ## Recent changes
 
-- COE-408: Harness Adapter And Capability Model
+- COE-423: Model And Credential Settings
 
 ## Source refs
 
-- COE-408
+- COE-423
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

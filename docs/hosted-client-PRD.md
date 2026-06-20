@@ -705,7 +705,7 @@ Candidate features:
 
 ## Current model
 
-- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
+- COE-423 contributed: PR #130: feat(gateway): add model credential settings seam (merge `07274f4`)
 
 ## Important invariants
 
@@ -722,10 +722,10 @@ Candidate features:
 
 ## Recent changes
 
-- COE-419: Hosted Auth Placeholders And Web Parity
+- COE-423: Model And Credential Settings
 
 ## Source refs
 
-- COE-419
+- COE-423
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
