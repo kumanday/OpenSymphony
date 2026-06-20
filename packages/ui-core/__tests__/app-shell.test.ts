@@ -360,6 +360,20 @@ function buildModelProfileController(
       });
       return active;
     },
+    async removeProfile(profileId) {
+      const index = saved.findIndex((profile) => profile.id === profileId);
+      if (index < 0) {
+        throw new Error(`Unknown model profile: ${profileId}`);
+      }
+      if (saved.length <= 1) {
+        throw new Error("Cannot remove the last model profile");
+      }
+      saved.splice(index, 1);
+      if (!saved.some((profile) => profile.active) && saved[0]) {
+        saved[0].active = true;
+      }
+      return saved;
+    },
   };
 }
 
@@ -613,12 +627,24 @@ describe("OpenSymphonyApp mount", () => {
   it("edits a subscription-backed model profile", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    const modelProfileController = buildModelProfileController();
+    const profiles = defaultModelProfiles();
+    profiles[1] = {
+      ...profiles[1],
+      subscriptionCredential: {
+        ...profiles[1].subscriptionCredential!,
+        authMethod: "browser",
+        openBrowser: true,
+        forceLogin: true,
+        accountIdentityHeader: "X-OpenSymphony-Account",
+      },
+    };
+    const modelProfileController = buildModelProfileController(profiles);
     const handle = renderOpenSymphonyApp({
       root,
       mode: "web",
       transport: buildTransport(),
       modelProfileController,
+      initialModelProfiles: profiles,
     });
 
     await flushUntil(() => root.querySelector("[data-model-profile-select]") !== null);
@@ -646,9 +672,42 @@ describe("OpenSymphonyApp mount", () => {
     expect(saved?.apiKeyRef).toBeNull();
     expect(saved?.subscriptionCredential?.authDirectoryEnv).toBe("OPENHANDS_AUTH_DIR");
     expect(saved?.subscriptionCredential?.provider).toBe("openai");
-    expect(saved?.subscriptionCredential?.authMethod).toBe("device_code");
+    expect(saved?.subscriptionCredential?.authMethod).toBe("browser");
+    expect(saved?.subscriptionCredential?.openBrowser).toBe(true);
+    expect(saved?.subscriptionCredential?.forceLogin).toBe(true);
+    expect(saved?.subscriptionCredential?.accountIdentityHeader).toBe("X-OpenSymphony-Account");
     expect(saved?.credentialStorage).toBe("openhands_auth_directory");
     expect(saved?.harnesses).toEqual(["openhands_agent_server", "codex_app_server"]);
+
+    await handle.destroy();
+  });
+
+  it("creates and removes model profiles from the panel", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() => root.querySelector("[data-new-model-profile]") !== null);
+    const startingCount = root.querySelectorAll("[data-model-profile-select] option").length;
+    (root.querySelector("[data-new-model-profile]") as HTMLButtonElement).click();
+
+    await flushUntil(() =>
+      root.querySelectorAll("[data-model-profile-select] option").length === startingCount + 1,
+    );
+    const createdId = (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).value;
+    expect(modelProfileController.saved.some((profile) => profile.id === createdId)).toBe(true);
+
+    (root.querySelector("[data-remove-model-profile]") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      !modelProfileController.saved.some((profile) => profile.id === createdId),
+    );
+    expect(root.querySelectorAll("[data-model-profile-select] option")).toHaveLength(startingCount);
 
     await handle.destroy();
   });
@@ -681,6 +740,32 @@ describe("OpenSymphonyApp mount", () => {
     );
     expect(root.querySelector(".os-topbar p")?.textContent).not.toContain("Model profile save failed");
     expect(root.querySelector(".os-status-connected")).not.toBeNull();
+    expect(root.querySelector(".os-status-failed")).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("keeps model profile load failures separate from gateway connection health", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController: {
+        ...modelProfileController,
+        async listProfiles() {
+          throw new Error("settings store unavailable");
+        },
+      },
+    });
+
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-profile-error']")?.textContent?.includes("Model profiles unavailable: settings store unavailable") ?? false,
+    );
+    await flushUntil(() => root.querySelector(".os-status-connected") !== null);
+    expect(root.querySelector(".os-topbar p")?.textContent).not.toContain("Model profiles unavailable");
     expect(root.querySelector(".os-status-failed")).toBeNull();
 
     await handle.destroy();

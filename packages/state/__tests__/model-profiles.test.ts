@@ -110,6 +110,11 @@ describe("createModelProfileStore", () => {
     expect(saved?.harnesses).toContain("custom_harness");
     expect(saved?.metadata.reasoningEffort).toBe("provider-ultra");
     expect(profiles.find((candidate) => candidate.id === profile.id)?.active).toBe(true);
+
+    await reloaded.removeProfile(profile.id);
+    const afterRemove = await reloaded.listProfiles();
+    expect(afterRemove.some((candidate) => candidate.id === profile.id)).toBe(false);
+    expect(afterRemove.length).toBeGreaterThan(0);
   });
 
   it("serializes concurrent profile writes", async () => {
@@ -136,5 +141,13 @@ describe("createModelProfileStore", () => {
     };
 
     await expect(store.storeProfile(profile)).rejects.toThrow("Credential ref");
+  });
+
+  it("rejects removing an unknown or final model profile", async () => {
+    const profile = { ...createModelProfile("api_key"), id: "only-profile" };
+    const store = createModelProfileStore({ defaults: [profile] });
+
+    await expect(store.removeProfile("missing-profile")).rejects.toThrow("Unknown model profile");
+    await expect(store.removeProfile(profile.id)).rejects.toThrow("Cannot remove the last model profile");
   });
 });

@@ -119,6 +119,7 @@ export interface ModelProfileStore {
   listProfiles(): Promise<ModelConfigurationProfile[]>;
   storeProfile(profile: ModelConfigurationProfile): Promise<ModelConfigurationProfile>;
   setActiveProfile(profileId: string): Promise<ModelConfigurationProfile>;
+  removeProfile(profileId: string): Promise<ModelConfigurationProfile[]>;
 }
 
 export interface ModelProfileStoreOptions {
@@ -206,6 +207,23 @@ export function createModelProfileStore(
           activeProfileId: profileId,
         });
         return next.profiles.find((profile) => profile.id === profileId)!;
+      });
+    },
+    async removeProfile(profileId) {
+      return serialize(() => {
+        const current = read();
+        if (!current.profiles.some((profile) => profile.id === profileId)) {
+          throw new Error(`Unknown model profile: ${profileId}`);
+        }
+        if (current.profiles.length <= 1) {
+          throw new Error("Cannot remove the last model profile");
+        }
+        const next = write({
+          profiles: current.profiles.filter((profile) => profile.id !== profileId),
+          activeProfileId:
+            current.activeProfileId === profileId ? null : current.activeProfileId,
+        });
+        return next.profiles;
       });
     },
   };

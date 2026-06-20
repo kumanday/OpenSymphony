@@ -125,6 +125,7 @@ export interface ModelProfileController {
   listProfiles(): Promise<ModelConfigurationProfile[]>;
   storeProfile(profile: ModelConfigurationProfile): Promise<ModelConfigurationProfile>;
   setActiveProfile(profileId: string): Promise<ModelConfigurationProfile>;
+  removeProfile(profileId: string): Promise<ModelConfigurationProfile[]>;
 }
 
 export interface EditableProfileInput {
@@ -375,12 +376,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     try {
       const profiles = await this.options.modelProfileController.listProfiles();
       this.state.modelProfiles = profiles.length > 0 ? profiles : defaultModelProfiles();
-      const active = this.state.modelProfiles.find((profile) => profile.active)
+      const active = this.state.modelProfiles.find((profile) => profile.id === this.state.activeModelProfileId)
+        ?? this.state.modelProfiles.find((profile) => profile.active)
         ?? this.state.modelProfiles[0]
         ?? null;
       this.state.activeModelProfileId = active?.id ?? null;
+      this.state.modelProfileError = null;
     } catch (error) {
-      this.state.connectionMessage = `Model profiles unavailable: ${errorMessage(error)}`;
+      this.state.modelProfileError = `Model profiles unavailable: ${errorMessage(error)}`;
     }
   }
 
@@ -806,8 +809,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!controller) {
       return;
     }
-    const active = activeModelProfile(this.state.modelProfiles, this.state.activeModelProfileId);
+    const selectedProfileId = this.valueOf<HTMLSelectElement>("[data-model-profile-select]")
+      || this.state.activeModelProfileId;
+    const active = activeModelProfile(this.state.modelProfiles, selectedProfileId);
     const mode = modelModeFromValue(this.valueOf<HTMLSelectElement>("[data-model-mode]"));
+    const baseProfile = active ?? createModelProfile(mode);
     const label = this.valueOf<HTMLInputElement>("[data-model-label]").trim() || active?.label || "Model profile";
     const model = this.valueOf<HTMLInputElement>("[data-model-name]").trim();
     if (!model) {
@@ -818,14 +824,15 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
     const credentialInput = this.valueOf<HTMLInputElement>("[data-model-credential-ref]").trim();
     const credentialStorage = credentialStorageFromValue(this.valueOf<HTMLSelectElement>("[data-model-credential-storage]"));
+    const subscriptionCredentialDefaults = defaultModelProfiles()
+      .find((profile) => profile.mode === "subscription")!
+      .subscriptionCredential!;
     const subscriptionCredential = mode === "subscription"
       ? {
+          ...subscriptionCredentialDefaults,
+          ...baseProfile.subscriptionCredential,
           provider: this.valueOf<HTMLInputElement>("[data-model-subscription-provider]").trim(),
           authDirectoryEnv: credentialInput || null,
-          authMethod: "device_code" as const,
-          openBrowser: false,
-          forceLogin: false,
-          accountIdentityHeader: null,
         }
       : null;
     const credentialError = mode === "api_key"
@@ -836,7 +843,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.render();
       return;
     }
-    const baseProfile = active ?? createModelProfile(mode);
     const activeFlag = this.options.root.querySelector<HTMLInputElement>("[data-model-active]")?.checked ?? baseProfile.active;
     const profile: ModelConfigurationProfile = {
       ...baseProfile,
@@ -877,6 +883,50 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.render();
     } catch (error) {
       this.state.modelProfileError = `Model profile save failed: ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private async createModelProfileDraft(): Promise<void> {
+    const controller = this.options.modelProfileController;
+    if (!controller) {
+      return;
+    }
+    const active = activeModelProfile(this.state.modelProfiles, this.state.activeModelProfileId);
+    const draft = createModelProfile(active?.mode ?? "api_key");
+    try {
+      const saved = await controller.storeProfile(draft);
+      this.state.modelProfiles = [
+        ...this.state.modelProfiles.filter((profile) => profile.id !== saved.id),
+        saved,
+      ];
+      this.state.activeModelProfileId = saved.id;
+      this.state.modelProfileError = null;
+      this.render();
+    } catch (error) {
+      this.state.modelProfileError = `Model profile create failed: ${errorMessage(error)}`;
+      this.render();
+    }
+  }
+
+  private async removeModelProfile(): Promise<void> {
+    const controller = this.options.modelProfileController;
+    if (!controller) {
+      return;
+    }
+    const active = activeModelProfile(this.state.modelProfiles, this.state.activeModelProfileId);
+    if (!active) {
+      return;
+    }
+    try {
+      const profiles = await controller.removeProfile(active.id);
+      const nextActive = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
+      this.state.modelProfiles = profiles;
+      this.state.activeModelProfileId = nextActive?.id ?? null;
+      this.state.modelProfileError = null;
+      this.render();
+    } catch (error) {
+      this.state.modelProfileError = `Model profile remove failed: ${errorMessage(error)}`;
       this.render();
     }
   }
@@ -1103,6 +1153,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const modelProfileError = this.state.modelProfileError
       ? `<div class="os-model-error" role="alert" data-testid="model-profile-error">${escapeHtml(this.state.modelProfileError)}</div>`
       : "";
+    const canRemoveProfile = profiles.length > 1;
     return `
       <section class="os-panel os-model-panel" data-testid="model-profile-panel">
         <div class="os-section-head">
@@ -1181,7 +1232,11 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             <input data-model-active type="checkbox" ${active.active ? "checked" : ""} />
             <span>Active</span>
           </label>
-          <button type="button" data-save-model-profile ${this.options.modelProfileController ? "" : "disabled"}>Save</button>
+          <div class="os-model-actions">
+            <button type="button" data-save-model-profile ${this.options.modelProfileController ? "" : "disabled"}>Save</button>
+            <button type="button" data-new-model-profile ${this.options.modelProfileController ? "" : "disabled"}>New</button>
+            <button type="button" data-remove-model-profile ${this.options.modelProfileController && canRemoveProfile ? "" : "disabled"}>Delete</button>
+          </div>
         </div>
         <div class="os-model-meta" data-testid="model-redacted-credential">
           Credential: ${escapeHtml(redactCredentialRef(credentialRef))}
@@ -1414,6 +1469,12 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     });
     this.options.root.querySelector("[data-save-model-profile]")?.addEventListener("click", () => {
       void this.saveModelProfile();
+    });
+    this.options.root.querySelector("[data-new-model-profile]")?.addEventListener("click", () => {
+      void this.createModelProfileDraft();
+    });
+    this.options.root.querySelector("[data-remove-model-profile]")?.addEventListener("click", () => {
+      void this.removeModelProfile();
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-auth-action]").forEach((button) => {
       button.addEventListener("click", () => {
@@ -2992,6 +3053,7 @@ function appShellStyles(): string {
     .os-model-panel { grid-column: 1 / -1; }
     .os-model-layout { display: grid; grid-template-columns: repeat(4, minmax(160px, 1fr)); gap: 10px; align-items: end; }
     .os-model-layout button { align-self: end; }
+    .os-model-actions { display: flex; gap: 8px; align-items: end; flex-wrap: wrap; }
     .os-model-meta { margin-top: 10px; color: #667788; font-size: 12px; }
     .os-model-error { margin-top: 10px; border: 1px solid #f0b88e; border-radius: 6px; padding: 8px 10px; background: #fff7ed; color: #9a3412; font-size: 12px; }
     .os-check-field { min-height: 34px; display: inline-flex; align-items: center; gap: 8px; color: #536170; font-size: 12px; }
