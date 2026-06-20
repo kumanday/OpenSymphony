@@ -165,6 +165,7 @@ async function waitForReadyz(url, timeoutMs = 5000) {
     const abort = setTimeout(() => controller.abort(), Math.min(remainingMs, 500));
     try {
       const response = await fetch(url, { signal: controller.signal });
+      await response.arrayBuffer();
       if (response.ok) return true;
       lastError = new Error(`readyz returned ${response.status}`);
     } catch (error) {
@@ -222,7 +223,7 @@ function requestOverSocket(ws, id, method, params = {}, timeoutMs = requestTimeo
         reject(error);
         return;
       }
-      if (parsed.id !== id) return;
+      if (String(parsed.id) !== String(id)) return;
       cleanup();
       resolve({ latencyMs: performance.now() - startedAt, response: parsed });
     };

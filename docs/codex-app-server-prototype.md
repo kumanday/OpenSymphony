@@ -89,17 +89,53 @@ WebSocket probes are supported. A 10-request local run produced:
 
 ```json
 {
-  "stdioInitializeLatencyMs": 126.372,
-  "websocketInitializeLatencyMs": 1.363,
-  "websocketQueuedRequests": 10,
-  "websocketQueuedResponses": 10,
-  "websocketRequestsPerSecond": 10822.99,
-  "websocketLatencyMs": { "p50": 0.526, "p95": 0.554, "max": 0.554 },
-  "websocketReconnectLatencyMs": 1.571,
-  "websocketReconnectResponse": "ok",
-  "websocketLocalhostOnly": true,
-  "capabilityTokenModeAdvertised": true,
-  "signedBearerModeAdvertised": true
+  "generatedAt": "2026-06-20T06:18:53.559Z",
+  "codexVersion": "codex-cli 0.138.0",
+  "stdio": {
+    "transport": "stdio",
+    "initializeLatencyMs": 119.594,
+    "response": {
+      "id": 1,
+      "result": {
+        "userAgent": "opensymphony-codex-benchmark/0.138.0 (Mac OS 26.4.0; arm64) dumb (opensymphony-codex-benchmark; 0.0.0)",
+        "codexHome": "/home/user/.codex",
+        "platformFamily": "unix",
+        "platformOs": "macos"
+      }
+    }
+  },
+  "websocket": {
+    "transport": "websocket_loopback",
+    "port": 18772,
+    "initializeLatencyMs": 1.096,
+    "queuedRequests": 10,
+    "queuedResponses": 10,
+    "queueElapsedMs": 0.934,
+    "requestsPerSecond": 10701.86,
+    "latencyMs": {
+      "p50": 0.488,
+      "p95": 0.586,
+      "max": 0.586
+    },
+    "reconnectLatencyMs": 1.466,
+    "reconnectResponse": "ok",
+    "exposure": {
+      "listener": "ws://127.0.0.1:18772",
+      "localhostOnly": true,
+      "authModesFromHelp": [
+        "capability-token",
+        "signed-bearer-token"
+      ]
+    }
+  },
+  "secureExposure": {
+    "transport": "websocket_secure_exposure",
+    "helpSha256": "ebddcbae81d5d6520609ad5605d069ddaf1d4c02cc97cc99d2585757aa4364ff",
+    "hasCapabilityTokenMode": true,
+    "hasSignedBearerMode": true,
+    "hasTokenFileFlag": true,
+    "hasSharedSecretFlag": true
+  }
 }
 ```
 
