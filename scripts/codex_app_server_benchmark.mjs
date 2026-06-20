@@ -422,19 +422,31 @@ async function runWebSocketProbe(secureExposure) {
       stdio: ["ignore", "pipe", "pipe"],
     }),
   );
-  let stdout = "";
-  let stderr = "";
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  const decodeOutput = () => ({
+    stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+    stderr: Buffer.concat(stderrChunks).toString("utf8"),
+  });
   child.stdout.on("data", (chunk) => {
-    stdout += chunk.toString("utf8");
+    stdoutChunks.push(chunk);
   });
   child.stderr.on("data", (chunk) => {
-    stderr += chunk.toString("utf8");
+    stderrChunks.push(chunk);
   });
 
   let ws = null;
   let ws2 = null;
   try {
-    await waitForReadyz(`http://127.0.0.1:${port}/readyz`);
+    const exitedBeforeReadyz = once(child, "exit").then(([code, signal]) => {
+      const { stdout, stderr } = decodeOutput();
+      const suffix = signal ? `signal ${signal}` : `code ${code}`;
+      throw new Error(
+        `codex app-server exited before readyz with ${suffix}; stdout=${JSON.stringify(stdout.trim())}; stderr=${JSON.stringify(stderr.trim())}`,
+      );
+    });
+    exitedBeforeReadyz.catch(() => {});
+    await Promise.race([waitForReadyz(`http://127.0.0.1:${port}/readyz`), exitedBeforeReadyz]);
 
     ws = await openSocket(`ws://127.0.0.1:${port}`);
     const initialize = await requestOverSocket(ws, 1, "initialize", {
@@ -471,6 +483,8 @@ async function runWebSocketProbe(secureExposure) {
     });
     assertJsonRpcResult("websocket reconnect initialize", reconnectInitialize.response);
     const reconnectMs = performance.now() - reconnectStartedAt;
+    const { stdout, stderr } = decodeOutput();
+    const stderrTrimmed = stderr.trim();
 
     return {
       transport: "websocket_loopback",
@@ -488,6 +502,8 @@ async function runWebSocketProbe(secureExposure) {
       reconnectLatencyMs: Number(reconnectMs.toFixed(3)),
       reconnectResponse: "ok",
       stdoutBytes: Buffer.byteLength(stdout, "utf8"),
+      stderrBytes: Buffer.byteLength(stderr, "utf8"),
+      stderrPreview: stderrTrimmed ? stderrTrimmed.slice(-1000) : null,
       exposure: {
         listener: `ws://127.0.0.1:${port}`,
         localhostOnly: /binds localhost only/.test(`${stdout}\n${stderr}`),
@@ -513,6 +529,7 @@ async function runHelpProbe() {
   const help = await collectChildOutput(child, "codex app-server --help");
   return {
     transport: "websocket_secure_exposure",
+    authEvidence: "advertised_in_help",
     helpSha256: createHash("sha256").update(help).digest("hex"),
     hasCapabilityTokenMode: help.includes("capability-token"),
     hasSignedBearerMode: help.includes("signed-bearer-token"),

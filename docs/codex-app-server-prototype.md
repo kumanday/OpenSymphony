@@ -89,8 +89,9 @@ The script performs:
 - WebSocket `initialize` latency,
 - queued `thread/loaded/list` request throughput and p50/p95 latency,
 - reconnect by closing the socket, opening a new socket, and initializing again,
-- secure exposure checks for localhost-only listener output and advertised
-  capability-token/signed-bearer WebSocket auth flags.
+- secure exposure checks for runtime localhost-only listener output and
+  capability-token/signed-bearer WebSocket auth flags advertised by
+  `codex app-server --help`.
 
 Use `--skip-websocket` when the installed Codex version lacks WebSocket support.
 
@@ -133,6 +134,8 @@ WebSocket probes are supported. A 10-request local run produced:
     "reconnectLatencyMs": 0.853,
     "reconnectResponse": "ok",
     "stdoutBytes": 0,
+    "stderrBytes": 222,
+    "stderrPreview": "codex app-server (WebSockets)\n  listening on: ws://127.0.0.1:18779\n  readyz: http://127.0.0.1:18779/readyz\n  healthz: http://127.0.0.1:18779/healthz\n  note: binds localhost only (use SSH port-forwarding for remote access)",
     "exposure": {
       "listener": "ws://127.0.0.1:18779",
       "localhostOnly": true,
@@ -144,6 +147,7 @@ WebSocket probes are supported. A 10-request local run produced:
   },
   "secureExposure": {
     "transport": "websocket_secure_exposure",
+    "authEvidence": "advertised_in_help",
     "helpSha256": "ebddcbae81d5d6520609ad5605d069ddaf1d4c02cc97cc99d2585757aa4364ff",
     "hasCapabilityTokenMode": true,
     "hasSignedBearerMode": true,
@@ -168,8 +172,9 @@ codex app-server (WebSockets)
 ```
 
 The production recommendation is to keep WebSocket feature-gated until CI or a
-repeatable developer benchmark records stable throughput, queue, reconnect, and
-auth behavior for the pinned Codex version.
+repeatable developer benchmark records stable throughput, queue, reconnect,
+runtime localhost exposure, and runtime authenticated-listener behavior for the
+pinned Codex version.
 
 ## Model And Credential Reuse
 
