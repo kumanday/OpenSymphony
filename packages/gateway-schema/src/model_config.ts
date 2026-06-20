@@ -199,7 +199,7 @@ export function validateStoredCredentialRef(
   const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const referencePattern = new RegExp(`^${escapedPrefix}[A-Za-z0-9._/@-]{1,128}$`);
   if (!referencePattern.test(trimmed)) {
-    return `Credential ref must match ${prefix}<stored-reference-id>`;
+    return `API key secret must use ${prefix}<name>`;
   }
   return null;
 }

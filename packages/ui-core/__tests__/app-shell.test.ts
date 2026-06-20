@@ -394,6 +394,19 @@ async function flushUntil(
   );
 }
 
+async function expandSettingsPanel(
+  root: HTMLElement,
+  panel: "connection" | "model",
+  readySelector: string,
+): Promise<void> {
+  const toggle = root.querySelector(
+    `[data-toggle-settings='${panel}']`,
+  ) as HTMLButtonElement;
+  expect(toggle).not.toBeNull();
+  toggle.click();
+  await flushUntil(() => root.querySelector(readySelector) !== null);
+}
+
 describe("OpenSymphonyApp mount", () => {
   it("flushUntil rejects with a clear timeout message instead of returning silently", async () => {
     // Regression coverage for the reviewer finding that exhausted
@@ -552,6 +565,7 @@ describe("OpenSymphonyApp mount", () => {
     const profiles = defaultModelProfiles();
     profiles[0].metadata = {
       ...profiles[0].metadata,
+      recommendedFor: ["implementation", "validation"],
       providerFamily: "future-router-hint",
     } as typeof profiles[0]["metadata"];
     const modelProfileController = buildModelProfileController(profiles);
@@ -567,14 +581,20 @@ describe("OpenSymphonyApp mount", () => {
 
     expect(root.querySelector(".os-model-panel h2")?.textContent).toBe("Model Configuration");
     expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("Not configured");
+    expect(root.querySelector("[data-model-credential-ref]")).toBeNull();
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
     expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("password");
+    expect(root.textContent).not.toContain("Cost Profile");
+    expect(root.textContent).not.toContain("Context Window");
+    expect(root.textContent).not.toContain("Recommended For");
+    expect(root.textContent).not.toContain("Subscription Provider");
+    expect(root.textContent).not.toContain("Credential Storage");
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
     (root.querySelector("[data-model-base-url]") as HTMLInputElement).value = "https://models.example.test/v1";
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "local_keychain:custom-api-key";
     (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, custom_harness";
     (root.querySelector("[data-model-reasoning-effort]") as HTMLInputElement).value = "provider-ultra";
-    (root.querySelector("[data-model-recommended-for]") as HTMLInputElement).value = "implementation, validation";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
 
     await flushUntil(() =>
@@ -607,17 +627,16 @@ describe("OpenSymphonyApp mount", () => {
       modelProfileController,
     });
 
-    await flushUntil(() => root.querySelector("[data-model-credential-ref]") !== null);
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "sk-secret-value-123456789";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
-    await flushUntil(() => root.textContent?.includes("Credential ref must match local_keychain:") ?? false);
+    await flushUntil(() => root.textContent?.includes("API key secret must use local_keychain:") ?? false);
 
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "openhands_auth:openai";
-    (root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value = "local_keychain";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
-    await flushUntil(() => root.textContent?.includes("Credential ref must match local_keychain:") ?? false);
+    await flushUntil(() => root.textContent?.includes("API key secret must use local_keychain:") ?? false);
 
     expect(modelProfileController.saved.some((profile) => profile.model === "provider/custom-model-name")).toBe(false);
 
@@ -647,7 +666,7 @@ describe("OpenSymphonyApp mount", () => {
       initialModelProfiles: profiles,
     });
 
-    await flushUntil(() => root.querySelector("[data-model-profile-select]") !== null);
+    await expandSettingsPanel(root, "model", "[data-model-profile-select]");
 
     (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).value = "openai-subscription";
     (root.querySelector("[data-model-profile-select]") as HTMLSelectElement).dispatchEvent(
@@ -655,12 +674,9 @@ describe("OpenSymphonyApp mount", () => {
     );
     await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
     expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("text");
-    expect((root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value).toBe("openhands_auth_directory");
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "codex-subscription-preview";
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "OPENHANDS_AUTH_DIR";
-    (root.querySelector("[data-model-subscription-provider]") as HTMLInputElement).value = "openai";
-    (root.querySelector("[data-model-credential-storage]") as HTMLSelectElement).value = "local_keychain";
     (root.querySelector("[data-model-harnesses]") as HTMLInputElement).value = "openhands_agent_server, codex_app_server";
     (root.querySelector("[data-save-model-profile]") as HTMLButtonElement).click();
 
@@ -694,7 +710,7 @@ describe("OpenSymphonyApp mount", () => {
       modelProfileController,
     });
 
-    await flushUntil(() => root.querySelector("[data-new-model-profile]") !== null);
+    await expandSettingsPanel(root, "model", "[data-new-model-profile]");
     const startingCount = root.querySelectorAll("[data-model-profile-select] option").length;
     (root.querySelector("[data-new-model-profile]") as HTMLButtonElement).click();
 
@@ -724,7 +740,7 @@ describe("OpenSymphonyApp mount", () => {
       modelProfileController,
     });
 
-    await flushUntil(() => root.querySelector("[data-model-active]") !== null);
+    await expandSettingsPanel(root, "model", "[data-model-active]");
     expect((root.querySelector("[data-model-active]") as HTMLInputElement).checked).toBe(true);
 
     (root.querySelector("[data-model-active]") as HTMLInputElement).checked = false;
@@ -754,7 +770,7 @@ describe("OpenSymphonyApp mount", () => {
       },
     });
 
-    await flushUntil(() => root.querySelector("[data-model-credential-ref]") !== null);
+    await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
     await flushUntil(() => root.querySelector(".os-status-connected") !== null);
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "provider/custom-model-name";
@@ -847,7 +863,7 @@ describe("OpenSymphonyApp mount", () => {
       transport: buildTransport(),
     });
 
-    await flushUntil(() => root.querySelector("[data-save-profile]") !== null);
+    await expandSettingsPanel(root, "connection", "[data-save-profile]");
     const save = root.querySelector("[data-save-profile]") as HTMLButtonElement;
     expect(save).not.toBeNull();
     expect(save.disabled).toBe(true);
@@ -887,6 +903,9 @@ describe("OpenSymphonyApp mount", () => {
           managed: false,
         };
       },
+      async removeProfile(): Promise<ConnectionProfile[]> {
+        return [];
+      },
     };
 
     const handle = renderOpenSymphonyApp({
@@ -900,7 +919,7 @@ describe("OpenSymphonyApp mount", () => {
       },
     });
 
-    await flushUntil(() => root.querySelector("[data-save-profile]") !== null);
+    await expandSettingsPanel(root, "connection", "[data-save-profile]");
 
     const gatewayInput = root.querySelector(
       "[data-profile-gateway]",
@@ -917,6 +936,88 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("creates and deletes connection profiles from the panel", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+
+    const profiles: ConnectionProfile[] = [
+      {
+        id: "local",
+        label: "Local",
+        kind: "local_daemon",
+        active: true,
+        gatewayUrl: "http://127.0.0.1:2468",
+        transport: "loopback_http",
+        managed: false,
+      },
+    ];
+    const controller: ProfileController = {
+      async listProfiles() {
+        return profiles;
+      },
+      async storeProfile(profile) {
+        const saved: ConnectionProfile = {
+          id: profile.id ?? "created",
+          label: profile.label,
+          kind: profile.kind,
+          active: true,
+          gatewayUrl: profile.gatewayUrl,
+          transport: "loopback_http",
+          managed: false,
+        };
+        const index = profiles.findIndex((candidate) => candidate.id === saved.id);
+        if (index >= 0) {
+          profiles[index] = saved;
+        } else {
+          profiles.push(saved);
+        }
+        return saved;
+      },
+      async setActiveProfile(profileId) {
+        const active = profiles.find((profile) => profile.id === profileId);
+        if (!active) {
+          throw new Error(`Unknown profile: ${profileId}`);
+        }
+        profiles.forEach((profile) => {
+          profile.active = profile.id === profileId;
+        });
+        return active;
+      },
+      async removeProfile(profileId) {
+        const index = profiles.findIndex((profile) => profile.id === profileId);
+        if (index < 0) {
+          throw new Error(`Unknown profile: ${profileId}`);
+        }
+        profiles.splice(index, 1);
+        if (profiles[0]) {
+          profiles[0].active = true;
+        }
+        return profiles;
+      },
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      profileController: controller,
+    });
+
+    await expandSettingsPanel(root, "connection", "[data-new-profile]");
+    (root.querySelector("[data-new-profile]") as HTMLButtonElement).click();
+    await flushUntil(() =>
+      Array.from(root.querySelectorAll("[data-profile-select] option")).some((option) =>
+        option.getAttribute("value") === "created"
+      ),
+    );
+    expect(profiles.some((profile) => profile.id === "created")).toBe(true);
+
+    (root.querySelector("[data-remove-profile]") as HTMLButtonElement).click();
+    await flushUntil(() => !profiles.some((profile) => profile.id === "created"));
+    expect(root.querySelectorAll("[data-profile-select] option")).toHaveLength(1);
+
+    await handle.destroy();
+  });
+
   it("renders the profile panel and provided initial profile when no controller is set", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -927,6 +1028,8 @@ describe("OpenSymphonyApp mount", () => {
     });
 
     await flushUntil(() => root.querySelector(".os-profile-panel") !== null);
+    expect(root.querySelector("[data-profile-select]")).toBeNull();
+    await expandSettingsPanel(root, "connection", "[data-profile-select]");
     const select = root.querySelector(
       "[data-profile-select]",
     ) as HTMLSelectElement;

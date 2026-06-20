@@ -140,7 +140,7 @@ describe("createModelProfileStore", () => {
       apiKeyRef: "sk-secret-value-123456789",
     };
 
-    await expect(store.storeProfile(profile)).rejects.toThrow("Credential ref");
+    await expect(store.storeProfile(profile)).rejects.toThrow("API key secret");
   });
 
   it("allows the active model profile to be deactivated", async () => {

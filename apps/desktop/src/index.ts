@@ -277,6 +277,13 @@ export function createDesktopProfileController(): ProfileController | undefined 
       });
       return toConnectionProfile(active);
     },
+
+    async removeProfile(profileId: string) {
+      const profiles = await invoke<NativeProfileResponse[]>("remove_profile", {
+        profileId,
+      });
+      return profiles.map(toConnectionProfile);
+    },
   };
 }
 

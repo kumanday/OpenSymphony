@@ -79,6 +79,8 @@ describe("desktop app shell render", () => {
     expect(root.querySelector(".os-topbar")).not.toBeNull();
     expect(root.querySelector(".os-grid")).not.toBeNull();
     expect(root.querySelector(".os-profile-panel")).not.toBeNull();
+    (root.querySelector("[data-toggle-settings='connection']") as HTMLButtonElement).click();
+    await Promise.resolve();
     expect(root.querySelector("[data-profile-select]")).not.toBeNull();
     expect(root.querySelector("[data-profile-gateway]")).not.toBeNull();
     expect(root.querySelector("[data-save-profile]")).not.toBeNull();
@@ -117,6 +119,41 @@ describe("desktop app shell render", () => {
       },
     ]);
     expect(profile.gatewayUrl).toBe("http://127.0.0.1:2468");
+  });
+
+  it("removes profiles with Tauri's camelCase command argument", async () => {
+    const calls: TauriInvokeCall[] = [];
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          return [
+            {
+              id: "local-daemon",
+              label: "Local Gateway",
+              kind: "local_daemon",
+              gateway_url: "http://127.0.0.1:2468",
+              transport: "loopback_http",
+              managed: false,
+              active: true,
+            },
+          ];
+        },
+      },
+    };
+
+    const controller = createDesktopProfileController();
+
+    expect(controller).toBeDefined();
+    const profiles = await controller!.removeProfile("hosted");
+
+    expect(calls).toEqual([
+      {
+        command: "remove_profile",
+        args: { profileId: "hosted" },
+      },
+    ]);
+    expect(profiles).toHaveLength(1);
   });
 
   it("uses native Tauri commands for desktop gateway reads", async () => {

@@ -56,7 +56,7 @@ export function createWebProfileController(
 
     async storeProfile(input: EditableProfileInput) {
       const stored = read();
-      const id = input.id ?? stored.activeProfileId ?? nextProfileId();
+      const id = input.id ?? nextProfileId();
       const saved = profileFromInput(input, id);
       const profiles = stored.profiles.filter((profile) => profile.id !== id);
       const next = normalizeStored(
@@ -88,6 +88,29 @@ export function createWebProfileController(
       );
       write(next);
       return next.profiles.find((profile) => profile.id === profileId)!;
+    },
+
+    async removeProfile(profileId: string) {
+      const stored = read();
+      if (!stored.profiles.some((profile) => profile.id === profileId)) {
+        throw new Error(`Unknown profile: ${profileId}`);
+      }
+      if (stored.profiles.length <= 1) {
+        throw new Error("Cannot remove the last profile");
+      }
+      const profiles = stored.profiles.filter((profile) => profile.id !== profileId);
+      const next = normalizeStored(
+        {
+          profiles,
+          activeProfileId:
+            stored.activeProfileId === profileId
+              ? profiles[0]?.id ?? null
+              : stored.activeProfileId,
+        },
+        options.defaultGatewayUrl,
+      );
+      write(next);
+      return next.profiles;
     },
   };
 }
