@@ -1,7 +1,7 @@
 ---
 id: OSYM-763
 title: Model Configuration UI And Routing Metadata
-milestone: "M12: Provider, Harness, And Model Readiness"
+milestone: "M10.3: Codex And Subscription Readiness"
 priority: 3
 estimate: 5
 blockedBy: ["OSYM-762"]

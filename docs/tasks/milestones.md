@@ -85,6 +85,23 @@ Tasks:
 - OSYM-741 Browser Transport And Remote Stream Protocols
 - OSYM-742 Hosted Auth Placeholders And Web Parity
 
+## M10.3: Codex And Subscription Readiness
+
+Goal: Deliver local Codex app-server support and ChatGPT subscription credential foundations before full hosted mode.
+
+Placement: After M10 web client/external gateway work and before M10.5 OKF Memory Bundle Foundation, M11 Hosted Alpha, and the broader M12 provider/harness backlog.
+
+Tasks:
+
+- OSYM-760 Harness Adapter And Capability Model
+- OSYM-761 Model And Credential Settings
+- OSYM-762 OpenHands Subscription Credential Adapter
+- OSYM-763 Model Configuration UI And Routing Metadata
+- OSYM-764 Codex App-Server Prototype And Benchmarks
+- OSYM-766 ChatGPT OAuth For Codex Harness
+- OSYM-767 Codex Production Harness Enablement
+- OSYM-765 Codex Approvals And Cross-Harness Routing
+
 ## M10.5: OKF Memory Bundle Foundation
 
 Goal: Evolve project memory into OKF-conformant bundles while keeping existing memory query, docs sync, and privacy behavior intact.
@@ -108,6 +125,7 @@ Tasks:
 - OSYM-752 Hosted Workspace Isolation And Runtime Pool
 - OSYM-753 Client-Independent Run Persistence
 - OSYM-754 Hosted Audit, Metrics, And Admin Controls
+- OSYM-755 Hosted Subscription Credential Broker And Secret Store
 
 ## M11.5: LLM Wiki Graph View
 
@@ -125,16 +143,11 @@ Tasks:
 
 ## M12: Provider, Harness, And Model Readiness
 
-Goal: Add the model, credential, and harness seams for OpenAI ChatGPT/Codex subscription-backed OpenHands use, feature-gated Codex app-server prototypes, and future cross-harness routing.
+Goal: Hold follow-on provider, harness, and model readiness work after the near-term Codex subscription-readiness milestone.
 
 Tasks:
 
-- OSYM-760 Harness Adapter And Capability Model
-- OSYM-761 Model And Credential Settings
-- OSYM-762 OpenHands Subscription Credential Adapter
-- OSYM-763 Model Configuration UI And Routing Metadata
-- OSYM-764 Codex App-Server Prototype And Benchmarks
-- OSYM-765 Codex Approvals And Cross-Harness Routing
+- Follow-on tasks to be assigned after M10.3 Codex And Subscription Readiness.
 
 ## M12.5: ACP Debugging And IDE Attach
 

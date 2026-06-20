@@ -20,6 +20,9 @@ milestones:
   'M10: Web Client And External Gateway':
     milestoneId: 58d8ef29-ea13-4cd2-b7a5-3768070e8a01
     name: 'M10: Web Client And External Gateway'
+  'M10.3: Codex And Subscription Readiness':
+    milestoneId: 613f83d5-7208-47ea-9d5e-0db62bdd434c
+    name: 'M10.3: Codex And Subscription Readiness'
   'M11: Hosted Alpha':
     milestoneId: 4a82a4eb-1782-47a1-8a47-7afb0210cb76
     name: 'M11: Hosted Alpha'
@@ -240,6 +243,11 @@ tasks:
     issueId: 2684469b-4ea6-465f-be81-11a2737c3d4f
     url: https://linear.app/trilogy-ai-coe/issue/COE-427/hosted-audit-metrics-and-admin-controls
     file: docs/tasks/osym-754-hosted-audit-metrics-and-admin-controls.md
+  OSYM-755:
+    issue: COE-477
+    issueId: 1b0711b0-1418-4ff6-8164-ad4c312bd070
+    url: https://linear.app/trilogy-ai-coe/issue/COE-477/hosted-subscription-credential-broker-and-secret-store
+    file: docs/tasks/osym-755-hosted-subscription-credential-broker-and-secret-store.md
   OSYM-763:
     issue: COE-428
     issueId: bf2051cd-29f4-426f-bc6b-f1f6e68304c1
@@ -250,6 +258,16 @@ tasks:
     issueId: 58baa8e2-9915-404d-9cda-1164ac2190e0
     url: https://linear.app/trilogy-ai-coe/issue/COE-429/codex-approvals-and-cross-harness-routing
     file: docs/tasks/osym-765-codex-approvals-and-cross-harness-routing.md
+  OSYM-766:
+    issue: COE-475
+    issueId: 775ab80a-9fe1-4898-8bb8-1f82cb4534fa
+    url: https://linear.app/trilogy-ai-coe/issue/COE-475/chatgpt-oauth-for-codex-harness
+    file: docs/tasks/osym-766-chatgpt-oauth-for-codex-harness.md
+  OSYM-767:
+    issue: COE-476
+    issueId: 1035cde4-56b5-4a37-a2d5-e18fec4f2ff2
+    url: https://linear.app/trilogy-ai-coe/issue/COE-476/codex-production-harness-enablement
+    file: docs/tasks/osym-767-codex-production-harness-enablement.md
   OSYM-770:
     issue: COE-430
     issueId: 73e4816c-758d-46b9-a598-3a9606961370

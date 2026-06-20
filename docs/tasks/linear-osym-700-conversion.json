@@ -665,7 +665,8 @@
         "COE-421",
         "COE-422",
         "COE-424",
-        "COE-427"
+        "COE-427",
+        "COE-477"
       ]
     },
     "OSYM-751": {
@@ -681,7 +682,7 @@
       ],
       "blocks": [
         "COE-422",
-        "COE-423"
+        "COE-477"
       ]
     },
     "OSYM-752": {
@@ -737,22 +738,32 @@
         "COE-432"
       ]
     },
+    "OSYM-755": {
+      "title": "Hosted Subscription Credential Broker And Secret Store",
+      "linearId": "COE-477",
+      "linearUuid": "1b0711b0-1418-4ff6-8164-ad4c312bd070",
+      "url": "https://linear.app/trilogy-ai-coe/issue/COE-477/hosted-subscription-credential-broker-and-secret-store",
+      "milestone": "M11: Hosted Alpha",
+      "priority": 2,
+      "estimate": 8,
+      "blockedBy": [
+        "COE-420",
+        "COE-421"
+      ],
+      "blocks": []
+    },
     "OSYM-760": {
       "title": "Harness Adapter And Capability Model",
       "linearId": "COE-408",
       "linearUuid": "0be5de05-7f59-4217-a985-5a3787dde922",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-408/harness-adapter-and-capability-model",
-      "milestone": "M12: Provider, Harness, And Model Readiness",
+      "milestone": "M10.3: Codex And Subscription Readiness",
       "priority": 2,
       "estimate": 5,
-      "blockedBy": [
-        "COE-390",
-        "COE-400"
-      ],
+      "blockedBy": [],
       "blocks": [
         "COE-423",
-        "COE-426",
-        "COE-429"
+        "COE-426"
       ]
     },
     "OSYM-761": {
@@ -760,18 +771,16 @@
       "linearId": "COE-423",
       "linearUuid": "8e3d1abf-acef-4465-8fa2-08361b25bb6f",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-423/model-and-credential-settings",
-      "milestone": "M12: Provider, Harness, And Model Readiness",
+      "milestone": "M10.3: Codex And Subscription Readiness",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
-        "COE-409",
-        "COE-421",
         "COE-408"
       ],
       "blocks": [
         "COE-425",
-        "COE-428",
-        "COE-426"
+        "COE-426",
+        "COE-475"
       ]
     },
     "OSYM-762": {
@@ -779,7 +788,7 @@
       "linearId": "COE-425",
       "linearUuid": "548c05c1-1b30-4d67-8f53-3c9a0074d2a4",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-425/openhands-subscription-credential-adapter",
-      "milestone": "M12: Provider, Harness, And Model Readiness",
+      "milestone": "M10.3: Codex And Subscription Readiness",
       "priority": 2,
       "estimate": 8,
       "blockedBy": [
@@ -794,7 +803,7 @@
       "linearId": "COE-428",
       "linearUuid": "bf2051cd-29f4-426f-bc6b-f1f6e68304c1",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-428/model-configuration-ui-and-routing-metadata",
-      "milestone": "M12: Provider, Harness, And Model Readiness",
+      "milestone": "M10.3: Codex And Subscription Readiness",
       "priority": 3,
       "estimate": 5,
       "blockedBy": [
@@ -809,12 +818,46 @@
       "linearId": "COE-426",
       "linearUuid": "d545f1dc-040a-4951-96e7-84f021740cb2",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-426/codex-app-server-prototype-and-benchmarks",
-      "milestone": "M12: Provider, Harness, And Model Readiness",
+      "milestone": "M10.3: Codex And Subscription Readiness",
       "priority": 3,
       "estimate": 8,
       "blockedBy": [
         "COE-408",
         "COE-423"
+      ],
+      "blocks": [
+        "COE-429",
+        "COE-475",
+        "COE-476"
+      ]
+    },
+    "OSYM-766": {
+      "title": "ChatGPT OAuth For Codex Harness",
+      "linearId": "COE-475",
+      "linearUuid": "775ab80a-9fe1-4898-8bb8-1f82cb4534fa",
+      "url": "https://linear.app/trilogy-ai-coe/issue/COE-475/chatgpt-oauth-for-codex-harness",
+      "milestone": "M10.3: Codex And Subscription Readiness",
+      "priority": 2,
+      "estimate": 5,
+      "blockedBy": [
+        "COE-423",
+        "COE-426"
+      ],
+      "blocks": [
+        "COE-476"
+      ]
+    },
+    "OSYM-767": {
+      "title": "Codex Production Harness Enablement",
+      "linearId": "COE-476",
+      "linearUuid": "1035cde4-56b5-4a37-a2d5-e18fec4f2ff2",
+      "url": "https://linear.app/trilogy-ai-coe/issue/COE-476/codex-production-harness-enablement",
+      "milestone": "M10.3: Codex And Subscription Readiness",
+      "priority": 2,
+      "estimate": 8,
+      "blockedBy": [
+        "COE-426",
+        "COE-475"
       ],
       "blocks": [
         "COE-429"
@@ -825,12 +868,13 @@
       "linearId": "COE-429",
       "linearUuid": "58baa8e2-9915-404d-9cda-1164ac2190e0",
       "url": "https://linear.app/trilogy-ai-coe/issue/COE-429/codex-approvals-and-cross-harness-routing",
-      "milestone": "M12: Provider, Harness, And Model Readiness",
+      "milestone": "M10.3: Codex And Subscription Readiness",
       "priority": 3,
       "estimate": 8,
       "blockedBy": [
         "COE-428",
-        "COE-426"
+        "COE-426",
+        "COE-476"
       ],
       "blocks": [
         "COE-430",

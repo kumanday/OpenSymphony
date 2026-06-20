@@ -1,11 +1,11 @@
 ---
 id: OSYM-760
 title: Harness Adapter And Capability Model
-milestone: "M12: Provider, Harness, And Model Readiness"
+milestone: "M10.3: Codex And Subscription Readiness"
 priority: 2
 estimate: 5
-blockedBy: ["OSYM-701", "OSYM-723"]
-blocks: ["OSYM-761", "OSYM-764", "OSYM-765"]
+blockedBy: []
+blocks: ["OSYM-761", "OSYM-764"]
 parent: null
 ---
 

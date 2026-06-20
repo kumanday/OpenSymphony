@@ -1,10 +1,10 @@
 ---
 id: OSYM-765
 title: Codex Approvals And Cross-Harness Routing
-milestone: "M12: Provider, Harness, And Model Readiness"
+milestone: "M10.3: Codex And Subscription Readiness"
 priority: 3
 estimate: 8
-blockedBy: ["OSYM-763", "OSYM-764"]
+blockedBy: ["OSYM-763", "OSYM-764", "OSYM-767"]
 blocks: ["OSYM-770", "OSYM-771"]
 parent: null
 ---

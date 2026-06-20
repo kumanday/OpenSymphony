@@ -189,9 +189,17 @@ milestones instead of broadening the existing hardening milestone:
 
 | Milestone | Placement | Scope |
 |---|---|---|
+| M10.3 Codex And Subscription Readiness | after M10 web client/external gateway work, before M10.5 OKF memory and M11 hosted alpha | local Codex app-server support and ChatGPT subscription credential foundations before full hosted mode |
 | M10.5 OKF Memory Bundle Foundation | after M10 web/client transport, before M11 hosted visibility depends on portable memory documents | OKF concept schema, writer/lint, catalog reindex, import/export, docs sync and MCP/admin parity |
 | M11.5 LLM Wiki Graph View | after M11 hosted identity and visibility foundations, before provider/harness readiness | memory graph DTOs, graph extraction, shared frontend package, Three.js renderer, inspector/accessibility, live privacy gates |
 | M12.5 ACP Debugging And IDE Attach | after M12 harness/model seams, before M13 release hardening | debug attachment refactor, ACP stdio server, Zed setup, Tauri Debug in Zed action, default debug UX transition, integration tests |
+
+M10.3 pulls the shared harness adapter, model/credential settings, OpenHands
+subscription credential adapter, model configuration UI metadata, Codex
+app-server prototype, ChatGPT OAuth readiness, production Codex harness
+enablement, and cross-harness approval/routing work forward before the broader
+hosted-provider backlog. Hosted subscription credential brokering remains in
+M11 so local Codex subscription support is not blocked by hosted secret storage.
 
 The planning source for this wave is
 `docs/tasks/advanced-knowledge-debug-task-package.yaml`. The existing

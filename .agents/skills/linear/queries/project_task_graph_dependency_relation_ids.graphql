@@ -1,0 +1,59 @@
+query ProjectTaskGraphDependencyRelationIds($slug: String!, $first: Int!) {
+  issues(
+    filter: { project: { slugId: { eq: $slug } } }
+    first: $first
+    includeArchived: false
+  ) {
+    nodes {
+      id
+      identifier
+      title
+      url
+      state {
+        id
+        name
+        type
+      }
+      projectMilestone {
+        id
+        name
+      }
+      parent {
+        id
+        identifier
+      }
+      inverseRelations(first: 100) {
+        nodes {
+          id
+          type
+          issue {
+            id
+            identifier
+            title
+            state {
+              id
+              name
+              type
+            }
+          }
+        }
+      }
+      relations(first: 100) {
+        nodes {
+          id
+          type
+          relatedIssue {
+            id
+            identifier
+            title
+            state {
+              id
+              name
+              type
+            }
+          }
+        }
+      }
+    }
+  }
+}

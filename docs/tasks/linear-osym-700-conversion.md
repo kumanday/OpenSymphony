@@ -51,17 +51,20 @@ Project: [OpenSymphony-bootstrap](https://linear.app/trilogy-ai-coe/project/open
 | `OSYM-740` | [COE-401: Web App Entry And Deployment Modes](https://linear.app/trilogy-ai-coe/issue/COE-401/web-app-entry-and-deployment-modes) | M10: Web Client And External Gateway | High | 5 | COE-394 | COE-407, COE-419 |
 | `OSYM-741` | [COE-407: Browser Transport And Remote Stream Protocols](https://linear.app/trilogy-ai-coe/issue/COE-407/browser-transport-and-remote-stream-protocols) | M10: Web Client And External Gateway | Urgent | 8 | COE-393, COE-397, COE-401 | COE-419, COE-420 |
 | `OSYM-742` | [COE-419: Hosted Auth Placeholders And Web Parity](https://linear.app/trilogy-ai-coe/issue/COE-419/hosted-auth-placeholders-and-web-parity) | M10: Web Client And External Gateway | High | 5 | COE-402, COE-417, COE-401, COE-407 | COE-420, COE-431 |
-| `OSYM-750` | [COE-420: Hosted Identity, Auth, And RBAC](https://linear.app/trilogy-ai-coe/issue/COE-420/hosted-identity-auth-and-rbac) | M11: Hosted Alpha | Urgent | 8 | COE-396, COE-407, COE-419 | COE-421, COE-422, COE-424, COE-427 |
-| `OSYM-751` | [COE-421: Hosted Secrets And Linear Connections](https://linear.app/trilogy-ai-coe/issue/COE-421/hosted-secrets-and-linear-connections) | M11: Hosted Alpha | Urgent | 8 | COE-420 | COE-422, COE-423 |
+| `OSYM-750` | [COE-420: Hosted Identity, Auth, And RBAC](https://linear.app/trilogy-ai-coe/issue/COE-420/hosted-identity-auth-and-rbac) | M11: Hosted Alpha | Urgent | 8 | COE-396, COE-407, COE-419 | COE-421, COE-422, COE-424, COE-427, COE-477 |
+| `OSYM-751` | [COE-421: Hosted Secrets And Linear Connections](https://linear.app/trilogy-ai-coe/issue/COE-421/hosted-secrets-and-linear-connections) | M11: Hosted Alpha | Urgent | 8 | COE-420 | COE-422, COE-477 |
 | `OSYM-752` | [COE-422: Hosted Workspace Isolation And Runtime Pool](https://linear.app/trilogy-ai-coe/issue/COE-422/hosted-workspace-isolation-and-runtime-pool) | M11: Hosted Alpha | Urgent | 13 | COE-400, COE-414, COE-420, COE-421 | COE-424 |
 | `OSYM-753` | [COE-424: Client-Independent Run Persistence](https://linear.app/trilogy-ai-coe/issue/COE-424/client-independent-run-persistence) | M11: Hosted Alpha | Urgent | 8 | COE-393, COE-420, COE-422 | COE-427, COE-431 |
 | `OSYM-754` | [COE-427: Hosted Audit, Metrics, And Admin Controls](https://linear.app/trilogy-ai-coe/issue/COE-427/hosted-audit-metrics-and-admin-controls) | M11: Hosted Alpha | High | 8 | COE-420, COE-424 | COE-431, COE-432 |
-| `OSYM-760` | [COE-408: Harness Adapter And Capability Model](https://linear.app/trilogy-ai-coe/issue/COE-408/harness-adapter-and-capability-model) | M12: Provider, Harness, And Model Readiness | High | 5 | COE-390, COE-400 | COE-423, COE-426, COE-429 |
-| `OSYM-761` | [COE-423: Model And Credential Settings](https://linear.app/trilogy-ai-coe/issue/COE-423/model-and-credential-settings) | M12: Provider, Harness, And Model Readiness | High | 8 | COE-409, COE-421, COE-408 | COE-425, COE-428, COE-426 |
-| `OSYM-762` | [COE-425: OpenHands Subscription Credential Adapter](https://linear.app/trilogy-ai-coe/issue/COE-425/openhands-subscription-credential-adapter) | M12: Provider, Harness, And Model Readiness | High | 8 | COE-423 | COE-428 |
-| `OSYM-763` | [COE-428: Model Configuration UI And Routing Metadata](https://linear.app/trilogy-ai-coe/issue/COE-428/model-configuration-ui-and-routing-metadata) | M12: Provider, Harness, And Model Readiness | Normal | 5 | COE-425 | COE-429 |
-| `OSYM-764` | [COE-426: Codex App-Server Prototype And Benchmarks](https://linear.app/trilogy-ai-coe/issue/COE-426/codex-app-server-prototype-and-benchmarks) | M12: Provider, Harness, And Model Readiness | Normal | 8 | COE-408, COE-423 | COE-429 |
-| `OSYM-765` | [COE-429: Codex Approvals And Cross-Harness Routing](https://linear.app/trilogy-ai-coe/issue/COE-429/codex-approvals-and-cross-harness-routing) | M12: Provider, Harness, And Model Readiness | Normal | 8 | COE-428, COE-426 | COE-430, COE-431 |
+| `OSYM-755` | [COE-477: Hosted Subscription Credential Broker And Secret Store](https://linear.app/trilogy-ai-coe/issue/COE-477/hosted-subscription-credential-broker-and-secret-store) | M11: Hosted Alpha | High | 8 | COE-420, COE-421 | None |
+| `OSYM-760` | [COE-408: Harness Adapter And Capability Model](https://linear.app/trilogy-ai-coe/issue/COE-408/harness-adapter-and-capability-model) | M10.3: Codex And Subscription Readiness | High | 5 | None | COE-423, COE-426 |
+| `OSYM-761` | [COE-423: Model And Credential Settings](https://linear.app/trilogy-ai-coe/issue/COE-423/model-and-credential-settings) | M10.3: Codex And Subscription Readiness | High | 8 | COE-408 | COE-425, COE-426, COE-475 |
+| `OSYM-762` | [COE-425: OpenHands Subscription Credential Adapter](https://linear.app/trilogy-ai-coe/issue/COE-425/openhands-subscription-credential-adapter) | M10.3: Codex And Subscription Readiness | High | 8 | COE-423 | COE-428 |
+| `OSYM-763` | [COE-428: Model Configuration UI And Routing Metadata](https://linear.app/trilogy-ai-coe/issue/COE-428/model-configuration-ui-and-routing-metadata) | M10.3: Codex And Subscription Readiness | Normal | 5 | COE-425 | COE-429 |
+| `OSYM-764` | [COE-426: Codex App-Server Prototype And Benchmarks](https://linear.app/trilogy-ai-coe/issue/COE-426/codex-app-server-prototype-and-benchmarks) | M10.3: Codex And Subscription Readiness | Normal | 8 | COE-408, COE-423 | COE-429, COE-475, COE-476 |
+| `OSYM-766` | [COE-475: ChatGPT OAuth For Codex Harness](https://linear.app/trilogy-ai-coe/issue/COE-475/chatgpt-oauth-for-codex-harness) | M10.3: Codex And Subscription Readiness | High | 5 | COE-423, COE-426 | COE-476 |
+| `OSYM-767` | [COE-476: Codex Production Harness Enablement](https://linear.app/trilogy-ai-coe/issue/COE-476/codex-production-harness-enablement) | M10.3: Codex And Subscription Readiness | High | 8 | COE-426, COE-475 | COE-429 |
+| `OSYM-765` | [COE-429: Codex Approvals And Cross-Harness Routing](https://linear.app/trilogy-ai-coe/issue/COE-429/codex-approvals-and-cross-harness-routing) | M10.3: Codex And Subscription Readiness | Normal | 8 | COE-428, COE-426, COE-476 | COE-430, COE-431 |
 | `OSYM-770` | [COE-430: Contract And Local End-To-End Tests](https://linear.app/trilogy-ai-coe/issue/COE-430/contract-and-local-end-to-end-tests) | M13: Hardening And Release Quality | Urgent | 8 | COE-412, COE-414, COE-418, COE-429 | COE-431, COE-432 |
 | `OSYM-771` | [COE-431: Web, Hosted, And Performance Tests](https://linear.app/trilogy-ai-coe/issue/COE-431/web-hosted-and-performance-tests) | M13: Hardening And Release Quality | Urgent | 8 | COE-410, COE-407, COE-424, COE-429, COE-430 | COE-432 |
 | `OSYM-772` | [COE-432: Security, Accessibility, Documentation, And Developer Experience](https://linear.app/trilogy-ai-coe/issue/COE-432/security-accessibility-documentation-and-developer-experience) | M13: Hardening And Release Quality | Urgent | 8 | COE-427, COE-431 | None |
@@ -178,17 +181,20 @@ Project: [OpenSymphony-bootstrap](https://linear.app/trilogy-ai-coe/project/open
 - COE-422 blocks COE-424
 - COE-420 blocks COE-427
 - COE-424 blocks COE-427
-- COE-390 blocks COE-408
-- COE-400 blocks COE-408
-- COE-409 blocks COE-423
-- COE-421 blocks COE-423
+- COE-420 blocks COE-477
+- COE-421 blocks COE-477
 - COE-408 blocks COE-423
 - COE-423 blocks COE-425
+- COE-423 blocks COE-475
 - COE-425 blocks COE-428
 - COE-408 blocks COE-426
 - COE-423 blocks COE-426
+- COE-426 blocks COE-475
+- COE-426 blocks COE-476
+- COE-475 blocks COE-476
 - COE-428 blocks COE-429
 - COE-426 blocks COE-429
+- COE-476 blocks COE-429
 - COE-412 blocks COE-430
 - COE-414 blocks COE-430
 - COE-418 blocks COE-430

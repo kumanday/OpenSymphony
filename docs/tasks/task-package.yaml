@@ -7,6 +7,7 @@ milestones:
   - "M9: Collaborative Planning Alpha"
   - "M9.5: Developer Build Acceleration"
   - "M10: Web Client And External Gateway"
+  - "M10.3: Codex And Subscription Readiness"
   - "M11: Hosted Alpha"
   - "M12: Provider, Harness, And Model Readiness"
   - "M13: Hardening And Release Quality"
@@ -87,6 +88,8 @@ tasks:
     file: docs/tasks/osym-753-client-independent-run-persistence.md
   - id: OSYM-754
     file: docs/tasks/osym-754-hosted-audit-metrics-and-admin-controls.md
+  - id: OSYM-755
+    file: docs/tasks/osym-755-hosted-subscription-credential-broker-and-secret-store.md
   - id: OSYM-760
     file: docs/tasks/osym-760-harness-adapter-and-capability-model.md
   - id: OSYM-761
@@ -99,6 +102,10 @@ tasks:
     file: docs/tasks/osym-764-codex-app-server-prototype-and-benchmarks.md
   - id: OSYM-765
     file: docs/tasks/osym-765-codex-approvals-and-cross-harness-routing.md
+  - id: OSYM-766
+    file: docs/tasks/osym-766-chatgpt-oauth-for-codex-harness.md
+  - id: OSYM-767
+    file: docs/tasks/osym-767-codex-production-harness-enablement.md
   - id: OSYM-770
     file: docs/tasks/osym-770-contract-and-local-end-to-end-tests.md
   - id: OSYM-771

@@ -39,3 +39,6 @@ apps/desktop/src-tauri/gen/
 !.opensymphony/memory/
 .opensymphony/memory/*
 !.opensymphony/memory/memory.yaml
+
+# Codex-specific instructions for local use
+.codex

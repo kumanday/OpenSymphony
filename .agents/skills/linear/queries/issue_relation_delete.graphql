@@ -1,0 +1,5 @@
+mutation IssueRelationDelete($id: String!) {
+  issueRelationDelete(id: $id) {
+    success
+  }
+}
