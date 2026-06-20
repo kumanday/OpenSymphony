@@ -94,6 +94,9 @@ The script performs:
   `codex app-server --help`.
 
 Use `--skip-websocket` when the installed Codex version lacks WebSocket support.
+Queued WebSocket requests use a derived per-request deadline of
+`--request-timeout-ms + --iterations`, so the documented high-iteration range
+does not inherit the default 5s timeout as an accidental whole-batch deadline.
 
 ## Local Benchmark Result
 

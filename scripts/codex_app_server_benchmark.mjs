@@ -59,6 +59,10 @@ function request(id, method, params = {}) {
   return JSON.stringify({ jsonrpc: "2.0", id, method, params });
 }
 
+function websocketBatchTimeoutMs() {
+  return Math.max(requestTimeoutMs, requestTimeoutMs + iterations);
+}
+
 async function terminateChild(child, graceMs = 1000) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = once(child, "exit").then(() => true);
@@ -170,7 +174,7 @@ class LineReader {
   }
 }
 
-async function readJsonRpcResponse(reader, label, timeoutMs) {
+async function readJsonRpcResponse(reader, label, expectedId, timeoutMs) {
   const deadline = performance.now() + timeoutMs;
   for (;;) {
     const remainingMs = Math.max(1, deadline - performance.now());
@@ -190,7 +194,7 @@ async function readJsonRpcResponse(reader, label, timeoutMs) {
       Object.hasOwn(response, "id") &&
       (Object.hasOwn(response, "result") || Object.hasOwn(response, "error"))
     ) {
-      return response;
+      if (String(response.id) === String(expectedId)) return response;
     }
   }
 }
@@ -303,7 +307,7 @@ async function runStdioProbe() {
       childError,
     ]);
     const response = await Promise.race([
-      readJsonRpcResponse(stdout, "stdio initialize", requestTimeoutMs),
+      readJsonRpcResponse(stdout, "stdio initialize", 1, requestTimeoutMs),
       childError,
     ]);
     const latencyMs = performance.now() - startedAt;
@@ -527,8 +531,9 @@ async function runWebSocketProbe(secureExposure) {
     const batchStartedAt = performance.now();
     const requests = [];
     let nextRequestId = 2;
+    const batchTimeoutMs = websocketBatchTimeoutMs();
     for (let i = 0; i < iterations; i += 1) {
-      requests.push(client.request(nextRequestId, "thread/loaded/list", { limit: 1 }));
+      requests.push(client.request(nextRequestId, "thread/loaded/list", { limit: 1 }, batchTimeoutMs));
       nextRequestId += 1;
     }
     const responses = await Promise.all(requests);
