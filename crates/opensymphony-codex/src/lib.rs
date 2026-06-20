@@ -25,6 +25,13 @@ pub enum CodexAppServerTransport {
     WebSocketLoopback { port: u16 },
 }
 
+/// WebSocket auth arguments for the Codex app-server prototype.
+///
+/// This prototype's launch helpers return UTF-8 `String` arguments for stable
+/// tests and documentation snapshots. Token and shared-secret file paths are
+/// therefore limited to paths that can be passed losslessly as UTF-8; non-UTF-8
+/// local paths are out of scope until a production adapter carries `OsString`
+/// arguments or constructs a `std::process::Command` directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexWebSocketAuth {
     CapabilityToken {
@@ -82,6 +89,12 @@ impl CodexAppServerLaunch {
         (self.program.clone(), self.command_args())
     }
 
+    /// Builds UTF-8 CLI arguments for prototype evidence and tests.
+    ///
+    /// Auth file paths are converted with `Path::to_string_lossy()` because this
+    /// helper returns `Vec<String>`. Use UTF-8 paths with the prototype; a
+    /// production harness should preserve native path bytes with `OsString` or
+    /// `std::process::Command` arguments.
     pub fn command_args(&self) -> Vec<String> {
         let mut args = vec!["app-server".into()];
         args.extend(self.extra_args.clone());
