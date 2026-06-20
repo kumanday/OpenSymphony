@@ -214,6 +214,29 @@ function writeToStream(stream, data, label, timeoutMs) {
   });
 }
 
+function endStream(stream, label, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timeout);
+      stream.removeListener("error", onError);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${label} end timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    stream.once("error", onError);
+    stream.end((error) => {
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 async function collectChildOutput(child, label, timeoutMs = requestTimeoutMs) {
   const stdout = [];
   const stderr = [];
@@ -222,8 +245,13 @@ async function collectChildOutput(child, label, timeoutMs = requestTimeoutMs) {
 
   const result = await Promise.race([
     once(child, "exit").then(([code, signal]) => ({ code, signal, timedOut: false })),
+    once(child, "error").then(([error]) => ({ error, timedOut: false })),
     sleep(timeoutMs).then(() => ({ code: null, signal: null, timedOut: true })),
   ]);
+
+  if (result.error) {
+    throw new Error(`${label} failed to start: ${result.error.message}`);
+  }
 
   if (result.timedOut) {
     await terminateChild(child);
@@ -266,6 +294,7 @@ async function runStdioProbe() {
     const response = await readJsonRpcResponse(stdout, "stdio initialize", requestTimeoutMs);
     const latencyMs = performance.now() - startedAt;
     assertJsonRpcResult("stdio initialize", response);
+    await endStream(child.stdin, "stdio initialize", requestTimeoutMs);
     return {
       transport: "stdio",
       initializeLatencyMs: Number(latencyMs.toFixed(3)),
@@ -393,10 +422,10 @@ async function runWebSocketProbe(secureExposure) {
       stdio: ["ignore", "pipe", "pipe"],
     }),
   );
-  let stdoutBytes = 0;
+  let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => {
-    stdoutBytes += chunk.length;
+    stdout += chunk.toString("utf8");
   });
   child.stderr.on("data", (chunk) => {
     stderr += chunk.toString("utf8");
@@ -456,10 +485,10 @@ async function runWebSocketProbe(secureExposure) {
       },
       reconnectLatencyMs: Number(reconnectMs.toFixed(3)),
       reconnectResponse: "ok",
-      stdoutBytes,
+      stdoutBytes: Buffer.byteLength(stdout, "utf8"),
       exposure: {
         listener: `ws://127.0.0.1:${port}`,
-        localhostOnly: /binds localhost only/.test(stderr),
+        localhostOnly: /binds localhost only/.test(`${stdout}\n${stderr}`),
         authModesFromHelp: [
           ...(secureExposure.hasCapabilityTokenMode ? ["capability-token"] : []),
           ...(secureExposure.hasSignedBearerMode ? ["signed-bearer-token"] : []),

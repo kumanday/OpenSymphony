@@ -59,6 +59,10 @@ impl CodexAppServerLaunch {
         }
     }
 
+    pub fn command(&self) -> (&str, Vec<String>) {
+        (&self.program, self.command_args())
+    }
+
     pub fn command_args(&self) -> Vec<String> {
         let mut args = vec!["app-server".into()];
         args.extend(self.extra_args.clone());
