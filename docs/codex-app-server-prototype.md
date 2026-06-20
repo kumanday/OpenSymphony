@@ -70,6 +70,10 @@ Run:
 node scripts/codex_app_server_benchmark.mjs --iterations 50 --port 18765
 ```
 
+The loopback WebSocket probe uses Node's global `WebSocket` and `fetch`
+implementations and therefore requires Node.js 22 or newer. Use
+`--skip-websocket` for stdio-only evidence on older Node runtimes.
+
 The script performs:
 
 - stdio `initialize` latency,
@@ -89,11 +93,11 @@ WebSocket probes are supported. A 10-request local run produced:
 
 ```json
 {
-  "generatedAt": "2026-06-20T06:25:55.254Z",
+  "generatedAt": "2026-06-20T06:34:40.884Z",
   "codexVersion": "codex-cli 0.138.0",
   "stdio": {
     "transport": "stdio",
-    "initializeLatencyMs": 123.147,
+    "initializeLatencyMs": 117.115,
     "response": {
       "id": 1,
       "result": {
@@ -102,25 +106,26 @@ WebSocket probes are supported. A 10-request local run produced:
         "platformFamily": "unix",
         "platformOs": "macos"
       }
-    }
+    },
+    "stderrBytes": 0
   },
   "websocket": {
     "transport": "websocket_loopback",
-    "port": 18775,
-    "initializeLatencyMs": 1.131,
+    "port": 18777,
+    "initializeLatencyMs": 1.103,
     "queuedRequests": 10,
     "queuedResponses": 10,
-    "queueElapsedMs": 0.896,
-    "requestsPerSecond": 11164.34,
+    "queueElapsedMs": 0.905,
+    "requestsPerSecond": 11049.22,
     "latencyMs": {
-      "p50": 0.494,
-      "p95": 0.567,
-      "max": 0.567
+      "p50": 0.558,
+      "p95": 0.67,
+      "max": 0.67
     },
-    "reconnectLatencyMs": 1.128,
+    "reconnectLatencyMs": 1.027,
     "reconnectResponse": "ok",
     "exposure": {
-      "listener": "ws://127.0.0.1:18775",
+      "listener": "ws://127.0.0.1:18777",
       "localhostOnly": true,
       "authModesFromHelp": [
         "capability-token",

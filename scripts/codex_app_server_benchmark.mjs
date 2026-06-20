@@ -18,10 +18,29 @@ for (let i = 2; i < process.argv.length; i += 1) {
   }
 }
 
-const iterations = Number(args.get("--iterations") ?? "50");
-const port = Number(args.get("--port") ?? "18765");
+function parseIntegerOption(flag, defaultValue, min, max) {
+  const raw = args.get(flag) ?? String(defaultValue);
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    console.error(`${flag} must be an integer from ${min} to ${max}; received ${JSON.stringify(raw)}`);
+    process.exit(1);
+  }
+  return value;
+}
+
+const iterations = parseIntegerOption("--iterations", 50, 1, 100000);
+const port = parseIntegerOption("--port", 18765, 1, 65535);
 const runWebSocket = args.get("--skip-websocket") !== "true";
-const requestTimeoutMs = Number(args.get("--request-timeout-ms") ?? "5000");
+const requestTimeoutMs = parseIntegerOption("--request-timeout-ms", 5000, 1, 300000);
+
+function assertWebSocketRuntime() {
+  const nodeVersion = process.versions?.node ?? "unknown";
+  if (typeof globalThis.WebSocket !== "function" || typeof globalThis.fetch !== "function") {
+    throw new Error(
+      `WebSocket benchmark requires Node.js 22+ globals WebSocket and fetch; current Node.js is ${nodeVersion}. Use --skip-websocket to run stdio-only probes.`,
+    );
+  }
+}
 
 function percentile(values, pct) {
   if (values.length === 0) return null;
@@ -171,6 +190,10 @@ async function runStdioProbe() {
   try {
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
     const stdout = new LineReader(child.stdout);
     const startedAt = performance.now();
     await writeToStream(
@@ -190,6 +213,7 @@ async function runStdioProbe() {
       transport: "stdio",
       initializeLatencyMs: Number(latencyMs.toFixed(3)),
       response,
+      stderrBytes: Buffer.byteLength(stderr, "utf8"),
     };
   } finally {
     await terminateChild(child);
@@ -408,6 +432,7 @@ try {
   report.stdio = await runStdioProbe();
   report.secureExposure = await runHelpProbe();
   if (runWebSocket) {
+    assertWebSocketRuntime();
     report.websocket = await runWebSocketProbe(report.secureExposure);
   }
   console.log(JSON.stringify(report, null, 2));
