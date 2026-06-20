@@ -34,7 +34,7 @@ function parseIntegerOption(flag, defaultValue, min, max) {
 
 const iterations = parseIntegerOption("--iterations", 50, 1, 100000);
 const port = parseIntegerOption("--port", 18765, 1, 65535);
-const runWebSocket = args.get("--skip-websocket") !== "true";
+const runWebSocket = !args.has("--skip-websocket");
 const requestTimeoutMs = parseIntegerOption("--request-timeout-ms", 5000, 1, 300000);
 const activeChildren = new Set();
 const activeSockets = new Set();
@@ -102,7 +102,10 @@ function assertJsonRpcResult(label, response) {
   if (response == null || typeof response !== "object") {
     throw new Error(`${label} returned non-object JSON-RPC response: ${JSON.stringify(response)}`);
   }
-  if (response.error) {
+  if (Object.hasOwn(response, "error")) {
+    if (response.error == null || typeof response.error !== "object") {
+      throw new Error(`${label} returned malformed JSON-RPC error: ${JSON.stringify(response.error)}`);
+    }
     throw new Error(`${label} returned JSON-RPC error: ${JSON.stringify(response.error)}`);
   }
   if (Object.hasOwn(response, "jsonrpc") && response.jsonrpc !== "2.0") {
@@ -588,6 +591,7 @@ async function runWebSocketProbe(secureExposure) {
     await withChildFailure(closed);
     ws = null;
     const reconnectStartedAt = performance.now();
+    await withChildFailure(waitForReadyz(`http://127.0.0.1:${port}/readyz`, requestTimeoutMs));
     ws2 = await withChildFailure(openSocket(`ws://127.0.0.1:${port}`));
     reconnectClient = new WebSocketJsonRpcClient(ws2);
     const reconnectInitialize = await withChildFailure(
@@ -621,7 +625,9 @@ async function runWebSocketProbe(secureExposure) {
       stderrPreview: stderrTrimmed ? [...stderrTrimmed].slice(-1000).join("") : null,
       exposure: {
         listener: `ws://127.0.0.1:${port}`,
+        listenerHost: "127.0.0.1",
         localhostOnly: /binds localhost only/.test(`${stdout}\n${stderr}`),
+        localhostOnlyEvidence: ["configured_loopback_listener", "startup_banner"],
         authModesAdvertisedInHelp: [
           ...(secureExposure.hasCapabilityTokenMode ? ["capability-token"] : []),
           ...(secureExposure.hasSignedBearerMode ? ["signed-bearer-token"] : []),

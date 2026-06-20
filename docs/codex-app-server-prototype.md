@@ -94,7 +94,8 @@ The script performs:
   capability-token/signed-bearer WebSocket auth flags advertised by
   `codex app-server --help`.
 
-Use `--skip-websocket` when the installed Codex version lacks WebSocket support.
+Use `--skip-websocket` when the installed Codex version lacks WebSocket support;
+the flag is presence-based and does not take a value.
 Queued WebSocket requests use a derived per-request deadline of
 `--request-timeout-ms + --iterations`, so the documented high-iteration range
 does not inherit the default 5s timeout as an accidental whole-batch deadline.
@@ -148,10 +149,15 @@ WebSocket probes are supported. A 10-request local run produced:
     "stdoutBytes": 0,
     "stderrBytes": 222,
     "stderrPreview": "codex app-server (WebSockets)\n  listening on: ws://127.0.0.1:18779\n  readyz: http://127.0.0.1:18779/readyz\n  healthz: http://127.0.0.1:18779/healthz\n  note: binds localhost only (use SSH port-forwarding for remote access)",
-    "exposure": {
-      "listener": "ws://127.0.0.1:18779",
-      "localhostOnly": true,
-      "authModesAdvertisedInHelp": [
+	    "exposure": {
+	      "listener": "ws://127.0.0.1:18779",
+	      "listenerHost": "127.0.0.1",
+	      "localhostOnly": true,
+	      "localhostOnlyEvidence": [
+	        "configured_loopback_listener",
+	        "startup_banner"
+	      ],
+	      "authModesAdvertisedInHelp": [
         "capability-token",
         "signed-bearer-token"
       ]
