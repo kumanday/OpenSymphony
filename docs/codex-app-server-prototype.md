@@ -92,17 +92,20 @@ supported Codex CLI surfaces:
 The model-settings response includes a `codex_local_readiness` summary with the
 detected CLI version, app-server support, ChatGPT login state, and the safe
 operator commands for login/status/logout. It also exposes the Codex profile as
-a `codex_cli_login` credential reference. That reference identifies the
+a `codex_cli_login` credential reference under the existing
+`codex-chatgpt-local-keychain` profile ID. That reference identifies the
 operator-owned Codex CLI login state; it is not a copied access token, refresh
 credential, or parsed private Codex credential payload.
 
 The gateway caches the Codex readiness probe for a short in-process TTL so
 repeated `model-settings` reads do not spawn new Codex subprocesses on every
-request. The readiness classifier uses command success/failure plus the current
-Codex CLI status text. It treats `Logged in using ChatGPT` and
-`Logged in with ChatGPT` as subscription-ready ChatGPT login signals; logged-out,
-expired, unsupported, and permission-denied text are rendered as explicit
-non-ready states.
+request. Concurrent cache misses share a single refresh path, and each Codex CLI
+probe has a bounded timeout so a stalled login-status command returns an
+explicit unknown/non-ready state instead of hanging the gateway request. The
+readiness classifier uses command success/failure plus the current Codex CLI
+status text. It treats `Logged in using ChatGPT` and `Logged in with ChatGPT` as
+subscription-ready ChatGPT login signals; logged-out, expired, unsupported, and
+permission-denied text are rendered as explicit non-ready states.
 
 Logout and revocation stay owned by Codex and ChatGPT. Run `codex logout` to
 remove the local Codex login, and revoke account/device access from ChatGPT
@@ -323,8 +326,8 @@ pinned Codex version.
 Codex must reuse the gateway model settings shape instead of owning
 subscription credentials. The current mapping is:
 
-- `codex-chatgpt-cli-login`: local Codex CLI ChatGPT login reference for
-  future desktop/local Codex app-server use.
+- `codex-chatgpt-local-keychain`: stable local Codex CLI ChatGPT login
+  reference for future desktop/local Codex app-server use.
 - `hosted-openai-subscription-broker`: hosted broker reference for future
   hosted Codex app-server or OpenHands subscription use.
 - literal model references are converted into Codex config overrides where the

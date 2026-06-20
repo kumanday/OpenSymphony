@@ -336,7 +336,7 @@ fn openhands_api_key_profile(status: CredentialStatusKind) -> ModelSettingsProfi
 
 fn codex_cli_login_profile(status: CredentialStatusKind) -> ModelSettingsProfile {
     ModelSettingsProfile {
-        id: "codex-chatgpt-cli-login".into(),
+        id: "codex-chatgpt-local-keychain".into(),
         display_name: "Codex ChatGPT CLI login reference".into(),
         owner_scope: OwnerScope::LocalUser,
         provider: CredentialProvider::OpenAiChatGptCodex,

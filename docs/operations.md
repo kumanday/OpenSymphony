@@ -262,7 +262,9 @@ When `codex login status` is logged out or expired, run
 device-code flow succeeds. To revoke local Codex access, run `codex logout` and
 use ChatGPT account settings for account-side revocation. OpenSymphony must not
 read private Codex credential files or copy access/refresh material into
-workspaces, logs, workflow files, Linear comments, or browser payloads.
+workspaces, logs, workflow files, Linear comments, or browser payloads. Gateway
+readiness checks are cached briefly and have bounded per-command timeouts so
+operator UI polling cannot hang on a stalled local Codex command.
 
 ## 5. Linear operational model
 

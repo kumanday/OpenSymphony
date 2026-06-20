@@ -104,6 +104,7 @@ const GATEWAY_SUBSCRIBER_CAPACITY: usize = 256;
 const GATEWAY_EVENT_PAGE_LIMIT: usize = 100;
 const GATEWAY_WS_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const CODEX_READINESS_CACHE_TTL: Duration = Duration::from_secs(30);
+const CODEX_READINESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const CODEX_CLI_COMMAND: &str = "codex";
 
 #[async_trait]
@@ -274,7 +275,8 @@ impl Clone for GatewayState {
 
 #[derive(Debug, Default)]
 pub struct CodexReadinessCache {
-    entry: tokio::sync::Mutex<Option<CachedCodexReadiness>>,
+    entry: tokio::sync::RwLock<Option<CachedCodexReadiness>>,
+    refresh: tokio::sync::Mutex<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -794,22 +796,33 @@ async fn detect_codex_local_readiness(command: &str) -> CodexLocalReadiness {
 }
 
 async fn run_codex_probe<const N: usize>(command: &str, args: [&str; N]) -> ProbeCommandResult {
-    match TokioCommand::new(command).args(args).output().await {
-        Ok(output) if output.status.success() => ProbeCommandResult::Success {
+    let mut process = TokioCommand::new(command);
+    process.kill_on_drop(true).args(args);
+    match tokio::time::timeout(CODEX_READINESS_PROBE_TIMEOUT, process.output()).await {
+        Err(_) => ProbeCommandResult::Failure {
+            stdout: String::new(),
+            stderr: format!(
+                "codex readiness probe timed out after {}ms",
+                CODEX_READINESS_PROBE_TIMEOUT.as_millis()
+            ),
+        },
+        Ok(Ok(output)) if output.status.success() => ProbeCommandResult::Success {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
-        Ok(output) => ProbeCommandResult::Failure {
+        Ok(Ok(output)) => ProbeCommandResult::Failure {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => ProbeCommandResult::NotFound,
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            ProbeCommandResult::NotFound
+        }
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             ProbeCommandResult::PermissionDenied {
                 detail: error.to_string(),
             }
         }
-        Err(error) => ProbeCommandResult::Failure {
+        Ok(Err(error)) => ProbeCommandResult::Failure {
             stdout: String::new(),
             stderr: error.to_string(),
         },
@@ -820,15 +833,21 @@ impl CodexReadinessCache {
     /// Production readiness checks always use the hardcoded Codex CLI command.
     /// Tests pass a fake executable path here to exercise the subprocess path.
     async fn readiness(&self, command: &str) -> CodexLocalReadiness {
-        let mut entry = self.entry.lock().await;
-        if let Some(cached) = entry.as_ref()
+        if let Some(cached) = self.entry.read().await.as_ref()
+            && cached.checked_at.elapsed() < CODEX_READINESS_CACHE_TTL
+        {
+            return cached.readiness.clone();
+        }
+
+        let _refresh = self.refresh.lock().await;
+        if let Some(cached) = self.entry.read().await.as_ref()
             && cached.checked_at.elapsed() < CODEX_READINESS_CACHE_TTL
         {
             return cached.readiness.clone();
         }
 
         let readiness = detect_codex_local_readiness(command).await;
-        *entry = Some(CachedCodexReadiness {
+        *self.entry.write().await = Some(CachedCodexReadiness {
             checked_at: Instant::now(),
             readiness: readiness.clone(),
         });
@@ -3547,6 +3566,56 @@ exit 2
             3,
             "three probes should run only for the first cache miss"
         );
+    }
+
+    #[tokio::test]
+    async fn codex_readiness_probe_timeout_returns_unknown_status() {
+        use crate::opensymphony_gateway_schema::model_settings::CredentialStatusKind;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+
+        let temp = tempfile::tempdir().expect("temp dir should be created");
+        let fake_codex = temp.path().join("codex");
+        std::fs::write(
+            &fake_codex,
+            r#"#!/bin/sh
+if [ "$1" = "--version" ]; then
+  echo "codex-cli 0.138.0"
+  exit 0
+fi
+if [ "$1" = "app-server" ] && [ "$2" = "--help" ]; then
+  echo "Usage: codex app-server"
+  exit 0
+fi
+if [ "$1" = "login" ] && [ "$2" = "status" ]; then
+  sleep 30
+fi
+exit 2
+"#,
+        )
+        .expect("fake codex script should be written");
+        let mut permissions = std::fs::metadata(&fake_codex)
+            .expect("fake codex metadata should be readable")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_codex, permissions)
+            .expect("fake codex script should be executable");
+
+        let command = fake_codex
+            .to_str()
+            .expect("fake codex path should be utf-8");
+        let started = Instant::now();
+        let readiness = detect_codex_local_readiness(command).await;
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "probe timeout should bound a hanging Codex login status command"
+        );
+        assert_eq!(readiness.cli_status, CredentialStatusKind::Installed);
+        assert_eq!(readiness.app_server_status, CredentialStatusKind::Installed);
+        assert_eq!(readiness.login_status, CredentialStatusKind::Unknown);
+        assert_eq!(readiness.subscription_status, CredentialStatusKind::Unknown);
+        assert!(readiness.detail.contains("did not report a recognized"));
     }
 
     #[test]

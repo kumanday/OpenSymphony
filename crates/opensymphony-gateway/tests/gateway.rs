@@ -616,7 +616,8 @@ fn gateway_model_settings_reflects_codex_cli_readiness() {
         CredentialStatusKind::Installed
     );
     assert!(settings.profiles.iter().any(|profile| {
-        profile.id == "codex-chatgpt-cli-login" && profile.status == CredentialStatusKind::Installed
+        profile.id == "codex-chatgpt-local-keychain"
+            && profile.status == CredentialStatusKind::Installed
     }));
     assert!(settings.credential_statuses.iter().any(|status| {
         status.credential_reference_id == "credential:codex-cli:chatgpt-login"
@@ -635,7 +636,8 @@ fn gateway_model_settings_reflects_codex_cli_readiness() {
         CredentialStatusKind::LoggedOut
     );
     assert!(settings.profiles.iter().any(|profile| {
-        profile.id == "codex-chatgpt-cli-login" && profile.status == CredentialStatusKind::LoggedOut
+        profile.id == "codex-chatgpt-local-keychain"
+            && profile.status == CredentialStatusKind::LoggedOut
     }));
 }
 

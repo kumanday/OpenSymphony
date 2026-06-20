@@ -143,6 +143,7 @@ they do not contain raw API keys, OAuth access tokens, or refresh tokens.
 For the Codex app-server harness, OpenSymphony represents the local ChatGPT
 subscription as a Codex CLI login reference:
 
+- `profile.id`: `codex-chatgpt-local-keychain`
 - `credential_reference.kind`: `codex_cli_login`
 - `credential_reference.reference`: `codex-cli:chatgpt-login`
 - `storage_mode`: `codex_cli_home`
@@ -153,7 +154,9 @@ installed Codex CLI. OpenSymphony checks readiness with `codex --version`,
 Codex credential files and does not copy OAuth access or refresh material into
 workspaces, workflow files, logs, Linear comments, or browser payloads. Gateway
 checks are cached briefly in process to avoid spawning Codex subprocesses for
-every client poll.
+every client poll, and each Codex CLI check has a bounded timeout so a stalled
+local login probe reports an unknown/non-ready state instead of blocking the
+gateway request.
 
 The `codex_local_readiness` field on `GET /api/v1/model-settings` reports:
 

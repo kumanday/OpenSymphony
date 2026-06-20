@@ -113,7 +113,7 @@ fn model_settings_roundtrip_and_redact_secret_material() {
             && profile.status == CredentialStatusKind::Unsupported
     }));
     assert!(back.profiles.iter().any(|profile| {
-        profile.id == "codex-chatgpt-cli-login"
+        profile.id == "codex-chatgpt-local-keychain"
             && profile.storage_mode == CredentialStorageMode::CodexCliHome
             && profile.credential_reference.redacted
             && profile.credential_reference.kind == CredentialReferenceKind::CodexCliLogin
@@ -195,7 +195,7 @@ fn codex_local_readiness_maps_supported_command_output() {
     );
     assert!(readiness.detail.contains("ready"));
     assert!(settings.profiles.iter().any(|profile| {
-        profile.id == "codex-chatgpt-cli-login"
+        profile.id == "codex-chatgpt-local-keychain"
             && profile.status == CredentialStatusKind::Installed
             && profile.credential_reference.reference == "codex-cli:chatgpt-login"
     }));
