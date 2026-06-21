@@ -421,6 +421,13 @@ managed server against the store containing the requested conversation. If
 another OpenHands server is already bound to the configured port with a
 different store, stop it and retry the debug command.
 
+For issues last run through the local Codex app-server harness,
+`opensymphony debug COE-123` reads the recorded Codex thread id from the issue
+workspace manifest and runs `codex resume <thread-id>` from that exact issue
+workspace. Set `OPENSYMPHONY_CODEX_BIN` to override the Codex binary. Use
+`opensymphony debug COE-123 --app` to print `codex://threads/<thread-id>`
+without starting OpenHands or launching the Codex CLI.
+
 See [Project Memory](memory.md) for the full command surface, import YAML
 schema, and troubleshooting notes.
 
