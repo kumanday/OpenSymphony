@@ -174,6 +174,36 @@ logged-out, expired, unsupported, permission-denied, and unknown outputs as
 non-ready status states rather than guessing or reading private credential
 files.
 
+Workflow routing is configured with the alpha `routing` front-matter section.
+When omitted, `opensymphony run` keeps the default `openhands_agent_server`
+route. A workflow can opt a task type into the local Codex app-server harness
+by requiring public harness capabilities and naming the model profile that the
+route should use:
+
+```yaml
+routing:
+  default_harness: openhands_agent_server
+  user_override_env: OPENSYMPHONY_HARNESS
+  dry_run: false
+  rules:
+    - task_type: issue_execution
+      harness: codex_app_server
+      model_profile: codex-chatgpt-local-keychain
+      required_capabilities:
+        - start_run
+        - tool_approval
+        - subscription_credentials
+      reason: prefer local Codex for approval-bearing issue execution
+      user_policy: allow_local_stdio
+      cost: subscription
+      speed: local
+```
+
+Set `routing.dry_run: true` to preview route selection without launching a
+model-backed worker. Set `OPENSYMPHONY_HARNESS=codex_app_server` to force an
+explicit operator override for the current process. Overrides still require an
+available harness that can start runs.
+
 OpenAI ChatGPT/Codex subscription credentials are available only when
 OpenSymphony is built with the `openhands-subscription-credentials` Cargo
 feature. The workflow stores environment-variable names and auth-directory

@@ -7,6 +7,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -17,9 +18,14 @@ use crate::opensymphony_gateway_schema::model_settings::{
 use crate::{
     opensymphony_domain::HarnessAdapter,
     opensymphony_gateway_schema::{
+        approval::{
+            ApprovalActor, ApprovalKind, ApprovalRequest, ApprovalRiskLevel, ApprovalRiskSummary,
+            ApprovalStatus, ApprovalTargetContext,
+        },
         capability::HarnessCapability,
         envelope::EntityRef,
         event_journal::{EventActor, EventKind, EventRecord},
+        version::SchemaVersion,
     },
 };
 
@@ -623,6 +629,142 @@ pub fn normalized_event_to_journal_record(
         .payload(payload)
         .raw_payload_ref(format!("codex:{run_id}:{sequence}"))
         .build()
+}
+
+pub fn codex_approval_request_from_event(
+    run_id: impl Into<String>,
+    issue_id: impl Into<String>,
+    issue_identifier: impl Into<String>,
+    requested_at: DateTime<Utc>,
+    event: &NormalizedCodexEvent,
+) -> Option<ApprovalRequest> {
+    if event.kind != NormalizedCodexEventKind::ApprovalRequested {
+        return None;
+    }
+    let run_id = run_id.into();
+    let issue_id = issue_id.into();
+    let issue_identifier = issue_identifier.into();
+    let params = event.raw.get("params").unwrap_or(&Value::Null);
+    let approval_id =
+        first_string_param(params, &["approvalId", "approval_id", "itemId", "item_id"])
+            .or_else(|| event.item_id.clone())?;
+    let command = first_string_param(params, &["command", "shellCommand", "toolCommand"]);
+    let file_path = first_string_param(params, &["filePath", "path"]);
+    let title = first_string_param(params, &["title", "label"])
+        .or_else(|| {
+            command
+                .as_ref()
+                .map(|command| format!("Approve command `{command}`"))
+        })
+        .unwrap_or_else(|| "Codex approval request".into());
+    let description = first_string_param(params, &["description", "message", "reason"])
+        .unwrap_or_else(|| "Codex requested operator approval before continuing.".into());
+    let kind = if command.is_some() {
+        ApprovalKind::CommandExecution
+    } else if file_path.is_some() {
+        ApprovalKind::FileWrite
+    } else {
+        ApprovalKind::ToolUse
+    };
+    let correlation_id = [
+        event.thread_id.as_deref(),
+        event.turn_id.as_deref(),
+        Some(approval_id.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(":");
+
+    Some(ApprovalRequest {
+        schema_version: SchemaVersion::v1(),
+        approval_id,
+        run_id: run_id.clone(),
+        issue_id: issue_id.clone(),
+        kind,
+        title,
+        description,
+        proposed_action: params.as_object().map(|_| params.clone()),
+        actor: Some(ApprovalActor {
+            actor_id: CODEX_APP_SERVER_KIND.into(),
+            actor_kind: "harness".into(),
+            display_name: Some("Codex app-server".into()),
+        }),
+        target_context: Some(ApprovalTargetContext {
+            file_path,
+            command,
+            issue_id: Some(issue_id),
+            issue_identifier: Some(issue_identifier),
+            run_id: Some(run_id),
+        }),
+        risk_summary: Some(codex_approval_risk_summary(params)),
+        requested_at,
+        expires_at: None,
+        status: ApprovalStatus::Pending,
+        correlation_id,
+        decided_at: None,
+    })
+}
+
+pub fn codex_approval_decision_audit_record(
+    run_id: impl Into<String>,
+    sequence: u64,
+    approval_id: impl Into<String>,
+    decision: CodexApprovalDecision,
+    message: Option<String>,
+) -> EventRecord {
+    let run_id = run_id.into();
+    let approval_id = approval_id.into();
+    let (kind, summary) = match decision {
+        CodexApprovalDecision::Approve => (
+            EventKind::ApprovalGranted,
+            format!("Codex approval {approval_id} approved and sent to app-server"),
+        ),
+        CodexApprovalDecision::Reject => (
+            EventKind::ApprovalDenied,
+            format!("Codex approval {approval_id} rejected and sent to app-server"),
+        ),
+    };
+    EventRecord::builder()
+        .sequence(sequence)
+        .actor(EventActor::system("opensymphony_approval_bridge"))
+        .entity_ref(EntityRef::run(run_id.clone()))
+        .summary(summary)
+        .kind(kind)
+        .payload(json!({
+            "approval_id": approval_id,
+            "decision": decision.as_protocol_value(),
+            "message": message,
+            "harness_kind": CODEX_APP_SERVER_KIND,
+        }))
+        .raw_payload_ref(format!("codex:{run_id}:approval-decision:{sequence}"))
+        .build()
+}
+
+fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| string_param(params, key))
+}
+
+fn codex_approval_risk_summary(params: &Value) -> ApprovalRiskSummary {
+    let mut reasons = Vec::new();
+    let command = first_string_param(params, &["command", "shellCommand", "toolCommand"]);
+    let level = match command.as_deref() {
+        Some(command)
+            if command.contains("sudo")
+                || command.contains("rm -rf")
+                || command.contains("chmod")
+                || command.contains("chown") =>
+        {
+            reasons.push("Command can mutate privileged or destructive host state.".into());
+            ApprovalRiskLevel::High
+        }
+        Some(_) => {
+            reasons.push("Command execution requires explicit operator approval.".into());
+            ApprovalRiskLevel::Medium
+        }
+        None => ApprovalRiskLevel::Unknown,
+    };
+    ApprovalRiskSummary { level, reasons }
 }
 
 fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventKind, String) {

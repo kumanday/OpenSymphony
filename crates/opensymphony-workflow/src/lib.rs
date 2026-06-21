@@ -21,8 +21,9 @@ pub use model::{
     OpenHandsSubscriptionCredentialConfig, OpenHandsSubscriptionCredentialFrontMatter,
     OpenHandsTransportConfig, OpenHandsTransportFrontMatter, OpenHandsWebSocketConfig,
     OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter, ProcessEnvironment,
-    PromptContext, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind,
-    WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkflowFrontMatter, WorkspaceConfig,
+    PromptContext, ResolvedWorkflow, RoutingConfig, RoutingFrontMatter, RoutingRuleConfig,
+    RoutingRuleFrontMatter, TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig,
+    WorkflowDefinition, WorkflowExtensions, WorkflowFrontMatter, WorkspaceConfig,
     WorkspaceFrontMatter,
 };
 
@@ -2418,6 +2419,98 @@ agent:
             error,
             WorkflowConfigError::InvalidField {
                 field: "agent.max_concurrent_agents_by_state",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolves_alpha_routing_policy_and_user_override() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  default_harness: openhands_agent_server
+  dry_run: true
+  rules:
+    - task_type: issue_execution
+      harness: codex_app_server
+      model_profile: codex-chatgpt-local-keychain
+      required_capabilities:
+        - start_run
+        - tool_approval
+        - subscription_credentials
+      reason: prefer local Codex for approval-bearing coding tasks
+      user_policy: allow_local_stdio
+      cost: subscription
+      speed: local
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("OPENSYMPHONY_HARNESS", "codex_app_server"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("routing policy should resolve");
+
+        assert_eq!(
+            resolved.config.routing.default_harness,
+            "openhands_agent_server"
+        );
+        assert_eq!(
+            resolved.config.routing.user_override_harness.as_deref(),
+            Some("codex_app_server")
+        );
+        assert!(resolved.config.routing.dry_run);
+        assert_eq!(resolved.config.routing.rules[0].harness, "codex_app_server");
+        assert_eq!(
+            resolved.config.routing.rules[0].model_profile.as_deref(),
+            Some("codex-chatgpt-local-keychain")
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_routing_capability_names() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  rules:
+    - harness: codex_app_server
+      required_capabilities:
+        - teleport
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let error = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect_err("unknown capability should fail");
+
+        assert!(matches!(
+            error,
+            WorkflowConfigError::InvalidField {
+                field: "routing.rules",
                 ..
             }
         ));

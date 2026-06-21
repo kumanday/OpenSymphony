@@ -1,11 +1,16 @@
+use chrono::{TimeZone, Utc};
 use opensymphony::opensymphony_codex::{
     CodexAppServerAdapter, CodexAppServerLaunch, CodexApprovalDecision, CodexContractArtifact,
     CodexContractGeneration, CodexJsonRpcSession, CodexLifecycleRequest, CodexThreadStartParams,
     CodexTurnStartParams, CodexUserInput, CodexWebSocketAuth, NormalizedCodexEventKind,
+    codex_approval_decision_audit_record, codex_approval_request_from_event,
     normalize_server_notification, normalized_event_to_journal_record,
     websocket_benchmark_requirements,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
+use opensymphony::opensymphony_gateway_schema::approval::{
+    ApprovalKind, ApprovalRiskLevel, ApprovalStatus,
+};
 use opensymphony::opensymphony_gateway_schema::event_journal::EventKind;
 use opensymphony::opensymphony_gateway_schema::model_settings::{
     CredentialReferenceKind, CredentialStorageMode, ModelSettingsResponse,
@@ -389,6 +394,86 @@ fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
         EventKind::HarnessEventNormalized {
             source_kind: "turn/cancelled".into()
         }
+    );
+}
+
+#[test]
+fn codex_approval_notification_maps_to_approval_center_contract() {
+    let raw = json!({
+        "jsonrpc": "2.0",
+        "method": "item/permissions/requestApproval",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-1",
+            "title": "Run shell command",
+            "description": "Codex wants to inspect the repo",
+            "command": "rg approval crates"
+        }
+    });
+    let event = normalize_server_notification(raw).expect("approval notification normalizes");
+    let requested_at = Utc
+        .timestamp_millis_opt(1_720_000_000_000)
+        .single()
+        .expect("timestamp");
+
+    let approval =
+        codex_approval_request_from_event("run-1", "lin-429", "COE-429", requested_at, &event)
+            .expect("approval request should map");
+
+    assert_eq!(approval.approval_id, "approval-1");
+    assert_eq!(approval.run_id, "run-1");
+    assert_eq!(approval.issue_id, "lin-429");
+    assert_eq!(approval.kind, ApprovalKind::CommandExecution);
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(approval.correlation_id, "thread-1:turn-1:approval-1");
+    assert_eq!(
+        approval.actor.as_ref().expect("actor").actor_id,
+        "codex_app_server"
+    );
+    assert_eq!(
+        approval
+            .target_context
+            .as_ref()
+            .expect("target context")
+            .command
+            .as_deref(),
+        Some("rg approval crates")
+    );
+    assert_eq!(
+        approval.risk_summary.as_ref().expect("risk").level,
+        ApprovalRiskLevel::Medium
+    );
+    assert!(approval.proposed_action.is_some());
+}
+
+#[test]
+fn codex_approval_decision_request_and_audit_record_stay_correlated() {
+    let adapter = CodexAppServerAdapter::local_stdio("codex-test", "opensymphony-test", "1.10.1");
+    let mut session = adapter.session();
+
+    let response = adapter.approval_response(
+        &mut session,
+        "approval-1",
+        CodexApprovalDecision::Approve,
+        Some("operator accepted command".into()),
+    );
+    let audit = codex_approval_decision_audit_record(
+        "run-1",
+        42,
+        "approval-1",
+        CodexApprovalDecision::Approve,
+        Some("operator accepted command".into()),
+    );
+
+    assert_eq!(response.request.method, "approval/respond");
+    assert_eq!(response.request.params["approvalId"], "approval-1");
+    assert_eq!(response.request.params["decision"], "approve");
+    assert_eq!(audit.kind, EventKind::ApprovalGranted);
+    assert_eq!(audit.actor.actor_id(), "opensymphony_approval_bridge");
+    assert_eq!(
+        audit.raw_payload_ref.as_deref(),
+        Some("codex:run-1:approval-decision:42")
     );
 }
 

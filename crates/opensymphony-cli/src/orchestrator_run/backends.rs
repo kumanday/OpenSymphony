@@ -7,10 +7,14 @@ use std::{
     time::Duration,
 };
 
+use crate::opensymphony_codex::{
+    CodexAppServerAdapter, CodexJsonRpcSession, NormalizedCodexEvent, NormalizedCodexEventKind,
+    normalize_server_notification,
+};
 use crate::opensymphony_domain::{
-    ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-    NormalizedIssue, TimestampMs, TrackerIssue, WorkerOutcomeKind, WorkerOutcomeRecord,
-    WorkspaceKey,
+    ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
+    NormalizedIssue, RuntimeStreamState, TimestampMs, TrackerIssue, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -27,13 +31,15 @@ use crate::opensymphony_orchestrator::{
 };
 use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunStatus,
-    WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
+    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
+    RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
 };
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
     fs,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::Command,
     sync::{mpsc, oneshot},
     task::JoinHandle,
     time::timeout,
@@ -689,6 +695,7 @@ impl RuntimeWorkerBackend {
         let finished_worker_id = worker_id.clone();
         let (launch_tx, launch_rx) = oneshot::channel();
         let run = request.run.clone();
+        let route = request.route.clone();
         let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
@@ -718,6 +725,48 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
+
+            emit_route_decision_event(&updates_tx, &observer_worker_id.to_string(), &route);
+
+            if route.dry_run {
+                if let Some(sender) = launch_tx.take() {
+                    let _ = sender.send(LaunchReport::Conversation(Box::new(
+                        dry_run_conversation_metadata(&run, &route),
+                    )));
+                }
+                let outcome = WorkerOutcomeRecord::from_run(
+                    &run,
+                    WorkerOutcomeKind::Succeeded,
+                    now_timestamp(),
+                    Some(route.summary()),
+                    None,
+                );
+                let _ = updates_tx.send(WorkerUpdate::Finished {
+                    worker_id: finished_worker_id.clone(),
+                    outcome,
+                });
+                return;
+            }
+
+            if route.harness_kind == "codex_app_server" {
+                let outcome = run_codex_stdio_issue(
+                    &route,
+                    &workspace_manager,
+                    &ensured.handle,
+                    &mut run_manifest,
+                    &issue,
+                    &run,
+                    &workflow,
+                    &updates_tx,
+                    &mut launch_tx,
+                )
+                .await;
+                let _ = updates_tx.send(WorkerUpdate::Finished {
+                    worker_id: finished_worker_id.clone(),
+                    outcome,
+                });
+                return;
+            }
 
             let mut observer = SchedulerObserver {
                 worker_id: observer_worker_id.to_string(),
@@ -806,6 +855,62 @@ impl RuntimeWorkerBackend {
     }
 }
 
+fn emit_route_decision_event(
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &str,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) {
+    let payload = serde_json::json!({
+        "task_type": &route.task_type,
+        "harness_kind": &route.harness_kind,
+        "model_profile": &route.model_profile,
+        "reason": &route.reason,
+        "required_capabilities": &route.required_capabilities,
+        "dry_run": route.dry_run,
+        "user_override": route.user_override,
+    });
+    let Ok(worker_id) = crate::opensymphony_domain::WorkerId::new(worker_id.to_string()) else {
+        return;
+    };
+    let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
+        worker_id,
+        observed_at: now_timestamp(),
+        event_id: Some(format!("route-{}", route.harness_kind)),
+        event_kind: Some("routing.decision".into()),
+        summary: Some(route.summary()),
+        payload: Some(payload),
+    });
+}
+
+fn dry_run_conversation_metadata(
+    run: &crate::opensymphony_domain::RunAttempt,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> ConversationMetadata {
+    ConversationMetadata {
+        conversation_id: ConversationId::new(format!("route-preview-{}", run.worker_id))
+            .expect("route preview conversation id should not be empty"),
+        server_base_url: None,
+        transport_target: Some(route.harness_kind.clone()),
+        http_auth_mode: None,
+        websocket_auth_mode: None,
+        websocket_query_param_name: None,
+        fresh_conversation: true,
+        runtime_contract_version: Some("opensymphony-routing-alpha-v1".into()),
+        stream_state: RuntimeStreamState::Closed,
+        last_event_id: None,
+        last_event_kind: Some("routing.decision".into()),
+        last_event_at: Some(now_timestamp()),
+        last_event_summary: Some(route.summary()),
+        recent_activity: Vec::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: 0,
+        runtime_seconds: 0,
+        next_activity_sequence: 0,
+    }
+}
+
 fn inject_memory_env(
     env: &mut std::collections::BTreeMap<String, String>,
     memory: &RuntimeMemoryEnv,
@@ -843,6 +948,315 @@ fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
 impl Drop for RuntimeWorkerBackend {
     fn drop(&mut self) {
         self.abort_all_tracked_tasks();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_codex_stdio_issue(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    workflow: &ResolvedWorkflow,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+) -> WorkerOutcomeRecord {
+    match try_run_codex_stdio_issue(
+        route, workspace, issue, run, workflow, updates_tx, launch_tx,
+    )
+    .await
+    {
+        Ok((outcome, status)) => {
+            finish_codex_workspace_run(workspace_manager, workspace, run_manifest, status).await;
+            outcome
+        }
+        Err(error) => {
+            finish_codex_workspace_run(
+                workspace_manager,
+                workspace,
+                run_manifest,
+                RunStatus::Failed,
+            )
+            .await;
+            if launch_tx.is_some() {
+                report_launch_failure(launch_tx, error.clone());
+            }
+            WorkerOutcomeRecord::from_run(
+                run,
+                WorkerOutcomeKind::Failed,
+                now_timestamp(),
+                Some("Codex app-server worker failed".into()),
+                Some(error),
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_run_codex_stdio_issue(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    workspace: &WorkspaceHandle,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    workflow: &ResolvedWorkflow,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
+    let codex = std::env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into());
+    let adapter =
+        CodexAppServerAdapter::local_stdio(&codex, "opensymphony", env!("CARGO_PKG_VERSION"));
+    let (program, args) = adapter.launch().to_command();
+    let mut child = Command::new(&program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| format!("failed to launch `{program} app-server --stdio`: {source}"))?;
+    let mut stdin = child.stdin.take().ok_or("Codex child stdin missing")?;
+    let stdout = child.stdout.take().ok_or("Codex child stdout missing")?;
+    let mut reader = BufReader::new(stdout).lines();
+    let mut session = adapter.session();
+
+    let initialize = session.initialize();
+    stdin
+        .write_all(
+            CodexJsonRpcSession::encode_line(&initialize)
+                .map_err(|source| source.to_string())?
+                .as_bytes(),
+        )
+        .await
+        .map_err(|source| format!("failed to write Codex initialize request: {source}"))?;
+    read_response_line(
+        &mut reader,
+        initialize.id,
+        updates_tx,
+        &run.worker_id.to_string(),
+    )
+    .await?;
+
+    let prompt = workflow
+        .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
+        .map_err(|source| format!("failed to render workflow prompt for Codex route: {source}"))?;
+    let model = codex_model_from_route(route);
+    let start = adapter
+        .start_issue_request(
+            &mut session,
+            workspace.workspace_path().display().to_string(),
+            model,
+            prompt,
+            serde_json::json!({
+                "opensymphonyRoute": {
+                    "harness": &route.harness_kind,
+                    "modelProfile": &route.model_profile,
+                    "reason": &route.reason,
+                }
+            }),
+        )
+        .map_err(|source| format!("failed to build Codex thread/start request: {source}"))?;
+    stdin
+        .write_all(
+            CodexJsonRpcSession::encode_line(&start.request)
+                .map_err(|source| source.to_string())?
+                .as_bytes(),
+        )
+        .await
+        .map_err(|source| format!("failed to write Codex thread/start request: {source}"))?;
+    let start_response = read_response_line(
+        &mut reader,
+        start.request.id,
+        updates_tx,
+        &run.worker_id.to_string(),
+    )
+    .await?;
+    let conversation_id = start_response
+        .get("result")
+        .and_then(|result| {
+            result
+                .get("threadId")
+                .or_else(|| result.get("thread_id"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .unwrap_or("codex-thread")
+        .to_string();
+    if let Some(sender) = launch_tx.take() {
+        let _ = sender.send(LaunchReport::Conversation(Box::new(
+            codex_conversation_metadata(conversation_id, route),
+        )));
+    }
+
+    let terminal =
+        read_until_codex_terminal(&mut reader, updates_tx, &run.worker_id.to_string()).await?;
+    let summary = format!(
+        "Codex app-server route completed with terminal event {:?}",
+        terminal.event_kind
+    );
+    let _ = child.kill().await;
+    Ok((
+        WorkerOutcomeRecord::from_run(run, terminal.outcome, now_timestamp(), Some(summary), None),
+        terminal.status,
+    ))
+}
+
+fn codex_model_from_route(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> String {
+    match route.model_profile.as_deref() {
+        Some("codex-chatgpt-local-keychain") | None => "openai/chatgpt-codex-subscription".into(),
+        Some(model_or_profile) => model_or_profile.into(),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodexTerminalOutcome {
+    event_kind: NormalizedCodexEventKind,
+    outcome: WorkerOutcomeKind,
+    status: RunStatus,
+}
+
+async fn read_response_line(
+    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    request_id: u64,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &str,
+) -> Result<serde_json::Value, String> {
+    loop {
+        let line = timeout(Duration::from_secs(30), reader.next_line())
+            .await
+            .map_err(|_| format!("timed out waiting for Codex response id {request_id}"))?
+            .map_err(|source| format!("failed reading Codex stdout: {source}"))?
+            .ok_or_else(|| format!("Codex stdout closed before response id {request_id}"))?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|source| format!("invalid Codex JSON: {source}"))?;
+        if value.get("id").and_then(serde_json::Value::as_u64) == Some(request_id) {
+            return Ok(value);
+        }
+        emit_codex_notification(updates_tx, worker_id, value);
+    }
+}
+
+async fn read_until_codex_terminal(
+    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &str,
+) -> Result<CodexTerminalOutcome, String> {
+    loop {
+        let line = timeout(Duration::from_secs(300), reader.next_line())
+            .await
+            .map_err(|_| "timed out waiting for Codex terminal notification".to_string())?
+            .map_err(|source| format!("failed reading Codex stdout: {source}"))?
+            .ok_or("Codex stdout closed before terminal notification")?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|source| format!("invalid Codex JSON: {source}"))?;
+        if let Some(event) = emit_codex_notification(updates_tx, worker_id, value)
+            && let Some(outcome) = codex_terminal_outcome(&event)
+        {
+            return Ok(outcome);
+        }
+    }
+}
+
+fn emit_codex_notification(
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &str,
+    value: serde_json::Value,
+) -> Option<NormalizedCodexEvent> {
+    let event = normalize_server_notification(value)?;
+    let Ok(worker_id) = crate::opensymphony_domain::WorkerId::new(worker_id.to_string()) else {
+        return Some(event);
+    };
+    let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
+        worker_id,
+        observed_at: now_timestamp(),
+        event_id: event.item_id.clone().or_else(|| event.turn_id.clone()),
+        event_kind: Some(format!("codex.{}", event.method)),
+        summary: Some(format!("Codex event: {}", event.method)),
+        payload: Some(event.raw.clone()),
+    });
+    Some(event)
+}
+
+fn codex_terminal_outcome(event: &NormalizedCodexEvent) -> Option<CodexTerminalOutcome> {
+    let (outcome, status) = match event.kind {
+        NormalizedCodexEventKind::TurnCompleted => {
+            (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+        }
+        NormalizedCodexEventKind::TurnCancelled => {
+            (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
+        }
+        NormalizedCodexEventKind::Error => (WorkerOutcomeKind::Failed, RunStatus::Failed),
+        NormalizedCodexEventKind::ThreadStatusChanged => {
+            let status = event
+                .raw
+                .get("params")
+                .and_then(|params| params.get("status"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_ascii_lowercase);
+            match status.as_deref() {
+                Some("completed" | "succeeded" | "success") => {
+                    (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+                }
+                Some("failed" | "error") => (WorkerOutcomeKind::Failed, RunStatus::Failed),
+                Some("cancelled" | "canceled") => {
+                    (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(CodexTerminalOutcome {
+        event_kind: event.kind,
+        outcome,
+        status,
+    })
+}
+
+async fn finish_codex_workspace_run(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    status: RunStatus,
+) {
+    run_manifest.status = status;
+    run_manifest.status_detail = Some(format!("Codex app-server route ended with {status}"));
+    if let Err(error) = workspace_manager
+        .finish_run(workspace, run_manifest, status)
+        .await
+    {
+        tracing::warn!(%error, "failed to finish Codex workspace run manifest");
+    }
+}
+
+fn codex_conversation_metadata(
+    conversation_id: String,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> ConversationMetadata {
+    ConversationMetadata {
+        conversation_id: ConversationId::new(conversation_id)
+            .expect("Codex conversation id should not be empty"),
+        server_base_url: None,
+        transport_target: Some(route.harness_kind.clone()),
+        http_auth_mode: None,
+        websocket_auth_mode: None,
+        websocket_query_param_name: None,
+        fresh_conversation: true,
+        runtime_contract_version: Some("codex-app-server-json-rpc-v2".into()),
+        stream_state: RuntimeStreamState::Ready,
+        last_event_id: None,
+        last_event_kind: None,
+        last_event_at: None,
+        last_event_summary: Some(route.summary()),
+        recent_activity: Vec::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: 0,
+        runtime_seconds: 0,
+        next_activity_sequence: 0,
     }
 }
 
@@ -1153,6 +1567,15 @@ mod tests {
                 issue,
                 workspace,
                 run,
+                route: crate::opensymphony_orchestrator::HarnessRouteDecision {
+                    task_type: "issue_execution".into(),
+                    harness_kind: "openhands_agent_server".into(),
+                    model_profile: None,
+                    reason: "test default route".into(),
+                    required_capabilities: vec!["start_run".into()],
+                    dry_run: false,
+                    user_override: false,
+                },
             })
             .await
             .expect_err("workspace setup failure should fail the launch immediately");
@@ -1496,7 +1919,7 @@ Run the scheduler.
 
     fn sample_issue_conversation_manifest(
         issue: &NormalizedIssue,
-        workspace: &crate::opensymphony_workspace::WorkspaceHandle,
+        workspace: &WorkspaceHandle,
         conversation_id: Uuid,
     ) -> IssueConversationManifest {
         let now = chrono::Utc::now();

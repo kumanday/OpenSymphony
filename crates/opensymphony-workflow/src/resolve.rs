@@ -18,7 +18,8 @@ use super::{
         DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
         DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
         DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
-        DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, Environment,
+        DEFAULT_POLL_INTERVAL_MS, DEFAULT_ROUTING_HARNESS, DEFAULT_ROUTING_OVERRIDE_ENV,
+        DEFAULT_ROUTING_TASK_TYPE, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, Environment,
         HooksConfig, HooksFrontMatter, IntegerLike, OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY,
         OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION, OpenHandsConfig,
         OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
@@ -29,8 +30,9 @@ use super::{
         OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
         OpenHandsSubscriptionCredentialConfig, OpenHandsSubscriptionCredentialFrontMatter,
         OpenHandsTransportConfig, OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter,
-        PollingConfig, PollingFrontMatter, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter,
-        TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkspaceConfig,
+        PollingConfig, PollingFrontMatter, ResolvedWorkflow, RoutingConfig, RoutingFrontMatter,
+        RoutingRuleConfig, RoutingRuleFrontMatter, TrackerConfig, TrackerFrontMatter, TrackerKind,
+        WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkspaceConfig,
         WorkspaceFrontMatter,
     },
 };
@@ -47,6 +49,7 @@ pub(crate) fn resolve_workflow<E: Environment>(
             workspace: resolve_workspace(&workflow.front_matter.workspace, base_dir, env)?,
             hooks: resolve_hooks(&workflow.front_matter.hooks)?,
             agent: resolve_agent(&workflow.front_matter.agent)?,
+            routing: resolve_routing(&workflow.front_matter.routing, env)?,
         },
         extensions: WorkflowExtensions {
             openhands: resolve_openhands(&workflow.front_matter.openhands, base_dir, env)?,
@@ -167,6 +170,172 @@ fn resolve_agent(agent: &AgentFrontMatter) -> Result<AgentConfig, WorkflowConfig
             agent.max_concurrent_agents_by_state.as_ref(),
         )?,
     })
+}
+
+fn resolve_routing<E: Environment>(
+    routing: &RoutingFrontMatter,
+    env: &E,
+) -> Result<RoutingConfig, WorkflowConfigError> {
+    let default_harness = resolve_string_or_default(
+        routing.default_harness.as_deref(),
+        env,
+        "routing.default_harness",
+        DEFAULT_ROUTING_HARNESS,
+    )?;
+    validate_harness_kind(&default_harness, "routing.default_harness")?;
+
+    let user_override_env = resolve_string_or_default(
+        routing.user_override_env.as_deref(),
+        env,
+        "routing.user_override_env",
+        DEFAULT_ROUTING_OVERRIDE_ENV,
+    )?;
+    validate_env_name(&user_override_env, "routing.user_override_env")?;
+    let user_override_harness = env
+        .get(&user_override_env)
+        .and_then(normalize_optional_owned)
+        .map(|override_harness| {
+            validate_harness_kind(&override_harness, "routing.user_override_env")?;
+            Ok::<_, WorkflowConfigError>(override_harness)
+        })
+        .transpose()?;
+
+    let rules = routing
+        .rules
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| resolve_routing_rule(index, rule, env))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(RoutingConfig {
+        default_harness,
+        user_override_env,
+        user_override_harness,
+        dry_run: routing.dry_run.unwrap_or(false),
+        rules,
+    })
+}
+
+fn resolve_routing_rule<E: Environment>(
+    index: usize,
+    rule: &RoutingRuleFrontMatter,
+    env: &E,
+) -> Result<RoutingRuleConfig, WorkflowConfigError> {
+    let field = "routing.rules";
+    let harness = resolve_string(&rule.harness, env, field)?;
+    validate_harness_kind(&harness, field)?;
+    let task_type = resolve_string_or_default(
+        rule.task_type.as_deref(),
+        env,
+        field,
+        DEFAULT_ROUTING_TASK_TYPE,
+    )?;
+    let task_type =
+        normalize_optional(&task_type).ok_or_else(|| WorkflowConfigError::InvalidField {
+            field,
+            message: format!("rule {index} task_type must not be empty"),
+        })?;
+    let reason = resolve_string_or_default(
+        rule.reason.as_deref(),
+        env,
+        field,
+        "matched workflow routing policy",
+    )?;
+    let required_capabilities = rule
+        .required_capabilities
+        .iter()
+        .map(|capability| {
+            let capability = resolve_string(capability, env, field)?;
+            validate_routing_capability(&capability, field)?;
+            Ok(capability)
+        })
+        .collect::<Result<Vec<_>, WorkflowConfigError>>()?;
+
+    Ok(RoutingRuleConfig {
+        task_type,
+        harness,
+        model_profile: rule
+            .model_profile
+            .as_deref()
+            .map(|value| resolve_string(value, env, field))
+            .transpose()?,
+        required_capabilities,
+        reason,
+        user_policy: rule
+            .user_policy
+            .as_deref()
+            .map(|value| resolve_string(value, env, field))
+            .transpose()?,
+        cost: rule
+            .cost
+            .as_deref()
+            .map(|value| resolve_string(value, env, field))
+            .transpose()?,
+        speed: rule
+            .speed
+            .as_deref()
+            .map(|value| resolve_string(value, env, field))
+            .transpose()?,
+    })
+}
+
+fn validate_harness_kind(value: &str, field: &'static str) -> Result<(), WorkflowConfigError> {
+    match value {
+        "openhands_agent_server" | "codex_app_server" | "rust_native" => Ok(()),
+        _ => Err(WorkflowConfigError::InvalidField {
+            field,
+            message:
+                "must be one of `openhands_agent_server`, `codex_app_server`, or `rust_native`"
+                    .to_owned(),
+        }),
+    }
+}
+
+fn validate_routing_capability(
+    value: &str,
+    field: &'static str,
+) -> Result<(), WorkflowConfigError> {
+    match value {
+        "start_run"
+        | "approve"
+        | "reject"
+        | "tool_approval"
+        | "human_decision"
+        | "policy_metadata"
+        | "api_compatible_settings"
+        | "subscription_credentials"
+        | "per_run_overrides"
+        | "local_transport"
+        | "remote_transport"
+        | "history_fetch"
+        | "reconnect_replay"
+        | "preserve_unknown_events" => Ok(()),
+        _ => Err(WorkflowConfigError::InvalidField {
+            field,
+            message: format!("unsupported routing capability `{value}`"),
+        }),
+    }
+}
+
+fn validate_env_name(value: &str, field: &'static str) -> Result<(), WorkflowConfigError> {
+    let valid = !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+        && value
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase() || character == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err(WorkflowConfigError::InvalidField {
+            field,
+            message: "must be an environment variable name such as OPENSYMPHONY_HARNESS".to_owned(),
+        })
+    }
 }
 
 fn resolve_stall_timeout(

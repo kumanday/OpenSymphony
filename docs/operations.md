@@ -272,6 +272,15 @@ or logged-out Codex installations must fail with the readiness guidance above
 instead of partially starting an issue. Loopback WebSocket and hosted Codex
 worker pools remain non-production paths.
 
+For cross-harness route testing, set `routing.dry_run: true` in `WORKFLOW.md`.
+`opensymphony run` will still poll Linear and prepare workspaces, but the worker
+returns a route preview instead of launching a model-backed harness. The preview
+is recorded as a `routing.decision` runtime event and includes the selected
+harness, model profile, required capabilities, and policy reason. To force a
+local process override without editing workflow rules, start the daemon with
+`OPENSYMPHONY_HARNESS=codex_app_server`; the override is accepted only when the
+public harness capability can start runs.
+
 The alpha model configuration panel exposed by the web and desktop shells uses
 the shared model profile state store, but those entrypoints currently construct
 it without durable storage. Treat profile edits as session-local until a

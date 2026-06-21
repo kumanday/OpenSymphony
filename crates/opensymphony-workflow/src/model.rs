@@ -29,6 +29,9 @@ pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 pub const DEFAULT_OPENHANDS_LLM_MODEL: &str = "openai/gpt-5.4";
 pub const DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE: &str = "api_key";
+pub const DEFAULT_ROUTING_TASK_TYPE: &str = "issue_execution";
+pub const DEFAULT_ROUTING_HARNESS: &str = "openhands_agent_server";
+pub const DEFAULT_ROUTING_OVERRIDE_ENV: &str = "OPENSYMPHONY_HARNESS";
 pub const OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY: &str = "api_key";
 pub const OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION: &str = "openai_subscription";
 pub const DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE: u64 = 240;
@@ -54,6 +57,8 @@ pub struct WorkflowFrontMatter {
     pub agent: AgentFrontMatter,
     #[serde(default)]
     pub openhands: OpenHandsFrontMatter,
+    #[serde(default)]
+    pub routing: RoutingFrontMatter,
     #[serde(default)]
     pub codex: Option<BTreeMap<String, serde_yaml::Value>>,
     #[serde(default)]
@@ -103,6 +108,29 @@ pub struct AgentFrontMatter {
     pub max_retry_backoff_ms: Option<IntegerLike>,
     pub stall_timeout_ms: Option<IntegerLike>,
     pub max_concurrent_agents_by_state: Option<BTreeMap<String, IntegerLike>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingFrontMatter {
+    pub default_harness: Option<String>,
+    pub user_override_env: Option<String>,
+    pub dry_run: Option<bool>,
+    pub rules: Option<Vec<RoutingRuleFrontMatter>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingRuleFrontMatter {
+    pub task_type: Option<String>,
+    pub harness: String,
+    pub model_profile: Option<String>,
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
+    pub reason: Option<String>,
+    pub user_policy: Option<String>,
+    pub cost: Option<String>,
+    pub speed: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -244,6 +272,7 @@ pub struct WorkflowConfig {
     pub workspace: WorkspaceConfig,
     pub hooks: HooksConfig,
     pub agent: AgentConfig,
+    pub routing: RoutingConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -292,6 +321,27 @@ pub struct AgentConfig {
     pub max_retry_backoff_ms: u64,
     pub stall_timeout_ms: Option<u64>,
     pub max_concurrent_agents_by_state: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingConfig {
+    pub default_harness: String,
+    pub user_override_env: String,
+    pub user_override_harness: Option<String>,
+    pub dry_run: bool,
+    pub rules: Vec<RoutingRuleConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingRuleConfig {
+    pub task_type: String,
+    pub harness: String,
+    pub model_profile: Option<String>,
+    pub required_capabilities: Vec<String>,
+    pub reason: String,
+    pub user_policy: Option<String>,
+    pub cost: Option<String>,
+    pub speed: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

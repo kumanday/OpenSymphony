@@ -358,13 +358,14 @@ an installed compatible Codex CLI and an active ChatGPT login. The gateway
 surfaces unsupported CLI output, missing app-server support, logged-out,
 expired, permission-denied, and unknown states as actionable non-ready statuses.
 Capability discovery reports the local adapter contract and stdio runtime
-surface, but `opensymphony run` still dispatches through OpenHands until the
-cross-harness runtime-routing work lands in COE-429.
+surface. `opensymphony run` now attaches an alpha route decision to each worker
+launch. Workflow `routing.rules` or `OPENSYMPHONY_HARNESS=codex_app_server`
+can select the local Codex app-server stdio worker when capability checks pass.
+Set `routing.dry_run: true` to emit a route preview without launching a
+model-backed Codex session.
 
 Remaining follow-up work:
 
-- COE-429 scheduler/runtime dispatch selection for `opensymphony run` so a
-  workflow can route issue execution to the Codex worker backend,
 - a checked-in generated schema artifact policy for future Codex protocol bumps,
 - replay/history semantics beyond the local stdio request lifecycle (capability
   metadata currently marks history fetch, reconnect replay, and stdio

@@ -11,7 +11,8 @@ use crate::opensymphony_domain::{
     SchedulerStatus, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueStateSnapshot,
     TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
-use crate::opensymphony_workflow::ResolvedWorkflow;
+use crate::opensymphony_gateway_schema::capability::HarnessCapability;
+use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig, RoutingRuleConfig};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::{
@@ -23,6 +24,7 @@ use tracing::{debug, warn};
 use super::filter_issues_for_dispatch;
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
+const ROUTING_TASK_ISSUE_EXECUTION: &str = "issue_execution";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
@@ -34,6 +36,7 @@ pub struct SchedulerConfig {
     pub stall_timeout_ms: Option<u64>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
+    pub routing: RoutingConfig,
 }
 
 impl SchedulerConfig {
@@ -81,6 +84,7 @@ impl SchedulerConfig {
             stall_timeout_ms: workflow.config.agent.stall_timeout_ms,
             active_states: workflow.config.tracker.active_states.clone(),
             terminal_states: workflow.config.tracker.terminal_states.clone(),
+            routing: workflow.config.routing.clone(),
         })
     }
 
@@ -101,6 +105,32 @@ pub struct WorkerStartRequest {
     pub issue: NormalizedIssue,
     pub workspace: WorkspaceRecord,
     pub run: RunAttempt,
+    pub route: HarnessRouteDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessRouteDecision {
+    pub task_type: String,
+    pub harness_kind: String,
+    pub model_profile: Option<String>,
+    pub reason: String,
+    pub required_capabilities: Vec<String>,
+    pub dry_run: bool,
+    pub user_override: bool,
+}
+
+impl HarnessRouteDecision {
+    pub fn summary(&self) -> String {
+        let profile = self
+            .model_profile
+            .as_deref()
+            .unwrap_or("<default model profile>");
+        let mode = if self.dry_run { "dry-run " } else { "" };
+        format!(
+            "{mode}route selected harness `{}` with model profile `{profile}`: {}",
+            self.harness_kind, self.reason
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +722,7 @@ where
                 previous_retry,
                 self.config.max_turns,
             );
+            let route = decide_issue_route(&normalized, &self.config)?;
 
             let mut execution = self
                 .remove_execution(&issue_id)
@@ -708,6 +739,7 @@ where
                 issue: normalized.clone(),
                 workspace,
                 run: claimed_run.clone(),
+                route,
             };
 
             *planned_running_by_state.entry(state_key).or_default() += 1;
@@ -1080,6 +1112,130 @@ impl TrackerSnapshot {
 
     fn terminal_state_name(&self, issue_id: &str) -> Option<&str> {
         self.terminal_state_by_id.get(issue_id).map(String::as_str)
+    }
+}
+
+pub fn decide_issue_route(
+    issue: &NormalizedIssue,
+    config: &SchedulerConfig,
+) -> Result<HarnessRouteDecision, SchedulerError> {
+    if let Some(override_harness) = config.routing.user_override_harness.as_deref() {
+        let capability = harness_capability(override_harness)?;
+        if !capability.available || !capability.actions.start_run {
+            return Err(SchedulerError::InvalidConfiguration {
+                detail: format!(
+                    "routing override `{override_harness}` cannot start issue execution"
+                ),
+            });
+        }
+        return Ok(HarnessRouteDecision {
+            task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
+            harness_kind: override_harness.into(),
+            model_profile: None,
+            reason: format!(
+                "user override from {} selected {override_harness}",
+                config.routing.user_override_env
+            ),
+            required_capabilities: vec!["start_run".into()],
+            dry_run: config.routing.dry_run,
+            user_override: true,
+        });
+    }
+
+    for rule in &config.routing.rules {
+        if !route_rule_matches_issue_execution(rule) {
+            continue;
+        }
+        let capability = harness_capability(&rule.harness)?;
+        let missing = missing_capabilities(&capability, &rule.required_capabilities);
+        if missing.is_empty() && capability.available && capability.actions.start_run {
+            return Ok(HarnessRouteDecision {
+                task_type: rule.task_type.clone(),
+                harness_kind: rule.harness.clone(),
+                model_profile: rule.model_profile.clone(),
+                reason: routing_reason(rule, issue),
+                required_capabilities: rule.required_capabilities.clone(),
+                dry_run: config.routing.dry_run,
+                user_override: false,
+            });
+        }
+    }
+
+    let default_capability = harness_capability(&config.routing.default_harness)?;
+    if !default_capability.available || !default_capability.actions.start_run {
+        return Err(SchedulerError::InvalidConfiguration {
+            detail: format!(
+                "default routing harness `{}` cannot start issue execution",
+                config.routing.default_harness
+            ),
+        });
+    }
+    Ok(HarnessRouteDecision {
+        task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
+        harness_kind: config.routing.default_harness.clone(),
+        model_profile: None,
+        reason: "no matching routing rule selected another available harness".into(),
+        required_capabilities: vec!["start_run".into()],
+        dry_run: config.routing.dry_run,
+        user_override: false,
+    })
+}
+
+fn route_rule_matches_issue_execution(rule: &RoutingRuleConfig) -> bool {
+    rule.task_type == ROUTING_TASK_ISSUE_EXECUTION || rule.task_type == "*"
+}
+
+fn routing_reason(rule: &RoutingRuleConfig, issue: &NormalizedIssue) -> String {
+    let mut reason = rule.reason.clone();
+    if let Some(user_policy) = &rule.user_policy {
+        reason.push_str(&format!("; user_policy={user_policy}"));
+    }
+    if let Some(cost) = &rule.cost {
+        reason.push_str(&format!("; cost={cost}"));
+    }
+    if let Some(speed) = &rule.speed {
+        reason.push_str(&format!("; speed={speed}"));
+    }
+    reason.push_str(&format!("; issue={}", issue.identifier));
+    reason
+}
+
+fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {
+    match kind {
+        "openhands_agent_server" => Ok(HarnessCapability::openhands_agent_server()),
+        "codex_app_server" => Ok(HarnessCapability::codex_app_server_local()),
+        "rust_native" => Ok(HarnessCapability::rust_native_future()),
+        _ => Err(SchedulerError::InvalidConfiguration {
+            detail: format!("unknown routing harness `{kind}`"),
+        }),
+    }
+}
+
+fn missing_capabilities(capability: &HarnessCapability, required: &[String]) -> Vec<String> {
+    required
+        .iter()
+        .filter(|name| !capability_satisfied(capability, name))
+        .cloned()
+        .collect()
+}
+
+fn capability_satisfied(capability: &HarnessCapability, name: &str) -> bool {
+    match name {
+        "start_run" => capability.actions.start_run,
+        "approve" => capability.actions.approve,
+        "reject" => capability.actions.reject,
+        "tool_approval" => capability.approvals.tool_approval,
+        "human_decision" => capability.approvals.human_decision,
+        "policy_metadata" => capability.approvals.policy_metadata,
+        "api_compatible_settings" => capability.model_settings.api_compatible_settings,
+        "subscription_credentials" => capability.model_settings.subscription_credentials,
+        "per_run_overrides" => capability.model_settings.per_run_overrides,
+        "local_transport" => capability.transport.local,
+        "remote_transport" => capability.transport.remote,
+        "history_fetch" => capability.history.fetch_history,
+        "reconnect_replay" => capability.history.reconnect_and_replay,
+        "preserve_unknown_events" => capability.history.preserve_unknown_events,
+        _ => false,
     }
 }
 
