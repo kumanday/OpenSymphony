@@ -169,9 +169,16 @@ describe("createModelProfileStore", () => {
       apiKeyRef: "local_keychain:safe-api-key",
       active: true,
       routingPolicy: { tier: "fast" },
-      providerConfig: { apiKey: "sk-secret-nested", region: "us-east-1" },
-      nestedList: [{ oauthToken: "oauth-secret", label: "kept" }],
-      rawTokenMetadata: "should-not-survive",
+      providerConfig: {
+        apiKey: "sk-secret-nested",
+        region: "us-east-1",
+        tokenEndpoint: "https://auth.example/token",
+        credentialId: "public-credential-id",
+        oauthProvider: "openai",
+        tokens: ["scope:read"],
+      },
+      nestedList: [{ oauth_token: "oauth-secret", label: "kept" }],
+      token: "should-not-survive",
     };
     storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
       profiles: [
@@ -206,14 +213,21 @@ describe("createModelProfileStore", () => {
     });
     expect((profiles[0] as ModelConfigurationProfile & { providerConfig?: unknown }).providerConfig).toEqual({
       region: "us-east-1",
+      tokenEndpoint: "https://auth.example/token",
+      credentialId: "public-credential-id",
+      oauthProvider: "openai",
+      tokens: ["scope:read"],
     });
     expect((profiles[0] as ModelConfigurationProfile & { nestedList?: unknown }).nestedList).toEqual([
       { label: "kept" },
     ]);
-    expect((profiles[0] as ModelConfigurationProfile & { rawTokenMetadata?: unknown }).rawTokenMetadata).toBeUndefined();
+    expect((profiles[0] as ModelConfigurationProfile & { token?: unknown }).token).toBeUndefined();
     expect(quarantineReasons).toEqual(expect.arrayContaining([
       expect.stringContaining("raw-secret"),
       expect.stringContaining("wrong-storage"),
+      expect.stringContaining("safe-api: providerConfig.apiKey"),
+      expect.stringContaining("safe-api: nestedList.0.oauth_token"),
+      expect.stringContaining("safe-api: token"),
       "Dropped malformed model profile from durable storage",
     ]));
   });
@@ -234,6 +248,64 @@ describe("createModelProfileStore", () => {
 
     expect(profiles.length).toBeGreaterThan(0);
     expect(quarantineReasons).toContain("Dropped malformed model profile list from durable storage");
+  });
+
+  it("keeps the last valid sync state after a transient storage read failure", async () => {
+    const storage = new MemoryStorage();
+    const validProfile = {
+      ...createModelProfile("api_key"),
+      id: "valid-before-error",
+      model: "provider/valid-before-error",
+    };
+    storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
+      profiles: [validProfile],
+      activeProfileId: validProfile.id,
+    }));
+    const store = createModelProfileStore({ storage });
+
+    await expect(store.listProfiles()).resolves.toEqual([
+      expect.objectContaining({ id: validProfile.id }),
+    ]);
+    storage.setItem("opensymphony.modelProfiles.v1", "{not-json");
+
+    await expect(store.listProfiles()).resolves.toEqual([
+      expect.objectContaining({ id: validProfile.id }),
+    ]);
+  });
+
+  it("quarantines profiles with conflicting mode-specific credential fields", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
+      profiles: [
+        {
+          ...createModelProfile("api_key"),
+          id: "api-with-subscription",
+          subscriptionCredential: {
+            provider: "openai",
+          },
+        },
+        {
+          ...createModelProfile("subscription"),
+          id: "subscription-with-api-key",
+          apiKeyRef: "local_keychain:legacy",
+        },
+      ],
+    }));
+    const quarantineReasons: string[] = [];
+    const store = createModelProfileStore({
+      storage,
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+
+    const profiles = await store.listProfiles();
+
+    expect(profiles.map((profile) => profile.id)).toEqual(
+      defaultModelProfiles().map((profile) => profile.id),
+    );
+    expect(quarantineReasons).toEqual(expect.arrayContaining([
+      expect.stringContaining("api-with-subscription"),
+      expect.stringContaining("subscription-with-api-key"),
+    ]));
   });
 
   it("drops profiles when persisted harnesses contain no known harness kinds", async () => {

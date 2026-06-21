@@ -204,10 +204,12 @@ export function createModelProfileStore(
       }
       const parsed = JSON.parse(raw) as Partial<ModelProfileState>;
       const profiles = sanitizeModelProfiles(parsed.profiles, options.onQuarantine);
-      return normalizeModelProfileState({
+      const state = normalizeModelProfileState({
         profiles: profiles.length > 0 ? profiles : fallback.profiles,
         activeProfileId: parsed.activeProfileId ?? null,
       });
+      fallback = state;
+      return state;
     } catch (error) {
       options.onQuarantine?.(`Failed to read stored model profiles: ${errorMessage(error)}`);
       return fallback;
@@ -403,10 +405,22 @@ function sanitizeModelProfile(
       ?? template.subscriptionCredential
       ?? null
     : null;
+  if (
+    mode === "api_key"
+    && record.subscriptionCredential !== undefined
+    && record.subscriptionCredential !== null
+  ) {
+    onQuarantine?.(`Dropped invalid model profile ${id}: API key profiles must not store subscription credential metadata`);
+    return null;
+  }
   const apiKeyRef = mode === "api_key"
     ? nullableString(record.apiKeyRef)
     : null;
-  const extraMetadata = safeExtraMetadata(record);
+  if (mode === "subscription" && record.apiKeyRef !== undefined && record.apiKeyRef !== null) {
+    onQuarantine?.(`Dropped invalid model profile ${id}: Subscription profiles must not store API key references`);
+    return null;
+  }
+  const extraMetadata = safeExtraMetadata(record, id, onQuarantine);
   const harnesses = sanitizeHarnesses(record.harnesses, template.harnesses, id, onQuarantine);
   if (!harnesses) {
     return null;
@@ -512,20 +526,35 @@ function sanitizeHarnesses(
   return Array.from(new Set(items));
 }
 
-function safeExtraMetadata(record: Record<string, unknown>): Record<string, unknown> {
+function safeExtraMetadata(
+  record: Record<string, unknown>,
+  profileId: string,
+  onQuarantine?: (reason: string) => void,
+): Record<string, unknown> {
   const extra: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    if (modelProfileKnownFields.has(key) || looksSecretBearingKey(key)) {
+    if (modelProfileKnownFields.has(key)) {
       continue;
     }
-    extra[key] = stripSecretMetadata(value);
+    if (looksSecretBearingKey(key)) {
+      recordDroppedMetadata(profileId, key, onQuarantine);
+      continue;
+    }
+    extra[key] = stripSecretMetadata(value, profileId, key, onQuarantine);
   }
   return extra;
 }
 
-function stripSecretMetadata(value: unknown): unknown {
+function stripSecretMetadata(
+  value: unknown,
+  profileId: string,
+  path: string,
+  onQuarantine?: (reason: string) => void,
+): unknown {
   if (Array.isArray(value)) {
-    return value.map(stripSecretMetadata);
+    return value.map((item, index) =>
+      stripSecretMetadata(item, profileId, `${path}.${index}`, onQuarantine)
+    );
   }
   const record = objectRecord(value);
   if (!record) {
@@ -533,16 +562,26 @@ function stripSecretMetadata(value: unknown): unknown {
   }
   const stripped: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(record)) {
+    const childPath = `${path}.${key}`;
     if (looksSecretBearingKey(key)) {
+      recordDroppedMetadata(profileId, childPath, onQuarantine);
       continue;
     }
-    stripped[key] = stripSecretMetadata(child);
+    stripped[key] = stripSecretMetadata(child, profileId, childPath, onQuarantine);
   }
   return stripped;
 }
 
 function looksSecretBearingKey(key: string): boolean {
-  return /(?:api[_-]?key|secret|token|oauth|password|credential)/i.test(key);
+  return /^(?:api[_-]?key|apiKey|secret|token|oauth|oauth[_-]?token|oauthToken|password|credential)$/i.test(key);
+}
+
+function recordDroppedMetadata(
+  profileId: string,
+  path: string,
+  onQuarantine?: (reason: string) => void,
+): void {
+  onQuarantine?.(`Dropped secret-bearing model profile metadata for ${profileId}: ${path}`);
 }
 
 function errorMessage(error: unknown): string {
