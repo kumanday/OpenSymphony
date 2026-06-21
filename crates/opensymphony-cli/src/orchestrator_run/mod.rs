@@ -45,6 +45,11 @@ pub struct RunArgs {
     #[arg(help = "Runtime config YAML path; defaults to ./config.yaml when present")]
     #[arg(long)]
     pub config: Option<PathBuf>,
+    #[arg(
+        long,
+        help = "Preview selected harness/model routing without launching model-backed workers"
+    )]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Error)]

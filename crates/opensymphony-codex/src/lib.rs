@@ -130,7 +130,7 @@ impl CodexAppServerAdapter {
         &self,
         session: &mut CodexJsonRpcSession,
         cwd: impl Into<String>,
-        model: impl Into<String>,
+        model: Option<String>,
         workflow_prompt: impl Into<String>,
         config: Value,
     ) -> Result<CodexHarnessRequest, serde_json::Error> {
@@ -138,7 +138,7 @@ impl CodexAppServerAdapter {
             lifecycle: CodexLifecycleRequest::Start,
             request: session.thread_start(CodexThreadStartParams {
                 cwd: Some(cwd.into()),
-                model: Some(model.into()),
+                model,
                 // Codex CLI app-server currently exposes OpenAI/ChatGPT-backed
                 // model ids through this local harness path.
                 model_provider: Some(CODEX_DEFAULT_MODEL_PROVIDER.into()),

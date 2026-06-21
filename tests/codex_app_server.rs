@@ -230,7 +230,7 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
         .start_issue_request(
             &mut session,
             "/tmp/issue-workspace",
-            "gpt-5-codex",
+            Some("gpt-5-codex".into()),
             "workflow prompt",
             json!({ "approvalPolicy": "on-request" }),
         )
@@ -239,7 +239,26 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
     assert_eq!(start.request.method, "thread/start");
     assert_eq!(start.request.params["cwd"], "/tmp/issue-workspace");
     assert_eq!(start.request.params["baseInstructions"], "workflow prompt");
+    assert_eq!(start.request.params["model"], "gpt-5-codex");
     assert_eq!(start.request.params["modelProvider"], "openai");
+
+    let start_with_codex_default = adapter
+        .start_issue_request(
+            &mut session,
+            "/tmp/issue-workspace",
+            None,
+            "workflow prompt",
+            json!({}),
+        )
+        .expect("start request without selected model serializes");
+    assert!(
+        start_with_codex_default
+            .request
+            .params
+            .get("model")
+            .is_none(),
+        "omitting selected model should let Codex use its own configured default"
+    );
 
     let resume = adapter
         .resume_issue_request(&mut session, "thread-1", "/tmp/issue-workspace", "continue")

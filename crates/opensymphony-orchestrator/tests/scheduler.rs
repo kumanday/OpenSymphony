@@ -12,7 +12,7 @@ use crate::opensymphony_orchestrator::{
     WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey,
     WorkspaceRecord, decide_issue_route,
 };
-use crate::opensymphony_workflow::{RoutingConfig, RoutingRuleConfig};
+use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
 
 fn ts(value: u64) -> TimestampMs {
@@ -36,11 +36,16 @@ fn scheduler_config() -> SchedulerConfig {
         active_states: vec!["In Progress".to_string()],
         terminal_states: vec!["Done".to_string(), "Canceled".to_string()],
         routing: RoutingConfig {
-            default_harness: "openhands_agent_server".into(),
-            user_override_env: "OPENSYMPHONY_HARNESS".into(),
-            user_override_harness: None,
+            harness: "openhands_agent_server".into(),
+            model: None,
+            model_profile: None,
+            harness_env: "OPENSYMPHONY_HARNESS".into(),
+            model_env: "OPENSYMPHONY_MODEL".into(),
+            model_profile_env: "OPENSYMPHONY_MODEL_PROFILE".into(),
+            harness_from_env: false,
+            model_from_env: false,
+            model_profile_from_env: false,
             dry_run: false,
-            rules: Vec::new(),
         },
     }
 }
@@ -112,64 +117,48 @@ fn normalized_issue(id: &str, identifier: &str, state: &str) -> NormalizedIssue 
 }
 
 #[test]
-fn route_policy_selects_codex_when_capabilities_match() {
+fn selected_route_uses_configured_codex_harness_and_model() {
     let issue = normalized_issue("lin-429", "COE-429", "In Progress");
     let mut config = scheduler_config();
+    config.routing.harness = "codex_app_server".into();
+    config.routing.model = Some("gpt-5-codex".into());
+    config.routing.model_profile = Some("codex-chatgpt-local-keychain".into());
     config.routing.dry_run = true;
-    config.routing.rules.push(RoutingRuleConfig {
-        task_type: "issue_execution".into(),
-        harness: "codex_app_server".into(),
-        model_profile: Some("codex-chatgpt-local-keychain".into()),
-        required_capabilities: vec![
-            "start_run".into(),
-            "tool_approval".into(),
-            "subscription_credentials".into(),
-        ],
-        reason: "prefer Codex for approval bridge validation".into(),
-        user_policy: Some("allow_local_stdio".into()),
-        cost: Some("subscription".into()),
-        speed: Some("local".into()),
-    });
 
     let route = decide_issue_route(&issue, &config).expect("route should resolve");
 
     assert_eq!(route.harness_kind, "codex_app_server");
+    assert_eq!(route.model.as_deref(), Some("gpt-5-codex"));
     assert_eq!(
         route.model_profile.as_deref(),
         Some("codex-chatgpt-local-keychain")
     );
     assert!(route.dry_run);
-    assert!(route.reason.contains("allow_local_stdio"));
+    assert!(route.reason.contains("workflow routing.harness"));
 }
 
 #[test]
-fn route_policy_falls_back_when_required_capability_is_missing() {
+fn selected_route_rejects_unavailable_harness() {
     let issue = normalized_issue("lin-430", "COE-430", "In Progress");
     let mut config = scheduler_config();
-    config.routing.rules.push(RoutingRuleConfig {
-        task_type: "issue_execution".into(),
-        harness: "codex_app_server".into(),
-        model_profile: Some("codex-chatgpt-local-keychain".into()),
-        required_capabilities: vec!["history_fetch".into()],
-        reason: "require replay before selecting Codex".into(),
-        user_policy: None,
-        cost: None,
-        speed: None,
-    });
+    config.routing.harness = "rust_native".into();
 
-    let route = decide_issue_route(&issue, &config).expect("fallback route should resolve");
+    let error = decide_issue_route(&issue, &config).expect_err("unavailable harness should fail");
 
-    assert_eq!(route.harness_kind, "openhands_agent_server");
-    assert!(route.reason.contains("no matching routing rule"));
+    assert!(matches!(
+        error,
+        crate::opensymphony_orchestrator::SchedulerError::InvalidConfiguration { .. }
+    ));
 }
 
 #[test]
-fn route_policy_honors_explicit_user_override() {
+fn selected_route_records_environment_selection() {
     let issue = normalized_issue("lin-431", "COE-431", "In Progress");
     let mut config = scheduler_config();
-    config.routing.user_override_harness = Some("codex_app_server".into());
+    config.routing.harness = "codex_app_server".into();
+    config.routing.harness_from_env = true;
 
-    let route = decide_issue_route(&issue, &config).expect("override route should resolve");
+    let route = decide_issue_route(&issue, &config).expect("selected route should resolve");
 
     assert_eq!(route.harness_kind, "codex_app_server");
     assert!(route.user_override);

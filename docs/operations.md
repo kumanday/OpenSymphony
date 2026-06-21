@@ -272,14 +272,14 @@ or logged-out Codex installations must fail with the readiness guidance above
 instead of partially starting an issue. Loopback WebSocket and hosted Codex
 worker pools remain non-production paths.
 
-For cross-harness route testing, set `routing.dry_run: true` in `WORKFLOW.md`.
-`opensymphony run` will still poll Linear and prepare workspaces, but the worker
+For cross-harness route testing, run `opensymphony run --dry-run`.
+OpenSymphony will still poll Linear and prepare workspaces, but the worker
 returns a route preview instead of launching a model-backed harness. The preview
 is recorded as a `routing.decision` runtime event and includes the selected
-harness, model profile, required capabilities, and policy reason. To force a
-local process override without editing workflow rules, start the daemon with
-`OPENSYMPHONY_HARNESS=codex_app_server`; the override is accepted only when the
-public harness capability can start runs.
+harness, model, and model profile. To force a local process override without
+editing workflow config, start the daemon with `OPENSYMPHONY_HARNESS`, and pass
+`OPENSYMPHONY_MODEL` / `OPENSYMPHONY_MODEL_PROFILE` when a launcher wants to use
+the active model profile selected in the desktop or web UI.
 
 The Codex local stdio route executes the configured Codex binary with
 `cwd == issue_workspace_path`. `OPENSYMPHONY_CODEX_BIN` is a trusted local

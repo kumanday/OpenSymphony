@@ -761,9 +761,9 @@ current model wiring. API-compatible model profiles use the configured base URL,
 model string, credential reference, and harness capability. Context window,
 pricing tiers, task recommendations, and provider-specific reasoning controls
 must not be accepted as opaque operator-entered profile fields until a runtime
-adapter or routing policy consumes them. Later routing work should derive those
-signals from provider capability discovery, benchmark data, or explicit policy
-configuration rather than asking users to guess values.
+adapter or selection path consumes them. Later optimization work should derive
+those signals from provider capability discovery, benchmark data, or explicit
+operator configuration rather than asking users to guess values.
 
 ### 8.4 Codex app-server harness shape
 

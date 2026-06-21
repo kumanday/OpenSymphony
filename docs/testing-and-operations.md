@@ -259,11 +259,12 @@ Current implemented checks:
 - control-plane monotonic lag-recovery coverage in `opensymphony-control/src/lib.rs`
 - gateway compatibility coverage for `/healthz`, `/api/v1/snapshot`, `/api/v1/capabilities`, and `/api/v1/dashboard/snapshot` in `opensymphony-gateway/tests/gateway.rs`
 - `opensymphony run` startup coverage that verifies the configured bind address exposes both health and gateway dashboard routes in `opensymphony-cli/tests/run.rs`
-- workflow routing config coverage in `opensymphony-workflow` unit tests,
-  including Codex model-profile rules, `OPENSYMPHONY_HARNESS` override
-  resolution, dry-run flags, and invalid capability rejection
+- workflow harness/model selection coverage in `opensymphony-workflow` unit
+  tests, including `OPENSYMPHONY_HARNESS`, `OPENSYMPHONY_MODEL`, and
+  `OPENSYMPHONY_MODEL_PROFILE` override resolution
 - scheduler route decision coverage in `opensymphony-orchestrator/tests/scheduler.rs`
-  for Codex selection, explicit user override, and missing-capability fallback
+  for Codex selection, environment-sourced selection, and unavailable-harness
+  failure
 - Codex approval bridge coverage in `tests/codex_app_server.rs`, using fake
   JSON-RPC approval notifications to prove approval-center DTO mapping and
   approval decision audit records

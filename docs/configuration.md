@@ -174,35 +174,35 @@ logged-out, expired, unsupported, permission-denied, and unknown outputs as
 non-ready status states rather than guessing or reading private credential
 files.
 
-Workflow routing is configured with the alpha `routing` front-matter section.
-When omitted, `opensymphony run` keeps the default `openhands_agent_server`
-route. A workflow can opt a task type into the local Codex app-server harness
-by requiring public harness capabilities and naming the model profile that the
-route should use:
+Harness and model selection are configured with the alpha `routing`
+front-matter section. When omitted, `opensymphony run` keeps the default
+`openhands_agent_server` harness and the OpenHands LLM settings from the
+workflow.
 
 ```yaml
 routing:
-  default_harness: openhands_agent_server
-  user_override_env: OPENSYMPHONY_HARNESS
-  dry_run: false
-  rules:
-    - task_type: issue_execution
-      harness: codex_app_server
-      model_profile: codex-chatgpt-local-keychain
-      required_capabilities:
-        - start_run
-        - tool_approval
-        - subscription_credentials
-      reason: prefer local Codex for approval-bearing issue execution
-      user_policy: allow_local_stdio
-      cost: subscription
-      speed: local
+  harness: codex_app_server
+  model: gpt-5-codex
+  model_profile: codex-chatgpt-local-keychain
 ```
 
-Set `routing.dry_run: true` to preview route selection without launching a
-model-backed worker. Set `OPENSYMPHONY_HARNESS=codex_app_server` to force an
-explicit operator override for the current process. Overrides still require an
-available harness that can start runs.
+The same selected values can be supplied by a launcher or desktop shell through
+environment variables:
+
+- `OPENSYMPHONY_HARNESS`
+- `OPENSYMPHONY_MODEL`
+- `OPENSYMPHONY_MODEL_PROFILE`
+
+When `routing.harness` is `openhands_agent_server`, a selected `routing.model`
+or `OPENSYMPHONY_MODEL` becomes the OpenHands conversation LLM model. When
+`routing.harness` is `codex_app_server`, a selected model is passed to Codex
+`thread/start`; if no model is selected, OpenSymphony omits the model and lets
+the Codex CLI/app-server use its own default from Codex configuration such as
+`~/.codex/config.toml`.
+
+Set `opensymphony run --dry-run` to preview the selected harness/model without
+launching a model-backed worker. The selected harness must still be available
+and able to start runs.
 For local Codex stdio execution, `OPENSYMPHONY_CODEX_BIN` may point to an
 alternate Codex binary in trusted operator environments only; it is not a
 hosted-mode tenant input.

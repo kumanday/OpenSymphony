@@ -11,10 +11,8 @@ use crate::opensymphony_domain::{
     SchedulerStatus, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueStateSnapshot,
     TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
-use crate::opensymphony_gateway_schema::capability::{
-    HarnessCapability, HarnessKind, HarnessRoutingCapability,
-};
-use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig, RoutingRuleConfig};
+use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
+use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::{
@@ -114,9 +112,9 @@ pub struct WorkerStartRequest {
 pub struct HarnessRouteDecision {
     pub task_type: String,
     pub harness_kind: String,
+    pub model: Option<String>,
     pub model_profile: Option<String>,
     pub reason: String,
-    pub required_capabilities: Vec<String>,
     pub dry_run: bool,
     pub user_override: bool,
 }
@@ -127,9 +125,10 @@ impl HarnessRouteDecision {
             .model_profile
             .as_deref()
             .unwrap_or("<default model profile>");
+        let model = self.model.as_deref().unwrap_or("<harness default model>");
         let mode = if self.dry_run { "dry-run " } else { "" };
         format!(
-            "{mode}route selected harness `{}` with model profile `{profile}`: {}",
+            "{mode}selected harness `{}` with model `{model}` and profile `{profile}`: {}",
             self.harness_kind, self.reason
         )
     }
@@ -1118,88 +1117,54 @@ impl TrackerSnapshot {
 }
 
 pub fn decide_issue_route(
-    issue: &NormalizedIssue,
+    _issue: &NormalizedIssue,
     config: &SchedulerConfig,
 ) -> Result<HarnessRouteDecision, SchedulerError> {
-    if let Some(override_harness) = config.routing.user_override_harness.as_deref() {
-        let capability = harness_capability(override_harness)?;
-        if !capability.available || !capability.actions.start_run {
-            return Err(SchedulerError::InvalidConfiguration {
-                detail: format!(
-                    "routing override `{override_harness}` cannot start issue execution"
-                ),
-            });
-        }
-        return Ok(HarnessRouteDecision {
-            task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
-            harness_kind: override_harness.into(),
-            model_profile: None,
-            reason: format!(
-                "user override from {} selected {override_harness}",
-                config.routing.user_override_env
-            ),
-            required_capabilities: vec!["start_run".into()],
-            dry_run: config.routing.dry_run,
-            user_override: true,
-        });
-    }
-
-    for rule in &config.routing.rules {
-        if !route_rule_matches_issue_execution(rule) {
-            continue;
-        }
-        let capability = harness_capability(&rule.harness)?;
-        let missing = missing_capabilities(&capability, &rule.required_capabilities);
-        if missing.is_empty() && capability.available && capability.actions.start_run {
-            return Ok(HarnessRouteDecision {
-                task_type: rule.task_type.clone(),
-                harness_kind: rule.harness.clone(),
-                model_profile: rule.model_profile.clone(),
-                reason: routing_reason(rule, issue),
-                required_capabilities: rule.required_capabilities.clone(),
-                dry_run: config.routing.dry_run,
-                user_override: false,
-            });
-        }
-    }
-
-    let default_capability = harness_capability(&config.routing.default_harness)?;
-    if !default_capability.available || !default_capability.actions.start_run {
+    let capability = harness_capability(&config.routing.harness)?;
+    if !capability.available || !capability.actions.start_run {
         return Err(SchedulerError::InvalidConfiguration {
             detail: format!(
-                "default routing harness `{}` cannot start issue execution",
-                config.routing.default_harness
+                "selected harness `{}` cannot start issue execution",
+                config.routing.harness
             ),
         });
     }
+
     Ok(HarnessRouteDecision {
         task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
-        harness_kind: config.routing.default_harness.clone(),
-        model_profile: None,
-        reason: "no matching routing rule selected another available harness".into(),
-        required_capabilities: vec!["start_run".into()],
+        harness_kind: config.routing.harness.clone(),
+        model: config.routing.model.clone(),
+        model_profile: config.routing.model_profile.clone(),
+        reason: routing_reason(&config.routing),
         dry_run: config.routing.dry_run,
-        user_override: false,
+        user_override: config.routing.harness_from_env
+            || config.routing.model_from_env
+            || config.routing.model_profile_from_env,
     })
 }
 
-fn route_rule_matches_issue_execution(rule: &RoutingRuleConfig) -> bool {
-    rule.task_type == ROUTING_TASK_ISSUE_EXECUTION || rule.task_type == "*"
-}
-
-fn routing_reason(rule: &RoutingRuleConfig, issue: &NormalizedIssue) -> String {
-    let mut reason = rule.reason.clone();
-    if let Some(user_policy) = &rule.user_policy {
-        reason.push_str(&format!("; user_policy={user_policy}"));
+fn routing_reason(routing: &RoutingConfig) -> String {
+    let mut parts = Vec::new();
+    parts.push(if routing.harness_from_env {
+        format!("harness selected by {}", routing.harness_env)
+    } else {
+        "harness selected by workflow routing.harness".into()
+    });
+    if routing.model.is_some() {
+        parts.push(if routing.model_from_env {
+            format!("model selected by {}", routing.model_env)
+        } else {
+            "model selected by workflow routing.model".into()
+        });
     }
-    if let Some(cost) = &rule.cost {
-        reason.push_str(&format!("; cost={cost}"));
+    if routing.model_profile.is_some() {
+        parts.push(if routing.model_profile_from_env {
+            format!("model profile selected by {}", routing.model_profile_env)
+        } else {
+            "model profile selected by workflow routing.model_profile".into()
+        });
     }
-    if let Some(speed) = &rule.speed {
-        reason.push_str(&format!("; speed={speed}"));
-    }
-    reason.push_str(&format!("; issue={}", issue.identifier));
-    reason
+    parts.join("; ")
 }
 
 fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {
@@ -1208,19 +1173,6 @@ fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {
         .ok_or_else(|| SchedulerError::InvalidConfiguration {
             detail: format!("unknown routing harness `{kind}`"),
         })
-}
-
-fn missing_capabilities(capability: &HarnessCapability, required: &[String]) -> Vec<String> {
-    required
-        .iter()
-        .filter(|name| !capability_satisfied(capability, name))
-        .cloned()
-        .collect()
-}
-
-fn capability_satisfied(capability: &HarnessCapability, name: &str) -> bool {
-    HarnessRoutingCapability::parse(name)
-        .is_some_and(|routing_capability| routing_capability.is_satisfied_by(capability))
 }
 
 fn normalize_tracker_issue(

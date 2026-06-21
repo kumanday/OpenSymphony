@@ -899,9 +899,9 @@ fn route_decision_payload(
     serde_json::json!({
         "task_type": &route.task_type,
         "harness_kind": &route.harness_kind,
+        "model": &route.model,
         "model_profile": &route.model_profile,
         "reason": &route.reason,
-        "required_capabilities": &route.required_capabilities,
         "dry_run": route.dry_run,
         "user_override": route.user_override,
     })
@@ -1103,11 +1103,12 @@ async fn try_run_codex_stdio_issue(
         .start_issue_request(
             &mut session,
             workspace.workspace_path().display().to_string(),
-            model,
+            model.clone(),
             prompt,
             serde_json::json!({
                 "opensymphonyRoute": {
                     "harness": &route.harness_kind,
+                    "model": &model,
                     "modelProfile": &route.model_profile,
                     "reason": &route.reason,
                 }
@@ -1194,11 +1195,8 @@ impl<T> Drop for AbortOnDrop<T> {
 
 fn codex_model_from_route(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
-) -> String {
-    match route.model_profile.as_deref() {
-        Some("codex-chatgpt-local-keychain") | None => "openai/chatgpt-codex-subscription".into(),
-        Some(model_or_profile) => model_or_profile.into(),
-    }
+) -> Option<String> {
+    route.model.clone()
 }
 
 fn codex_thread_id_from_start_response(value: &serde_json::Value) -> Result<String, String> {
@@ -2210,9 +2208,9 @@ mod tests {
                 route: crate::opensymphony_orchestrator::HarnessRouteDecision {
                     task_type: "issue_execution".into(),
                     harness_kind: "openhands_agent_server".into(),
+                    model: None,
                     model_profile: None,
                     reason: "test default route".into(),
-                    required_capabilities: vec!["start_run".into()],
                     dry_run: false,
                     user_override: false,
                 },
@@ -2561,9 +2559,9 @@ Run the scheduler.
         crate::opensymphony_orchestrator::HarnessRouteDecision {
             task_type: "issue_execution".into(),
             harness_kind: "codex_app_server".into(),
+            model: None,
             model_profile: Some("codex-chatgpt-local-keychain".into()),
             reason: "test codex route".into(),
-            required_capabilities: vec!["start_run".into(), "tool_approval".into()],
             dry_run,
             user_override: false,
         }

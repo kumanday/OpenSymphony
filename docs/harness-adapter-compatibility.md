@@ -52,10 +52,10 @@ available with runtime contract `codex-app-server-json-rpc-v2`,
 `json_rpc_2_0` transport, and `stdio` mode. The old
 `codex-app-server-prototype` Cargo feature has been removed; local adapter and
 benchmark tests run through normal builds. `opensymphony run` can select Codex
-through explicit alpha workflow routing policy or the `OPENSYMPHONY_HARNESS`
-override after checking public harness capabilities. Capability clients must
-still read the `feature_gaps` list before presenting Codex as a general-purpose
-route: history fetch and reconnect replay remain unavailable until Codex
+through `routing.harness: codex_app_server` or the `OPENSYMPHONY_HARNESS`
+override when that harness is available. Capability clients must still read the
+`feature_gaps` list before presenting Codex as a general-purpose route: history
+fetch and reconnect replay remain unavailable until Codex
 cursor/replay storage is implemented, and stdio readiness reconciliation is
 unavailable until a real backlog mechanism exists.
 

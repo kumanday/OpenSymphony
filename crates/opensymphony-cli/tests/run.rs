@@ -122,20 +122,14 @@ async fn run_routing_dry_run_selects_codex_and_emits_route_decision() {
         openhands.base_url(),
         format!("control_plane:\n  bind: {bind_addr}\n"),
         r#"routing:
-  dry_run: true
-  rules:
-    - task_type: issue_execution
-      harness: codex_app_server
-      model_profile: codex-chatgpt-local-keychain
-      required_capabilities:
-        - start_run
-        - tool_approval
-      reason: dry-run proof selects Codex
+  harness: codex_app_server
+  model: gpt-5-codex-test
+  model_profile: codex-chatgpt-local-keychain
 "#,
     );
     write_memory_config(project.path());
 
-    let mut child = spawn_run_child(project.path(), &[]);
+    let mut child = spawn_run_child(project.path(), &["--dry-run"]);
 
     wait_for_dry_run_route_decision(&format!("http://{bind_addr}/api/v1/snapshot"))
         .await
@@ -312,6 +306,7 @@ fn route_decision_visible(envelope: &Value) -> bool {
                     events.iter().any(|event| {
                         event["kind"] == "routing.decision"
                             && event["payload"]["harness_kind"] == "codex_app_server"
+                            && event["payload"]["model"] == "gpt-5-codex-test"
                             && event["payload"]["model_profile"] == "codex-chatgpt-local-keychain"
                     })
                 })

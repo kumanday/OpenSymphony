@@ -112,12 +112,13 @@ pub(super) async fn resolve_runtime_config(
             source,
         }
     })?;
-    let workflow = workflow
+    let mut workflow = workflow
         .resolve_with_process_env(&target_repo)
         .map_err(|source| RunCommandError::ResolveWorkflow {
             path: workflow_path.clone(),
             source,
         })?;
+    workflow.config.routing.dry_run = args.dry_run;
     let bind_value = config
         .control_plane
         .bind
