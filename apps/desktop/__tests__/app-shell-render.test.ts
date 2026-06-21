@@ -22,7 +22,12 @@ import type {
   GatewayReader,
   OpenSymphonyAppHandle,
 } from "@opensymphony/ui-core";
-import { createDesktopProfileController, createDesktopTransport } from "../src/index";
+import { createModelProfile } from "@opensymphony/gateway-schema";
+import {
+  createDesktopModelProfileController,
+  createDesktopProfileController,
+  createDesktopTransport,
+} from "../src/index";
 
 interface TauriInvokeCall {
   command: string;
@@ -154,6 +159,143 @@ describe("desktop app shell render", () => {
       },
     ]);
     expect(profiles).toHaveLength(1);
+  });
+
+  it("persists model profiles through native settings commands", async () => {
+    const calls: TauriInvokeCall[] = [];
+    const settings = new Map<string, unknown>();
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          calls.push({ command, args });
+          if (command === "get_setting") {
+            const req = args?.req as { key: string };
+            return { value: settings.get(req.key) ?? null };
+          }
+          if (command === "set_setting") {
+            const req = args?.req as { key: string; value: unknown };
+            settings.set(req.key, req.value);
+            return { persisted: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+    const profile = {
+      ...createModelProfile("api_key"),
+      id: "desktop-api",
+      active: true,
+      model: "provider/desktop-api",
+      baseUrl: "https://desktop.example/v1",
+      apiKeyRef: "local_keychain:desktop-api-key",
+      harnesses: ["openhands_agent_server", "codex_app_server"],
+    };
+
+    const controller = createDesktopModelProfileController();
+    expect(controller?.persistence?.kind).toBe("durable");
+    await controller!.storeProfile(profile);
+    await controller!.setActiveProfile(profile.id);
+
+    const restored = createDesktopModelProfileController();
+    const profiles = await restored!.listProfiles();
+    const saved = profiles.find((candidate) => candidate.id === profile.id);
+
+    expect(saved).toMatchObject({
+      active: true,
+      model: "provider/desktop-api",
+      baseUrl: "https://desktop.example/v1",
+      apiKeyRef: "local_keychain:desktop-api-key",
+    });
+    expect(saved?.harnesses).toEqual(["openhands_agent_server", "codex_app_server"]);
+    expect(calls.some((call) => call.command === "get_setting")).toBe(true);
+    expect(calls.some((call) => call.command === "set_setting")).toBe(true);
+  });
+
+  it("falls back to session-only model profiles outside Tauri", async () => {
+    const controller = createDesktopModelProfileController();
+    const profile = {
+      ...createModelProfile("api_key"),
+      id: "desktop-session-api",
+      model: "provider/session-api",
+      apiKeyRef: "local_keychain:desktop-session-api-key",
+    };
+
+    expect(controller.persistence?.kind).toBe("session");
+    await controller.storeProfile(profile);
+
+    const profiles = await controller.listProfiles();
+    expect(profiles.find((candidate) => candidate.id === profile.id)?.model).toBe("provider/session-api");
+  });
+
+  it("records quarantine warnings from persisted desktop model settings", async () => {
+    const settings = new Map<string, unknown>();
+    settings.set("opensymphony.desktop.modelProfiles.v1", {
+      type: "Text",
+      value: JSON.stringify({
+        profiles: [
+          {
+            ...createModelProfile("api_key"),
+            id: "desktop-raw-secret",
+            apiKeyRef: "sk-secret-value-123456789",
+          },
+        ],
+        activeProfileId: "desktop-raw-secret",
+      }),
+    });
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          if (command === "get_setting") {
+            const req = args?.req as { key: string };
+            return { value: settings.get(req.key) ?? null };
+          }
+          if (command === "set_setting") {
+            const req = args?.req as { key: string; value: unknown };
+            settings.set(req.key, req.value);
+            return { persisted: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+
+    const controller = createDesktopModelProfileController();
+    await controller!.listProfiles();
+
+    expect(controller?.quarantineMessages).toEqual([
+      expect.stringContaining("desktop-raw-secret"),
+    ]);
+  });
+
+  it("records quarantine warnings for non-text desktop model settings", async () => {
+    const settings = new Map<string, unknown>();
+    settings.set("opensymphony.desktop.modelProfiles.v1", {
+      type: "Flag",
+      value: true,
+    });
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          if (command === "get_setting") {
+            const req = args?.req as { key: string };
+            return { value: settings.get(req.key) ?? null };
+          }
+          if (command === "set_setting") {
+            const req = args?.req as { key: string; value: unknown };
+            settings.set(req.key, req.value);
+            return { persisted: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+
+    const controller = createDesktopModelProfileController();
+    await controller!.listProfiles();
+
+    expect(controller?.quarantineMessages).toEqual([
+      "Dropped malformed desktop model profile setting: expected Text value",
+    ]);
   });
 
   it("uses native Tauri commands for desktop gateway reads", async () => {
