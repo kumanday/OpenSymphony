@@ -704,11 +704,7 @@ fn id_suffix(id: Option<&str>) -> String {
 
 fn error_summary(event: &NormalizedCodexEvent) -> Option<String> {
     let params = event.raw.get("params")?;
-    let message = params
-        .get("message")
-        .or_else(|| params.get("error"))
-        .or_else(|| params.get("detail"))?
-        .as_str()?;
+    let message = params.get("message")?.as_str()?;
     Some(format!("Codex app-server error: {message}"))
 }
 

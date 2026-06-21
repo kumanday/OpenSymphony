@@ -357,6 +357,23 @@ fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
     assert_eq!(failed_record.kind, EventKind::RunFailed);
     assert!(failed_record.summary.contains("missing login"));
 
+    let error_field_only = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "error",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "error": "future nested diagnostic"
+        }
+    }))
+    .expect("error notification normalizes");
+    let error_field_record = normalized_event_to_journal_record("COE-476", 19, &error_field_only);
+    assert_eq!(error_field_record.kind, EventKind::RunFailed);
+    assert_eq!(
+        error_field_record.summary,
+        "Codex app-server reported an error"
+    );
+
     let canceled = normalize_server_notification(json!({
         "jsonrpc": "2.0",
         "method": "turn/cancelled",
