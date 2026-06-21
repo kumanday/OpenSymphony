@@ -852,6 +852,11 @@ See [runtime docs](/areas/openhands-runtime.md).
                 .iter()
                 .any(|source| { source.kind == "github_pr" && source.id == "456" })
         );
+        assert!(metadata.source_refs.iter().any(|source| {
+            source.kind == "github_pr"
+                && source.id == "456"
+                && source.url.as_deref() == Some("https://github.com/example/repo/pull/456")
+        }));
         assert_eq!(concept.links[0].target, "/areas/openhands-runtime.md");
 
         let rendered = render_okf_concept(&concept).expect("concept should render");
@@ -891,6 +896,29 @@ opensymphony:
         assert!(rendered.contains("legacy_custom: keep-me"));
         assert!(!rendered.contains("legacy-area"));
         assert!(!rendered.contains("visibility: private"));
+    }
+
+    #[test]
+    fn okf_null_opensymphony_uses_legacy_source_of_truth() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+area: legacy-area
+visibility: public
+opensymphony: ~
+---
+
+# Runtime
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), original)
+            .expect("concept should parse");
+        assert!(concept.derived_opensymphony);
+
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        assert!(rendered.contains("area: legacy-area"));
+        assert!(rendered.contains("visibility: public"));
+        assert!(!rendered.contains("opensymphony:"));
     }
 
     #[test]

@@ -496,10 +496,14 @@ fn source_ref_from_token(kind: &str, token: &str) -> MemorySourceRef {
 }
 
 fn push_source_ref(refs: &mut Vec<MemorySourceRef>, source_ref: MemorySourceRef) {
-    if !refs
-        .iter()
-        .any(|existing| existing.kind == source_ref.kind && existing.id == source_ref.id)
+    if let Some(existing) = refs
+        .iter_mut()
+        .find(|existing| existing.kind == source_ref.kind && existing.id == source_ref.id)
     {
+        if existing.url.is_none() {
+            existing.url = source_ref.url;
+        }
+    } else {
         refs.push(source_ref);
     }
 }
