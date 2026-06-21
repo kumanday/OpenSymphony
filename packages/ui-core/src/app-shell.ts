@@ -656,7 +656,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         || node.identifier === entity.id
       ) ?? true;
     }
-    return true;
+    return false;
   }
 
   private async refreshLiveGatewayData(): Promise<void> {

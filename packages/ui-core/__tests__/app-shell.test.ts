@@ -327,6 +327,7 @@ function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?:
 }
 
 class LiveEventTransport extends MockGatewayTransport {
+  snapshotReads = 0;
   private queuedEvents: Array<GatewayEnvelope | null> = [];
   private resolveNext: ((event: GatewayEnvelope | null) => void) | null = null;
   private liveTaskGraph: TaskGraphSnapshot | null = null;
@@ -341,6 +342,7 @@ class LiveEventTransport extends MockGatewayTransport {
   }
 
   override async snapshot(): Promise<DashboardSnapshot> {
+    this.snapshotReads += 1;
     if (this.nextSnapshotError) {
       const error = this.nextSnapshotError;
       this.nextSnapshotError = null;
@@ -704,6 +706,44 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector("[data-testid='changed-file-item']")?.getAttribute("data-path")).toBe("src/live-update.ts");
     } finally {
       warnSpy.mockRestore();
+      await handle.destroy();
+    }
+  });
+
+  it("ignores unknown live gateway events without refreshing the shell", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+      runFiles: [{ runId: "COE-449", files: changedFiles }],
+      runDiffs: [{ runId: "COE-449", filePath: "src/config.ts", diff: fileDiff }],
+      runEvents: [runEvents],
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+    });
+
+    try {
+      await flushUntil(() => root.textContent?.includes("src/config.ts") ?? false);
+      const readsAfterLoad = transport.snapshotReads;
+
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 3, partition: "events" },
+        entity_ref: { kind: "unknown", id: "heartbeat" },
+        event_kind: "gateway.heartbeat",
+        emitted_at: "2025-09-01T00:02:00Z",
+      });
+      await flushAsync();
+
+      expect(transport.snapshotReads).toBe(readsAfterLoad);
+    } finally {
       await handle.destroy();
     }
   });
