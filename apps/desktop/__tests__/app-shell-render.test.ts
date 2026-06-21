@@ -211,6 +211,22 @@ describe("desktop app shell render", () => {
     expect(calls.some((call) => call.command === "set_setting")).toBe(true);
   });
 
+  it("falls back to session-only model profiles outside Tauri", async () => {
+    const controller = createDesktopModelProfileController();
+    const profile = {
+      ...createModelProfile("api_key"),
+      id: "desktop-session-api",
+      model: "provider/session-api",
+      apiKeyRef: "local_keychain:desktop-session-api-key",
+    };
+
+    expect(controller.persistence?.kind).toBe("session");
+    await controller.storeProfile(profile);
+
+    const profiles = await controller.listProfiles();
+    expect(profiles.find((candidate) => candidate.id === profile.id)?.model).toBe("provider/session-api");
+  });
+
   it("records quarantine warnings from persisted desktop model settings", async () => {
     const settings = new Map<string, unknown>();
     settings.set("opensymphony.desktop.modelProfiles.v1", {

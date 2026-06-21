@@ -9,6 +9,7 @@ import type { ConnectionProfile } from "@opensymphony/gateway-schema";
 import { defaultModelProfiles } from "@opensymphony/gateway-schema";
 import {
   createAsyncModelProfileStore,
+  createModelProfileStore,
 } from "@opensymphony/state";
 import {
   renderOpenSymphonyApp,
@@ -302,10 +303,27 @@ export function createDesktopProfileController(): ProfileController | undefined 
 
 const MODEL_PROFILE_SETTINGS_KEY = "opensymphony.desktop.modelProfiles.v1";
 
-export function createDesktopModelProfileController(): ModelProfileController | undefined {
+export function createDesktopModelProfileController(): ModelProfileController {
   const invoke = getTauriInvoke();
   if (!invoke) {
-    return undefined;
+    const quarantineMessages: string[] = [];
+    const store = createModelProfileStore({
+      defaults: defaultModelProfiles(),
+      onQuarantine: (reason) => {
+        quarantineMessages.push(reason);
+      },
+    });
+    return {
+      ...store,
+      quarantineMessages,
+      takeQuarantineMessages() {
+        return quarantineMessages.splice(0);
+      },
+      persistence: {
+        kind: "session",
+        label: "Model profiles are session-only because desktop settings are unavailable.",
+      },
+    };
   }
   const tauriInvoke = invoke;
 
