@@ -718,11 +718,11 @@ pub fn codex_approval_decision_audit_record(
     let (kind, summary) = match decision {
         CodexApprovalDecision::Approve => (
             EventKind::ApprovalGranted,
-            format!("Codex approval {approval_id} approved and sent to app-server"),
+            format!("Codex approval {approval_id} decision recorded for gateway forwarding"),
         ),
         CodexApprovalDecision::Reject => (
             EventKind::ApprovalDenied,
-            format!("Codex approval {approval_id} rejected and sent to app-server"),
+            format!("Codex approval {approval_id} rejection recorded for gateway forwarding"),
         ),
     };
     EventRecord::builder()

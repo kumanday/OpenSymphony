@@ -1,15 +1,15 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use crate::opensymphony_codex::{
     CodexAppServerAdapter, CodexJsonRpcSession, NormalizedCodexEvent, NormalizedCodexEventKind,
-    normalize_server_notification,
+    codex_approval_request_from_event, normalize_server_notification,
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
@@ -52,6 +52,7 @@ use super::{
 };
 
 const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_STDERR_TAIL_LINES: usize = 20;
 
 #[derive(Debug, Error)]
 pub(super) enum CliWorkspaceError {
@@ -1030,7 +1031,12 @@ async fn try_run_codex_stdio_issue(
     let mut stdin = child.stdin.take().ok_or("Codex child stdin missing")?;
     let stdout = child.stdout.take().ok_or("Codex child stdout missing")?;
     let stderr = child.stderr.take().ok_or("Codex child stderr missing")?;
-    let stderr_task = tokio::spawn(drain_codex_stderr(stderr, run.worker_id.to_string()));
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+    let stderr_task = tokio::spawn(drain_codex_stderr(
+        stderr,
+        run.worker_id.to_string(),
+        Arc::clone(&stderr_tail),
+    ));
     let mut reader = BufReader::new(stdout).lines();
     let mut session = adapter.session();
 
@@ -1042,14 +1048,22 @@ async fn try_run_codex_stdio_issue(
                 .as_bytes(),
         )
         .await
-        .map_err(|source| format!("failed to write Codex initialize request: {source}"))?;
+        .map_err(|source| {
+            with_codex_stderr(
+                format!("failed to write Codex initialize request: {source}"),
+                &stderr_tail,
+            )
+        })?;
     read_response_line(
         &mut reader,
         initialize.id,
         updates_tx,
         &run.worker_id.to_string(),
+        issue,
+        run,
     )
-    .await?;
+    .await
+    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
 
     let prompt = workflow
         .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
@@ -1077,14 +1091,22 @@ async fn try_run_codex_stdio_issue(
                 .as_bytes(),
         )
         .await
-        .map_err(|source| format!("failed to write Codex thread/start request: {source}"))?;
+        .map_err(|source| {
+            with_codex_stderr(
+                format!("failed to write Codex thread/start request: {source}"),
+                &stderr_tail,
+            )
+        })?;
     let start_response = read_response_line(
         &mut reader,
         start.request.id,
         updates_tx,
         &run.worker_id.to_string(),
+        issue,
+        run,
     )
-    .await?;
+    .await
+    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
     let conversation_id = start_response
         .get("result")
         .and_then(|result| {
@@ -1101,8 +1123,15 @@ async fn try_run_codex_stdio_issue(
         )));
     }
 
-    let terminal =
-        read_until_codex_terminal(&mut reader, updates_tx, &run.worker_id.to_string()).await?;
+    let terminal = read_until_codex_terminal(
+        &mut reader,
+        updates_tx,
+        &run.worker_id.to_string(),
+        issue,
+        run,
+    )
+    .await
+    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
     let summary = format!(
         "Codex app-server route completed with terminal event {:?}",
         terminal.event_kind
@@ -1124,11 +1153,16 @@ fn codex_model_from_route(
     }
 }
 
-async fn drain_codex_stderr(stderr: ChildStderr, worker_id: String) {
+async fn drain_codex_stderr(
+    stderr: ChildStderr,
+    worker_id: String,
+    tail: Arc<Mutex<VecDeque<String>>>,
+) {
     let mut lines = BufReader::new(stderr).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
+                push_codex_stderr_tail(&tail, line.clone());
                 tracing::debug!(%worker_id, stderr = %line, "Codex app-server stderr");
             }
             Ok(None) => break,
@@ -1138,6 +1172,26 @@ async fn drain_codex_stderr(stderr: ChildStderr, worker_id: String) {
             }
         }
     }
+}
+
+fn push_codex_stderr_tail(tail: &Arc<Mutex<VecDeque<String>>>, line: String) {
+    if let Ok(mut tail) = tail.lock() {
+        if tail.len() == CODEX_STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
+fn with_codex_stderr(error: String, tail: &Arc<Mutex<VecDeque<String>>>) -> String {
+    let Ok(tail) = tail.lock() else {
+        return error;
+    };
+    if tail.is_empty() {
+        return error;
+    }
+    let stderr = tail.iter().cloned().collect::<Vec<_>>().join("\n");
+    format!("{error}; recent Codex stderr:\n{stderr}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1152,6 +1206,8 @@ async fn read_response_line(
     request_id: u64,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     worker_id: &str,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
 ) -> Result<serde_json::Value, String> {
     loop {
         let line = timeout(Duration::from_secs(30), reader.next_line())
@@ -1165,7 +1221,7 @@ async fn read_response_line(
             reject_codex_json_rpc_error(request_id, &value)?;
             return Ok(value);
         }
-        emit_codex_notification(updates_tx, worker_id, value);
+        emit_codex_notification(updates_tx, worker_id, issue, run, value);
     }
 }
 
@@ -1188,6 +1244,8 @@ async fn read_until_codex_terminal(
     reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     worker_id: &str,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
 ) -> Result<CodexTerminalOutcome, String> {
     loop {
         let line = timeout(Duration::from_secs(300), reader.next_line())
@@ -1197,7 +1255,7 @@ async fn read_until_codex_terminal(
             .ok_or("Codex stdout closed before terminal notification")?;
         let value: serde_json::Value = serde_json::from_str(&line)
             .map_err(|source| format!("invalid Codex JSON: {source}"))?;
-        if let Some(event) = emit_codex_notification(updates_tx, worker_id, value)
+        if let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value)
             && let Some(outcome) = codex_terminal_outcome(&event)
         {
             return Ok(outcome);
@@ -1208,20 +1266,39 @@ async fn read_until_codex_terminal(
 fn emit_codex_notification(
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     worker_id: &str,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
     value: serde_json::Value,
 ) -> Option<NormalizedCodexEvent> {
     let event = normalize_server_notification(value)?;
     let Ok(worker_id) = crate::opensymphony_domain::WorkerId::new(worker_id.to_string()) else {
         return Some(event);
     };
+    let observed_at = now_timestamp();
     let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
-        worker_id,
-        observed_at: now_timestamp(),
+        worker_id: worker_id.clone(),
+        observed_at,
         event_id: event.item_id.clone().or_else(|| event.turn_id.clone()),
         event_kind: Some(format!("codex.{}", event.method)),
         summary: Some(format!("Codex event: {}", event.method)),
         payload: Some(event.raw.clone()),
     });
+    if let Some(approval) = codex_approval_request_from_event(
+        run.worker_id.as_str(),
+        issue.id.as_str(),
+        issue.identifier.as_str(),
+        timestamp_to_datetime(observed_at),
+        &event,
+    ) {
+        let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
+            worker_id,
+            observed_at,
+            event_id: Some(format!("approval:{}", approval.approval_id)),
+            event_kind: Some("approval.requested".into()),
+            summary: Some(format!("Approval requested: {}", approval.title)),
+            payload: serde_json::to_value(&approval).ok(),
+        });
+    }
     Some(event)
 }
 
@@ -1551,6 +1628,86 @@ mod tests {
 
         assert!(error.contains("response id 4"));
         assert!(error.contains("not logged in"));
+    }
+
+    #[test]
+    fn codex_stderr_tail_is_bounded_and_added_to_worker_errors() {
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        for line in 0..25 {
+            push_codex_stderr_tail(&tail, format!("stderr-line-{line}"));
+        }
+
+        let error = with_codex_stderr("Codex stdout closed".into(), &tail);
+
+        assert!(error.contains("recent Codex stderr"));
+        assert!(!error.contains("stderr-line-4"));
+        assert!(error.contains("stderr-line-5"));
+        assert!(error.contains("stderr-line-24"));
+    }
+
+    #[test]
+    fn codex_notification_emits_approval_center_runtime_event() {
+        let issue = sample_issue();
+        let run = RunAttempt::new(
+            WorkerId::new("worker-approval").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            PathBuf::from("/tmp/opensymphony-worker-approval"),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+
+        let event = emit_codex_notification(
+            &updates_tx,
+            run.worker_id.as_str(),
+            &issue,
+            &run,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "approval-1",
+                    "command": "rg approval crates"
+                }
+            }),
+        )
+        .expect("Codex approval notification should normalize");
+
+        assert_eq!(event.kind, NormalizedCodexEventKind::ApprovalRequested);
+        let raw_event = updates_rx
+            .try_recv()
+            .expect("raw Codex runtime event should be emitted");
+        let approval_event = updates_rx
+            .try_recv()
+            .expect("approval-center runtime event should be emitted");
+
+        assert!(matches!(
+            raw_event,
+            WorkerUpdate::RuntimeEvent {
+                event_kind: Some(kind),
+                ..
+            } if kind == "codex.item/permissions/requestApproval"
+        ));
+        match approval_event {
+            WorkerUpdate::RuntimeEvent {
+                event_id,
+                event_kind,
+                payload,
+                ..
+            } => {
+                assert_eq!(event_id.as_deref(), Some("approval:approval-1"));
+                assert_eq!(event_kind.as_deref(), Some("approval.requested"));
+                let payload = payload.expect("approval payload should serialize");
+                assert_eq!(payload["approval_id"], "approval-1");
+                assert_eq!(payload["run_id"], "worker-approval");
+                assert_eq!(payload["status"], "pending");
+            }
+            other => panic!("expected runtime event, got {other:?}"),
+        }
     }
 
     #[test]
