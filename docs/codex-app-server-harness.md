@@ -383,6 +383,9 @@ subscription credentials. The current mapping is:
   reference for desktop/local Codex app-server use.
 - `hosted-openai-subscription-broker`: hosted broker reference for future
   hosted Codex app-server or OpenHands subscription use.
+- default OpenAI subscription model entries use `gpt-5.5`; OpenHands
+  subscription launch normalizes bare OpenAI model names to the
+  `openai/<model>` SDK shape.
 - selected model strings from `routing.model` or `OPENSYMPHONY_MODEL` are
   passed to Codex `thread/start` and `turn/start` where the installed app-server
   supports per-session/per-turn model overrides.

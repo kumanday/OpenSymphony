@@ -3695,6 +3695,10 @@ mod tests {
             "openai/gpt-5.9-codex"
         );
         assert_eq!(
+            must(normalize_openai_subscription_model("gpt-5.5")),
+            "openai/gpt-5.5"
+        );
+        assert_eq!(
             must(normalize_openai_subscription_model("openai/gpt-5.9-codex")),
             "openai/gpt-5.9-codex"
         );

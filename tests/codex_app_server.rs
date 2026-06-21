@@ -930,6 +930,8 @@ fn codex_model_and_credential_reuse_maps_existing_settings_profiles() {
 
     assert!(codex_profiles.iter().any(|profile| {
         profile.profile_id == "codex-chatgpt-local-keychain"
+            && profile.model_reference == "gpt-5.5"
+            && profile.config_overrides.get("model").map(String::as_str) == Some("gpt-5.5")
             && profile.can_supply_subscription_credentials
             && profile.credential_reference_kind == CredentialReferenceKind::CodexCliLogin
             && profile.storage_mode == CredentialStorageMode::CodexCliHome
