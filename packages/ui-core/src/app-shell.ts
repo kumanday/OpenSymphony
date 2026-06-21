@@ -220,6 +220,8 @@ interface AuditTrailEntry {
 }
 
 const schemaVersion = { major: 1, minor: 0, patch: 0 };
+// Two consecutive failures avoid noisy transient warnings while still surfacing stale live data.
+const liveRefreshFailureThreshold = 2;
 
 export function renderOpenSymphonyApp(
   options: OpenSymphonyAppOptions,
@@ -605,8 +607,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       while (subscription.active && !this.destroyed) {
         const next = await iterator.next();
         if (next.done) break;
-        await this.onGatewayEvent(next.value);
         this.latestGatewayEventCursor = next.value.cursor;
+        await this.onGatewayEvent(next.value);
       }
     } catch (error) {
       console.warn("[opensymphony] gateway event stream unavailable; using one-shot refresh fallback", {
@@ -647,7 +649,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             baseUri: this.transport.baseUri,
             error: errorMessage(error),
           });
-          if (this.liveRefreshFailureCount >= 2) {
+          if (this.liveRefreshFailureCount >= liveRefreshFailureThreshold) {
             this.state.connectionMessage = `Live data stale: ${errorMessage(error)}`;
             this.render();
           }
