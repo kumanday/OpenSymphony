@@ -342,7 +342,7 @@ async fn migrate_legacy_workspace_conversations(
                 continue;
             }
         };
-        if manifest.transport_target.as_deref() == Some(CODEX_APP_SERVER_KIND) {
+        if conversation_manifest_is_codex(&manifest) {
             continue;
         }
 
@@ -413,7 +413,7 @@ async fn prepare_active_conversation_store_for_issues(
                 continue;
             }
         };
-        if manifest.transport_target.as_deref() == Some(CODEX_APP_SERVER_KIND) {
+        if conversation_manifest_is_codex(&manifest) {
             continue;
         }
 
@@ -445,6 +445,11 @@ async fn prepare_active_conversation_store_for_issues(
     }
 
     Ok(report)
+}
+
+fn conversation_manifest_is_codex(manifest: &IssueConversationManifest) -> bool {
+    manifest.transport_target.as_deref() == Some(CODEX_APP_SERVER_KIND)
+        || manifest.runtime_contract_version.as_deref() == Some(CODEX_APP_SERVER_CONTRACT)
 }
 
 pub(super) fn build_workspace_manager_config(
@@ -1743,13 +1748,14 @@ async fn write_codex_conversation_manifest(
     issue: &NormalizedIssue,
     thread_id: &str,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
-) -> Result<(), WorkspaceError> {
+) -> Result<(), String> {
     let now = chrono::Utc::now();
+    let conversation_id = ConversationId::new(thread_id.to_string())
+        .map_err(|error| format!("invalid Codex thread id for conversation manifest: {error}"))?;
     let manifest = IssueConversationManifest {
         issue_id: issue.id.clone(),
         identifier: issue.identifier.clone(),
-        conversation_id: ConversationId::new(thread_id.to_string())
-            .expect("Codex thread id should not be empty"),
+        conversation_id,
         reuse_policy: "per_issue".to_string(),
         server_base_url: None,
         transport_target: Some(CODEX_APP_SERVER_KIND.to_string()),
@@ -1786,6 +1792,7 @@ async fn write_codex_conversation_manifest(
             &manifest,
         )
         .await
+        .map_err(|error| error.to_string())
 }
 
 fn codex_conversation_metadata(
@@ -2044,7 +2051,7 @@ mod tests {
         collections::{BTreeMap, HashMap},
         fs,
         future::pending,
-        path::Path,
+        path::{Path, PathBuf},
     };
 
     use crate::opensymphony_domain::{
@@ -2059,6 +2066,44 @@ mod tests {
 
     fn empty_codex_schema_cache() -> CodexSchemaValidatorCache {
         Arc::new(AsyncMutex::new(HashMap::new()))
+    }
+
+    fn sample_conversation_manifest(conversation_id: &str) -> IssueConversationManifest {
+        let now = chrono::Utc::now();
+        IssueConversationManifest {
+            issue_id: IssueId::new("issue-contract").expect("issue id should be valid"),
+            identifier: IssueIdentifier::new("COE-479").expect("identifier should be valid"),
+            conversation_id: ConversationId::new(conversation_id.to_string())
+                .expect("conversation id should be valid"),
+            reuse_policy: "per_issue".to_string(),
+            server_base_url: None,
+            transport_target: None,
+            http_auth_mode: None,
+            websocket_auth_mode: None,
+            websocket_query_param_name: None,
+            persistence_dir: PathBuf::from(".opensymphony"),
+            created_at: now,
+            updated_at: now,
+            last_attached_at: now,
+            launch_profile: None,
+            llm_config_fingerprint: None,
+            fresh_conversation: true,
+            workflow_prompt_seeded: true,
+            reset_reason: None,
+            runtime_contract_version: None,
+            last_prompt_kind: None,
+            last_prompt_at: None,
+            last_prompt_path: None,
+            last_execution_status: None,
+            last_event_id: None,
+            last_event_kind: None,
+            last_event_at: None,
+            last_event_summary: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            last_token_accumulation_at: None,
+        }
     }
 
     #[test]
@@ -2159,6 +2204,17 @@ mod tests {
         }))
         .expect_err("empty thread id should fail launch");
         assert!(empty.contains("missing non-empty threadId/thread_id"));
+    }
+
+    #[test]
+    fn codex_manifest_detection_accepts_runtime_contract_only() {
+        let manifest = IssueConversationManifest {
+            transport_target: None,
+            runtime_contract_version: Some(CODEX_APP_SERVER_CONTRACT.to_string()),
+            ..sample_conversation_manifest("thread-contract")
+        };
+
+        assert!(conversation_manifest_is_codex(&manifest));
     }
 
     #[test]
