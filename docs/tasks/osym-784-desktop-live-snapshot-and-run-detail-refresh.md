@@ -1,5 +1,5 @@
 ---
-id: OSYM-768
+id: OSYM-784
 title: Desktop Live Snapshot And Run Detail Refresh
 milestone: "M10.4: Desktop Live Operations And Model Polish"
 priority: 2
