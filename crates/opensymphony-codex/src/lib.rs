@@ -35,7 +35,6 @@ use crate::{
 
 pub const CODEX_APP_SERVER_KIND: &str = "codex_app_server";
 pub const CODEX_APP_SERVER_CONTRACT: &str = "codex-app-server-json-rpc-v2";
-pub const CODEX_DEFAULT_MODEL_PROVIDER: &str = "openai";
 
 #[derive(Debug, thiserror::Error)]
 pub enum CodexSchemaValidationError {
@@ -239,16 +238,13 @@ impl CodexAppServerAdapter {
         model: Option<String>,
         config: Value,
     ) -> Result<CodexHarnessRequest, serde_json::Error> {
-        let model_provider = model
-            .as_ref()
-            .map(|_| CODEX_DEFAULT_MODEL_PROVIDER.to_string());
         Ok(CodexHarnessRequest {
             lifecycle: CodexLifecycleRequest::Start,
             request: session.thread_start(CodexThreadStartParams {
                 approval_policy: Some(CodexApprovalPolicy::Never),
                 cwd: Some(cwd.into()),
                 model,
-                model_provider,
+                model_provider: None,
                 base_instructions: None,
                 developer_instructions: None,
                 ephemeral: Some(false),

@@ -44,7 +44,7 @@ use tokio::{
     process::{ChildStderr, ChildStdin, Command},
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
     task::JoinHandle,
-    time::timeout,
+    time::{timeout, timeout_at},
 };
 use url::Url;
 
@@ -1264,14 +1264,14 @@ async fn cached_installed_codex_schema_validator(
     codex_bin: &str,
 ) -> Result<CodexAppServerSchemaValidator, String> {
     let key = codex_schema_cache_key(codex_bin).await;
-    let mut validators = cache.lock().await;
-    if let Some(validator) = validators.get(&key).cloned() {
+    if let Some(validator) = cache.lock().await.get(&key).cloned() {
         return Ok(validator);
     }
 
     let validator = load_installed_codex_schema_validator(codex_bin).await?;
-    validators.insert(key, validator.clone());
-    Ok(validator)
+    let mut validators = cache.lock().await;
+    let validator = validators.entry(key).or_insert(validator);
+    Ok(validator.clone())
 }
 
 async fn codex_schema_cache_key(codex_bin: &str) -> String {
@@ -1533,8 +1533,9 @@ async fn read_response_line(
     run: &crate::opensymphony_domain::RunAttempt,
     pending_terminal: &mut Option<CodexTerminalOutcome>,
 ) -> Result<serde_json::Value, String> {
+    let deadline = tokio::time::Instant::now() + CODEX_RESPONSE_TIMEOUT;
     loop {
-        let line = timeout(CODEX_RESPONSE_TIMEOUT, reader.next_line())
+        let line = timeout_at(deadline, reader.next_line())
             .await
             .map_err(|_| format!("timed out waiting for Codex response id {request_id}"))?
             .map_err(|source| format!("failed reading Codex stdout: {source}"))?

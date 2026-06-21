@@ -298,6 +298,10 @@ fn codex_installed_schema_accepts_automation_payloads_when_requested() {
             json!({ "opensymphonyRoute": { "harness": "codex_app_server" } }),
         )
         .expect("thread/start should serialize");
+    assert!(
+        thread.request.params.get("modelProvider").is_none(),
+        "selected model should not force a Codex provider"
+    );
     validator
         .validate_request(&thread.request)
         .expect("thread/start should match installed schema");
@@ -435,7 +439,10 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
             .is_none()
     );
     assert_eq!(thread_start.request.params["model"], "gpt-5-codex");
-    assert_eq!(thread_start.request.params["modelProvider"], "openai");
+    assert!(
+        thread_start.request.params.get("modelProvider").is_none(),
+        "selected Codex model should not force a provider"
+    );
     assert_eq!(
         thread_start.request.params["sandbox"],
         json!("danger-full-access")
