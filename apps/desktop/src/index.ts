@@ -6,10 +6,15 @@ import {
   type GatewayTransport,
 } from "@opensymphony/api-client";
 import type { ConnectionProfile } from "@opensymphony/gateway-schema";
-import { createModelProfileStore } from "@opensymphony/state";
+import { defaultModelProfiles } from "@opensymphony/gateway-schema";
+import {
+  createAsyncModelProfileStore,
+  createModelProfileStore,
+} from "@opensymphony/state";
 import {
   renderOpenSymphonyApp,
   type EditableProfileInput,
+  type ModelProfileController,
   type ProfileController,
 } from "@opensymphony/ui-core";
 
@@ -36,6 +41,15 @@ interface NativeProfileResponse {
   daemonPath?: string | null;
   transport?: ConnectionProfile["transport"];
 }
+
+interface NativeSettingResponse {
+  value?: NativeSettingValue | null;
+}
+
+type NativeSettingValue =
+  | { type: "Text"; value: string }
+  | { type: "Flag"; value: boolean }
+  | { type: "Number"; value: number };
 
 export interface TauriTransportAdapter extends ActionCapableTransport {
   attach(): Promise<void>;
@@ -287,6 +301,79 @@ export function createDesktopProfileController(): ProfileController | undefined 
   };
 }
 
+const MODEL_PROFILE_SETTINGS_KEY = "opensymphony.desktop.modelProfiles.v1";
+
+export function createDesktopModelProfileController(): ModelProfileController {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    const quarantineMessages: string[] = [];
+    const store = createModelProfileStore({
+      defaults: defaultModelProfiles(),
+      onQuarantine: (reason) => {
+        quarantineMessages.push(reason);
+      },
+    });
+    return {
+      ...store,
+      quarantineMessages,
+      takeQuarantineMessages() {
+        return quarantineMessages.splice(0);
+      },
+      persistence: {
+        kind: "session",
+        label: "Model profiles are session-only because desktop settings are unavailable.",
+      },
+    };
+  }
+  const tauriInvoke = invoke;
+
+  const quarantineMessages: string[] = [];
+  const recordQuarantine = (reason: string) => {
+    quarantineMessages.push(reason);
+  };
+  const store = createAsyncModelProfileStore({
+    defaults: defaultModelProfiles(),
+    onQuarantine: recordQuarantine,
+    async load() {
+      const response = await tauriInvoke<NativeSettingResponse>("get_setting", {
+        req: { key: MODEL_PROFILE_SETTINGS_KEY },
+      });
+      const value = response.value;
+      if (!value) {
+        return null;
+      }
+      if (value.type !== "Text") {
+        recordQuarantine("Dropped malformed desktop model profile setting: expected Text value");
+        return null;
+      }
+      return value.value;
+    },
+    async save(value) {
+      await tauriInvoke("set_setting", {
+        req: {
+          key: MODEL_PROFILE_SETTINGS_KEY,
+          value: {
+            type: "Text",
+            value,
+          },
+        },
+      });
+    },
+  });
+
+  return {
+    ...store,
+    quarantineMessages,
+    takeQuarantineMessages() {
+      return quarantineMessages.splice(0);
+    },
+    persistence: {
+      kind: "durable",
+      label: "Model profiles persist in desktop settings.",
+    },
+  };
+}
+
 function asActionCapableTransport(
   transport: GatewayTransport,
   baseUrl: string,
@@ -404,7 +491,7 @@ if (root) {
         managed: false,
       },
     ],
-    modelProfileController: createModelProfileStore(),
+    modelProfileController: createDesktopModelProfileController(),
     onGatewayUrlChanged: createTransportForGateway,
   });
 }

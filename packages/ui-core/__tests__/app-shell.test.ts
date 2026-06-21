@@ -941,6 +941,77 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("reports session-only model profile persistence in the panel", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    modelProfileController.persistence = {
+      kind: "session",
+      label: "Model profiles are session-only because host storage is unavailable.",
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() => root.querySelector("[data-testid='model-persistence-status']") !== null);
+
+    expect(root.querySelector("[data-testid='model-persistence-status']")?.textContent).toContain("session-only");
+    expect(root.querySelector(".os-model-persistence-session")).not.toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("surfaces model profile quarantine warnings in the panel", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    modelProfileController.quarantineMessages = [
+      "Dropped invalid model profile raw-secret: API key secret must use local_keychain:<name>",
+    ];
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-profile-error']")?.textContent?.includes("Dropped invalid model profile raw-secret") ?? false,
+    );
+
+    expect(root.querySelector("[data-testid='model-profile-error']")?.textContent).toContain("Model profile storage warning");
+
+    await handle.destroy();
+  });
+
+  it("uses the model profile controller warning drain when available", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    modelProfileController.quarantineMessages = ["stale warning"];
+    modelProfileController.takeQuarantineMessages = jest.fn(() => [
+      "Dropped model profile with missing id",
+    ]);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-profile-error']")?.textContent?.includes("missing id") ?? false,
+    );
+
+    expect(modelProfileController.takeQuarantineMessages).toHaveBeenCalled();
+    expect(modelProfileController.quarantineMessages).toEqual(["stale warning"]);
+
+    await handle.destroy();
+  });
+
   it("reports a failed connection instead of falling back to fixture data", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

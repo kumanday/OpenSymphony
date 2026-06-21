@@ -89,13 +89,14 @@ export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
 These `LLM_*` variables are required unless your target repo's `WORKFLOW.md`
 has been customized to resolve the LLM configuration some other way.
 
-The model configuration panel in the alpha web and desktop shells is currently
-an in-memory settings surface unless the embedding host provides a storage
-backend. It records model strings, API-compatible endpoint metadata,
-subscription bootstrap metadata, and stored credential references for the
-current app session, but it does not persist profiles across app restarts by
-itself. Raw API keys and OAuth refresh material remain owned by the selected
-keychain, OpenHands auth directory, or hosted secret store.
+The model configuration panel in the alpha web and desktop shells records model
+strings, API-compatible endpoint metadata, subscription bootstrap metadata, and
+stored credential references. Desktop profiles persist through the local native
+settings boundary. The web shell persists profiles when browser or embedding
+host storage is available, and reports a session-only fallback in the model
+panel when durable storage is unavailable. Raw API keys and OAuth refresh
+material remain owned by the selected keychain, OpenHands auth directory, or
+hosted secret store.
 
 ### Bootstrap A Target Repo
 

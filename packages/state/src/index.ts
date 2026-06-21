@@ -51,13 +51,16 @@ export type {
   ModelProfileStorage,
   ModelProfileStore,
   ModelProfileStoreOptions,
+  AsyncModelProfileStoreOptions,
 } from "./model-profiles.js";
 export {
+  createAsyncModelProfileStore,
   createModelProfileStore,
   getActiveModelProfile,
   initialModelProfileState,
   modelProfileReducer,
   normalizeModelProfileState,
+  sanitizeModelProfiles,
 } from "./model-profiles.js";
 
 // -- Connection state --

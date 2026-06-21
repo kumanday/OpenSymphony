@@ -177,7 +177,13 @@ export function validateModelProfileCredentials(
   profile: ModelConfigurationProfile,
 ): string | null {
   if (profile.mode === "api_key") {
+    if (profile.subscriptionCredential) {
+      return "API key profiles must not store subscription credential metadata";
+    }
     return validateStoredCredentialRef(profile.apiKeyRef, profile.credentialStorage);
+  }
+  if (profile.credentialStorage !== "openhands_auth_directory") {
+    return "Subscription profiles must use openhands_auth_directory credential storage";
   }
   if (profile.apiKeyRef) {
     return "Subscription profiles must not store API key references";

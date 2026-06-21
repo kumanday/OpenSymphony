@@ -69,6 +69,14 @@ describe("model configuration profiles", () => {
     expect(validateModelProfileCredentials(subscriptionProfile)).toBeNull();
     expect(validateModelProfileCredentials({
       ...subscriptionProfile,
+      credentialStorage: "local_keychain",
+    })).toContain("openhands_auth_directory");
+    expect(validateModelProfileCredentials({
+      ...apiProfile,
+      subscriptionCredential: subscriptionProfile.subscriptionCredential,
+    })).toContain("must not store subscription credential");
+    expect(validateModelProfileCredentials({
+      ...subscriptionProfile,
       subscriptionCredential: {
         ...subscriptionProfile.subscriptionCredential,
         authDirectoryEnv: "not-valid",
