@@ -43,6 +43,7 @@ impl OkfBundlePath {
             })
             .collect::<Vec<_>>()
             .join("/")
+            .replace('\\', "/")
     }
 
     pub fn reserved_file(&self) -> Option<OkfReservedFile> {
@@ -180,7 +181,7 @@ pub fn parse_okf_concept(
     };
     let (frontmatter, body) = split_okf_frontmatter(document_path, contents)?;
     let mut frontmatter: OkfFrontmatter =
-        serde_yaml::from_str(frontmatter).map_err(|source| MemoryError::ParseYaml {
+        serde_yaml::from_str(&frontmatter).map_err(|source| MemoryError::ParseYaml {
             path: document_path.to_path_buf(),
             source,
         })?;
@@ -201,23 +202,42 @@ pub fn render_okf_concept(concept: &OkfConcept) -> Result<String, MemoryError> {
     Ok(format!("---\n{frontmatter}---\n\n{}", concept.body))
 }
 
-fn split_okf_frontmatter<'a>(
-    path: &Path,
-    contents: &'a str,
-) -> Result<(&'a str, &'a str), MemoryError> {
-    let Some(after_open) = contents.strip_prefix("---\n") else {
+fn split_okf_frontmatter(path: &Path, contents: &str) -> Result<(String, String), MemoryError> {
+    let normalized = contents.replace("\r\n", "\n").replace('\r', "\n");
+    let first_end = normalized
+        .find('\n')
+        .map(|index| index + 1)
+        .unwrap_or(normalized.len());
+    if normalized[..first_end].trim() != "---" {
         return Err(MemoryError::InvalidInput(format!(
             "{} lacks OKF YAML frontmatter",
             path.display()
         )));
     };
-    let Some((frontmatter, body)) = after_open.split_once("\n---\n") else {
-        return Err(MemoryError::InvalidInput(format!(
-            "{} has unterminated OKF YAML frontmatter",
-            path.display()
-        )));
-    };
-    Ok((frontmatter, body.strip_prefix('\n').unwrap_or(body)))
+
+    let mut offset = first_end;
+    let mut frontmatter = String::new();
+    while offset < normalized.len() {
+        let next_end = normalized[offset..]
+            .find('\n')
+            .map(|index| offset + index + 1)
+            .unwrap_or(normalized.len());
+        let line = &normalized[offset..next_end];
+        if line.trim() == "---" {
+            let body = &normalized[next_end..];
+            return Ok((
+                frontmatter,
+                body.strip_prefix('\n').unwrap_or(body).to_string(),
+            ));
+        }
+        frontmatter.push_str(line);
+        offset = next_end;
+    }
+
+    Err(MemoryError::InvalidInput(format!(
+        "{} has unterminated OKF YAML frontmatter",
+        path.display()
+    )))
 }
 
 fn require_okf_type(concept_type: &str) -> Result<(), MemoryError> {
@@ -477,25 +497,136 @@ fn push_source_ref(refs: &mut Vec<MemorySourceRef>, source_ref: MemorySourceRef)
 
 fn extract_markdown_links(body: &str) -> Vec<OkfLink> {
     let mut links = Vec::new();
-    let mut rest = body;
-    while let Some(label_start) = rest.find('[') {
-        rest = &rest[label_start + 1..];
-        let Some(label_end) = rest.find("](") else {
-            continue;
-        };
-        let label = &rest[..label_end];
-        rest = &rest[label_end + 2..];
-        let Some(target_end) = rest.find(')') else {
+    let mut index = 0;
+    while index < body.len() {
+        let Some((current, next)) = char_at(body, index) else {
             break;
         };
-        let target = &rest[..target_end];
-        if !target.trim().is_empty() {
-            links.push(OkfLink {
-                target: target.to_string(),
-                label: Some(label.to_string()).filter(|label| !label.is_empty()),
-            });
+        match current {
+            '`' => index = skip_code_span(body, index),
+            '\\' => index = skip_escaped_char(body, next),
+            '[' if !is_image_marker(body, index) => {
+                let Some((label, after_label)) = parse_link_label(body, next) else {
+                    index = next;
+                    continue;
+                };
+                let Some(('(', after_open)) = char_at(body, after_label) else {
+                    index = after_label;
+                    continue;
+                };
+                let Some((target, after_target)) = parse_link_target(body, after_open) else {
+                    index = after_open;
+                    continue;
+                };
+                if !target.is_empty() {
+                    links.push(OkfLink {
+                        target,
+                        label: Some(label).filter(|label| !label.is_empty()),
+                    });
+                }
+                index = after_target;
+            }
+            _ => index = next,
         }
-        rest = &rest[target_end + 1..];
     }
     links
+}
+
+fn char_at(value: &str, index: usize) -> Option<(char, usize)> {
+    value[index..]
+        .chars()
+        .next()
+        .map(|character| (character, index + character.len_utf8()))
+}
+
+fn skip_escaped_char(value: &str, index: usize) -> usize {
+    char_at(value, index)
+        .map(|(_, next)| next)
+        .unwrap_or(index)
+}
+
+fn skip_code_span(value: &str, index: usize) -> usize {
+    let mut tick_end = index;
+    while let Some(('`', next)) = char_at(value, tick_end) {
+        tick_end = next;
+    }
+    let tick_count = tick_end - index;
+    let mut cursor = tick_end;
+    while cursor < value.len() {
+        if value[cursor..].starts_with(&"`".repeat(tick_count)) {
+            return cursor + tick_count;
+        }
+        let Some((_, next)) = char_at(value, cursor) else {
+            break;
+        };
+        cursor = next;
+    }
+    tick_end
+}
+
+fn is_image_marker(value: &str, index: usize) -> bool {
+    value[..index].ends_with('!')
+}
+
+fn parse_link_label(value: &str, mut index: usize) -> Option<(String, usize)> {
+    let label_start = index;
+    let mut depth = 1usize;
+    while index < value.len() {
+        let (current, next) = char_at(value, index)?;
+        match current {
+            '\\' => index = skip_escaped_char(value, next),
+            '`' => index = skip_code_span(value, index),
+            '[' => {
+                depth += 1;
+                index = next;
+            }
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((value[label_start..index].to_string(), next));
+                }
+                index = next;
+            }
+            _ => index = next,
+        }
+    }
+    None
+}
+
+fn parse_link_target(value: &str, mut index: usize) -> Option<(String, usize)> {
+    let target_start = index;
+    let mut depth = 1usize;
+    while index < value.len() {
+        let (current, next) = char_at(value, index)?;
+        match current {
+            '\\' => index = skip_escaped_char(value, next),
+            '(' => {
+                depth += 1;
+                index = next;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return normalize_link_target(&value[target_start..index])
+                        .map(|target| (target, next));
+                }
+                index = next;
+            }
+            _ => index = next,
+        }
+    }
+    None
+}
+
+fn normalize_link_target(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Some(after_open) = raw.strip_prefix('<')
+        && let Some((target, _)) = after_open.split_once('>')
+    {
+        return Some(target.to_string()).filter(|target| !target.is_empty());
+    }
+    raw.split_whitespace().next().map(str::to_string)
 }

@@ -964,6 +964,46 @@ legacy_number: 7
     }
 
     #[test]
+    fn okf_frontmatter_accepts_real_markdown_delimiters() {
+        let repo = TempDir::new().expect("temp repo");
+        let contents =
+            "---\r\ntype: topic-doc\r\ntitle: Runtime\r\n\r\n---   \r\n\r\n# Runtime\r\n";
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), contents)
+            .expect("CRLF frontmatter should parse");
+
+        assert_eq!(concept.frontmatter.concept_type, "topic-doc");
+        assert_eq!(concept.body, "# Runtime\n");
+    }
+
+    #[test]
+    fn okf_markdown_links_skip_images_code_and_escapes() {
+        let repo = TempDir::new().expect("temp repo");
+        let contents = r#"---
+type: topic-doc
+---
+
+![diagram](/images/runtime.png)
+`[code](/ignored.md)`
+\[escaped](/ignored.md)
+[text [nested]](/issues/COE-123.md)
+[paren](/issues/COE-124.md?query=(ok))
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), contents)
+            .expect("concept should parse");
+
+        assert_eq!(
+            concept
+                .links
+                .iter()
+                .map(|link| link.target.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/issues/COE-123.md", "/issues/COE-124.md?query=(ok)"]
+        );
+    }
+
+    #[test]
     fn capture_plan_matches_prs_and_infers_areas() {
         let repo = TempDir::new().expect("temp repo");
         let config = config_for(repo.path());
