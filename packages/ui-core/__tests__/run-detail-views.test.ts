@@ -259,6 +259,34 @@ describe("Run detail views", () => {
     await handle.destroy();
   });
 
+  it("renders compact metric grid with explicit unknown fallbacks", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const run: RunDetail = {
+      ...runDetail,
+      turn_count: 2,
+      max_turns: 0,
+      runtime_seconds: 0,
+      started_at: undefined,
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport(run),
+    });
+
+    await openRun(root);
+
+    const metricText = root.querySelector(".os-run-grid")?.textContent ?? "";
+    expect(metricText).toContain("Turns2");
+    expect(metricText).toContain("Runtimeunknown");
+    expect(root.querySelector("style")?.textContent ?? "").toContain(
+      ".os-run-detail-panel .os-run-grid { grid-template-columns: repeat(auto-fit, minmax(82px, 1fr));",
+    );
+
+    await handle.destroy();
+  });
+
   it("selecting a changed file updates the diff panel", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

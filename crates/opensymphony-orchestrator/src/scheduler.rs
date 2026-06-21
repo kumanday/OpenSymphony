@@ -154,6 +154,13 @@ pub enum WorkerUpdate {
         worker_id: WorkerId,
         conversation: ConversationMetadata,
     },
+    TokenUsageUpdate {
+        worker_id: WorkerId,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        total_tokens: u64,
+    },
     Finished {
         worker_id: WorkerId,
         outcome: WorkerOutcomeRecord,
@@ -343,6 +350,11 @@ where
             .filter_map(|issue| issue.conversation.as_ref())
             .map(|conversation| conversation.cache_read_tokens)
             .sum();
+        let total_tokens: u64 = issues
+            .iter()
+            .filter_map(|issue| issue.conversation.as_ref())
+            .map(|conversation| conversation.effective_total_tokens())
+            .sum();
 
         let daemon = DaemonSnapshot::new(
             self.health,
@@ -354,7 +366,7 @@ where
                 input_tokens: total_input_tokens,
                 output_tokens: total_output_tokens,
                 cache_read_tokens: total_cache_read_tokens,
-                total_tokens: total_input_tokens + total_output_tokens,
+                total_tokens,
                 runtime_seconds: 0,
                 estimated_cost_usd_micros: None,
             },
@@ -840,6 +852,25 @@ where
                     };
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
                         execution.update_conversation(conversation);
+                    }
+                }
+                WorkerUpdate::TokenUsageUpdate {
+                    worker_id,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_tokens,
+                    total_tokens,
+                } => {
+                    let Some(issue_id) = self.worker_index.get(&worker_id).cloned() else {
+                        continue;
+                    };
+                    if let Some(execution) = self.executions.get_mut(&issue_id) {
+                        execution.update_conversation_token_usage(
+                            input_tokens,
+                            output_tokens,
+                            cache_read_tokens,
+                            total_tokens,
+                        );
                     }
                 }
             }

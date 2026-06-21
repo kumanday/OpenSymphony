@@ -1169,7 +1169,11 @@ impl TuiState {
                     Span::styled(
                         format!(
                             "{} total",
-                            format_metric(issue.input_tokens + issue.output_tokens)
+                            format_metric(if issue.total_tokens > 0 {
+                                issue.total_tokens
+                            } else {
+                                issue.input_tokens + issue.output_tokens
+                            })
                         ),
                         Style::new().dim(),
                     ),
@@ -4004,6 +4008,12 @@ mod tests {
                         conversation_id_suffix: format!("conv-{index}"),
                         workspace_path_suffix: format!("workspace-{index}"),
                         retry_count: index as u32,
+                        claimed_at: None,
+                        started_at: None,
+                        finished_at: None,
+                        turn_count: 0,
+                        max_turns: 0,
+                        runtime_seconds: 0,
                         blocked: false,
                         blocked_by: Vec::new(),
                         server_base_url: Some("http://127.0.0.1:3000".to_owned()),
@@ -4048,6 +4058,7 @@ mod tests {
                         input_tokens: 1024 + (index as u64 * 100),
                         output_tokens: 512 + (index as u64 * 50),
                         cache_read_tokens: 256 + (index as u64 * 25),
+                        total_tokens: 0,
                         cancel_acknowledged: false,
                         cancel_failed: false,
                         detached: false,

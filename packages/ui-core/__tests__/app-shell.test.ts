@@ -578,7 +578,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(collapsedToggle.getAttribute("aria-expanded")).toBe("false");
     expect(collapsedToggle.textContent).not.toContain("Collapse");
     expect(collapsedToggle.textContent).not.toContain("Edit");
-    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("Not configured");
+    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("API key not configured");
     expect(root.querySelector("[data-model-credential-ref]")).toBeNull();
     await expandSettingsPanel(root, "model", "[data-model-credential-ref]");
     const expandedToggle = root.querySelector("[data-toggle-settings='model']") as HTMLButtonElement;
@@ -610,7 +610,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(saved?.apiKeyRef).toBe("local_keychain:custom-api-key");
     expect(saved?.harnesses).toContain("custom_harness");
     await flushUntil(() =>
-      root.querySelector("[data-testid='model-redacted-credential']")?.textContent?.includes("Configured") ?? false,
+      root.querySelector("[data-testid='model-redacted-credential']")?.textContent?.includes("API key configured") ?? false,
     );
 
     await handle.destroy();
@@ -674,6 +674,9 @@ describe("OpenSymphonyApp mount", () => {
     );
     await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
     expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("text");
+    expect(root.textContent).toContain("OpenHands Auth Directory Env (OpenHands only)");
+    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("Codex CLI login via gateway readiness");
+    expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("OpenHands auth dir env OPENHANDS_AUTH_DIR");
 
     (root.querySelector("[data-model-name]") as HTMLInputElement).value = "codex-subscription-preview";
     (root.querySelector("[data-model-credential-ref]") as HTMLInputElement).value = "OPENHANDS_AUTH_DIR";

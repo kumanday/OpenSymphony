@@ -121,11 +121,16 @@ export interface RunDetail {
   finished_at?: string;
   release_reason?: ReleaseReason;
   turn_count: number;
+  /** Configured turn budget. A value of 0 means the budget is unknown. */
   max_turns: number;
   retry_attempt?: number;
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
+  /**
+   * Elapsed runtime in whole seconds. A value of 0 means runtime is unknown
+   * unless the run is actively running and has a start timestamp.
+   */
   runtime_seconds: number;
   conversation_id?: string;
   /** Logical workspace identifier for hosted mode. */

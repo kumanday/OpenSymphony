@@ -69,7 +69,8 @@ Shows:
 - running issue count
 - retry queue count
 - last poll tick
-- aggregated token and cost metrics if available
+- aggregated token and cost metrics if available, including cache-read and
+  provider-reported total token counters when present in the snapshot
 
 ## 4.2 Issue list
 
@@ -96,6 +97,8 @@ Shows selected issue:
 - workspace metadata
 - conversation metadata
 - retry metadata
+- input, output, cache-read, and total token counters from the control-plane
+  issue snapshot
 - recent worker outcomes
 - recent validation commands if recorded
 

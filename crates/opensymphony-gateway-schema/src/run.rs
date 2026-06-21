@@ -35,11 +35,14 @@ pub struct RunDetail {
     pub finished_at: Option<DateTime<Utc>>,
     pub release_reason: Option<ReleaseReason>,
     pub turn_count: u32,
+    /// Configured turn budget. A value of 0 means the budget is unknown.
     pub max_turns: u32,
     pub retry_attempt: Option<u32>,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Elapsed runtime in whole seconds. A value of 0 means runtime is unknown
+    /// unless the run is actively running and has a start timestamp.
     pub runtime_seconds: u64,
     pub conversation_id: Option<String>,
     /// Logical workspace identifier for hosted mode.
