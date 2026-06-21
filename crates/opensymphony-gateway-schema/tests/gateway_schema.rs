@@ -114,10 +114,18 @@ fn model_settings_roundtrip_and_redact_secret_material() {
     }));
     assert!(back.profiles.iter().any(|profile| {
         profile.id == "codex-chatgpt-local-keychain"
+            && profile.model.reference == "gpt-5.5"
             && profile.storage_mode == CredentialStorageMode::CodexCliHome
             && profile.credential_reference.redacted
             && profile.credential_reference.kind == CredentialReferenceKind::CodexCliLogin
             && profile.compatible_harnesses == vec!["codex_app_server"]
+    }));
+    assert!(back.profiles.iter().any(|profile| {
+        profile.id == "openhands-chatgpt-auth-directory"
+            && profile.model.reference == "gpt-5.5"
+            && profile.storage_mode == CredentialStorageMode::OpenHandsAuthDirectory
+            && profile.credential_reference.redacted
+            && profile.credential_reference.kind == CredentialReferenceKind::OpenHandsAuthDirectory
     }));
     assert_eq!(
         back.codex_local_readiness.subscription_status,

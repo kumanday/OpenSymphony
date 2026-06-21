@@ -348,7 +348,7 @@ fn codex_cli_login_profile(status: CredentialStatusKind) -> ModelSettingsProfile
         provider: CredentialProvider::OpenAiChatGptCodex,
         credential_mode: CredentialMode::Subscription,
         storage_mode: CredentialStorageMode::CodexCliHome,
-        model: literal_ref("openai/chatgpt-codex-subscription"),
+        model: literal_ref("gpt-5.5"),
         base_url: None,
         credential_reference: CredentialReference {
             id: "credential:codex-cli:chatgpt-login".into(),
@@ -371,7 +371,7 @@ fn openhands_auth_directory_profile() -> ModelSettingsProfile {
         provider: CredentialProvider::OpenAiChatGptCodex,
         credential_mode: CredentialMode::Subscription,
         storage_mode: CredentialStorageMode::OpenHandsAuthDirectory,
-        model: literal_ref("openai/chatgpt-codex-subscription"),
+        model: literal_ref("gpt-5.5"),
         base_url: None,
         credential_reference: CredentialReference {
             id: "credential:openhands-auth-dir:openai".into(),
@@ -394,7 +394,7 @@ fn hosted_broker_future_profile() -> ModelSettingsProfile {
         provider: CredentialProvider::HostedCredentialBroker,
         credential_mode: CredentialMode::Subscription,
         storage_mode: CredentialStorageMode::HostedBroker,
-        model: literal_ref("openai/chatgpt-codex-subscription"),
+        model: literal_ref("gpt-5.5"),
         base_url: None,
         credential_reference: CredentialReference {
             id: "credential:hosted-broker:openai-chatgpt-codex".into(),

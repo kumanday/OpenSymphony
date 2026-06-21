@@ -68,7 +68,7 @@ export function defaultModelProfiles(): ModelConfigurationProfile[] {
       mode: "api_key",
       owner: "user",
       baseUrl: "https://api.openai.com/v1",
-      model: "gpt-4.1",
+      model: "gpt-5.5",
       apiKeyRef: null,
       subscriptionCredential: null,
       credentialStorage: "local_keychain",
@@ -81,7 +81,7 @@ export function defaultModelProfiles(): ModelConfigurationProfile[] {
       mode: "subscription",
       owner: "user",
       baseUrl: "",
-      model: "codex",
+      model: "gpt-5.5",
       apiKeyRef: null,
       subscriptionCredential: {
         provider: "openai",

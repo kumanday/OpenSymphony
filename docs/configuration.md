@@ -174,6 +174,10 @@ logged-out, expired, unsupported, permission-denied, and unknown outputs as
 non-ready status states rather than guessing or reading private credential
 files.
 
+Default OpenAI model profiles use `gpt-5.5` for API-compatible and
+subscription-backed entries. Existing saved desktop or web profiles remain
+unchanged until an operator edits them.
+
 Harness and model selection are configured with the alpha `routing`
 front-matter section. When omitted, `opensymphony run` keeps the default
 `openhands_agent_server` harness and the OpenHands LLM settings from the
