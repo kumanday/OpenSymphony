@@ -266,6 +266,12 @@ workspaces, logs, workflow files, Linear comments, or browser payloads. Gateway
 readiness checks are cached briefly and have bounded per-command timeouts so
 operator UI polling cannot hang on a stalled local Codex command.
 
+The local Codex app-server harness path uses `codex app-server --stdio` and is
+advertised as available when clients read `/api/v1/capabilities`. Unsupported
+or logged-out Codex installations must fail with the readiness guidance above
+instead of partially starting an issue. Loopback WebSocket and hosted Codex
+worker pools remain non-production paths.
+
 The alpha model configuration panel exposed by the web and desktop shells uses
 the shared model profile state store, but those entrypoints currently construct
 it without durable storage. Treat profile edits as session-local until a

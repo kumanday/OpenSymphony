@@ -212,34 +212,36 @@ status, but OpenSymphony does not forward them as undocumented agent-server
 conversation fields. Only the short-lived access token reference is resolved
 when building the OpenHands conversation request.
 
-### Feature-Gated Local Testing
+### Local Codex And Subscription Testing
 
-The Codex app-server prototype and OpenHands ChatGPT/Codex subscription adapter
-are compile-time opt-in features. Local test binaries must include the feature
-you are exercising:
+The local Codex app-server stdio harness is compiled into normal OpenSymphony
+builds. OpenHands ChatGPT/Codex subscription adapter tests remain
+feature-gated. Use the smallest feature set for the path you are exercising:
 
 ```bash
 cargo check-system-duckdb \
-  --features openhands-subscription-credentials,codex-app-server-prototype
+  --features openhands-subscription-credentials
 
 cargo test-system-duckdb \
   --features openhands-subscription-credentials \
   subscription -- --nocapture
 
-cargo test-system-duckdb \
-  --features codex-app-server-prototype \
-  --test codex_app_server
+cargo test-system-duckdb --test codex_app_server
 ```
 
-To install a local `opensymphony` binary with both gates enabled while using the
-system DuckDB development path:
+The old `codex-app-server-prototype` feature has been removed; local stdio
+harness capability, lifecycle, normalization, and benchmark checks run through
+normal OpenSymphony builds.
+
+To install a local `opensymphony` binary with subscription credentials enabled
+while using the system DuckDB development path:
 
 ```bash
 export DUCKDB_LIB_DIR="/opt/homebrew/opt/duckdb/lib"
 export DUCKDB_INCLUDE_DIR="/opt/homebrew/opt/duckdb/include"
 export DYLD_LIBRARY_PATH="$DUCKDB_LIB_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
 cargo install --path . --no-default-features \
-  --features duckdb-prebuilt,openhands-subscription-credentials,codex-app-server-prototype
+  --features duckdb-prebuilt,openhands-subscription-credentials
 ```
 
 For a local subscription-auth smoke test, establish the OpenAI ChatGPT/Codex

@@ -1,44 +1,51 @@
-# Codex App-Server Prototype And Benchmark Report
+# Codex App-Server Local Harness And Benchmark Report
 
-COE-426 establishes a feature-gated Codex app-server integration shape. It does
-not enable Codex as a production harness and does not route OpenSymphony issues
-to Codex.
+COE-426 established the benchmark/prototype integration shape. COE-476 promotes
+the local stdio path into a supported OpenSymphony harness capability while
+leaving hosted worker pools and loopback WebSocket routing out of production
+scope.
 
-## Prototype Scope
+## Local Harness Scope
 
-- Feature gate: `codex-app-server-prototype`.
 - Runtime kind: `codex_app_server`.
-- Local transport: `codex app-server --stdio`.
+- Supported local transport: `codex app-server --stdio`.
 - Experimental loopback WebSocket transport:
   `codex app-server --listen ws://127.0.0.1:<port>`.
 - Contract source: generated Codex app-server JSON Schema and TypeScript
   bindings from the installed Codex CLI.
 
-The prototype adds a small Rust module for:
+The Rust module provides:
 
 - launch argument construction for stdio and loopback WebSocket,
 - JSON-RPC request construction for `initialize`, `thread/start`, and
-  `turn/start`,
-- normalization of basic thread, turn, item, plan, error, and unknown
-  notifications while preserving the raw payload,
-- mapping existing OpenSymphony model and credential setting profiles to future
-  Codex app-server use.
+  `turn/start`, plus resume, cancel, and approval responses,
+- normalization of thread, turn, item, approval, cancellation, error, and
+  unknown notifications while preserving the raw payload,
+- mapping existing OpenSymphony model and credential setting profiles to Codex
+  app-server use,
+- a concrete `HarnessAdapter` implementation for the local stdio capability.
+
+The current request builder defaults `modelProvider` to `openai` because Codex
+CLI app-server exposes local OpenAI/ChatGPT-backed model ids on this path. If a
+future Codex CLI adds provider-neutral model routing, OpenSymphony should pass
+that provider through the harness adapter instead of treating it as a local
+default.
 
 The companion benchmark script issues `thread/loaded/list` requests directly so
 throughput can be measured without starting model-backed turns.
 
-## Local Feature-Gated Testing
+## Local Testing
 
-Codex app-server support is available only when OpenSymphony is built with the
-`codex-app-server-prototype` Cargo feature. The feature exposes contract tests
-and benchmark helpers; it does not make Codex the production issue-execution
-harness.
+Codex app-server local stdio support is compiled into normal OpenSymphony
+builds. The old `codex-app-server-prototype` Cargo feature has been removed;
+adapter contract and benchmark tests run through the normal local harness
+module.
 
 Use the system DuckDB developer aliases for quick local verification:
 
 ```bash
-cargo check-system-duckdb --features codex-app-server-prototype
-cargo test-system-duckdb --features codex-app-server-prototype --test codex_app_server
+cargo check-system-duckdb
+cargo test-system-duckdb --test codex_app_server
 ```
 
 Install or select the Codex CLI that should be tested, then confirm the
@@ -130,12 +137,13 @@ when you only need stdio evidence. The benchmark intentionally avoids
 model-backed turns, so it should not consume subscription/API quota.
 
 If you want to build one local OpenSymphony binary that includes both Codex
-app-server and OpenHands ChatGPT/Codex subscription credential support, combine
-the feature gates:
+app-server and OpenHands ChatGPT/Codex subscription credential support, enable
+the subscription feature. The Codex stdio harness itself is available in normal
+builds:
 
 ```bash
 cargo install --path . --no-default-features \
-  --features duckdb-prebuilt,codex-app-server-prototype,openhands-subscription-credentials
+  --features duckdb-prebuilt,openhands-subscription-credentials
 ```
 
 The subscription credential path is still owned by the model settings and
@@ -222,9 +230,10 @@ Queued WebSocket requests use `--batch-timeout-ms`, which defaults to
 `min(300000, --request-timeout-ms + --iterations * 100)`, so the timeout remains
 an explicit duration even for high-iteration runs.
 
-Do not point this prototype at real shared-environment secrets. Codex WebSocket
-auth file paths and token hashes are passed as process arguments, so they can be
-visible to local process-list inspection on some systems.
+Do not point the experimental WebSocket benchmark at real shared-environment
+secrets. Codex WebSocket auth file paths and token hashes are passed as process
+arguments, so they can be visible to local process-list inspection on some
+systems.
 
 ## Local Benchmark Result
 
@@ -329,7 +338,7 @@ Codex must reuse the gateway model settings shape instead of owning
 subscription credentials. The current mapping is:
 
 - `codex-chatgpt-local-keychain`: stable local Codex CLI ChatGPT login
-  reference for future desktop/local Codex app-server use.
+  reference for desktop/local Codex app-server use.
 - `hosted-openai-subscription-broker`: hosted broker reference for future
   hosted Codex app-server or OpenHands subscription use.
 - literal model references are converted into Codex config overrides where the
@@ -342,18 +351,27 @@ Gaps:
   browser clients.
 - Hosted credential broker support remains a follow-up implementation.
 
-## Readiness Recommendation
+## Readiness And Gaps
 
-Codex app-server is suitable for a feature-gated local prototype and contract
-test path. Production enablement should wait for:
+Codex app-server stdio is the supported local harness path. It still requires
+an installed compatible Codex CLI and an active ChatGPT login. The gateway
+surfaces unsupported CLI output, missing app-server support, logged-out,
+expired, permission-denied, and unknown states as actionable non-ready statuses.
+Capability discovery reports the local adapter contract and stdio runtime
+surface, but `opensymphony run` still dispatches through OpenHands until the
+cross-harness runtime-routing work lands in COE-429.
 
-- a pinned Codex app-server protocol version and generated schema artifact
-  policy,
-- replay/history semantics for reconnect beyond one-shot request recovery,
-- approval request mapping into OpenSymphony approval DTOs,
-- subscription credential adapter completion,
+Remaining follow-up work:
+
+- COE-429 scheduler/runtime dispatch selection for `opensymphony run` so a
+  workflow can route issue execution to the Codex worker backend,
+- a checked-in generated schema artifact policy for future Codex protocol bumps,
+- replay/history semantics beyond the local stdio request lifecycle (capability
+  metadata currently marks history fetch, reconnect replay, and stdio
+  reconciliation unavailable),
 - security review of non-loopback WebSocket exposure with capability-token and
-  signed-bearer modes.
+  signed-bearer modes,
+- hosted Codex worker pools and hosted credential broker integration.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

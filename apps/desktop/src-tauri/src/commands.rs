@@ -1209,6 +1209,9 @@ pub struct GatewayConnectionInfo {
 /// Used by the frontend transport factory to select the optimal profile.
 #[command]
 pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
+    // Desktop exposes the same loopback gateway capability truth consumed by
+    // the frontend. Harness execution still routes through the gateway/runtime,
+    // not a separate desktop-side Codex launcher.
     Ok(GatewayCapabilities {
         schema_version: SchemaVersion::v1(),
         gateway_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1221,7 +1224,7 @@ pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
         }],
         harnesses: vec![
             HarnessCapability::openhands_agent_server(),
-            HarnessCapability::codex_app_server_future(),
+            HarnessCapability::codex_app_server_local(),
             HarnessCapability::rust_native_future(),
         ],
         features: vec![
@@ -1408,7 +1411,7 @@ mod tests {
             harnesses,
             vec![
                 ("openhands_agent_server", true),
-                ("codex_app_server", false),
+                ("codex_app_server", true),
                 ("rust_native", false),
             ]
         );

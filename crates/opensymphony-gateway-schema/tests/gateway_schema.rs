@@ -623,7 +623,7 @@ fn gateway_capabilities_roundtrips() {
 fn harness_capability_roundtrips_future_adapters() {
     let caps = vec![
         HarnessCapability::openhands_agent_server(),
-        HarnessCapability::codex_app_server_future(),
+        HarnessCapability::codex_app_server_local(),
         HarnessCapability::rust_native_future(),
     ];
 
@@ -647,20 +647,56 @@ fn harness_capability_roundtrips_future_adapters() {
             .credential_reference_kinds
             .contains(&"codex_cli_login".to_string())
     );
+    assert!(back[1].available);
+    assert_eq!(
+        back[1].runtime_contract_version.as_deref(),
+        Some("codex-app-server-json-rpc-v2")
+    );
+    assert_eq!(back[1].transport.modes, vec!["stdio"]);
+    assert!(!back[1].transport.remote);
     assert!(
         back[1]
             .feature_gaps
             .iter()
-            .any(|gap| gap.contains("COE-426"))
-    );
-    assert!(
-        !back[1]
-            .feature_gaps
-            .iter()
-            .any(|gap| gap.contains("COE-408"))
+            .any(|gap| gap.contains("Hosted Codex worker pools"))
     );
     assert_eq!(back[2].kind, "rust_native");
     assert!(back[2].pause_resume.pause);
+}
+
+#[test]
+fn codex_future_capability_shape_is_stable() {
+    let future = HarnessCapability::codex_app_server_future();
+    let json = must_serialize(&future);
+    let back: HarnessCapability = must_deserialize(&json);
+
+    assert_eq!(back.kind, "codex_app_server");
+    assert_eq!(back.display_name, "Codex app-server");
+    assert!(!back.available);
+    assert_eq!(back.adapter_contract_version, "harness-adapter-v1");
+    assert_eq!(back.runtime_contract_version, None);
+    assert!(back.actions.start_run);
+    assert!(back.actions.approve);
+    assert!(back.actions.comment);
+    assert!(back.event_streams.runtime_events);
+    assert_eq!(
+        back.event_streams.delivery_modes,
+        vec!["json_rpc_notifications", "websocket_experimental"]
+    );
+    assert_eq!(back.transport.protocol, "json_rpc_2_0");
+    assert_eq!(
+        back.transport.modes,
+        vec!["stdio", "websocket_experimental"]
+    );
+    assert!(back.transport.local);
+    assert!(back.transport.remote);
+    assert!(!back.history.fetch_history);
+    assert!(!back.history.reconnect_and_replay);
+    assert!(
+        back.feature_gaps
+            .iter()
+            .any(|gap| gap.contains("Production hosted or remote Codex routing"))
+    );
 }
 
 #[test]

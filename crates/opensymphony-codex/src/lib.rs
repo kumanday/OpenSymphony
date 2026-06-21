@@ -1,9 +1,9 @@
-//! Feature-gated Codex app-server prototype helpers.
+//! Codex app-server local harness helpers.
 //!
 //! OpenSymphony-generated JSON-RPC requests intentionally use monotonic numeric
-//! IDs in this prototype. The session owns outgoing request allocation and
-//! response correlation; benchmark tooling still compares IDs by string so it
-//! can report future Codex response-shape changes cleanly.
+//! IDs. The session owns outgoing request allocation and response correlation;
+//! benchmark tooling still compares IDs by string so it can report future Codex
+//! response-shape changes cleanly.
 
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -14,10 +14,230 @@ use crate::opensymphony_gateway_schema::model_settings::{
     ConfiguredValueSource, CredentialMode, CredentialReferenceKind, CredentialStorageMode,
     ModelSettingsProfile,
 };
+use crate::{
+    opensymphony_domain::HarnessAdapter,
+    opensymphony_gateway_schema::{
+        capability::HarnessCapability,
+        envelope::EntityRef,
+        event_journal::{EventActor, EventKind, EventRecord},
+    },
+};
 
-pub const CODEX_APP_SERVER_FEATURE: &str = "codex-app-server-prototype";
 pub const CODEX_APP_SERVER_KIND: &str = "codex_app_server";
 pub const CODEX_APP_SERVER_CONTRACT: &str = "codex-app-server-json-rpc-v2";
+pub const CODEX_DEFAULT_MODEL_PROVIDER: &str = "openai";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexContractArtifact {
+    JsonSchema,
+    TypeScript,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexContractGeneration {
+    program: String,
+    artifact: CodexContractArtifact,
+    out_dir: PathBuf,
+}
+
+impl CodexContractGeneration {
+    pub fn json_schema(out_dir: impl Into<PathBuf>) -> Self {
+        Self::json_schema_with_program("codex", out_dir)
+    }
+
+    pub fn json_schema_with_program(
+        program: impl Into<String>,
+        out_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            artifact: CodexContractArtifact::JsonSchema,
+            out_dir: out_dir.into(),
+        }
+    }
+
+    pub fn typescript(out_dir: impl Into<PathBuf>) -> Self {
+        Self::typescript_with_program("codex", out_dir)
+    }
+
+    pub fn typescript_with_program(
+        program: impl Into<String>,
+        out_dir: impl Into<PathBuf>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            artifact: CodexContractArtifact::TypeScript,
+            out_dir: out_dir.into(),
+        }
+    }
+
+    pub fn artifact(&self) -> CodexContractArtifact {
+        self.artifact
+    }
+
+    pub fn to_command(&self) -> (String, Vec<String>) {
+        let generator = match self.artifact {
+            CodexContractArtifact::JsonSchema => "generate-json-schema",
+            CodexContractArtifact::TypeScript => "generate-ts",
+        };
+        (
+            self.program.clone(),
+            vec![
+                "app-server".into(),
+                generator.into(),
+                "--out".into(),
+                self.out_dir.to_string_lossy().to_string(),
+            ],
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexAppServerAdapter {
+    launch: CodexAppServerLaunch,
+    client_name: String,
+    client_version: String,
+}
+
+impl CodexAppServerAdapter {
+    pub fn local_stdio(
+        program: impl Into<String>,
+        client_name: impl Into<String>,
+        client_version: impl Into<String>,
+    ) -> Self {
+        Self {
+            launch: CodexAppServerLaunch::stdio_with_program(program),
+            client_name: client_name.into(),
+            client_version: client_version.into(),
+        }
+    }
+
+    pub fn launch(&self) -> &CodexAppServerLaunch {
+        &self.launch
+    }
+
+    pub fn session(&self) -> CodexJsonRpcSession {
+        CodexJsonRpcSession::new(self.client_name.clone(), self.client_version.clone())
+    }
+
+    pub fn start_issue_request(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        cwd: impl Into<String>,
+        model: impl Into<String>,
+        workflow_prompt: impl Into<String>,
+        config: Value,
+    ) -> Result<CodexHarnessRequest, serde_json::Error> {
+        Ok(CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::Start,
+            request: session.thread_start(CodexThreadStartParams {
+                cwd: Some(cwd.into()),
+                model: Some(model.into()),
+                // Codex CLI app-server currently exposes OpenAI/ChatGPT-backed
+                // model ids through this local harness path.
+                model_provider: Some(CODEX_DEFAULT_MODEL_PROVIDER.into()),
+                base_instructions: Some(workflow_prompt.into()),
+                developer_instructions: None,
+                ephemeral: Some(false),
+                config: Some(config),
+            })?,
+        })
+    }
+
+    pub fn resume_issue_request(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        thread_id: impl Into<String>,
+        cwd: impl Into<String>,
+        continuation: impl Into<String>,
+    ) -> Result<CodexHarnessRequest, serde_json::Error> {
+        Ok(CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::Resume,
+            request: session.turn_start(CodexTurnStartParams {
+                thread_id: thread_id.into(),
+                input: vec![CodexUserInput::Text {
+                    text: continuation.into(),
+                    text_elements: Vec::new(),
+                }],
+                cwd: Some(cwd.into()),
+                model: None,
+                client_user_message_id: None,
+            })?,
+        })
+    }
+
+    pub fn cancel_turn_request(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        turn_id: impl Into<String>,
+    ) -> CodexHarnessRequest {
+        CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::Cancel,
+            request: session.request("turn/cancel", json!({ "turnId": turn_id.into() })),
+        }
+    }
+
+    pub fn approval_response(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        approval_id: impl Into<String>,
+        decision: CodexApprovalDecision,
+        message: Option<String>,
+    ) -> CodexHarnessRequest {
+        let mut params = json!({
+            "approvalId": approval_id.into(),
+            "decision": decision.as_protocol_value(),
+        });
+        if let Some(message) = message
+            && let Some(object) = params.as_object_mut()
+        {
+            object.insert("message".into(), Value::String(message));
+        }
+        CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::Approval,
+            request: session.request("approval/respond", params),
+        }
+    }
+}
+
+impl HarnessAdapter for CodexAppServerAdapter {
+    fn harness_kind(&self) -> &'static str {
+        CODEX_APP_SERVER_KIND
+    }
+
+    fn capabilities(&self) -> HarnessCapability {
+        HarnessCapability::codex_app_server_local()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodexLifecycleRequest {
+    Start,
+    Resume,
+    Cancel,
+    Approval,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodexHarnessRequest {
+    pub lifecycle: CodexLifecycleRequest,
+    pub request: JsonRpcRequestEnvelope,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexApprovalDecision {
+    Approve,
+    Reject,
+}
+
+impl CodexApprovalDecision {
+    fn as_protocol_value(self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexAppServerTransport {
@@ -318,10 +538,13 @@ pub enum NormalizedCodexEventKind {
     ThreadStatusChanged,
     TurnStarted,
     TurnCompleted,
+    TurnCancelled,
     ItemStarted,
     ItemCompleted,
     AgentMessageDelta,
     PlanDelta,
+    ApprovalRequested,
+    ApprovalCompleted,
     Error,
     Unknown,
 }
@@ -350,10 +573,13 @@ pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent>
         "thread/status/changed" => NormalizedCodexEventKind::ThreadStatusChanged,
         "turn/started" => NormalizedCodexEventKind::TurnStarted,
         "turn/completed" => NormalizedCodexEventKind::TurnCompleted,
+        "turn/cancelled" | "turn/canceled" => NormalizedCodexEventKind::TurnCancelled,
         "item/started" => NormalizedCodexEventKind::ItemStarted,
         "item/completed" => NormalizedCodexEventKind::ItemCompleted,
         "item/agentMessage/delta" => NormalizedCodexEventKind::AgentMessageDelta,
         "item/plan/delta" => NormalizedCodexEventKind::PlanDelta,
+        "item/permissions/requestApproval" => NormalizedCodexEventKind::ApprovalRequested,
+        "approval/completed" => NormalizedCodexEventKind::ApprovalCompleted,
         "error" => NormalizedCodexEventKind::Error,
         _ => NormalizedCodexEventKind::Unknown,
     };
@@ -371,6 +597,148 @@ pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent>
 
 fn string_param(params: &Value, key: &str) -> Option<String> {
     params.get(key)?.as_str().map(str::to_owned)
+}
+
+pub fn normalized_event_to_journal_record(
+    run_id: impl Into<String>,
+    sequence: u64,
+    event: &NormalizedCodexEvent,
+) -> EventRecord {
+    let run_id = run_id.into();
+    let payload = json!({
+        "source_kind": event.method,
+        "thread_id": event.thread_id,
+        "turn_id": event.turn_id,
+        "item_id": event.item_id,
+        "message_delta": event.message_delta,
+        "raw_payload": event.raw,
+    });
+    let (kind, summary) = codex_event_journal_kind_and_summary(event);
+    EventRecord::builder()
+        .sequence(sequence)
+        .actor(EventActor::harness(CODEX_APP_SERVER_KIND))
+        .entity_ref(EntityRef::run(run_id.clone()))
+        .summary(summary)
+        .kind(kind)
+        .payload(payload)
+        .raw_payload_ref(format!("codex:{run_id}:{sequence}"))
+        .build()
+}
+
+fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventKind, String) {
+    match event.kind {
+        NormalizedCodexEventKind::ThreadStarted => (
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
+            format!(
+                "Codex thread started{}",
+                id_suffix(event.thread_id.as_deref())
+            ),
+        ),
+        NormalizedCodexEventKind::TurnStarted => (
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
+            format!("Codex turn started{}", id_suffix(event.turn_id.as_deref())),
+        ),
+        NormalizedCodexEventKind::TurnCompleted => (
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
+            format!(
+                "Codex turn completed{}",
+                id_suffix(event.turn_id.as_deref())
+            ),
+        ),
+        NormalizedCodexEventKind::TurnCancelled => (
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
+            format!(
+                "Codex turn cancelled{}",
+                id_suffix(event.turn_id.as_deref())
+            ),
+        ),
+        NormalizedCodexEventKind::ApprovalRequested => (
+            EventKind::ApprovalRequested,
+            format!(
+                "Codex requested approval{}",
+                id_suffix(event.item_id.as_deref())
+            ),
+        ),
+        NormalizedCodexEventKind::ApprovalCompleted => (
+            approval_completed_kind(event),
+            format!(
+                "Codex approval completed{}",
+                id_suffix(event.item_id.as_deref())
+            ),
+        ),
+        NormalizedCodexEventKind::Error => (
+            EventKind::RunFailed,
+            error_summary(event).unwrap_or_else(|| "Codex app-server reported an error".into()),
+        ),
+        NormalizedCodexEventKind::ThreadStatusChanged => (
+            thread_status_kind(event),
+            format!("Codex event: {}", event.method),
+        ),
+        NormalizedCodexEventKind::ItemStarted
+        | NormalizedCodexEventKind::ItemCompleted
+        | NormalizedCodexEventKind::AgentMessageDelta
+        | NormalizedCodexEventKind::PlanDelta => (
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
+            format!("Codex event: {}", event.method),
+        ),
+        NormalizedCodexEventKind::Unknown => (
+            EventKind::Unknown {
+                raw_kind: event.method.clone(),
+            },
+            format!("Codex event: {}", event.method),
+        ),
+    }
+}
+
+fn id_suffix(id: Option<&str>) -> String {
+    id.map(|value| format!(" {value}")).unwrap_or_default()
+}
+
+fn error_summary(event: &NormalizedCodexEvent) -> Option<String> {
+    let params = event.raw.get("params")?;
+    let message = params.get("message")?.as_str()?;
+    Some(format!("Codex app-server error: {message}"))
+}
+
+fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
+    let params = event.raw.get("params").unwrap_or(&Value::Null);
+    let decision = params
+        .get("decision")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    match decision.as_deref() {
+        Some("approve") => EventKind::ApprovalGranted,
+        Some("reject") => EventKind::ApprovalDenied,
+        _ => EventKind::HarnessEventNormalized {
+            source_kind: event.method.clone(),
+        },
+    }
+}
+
+fn thread_status_kind(event: &NormalizedCodexEvent) -> EventKind {
+    let params = event.raw.get("params").unwrap_or(&Value::Null);
+    let status = params
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    match status.as_deref() {
+        Some("completed") => EventKind::RunCompleted,
+        Some("failed") => EventKind::RunFailed,
+        Some("cancelled") => EventKind::RunCancelled,
+        _ => EventKind::HarnessEventNormalized {
+            source_kind: event.method.clone(),
+        },
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

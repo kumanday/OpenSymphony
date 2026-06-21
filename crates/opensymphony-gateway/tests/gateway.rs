@@ -715,7 +715,11 @@ async fn gateway_serves_capabilities_and_dashboard_snapshot() {
         caps_response
             .harnesses
             .iter()
-            .any(|harness| harness.kind == "codex_app_server" && !harness.available)
+            .any(|harness| harness.kind == "codex_app_server"
+                && harness.available
+                && harness.runtime_contract_version.as_deref()
+                    == Some("codex-app-server-json-rpc-v2")
+                && harness.transport.modes == vec!["stdio"])
     );
     assert!(
         caps_response

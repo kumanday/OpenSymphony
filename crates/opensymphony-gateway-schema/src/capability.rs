@@ -192,6 +192,92 @@ impl HarnessCapability {
         }
     }
 
+    pub fn codex_app_server_local() -> Self {
+        Self {
+            kind: "codex_app_server".into(),
+            display_name: "Codex app-server".into(),
+            available: true,
+            adapter_contract_version: "harness-adapter-v1".into(),
+            runtime_contract_version: Some("codex-app-server-json-rpc-v2".into()),
+            actions: HarnessActionCapability {
+                start_run: true,
+                send_user_message: true,
+                retry: true,
+                cancel: true,
+                pause: false,
+                resume: false,
+                approve: true,
+                reject: true,
+                comment: false,
+            },
+            event_streams: HarnessEventStreamCapability {
+                runtime_events: true,
+                terminal_frames: true,
+                replay_from_cursor: false,
+                raw_payload_refs: true,
+                delivery_modes: vec!["json_rpc_notifications".into()],
+            },
+            approvals: HarnessApprovalCapability {
+                tool_approval: true,
+                human_decision: true,
+                policy_metadata: true,
+            },
+            model_settings: HarnessModelSettingsCapability {
+                api_compatible_settings: true,
+                subscription_credentials: true,
+                per_run_overrides: true,
+                credential_reference_kinds: vec![
+                    "model_settings_ref".into(),
+                    "inherited_subscription_login".into(),
+                    "codex_cli_login".into(),
+                    "capability_token".into(),
+                    "signed_bearer".into(),
+                ],
+            },
+            transport: HarnessTransportCapability {
+                protocol: "json_rpc_2_0".into(),
+                modes: vec!["stdio".into()],
+                local: true,
+                remote: false,
+            },
+            cancellation: HarnessCancellationCapability {
+                cancel_run: true,
+                force_stop: false,
+                acknowledges_cancel: true,
+            },
+            pause_resume: HarnessPauseResumeCapability {
+                pause: false,
+                resume: false,
+            },
+            history: HarnessHistoryCapability {
+                fetch_history: false,
+                reconcile_after_ready: false,
+                reconnect_and_replay: false,
+                preserve_unknown_events: true,
+            },
+            notes: vec![
+                "Supported local adapter path using `codex app-server --stdio`.".into(),
+                "Requires a compatible Codex CLI with ChatGPT login available to the operator-owned Codex home.".into(),
+            ],
+            feature_gaps: vec![
+                "`opensymphony run` dispatch still defaults to OpenHands until COE-429 wires cross-harness runtime routing."
+                    .into(),
+                "Codex history fetch and reconnect replay cursors are not implemented for the local stdio adapter."
+                    .into(),
+                "Codex stdio reconciliation after readiness is not implemented; events are consumed from the live JSON-RPC stream."
+                    .into(),
+                "Harness-native comments are not implemented; tracker comments remain orchestrator-owned."
+                    .into(),
+                "Pause/resume semantics need protocol confirmation before being advertised as available."
+                    .into(),
+                "Hosted Codex worker pools and remote transport remain out of scope for the local adapter."
+                    .into(),
+                "Loopback WebSocket mode remains benchmark-only until exposure and auth policy are hardened."
+                    .into(),
+            ],
+        }
+    }
+
     pub fn codex_app_server_future() -> Self {
         Self {
             kind: "codex_app_server".into(),
@@ -213,9 +299,12 @@ impl HarnessCapability {
             event_streams: HarnessEventStreamCapability {
                 runtime_events: true,
                 terminal_frames: true,
-                replay_from_cursor: true,
+                replay_from_cursor: false,
                 raw_payload_refs: true,
-                delivery_modes: vec!["json_rpc_notifications".into()],
+                delivery_modes: vec![
+                    "json_rpc_notifications".into(),
+                    "websocket_experimental".into(),
+                ],
             },
             approvals: HarnessApprovalCapability {
                 tool_approval: true,
@@ -250,14 +339,15 @@ impl HarnessCapability {
                 resume: false,
             },
             history: HarnessHistoryCapability {
-                fetch_history: true,
-                reconcile_after_ready: true,
-                reconnect_and_replay: true,
+                fetch_history: false,
+                reconcile_after_ready: false,
+                reconnect_and_replay: false,
                 preserve_unknown_events: true,
             },
-            notes: vec!["Future adapter shaped around JSON-RPC requests and notifications.".into()],
+            notes: vec!["Future hosted/remote adapter shape for Codex app-server.".into()],
             feature_gaps: vec![
-                "Production adapter implementation is out of scope for COE-426.".into(),
+                "Production hosted or remote Codex routing is not implemented.".into(),
+                "Codex history fetch and reconnect replay cursors are not implemented.".into(),
                 "Pause/resume semantics need protocol confirmation before being advertised as available."
                     .into(),
             ],

@@ -128,11 +128,14 @@ The runtime client must:
 - Future or experimental harnesses may be advertised as unavailable capability entries, but their feature gaps must be explicit.
 - When changing harness capability discovery, update gateway schema round-trip tests, the gateway capabilities endpoint test, adapter-boundary tests, and `docs/harness-adapter-compatibility.md`.
 
-The feature-gated Codex app-server prototype uses the `codex-app-server-prototype`
-feature and the `opensymphony_codex` internal module boundary. Keep Codex
-app-server launch, JSON-RPC, and benchmark evidence documented in
-`docs/codex-app-server-prototype.md`; do not enable production routing while
-`codex_app_server` is advertised as unavailable.
+The local Codex app-server harness uses the `opensymphony_codex` internal module
+boundary and is advertised as an available local stdio capability. Keep Codex
+app-server launch, JSON-RPC lifecycle, event-normalization, generated-contract,
+and benchmark evidence documented in `docs/codex-app-server-harness.md`. The old
+`codex-app-server-prototype` Cargo feature has been removed; local stdio harness
+capability must stay available in normal builds. Do not advertise hosted worker
+pools, remote routing, or loopback WebSocket as production-ready until those
+paths have their own hardening evidence.
 
 ### Preserve forward compatibility
 
@@ -285,8 +288,8 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/architecture.md`: runtime architecture
 - `docs/symphony-spec-alignment.md`: upstream spec mapping
 - `docs/openhands-agent-server.md`: agent-server integration choices
-- `docs/codex-app-server-prototype.md`: feature-gated Codex app-server
-  prototype, launch contract, JSON-RPC evidence, and benchmark results
+- `docs/codex-app-server-harness.md`: local Codex app-server stdio harness,
+  launch contract, JSON-RPC lifecycle evidence, and benchmark results
 - `docs/websocket-runtime.md`: wire contract and recovery behavior
 - `docs/workspace-and-lifecycle.md`: workspace ownership and hooks
 - `docs/linear-and-tools.md`: Linear integration and GraphQL helper assets
