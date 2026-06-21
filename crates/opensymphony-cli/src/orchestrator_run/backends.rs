@@ -11,7 +11,7 @@ use std::{
 use crate::opensymphony_codex::{
     CodexAppServerAdapter, CodexAppServerSchemaValidator, CodexContractGeneration,
     CodexJsonRpcSession, JsonRpcRequestEnvelope, NormalizedCodexEvent, NormalizedCodexEventKind,
-    codex_approval_request_from_event, normalize_server_notification,
+    codex_approval_request_from_event, codex_event_payload, normalize_server_notification,
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
@@ -1617,14 +1617,24 @@ fn emit_codex_notification(
         return Some(event);
     };
     let observed_at = now_timestamp();
+    let payload = codex_event_payload(&event);
     let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
         worker_id: worker_id.clone(),
         observed_at,
         event_id: event.item_id.clone().or_else(|| event.turn_id.clone()),
         event_kind: Some(format!("codex.{}", event.method)),
         summary: Some(format!("Codex event: {}", event.method)),
-        payload: Some(event.raw.clone()),
+        payload: Some(payload),
     });
+    if let Some(usage) = event.token_usage {
+        let _ = updates_tx.send(WorkerUpdate::TokenUsageUpdate {
+            worker_id: worker_id.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            total_tokens: usage.total_tokens,
+        });
+    }
     if let Some(approval) = codex_approval_request_from_event(
         run.worker_id.as_str(),
         issue.id.as_str(),
@@ -2176,6 +2186,87 @@ mod tests {
                 assert_eq!(payload["status"], "pending");
             }
             other => panic!("expected runtime event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codex_token_usage_notification_emits_metadata_update() {
+        let issue = sample_issue();
+        let run = RunAttempt::new(
+            WorkerId::new("worker-token-usage").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            PathBuf::from("/tmp/opensymphony-worker-token-usage"),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+
+        let event = emit_codex_notification(
+            &updates_tx,
+            run.worker_id.as_str(),
+            &issue,
+            &run,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tokenUsage": {
+                        "total": {
+                            "cachedInputTokens": 30,
+                            "inputTokens": 100,
+                            "outputTokens": 50,
+                            "reasoningOutputTokens": 5,
+                            "totalTokens": 150
+                        }
+                    }
+                }
+            }),
+        )
+        .expect("Codex token usage notification should normalize");
+
+        assert_eq!(event.kind, NormalizedCodexEventKind::TokenUsageUpdated);
+        match updates_rx
+            .try_recv()
+            .expect("raw Codex runtime event should be emitted")
+        {
+            WorkerUpdate::RuntimeEvent {
+                event_kind,
+                payload,
+                ..
+            } => {
+                assert_eq!(
+                    event_kind.as_deref(),
+                    Some("codex.thread/tokenUsage/updated")
+                );
+                let payload = payload.expect("token event payload should be present");
+                assert_eq!(payload["usage"]["input_tokens"], 100);
+                assert_eq!(payload["usage"]["output_tokens"], 50);
+                assert_eq!(payload["usage"]["cache_read_tokens"], 30);
+                assert_eq!(payload["usage"]["total_tokens"], 150);
+            }
+            other => panic!("expected runtime event, got {other:?}"),
+        }
+        match updates_rx
+            .try_recv()
+            .expect("token metadata update should be emitted")
+        {
+            WorkerUpdate::TokenUsageUpdate {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                total_tokens,
+                ..
+            } => {
+                assert_eq!(input_tokens, 100);
+                assert_eq!(output_tokens, 50);
+                assert_eq!(cache_read_tokens, 30);
+                assert_eq!(total_tokens, 150);
+            }
+            other => panic!("expected token usage update, got {other:?}"),
         }
     }
 

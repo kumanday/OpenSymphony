@@ -218,6 +218,17 @@ fn map_issue(
             .as_ref()
             .map(|conversation| conversation.cache_read_tokens)
             .unwrap_or(0),
+        total_tokens: issue
+            .conversation
+            .as_ref()
+            .map(|conversation| {
+                if conversation.total_tokens > 0 {
+                    conversation.total_tokens
+                } else {
+                    conversation.input_tokens + conversation.output_tokens
+                }
+            })
+            .unwrap_or(0),
         detached: false,
         cancel_acknowledged: false,
         cancel_failed: false,
