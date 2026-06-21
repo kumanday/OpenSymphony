@@ -1625,6 +1625,15 @@ fn emit_codex_notification(
         summary: Some(codex_event_summary(&event)),
         payload: Some(event.raw.clone()),
     });
+    if let Some(usage) = event.token_usage {
+        let _ = updates_tx.send(WorkerUpdate::TokenUsageUpdate {
+            worker_id: worker_id.clone(),
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            total_tokens: usage.total_tokens,
+        });
+    }
     if let Some(approval) = codex_approval_request_from_event(
         run.worker_id.as_str(),
         issue.id.as_str(),
