@@ -222,6 +222,7 @@ interface AuditTrailEntry {
 const schemaVersion = { major: 1, minor: 0, patch: 0 };
 // Two consecutive failures avoid noisy transient warnings while still surfacing stale live data.
 const liveRefreshFailureThreshold = 2;
+const liveRefreshPollIntervalMs = 5_000;
 
 export function renderOpenSymphonyApp(
   options: OpenSymphonyAppOptions,
@@ -245,6 +246,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private liveRefreshInFlight = false;
   private liveRefreshQueued = false;
   private liveRefreshFailureCount = 0;
+  private liveRefreshTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
@@ -371,6 +373,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   async destroy(): Promise<void> {
     this.destroyed = true;
+    this.stopLiveRefreshTimer();
     this.stopEventSubscription();
     await this.transport.close().catch(() => undefined);
     this.options.root.replaceChildren();
@@ -454,6 +457,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.selectedProjectId = snapshot.projects[0]?.project_id ?? "default";
       await this.loadTaskGraph(this.state.selectedProjectId);
       this.startEventSubscription();
+      this.startLiveRefreshTimer();
       this.loadPlanningWorkspace(this.state.selectedProjectId);
       this.state.planningWorkspace = {
         ...this.state.planningWorkspace,
@@ -477,6 +481,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private clearGatewayData(): void {
+    this.stopLiveRefreshTimer();
     this.state.snapshot = null;
     this.state.taskGraph = null;
     this.state.selectedProjectId = null;
@@ -585,6 +590,26 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     void this.consumeGatewayEvents(subscription);
   }
 
+  private startLiveRefreshTimer(): void {
+    if (this.liveRefreshTimer) {
+      return;
+    }
+    this.liveRefreshTimer = setInterval(() => {
+      if (this.destroyed || this.state.connectionMode !== "connected" || !this.state.selectedProjectId) {
+        return;
+      }
+      void this.requestLiveRefresh();
+    }, liveRefreshPollIntervalMs);
+  }
+
+  private stopLiveRefreshTimer(): void {
+    if (!this.liveRefreshTimer) {
+      return;
+    }
+    clearInterval(this.liveRefreshTimer);
+    this.liveRefreshTimer = null;
+  }
+
   private stopEventSubscription(): void {
     const subscription = this.eventSubscription;
     if (!subscription) return;
@@ -618,7 +643,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         }
       }
     } catch (error) {
-      console.warn("[opensymphony] gateway event stream unavailable; using one-shot refresh fallback", {
+      console.warn("[opensymphony] gateway event stream unavailable; using periodic refresh fallback", {
         baseUri: subscription.transport.baseUri,
         error: errorMessage(error),
       });
@@ -633,6 +658,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!this.eventAffectsCurrentView(envelope)) {
       return;
     }
+    await this.requestLiveRefresh();
+  }
+
+  private async requestLiveRefresh(): Promise<void> {
     if (this.liveRefreshInFlight) {
       this.liveRefreshQueued = true;
       return;

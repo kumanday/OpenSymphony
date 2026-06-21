@@ -460,6 +460,12 @@ function flushAsync(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+async function flushMicrotasks(iterations = 20): Promise<void> {
+  for (let i = 0; i < iterations; i++) {
+    await Promise.resolve();
+  }
+}
+
 async function flushUntil(
   predicate: () => boolean,
   maxIterations = 40,
@@ -935,7 +941,7 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
-  it("keeps the one-shot shell load when the event stream is unavailable", async () => {
+  it("keeps the shell loaded when the event stream is unavailable", async () => {
     class UnavailableEventTransport extends MockGatewayTransport {
       override async *events(): AsyncIterable<GatewayEnvelope> {
         throw new Error("stream unavailable");
@@ -965,7 +971,7 @@ describe("OpenSymphonyApp mount", () => {
       expect(root.querySelector(".os-status-connected")).not.toBeNull();
       expect(root.querySelector("[data-testid='changed-file-item']")?.getAttribute("data-path")).toBe("src/config.ts");
       expect(warnSpy).toHaveBeenCalledWith(
-        "[opensymphony] gateway event stream unavailable; using one-shot refresh fallback",
+        "[opensymphony] gateway event stream unavailable; using periodic refresh fallback",
         expect.objectContaining({
           baseUri: "http://127.0.0.1:2468",
           error: "stream unavailable",
@@ -974,6 +980,60 @@ describe("OpenSymphonyApp mount", () => {
     } finally {
       warnSpy.mockRestore();
       await handle.destroy();
+    }
+  });
+
+  it("refreshes selected run evidence from the periodic fallback when live events are silent", async () => {
+    jest.useFakeTimers();
+    class SilentEventTransport extends MockGatewayTransport {
+      override async *events(): AsyncIterable<GatewayEnvelope> {
+        await new Promise<never>(() => undefined);
+      }
+    }
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new SilentEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+      runFiles: [{ runId: "COE-449", files: changedFiles }],
+      runDiffs: [{ runId: "COE-449", filePath: "src/config.ts", diff: fileDiff }],
+      runEvents: [runEvents],
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+    });
+
+    try {
+      await flushMicrotasks();
+      expect(root.textContent).toContain("src/config.ts");
+
+      transport.setRunFiles("COE-449", [
+        {
+          path: "src/poll-refresh.ts",
+          change_kind: "modified",
+          lines_added: 2,
+          lines_removed: 0,
+        },
+      ]);
+      transport.setRunDiff("COE-449", "src/poll-refresh.ts", {
+        ...fileDiff,
+        run_id: "COE-449",
+        file_path: "src/poll-refresh.ts",
+      });
+
+      jest.advanceTimersByTime(5_000);
+      await flushMicrotasks();
+
+      expect(root.textContent).toContain("src/poll-refresh.ts");
+      expect(root.textContent).not.toContain("src/config.ts");
+    } finally {
+      await handle.destroy();
+      jest.useRealTimers();
     }
   });
 
