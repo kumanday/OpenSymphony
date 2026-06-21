@@ -857,7 +857,58 @@ See [runtime docs](/areas/openhands-runtime.md).
         let rendered = render_okf_concept(&concept).expect("concept should render");
         assert!(rendered.contains("legacy_custom: keep-me"));
         assert!(rendered.contains("issue: COE-123"));
+        assert!(!rendered.contains("opensymphony:"));
+    }
+
+    #[test]
+    fn okf_explicit_opensymphony_metadata_round_trips() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+opensymphony:
+  visibility: public
+  kind: curated_topic
+  schema_version: 7
+---
+
+# Runtime
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), original)
+            .expect("concept should parse");
+        assert!(!concept.derived_opensymphony);
+
+        let rendered = render_okf_concept(&concept).expect("concept should render");
         assert!(rendered.contains("opensymphony:"));
+        assert!(rendered.contains("curated_topic"));
+    }
+
+    #[test]
+    fn okf_demo_parse_render_preserves_legacy_source_of_truth() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+area: openhands-runtime
+visibility: public
+docs_sync:
+  status: pending
+---
+
+# Runtime
+
+See [COE-123](/issues/COE-123.md).
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("./areas/./runtime.md"), original)
+            .expect("concept should parse");
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        println!("{rendered}");
+
+        assert_eq!(concept.path.as_path(), Path::new("areas/runtime.md"));
+        assert!(concept.derived_opensymphony);
+        assert!(rendered.contains("visibility: public"));
+        assert!(rendered.contains("docs_sync:"));
+        assert!(!rendered.contains("opensymphony:"));
     }
 
     #[test]

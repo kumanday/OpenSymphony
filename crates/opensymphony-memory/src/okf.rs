@@ -146,6 +146,7 @@ pub struct OkfConcept {
     pub frontmatter: OkfFrontmatter,
     pub body: String,
     pub links: Vec<OkfLink>,
+    pub derived_opensymphony: bool,
 }
 
 impl OkfConcept {
@@ -163,6 +164,7 @@ impl OkfConcept {
             path,
             frontmatter,
             body,
+            derived_opensymphony: false,
         })
     }
 }
@@ -190,16 +192,23 @@ pub fn parse_okf_concept(
             source,
         })?;
     require_okf_type(&frontmatter.concept_type)?;
+    let derived_opensymphony = frontmatter.opensymphony.is_none();
     let legacy = legacy_frontmatter_to_opensymphony_metadata(&frontmatter);
     merge_opensymphony_metadata(&mut frontmatter, legacy);
-    OkfConcept::new(relative_path, frontmatter, body.to_string())
+    let mut concept = OkfConcept::new(relative_path, frontmatter, body.to_string())?;
+    concept.derived_opensymphony = derived_opensymphony;
+    Ok(concept)
 }
 
 pub fn render_okf_concept(concept: &OkfConcept) -> Result<String, MemoryError> {
     require_okf_type(&concept.frontmatter.concept_type)?;
     OkfBundlePath::new(concept.path.as_path().to_path_buf())?;
+    let mut frontmatter = concept.frontmatter.clone();
+    if concept.derived_opensymphony {
+        frontmatter.opensymphony = None;
+    }
     let frontmatter =
-        serde_yaml::to_string(&concept.frontmatter).map_err(|source| MemoryError::ParseYaml {
+        serde_yaml::to_string(&frontmatter).map_err(|source| MemoryError::ParseYaml {
             path: concept.path.as_path().to_path_buf(),
             source,
         })?;
