@@ -608,7 +608,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         const next = await iterator.next();
         if (next.done) break;
         this.latestGatewayEventCursor = next.value.cursor;
-        await this.onGatewayEvent(next.value);
+        try {
+          await this.onGatewayEvent(next.value);
+        } catch (error) {
+          console.warn("[opensymphony] gateway event processing failed after cursor advance", {
+            baseUri: subscription.transport.baseUri,
+            error: errorMessage(error),
+          });
+        }
       }
     } catch (error) {
       console.warn("[opensymphony] gateway event stream unavailable; using one-shot refresh fallback", {
