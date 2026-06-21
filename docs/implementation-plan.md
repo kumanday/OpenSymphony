@@ -203,9 +203,10 @@ hosted-provider backlog. Hosted subscription credential brokering remains in
 M11 so local Codex subscription support is not blocked by hosted secret storage.
 
 M10.4 captures the immediate operator feedback from live Codex-backed desktop
-use: live snapshot/run-detail refresh without app restart, truthful Run Detail
-metrics, and model configuration defaults/auth-status cleanup for Codex
-subscription profiles.
+and TUI use: live snapshot/run-detail refresh without app restart, truthful Run
+Detail metrics, model configuration defaults/auth-status cleanup for Codex
+subscription profiles, Codex token usage accounting, and more useful Codex
+event summaries.
 
 The planning source for this wave is
 `docs/tasks/advanced-knowledge-debug-task-package.yaml`. The existing

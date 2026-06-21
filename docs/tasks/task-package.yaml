@@ -113,6 +113,10 @@ tasks:
     file: docs/tasks/osym-769-run-detail-metrics-and-density.md
   - id: OSYM-780
     file: docs/tasks/osym-780-model-configuration-codex-subscription-follow-up.md
+  - id: OSYM-782
+    file: docs/tasks/osym-782-tui-codex-token-usage-accounting.md
+  - id: OSYM-783
+    file: docs/tasks/osym-783-codex-event-content-summaries.md
   - id: OSYM-770
     file: docs/tasks/osym-770-contract-and-local-end-to-end-tests.md
   - id: OSYM-771

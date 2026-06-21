@@ -113,6 +113,8 @@ Tasks:
 - OSYM-768 Desktop Live Snapshot And Run Detail Refresh
 - OSYM-769 Run Detail Metrics And Density
 - OSYM-780 Model Configuration Codex Subscription Follow-Up
+- OSYM-782 TUI Codex Token Usage Accounting
+- OSYM-783 Codex Event Content Summaries
 
 ## M10.5: OKF Memory Bundle Foundation
 

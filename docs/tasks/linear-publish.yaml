@@ -1,6 +1,6 @@
 planningWave: rich-client-hosted-mode
 linearProject: e7b957855cb7
-publishedAt: '2026-06-21T16:51:43Z'
+publishedAt: '2026-06-21T17:06:01Z'
 milestones:
   'M6: Gateway And Stream Contract':
     milestoneId: c32b5191-7349-4f30-bd46-6340af6da3e5
@@ -286,6 +286,16 @@ tasks:
     issueId: 002dc781-fe1f-47ec-9187-0c571366f6e1
     url: https://linear.app/trilogy-ai-coe/issue/COE-481/model-configuration-codex-subscription-follow-up
     file: docs/tasks/osym-780-model-configuration-codex-subscription-follow-up.md
+  OSYM-782:
+    issue: COE-482
+    issueId: 0b5d2c38-069e-48dd-9321-3a95387390b1
+    url: https://linear.app/trilogy-ai-coe/issue/COE-482/tui-codex-token-usage-accounting
+    file: docs/tasks/osym-782-tui-codex-token-usage-accounting.md
+  OSYM-783:
+    issue: COE-483
+    issueId: a8da075b-7998-453b-bb58-09f00a924ecd
+    url: https://linear.app/trilogy-ai-coe/issue/COE-483/codex-event-content-summaries
+    file: docs/tasks/osym-783-codex-event-content-summaries.md
   OSYM-770:
     issue: COE-430
     issueId: 73e4816c-758d-46b9-a598-3a9606961370
