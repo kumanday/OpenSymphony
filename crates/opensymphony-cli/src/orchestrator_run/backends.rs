@@ -1063,6 +1063,7 @@ async fn run_codex_stdio_issue(
             }
         }
         Err(error) => {
+            let mut detail = error.clone();
             if let Err(finish_error) = finish_codex_workspace_run(
                 workspace_manager,
                 workspace,
@@ -1071,17 +1072,25 @@ async fn run_codex_stdio_issue(
             )
             .await
             {
-                tracing::warn!(%finish_error, "failed to finish failed Codex workspace run manifest");
+                let finish_detail = record_codex_finish_failure(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    RunStatus::Failed,
+                    finish_error,
+                )
+                .await;
+                detail = format!("{detail}; {finish_detail}");
             }
             if launch_tx.is_some() {
-                report_launch_failure(launch_tx, error.clone());
+                report_launch_failure(launch_tx, detail.clone());
             }
             WorkerOutcomeRecord::from_run(
                 run,
                 WorkerOutcomeKind::Failed,
                 now_timestamp(),
                 Some("Codex app-server worker failed".into()),
-                Some(error),
+                Some(detail),
             )
         }
     }
@@ -2259,6 +2268,82 @@ mod tests {
             LaunchReport::Failed(detail)
                 if detail.contains("fake initialize failure")
                     && !detail.contains("fake child stderr before failure")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_error_path_records_workspace_finalization_failure() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-error-finish", 1),
+            )
+            .await
+            .expect("run should start");
+        let run_manifest_path = ensured.handle.run_manifest_path();
+        fs::remove_file(&run_manifest_path).expect("run manifest file should be removable");
+        fs::create_dir(&run_manifest_path)
+            .expect("run manifest path should be replaceable by a directory");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-error-finish").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex-error-finish.log");
+        let fake_codex = tempdir.path().join("fake-codex-error-finish");
+        write_fake_codex_error_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex error path should be utf-8"),
+            &codex_schema_validators,
+            &updates_tx,
+            &mut launch_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert_eq!(run_manifest.status, RunStatus::Failed);
+        let error = outcome.error.expect("failure should include detail");
+        assert!(error.contains("fake initialize failure"));
+        assert!(error.contains("failed to finish Codex workspace run as failed"));
+        assert!(error.contains("additionally failed to persist failed status"));
+        let launch = launch_rx
+            .await
+            .expect("launch failure should be reported to caller");
+        assert!(matches!(
+            launch,
+            LaunchReport::Failed(detail)
+                if detail.contains("fake initialize failure")
+                    && detail.contains("failed to finish Codex workspace run as failed")
         ));
     }
 
