@@ -716,6 +716,7 @@ pub enum CodexUserInput {
 pub enum NormalizedCodexEventKind {
     ThreadStarted,
     ThreadStatusChanged,
+    TokenUsageUpdated,
     TurnStarted,
     TurnCompleted,
     TurnCancelled,
@@ -737,7 +738,16 @@ pub struct NormalizedCodexEvent {
     pub turn_id: Option<String>,
     pub item_id: Option<String>,
     pub message_delta: Option<String>,
+    pub token_usage: Option<CodexTokenUsage>,
     pub raw: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexTokenUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_tokens: u64,
 }
 
 /// Normalize a server notification after the transport layer has accepted the
@@ -751,6 +761,7 @@ pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent>
     let kind = match method.as_str() {
         "thread/started" => NormalizedCodexEventKind::ThreadStarted,
         "thread/status/changed" => NormalizedCodexEventKind::ThreadStatusChanged,
+        "thread/tokenUsage/updated" => NormalizedCodexEventKind::TokenUsageUpdated,
         "turn/started" => NormalizedCodexEventKind::TurnStarted,
         "turn/completed" => NormalizedCodexEventKind::TurnCompleted,
         "turn/cancelled" | "turn/canceled" => NormalizedCodexEventKind::TurnCancelled,
@@ -771,6 +782,7 @@ pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent>
         turn_id: string_param(&params, "turnId"),
         item_id: string_param(&params, "itemId"),
         message_delta: string_param(&params, "delta"),
+        token_usage: codex_token_usage(&params),
         raw,
     })
 }
@@ -779,13 +791,43 @@ fn string_param(params: &Value, key: &str) -> Option<String> {
     params.get(key)?.as_str().map(str::to_owned)
 }
 
-pub fn normalized_event_to_journal_record(
-    run_id: impl Into<String>,
-    sequence: u64,
-    event: &NormalizedCodexEvent,
-) -> EventRecord {
-    let run_id = run_id.into();
-    let payload = json!({
+fn codex_token_usage(params: &Value) -> Option<CodexTokenUsage> {
+    let usage = params.get("tokenUsage")?;
+    let total = usage.get("total").unwrap_or(usage);
+    let input_tokens = u64_param(total, &["inputTokens", "input_tokens", "prompt_tokens"]);
+    let output_tokens = u64_param(
+        total,
+        &["outputTokens", "output_tokens", "completion_tokens"],
+    );
+    let cache_read_tokens = u64_param(
+        total,
+        &["cachedInputTokens", "cacheReadTokens", "cache_read_tokens"],
+    );
+    let explicit_total_tokens = u64_param(total, &["totalTokens", "total_tokens"]);
+    let total_tokens = if explicit_total_tokens > 0 {
+        explicit_total_tokens
+    } else {
+        input_tokens + output_tokens + cache_read_tokens
+    };
+    if input_tokens == 0 && output_tokens == 0 && cache_read_tokens == 0 && total_tokens == 0 {
+        return None;
+    }
+    Some(CodexTokenUsage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        total_tokens,
+    })
+}
+
+fn u64_param(params: &Value, keys: &[&str]) -> u64 {
+    keys.iter()
+        .find_map(|key| params.get(*key).and_then(Value::as_u64))
+        .unwrap_or(0)
+}
+
+pub fn codex_event_payload(event: &NormalizedCodexEvent) -> Value {
+    let mut payload = json!({
         "source_kind": event.method,
         "thread_id": event.thread_id,
         "turn_id": event.turn_id,
@@ -793,6 +835,28 @@ pub fn normalized_event_to_journal_record(
         "message_delta": event.message_delta,
         "raw_payload": event.raw,
     });
+    if let Some(usage) = event.token_usage
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(
+            "usage".into(),
+            json!({
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "cache_read_tokens": usage.cache_read_tokens,
+                "total_tokens": usage.total_tokens,
+            }),
+        );
+    }
+    payload
+}
+
+pub fn normalized_event_to_journal_record(
+    run_id: impl Into<String>,
+    sequence: u64,
+    event: &NormalizedCodexEvent,
+) -> EventRecord {
+    let run_id = run_id.into();
     let (kind, summary) = codex_event_journal_kind_and_summary(event);
     EventRecord::builder()
         .sequence(sequence)
@@ -800,7 +864,7 @@ pub fn normalized_event_to_journal_record(
         .entity_ref(EntityRef::run(run_id.clone()))
         .summary(summary)
         .kind(kind)
-        .payload(payload)
+        .payload(codex_event_payload(event))
         .raw_payload_ref(format!("codex:{run_id}:{sequence}"))
         .build()
 }
@@ -1003,6 +1067,12 @@ fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventK
         NormalizedCodexEventKind::ThreadStatusChanged => (
             thread_status_kind(event),
             format!("Codex event: {}", event.method),
+        ),
+        NormalizedCodexEventKind::TokenUsageUpdated => (
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
+            "Codex token usage updated".into(),
         ),
         NormalizedCodexEventKind::ItemStarted
         | NormalizedCodexEventKind::ItemCompleted

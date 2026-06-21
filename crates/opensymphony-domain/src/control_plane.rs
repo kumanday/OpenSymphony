@@ -129,6 +129,8 @@ pub struct ControlPlaneIssueSnapshot {
     pub output_tokens: u64,
     #[serde(default)]
     pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
     /// True when the harness has been detached from the run (local operator or
     /// host requested disconnect without a clean terminal state).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]

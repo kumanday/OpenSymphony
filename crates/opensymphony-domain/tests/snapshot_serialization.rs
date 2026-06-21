@@ -68,6 +68,7 @@ fn fixture() -> SnapshotEnvelope {
                 input_tokens: 2048,
                 output_tokens: 1024,
                 cache_read_tokens: 512,
+                total_tokens: 3072,
                 cancel_acknowledged: false,
                 cancel_failed: false,
                 detached: false,

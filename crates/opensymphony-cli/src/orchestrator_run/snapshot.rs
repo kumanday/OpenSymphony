@@ -250,6 +250,11 @@ fn map_issue(
             .as_ref()
             .map(|conversation| conversation.cache_read_tokens)
             .unwrap_or(0),
+        total_tokens: issue
+            .conversation
+            .as_ref()
+            .map(|conversation| conversation.effective_total_tokens())
+            .unwrap_or(0),
         detached: false,
         cancel_acknowledged: false,
         cancel_failed: false,

@@ -226,6 +226,23 @@ impl IssueExecution {
         self.conversation = Some(conversation);
     }
 
+    pub fn update_conversation_token_usage(
+        &mut self,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        total_tokens: u64,
+    ) {
+        if let Some(conversation) = &mut self.conversation {
+            conversation.set_token_usage(
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                total_tokens,
+            );
+        }
+    }
+
     pub fn retry(&self) -> Option<&RetryEntry> {
         match &self.state {
             SchedulerState::RetryQueued { retry } => Some(retry),

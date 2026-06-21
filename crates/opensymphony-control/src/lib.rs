@@ -465,6 +465,7 @@ mod tests {
                 input_tokens: 1024,
                 output_tokens: 512,
                 cache_read_tokens: 256,
+                total_tokens: 0,
                 cancel_acknowledged: false,
                 cancel_failed: false,
                 detached: false,

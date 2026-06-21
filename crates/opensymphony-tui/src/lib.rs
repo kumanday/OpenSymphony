@@ -1169,7 +1169,11 @@ impl TuiState {
                     Span::styled(
                         format!(
                             "{} total",
-                            format_metric(issue.input_tokens + issue.output_tokens)
+                            format_metric(if issue.total_tokens > 0 {
+                                issue.total_tokens
+                            } else {
+                                issue.input_tokens + issue.output_tokens
+                            })
                         ),
                         Style::new().dim(),
                     ),
@@ -4054,6 +4058,7 @@ mod tests {
                         input_tokens: 1024 + (index as u64 * 100),
                         output_tokens: 512 + (index as u64 * 50),
                         cache_read_tokens: 256 + (index as u64 * 25),
+                        total_tokens: 0,
                         cancel_acknowledged: false,
                         cancel_failed: false,
                         detached: false,

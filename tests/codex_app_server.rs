@@ -3,8 +3,8 @@ use opensymphony::opensymphony_codex::{
     CodexAppServerAdapter, CodexAppServerLaunch, CodexAppServerSchemaValidator,
     CodexApprovalDecision, CodexApprovalPolicy, CodexContractArtifact, CodexContractGeneration,
     CodexJsonRpcSession, CodexLifecycleRequest, CodexSandboxPolicy, CodexThreadSandboxMode,
-    CodexThreadStartParams, CodexTurnStartParams, CodexUserInput, CodexWebSocketAuth,
-    NormalizedCodexEventKind, codex_approval_decision_audit_record,
+    CodexThreadStartParams, CodexTokenUsage, CodexTurnStartParams, CodexUserInput,
+    CodexWebSocketAuth, NormalizedCodexEventKind, codex_approval_decision_audit_record,
     codex_approval_request_from_event, normalize_server_notification,
     normalized_event_to_journal_record, websocket_benchmark_requirements,
 };
@@ -377,6 +377,117 @@ fn codex_notification_normalization_preserves_thread_turn_and_raw_payload() {
         }))
         .is_none()
     );
+}
+
+#[test]
+fn codex_token_usage_notification_maps_to_normalized_usage_payload() {
+    let event = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "tokenUsage": {
+                "last": {
+                    "cachedInputTokens": 4,
+                    "inputTokens": 10,
+                    "outputTokens": 20,
+                    "reasoningOutputTokens": 2,
+                    "totalTokens": 30
+                },
+                "total": {
+                    "cachedInputTokens": 40,
+                    "inputTokens": 100,
+                    "outputTokens": 200,
+                    "reasoningOutputTokens": 20,
+                    "totalTokens": 300
+                }
+            }
+        }
+    }))
+    .expect("token usage notification normalizes");
+
+    assert_eq!(event.kind, NormalizedCodexEventKind::TokenUsageUpdated);
+    assert_eq!(event.thread_id.as_deref(), Some("thread-1"));
+    assert_eq!(event.turn_id.as_deref(), Some("turn-1"));
+    assert_eq!(
+        event.token_usage,
+        Some(CodexTokenUsage {
+            input_tokens: 100,
+            output_tokens: 200,
+            cache_read_tokens: 40,
+            total_tokens: 300,
+        })
+    );
+
+    let record = normalized_event_to_journal_record("COE-482", 21, &event);
+    let payload = record.payload.expect("journal record should carry payload");
+    assert_eq!(payload["usage"]["input_tokens"], 100);
+    assert_eq!(payload["usage"]["output_tokens"], 200);
+    assert_eq!(payload["usage"]["cache_read_tokens"], 40);
+    assert_eq!(payload["usage"]["total_tokens"], 300);
+    assert_eq!(
+        payload["raw_payload"]["params"]["tokenUsage"]["total"]["cachedInputTokens"],
+        40
+    );
+
+    let sparse = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "tokenUsage": { "total": { "totalTokens": 9 } }
+        }
+    }))
+    .expect("sparse token usage notification normalizes");
+    assert_eq!(
+        sparse.token_usage,
+        Some(CodexTokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            total_tokens: 9,
+        })
+    );
+
+    let missing_total = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "tokenUsage": {
+                "total": {
+                    "cachedInputTokens": 3,
+                    "inputTokens": 5,
+                    "outputTokens": 7
+                }
+            }
+        }
+    }))
+    .expect("token usage without explicit total normalizes");
+    assert_eq!(
+        missing_total.token_usage,
+        Some(CodexTokenUsage {
+            input_tokens: 5,
+            output_tokens: 7,
+            cache_read_tokens: 3,
+            total_tokens: 15,
+        })
+    );
+
+    let empty = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "tokenUsage": { "total": {} }
+        }
+    }))
+    .expect("missing token fields should not panic");
+    assert_eq!(empty.token_usage, None);
 }
 
 #[test]

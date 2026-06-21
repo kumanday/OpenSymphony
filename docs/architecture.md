@@ -202,6 +202,9 @@ into orchestrator internals. Dashboard and run state come from the
 control-plane snapshot, while the task graph read endpoint asks the
 orchestrator-side Linear adapter for tracker hierarchy and dependency
 relationships, then overlays live runtime details from the latest snapshot.
+Runtime token usage in that snapshot carries input, output, cache-read, and
+provider-reported total counters when the selected harness reports them; legacy
+metadata without an explicit total falls back to input plus output.
 The gateway emits `root_ids` from the returned Linear parent/child graph so
 clients can render the same forest without inventing hierarchy locally.
 If the optional task graph reader cannot be built, `opensymphony run` still

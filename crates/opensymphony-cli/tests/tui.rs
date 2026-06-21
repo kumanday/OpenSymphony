@@ -37,7 +37,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             input_tokens: 512,
             output_tokens: 512,
             cache_read_tokens: 256,
-            total_tokens: 1024,
+            total_tokens: 2048,
             total_cost_micros: 50_000,
         },
         issues: vec![IssueSnapshot {
@@ -68,6 +68,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             input_tokens: 1024,
             output_tokens: 512,
             cache_read_tokens: 256,
+            total_tokens: 2048,
             cancel_acknowledged: false,
             cancel_failed: false,
             detached: false,
@@ -173,6 +174,16 @@ async fn scripted_tui_exits_zero_after_healthy_attach() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if std::env::var_os("OPENSYMPHONY_PRINT_TUI_CAPTURE").is_some() {
+        println!("{stdout}");
+    }
+    for expected in ["1.0k input (256 cache)", "512 output", "2.0k", "total"] {
+        assert!(
+            stdout.contains(expected),
+            "expected scripted TUI capture to include {expected:?}; stdout={stdout}"
+        );
+    }
 
     server_task.abort();
 }
