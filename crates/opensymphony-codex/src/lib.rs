@@ -964,85 +964,19 @@ fn codex_approval_risk_summary(params: &Value) -> ApprovalRiskSummary {
 }
 
 fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventKind, String) {
-    match event.kind {
-        NormalizedCodexEventKind::ThreadStarted => (
-            EventKind::HarnessEventNormalized {
-                source_kind: event.method.clone(),
-            },
-            format!(
-                "Codex thread started{}",
-                id_suffix(event.thread_id.as_deref())
-            ),
-        ),
-        NormalizedCodexEventKind::TurnStarted => (
-            EventKind::HarnessEventNormalized {
-                source_kind: event.method.clone(),
-            },
-            format!("Codex turn started{}", id_suffix(event.turn_id.as_deref())),
-        ),
-        NormalizedCodexEventKind::TurnCompleted => (
-            EventKind::HarnessEventNormalized {
-                source_kind: event.method.clone(),
-            },
-            format!(
-                "Codex turn completed{}",
-                id_suffix(event.turn_id.as_deref())
-            ),
-        ),
-        NormalizedCodexEventKind::TurnCancelled => (
-            EventKind::HarnessEventNormalized {
-                source_kind: event.method.clone(),
-            },
-            format!(
-                "Codex turn cancelled{}",
-                id_suffix(event.turn_id.as_deref())
-            ),
-        ),
-        NormalizedCodexEventKind::ApprovalRequested => (
-            EventKind::ApprovalRequested,
-            format!(
-                "Codex requested approval{}",
-                id_suffix(event.item_id.as_deref())
-            ),
-        ),
-        NormalizedCodexEventKind::ApprovalCompleted => (
-            approval_completed_kind(event),
-            format!(
-                "Codex approval completed{}",
-                id_suffix(event.item_id.as_deref())
-            ),
-        ),
-        NormalizedCodexEventKind::Error => (
-            EventKind::RunFailed,
-            error_summary(event).unwrap_or_else(|| "Codex app-server reported an error".into()),
-        ),
-        NormalizedCodexEventKind::ThreadTokenUsageUpdated => (
-            EventKind::HarnessEventNormalized {
-                source_kind: event.method.clone(),
-            },
-            codex_event_summary(event),
-        ),
-        NormalizedCodexEventKind::ThreadStatusChanged => {
-            (thread_status_kind(event), codex_event_summary(event))
-        }
-        NormalizedCodexEventKind::ItemStarted
-        | NormalizedCodexEventKind::ItemCompleted
-        | NormalizedCodexEventKind::AgentMessageDelta
-        | NormalizedCodexEventKind::CommandExecutionOutputDelta
-        | NormalizedCodexEventKind::TurnDiffUpdated
-        | NormalizedCodexEventKind::PlanDelta => (
-            EventKind::HarnessEventNormalized {
-                source_kind: event.method.clone(),
-            },
-            codex_event_summary(event),
-        ),
-        NormalizedCodexEventKind::Unknown => (
-            EventKind::Unknown {
-                raw_kind: event.method.clone(),
-            },
-            format!("Codex event: {}", event.method),
-        ),
-    }
+    let kind = match event.kind {
+        NormalizedCodexEventKind::ApprovalRequested => EventKind::ApprovalRequested,
+        NormalizedCodexEventKind::ApprovalCompleted => approval_completed_kind(event),
+        NormalizedCodexEventKind::Error => EventKind::RunFailed,
+        NormalizedCodexEventKind::ThreadStatusChanged => thread_status_kind(event),
+        NormalizedCodexEventKind::Unknown => EventKind::Unknown {
+            raw_kind: event.method.clone(),
+        },
+        _ => EventKind::HarnessEventNormalized {
+            source_kind: event.method.clone(),
+        },
+    };
+    (kind, codex_event_summary(event))
 }
 
 pub fn codex_event_summary(event: &NormalizedCodexEvent) -> String {
@@ -1212,10 +1146,14 @@ fn bounded_redacted_preview(raw: &str) -> Option<String> {
             redact_next = false;
             continue;
         }
-        if lower.ends_with(':') {
-            let key = lower.trim_end_matches(':');
-            if key == "authorization" || secret_key(key) {
-                redacted.push(format!("{word}[redacted]"));
+        if let Some(index) = word.find(':') {
+            let key = word[..index]
+                .trim_matches(|character: char| {
+                    !character.is_ascii_alphanumeric() && character != '_'
+                })
+                .to_ascii_lowercase();
+            if key == "authorization" || secret_key(&key) {
+                redacted.push(format!("{}:[redacted]", &word[..index]));
                 break;
             }
         }

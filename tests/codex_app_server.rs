@@ -466,6 +466,22 @@ fn codex_event_summaries_extract_bounded_redacted_previews() {
         "Codex command output: curl -H Authorization:[redacted]"
     );
 
+    let compact_authorization_scheme = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-compact-authorization",
+            "delta": "curl -H Authorization:Token abc123"
+        }
+    }))
+    .expect("compact authorization scheme command output normalizes");
+    assert_eq!(
+        codex_event_summary(&compact_authorization_scheme),
+        "Codex command output: curl -H Authorization:[redacted]"
+    );
+
     let password = normalize_server_notification(json!({
         "jsonrpc": "2.0",
         "method": "item/commandExecution/outputDelta",
