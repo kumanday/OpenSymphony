@@ -811,6 +811,92 @@ describe("OpenSymphonyApp mount", () => {
     }
   });
 
+  it("resumes after the cursor from failed live refresh events", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+      runFiles: [{ runId: "COE-449", files: changedFiles }],
+      runDiffs: [{ runId: "COE-449", filePath: "src/config.ts", diff: fileDiff }],
+      runEvents: [runEvents],
+    });
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+    });
+
+    try {
+      await flushUntil(() => root.textContent?.includes("src/config.ts") ?? false);
+      await flushUntil(() => transport.subscriptions.length === 1);
+
+      transport.failNextSnapshot("first failed live refresh");
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 10, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:03:00Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() =>
+        warnSpy.mock.calls.some((call) =>
+          call[0] === "[opensymphony] live gateway refresh failed; event stream remains active"
+          && (call[1] as { error?: string }).error === "first failed live refresh"
+        ),
+      );
+      expect(transport.activeStreams).toBe(1);
+
+      transport.failNextSnapshot("second failed live refresh");
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 11, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:03:05Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() => root.textContent?.includes("Live data stale: second failed live refresh") ?? false);
+
+      transport.endStream();
+      await flushUntil(() => transport.activeStreams === 0);
+      await handle.refresh();
+      await flushUntil(() => transport.subscriptions.length === 2);
+
+      expect(transport.subscriptions[1]).toEqual({ sequence: 11, partition: "events" });
+
+      const readsAfterRestart = transport.snapshotReads;
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 11, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:03:10Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushAsync();
+      expect(transport.snapshotReads).toBe(readsAfterRestart);
+
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 12, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:03:15Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() => transport.snapshotReads > readsAfterRestart);
+    } finally {
+      warnSpy.mockRestore();
+      await handle.destroy();
+    }
+  });
+
   it("ignores unknown live gateway events without refreshing the shell", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
