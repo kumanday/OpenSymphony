@@ -39,7 +39,7 @@ use thiserror::Error;
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::Command,
+    process::{ChildStderr, Command},
     sync::{mpsc, oneshot},
     task::JoinHandle,
     time::timeout,
@@ -1018,6 +1018,8 @@ async fn try_run_codex_stdio_issue(
         .map_err(|source| format!("failed to launch `{program} app-server --stdio`: {source}"))?;
     let mut stdin = child.stdin.take().ok_or("Codex child stdin missing")?;
     let stdout = child.stdout.take().ok_or("Codex child stdout missing")?;
+    let stderr = child.stderr.take().ok_or("Codex child stderr missing")?;
+    let stderr_task = tokio::spawn(drain_codex_stderr(stderr, run.worker_id.to_string()));
     let mut reader = BufReader::new(stdout).lines();
     let mut session = adapter.session();
 
@@ -1095,6 +1097,7 @@ async fn try_run_codex_stdio_issue(
         terminal.event_kind
     );
     let _ = child.kill().await;
+    stderr_task.abort();
     Ok((
         WorkerOutcomeRecord::from_run(run, terminal.outcome, now_timestamp(), Some(summary), None),
         terminal.status,
@@ -1107,6 +1110,22 @@ fn codex_model_from_route(
     match route.model_profile.as_deref() {
         Some("codex-chatgpt-local-keychain") | None => "openai/chatgpt-codex-subscription".into(),
         Some(model_or_profile) => model_or_profile.into(),
+    }
+}
+
+async fn drain_codex_stderr(stderr: ChildStderr, worker_id: String) {
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                tracing::debug!(%worker_id, stderr = %line, "Codex app-server stderr");
+            }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(%worker_id, %error, "failed to drain Codex app-server stderr");
+                break;
+            }
+        }
     }
 }
 

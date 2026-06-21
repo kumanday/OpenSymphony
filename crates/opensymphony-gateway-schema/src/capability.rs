@@ -123,6 +123,152 @@ pub struct HarnessHistoryCapability {
     pub preserve_unknown_events: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessKind {
+    OpenHandsAgentServer,
+    CodexAppServer,
+    RustNative,
+}
+
+impl HarnessKind {
+    pub const ALL: [Self; 3] = [
+        Self::OpenHandsAgentServer,
+        Self::CodexAppServer,
+        Self::RustNative,
+    ];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "openhands_agent_server" => Some(Self::OpenHandsAgentServer),
+            "codex_app_server" => Some(Self::CodexAppServer),
+            "rust_native" => Some(Self::RustNative),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenHandsAgentServer => "openhands_agent_server",
+            Self::CodexAppServer => "codex_app_server",
+            Self::RustNative => "rust_native",
+        }
+    }
+
+    pub fn supported_names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|kind| kind.as_str()).collect()
+    }
+
+    pub fn capability(self) -> HarnessCapability {
+        match self {
+            Self::OpenHandsAgentServer => HarnessCapability::openhands_agent_server(),
+            Self::CodexAppServer => HarnessCapability::codex_app_server_local(),
+            Self::RustNative => HarnessCapability::rust_native_future(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessRoutingCapability {
+    StartRun,
+    Approve,
+    Reject,
+    ToolApproval,
+    HumanDecision,
+    PolicyMetadata,
+    ApiCompatibleSettings,
+    SubscriptionCredentials,
+    PerRunOverrides,
+    LocalTransport,
+    RemoteTransport,
+    HistoryFetch,
+    ReconnectReplay,
+    PreserveUnknownEvents,
+}
+
+impl HarnessRoutingCapability {
+    pub const ALL: [Self; 14] = [
+        Self::StartRun,
+        Self::Approve,
+        Self::Reject,
+        Self::ToolApproval,
+        Self::HumanDecision,
+        Self::PolicyMetadata,
+        Self::ApiCompatibleSettings,
+        Self::SubscriptionCredentials,
+        Self::PerRunOverrides,
+        Self::LocalTransport,
+        Self::RemoteTransport,
+        Self::HistoryFetch,
+        Self::ReconnectReplay,
+        Self::PreserveUnknownEvents,
+    ];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "start_run" => Some(Self::StartRun),
+            "approve" => Some(Self::Approve),
+            "reject" => Some(Self::Reject),
+            "tool_approval" => Some(Self::ToolApproval),
+            "human_decision" => Some(Self::HumanDecision),
+            "policy_metadata" => Some(Self::PolicyMetadata),
+            "api_compatible_settings" => Some(Self::ApiCompatibleSettings),
+            "subscription_credentials" => Some(Self::SubscriptionCredentials),
+            "per_run_overrides" => Some(Self::PerRunOverrides),
+            "local_transport" => Some(Self::LocalTransport),
+            "remote_transport" => Some(Self::RemoteTransport),
+            "history_fetch" => Some(Self::HistoryFetch),
+            "reconnect_replay" => Some(Self::ReconnectReplay),
+            "preserve_unknown_events" => Some(Self::PreserveUnknownEvents),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StartRun => "start_run",
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+            Self::ToolApproval => "tool_approval",
+            Self::HumanDecision => "human_decision",
+            Self::PolicyMetadata => "policy_metadata",
+            Self::ApiCompatibleSettings => "api_compatible_settings",
+            Self::SubscriptionCredentials => "subscription_credentials",
+            Self::PerRunOverrides => "per_run_overrides",
+            Self::LocalTransport => "local_transport",
+            Self::RemoteTransport => "remote_transport",
+            Self::HistoryFetch => "history_fetch",
+            Self::ReconnectReplay => "reconnect_replay",
+            Self::PreserveUnknownEvents => "preserve_unknown_events",
+        }
+    }
+
+    pub fn supported_names() -> Vec<&'static str> {
+        Self::ALL
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect()
+    }
+
+    pub fn is_satisfied_by(self, capability: &HarnessCapability) -> bool {
+        match self {
+            Self::StartRun => capability.actions.start_run,
+            Self::Approve => capability.actions.approve,
+            Self::Reject => capability.actions.reject,
+            Self::ToolApproval => capability.approvals.tool_approval,
+            Self::HumanDecision => capability.approvals.human_decision,
+            Self::PolicyMetadata => capability.approvals.policy_metadata,
+            Self::ApiCompatibleSettings => capability.model_settings.api_compatible_settings,
+            Self::SubscriptionCredentials => capability.model_settings.subscription_credentials,
+            Self::PerRunOverrides => capability.model_settings.per_run_overrides,
+            Self::LocalTransport => capability.transport.local,
+            Self::RemoteTransport => capability.transport.remote,
+            Self::HistoryFetch => capability.history.fetch_history,
+            Self::ReconnectReplay => capability.history.reconnect_and_replay,
+            Self::PreserveUnknownEvents => capability.history.preserve_unknown_events,
+        }
+    }
+}
+
 impl HarnessCapability {
     pub fn openhands_agent_server() -> Self {
         Self {

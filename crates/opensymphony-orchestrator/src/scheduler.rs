@@ -11,7 +11,9 @@ use crate::opensymphony_domain::{
     SchedulerStatus, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueStateSnapshot,
     TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
-use crate::opensymphony_gateway_schema::capability::HarnessCapability;
+use crate::opensymphony_gateway_schema::capability::{
+    HarnessCapability, HarnessKind, HarnessRoutingCapability,
+};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig, RoutingRuleConfig};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
@@ -1201,14 +1203,11 @@ fn routing_reason(rule: &RoutingRuleConfig, issue: &NormalizedIssue) -> String {
 }
 
 fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {
-    match kind {
-        "openhands_agent_server" => Ok(HarnessCapability::openhands_agent_server()),
-        "codex_app_server" => Ok(HarnessCapability::codex_app_server_local()),
-        "rust_native" => Ok(HarnessCapability::rust_native_future()),
-        _ => Err(SchedulerError::InvalidConfiguration {
+    HarnessKind::parse(kind)
+        .map(HarnessKind::capability)
+        .ok_or_else(|| SchedulerError::InvalidConfiguration {
             detail: format!("unknown routing harness `{kind}`"),
-        }),
-    }
+        })
 }
 
 fn missing_capabilities(capability: &HarnessCapability, required: &[String]) -> Vec<String> {
@@ -1220,23 +1219,8 @@ fn missing_capabilities(capability: &HarnessCapability, required: &[String]) -> 
 }
 
 fn capability_satisfied(capability: &HarnessCapability, name: &str) -> bool {
-    match name {
-        "start_run" => capability.actions.start_run,
-        "approve" => capability.actions.approve,
-        "reject" => capability.actions.reject,
-        "tool_approval" => capability.approvals.tool_approval,
-        "human_decision" => capability.approvals.human_decision,
-        "policy_metadata" => capability.approvals.policy_metadata,
-        "api_compatible_settings" => capability.model_settings.api_compatible_settings,
-        "subscription_credentials" => capability.model_settings.subscription_credentials,
-        "per_run_overrides" => capability.model_settings.per_run_overrides,
-        "local_transport" => capability.transport.local,
-        "remote_transport" => capability.transport.remote,
-        "history_fetch" => capability.history.fetch_history,
-        "reconnect_replay" => capability.history.reconnect_and_replay,
-        "preserve_unknown_events" => capability.history.preserve_unknown_events,
-        _ => false,
-    }
+    HarnessRoutingCapability::parse(name)
+        .is_some_and(|routing_capability| routing_capability.is_satisfied_by(capability))
 }
 
 fn normalize_tracker_issue(

@@ -3,6 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use crate::opensymphony_gateway_schema::capability::{HarnessKind, HarnessRoutingCapability};
 use url::{Host, Url};
 
 use super::{
@@ -282,14 +283,16 @@ fn resolve_routing_rule<E: Environment>(
 }
 
 fn validate_harness_kind(value: &str, field: &'static str) -> Result<(), WorkflowConfigError> {
-    match value {
-        "openhands_agent_server" | "codex_app_server" | "rust_native" => Ok(()),
-        _ => Err(WorkflowConfigError::InvalidField {
+    if HarnessKind::parse(value).is_some() {
+        Ok(())
+    } else {
+        Err(WorkflowConfigError::InvalidField {
             field,
-            message:
-                "must be one of `openhands_agent_server`, `codex_app_server`, or `rust_native`"
-                    .to_owned(),
-        }),
+            message: format!(
+                "must be one of `{}`",
+                HarnessKind::supported_names().join("`, `")
+            ),
+        })
     }
 }
 
@@ -297,25 +300,13 @@ fn validate_routing_capability(
     value: &str,
     field: &'static str,
 ) -> Result<(), WorkflowConfigError> {
-    match value {
-        "start_run"
-        | "approve"
-        | "reject"
-        | "tool_approval"
-        | "human_decision"
-        | "policy_metadata"
-        | "api_compatible_settings"
-        | "subscription_credentials"
-        | "per_run_overrides"
-        | "local_transport"
-        | "remote_transport"
-        | "history_fetch"
-        | "reconnect_replay"
-        | "preserve_unknown_events" => Ok(()),
-        _ => Err(WorkflowConfigError::InvalidField {
+    if HarnessRoutingCapability::parse(value).is_some() {
+        Ok(())
+    } else {
+        Err(WorkflowConfigError::InvalidField {
             field,
             message: format!("unsupported routing capability `{value}`"),
-        }),
+        })
     }
 }
 
