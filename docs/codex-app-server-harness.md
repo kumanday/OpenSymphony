@@ -426,6 +426,13 @@ worker errors or run manifests. JSON-RPC initialize/start waits currently use
 fixed alpha bounds of 30 seconds per response and 300 seconds for terminal
 notification wait.
 
+After `thread/start` succeeds, the worker records the Codex thread id in the
+issue workspace `.opensymphony/conversation.json` manifest with
+`transport_target: codex_app_server`. `opensymphony debug <issue-key>` uses that
+recorded thread id to run `codex resume <thread-id>` from the issue workspace.
+`opensymphony debug <issue-key> --app` prints the matching
+`codex://threads/<thread-id>` deep link.
+
 Codex approval notifications are normalized into the shared approval-center
 contract, and the Codex adapter exposes the `approval/respond` request shape
 plus matching audit records that the future action path will use. The live

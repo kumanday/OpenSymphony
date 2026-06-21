@@ -4,10 +4,11 @@ use std::{
     env, io,
     io::{IsTerminal, Write},
     path::{Path, PathBuf},
-    process::ExitCode,
+    process::{ExitCode, Stdio},
     time::Duration,
 };
 
+use crate::opensymphony_codex::{CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND};
 use crate::opensymphony_openhands::{
     ConversationLaunchProfile, ConversationMoveOutcome, ConversationStoreKind, EventEnvelope,
     IssueConversationManifest, IssueSessionRunnerConfig, KnownEvent, LocalServerSupervisor,
@@ -33,7 +34,7 @@ use crossterm::{
 };
 use serde::Deserialize;
 use thiserror::Error;
-use tokio::{fs, time::timeout_at};
+use tokio::{fs, process::Command, time::timeout_at};
 use url::Url;
 use uuid::Uuid;
 
@@ -49,6 +50,9 @@ pub struct DebugArgs {
     #[arg(help = "Runtime config YAML path; defaults to ./config.yaml when present")]
     #[arg(long)]
     pub config: Option<PathBuf>,
+    #[arg(help = "Print the Codex app deep link for a Codex-backed issue")]
+    #[arg(long)]
+    pub app: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -118,6 +122,32 @@ enum DebugCommandError {
         #[source]
         source: serde_json::Error,
     },
+    #[error(
+        "issue `{issue_reference}` was not run by the Codex app-server harness; recorded transport target is `{transport_target}`. Use `opensymphony debug {issue_reference}` for OpenHands-backed issues."
+    )]
+    NotCodexRun {
+        issue_reference: String,
+        transport_target: String,
+    },
+    #[error(
+        "Codex-backed issue `{issue_reference}` has no recorded Codex thread id in {path}. Re-run the issue with the Codex harness to record the thread id before debugging."
+    )]
+    CodexThreadIdMissing {
+        issue_reference: String,
+        path: PathBuf,
+    },
+    #[error(
+        "installed Codex CLI `{program}` does not expose the required `codex resume <session-id>` path: {detail}. Update Codex, then retry."
+    )]
+    CodexResumeUnsupported { program: String, detail: String },
+    #[error("failed to launch Codex CLI `{program}`: {source}")]
+    CodexLaunch {
+        program: String,
+        #[source]
+        source: io::Error,
+    },
+    #[error("Codex resume command exited with status {status}")]
+    CodexResumeFailed { status: std::process::ExitStatus },
     #[error("conversation manifest contains invalid conversation id `{value}`: {source}")]
     InvalidConversationId {
         value: String,
@@ -333,8 +363,27 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
             issue_reference: args.issue_id.clone(),
             workspace_root: runtime.workflow.config.workspace.root.clone(),
         })?;
+    let manifest_path = workspace.conversation_manifest_path();
+    let raw_manifest = load_conversation_manifest_raw(&manager, &workspace).await?;
+    if let Some(codex) = codex_debug_metadata_from_raw_manifest(
+        &raw_manifest,
+        &manifest_path,
+        args.issue_id.as_str(),
+    )? {
+        if args.app {
+            println!("{}", codex.deep_link());
+            return Ok(());
+        }
+        return run_codex_resume(&workspace, &codex).await;
+    }
+    if args.app {
+        return Err(DebugCommandError::NotCodexRun {
+            issue_reference: args.issue_id,
+            transport_target: manifest_transport_target(&raw_manifest),
+        });
+    }
     let issue_manifest = manager.load_issue_manifest(&workspace).await?;
-    let manifest = load_conversation_manifest(&manager, &workspace).await?;
+    let manifest = parse_openhands_conversation_manifest(&raw_manifest, &manifest_path)?;
     let config = IssueSessionRunnerConfig::from_workflow(&runtime.workflow);
     let conversation_id = parse_conversation_id(&manifest)?;
     let store_kind =
@@ -419,6 +468,129 @@ async fn run_debug_session(args: DebugArgs) -> Result<(), DebugCommandError> {
     result?;
     close_result?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct CodexDebugMetadata {
+    thread_id: String,
+}
+
+impl CodexDebugMetadata {
+    fn deep_link(&self) -> String {
+        format!("codex://threads/{}", self.thread_id)
+    }
+}
+
+async fn run_codex_resume(
+    workspace: &WorkspaceHandle,
+    metadata: &CodexDebugMetadata,
+) -> Result<(), DebugCommandError> {
+    let program = env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".to_string());
+    validate_codex_resume_support(&program).await?;
+    let status = Command::new(&program)
+        .arg("resume")
+        .arg(&metadata.thread_id)
+        .current_dir(workspace.workspace_path())
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await
+        .map_err(|source| DebugCommandError::CodexLaunch {
+            program: program.clone(),
+            source,
+        })?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(DebugCommandError::CodexResumeFailed { status })
+    }
+}
+
+async fn validate_codex_resume_support(program: &str) -> Result<(), DebugCommandError> {
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new(program).arg("resume").arg("--help").output(),
+    )
+    .await
+    .map_err(|_| DebugCommandError::CodexResumeUnsupported {
+        program: program.to_string(),
+        detail: "timed out running `resume --help`".into(),
+    })?
+    .map_err(|source| DebugCommandError::CodexLaunch {
+        program: program.to_string(),
+        source,
+    })?;
+    let help = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if output.status.success() && help.contains("resume") && help.contains("SESSION_ID") {
+        Ok(())
+    } else {
+        Err(DebugCommandError::CodexResumeUnsupported {
+            program: program.to_string(),
+            detail: help
+                .lines()
+                .next()
+                .unwrap_or("empty help output")
+                .to_string(),
+        })
+    }
+}
+
+fn codex_debug_metadata_from_raw_manifest(
+    raw: &str,
+    path: &Path,
+    issue_reference: &str,
+) -> Result<Option<CodexDebugMetadata>, DebugCommandError> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|source| {
+        DebugCommandError::DecodeConversationManifest {
+            path: path.to_path_buf(),
+            source,
+        }
+    })?;
+    if !manifest_is_codex(&value) {
+        return Ok(None);
+    }
+    let thread_id = value
+        .get("codex_thread_id")
+        .or_else(|| value.get("thread_id"))
+        .or_else(|| value.get("conversation_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|thread_id| !thread_id.is_empty())
+        .ok_or_else(|| DebugCommandError::CodexThreadIdMissing {
+            issue_reference: issue_reference.to_string(),
+            path: path.to_path_buf(),
+        })?;
+    Ok(Some(CodexDebugMetadata {
+        thread_id: thread_id.to_string(),
+    }))
+}
+
+fn manifest_is_codex(value: &serde_json::Value) -> bool {
+    value
+        .get("transport_target")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|target| target == CODEX_APP_SERVER_KIND)
+        || value
+            .get("runtime_contract_version")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|contract| contract == CODEX_APP_SERVER_CONTRACT)
+}
+
+fn manifest_transport_target(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("transport_target")
+                .and_then(serde_json::Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 async fn resolve_runtime_config(args: &DebugArgs) -> Result<DebugRuntimeConfig, DebugCommandError> {
@@ -687,17 +859,25 @@ fn transport_port_override(url: &Url) -> Result<u16, DebugCommandError> {
         })
 }
 
-async fn load_conversation_manifest(
+async fn load_conversation_manifest_raw(
     manager: &WorkspaceManager,
     workspace: &WorkspaceHandle,
-) -> Result<IssueConversationManifest, DebugCommandError> {
+) -> Result<String, DebugCommandError> {
     let path = workspace.conversation_manifest_path();
-    let raw = manager
+    manager
         .read_text_artifact(workspace, &path)
         .await?
-        .ok_or_else(|| DebugCommandError::ConversationManifestMissing { path: path.clone() })?;
-    serde_json::from_str(&raw)
-        .map_err(|source| DebugCommandError::DecodeConversationManifest { path, source })
+        .ok_or(DebugCommandError::ConversationManifestMissing { path })
+}
+
+fn parse_openhands_conversation_manifest(
+    raw: &str,
+    path: &Path,
+) -> Result<IssueConversationManifest, DebugCommandError> {
+    serde_json::from_str(raw).map_err(|source| DebugCommandError::DecodeConversationManifest {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 fn parse_conversation_id(manifest: &IssueConversationManifest) -> Result<Uuid, DebugCommandError> {
@@ -1434,8 +1614,8 @@ mod tests {
 
     use super::{
         DebugCommandError, DebugInput, DebugRuntimeConfig, build_debug_client,
-        normalize_debug_input_fragment, parse_debug_input, prepare_debug_conversation_store,
-        should_rehydrate_after_attach_failure,
+        codex_debug_metadata_from_raw_manifest, normalize_debug_input_fragment, parse_debug_input,
+        prepare_debug_conversation_store, should_rehydrate_after_attach_failure,
     };
 
     #[test]
@@ -1471,6 +1651,38 @@ mod tests {
             normalize_debug_input_fragment("one\r\ntwo\rthree\nfour"),
             "one\ntwo\nthree\nfour"
         );
+    }
+
+    #[test]
+    fn codex_debug_metadata_uses_recorded_thread_id() {
+        let metadata = codex_debug_metadata_from_raw_manifest(
+            r#"{
+                "transport_target": "codex_app_server",
+                "conversation_id": "thread-123"
+            }"#,
+            std::path::Path::new(".opensymphony/conversation.json"),
+            "COE-479",
+        )
+        .expect("Codex manifest should parse")
+        .expect("Codex metadata should be detected");
+
+        assert_eq!(metadata.thread_id, "thread-123");
+        assert_eq!(metadata.deep_link(), "codex://threads/thread-123");
+    }
+
+    #[test]
+    fn codex_debug_metadata_reports_missing_thread_id() {
+        let error = codex_debug_metadata_from_raw_manifest(
+            r#"{"transport_target": "codex_app_server"}"#,
+            std::path::Path::new(".opensymphony/conversation.json"),
+            "COE-479",
+        )
+        .expect_err("Codex manifest without thread id should fail");
+
+        assert!(matches!(
+            error,
+            DebugCommandError::CodexThreadIdMissing { .. }
+        ));
     }
 
     #[test]
