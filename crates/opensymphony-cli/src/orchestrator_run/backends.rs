@@ -41,7 +41,7 @@ use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStderr, ChildStdin, Command},
-    sync::{mpsc, oneshot},
+    sync::{Mutex as AsyncMutex, mpsc, oneshot},
     task::JoinHandle,
     time::timeout,
 };
@@ -136,11 +136,14 @@ pub(super) struct RuntimeWorkerBackend {
     runner_config: IssueSessionRunnerConfig,
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
     codex_bin: String,
+    codex_schema_validators: CodexSchemaValidatorCache,
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
     tasks: HashMap<String, ActiveWorkerTask>,
 }
+
+type CodexSchemaValidatorCache = Arc<AsyncMutex<HashMap<String, CodexAppServerSchemaValidator>>>;
 
 struct ActiveWorkerTask {
     handle: JoinHandle<()>,
@@ -662,6 +665,7 @@ impl RuntimeWorkerBackend {
                 .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
             workpad_comment_source,
             codex_bin: std::env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
+            codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
@@ -706,6 +710,7 @@ impl RuntimeWorkerBackend {
         let route = request.route.clone();
         let pending_route = route.clone();
         let codex_bin = self.codex_bin.clone();
+        let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
         let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
@@ -781,6 +786,7 @@ impl RuntimeWorkerBackend {
                     &run,
                     &workflow,
                     &codex_bin,
+                    &codex_schema_validators,
                     &updates_tx,
                     &mut launch_tx,
                 )
@@ -1015,11 +1021,20 @@ async fn run_codex_stdio_issue(
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
     codex_bin: &str,
+    codex_schema_validators: &CodexSchemaValidatorCache,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
 ) -> WorkerOutcomeRecord {
     match try_run_codex_stdio_issue(
-        route, workspace, issue, run, workflow, codex_bin, updates_tx, launch_tx,
+        route,
+        workspace,
+        issue,
+        run,
+        workflow,
+        codex_bin,
+        codex_schema_validators,
+        updates_tx,
+        launch_tx,
     )
     .await
     {
@@ -1080,12 +1095,14 @@ async fn try_run_codex_stdio_issue(
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
     codex_bin: &str,
+    codex_schema_validators: &CodexSchemaValidatorCache,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
         CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
-    let schema_validator = load_installed_codex_schema_validator(codex_bin).await?;
+    let schema_validator =
+        cached_installed_codex_schema_validator(codex_schema_validators, codex_bin).await?;
     let (program, args) = adapter.launch().to_command();
     let mut child = Command::new(&program)
         .args(args)
@@ -1228,6 +1245,20 @@ async fn try_run_codex_stdio_issue(
         WorkerOutcomeRecord::from_run(run, terminal.outcome, now_timestamp(), Some(summary), None),
         terminal.status,
     ))
+}
+
+async fn cached_installed_codex_schema_validator(
+    cache: &CodexSchemaValidatorCache,
+    codex_bin: &str,
+) -> Result<CodexAppServerSchemaValidator, String> {
+    let mut validators = cache.lock().await;
+    if let Some(validator) = validators.get(codex_bin).cloned() {
+        return Ok(validator);
+    }
+
+    let validator = load_installed_codex_schema_validator(codex_bin).await?;
+    validators.insert(codex_bin.to_string(), validator.clone());
+    Ok(validator)
 }
 
 async fn load_installed_codex_schema_validator(
@@ -1829,7 +1860,12 @@ fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, future::pending, path::Path};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        fs,
+        future::pending,
+        path::Path,
+    };
 
     use crate::opensymphony_domain::{
         ConversationId, IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt,
@@ -1840,6 +1876,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    fn empty_codex_schema_cache() -> CodexSchemaValidatorCache {
+        Arc::new(AsyncMutex::new(HashMap::new()))
+    }
 
     #[test]
     fn codex_json_rpc_error_response_is_launch_failure() {
@@ -2019,6 +2059,7 @@ mod tests {
         let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
         let (launch_tx, launch_rx) = oneshot::channel();
         let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
 
         let outcome = run_codex_stdio_issue(
             &route,
@@ -2031,6 +2072,7 @@ mod tests {
             fake_codex
                 .to_str()
                 .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
             &updates_tx,
             &mut launch_tx,
         )
@@ -2107,6 +2149,7 @@ mod tests {
         let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
         let (launch_tx, launch_rx) = oneshot::channel();
         let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
 
         let outcome = run_codex_stdio_issue(
             &route,
@@ -2119,6 +2162,7 @@ mod tests {
             fake_codex
                 .to_str()
                 .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
             &updates_tx,
             &mut launch_tx,
         )
@@ -2182,6 +2226,7 @@ mod tests {
         let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
         let (launch_tx, launch_rx) = oneshot::channel();
         let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
 
         let outcome = run_codex_stdio_issue(
             &route,
@@ -2194,6 +2239,7 @@ mod tests {
             fake_codex
                 .to_str()
                 .expect("fake codex error path should be utf-8"),
+            &codex_schema_validators,
             &updates_tx,
             &mut launch_tx,
         )
@@ -2214,6 +2260,35 @@ mod tests {
                 if detail.contains("fake initialize failure")
                     && !detail.contains("fake child stderr before failure")
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_schema_validator_cache_reuses_compiled_installed_schema() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let fake_codex = tempdir.path().join("fake-codex-schema");
+        let count_path = tempdir.path().join("schema-count.log");
+        write_fake_codex_schema_generator(&fake_codex, &count_path);
+        let cache = empty_codex_schema_cache();
+        let codex_bin = fake_codex
+            .to_str()
+            .expect("fake codex schema path should be utf-8");
+
+        cached_installed_codex_schema_validator(&cache, codex_bin)
+            .await
+            .expect("first schema load should compile");
+        cached_installed_codex_schema_validator(&cache, codex_bin)
+            .await
+            .expect("second schema load should use cache");
+
+        let generations =
+            fs::read_to_string(&count_path).expect("schema generation count should exist");
+        assert_eq!(
+            generations.lines().count(),
+            1,
+            "schema generation should run once per Codex binary path"
+        );
+        assert!(cache.lock().await.contains_key(codex_bin));
     }
 
     #[tokio::test]
@@ -2886,6 +2961,31 @@ while IFS= read -r line; do
 done
 "#,
                 log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_schema_generator(path: &Path, count_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  printf 'generated\n' >> "{count}"
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+echo "unexpected fake codex invocation: $*" >&2
+exit 64
+"#,
+                count = count_path.display(),
                 schema = FAKE_CODEX_SCHEMA
             ),
         );
