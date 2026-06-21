@@ -1212,14 +1212,8 @@ fn bounded_redacted_preview(raw: &str) -> Option<String> {
     }
 
     let mut redacted = Vec::with_capacity(words.len());
-    let mut redact_next = false;
     for word in words {
         let lower = word.to_ascii_lowercase();
-        if redact_next {
-            redacted.push("[redacted]".to_string());
-            redact_next = false;
-            continue;
-        }
         if let Some(index) = word.find(':') {
             let key = word[..index]
                 .trim_matches(|character: char| {
@@ -1231,13 +1225,12 @@ fn bounded_redacted_preview(raw: &str) -> Option<String> {
                 break;
             }
         }
-        if matches!(
-            lower.as_str(),
-            "authorization" | "bearer" | "basic" | "token" | "password" | "secret"
-        ) {
+        let bare_key = lower
+            .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_');
+        if bare_key == "authorization" || secret_key(bare_key) {
             redacted.push(word.to_string());
-            redact_next = true;
-            continue;
+            redacted.push("[redacted]".to_string());
+            break;
         }
         redacted.push(redact_inline_secret(word));
     }

@@ -593,6 +593,22 @@ fn codex_event_summaries_extract_bounded_redacted_previews() {
         "Codex command output: curl -H Authorization:[redacted]"
     );
 
+    let bare_authorization_scheme = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-bare-authorization",
+            "delta": "curl -H Authorization Bearer abc123"
+        }
+    }))
+    .expect("bare authorization scheme command output normalizes");
+    assert_eq!(
+        codex_event_summary(&bare_authorization_scheme),
+        "Codex command output: curl -H Authorization [redacted]"
+    );
+
     let password = normalize_server_notification(json!({
         "jsonrpc": "2.0",
         "method": "item/commandExecution/outputDelta",
@@ -623,6 +639,38 @@ fn codex_event_summaries_extract_bounded_redacted_previews() {
     assert_eq!(
         codex_event_summary(&multi_word_password),
         "Codex command output: login password:[redacted]"
+    );
+
+    let bare_multi_word_password = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-bare-password-phrase",
+            "delta": "login password my secret value"
+        }
+    }))
+    .expect("bare multi-word password command output normalizes");
+    assert_eq!(
+        codex_event_summary(&bare_multi_word_password),
+        "Codex command output: login password [redacted]"
+    );
+
+    let spaced_token_assignment = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-spaced-token-assignment",
+            "delta": "request token = abc123"
+        }
+    }))
+    .expect("spaced token assignment command output normalizes");
+    assert_eq!(
+        codex_event_summary(&spaced_token_assignment),
+        "Codex command output: request token [redacted]"
     );
 
     let long_output = normalize_server_notification(json!({
@@ -1352,6 +1400,8 @@ fn codex_model_and_credential_reuse_maps_existing_settings_profiles() {
 
     assert!(codex_profiles.iter().any(|profile| {
         profile.profile_id == "codex-chatgpt-local-keychain"
+            && profile.model_reference == "gpt-5.5"
+            && profile.config_overrides.get("model").map(String::as_str) == Some("gpt-5.5")
             && profile.can_supply_subscription_credentials
             && profile.credential_reference_kind == CredentialReferenceKind::CodexCliLogin
             && profile.storage_mode == CredentialStorageMode::CodexCliHome
