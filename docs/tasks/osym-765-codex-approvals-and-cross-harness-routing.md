@@ -21,6 +21,8 @@ Map Codex approval events into the OpenSymphony approval center and add an alpha
 - Send approval decisions back to Codex.
 - Audit approval decisions.
 - Define routing rules by task type, model profile, harness capability, cost, speed, and user policy.
+- Wire scheduler/runtime dispatch selection for `opensymphony run` so workflow
+  policy can route issue execution to the Codex worker backend.
 - Add explicit user override.
 - Add route decision audit events.
 - Add dry-run route preview.
@@ -43,11 +45,15 @@ Map Codex approval events into the OpenSymphony approval center and add an alpha
 
 - [ ] Codex approval requests appear in the same approval center contract as OpenHands-supported approvals.
 - [ ] Approval decisions are delivered back to Codex and audited.
+- [ ] `opensymphony run` can select the Codex app-server harness for issue
+      execution when workflow policy and capability checks choose it.
 - [ ] Routing dry-runs explain selected harness, model profile, and policy reason.
 
 ## Test Plan
 
 - Run Codex approval bridge tests with fake JSON-RPC notifications.
+- Run scheduler/runtime route selection tests that prove `opensymphony run`
+  dispatches through the selected harness backend.
 - Run route decision tests for task type, capability, user override, and missing-capability cases.
 
 ## Context

@@ -359,12 +359,12 @@ surfaces unsupported CLI output, missing app-server support, logged-out,
 expired, permission-denied, and unknown states as actionable non-ready statuses.
 Capability discovery reports the local adapter contract and stdio runtime
 surface, but `opensymphony run` still dispatches through OpenHands until the
-cross-harness runtime-routing work lands.
+cross-harness runtime-routing work lands in COE-429.
 
 Remaining follow-up work:
 
-- scheduler/runtime dispatch selection for `opensymphony run` so a workflow can
-  route issue execution to the Codex worker backend,
+- COE-429 scheduler/runtime dispatch selection for `opensymphony run` so a
+  workflow can route issue execution to the Codex worker backend,
 - a checked-in generated schema artifact policy for future Codex protocol bumps,
 - replay/history semantics beyond the local stdio request lifecycle (capability
   metadata currently marks history fetch, reconnect replay, and stdio

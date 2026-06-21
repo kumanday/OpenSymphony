@@ -260,7 +260,7 @@ impl HarnessCapability {
                 "Requires a compatible Codex CLI with ChatGPT login available to the operator-owned Codex home.".into(),
             ],
             feature_gaps: vec![
-                "`opensymphony run` dispatch still defaults to OpenHands until cross-harness runtime routing is wired."
+                "`opensymphony run` dispatch still defaults to OpenHands until COE-429 wires cross-harness runtime routing."
                     .into(),
                 "Codex history fetch and reconnect replay cursors are not implemented for the local stdio adapter."
                     .into(),
