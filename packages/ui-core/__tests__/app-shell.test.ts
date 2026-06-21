@@ -328,6 +328,8 @@ function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?:
 
 class LiveEventTransport extends MockGatewayTransport {
   snapshotReads = 0;
+  activeStreams = 0;
+  subscriptions: Array<{ sequence: number; partition: string } | undefined> = [];
   private queuedEvents: Array<GatewayEnvelope | null> = [];
   private resolveNext: ((event: GatewayEnvelope | null) => void) | null = null;
   private liveTaskGraph: TaskGraphSnapshot | null = null;
@@ -339,6 +341,10 @@ class LiveEventTransport extends MockGatewayTransport {
 
   failNextSnapshot(message: string): void {
     this.nextSnapshotError = new Error(message);
+  }
+
+  endStream(): void {
+    this.push(null);
   }
 
   override async snapshot(): Promise<DashboardSnapshot> {
@@ -359,20 +365,35 @@ class LiveEventTransport extends MockGatewayTransport {
     return this.liveTaskGraph ?? super.taskGraph(projectId);
   }
 
-  override async *events(): AsyncIterable<GatewayEnvelope> {
-    while (true) {
-      const event = this.queuedEvents.length > 0
-        ? this.queuedEvents.shift()!
-        : await new Promise<GatewayEnvelope | null>((resolve) => {
-            this.resolveNext = resolve;
-          });
-      if (!event) return;
-      yield event;
+  override async *events(
+    fromCursor?: { sequence: number; partition: string },
+  ): AsyncIterable<GatewayEnvelope> {
+    this.subscriptions.push(fromCursor);
+    this.activeStreams += 1;
+    try {
+      while (true) {
+        const event = this.queuedEvents.length > 0
+          ? this.queuedEvents.shift()!
+          : await new Promise<GatewayEnvelope | null>((resolve) => {
+              this.resolveNext = resolve;
+            });
+        if (!event) return;
+        if (
+          fromCursor
+          && event.cursor.partition === fromCursor.partition
+          && event.cursor.sequence <= fromCursor.sequence
+        ) {
+          continue;
+        }
+        yield event;
+      }
+    } finally {
+      this.activeStreams -= 1;
     }
   }
 
   override async close(): Promise<void> {
-    this.push(null);
+    this.endStream();
     await super.close();
   }
 
@@ -661,6 +682,19 @@ describe("OpenSymphonyApp mount", () => {
           && (call[1] as { error?: string }).error === "transient snapshot failure"
         ),
       );
+      expect(root.textContent).not.toContain("Live data stale");
+
+      transport.failNextSnapshot("persistent snapshot failure");
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 2, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.completed",
+        emitted_at: "2025-09-01T00:00:45Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() => root.textContent?.includes("Live data stale") ?? false);
+      expect(root.textContent).toContain("persistent snapshot failure");
 
       const nextFiles: ChangedFileEntry[] = [
         {
@@ -691,7 +725,7 @@ describe("OpenSymphonyApp mount", () => {
       });
       transport.emit({
         schema_version: schemaVersionV1(),
-        cursor: { sequence: 2, partition: "events" },
+        cursor: { sequence: 3, partition: "events" },
         entity_ref: { kind: "run", id: "COE-449" },
         event_kind: "run.completed",
         emitted_at: "2025-09-01T00:01:00Z",
@@ -701,9 +735,162 @@ describe("OpenSymphonyApp mount", () => {
       await flushUntil(() => root.textContent?.includes("src/live-update.ts") ?? false);
 
       expect(root.textContent).not.toContain("src/config.ts");
+      expect(root.textContent).not.toContain("Live data stale");
       expect(root.querySelector(".os-pill")?.textContent).toBe("released");
       expect(root.querySelector("[data-node-id='desktop-alpha']")?.textContent).toContain("Done");
       expect(root.querySelector("[data-testid='changed-file-item']")?.getAttribute("data-path")).toBe("src/live-update.ts");
+    } finally {
+      warnSpy.mockRestore();
+      await handle.destroy();
+    }
+  });
+
+  it("resumes restarted live subscriptions after the latest processed cursor", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+      runFiles: [{ runId: "COE-449", files: changedFiles }],
+      runDiffs: [{ runId: "COE-449", filePath: "src/config.ts", diff: fileDiff }],
+      runEvents: [runEvents],
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+    });
+
+    try {
+      await flushUntil(() => root.textContent?.includes("src/config.ts") ?? false);
+      await flushUntil(() => transport.subscriptions.length === 1);
+
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 8, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:02:00Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() => transport.snapshotReads >= 2);
+
+      transport.endStream();
+      await flushUntil(() => transport.activeStreams === 0);
+      await handle.refresh();
+      await flushUntil(() => transport.subscriptions.length === 2);
+
+      expect(transport.subscriptions[1]).toEqual({ sequence: 8, partition: "events" });
+
+      const readsAfterRestart = transport.snapshotReads;
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 8, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:02:05Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushAsync();
+      expect(transport.snapshotReads).toBe(readsAfterRestart);
+
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 9, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:02:10Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() => transport.snapshotReads > readsAfterRestart);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("resumes after the cursor from failed live refresh events", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+      runFiles: [{ runId: "COE-449", files: changedFiles }],
+      runDiffs: [{ runId: "COE-449", filePath: "src/config.ts", diff: fileDiff }],
+      runEvents: [runEvents],
+    });
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+    });
+
+    try {
+      await flushUntil(() => root.textContent?.includes("src/config.ts") ?? false);
+      await flushUntil(() => transport.subscriptions.length === 1);
+
+      transport.failNextSnapshot("first failed live refresh");
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 10, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:03:00Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() =>
+        warnSpy.mock.calls.some((call) =>
+          call[0] === "[opensymphony] live gateway refresh failed; event stream remains active"
+          && (call[1] as { error?: string }).error === "first failed live refresh"
+        ),
+      );
+      expect(transport.activeStreams).toBe(1);
+
+      transport.failNextSnapshot("second failed live refresh");
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 11, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:03:05Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() => root.textContent?.includes("Live data stale: second failed live refresh") ?? false);
+
+      transport.endStream();
+      await flushUntil(() => transport.activeStreams === 0);
+      await handle.refresh();
+      await flushUntil(() => transport.subscriptions.length === 2);
+
+      expect(transport.subscriptions[1]).toEqual({ sequence: 11, partition: "events" });
+
+      const readsAfterRestart = transport.snapshotReads;
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 11, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:03:10Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushAsync();
+      expect(transport.snapshotReads).toBe(readsAfterRestart);
+
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 12, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.updated",
+        emitted_at: "2025-09-01T00:03:15Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() => transport.snapshotReads > readsAfterRestart);
     } finally {
       warnSpy.mockRestore();
       await handle.destroy();

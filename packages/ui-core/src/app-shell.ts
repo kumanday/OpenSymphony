@@ -220,6 +220,8 @@ interface AuditTrailEntry {
 }
 
 const schemaVersion = { major: 1, minor: 0, patch: 0 };
+// Two consecutive failures avoid noisy transient warnings while still surfacing stale live data.
+const liveRefreshFailureThreshold = 2;
 
 export function renderOpenSymphonyApp(
   options: OpenSymphonyAppOptions,
@@ -239,8 +241,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     transport: GatewayReader;
     iterator?: AsyncIterator<GatewayEnvelope>;
   } | null = null;
+  private latestGatewayEventCursor: { sequence: number; partition: string } | null = null;
   private liveRefreshInFlight = false;
   private liveRefreshQueued = false;
+  private liveRefreshFailureCount = 0;
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
@@ -446,6 +450,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.connectionMode = "connected";
       this.state.authState = this.resolveAuthState(null);
       this.state.connectionMessage = `Connected to ${this.transport.baseUri || "same-origin gateway"}`;
+      this.liveRefreshFailureCount = 0;
       this.state.selectedProjectId = snapshot.projects[0]?.project_id ?? "default";
       await this.loadTaskGraph(this.state.selectedProjectId);
       this.startEventSubscription();
@@ -595,12 +600,22 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     iterator?: AsyncIterator<GatewayEnvelope>;
   }): Promise<void> {
     try {
-      const iterator = subscription.transport.events!()[Symbol.asyncIterator]();
+      const iterator = subscription.transport.events!(
+        this.latestGatewayEventCursor ?? undefined,
+      )[Symbol.asyncIterator]();
       subscription.iterator = iterator;
       while (subscription.active && !this.destroyed) {
         const next = await iterator.next();
         if (next.done) break;
-        await this.onGatewayEvent(next.value);
+        this.latestGatewayEventCursor = next.value.cursor;
+        try {
+          await this.onGatewayEvent(next.value);
+        } catch (error) {
+          console.warn("[opensymphony] gateway event processing failed after cursor advance", {
+            baseUri: subscription.transport.baseUri,
+            error: errorMessage(error),
+          });
+        }
       }
     } catch (error) {
       console.warn("[opensymphony] gateway event stream unavailable; using one-shot refresh fallback", {
@@ -627,12 +642,24 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       do {
         this.liveRefreshQueued = false;
         try {
+          const hadLiveRefreshFailures = this.liveRefreshFailureCount > 0;
           await this.refreshLiveGatewayData();
+          this.liveRefreshFailureCount = 0;
+          this.state.connectionMode = "connected";
+          this.state.connectionMessage = `Connected to ${this.transport.baseUri || "same-origin gateway"}`;
+          if (hadLiveRefreshFailures) {
+            this.render();
+          }
         } catch (error) {
+          this.liveRefreshFailureCount += 1;
           console.warn("[opensymphony] live gateway refresh failed; event stream remains active", {
             baseUri: this.transport.baseUri,
             error: errorMessage(error),
           });
+          if (this.liveRefreshFailureCount >= liveRefreshFailureThreshold) {
+            this.state.connectionMessage = `Live data stale: ${errorMessage(error)}`;
+            this.render();
+          }
         }
       } while (this.liveRefreshQueued && !this.destroyed);
     } finally {
