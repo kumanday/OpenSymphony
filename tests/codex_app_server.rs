@@ -233,11 +233,12 @@ fn codex_schema_validator_accepts_defs_client_request_shape() {
     let schema = json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
         "$defs": {
+            "JsonRpcVersion": { "const": "2.0" },
             "ClientRequest": {
                 "type": "object",
                 "required": ["jsonrpc", "id", "method", "params"],
                 "properties": {
-                    "jsonrpc": { "const": "2.0" },
+                    "jsonrpc": { "$ref": "#/$defs/JsonRpcVersion" },
                     "id": { "type": "integer" },
                     "method": { "enum": ["initialize"] },
                     "params": { "type": "object" }
@@ -312,6 +313,25 @@ fn codex_installed_schema_accepts_automation_payloads_when_requested() {
     validator
         .validate_request(&turn.request)
         .expect("turn/start should match installed schema");
+    let default_thread = adapter
+        .start_issue_thread_request(
+            &mut session,
+            "/tmp/issue-workspace",
+            None,
+            json!({ "opensymphonyRoute": { "harness": "codex_app_server" } }),
+        )
+        .expect("thread/start without selected model should serialize");
+    assert!(
+        default_thread.request.params.get("model").is_none(),
+        "omitted model should leave Codex model selection to its own config"
+    );
+    assert!(
+        default_thread.request.params.get("modelProvider").is_none(),
+        "omitted model should not force a Codex provider"
+    );
+    validator
+        .validate_request(&default_thread.request)
+        .expect("thread/start without model should match installed schema");
 }
 
 #[test]
@@ -453,6 +473,14 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
             .get("model")
             .is_none(),
         "omitting selected model should let Codex use its own configured default"
+    );
+    assert!(
+        start_with_codex_default
+            .request
+            .params
+            .get("modelProvider")
+            .is_none(),
+        "omitting selected model should not force Codex's configured provider"
     );
 
     let resume = adapter

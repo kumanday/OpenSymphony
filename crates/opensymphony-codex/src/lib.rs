@@ -80,10 +80,14 @@ impl CodexAppServerSchemaValidator {
     }
 
     pub fn from_schema_json(schema: Value) -> Result<Self, CodexSchemaValidationError> {
-        let definitions = schema
+        let (definitions_key, definitions) = schema
             .get("definitions")
-            .or_else(|| schema.get("$defs"))
-            .cloned()
+            .map(|definitions| ("definitions", definitions))
+            .or_else(|| {
+                schema
+                    .get("$defs")
+                    .map(|definitions| ("$defs", definitions))
+            })
             .ok_or_else(|| {
                 CodexSchemaValidationError::SchemaShape(
                     "missing top-level definitions or $defs object".into(),
@@ -94,11 +98,19 @@ impl CodexAppServerSchemaValidator {
                 "missing definitions/$defs ClientRequest schema".into(),
             ));
         }
-        let client_request_schema = json!({
-            "$schema": "http://json-schema.org/draft-07/schema#",
-            "$ref": "#/definitions/ClientRequest",
-            "definitions": definitions,
-        });
+        let mut client_request_schema = serde_json::Map::new();
+        if let Some(schema_uri) = schema.get("$schema") {
+            client_request_schema.insert("$schema".into(), schema_uri.clone());
+        }
+        if let Some(schema_id) = schema.get("$id") {
+            client_request_schema.insert("$id".into(), schema_id.clone());
+        }
+        client_request_schema.insert(
+            "$ref".into(),
+            Value::String(format!("#/{definitions_key}/ClientRequest")),
+        );
+        client_request_schema.insert(definitions_key.into(), definitions.clone());
+        let client_request_schema = Value::Object(client_request_schema);
         let validator = jsonschema::validator_for(&client_request_schema)
             .map_err(|error| CodexSchemaValidationError::SchemaCompile(error.to_string()))?;
         Ok(Self { validator })
@@ -227,15 +239,16 @@ impl CodexAppServerAdapter {
         model: Option<String>,
         config: Value,
     ) -> Result<CodexHarnessRequest, serde_json::Error> {
+        let model_provider = model
+            .as_ref()
+            .map(|_| CODEX_DEFAULT_MODEL_PROVIDER.to_string());
         Ok(CodexHarnessRequest {
             lifecycle: CodexLifecycleRequest::Start,
             request: session.thread_start(CodexThreadStartParams {
                 approval_policy: Some(CodexApprovalPolicy::Never),
                 cwd: Some(cwd.into()),
                 model,
-                // Codex CLI app-server currently exposes OpenAI/ChatGPT-backed
-                // model ids through this local harness path.
-                model_provider: Some(CODEX_DEFAULT_MODEL_PROVIDER.into()),
+                model_provider,
                 base_instructions: None,
                 developer_instructions: None,
                 ephemeral: Some(false),

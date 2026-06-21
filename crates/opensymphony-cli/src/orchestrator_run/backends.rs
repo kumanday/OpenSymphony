@@ -56,6 +56,7 @@ use super::{
 const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
 const CODEX_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
+const CODEX_SCHEMA_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
 const CODEX_SCHEMA_STDERR_PREVIEW_CHARS: usize = 500;
@@ -1332,10 +1333,19 @@ async fn load_installed_codex_schema_validator(
     let generation =
         CodexContractGeneration::json_schema_with_program(codex_bin, schema_dir.path());
     let (program, args) = generation.to_command();
-    let output = Command::new(&program)
-        .args(&args)
-        .output()
-        .await
+    let output = timeout(CODEX_SCHEMA_GENERATION_TIMEOUT, async {
+        let mut command = Command::new(&program);
+        command.args(&args).kill_on_drop(true);
+        command.output().await
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out after {}s generating Codex app-server JSON schema with `{program} {}`. Update Codex to a compatible app-server build.",
+            CODEX_SCHEMA_GENERATION_TIMEOUT.as_secs(),
+            args.join(" ")
+        )
+    })?
         .map_err(|source| {
             format!(
                 "failed to generate Codex app-server JSON schema with `{program} {}`: {source}. Update Codex to a build that supports `codex app-server generate-json-schema`.",
