@@ -987,6 +987,31 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("uses the model profile controller warning drain when available", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const modelProfileController = buildModelProfileController();
+    modelProfileController.quarantineMessages = ["stale warning"];
+    modelProfileController.takeQuarantineMessages = jest.fn(() => [
+      "Dropped model profile with missing id",
+    ]);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport(),
+      modelProfileController,
+    });
+
+    await flushUntil(() =>
+      root.querySelector("[data-testid='model-profile-error']")?.textContent?.includes("missing id") ?? false,
+    );
+
+    expect(modelProfileController.takeQuarantineMessages).toHaveBeenCalled();
+    expect(modelProfileController.quarantineMessages).toEqual(["stale warning"]);
+
+    await handle.destroy();
+  });
+
   it("reports a failed connection instead of falling back to fixture data", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);

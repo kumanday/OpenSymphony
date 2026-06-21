@@ -125,6 +125,7 @@ export interface ProfileController {
 export interface ModelProfileController {
   persistence?: ModelProfilePersistenceInfo;
   quarantineMessages?: string[];
+  takeQuarantineMessages?(): string[];
   listProfiles(): Promise<ModelConfigurationProfile[]>;
   storeProfile(profile: ModelConfigurationProfile): Promise<ModelConfigurationProfile>;
   setActiveProfile(profileId: string): Promise<ModelConfigurationProfile>;
@@ -388,7 +389,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.modelProfiles = profiles.length > 0 ? profiles : defaultModelProfiles();
       const active = this.state.modelProfiles.find((profile) => profile.active) ?? null;
       this.state.activeModelProfileId = active?.id ?? null;
-      const warnings = this.options.modelProfileController.quarantineMessages?.splice(0) ?? [];
+      const warnings = this.options.modelProfileController.takeQuarantineMessages?.()
+        ?? this.options.modelProfileController.quarantineMessages?.slice()
+        ?? [];
       this.state.modelProfileError = warnings.length > 0
         ? `Model profile storage warning: ${warnings.join("; ")}`
         : null;

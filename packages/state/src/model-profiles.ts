@@ -386,11 +386,13 @@ function sanitizeModelProfile(
   }
   const mode = stringUnion(record.mode, credentialModes);
   if (!mode) {
+    onQuarantine?.(`Dropped model profile with invalid mode: ${String(record.mode)}`);
     return null;
   }
   const template = createModelProfile(mode);
   const id = stringField(record, "id");
   if (!id) {
+    onQuarantine?.("Dropped model profile with missing id");
     return null;
   }
   const credentialStorage =
@@ -398,6 +400,7 @@ function sanitizeModelProfile(
       ? template.credentialStorage
       : stringUnion(record.credentialStorage, credentialStorages);
   if (!credentialStorage) {
+    onQuarantine?.(`Dropped invalid model profile ${id}: invalid credential storage ${String(record.credentialStorage)}`);
     return null;
   }
   const subscriptionCredential = mode === "subscription"

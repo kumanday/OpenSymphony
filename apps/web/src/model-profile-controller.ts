@@ -31,6 +31,9 @@ export function createWebModelProfileController(
       },
     }),
     quarantineMessages,
+    takeQuarantineMessages() {
+      return quarantineMessages.splice(0);
+    },
     persistence: durable
       ? {
           kind: "durable",

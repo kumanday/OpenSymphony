@@ -340,6 +340,34 @@ describe("createModelProfileStore", () => {
     ]));
   });
 
+  it("reports specific quarantine reasons for malformed core profile fields", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
+      profiles: [
+        { id: "invalid-mode", mode: "api_key_typo" },
+        { mode: "api_key" },
+        {
+          ...createModelProfile("api_key"),
+          id: "invalid-storage",
+          credentialStorage: "plain_text",
+        },
+      ],
+    }));
+    const quarantineReasons: string[] = [];
+    const store = createModelProfileStore({
+      storage,
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+
+    await store.listProfiles();
+
+    expect(quarantineReasons).toEqual(expect.arrayContaining([
+      "Dropped model profile with invalid mode: api_key_typo",
+      "Dropped model profile with missing id",
+      "Dropped invalid model profile invalid-storage: invalid credential storage plain_text",
+    ]));
+  });
+
   it("drops profiles when persisted harnesses contain no known harness kinds", async () => {
     const storage = new MemoryStorage();
     storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({

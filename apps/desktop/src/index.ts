@@ -346,6 +346,9 @@ export function createDesktopModelProfileController(): ModelProfileController | 
   return {
     ...store,
     quarantineMessages,
+    takeQuarantineMessages() {
+      return quarantineMessages.splice(0);
+    },
     persistence: {
       kind: "durable",
       label: "Model profiles persist in desktop settings.",
