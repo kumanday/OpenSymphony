@@ -17,7 +17,9 @@ describe("model configuration profiles", () => {
       "subscription",
     ]);
     expect(profiles[0].baseUrl).toBe("https://api.openai.com/v1");
+    expect(profiles[0].model).toBe("gpt-5.5");
     expect(profiles[0].apiKeyRef).toBeNull();
+    expect(profiles[1].model).toBe("gpt-5.5");
     expect(profiles[1].subscriptionCredential?.provider).toBe("openai");
     expect(profiles[1].subscriptionCredential?.authDirectoryEnv).toBe("OPENHANDS_AUTH_DIR");
     expect(profiles[1].harnesses).toEqual([

@@ -1315,6 +1315,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const credentialRef = active.mode === "subscription"
       ? active.subscriptionCredential?.authDirectoryEnv
       : active.apiKeyRef;
+    const credentialSummary = modelCredentialSummary(active);
     const credentialLabel = active.mode === "subscription" ? "OpenHands Auth Directory Env" : "API Key Secret";
     const credentialInputType = active.mode === "subscription" ? "text" : "password";
     const modelProfileError = this.state.modelProfileError
@@ -1343,7 +1344,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <section class="os-panel os-model-panel os-panel-collapsed" data-testid="model-profile-panel">
           ${header}
           <div class="os-model-meta" data-testid="model-redacted-credential">
-            Auth: ${escapeHtml(redactCredentialRef(credentialRef))}
+            Credential: ${escapeHtml(credentialSummary)}
           </div>
           ${persistenceMeta}
           ${modelProfileError}
@@ -1409,7 +1410,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           </div>
         </div>
         <div class="os-model-meta" data-testid="model-redacted-credential">
-          Auth: ${escapeHtml(redactCredentialRef(credentialRef))}
+          Credential: ${escapeHtml(credentialSummary)}
         </div>
         ${persistenceMeta}
         ${modelProfileError}
@@ -2694,6 +2695,21 @@ function modelProfilesWithDefaults(
   profiles: ModelConfigurationProfile[],
 ): ModelConfigurationProfile[] {
   return profiles.length > 0 ? profiles : defaultModelProfiles();
+}
+
+function modelCredentialSummary(profile: ModelConfigurationProfile): string {
+  if (profile.mode === "api_key") {
+    return `API key ${redactCredentialRef(profile.apiKeyRef).toLowerCase()}`;
+  }
+  const authDirectoryEnv = profile.subscriptionCredential?.authDirectoryEnv?.trim();
+  const codexReady = profile.harnesses.includes("codex_app_server")
+    ? "Codex CLI login via gateway readiness"
+    : null;
+  const openhandsReady = authDirectoryEnv
+    ? `OpenHands auth dir env ${authDirectoryEnv}`
+    : "OpenHands auth dir env not configured";
+
+  return codexReady ? `${codexReady}; ${openhandsReady}` : openhandsReady;
 }
 
 function upsertModelProfile(
