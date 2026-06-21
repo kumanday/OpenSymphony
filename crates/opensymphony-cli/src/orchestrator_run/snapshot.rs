@@ -221,13 +221,7 @@ fn map_issue(
         total_tokens: issue
             .conversation
             .as_ref()
-            .map(|conversation| {
-                if conversation.total_tokens > 0 {
-                    conversation.total_tokens
-                } else {
-                    conversation.input_tokens + conversation.output_tokens
-                }
-            })
+            .map(|conversation| conversation.effective_total_tokens())
             .unwrap_or(0),
         detached: false,
         cancel_acknowledged: false,

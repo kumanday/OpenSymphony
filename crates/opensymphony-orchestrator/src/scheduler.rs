@@ -353,13 +353,7 @@ where
         let total_tokens: u64 = issues
             .iter()
             .filter_map(|issue| issue.conversation.as_ref())
-            .map(|conversation| {
-                if conversation.total_tokens > 0 {
-                    conversation.total_tokens
-                } else {
-                    conversation.input_tokens + conversation.output_tokens
-                }
-            })
+            .map(|conversation| conversation.effective_total_tokens())
             .sum();
 
         let daemon = DaemonSnapshot::new(

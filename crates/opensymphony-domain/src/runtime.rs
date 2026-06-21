@@ -621,6 +621,14 @@ impl ConversationMetadata {
         self.total_tokens = total;
     }
 
+    pub fn effective_total_tokens(&self) -> u64 {
+        if self.total_tokens > 0 {
+            self.total_tokens
+        } else {
+            self.input_tokens + self.output_tokens
+        }
+    }
+
     pub fn add_runtime_seconds(&mut self, seconds: u64) {
         self.runtime_seconds += seconds;
     }

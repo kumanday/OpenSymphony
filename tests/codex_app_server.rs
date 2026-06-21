@@ -451,6 +451,32 @@ fn codex_token_usage_notification_maps_to_normalized_usage_payload() {
         })
     );
 
+    let missing_total = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "tokenUsage": {
+                "total": {
+                    "cachedInputTokens": 3,
+                    "inputTokens": 5,
+                    "outputTokens": 7
+                }
+            }
+        }
+    }))
+    .expect("token usage without explicit total normalizes");
+    assert_eq!(
+        missing_total.token_usage,
+        Some(CodexTokenUsage {
+            input_tokens: 5,
+            output_tokens: 7,
+            cache_read_tokens: 3,
+            total_tokens: 15,
+        })
+    );
+
     let empty = normalize_server_notification(json!({
         "jsonrpc": "2.0",
         "method": "thread/tokenUsage/updated",

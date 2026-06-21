@@ -11,7 +11,7 @@ use std::{
 use crate::opensymphony_codex::{
     CodexAppServerAdapter, CodexAppServerSchemaValidator, CodexContractGeneration,
     CodexJsonRpcSession, JsonRpcRequestEnvelope, NormalizedCodexEvent, NormalizedCodexEventKind,
-    codex_approval_request_from_event, codex_event_payload, normalize_server_notification,
+    codex_approval_request_from_event, normalize_server_notification,
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
@@ -1617,14 +1617,13 @@ fn emit_codex_notification(
         return Some(event);
     };
     let observed_at = now_timestamp();
-    let payload = codex_event_payload(&event);
     let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
         worker_id: worker_id.clone(),
         observed_at,
         event_id: event.item_id.clone().or_else(|| event.turn_id.clone()),
         event_kind: Some(format!("codex.{}", event.method)),
         summary: Some(format!("Codex event: {}", event.method)),
-        payload: Some(payload),
+        payload: Some(event.raw.clone()),
     });
     if let Some(usage) = event.token_usage {
         let _ = updates_tx.send(WorkerUpdate::TokenUsageUpdate {
@@ -2243,10 +2242,13 @@ mod tests {
                     Some("codex.thread/tokenUsage/updated")
                 );
                 let payload = payload.expect("token event payload should be present");
-                assert_eq!(payload["usage"]["input_tokens"], 100);
-                assert_eq!(payload["usage"]["output_tokens"], 50);
-                assert_eq!(payload["usage"]["cache_read_tokens"], 30);
-                assert_eq!(payload["usage"]["total_tokens"], 150);
+                assert_eq!(payload["params"]["tokenUsage"]["total"]["inputTokens"], 100);
+                assert_eq!(payload["params"]["tokenUsage"]["total"]["outputTokens"], 50);
+                assert_eq!(
+                    payload["params"]["tokenUsage"]["total"]["cachedInputTokens"],
+                    30
+                );
+                assert_eq!(payload["params"]["tokenUsage"]["total"]["totalTokens"], 150);
             }
             other => panic!("expected runtime event, got {other:?}"),
         }
