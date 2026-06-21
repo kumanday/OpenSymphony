@@ -143,6 +143,7 @@ struct ActiveWorkerTask {
 
 struct PendingLaunch {
     worker_id: String,
+    route: crate::opensymphony_orchestrator::HarnessRouteDecision,
     launch_rx: oneshot::Receiver<LaunchReport>,
 }
 
@@ -696,6 +697,7 @@ impl RuntimeWorkerBackend {
         let (launch_tx, launch_rx) = oneshot::channel();
         let run = request.run.clone();
         let route = request.route.clone();
+        let pending_route = route.clone();
         let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
@@ -725,8 +727,6 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
-
-            emit_route_decision_event(&updates_tx, &observer_worker_id.to_string(), &route);
 
             if route.dry_run {
                 if let Some(sender) = launch_tx.take() {
@@ -819,6 +819,7 @@ impl RuntimeWorkerBackend {
 
         PendingLaunch {
             worker_id: worker_id.to_string(),
+            route: pending_route,
             launch_rx,
         }
     }
@@ -826,15 +827,17 @@ impl RuntimeWorkerBackend {
     async fn resolve_launch_result(
         &mut self,
         worker_id: &str,
+        route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
         result: Result<
             Result<LaunchReport, oneshot::error::RecvError>,
             tokio::time::error::Elapsed,
         >,
     ) -> Result<WorkerLaunch, CliWorkerError> {
         match result {
-            Ok(Ok(LaunchReport::Conversation(conversation))) => Ok(WorkerLaunch {
-                conversation: *conversation,
-            }),
+            Ok(Ok(LaunchReport::Conversation(conversation))) => {
+                let conversation = annotate_route_decision(*conversation, worker_id, route);
+                Ok(WorkerLaunch { conversation })
+            }
             Ok(Ok(LaunchReport::Failed(detail))) => {
                 if let Some(task) = self.tasks.remove(worker_id) {
                     task.handle.await?;
@@ -855,12 +858,25 @@ impl RuntimeWorkerBackend {
     }
 }
 
-fn emit_route_decision_event(
-    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+fn annotate_route_decision(
+    mut conversation: ConversationMetadata,
     worker_id: &str,
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
-) {
-    let payload = serde_json::json!({
+) -> ConversationMetadata {
+    conversation.observe_event(
+        now_timestamp(),
+        Some(format!("route-{worker_id}-{}", route.harness_kind)),
+        Some("routing.decision".into()),
+        Some(route.summary()),
+        Some(route_decision_payload(route)),
+    );
+    conversation
+}
+
+fn route_decision_payload(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> serde_json::Value {
+    serde_json::json!({
         "task_type": &route.task_type,
         "harness_kind": &route.harness_kind,
         "model_profile": &route.model_profile,
@@ -868,18 +884,7 @@ fn emit_route_decision_event(
         "required_capabilities": &route.required_capabilities,
         "dry_run": route.dry_run,
         "user_override": route.user_override,
-    });
-    let Ok(worker_id) = crate::opensymphony_domain::WorkerId::new(worker_id.to_string()) else {
-        return;
-    };
-    let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
-        worker_id,
-        observed_at: now_timestamp(),
-        event_id: Some(format!("route-{}", route.harness_kind)),
-        event_kind: Some("routing.decision".into()),
-        summary: Some(route.summary()),
-        payload: Some(payload),
-    });
+    })
 }
 
 fn dry_run_conversation_metadata(
@@ -1010,6 +1015,7 @@ async fn try_run_codex_stdio_issue(
     let (program, args) = adapter.launch().to_command();
     let mut child = Command::new(&program)
         .args(args)
+        .current_dir(workspace.workspace_path())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1321,8 +1327,10 @@ impl WorkerBackend for RuntimeWorkerBackend {
     ) -> Result<WorkerLaunch, Self::Error> {
         let pending = self.spawn_worker_task(request);
         let worker_id = pending.worker_id.clone();
+        let route = pending.route.clone();
         self.resolve_launch_result(
             &worker_id,
+            &route,
             timeout(self.launch_timeout, pending.launch_rx).await,
         )
         .await
@@ -1336,9 +1344,9 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .into_iter()
             .map(|request| self.spawn_worker_task(request))
             .collect::<Vec<_>>();
-        let ordered_worker_ids = pending
+        let ordered_launches = pending
             .iter()
-            .map(|launch| launch.worker_id.clone())
+            .map(|launch| (launch.worker_id.clone(), launch.route.clone()))
             .collect::<Vec<_>>();
 
         let mut waiters = Vec::with_capacity(pending.len());
@@ -1372,14 +1380,17 @@ impl WorkerBackend for RuntimeWorkerBackend {
             }
         }
 
-        let mut launches = Vec::with_capacity(ordered_worker_ids.len());
-        for worker_id in ordered_worker_ids {
+        let mut launches = Vec::with_capacity(ordered_launches.len());
+        for (worker_id, route) in ordered_launches {
             let outcome = completed
                 .remove(&worker_id)
                 .unwrap_or(Ok(Ok(LaunchReport::Failed(
                     "worker launch waiter finished without a result".to_string(),
                 ))));
-            launches.push(self.resolve_launch_result(&worker_id, outcome).await);
+            launches.push(
+                self.resolve_launch_result(&worker_id, &route, outcome)
+                    .await,
+            );
         }
         launches
     }

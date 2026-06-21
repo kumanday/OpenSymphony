@@ -364,9 +364,27 @@ can select the local Codex app-server stdio worker when capability checks pass.
 Set `routing.dry_run: true` to emit a route preview without launching a
 model-backed Codex session.
 
+The local stdio worker launches the Codex binary from `OPENSYMPHONY_CODEX_BIN`,
+or `codex` when unset, inside the issue workspace path. This remains a
+trusted-environment alpha control: do not expose that environment variable to
+untrusted users or hosted tenants. The worker drains stderr to structured logs
+to avoid stdio pipe backpressure. JSON-RPC initialize/start waits currently use
+fixed alpha bounds of 30 seconds per response and 300 seconds for terminal
+notification wait.
+
+Codex approval notifications are normalized into the shared approval-center
+contract, and the Codex adapter exposes the `approval/respond` request used to
+deliver approve/reject decisions plus matching audit records. The live
+operator-to-Codex response command path is not yet wired into the
+`opensymphony run` local stdio worker; approval-response forwarding through the
+gateway/operator action loop remains follow-up work before approval-bearing
+Codex runs are considered production-ready.
+
 Remaining follow-up work:
 
 - a checked-in generated schema artifact policy for future Codex protocol bumps,
+- gateway/operator action wiring that forwards approval decisions to the live
+  Codex stdio session,
 - replay/history semantics beyond the local stdio request lifecycle (capability
   metadata currently marks history fetch, reconnect replay, and stdio
   reconciliation unavailable),

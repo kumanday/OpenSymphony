@@ -748,7 +748,8 @@ fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
 fn codex_approval_risk_summary(params: &Value) -> ApprovalRiskSummary {
     let mut reasons = Vec::new();
     let command = first_string_param(params, &["command", "shellCommand", "toolCommand"]);
-    let level = match command.as_deref() {
+    let normalized_command = command.as_ref().map(|command| command.to_ascii_lowercase());
+    let level = match normalized_command.as_deref() {
         Some(command)
             if command.contains("sudo")
                 || command.contains("rm -rf")

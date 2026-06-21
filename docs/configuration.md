@@ -203,6 +203,9 @@ Set `routing.dry_run: true` to preview route selection without launching a
 model-backed worker. Set `OPENSYMPHONY_HARNESS=codex_app_server` to force an
 explicit operator override for the current process. Overrides still require an
 available harness that can start runs.
+For local Codex stdio execution, `OPENSYMPHONY_CODEX_BIN` may point to an
+alternate Codex binary in trusted operator environments only; it is not a
+hosted-mode tenant input.
 
 OpenAI ChatGPT/Codex subscription credentials are available only when
 OpenSymphony is built with the `openhands-subscription-credentials` Cargo

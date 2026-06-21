@@ -281,6 +281,13 @@ local process override without editing workflow rules, start the daemon with
 `OPENSYMPHONY_HARNESS=codex_app_server`; the override is accepted only when the
 public harness capability can start runs.
 
+The Codex local stdio route executes the configured Codex binary with
+`cwd == issue_workspace_path`. `OPENSYMPHONY_CODEX_BIN` is a trusted local
+operator override and must not be treated as a hosted or multi-tenant input.
+Approval requests are surfaced through normalized runtime events and shared
+approval-center data models, but approval decisions are not yet forwarded from
+the operator action plane into a live Codex stdio session in this alpha route.
+
 The alpha model configuration panel exposed by the web and desktop shells uses
 the shared model profile state store, but those entrypoints currently construct
 it without durable storage. Treat profile edits as session-local until a
