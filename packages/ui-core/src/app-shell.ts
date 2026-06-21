@@ -1315,7 +1315,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const credentialRef = active.mode === "subscription"
       ? active.subscriptionCredential?.authDirectoryEnv
       : active.apiKeyRef;
-    const credentialLabel = active.mode === "subscription" ? "OpenHands Auth Directory Env" : "API Key Secret";
+    const credentialSummary = modelCredentialSummary(active);
+    const credentialLabel = modelCredentialLabel(active);
     const credentialInputType = active.mode === "subscription" ? "text" : "password";
     const modelProfileError = this.state.modelProfileError
       ? `<div class="os-model-error" role="alert" data-testid="model-profile-error">${escapeHtml(this.state.modelProfileError)}</div>`
@@ -1343,7 +1344,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <section class="os-panel os-model-panel os-panel-collapsed" data-testid="model-profile-panel">
           ${header}
           <div class="os-model-meta" data-testid="model-redacted-credential">
-            Auth: ${escapeHtml(redactCredentialRef(credentialRef))}
+            Credential: ${escapeHtml(credentialSummary)}
           </div>
           ${persistenceMeta}
           ${modelProfileError}
@@ -1409,7 +1410,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           </div>
         </div>
         <div class="os-model-meta" data-testid="model-redacted-credential">
-          Auth: ${escapeHtml(redactCredentialRef(credentialRef))}
+          Credential: ${escapeHtml(credentialSummary)}
         </div>
         ${persistenceMeta}
         ${modelProfileError}
@@ -2694,6 +2695,30 @@ function modelProfilesWithDefaults(
   profiles: ModelConfigurationProfile[],
 ): ModelConfigurationProfile[] {
   return profiles.length > 0 ? profiles : defaultModelProfiles();
+}
+
+function modelCredentialSummary(profile: ModelConfigurationProfile): string {
+  if (profile.mode === "api_key") {
+    return profile.apiKeyRef?.trim() ? "API key configured" : "API key not configured";
+  }
+  const authDirectoryEnv = profile.subscriptionCredential?.authDirectoryEnv?.trim();
+  const codexReady = profile.harnesses.includes("codex_app_server")
+    ? "Codex CLI login via gateway readiness"
+    : null;
+  const openhandsReady = authDirectoryEnv
+    ? `OpenHands auth dir env ${authDirectoryEnv}`
+    : "OpenHands auth dir env not configured";
+
+  return codexReady ? `${codexReady}; ${openhandsReady}` : openhandsReady;
+}
+
+function modelCredentialLabel(profile: ModelConfigurationProfile): string {
+  if (profile.mode === "api_key") {
+    return "API Key Secret";
+  }
+  return profile.harnesses.includes("codex_app_server")
+    ? "OpenHands Auth Directory Env (OpenHands only)"
+    : "OpenHands Auth Directory Env";
 }
 
 function upsertModelProfile(

@@ -85,6 +85,12 @@ uv run --script .agents/skills/convert-tasks-to-linear/scripts/convert_tasks_to_
   --manifest docs/tasks/task-package.yaml
 ```
 
+Targeted publishing safety:
+
+- When the user asks to create or publish only specific tasks, do not run `convert_tasks_to_linear.py apply` against the full canonical `docs/tasks/task-package.yaml`.
+- For targeted additions, create or update only the requested task files, create the Linear issues directly or through a temporary narrow manifest, then update `docs/tasks/linear-publish.yaml` only from the returned Linear issue IDs.
+- Before reusing a task source ID, check local docs and live Linear provenance (`task-source-id`) for an existing match. If the ID already belongs to a different title, milestone, or source file, stop and ask instead of updating it.
+
 Publish to Linear:
 
 ```bash
