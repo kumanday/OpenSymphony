@@ -674,6 +674,7 @@ describe("OpenSymphonyApp mount", () => {
     );
     await flushUntil(() => (root.querySelector("[data-model-mode]") as HTMLSelectElement).value === "subscription");
     expect((root.querySelector("[data-model-credential-ref]") as HTMLInputElement).type).toBe("text");
+    expect(root.textContent).toContain("OpenHands Auth Directory Env (OpenHands only)");
     expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("Codex CLI login via gateway readiness");
     expect(root.querySelector("[data-testid='model-redacted-credential']")?.textContent).toContain("OpenHands auth dir env OPENHANDS_AUTH_DIR");
 

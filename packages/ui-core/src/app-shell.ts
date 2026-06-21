@@ -1316,7 +1316,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       ? active.subscriptionCredential?.authDirectoryEnv
       : active.apiKeyRef;
     const credentialSummary = modelCredentialSummary(active);
-    const credentialLabel = active.mode === "subscription" ? "OpenHands Auth Directory Env" : "API Key Secret";
+    const credentialLabel = modelCredentialLabel(active);
     const credentialInputType = active.mode === "subscription" ? "text" : "password";
     const modelProfileError = this.state.modelProfileError
       ? `<div class="os-model-error" role="alert" data-testid="model-profile-error">${escapeHtml(this.state.modelProfileError)}</div>`
@@ -2710,6 +2710,15 @@ function modelCredentialSummary(profile: ModelConfigurationProfile): string {
     : "OpenHands auth dir env not configured";
 
   return codexReady ? `${codexReady}; ${openhandsReady}` : openhandsReady;
+}
+
+function modelCredentialLabel(profile: ModelConfigurationProfile): string {
+  if (profile.mode === "api_key") {
+    return "API Key Secret";
+  }
+  return profile.harnesses.includes("codex_app_server")
+    ? "OpenHands Auth Directory Env (OpenHands only)"
+    : "OpenHands Auth Directory Env";
 }
 
 function upsertModelProfile(
