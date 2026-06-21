@@ -1067,6 +1067,7 @@ async fn try_run_codex_stdio_issue(
     )));
     let mut reader = BufReader::new(stdout).lines();
     let mut session = adapter.session();
+    let mut pending_terminal = None;
 
     let initialize = session.initialize();
     stdin
@@ -1089,6 +1090,7 @@ async fn try_run_codex_stdio_issue(
         &run.worker_id.to_string(),
         issue,
         run,
+        &mut pending_terminal,
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
@@ -1132,6 +1134,7 @@ async fn try_run_codex_stdio_issue(
         &run.worker_id.to_string(),
         issue,
         run,
+        &mut pending_terminal,
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
@@ -1149,6 +1152,7 @@ async fn try_run_codex_stdio_issue(
         &run.worker_id.to_string(),
         issue,
         run,
+        &mut pending_terminal,
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
@@ -1268,6 +1272,7 @@ async fn read_response_line(
     worker_id: &str,
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
+    pending_terminal: &mut Option<CodexTerminalOutcome>,
 ) -> Result<serde_json::Value, String> {
     loop {
         let line = timeout(Duration::from_secs(30), reader.next_line())
@@ -1281,7 +1286,12 @@ async fn read_response_line(
             reject_codex_json_rpc_error(request_id, &value)?;
             return Ok(value);
         }
-        emit_codex_notification(updates_tx, worker_id, issue, run, value);
+        if let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value)
+            && pending_terminal.is_none()
+            && let Some(outcome) = codex_terminal_outcome(&event)
+        {
+            *pending_terminal = Some(outcome);
+        }
     }
 }
 
@@ -1306,7 +1316,12 @@ async fn read_until_codex_terminal(
     worker_id: &str,
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
+    pending_terminal: &mut Option<CodexTerminalOutcome>,
 ) -> Result<CodexTerminalOutcome, String> {
+    if let Some(outcome) = pending_terminal.take() {
+        return Ok(outcome);
+    }
+
     loop {
         let line = timeout(Duration::from_secs(300), reader.next_line())
             .await
@@ -1428,7 +1443,7 @@ fn codex_conversation_metadata(
         websocket_query_param_name: None,
         fresh_conversation: true,
         runtime_contract_version: Some("codex-app-server-json-rpc-v2".into()),
-        stream_state: RuntimeStreamState::Ready,
+        stream_state: RuntimeStreamState::Closed,
         last_event_id: None,
         last_event_kind: None,
         last_event_at: None,
@@ -1859,6 +1874,7 @@ mod tests {
         match launch {
             LaunchReport::Conversation(conversation) => {
                 assert_eq!(conversation.conversation_id.as_str(), "fake-thread");
+                assert_eq!(conversation.stream_state, RuntimeStreamState::Closed);
             }
             LaunchReport::Failed(error) => panic!("fake child should launch: {error}"),
         }
@@ -1881,6 +1897,81 @@ mod tests {
                 )
             }),
             "terminal Codex notification should be forwarded as a runtime event"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_keeps_terminal_notification_seen_before_start_response() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-out-of-order", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-out-of-order").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex-out-of-order.log");
+        let fake_codex = tempdir.path().join("fake-codex-out-of-order");
+        write_fake_codex_terminal_before_response_child(&fake_codex, &log_path);
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &updates_tx,
+            &mut launch_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        let launch = launch_rx.await.expect("launch report should still be sent");
+        assert!(matches!(
+            launch,
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        assert!(
+            std::iter::from_fn(|| updates_rx.try_recv().ok()).any(|update| {
+                matches!(
+                    update,
+                    WorkerUpdate::RuntimeEvent {
+                        event_kind: Some(kind),
+                        ..
+                    } if kind == "codex.turn/completed"
+                )
+            }),
+            "out-of-order terminal notification should still be forwarded"
         );
     }
 
@@ -2497,6 +2588,34 @@ while IFS= read -r line; do
     *'"method":"thread/start"'*)
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"threadId":"fake-thread"}}}}\n' "$id"
       printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
+      ;;
+  esac
+done
+"#,
+                log = log_path.display()
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_terminal_before_response_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"threadId":"fake-thread"}}}}\n' "$id"
       ;;
   esac
 done
