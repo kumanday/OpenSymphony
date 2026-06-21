@@ -2,9 +2,10 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    env,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use crate::opensymphony_codex::{
@@ -57,6 +58,7 @@ const CODEX_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
 const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
+const CODEX_SCHEMA_STDERR_PREVIEW_CHARS: usize = 500;
 
 #[derive(Debug, Error)]
 pub(super) enum CliWorkspaceError {
@@ -664,7 +666,7 @@ impl RuntimeWorkerBackend {
             runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
                 .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
             workpad_comment_source,
-            codex_bin: std::env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
+            codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
@@ -1260,14 +1262,66 @@ async fn cached_installed_codex_schema_validator(
     cache: &CodexSchemaValidatorCache,
     codex_bin: &str,
 ) -> Result<CodexAppServerSchemaValidator, String> {
+    let key = codex_schema_cache_key(codex_bin).await;
     let mut validators = cache.lock().await;
-    if let Some(validator) = validators.get(codex_bin).cloned() {
+    if let Some(validator) = validators.get(&key).cloned() {
         return Ok(validator);
     }
 
     let validator = load_installed_codex_schema_validator(codex_bin).await?;
-    validators.insert(codex_bin.to_string(), validator.clone());
+    validators.insert(key, validator.clone());
     Ok(validator)
+}
+
+async fn codex_schema_cache_key(codex_bin: &str) -> String {
+    let Some(fingerprint) = codex_binary_fingerprint(codex_bin).await else {
+        return format!("{codex_bin}|unfingerprinted");
+    };
+    format!("{codex_bin}|{fingerprint}")
+}
+
+async fn codex_binary_fingerprint(codex_bin: &str) -> Option<String> {
+    let executable = resolve_executable_path(codex_bin)?;
+    let metadata = fs::metadata(&executable).await.ok()?;
+    let canonical = fs::canonicalize(&executable).await.unwrap_or(executable);
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    Some(format!(
+        "{}:{}:{modified}",
+        canonical.display(),
+        metadata.len()
+    ))
+}
+
+fn resolve_executable_path(program: &str) -> Option<PathBuf> {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains('/') || program.contains('\\') {
+        return Some(path.to_path_buf());
+    }
+
+    for dir in env::split_paths(&env::var_os("PATH")?) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let Some(pathext) = env::var_os("PATHEXT") else {
+                continue;
+            };
+            for extension in env::split_paths(&pathext) {
+                let candidate = dir.join(format!("{program}{}", extension.to_string_lossy()));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
 }
 
 async fn load_installed_codex_schema_validator(
@@ -1289,10 +1343,14 @@ async fn load_installed_codex_schema_validator(
             )
         })?;
     if !output.status.success() {
+        let stderr_preview = codex_schema_stderr_preview(&output.stderr)
+            .map(|preview| format!(" stderr preview: {preview}."))
+            .unwrap_or_default();
         return Err(format!(
-            "Codex app-server JSON schema generation failed with status {} and {} stderr byte(s). Update Codex to a compatible app-server build.",
+            "Codex app-server JSON schema generation failed with status {} and {} stderr byte(s).{} Update Codex to a compatible app-server build.",
             output.status,
-            output.stderr.len()
+            output.stderr.len(),
+            stderr_preview
         ));
     }
     let schema_path = schema_dir
@@ -1304,6 +1362,26 @@ async fn load_installed_codex_schema_validator(
             schema_path.display()
         )
     })
+}
+
+fn codex_schema_stderr_preview(stderr: &[u8]) -> Option<String> {
+    if stderr.is_empty() {
+        return None;
+    }
+    let decoded = String::from_utf8_lossy(stderr);
+    let mut preview = decoded
+        .chars()
+        .take(CODEX_SCHEMA_STDERR_PREVIEW_CHARS)
+        .map(|character| match character {
+            '\n' | '\t' => character,
+            character if character.is_control() => ' ',
+            character => character,
+        })
+        .collect::<String>();
+    if decoded.chars().count() > CODEX_SCHEMA_STDERR_PREVIEW_CHARS {
+        preview.push_str("...");
+    }
+    Some(format!("{preview:?}"))
 }
 
 async fn write_codex_request(
@@ -1452,7 +1530,7 @@ async fn read_response_line(
             .ok_or_else(|| format!("Codex stdout closed before response id {request_id}"))?;
         let value: serde_json::Value = serde_json::from_str(&line)
             .map_err(|source| format!("invalid Codex JSON: {source}"))?;
-        if value.get("id").and_then(serde_json::Value::as_u64) == Some(request_id) {
+        if codex_response_id_matches(&value, request_id) {
             reject_codex_json_rpc_error(request_id, &value)?;
             return Ok(value);
         }
@@ -1463,6 +1541,13 @@ async fn read_response_line(
             *pending_terminal = Some(outcome);
         }
     }
+}
+
+fn codex_response_id_matches(value: &serde_json::Value, request_id: u64) -> bool {
+    let Some(id) = value.get("id") else {
+        return false;
+    };
+    id.as_u64() == Some(request_id) || id.as_str().is_some_and(|id| id == request_id.to_string())
 }
 
 fn reject_codex_json_rpc_error(request_id: u64, value: &serde_json::Value) -> Result<(), String> {
@@ -1924,6 +2009,42 @@ mod tests {
     }
 
     #[test]
+    fn codex_response_id_matches_numbers_and_equivalent_strings() {
+        assert!(codex_response_id_matches(
+            &serde_json::json!({ "id": 7 }),
+            7
+        ));
+        assert!(codex_response_id_matches(
+            &serde_json::json!({ "id": "7" }),
+            7
+        ));
+        assert!(!codex_response_id_matches(
+            &serde_json::json!({ "id": "07" }),
+            7
+        ));
+        assert!(!codex_response_id_matches(
+            &serde_json::json!({ "id": "turn-7" }),
+            7
+        ));
+    }
+
+    #[test]
+    fn codex_schema_stderr_preview_is_bounded_and_sanitized() {
+        let stderr = format!(
+            "schema failed\u{0000}{}",
+            "x".repeat(CODEX_SCHEMA_STDERR_PREVIEW_CHARS + 20)
+        );
+
+        let preview = codex_schema_stderr_preview(stderr.as_bytes())
+            .expect("non-empty stderr should produce preview");
+
+        assert!(preview.contains("schema failed"));
+        assert!(preview.contains("..."));
+        assert!(!preview.contains('\u{0000}'));
+        assert!(preview.len() < CODEX_SCHEMA_STDERR_PREVIEW_CHARS + 80);
+    }
+
+    #[test]
     fn codex_start_response_requires_real_thread_id() {
         let thread_id = codex_thread_id_from_start_response(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -2373,7 +2494,36 @@ mod tests {
             1,
             "schema generation should run once per Codex binary path"
         );
-        assert!(cache.lock().await.contains_key(codex_bin));
+        assert_eq!(cache.lock().await.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_schema_validator_cache_invalidates_when_binary_changes() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let fake_codex = tempdir.path().join("fake-codex-schema-changing");
+        let count_path = tempdir.path().join("schema-count-changing.log");
+        write_fake_codex_schema_generator_with_marker(&fake_codex, &count_path, "first");
+        let cache = empty_codex_schema_cache();
+        let codex_bin = fake_codex
+            .to_str()
+            .expect("fake codex schema path should be utf-8");
+
+        cached_installed_codex_schema_validator(&cache, codex_bin)
+            .await
+            .expect("first schema load should compile");
+        write_fake_codex_schema_generator_with_marker(&fake_codex, &count_path, "second marker");
+        cached_installed_codex_schema_validator(&cache, codex_bin)
+            .await
+            .expect("changed binary should force a second schema load");
+
+        let generations =
+            fs::read_to_string(&count_path).expect("schema generation count should exist");
+        assert_eq!(
+            generations.lines().count(),
+            2,
+            "schema generation should run again after the Codex binary changes"
+        );
     }
 
     #[tokio::test]
@@ -3053,10 +3203,16 @@ done
 
     #[cfg(unix)]
     fn write_fake_codex_schema_generator(path: &Path, count_path: &Path) {
+        write_fake_codex_schema_generator_with_marker(path, count_path, "default");
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_schema_generator_with_marker(path: &Path, count_path: &Path, marker: &str) {
         write_executable(
             path,
             &format!(
                 r#"#!/usr/bin/env bash
+# {marker}
 set -euo pipefail
 if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
   printf 'generated\n' >> "{count}"
@@ -3071,6 +3227,7 @@ echo "unexpected fake codex invocation: $*" >&2
 exit 64
 "#,
                 count = count_path.display(),
+                marker = marker,
                 schema = FAKE_CODEX_SCHEMA
             ),
         );
