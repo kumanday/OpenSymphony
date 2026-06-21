@@ -34,6 +34,12 @@ async fn codex_live_stdio_initializes_when_requested() {
     let initialize = session.initialize();
     let line = CodexJsonRpcSession::encode_line(&initialize).expect("encode initialize");
     let mut stdin = child.stdin.take().expect("child stdin");
+    let mut stderr = child.stderr.take().expect("child stderr");
+    let stderr_task = tokio::spawn(async move {
+        let mut output = String::new();
+        let _ = tokio::io::AsyncReadExt::read_to_string(&mut stderr, &mut output).await;
+        output
+    });
     tokio::io::AsyncWriteExt::write_all(&mut stdin, line.as_bytes())
         .await
         .expect("write initialize");
@@ -49,13 +55,16 @@ async fn codex_live_stdio_initializes_when_requested() {
     .expect("initialize response timeout")
     .expect("read initialize response");
 
+    drop(stdin);
     child.kill().await.ok();
-    let response: serde_json::Value =
-        serde_json::from_str(response.trim()).expect("initialize response is json");
+    let status = child.wait().await.expect("wait for codex child");
+    let stderr = stderr_task.await.expect("stderr reader joins");
+    let response: serde_json::Value = serde_json::from_str(response.trim())
+        .unwrap_or_else(|error| panic!("initialize response is json: {error}; stderr={stderr}"));
     assert_eq!(response["id"], initialize.id);
     assert!(
         response.get("result").is_some(),
-        "initialize should return a JSON-RPC result: {response}"
+        "initialize should return a JSON-RPC result: {response}; status={status}; stderr={stderr}"
     );
 }
 
@@ -172,8 +181,16 @@ fn codex_adapter_exposes_supported_local_harness_capabilities() {
     assert!(capabilities.actions.cancel);
     assert!(capabilities.actions.approve);
     assert!(capabilities.approvals.tool_approval);
+    assert!(!capabilities.history.fetch_history);
+    assert!(!capabilities.history.reconnect_and_replay);
     assert!(capabilities.history.preserve_unknown_events);
     assert!(!capabilities.transport.remote);
+    assert!(
+        capabilities
+            .feature_gaps
+            .iter()
+            .any(|gap| gap.contains("history fetch"))
+    );
 }
 
 #[test]

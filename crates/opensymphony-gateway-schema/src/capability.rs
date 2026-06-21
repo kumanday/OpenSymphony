@@ -213,7 +213,7 @@ impl HarnessCapability {
             event_streams: HarnessEventStreamCapability {
                 runtime_events: true,
                 terminal_frames: true,
-                replay_from_cursor: true,
+                replay_from_cursor: false,
                 raw_payload_refs: true,
                 delivery_modes: vec!["json_rpc_notifications".into()],
             },
@@ -250,9 +250,9 @@ impl HarnessCapability {
                 resume: false,
             },
             history: HarnessHistoryCapability {
-                fetch_history: true,
+                fetch_history: false,
                 reconcile_after_ready: true,
-                reconnect_and_replay: true,
+                reconnect_and_replay: false,
                 preserve_unknown_events: true,
             },
             notes: vec![
@@ -261,6 +261,8 @@ impl HarnessCapability {
             ],
             feature_gaps: vec![
                 "`opensymphony run` dispatch still defaults to OpenHands until cross-harness runtime routing is wired."
+                    .into(),
+                "Codex history fetch and reconnect replay cursors are not implemented for the local stdio adapter."
                     .into(),
                 "Pause/resume semantics need protocol confirmation before being advertised as available."
                     .into(),
@@ -273,17 +275,79 @@ impl HarnessCapability {
     }
 
     pub fn codex_app_server_future() -> Self {
-        let mut capability = Self::codex_app_server_local();
-        capability.available = false;
-        capability.runtime_contract_version = None;
-        capability.transport.modes = vec!["stdio".into(), "websocket_experimental".into()];
-        capability.transport.remote = true;
-        capability.notes = vec!["Future hosted/remote adapter shape for Codex app-server.".into()];
-        capability.feature_gaps.insert(
-            0,
-            "Production hosted or remote Codex routing is not implemented.".into(),
-        );
-        capability
+        Self {
+            kind: "codex_app_server".into(),
+            display_name: "Codex app-server".into(),
+            available: false,
+            adapter_contract_version: "harness-adapter-v1".into(),
+            runtime_contract_version: None,
+            actions: HarnessActionCapability {
+                start_run: true,
+                send_user_message: true,
+                retry: true,
+                cancel: true,
+                pause: false,
+                resume: false,
+                approve: true,
+                reject: true,
+                comment: true,
+            },
+            event_streams: HarnessEventStreamCapability {
+                runtime_events: true,
+                terminal_frames: true,
+                replay_from_cursor: false,
+                raw_payload_refs: true,
+                delivery_modes: vec![
+                    "json_rpc_notifications".into(),
+                    "websocket_experimental".into(),
+                ],
+            },
+            approvals: HarnessApprovalCapability {
+                tool_approval: true,
+                human_decision: true,
+                policy_metadata: true,
+            },
+            model_settings: HarnessModelSettingsCapability {
+                api_compatible_settings: true,
+                subscription_credentials: true,
+                per_run_overrides: true,
+                credential_reference_kinds: vec![
+                    "model_settings_ref".into(),
+                    "inherited_subscription_login".into(),
+                    "codex_cli_login".into(),
+                    "capability_token".into(),
+                    "signed_bearer".into(),
+                ],
+            },
+            transport: HarnessTransportCapability {
+                protocol: "json_rpc_2_0".into(),
+                modes: vec!["stdio".into(), "websocket_experimental".into()],
+                local: true,
+                remote: true,
+            },
+            cancellation: HarnessCancellationCapability {
+                cancel_run: true,
+                force_stop: false,
+                acknowledges_cancel: true,
+            },
+            pause_resume: HarnessPauseResumeCapability {
+                pause: false,
+                resume: false,
+            },
+            history: HarnessHistoryCapability {
+                fetch_history: false,
+                reconcile_after_ready: false,
+                reconnect_and_replay: false,
+                preserve_unknown_events: true,
+            },
+            notes: vec!["Future hosted/remote adapter shape for Codex app-server.".into()],
+            feature_gaps: vec![
+                "Production hosted or remote Codex routing is not implemented.".into(),
+                "Codex history fetch and reconnect replay cursors are not implemented.".into(),
+                "Pause/resume semantics need protocol confirmation before being advertised as available."
+                    .into(),
+            ],
+        }
     }
 
     pub fn rust_native_future() -> Self {

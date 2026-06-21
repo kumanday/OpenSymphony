@@ -722,10 +722,8 @@ fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
         .map(str::to_ascii_lowercase)
         .next();
     match decision.as_deref() {
-        Some("approve" | "approved" | "grant" | "granted" | "allow" | "allowed") => {
-            EventKind::ApprovalGranted
-        }
-        Some("reject" | "rejected" | "deny" | "denied" | "disallow") => EventKind::ApprovalDenied,
+        Some("approved") => EventKind::ApprovalGranted,
+        Some("rejected") => EventKind::ApprovalDenied,
         _ => EventKind::HarnessEventNormalized {
             source_kind: event.method.clone(),
         },

@@ -366,7 +366,8 @@ Remaining follow-up work:
 - scheduler/runtime dispatch selection for `opensymphony run` so a workflow can
   route issue execution to the Codex worker backend,
 - a checked-in generated schema artifact policy for future Codex protocol bumps,
-- replay/history semantics beyond the local stdio request lifecycle,
+- replay/history semantics beyond the local stdio request lifecycle (capability
+  metadata currently marks history fetch and reconnect replay unavailable),
 - security review of non-loopback WebSocket exposure with capability-token and
   signed-bearer modes,
 - hosted Codex worker pools and hosted credential broker integration.
