@@ -384,7 +384,12 @@ fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
     }))
     .expect("cancel notification normalizes");
     let canceled_record = normalized_event_to_journal_record("COE-476", 10, &canceled);
-    assert_eq!(canceled_record.kind, EventKind::RunCancelled);
+    assert_eq!(
+        canceled_record.kind,
+        EventKind::HarnessEventNormalized {
+            source_kind: "turn/cancelled".into()
+        }
+    );
 }
 
 #[test]
@@ -454,18 +459,37 @@ fn codex_approval_completed_maps_decisions_without_guessing() {
         }
     );
 
-    let result_field_only = normalize_server_notification(json!({
+    let alias = normalize_server_notification(json!({
         "jsonrpc": "2.0",
         "method": "approval/completed",
         "params": {
             "threadId": "thread-1",
             "turnId": "turn-1",
             "itemId": "approval-5",
+            "decision": "approved"
+        }
+    }))
+    .expect("alias completion normalizes");
+    let alias_record = normalized_event_to_journal_record("COE-476", 16, &alias);
+    assert_eq!(
+        alias_record.kind,
+        EventKind::HarnessEventNormalized {
+            source_kind: "approval/completed".into()
+        }
+    );
+
+    let result_field_only = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "approval/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-6",
             "result": "approve"
         }
     }))
     .expect("completion with non-contract result field normalizes");
-    let result_field_record = normalized_event_to_journal_record("COE-476", 16, &result_field_only);
+    let result_field_record = normalized_event_to_journal_record("COE-476", 17, &result_field_only);
     assert_eq!(
         result_field_record.kind,
         EventKind::HarnessEventNormalized {
@@ -495,7 +519,7 @@ fn codex_thread_status_changed_uses_only_status_field() {
         }
     }))
     .expect("thread status change normalizes");
-    let completed_record = normalized_event_to_journal_record("COE-476", 17, &completed);
+    let completed_record = normalized_event_to_journal_record("COE-476", 18, &completed);
     assert_eq!(completed_record.kind, EventKind::RunCompleted);
 
     let state_field_only = normalize_server_notification(json!({
@@ -507,7 +531,7 @@ fn codex_thread_status_changed_uses_only_status_field() {
         }
     }))
     .expect("thread status with non-contract state field normalizes");
-    let state_field_record = normalized_event_to_journal_record("COE-476", 18, &state_field_only);
+    let state_field_record = normalized_event_to_journal_record("COE-476", 20, &state_field_only);
     assert_eq!(
         state_field_record.kind,
         EventKind::HarnessEventNormalized {

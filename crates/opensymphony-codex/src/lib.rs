@@ -652,7 +652,9 @@ fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventK
             ),
         ),
         NormalizedCodexEventKind::TurnCancelled => (
-            EventKind::RunCancelled,
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
             format!(
                 "Codex turn cancelled{}",
                 id_suffix(event.turn_id.as_deref())
@@ -715,8 +717,8 @@ fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase);
     match decision.as_deref() {
-        Some("approve" | "approved") => EventKind::ApprovalGranted,
-        Some("reject" | "rejected") => EventKind::ApprovalDenied,
+        Some("approve") => EventKind::ApprovalGranted,
+        Some("reject") => EventKind::ApprovalDenied,
         _ => EventKind::HarnessEventNormalized {
             source_kind: event.method.clone(),
         },
