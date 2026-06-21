@@ -17,6 +17,7 @@ import type {
   ChangedFileEntry,
   DashboardSnapshot,
   FileDiffPage,
+  GatewayEnvelope,
   GatewayCapabilities,
   ModelConfigurationProfile,
   RunDetail,
@@ -325,6 +326,67 @@ function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?:
   });
 }
 
+class LiveEventTransport extends MockGatewayTransport {
+  snapshotReads = 0;
+  private queuedEvents: Array<GatewayEnvelope | null> = [];
+  private resolveNext: ((event: GatewayEnvelope | null) => void) | null = null;
+  private liveTaskGraph: TaskGraphSnapshot | null = null;
+  private nextSnapshotError: Error | null = null;
+
+  emit(event: GatewayEnvelope): void {
+    this.push(event);
+  }
+
+  failNextSnapshot(message: string): void {
+    this.nextSnapshotError = new Error(message);
+  }
+
+  override async snapshot(): Promise<DashboardSnapshot> {
+    this.snapshotReads += 1;
+    if (this.nextSnapshotError) {
+      const error = this.nextSnapshotError;
+      this.nextSnapshotError = null;
+      throw error;
+    }
+    return super.snapshot();
+  }
+
+  setTaskGraph(snapshot: TaskGraphSnapshot): void {
+    this.liveTaskGraph = snapshot;
+  }
+
+  override async taskGraph(projectId: string): Promise<TaskGraphSnapshot> {
+    return this.liveTaskGraph ?? super.taskGraph(projectId);
+  }
+
+  override async *events(): AsyncIterable<GatewayEnvelope> {
+    while (true) {
+      const event = this.queuedEvents.length > 0
+        ? this.queuedEvents.shift()!
+        : await new Promise<GatewayEnvelope | null>((resolve) => {
+            this.resolveNext = resolve;
+          });
+      if (!event) return;
+      yield event;
+    }
+  }
+
+  override async close(): Promise<void> {
+    this.push(null);
+    await super.close();
+  }
+
+  private push(event: GatewayEnvelope | null): void {
+    if (this.resolveNext) {
+      const resolve = this.resolveNext;
+      this.resolveNext = null;
+      resolve(event);
+      return;
+    }
+    this.queuedEvents.push(event);
+  }
+}
+
 function buildModelProfileController(
   initial = defaultModelProfiles(),
 ): ModelProfileController & { saved: ModelConfigurationProfile[] } {
@@ -553,6 +615,179 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
 
     await handle.destroy();
+  });
+
+  it("refreshes selected run evidence from live gateway events without remounting", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+      runFiles: [
+        { runId: "COE-449", files: changedFiles },
+      ],
+      runDiffs: [
+        { runId: "COE-449", filePath: "src/config.ts", diff: fileDiff },
+      ],
+      runEvents: [
+        runEvents,
+      ],
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+    });
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    try {
+      await flushUntil(() => root.textContent?.includes("src/config.ts") ?? false);
+
+      transport.failNextSnapshot("transient snapshot failure");
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 1, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.completed",
+        emitted_at: "2025-09-01T00:00:30Z",
+        payload: { run_id: "COE-449" },
+      });
+      await flushUntil(() =>
+        warnSpy.mock.calls.some((call) =>
+          call[0] === "[opensymphony] live gateway refresh failed; event stream remains active"
+          && (call[1] as { error?: string }).error === "transient snapshot failure"
+        ),
+      );
+
+      const nextFiles: ChangedFileEntry[] = [
+        {
+          path: "src/live-update.ts",
+          change_kind: "modified",
+          lines_added: 4,
+          lines_removed: 1,
+        },
+      ];
+      transport.setRunFiles("COE-449", nextFiles);
+      transport.setRunDiff("COE-449", "src/live-update.ts", {
+        ...fileDiff,
+        run_id: "COE-449",
+        file_path: "src/live-update.ts",
+      });
+      transport.updateRunDetail({
+        ...runDetail,
+        status: "released",
+        release_reason: "completed",
+      });
+      transport.setTaskGraph({
+        ...taskGraph,
+        nodes: taskGraph.nodes.map((node) =>
+          node.node_id === "desktop-alpha"
+            ? { ...node, state: "Done", state_category: "done" }
+            : node,
+        ),
+      });
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 2, partition: "events" },
+        entity_ref: { kind: "run", id: "COE-449" },
+        event_kind: "run.completed",
+        emitted_at: "2025-09-01T00:01:00Z",
+        payload: { run_id: "COE-449" },
+      });
+
+      await flushUntil(() => root.textContent?.includes("src/live-update.ts") ?? false);
+
+      expect(root.textContent).not.toContain("src/config.ts");
+      expect(root.querySelector(".os-pill")?.textContent).toBe("released");
+      expect(root.querySelector("[data-node-id='desktop-alpha']")?.textContent).toContain("Done");
+      expect(root.querySelector("[data-testid='changed-file-item']")?.getAttribute("data-path")).toBe("src/live-update.ts");
+    } finally {
+      warnSpy.mockRestore();
+      await handle.destroy();
+    }
+  });
+
+  it("ignores unknown live gateway events without refreshing the shell", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const transport = new LiveEventTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [runDetail],
+      runFiles: [{ runId: "COE-449", files: changedFiles }],
+      runDiffs: [{ runId: "COE-449", filePath: "src/config.ts", diff: fileDiff }],
+      runEvents: [runEvents],
+    });
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport,
+    });
+
+    try {
+      await flushUntil(() => root.textContent?.includes("src/config.ts") ?? false);
+      const readsAfterLoad = transport.snapshotReads;
+
+      transport.emit({
+        schema_version: schemaVersionV1(),
+        cursor: { sequence: 3, partition: "events" },
+        entity_ref: { kind: "unknown", id: "heartbeat" },
+        event_kind: "gateway.heartbeat",
+        emitted_at: "2025-09-01T00:02:00Z",
+      });
+      await flushAsync();
+
+      expect(transport.snapshotReads).toBe(readsAfterLoad);
+    } finally {
+      await handle.destroy();
+    }
+  });
+
+  it("keeps the one-shot shell load when the event stream is unavailable", async () => {
+    class UnavailableEventTransport extends MockGatewayTransport {
+      override async *events(): AsyncIterable<GatewayEnvelope> {
+        throw new Error("stream unavailable");
+      }
+    }
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: new UnavailableEventTransport({
+        baseUri: "http://127.0.0.1:2468",
+        health: capabilities,
+        snapshot: dashboard,
+        taskGraph,
+        runDetails: [runDetail],
+        runFiles: [{ runId: "COE-449", files: changedFiles }],
+        runDiffs: [{ runId: "COE-449", filePath: "src/config.ts", diff: fileDiff }],
+        runEvents: [runEvents],
+      }),
+    });
+
+    try {
+      await flushUntil(() => root.textContent?.includes("src/config.ts") ?? false);
+
+      expect(root.querySelector(".os-status-connected")).not.toBeNull();
+      expect(root.querySelector("[data-testid='changed-file-item']")?.getAttribute("data-path")).toBe("src/config.ts");
+      expect(warnSpy).toHaveBeenCalledWith(
+        "[opensymphony] gateway event stream unavailable; using one-shot refresh fallback",
+        expect.objectContaining({
+          baseUri: "http://127.0.0.1:2468",
+          error: "stream unavailable",
+        }),
+      );
+    } finally {
+      warnSpy.mockRestore();
+      await handle.destroy();
+    }
   });
 
   it("edits an API-compatible model profile and shows a redacted credential reference", async () => {
@@ -1074,11 +1309,41 @@ describe("OpenSymphonyApp mount", () => {
   });
 
   it("routes a saved profile through ProfileController and refreshes the active gateway URL", async () => {
+    class CloseCountingTransport extends MockGatewayTransport {
+      closeCalls = 0;
+
+      override async close(): Promise<void> {
+        this.closeCalls += 1;
+        await super.close();
+      }
+    }
     const root = document.createElement("div");
     document.body.appendChild(root);
 
     const newUrl = "http://127.0.0.1:9001";
     let lastConnect: string | null = null;
+    const initialTransport = new CloseCountingTransport({
+      baseUri: "http://127.0.0.1:2468",
+      health: capabilities,
+      snapshot: dashboard,
+      taskGraph,
+      runDetails: [
+        runDetail,
+        { ...runDetail, run_id: "desktop-alpha", issue_id: "desktop-alpha" },
+      ],
+      runFiles: [
+        { runId: "COE-449", files: changedFiles },
+        { runId: "desktop-alpha", files: changedFiles },
+      ],
+      runDiffs: [
+        { runId: "COE-449", filePath: "src/config.ts", diff: fileDiff },
+        { runId: "desktop-alpha", filePath: "src/config.ts", diff: { ...fileDiff, run_id: "desktop-alpha" } },
+      ],
+      runEvents: [
+        runEvents,
+        { ...runEvents, run_id: "desktop-alpha" },
+      ],
+    });
     const controller: ProfileController = {
       async listProfiles(): Promise<ConnectionProfile[]> {
         return [];
@@ -1113,7 +1378,7 @@ describe("OpenSymphonyApp mount", () => {
     const handle = renderOpenSymphonyApp({
       root,
       mode: "desktop",
-      transport: buildTransport(),
+      transport: initialTransport,
       profileController: controller,
       onGatewayUrlChanged: async (url) => {
         lastConnect = url;
@@ -1133,6 +1398,7 @@ describe("OpenSymphonyApp mount", () => {
 
     await flushUntil(() => lastConnect === newUrl);
     expect(lastConnect).toBe(newUrl);
+    expect(initialTransport.closeCalls).toBe(1);
     expect(save.disabled).toBe(false);
 
     await handle.destroy();

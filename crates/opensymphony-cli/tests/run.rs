@@ -125,6 +125,8 @@ async fn run_routing_dry_run_selects_codex_and_emits_route_decision() {
   harness: codex_app_server
   model: gpt-5-codex-test
   model_profile: codex-chatgpt-local-keychain
+polling:
+  interval_ms: 50
 "#,
     );
     write_memory_config(project.path());
@@ -203,6 +205,9 @@ fn spawn_run_child(project_root: &std::path::Path, extra_args: &[&str]) -> Child
         .current_dir(project_root)
         .env("LINEAR_API_KEY", "test-linear-key")
         .env("OPENHANDS_API_KEY", "test-openhands-key")
+        .env_remove("OPENSYMPHONY_HARNESS")
+        .env_remove("OPENSYMPHONY_MODEL")
+        .env_remove("OPENSYMPHONY_MODEL_PROFILE")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
