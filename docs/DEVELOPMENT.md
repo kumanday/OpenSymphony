@@ -90,6 +90,11 @@ the entry falls back to a loopback HTTP transport against
 `http://127.0.0.1:2468` and renders the same `OpenSymphony Desktop`
 shell.
 
+The shared shell subscribes to the gateway event stream when the active
+transport exposes it. Desktop local mode keeps using the loopback HTTP/SSE
+transport for live dashboard, task graph, and Run Detail refreshes; the
+unimplemented Tauri channel stream remains a future optimization.
+
 ### Verification artifacts
 
 Every release-blocking check below is wired to a single command and is

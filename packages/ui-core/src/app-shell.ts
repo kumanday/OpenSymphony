@@ -5,6 +5,7 @@ import type {
   ConnectionProfile,
   DashboardSnapshot,
   FileDiffPage,
+  GatewayEnvelope,
   GatewayCapabilities,
   ApprovalRequest,
   RunAction,
@@ -110,6 +111,7 @@ export interface GatewayReader {
   runDiffs?(runId: string, filePath?: string): Promise<FileDiffPage>;
   runValidation?(runId: string): Promise<RunValidationSummary>;
   runApprovals?(runId: string): Promise<ApprovalRequest[]>;
+  events?(fromCursor?: { sequence: number; partition: string }): AsyncIterable<GatewayEnvelope>;
   /** Optional action dispatch for gateway-mediated mutations. */
   dispatchAction?(action: ActionDispatch): Promise<ActionReceipt>;
   close(): Promise<void>;
@@ -232,6 +234,13 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   private transport: GatewayReader;
   private state: AppState;
   private destroyed = false;
+  private eventSubscription: {
+    active: boolean;
+    transport: GatewayReader;
+    iterator?: AsyncIterator<GatewayEnvelope>;
+  } | null = null;
+  private liveRefreshInFlight = false;
+  private liveRefreshQueued = false;
 
   constructor(options: OpenSymphonyAppOptions) {
     this.options = options;
@@ -285,7 +294,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.loadPlanningWorkspace("opensymphony-local");
   }
 
-  private async loadRunDetails(runId: string): Promise<void> {
+  private async loadRunDetails(runId: string, preserveSelection = false): Promise<void> {
+    const previousDiffPath = preserveSelection ? this.state.selectedDiffPath : null;
+    const previousEvidenceView = preserveSelection ? this.state.evidenceView : "diff";
     this.state.runFiles = null;
     this.state.runDiff = null;
     this.state.runEvents = null;
@@ -293,7 +304,6 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     this.state.runValidation = null;
     this.state.runApprovals = null;
     this.state.selectedDiffPath = null;
-    this.state.evidenceView = "diff";
     try {
       this.state.runFiles = typeof this.transport.runFiles === "function"
         ? await this.transport.runFiles(runId)
@@ -302,7 +312,10 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.runFiles = [];
       this.state.connectionMessage = `Changed files unavailable: ${errorMessage(error)}`;
     }
-    this.state.selectedDiffPath = this.state.runFiles[0]?.path ?? null;
+    this.state.selectedDiffPath = previousDiffPath && this.state.runFiles.some((file) => file.path === previousDiffPath)
+      ? previousDiffPath
+      : this.state.runFiles[0]?.path ?? null;
+    this.state.evidenceView = previousEvidenceView;
     try {
       this.state.runDiff = this.state.selectedDiffPath
         && typeof this.transport.runDiffs === "function"
@@ -354,6 +367,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
 
   async destroy(): Promise<void> {
     this.destroyed = true;
+    this.stopEventSubscription();
     await this.transport.close().catch(() => undefined);
     this.options.root.replaceChildren();
   }
@@ -373,6 +387,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         && this.options.onGatewayUrlChanged
         && active.gatewayUrl !== this.transport.baseUri
       ) {
+        this.stopEventSubscription();
+        await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
       }
     } catch (error) {
@@ -432,6 +448,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.connectionMessage = `Connected to ${this.transport.baseUri || "same-origin gateway"}`;
       this.state.selectedProjectId = snapshot.projects[0]?.project_id ?? "default";
       await this.loadTaskGraph(this.state.selectedProjectId);
+      this.startEventSubscription();
       this.loadPlanningWorkspace(this.state.selectedProjectId);
       this.state.planningWorkspace = {
         ...this.state.planningWorkspace,
@@ -549,6 +566,139 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     }
   }
 
+  private startEventSubscription(): void {
+    if (this.eventSubscription?.transport === this.transport || typeof this.transport.events !== "function") {
+      return;
+    }
+    this.stopEventSubscription();
+    const subscription = { active: true, transport: this.transport } as {
+      active: boolean;
+      transport: GatewayReader;
+      iterator?: AsyncIterator<GatewayEnvelope>;
+    };
+    this.eventSubscription = subscription;
+    void this.consumeGatewayEvents(subscription);
+  }
+
+  private stopEventSubscription(): void {
+    const subscription = this.eventSubscription;
+    if (!subscription) return;
+    subscription.active = false;
+    this.eventSubscription = null;
+    const closed = subscription.iterator?.return?.();
+    void closed?.catch(() => undefined);
+  }
+
+  private async consumeGatewayEvents(subscription: {
+    active: boolean;
+    transport: GatewayReader;
+    iterator?: AsyncIterator<GatewayEnvelope>;
+  }): Promise<void> {
+    try {
+      const iterator = subscription.transport.events!()[Symbol.asyncIterator]();
+      subscription.iterator = iterator;
+      while (subscription.active && !this.destroyed) {
+        const next = await iterator.next();
+        if (next.done) break;
+        await this.onGatewayEvent(next.value);
+      }
+    } catch (error) {
+      console.warn("[opensymphony] gateway event stream unavailable; using one-shot refresh fallback", {
+        baseUri: subscription.transport.baseUri,
+        error: errorMessage(error),
+      });
+    } finally {
+      if (this.eventSubscription === subscription) {
+        this.eventSubscription = null;
+      }
+    }
+  }
+
+  private async onGatewayEvent(envelope: GatewayEnvelope): Promise<void> {
+    if (!this.eventAffectsCurrentView(envelope)) {
+      return;
+    }
+    if (this.liveRefreshInFlight) {
+      this.liveRefreshQueued = true;
+      return;
+    }
+    this.liveRefreshInFlight = true;
+    try {
+      do {
+        this.liveRefreshQueued = false;
+        try {
+          await this.refreshLiveGatewayData();
+        } catch (error) {
+          console.warn("[opensymphony] live gateway refresh failed; event stream remains active", {
+            baseUri: this.transport.baseUri,
+            error: errorMessage(error),
+          });
+        }
+      } while (this.liveRefreshQueued && !this.destroyed);
+    } finally {
+      this.liveRefreshInFlight = false;
+    }
+  }
+
+  private eventAffectsCurrentView(envelope: GatewayEnvelope): boolean {
+    const projectId = this.state.selectedProjectId;
+    const entity = envelope.entity_ref;
+    if (entity?.kind === "project") {
+      return !projectId || entity.id === projectId;
+    }
+    if (entity?.kind === "run") {
+      return !this.state.runDetail || entity.id === this.state.runDetail.run_id;
+    }
+    if (entity?.kind === "issue" || entity?.kind === "sub_issue") {
+      return this.state.taskGraph?.nodes.some((node) =>
+        node.node_id === entity.id
+        || node.identifier === entity.identifier
+        || node.identifier === entity.id
+      ) ?? true;
+    }
+    return false;
+  }
+
+  private async refreshLiveGatewayData(): Promise<void> {
+    const snapshot = await this.transport.snapshot();
+    this.state.snapshot = snapshot;
+    const previousProjectId = this.state.selectedProjectId;
+    const projectStillPresent = snapshot.projects.some((project) => project.project_id === previousProjectId);
+    this.state.selectedProjectId = projectStillPresent
+      ? previousProjectId
+      : snapshot.projects[0]?.project_id ?? "default";
+
+    if (!this.state.selectedProjectId) {
+      this.render();
+      return;
+    }
+
+    const previousNodeId = this.state.selectedNodeId;
+    const previousRunId = this.state.runDetail?.run_id ?? null;
+    const taskGraph = await this.transport.taskGraph(this.state.selectedProjectId);
+    this.state.taskGraph = taskGraph;
+    const selectedNode = taskGraph.nodes.find((node) => node.node_id === previousNodeId)
+      ?? taskGraph.nodes.find((node) => node.run_id === previousRunId)
+      ?? initialSelectedTaskNode(taskGraph.nodes, taskGraph.root_ids);
+    this.state.selectedNodeId = selectedNode?.node_id ?? null;
+    await this.loadRunOverlays(taskGraph);
+    if (selectedNode) {
+      await this.refreshSelectedRun(selectedNode);
+    }
+    this.render();
+  }
+
+  private async refreshSelectedRun(node: TaskGraphNode): Promise<void> {
+    const runId = runIdForNode(node);
+    try {
+      this.state.runDetail = await this.transport.runDetail(runId);
+      this.state.runOverlays.set(runId, this.state.runDetail);
+      await this.loadRunDetails(runId, true);
+    } catch (error) {
+      this.state.connectionMessage = `Run ${runId} unavailable: ${errorMessage(error)}`;
+    }
+  }
+
   private async loadRunOverlays(taskGraph: TaskGraphSnapshot): Promise<void> {
     const runIds = new Set(taskGraph.nodes.map((node) => node.run_id).filter((id): id is string => Boolean(id)));
     if (runIds.size === 0) {
@@ -570,7 +720,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
   }
 
   private async openRun(node: TaskGraphNode): Promise<void> {
-    const runId = node.run_id || node.identifier || node.node_id;
+    const runId = runIdForNode(node);
     this.state.selectedNodeId = node.node_id;
     this.state.loading = true;
     this.render();
@@ -766,6 +916,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
     }
     if (this.options.onGatewayUrlChanged) {
+      this.stopEventSubscription();
+      await this.transport.close().catch(() => undefined);
       this.transport = await this.options.onGatewayUrlChanged(profile.gatewayUrl);
     }
     await this.refresh();
@@ -801,6 +953,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       });
       await controller.setActiveProfile(saved.id);
       if (this.options.onGatewayUrlChanged) {
+        this.stopEventSubscription();
+        await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(saved.gatewayUrl);
       }
       await this.refresh();
@@ -863,6 +1017,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.activeProfileId = active?.id ?? null;
       this.state.gatewayDraft = active?.gatewayUrl ?? this.transport.baseUri;
       if (active && this.options.onGatewayUrlChanged) {
+        this.stopEventSubscription();
+        await this.transport.close().catch(() => undefined);
         this.transport = await this.options.onGatewayUrlChanged(active.gatewayUrl);
       }
       this.render();
@@ -3218,6 +3374,10 @@ function isTerminalTaskNode(node: TaskGraphNode): boolean {
 
 function nodeLabel(node: TaskGraphNode): string {
   return node.identifier || node.node_id;
+}
+
+function runIdForNode(node: TaskGraphNode): string {
+  return node.run_id || node.identifier || node.node_id;
 }
 
 function findNodeByRef(nodes: TaskGraphNode[], ref: string): TaskGraphNode | undefined {
