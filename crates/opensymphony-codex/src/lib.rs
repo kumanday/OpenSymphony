@@ -578,10 +578,8 @@ pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent>
         "item/completed" => NormalizedCodexEventKind::ItemCompleted,
         "item/agentMessage/delta" => NormalizedCodexEventKind::AgentMessageDelta,
         "item/plan/delta" => NormalizedCodexEventKind::PlanDelta,
-        "item/permissions/requestApproval" | "approval/requested" => {
-            NormalizedCodexEventKind::ApprovalRequested
-        }
-        "approval/completed" | "approval/responded" => NormalizedCodexEventKind::ApprovalCompleted,
+        "item/permissions/requestApproval" => NormalizedCodexEventKind::ApprovalRequested,
+        "approval/completed" => NormalizedCodexEventKind::ApprovalCompleted,
         "error" => NormalizedCodexEventKind::Error,
         _ => NormalizedCodexEventKind::Unknown,
     };
@@ -716,11 +714,10 @@ fn error_summary(event: &NormalizedCodexEvent) -> Option<String> {
 
 fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
     let params = event.raw.get("params").unwrap_or(&Value::Null);
-    let decision = ["decision", "status", "outcome", "result"]
-        .into_iter()
-        .filter_map(|key| params.get(key)?.as_str())
-        .map(str::to_ascii_lowercase)
-        .next();
+    let decision = params
+        .get("decision")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
     match decision.as_deref() {
         Some("approve" | "approved") => EventKind::ApprovalGranted,
         Some("reject" | "rejected") => EventKind::ApprovalDenied,
@@ -732,11 +729,10 @@ fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
 
 fn thread_status_kind(event: &NormalizedCodexEvent) -> EventKind {
     let params = event.raw.get("params").unwrap_or(&Value::Null);
-    let status = ["status", "state", "execution_status"]
-        .into_iter()
-        .filter_map(|key| params.get(key)?.as_str())
-        .map(str::to_ascii_lowercase)
-        .next();
+    let status = params
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
     match status.as_deref() {
         Some("completed") => EventKind::RunCompleted,
         Some("failed") => EventKind::RunFailed,

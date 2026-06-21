@@ -76,6 +76,10 @@ async fn codex_live_stdio_initializes_when_requested() {
 
     drop(stdin);
     let (status, stderr) = terminate_codex_child(child, stderr_task).await;
+    assert!(
+        !response.trim().is_empty(),
+        "initialize should emit a JSON-RPC response line; status={status:?}; stderr={stderr}"
+    );
     let response: serde_json::Value = serde_json::from_str(response.trim())
         .unwrap_or_else(|error| panic!("initialize response is json: {error}; stderr={stderr}"));
     assert_eq!(response["id"], initialize.id);
@@ -384,7 +388,7 @@ fn codex_approval_completed_maps_decisions_without_guessing() {
 
     let rejected = normalize_server_notification(json!({
         "jsonrpc": "2.0",
-        "method": "approval/responded",
+        "method": "approval/completed",
         "params": {
             "threadId": "thread-1",
             "turnId": "turn-1",
@@ -430,6 +434,67 @@ fn codex_approval_completed_maps_decisions_without_guessing() {
         cancelled_record.kind,
         EventKind::HarnessEventNormalized {
             source_kind: "approval/completed".into()
+        }
+    );
+
+    let result_field_only = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "approval/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-5",
+            "result": "approve"
+        }
+    }))
+    .expect("completion with non-contract result field normalizes");
+    let result_field_record = normalized_event_to_journal_record("COE-476", 16, &result_field_only);
+    assert_eq!(
+        result_field_record.kind,
+        EventKind::HarnessEventNormalized {
+            source_kind: "approval/completed".into()
+        }
+    );
+
+    let alternate_method = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "approval/responded",
+        "params": {
+            "decision": "approve"
+        }
+    }))
+    .expect("unknown alternate method is retained");
+    assert_eq!(alternate_method.kind, NormalizedCodexEventKind::Unknown);
+}
+
+#[test]
+fn codex_thread_status_changed_uses_only_status_field() {
+    let completed = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/status/changed",
+        "params": {
+            "threadId": "thread-1",
+            "status": "completed"
+        }
+    }))
+    .expect("thread status change normalizes");
+    let completed_record = normalized_event_to_journal_record("COE-476", 17, &completed);
+    assert_eq!(completed_record.kind, EventKind::RunCompleted);
+
+    let state_field_only = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/status/changed",
+        "params": {
+            "threadId": "thread-1",
+            "state": "completed"
+        }
+    }))
+    .expect("thread status with non-contract state field normalizes");
+    let state_field_record = normalized_event_to_journal_record("COE-476", 18, &state_field_only);
+    assert_eq!(
+        state_field_record.kind,
+        EventKind::HarnessEventNormalized {
+            source_kind: "thread/status/changed".into()
         }
     );
 }
