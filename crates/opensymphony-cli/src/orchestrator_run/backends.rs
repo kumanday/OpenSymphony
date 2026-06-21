@@ -12,7 +12,7 @@ use crate::opensymphony_codex::{
     CODEX_APP_SERVER_CONTRACT, CODEX_APP_SERVER_KIND, CodexAppServerAdapter,
     CodexAppServerSchemaValidator, CodexContractGeneration, CodexJsonRpcSession,
     JsonRpcRequestEnvelope, NormalizedCodexEvent, NormalizedCodexEventKind,
-    codex_approval_request_from_event, normalize_server_notification,
+    codex_approval_request_from_event, codex_event_summary, normalize_server_notification,
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
@@ -1639,7 +1639,7 @@ fn emit_codex_notification(
         observed_at,
         event_id: event.item_id.clone().or_else(|| event.turn_id.clone()),
         event_kind: Some(format!("codex.{}", event.method)),
-        summary: Some(format!("Codex event: {}", event.method)),
+        summary: Some(codex_event_summary(&event)),
         payload: Some(event.raw.clone()),
     });
     if let Some(usage) = event.token_usage {
@@ -2302,6 +2302,64 @@ mod tests {
                 assert_eq!(payload["approval_id"], "approval-1");
                 assert_eq!(payload["run_id"], "worker-approval");
                 assert_eq!(payload["status"], "pending");
+            }
+            other => panic!("expected runtime event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn codex_notification_runtime_event_uses_content_summary() {
+        let issue = sample_issue();
+        let run = RunAttempt::new(
+            WorkerId::new("worker-content").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            PathBuf::from("/tmp/opensymphony-worker-content"),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+
+        let event = emit_codex_notification(
+            &updates_tx,
+            run.worker_id.as_str(),
+            &issue,
+            &run,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "item/commandExecution/outputDelta",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "cmd-1",
+                    "delta": "cargo test passed token=secret"
+                }
+            }),
+        )
+        .expect("Codex command notification should normalize");
+
+        assert_eq!(
+            event.kind,
+            NormalizedCodexEventKind::CommandExecutionOutputDelta
+        );
+        match updates_rx
+            .try_recv()
+            .expect("raw Codex runtime event should be emitted")
+        {
+            WorkerUpdate::RuntimeEvent {
+                event_kind,
+                summary,
+                ..
+            } => {
+                assert_eq!(
+                    event_kind.as_deref(),
+                    Some("codex.item/commandExecution/outputDelta")
+                );
+                assert_eq!(
+                    summary.as_deref(),
+                    Some("Codex command output: cargo test passed token=[redacted]")
+                );
             }
             other => panic!("expected runtime event, got {other:?}"),
         }

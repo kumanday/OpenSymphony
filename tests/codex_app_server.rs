@@ -5,7 +5,7 @@ use opensymphony::opensymphony_codex::{
     CodexJsonRpcSession, CodexLifecycleRequest, CodexSandboxPolicy, CodexThreadSandboxMode,
     CodexThreadStartParams, CodexTokenUsage, CodexTurnStartParams, CodexUserInput,
     CodexWebSocketAuth, NormalizedCodexEventKind, codex_approval_decision_audit_record,
-    codex_approval_request_from_event, normalize_server_notification,
+    codex_approval_request_from_event, codex_event_summary, normalize_server_notification,
     normalized_event_to_journal_record, websocket_benchmark_requirements,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
@@ -488,6 +488,365 @@ fn codex_token_usage_notification_maps_to_normalized_usage_payload() {
     }))
     .expect("missing token fields should not panic");
     assert_eq!(empty.token_usage, None);
+}
+
+#[test]
+fn codex_event_summaries_extract_bounded_redacted_previews() {
+    let message = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/agentMessage/delta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "delta": "Here is the answer\napi_key=sk-live-secret"
+        }
+    }))
+    .expect("message delta normalizes");
+    assert_eq!(
+        codex_event_summary(&message),
+        "Codex assistant: Here is the answer api_key=[redacted]"
+    );
+    let message_record = normalized_event_to_journal_record("COE-483", 1, &message);
+    assert_eq!(
+        message_record.summary,
+        "Codex assistant: Here is the answer api_key=[redacted]"
+    );
+
+    let command = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-1",
+            "delta": "running tests with Authorization: bearer-token"
+        }
+    }))
+    .expect("command output normalizes");
+    assert_eq!(
+        codex_event_summary(&command),
+        "Codex command output: running tests with Authorization:[redacted]"
+    );
+
+    let authorization_scheme = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-authorization",
+            "delta": "curl -H Authorization: Bearer abc123"
+        }
+    }))
+    .expect("authorization scheme command output normalizes");
+    assert_eq!(
+        codex_event_summary(&authorization_scheme),
+        "Codex command output: curl -H Authorization:[redacted]"
+    );
+
+    let custom_authorization_scheme = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-custom-authorization",
+            "delta": "curl -H Authorization: Digest abc123"
+        }
+    }))
+    .expect("custom authorization scheme command output normalizes");
+    assert_eq!(
+        codex_event_summary(&custom_authorization_scheme),
+        "Codex command output: curl -H Authorization:[redacted]"
+    );
+
+    let token_authorization_scheme = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-token-authorization",
+            "delta": "curl -H Authorization: Token abc123"
+        }
+    }))
+    .expect("token authorization scheme command output normalizes");
+    assert_eq!(
+        codex_event_summary(&token_authorization_scheme),
+        "Codex command output: curl -H Authorization:[redacted]"
+    );
+
+    let compact_authorization_scheme = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-compact-authorization",
+            "delta": "curl -H Authorization:Token abc123"
+        }
+    }))
+    .expect("compact authorization scheme command output normalizes");
+    assert_eq!(
+        codex_event_summary(&compact_authorization_scheme),
+        "Codex command output: curl -H Authorization:[redacted]"
+    );
+
+    let bare_authorization_scheme = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-bare-authorization",
+            "delta": "curl -H Authorization Bearer abc123"
+        }
+    }))
+    .expect("bare authorization scheme command output normalizes");
+    assert_eq!(
+        codex_event_summary(&bare_authorization_scheme),
+        "Codex command output: curl -H Authorization [redacted]"
+    );
+
+    let password = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-password",
+            "delta": "login password: hunter2"
+        }
+    }))
+    .expect("password command output normalizes");
+    assert_eq!(
+        codex_event_summary(&password),
+        "Codex command output: login password:[redacted]"
+    );
+
+    let multi_word_password = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-password-phrase",
+            "delta": "login password: my secret value"
+        }
+    }))
+    .expect("multi-word password command output normalizes");
+    assert_eq!(
+        codex_event_summary(&multi_word_password),
+        "Codex command output: login password:[redacted]"
+    );
+
+    let bare_multi_word_password = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-bare-password-phrase",
+            "delta": "login password my secret value"
+        }
+    }))
+    .expect("bare multi-word password command output normalizes");
+    assert_eq!(
+        codex_event_summary(&bare_multi_word_password),
+        "Codex command output: login password [redacted]"
+    );
+
+    let spaced_token_assignment = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-spaced-token-assignment",
+            "delta": "request token = abc123"
+        }
+    }))
+    .expect("spaced token assignment command output normalizes");
+    assert_eq!(
+        codex_event_summary(&spaced_token_assignment),
+        "Codex command output: request token [redacted]"
+    );
+
+    let long_output = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-2",
+            "delta": "x".repeat(220)
+        }
+    }))
+    .expect("long command output normalizes");
+    let summary = codex_event_summary(&long_output);
+    assert!(summary.starts_with("Codex command output: "));
+    assert!(summary.ends_with("..."));
+    assert!(summary.len() < 210);
+
+    let diff = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "turn/diff/updated",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "files": ["src/main.rs", "README.md"]
+        }
+    }))
+    .expect("diff update normalizes");
+    assert_eq!(codex_event_summary(&diff), "Codex diff updated: 2 file(s)");
+
+    let usage = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "thread-1",
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 8,
+                "cache_read_tokens": 4
+            }
+        }
+    }))
+    .expect("token usage normalizes");
+    assert_eq!(
+        codex_event_summary(&usage),
+        "Codex token usage: 12 input, 8 output, 4 cache"
+    );
+
+    let unknown = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "future/event",
+        "params": { "threadId": "thread-2" }
+    }))
+    .expect("unknown normalizes");
+    assert_eq!(codex_event_summary(&unknown), "Codex event: future/event");
+}
+
+#[test]
+fn codex_event_summaries_cover_lifecycle_and_item_branches() {
+    let thread_started = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/started",
+        "params": { "threadId": "thread-1" }
+    }))
+    .expect("thread start normalizes");
+    assert_eq!(
+        codex_event_summary(&thread_started),
+        "Codex thread started thread-1"
+    );
+
+    let turn_started = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "turn/started",
+        "params": { "turnId": "turn-1" }
+    }))
+    .expect("turn start normalizes");
+    assert_eq!(
+        codex_event_summary(&turn_started),
+        "Codex turn started turn-1"
+    );
+
+    let turn_completed = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "turn/completed",
+        "params": { "turnId": "turn-1" }
+    }))
+    .expect("turn completed normalizes");
+    assert_eq!(
+        codex_event_summary(&turn_completed),
+        "Codex turn completed turn-1"
+    );
+
+    let turn_cancelled = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "turn/cancelled",
+        "params": { "turnId": "turn-1" }
+    }))
+    .expect("turn cancelled normalizes");
+    assert_eq!(
+        codex_event_summary(&turn_cancelled),
+        "Codex turn cancelled turn-1"
+    );
+
+    let status = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/status/changed",
+        "params": { "status": "running" }
+    }))
+    .expect("thread status normalizes");
+    assert_eq!(codex_event_summary(&status), "Codex thread status: running");
+
+    let item_started = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/started",
+        "params": { "itemId": "item-1", "type": "commandExecution" }
+    }))
+    .expect("item start normalizes");
+    assert_eq!(
+        codex_event_summary(&item_started),
+        "Codex item started: commandExecution"
+    );
+
+    let item_completed = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/completed",
+        "params": { "itemId": "item-1", "type": "commandExecution" }
+    }))
+    .expect("item completion normalizes");
+    assert_eq!(
+        codex_event_summary(&item_completed),
+        "Codex item completed: commandExecution"
+    );
+
+    let plan = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/plan/delta",
+        "params": { "delta": "1. inspect\n2. patch" }
+    }))
+    .expect("plan delta normalizes");
+    assert_eq!(
+        codex_event_summary(&plan),
+        "Codex plan: 1. inspect 2. patch"
+    );
+
+    let approval_requested = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/permissions/requestApproval",
+        "params": { "itemId": "approval-1" }
+    }))
+    .expect("approval request normalizes");
+    assert_eq!(
+        codex_event_summary(&approval_requested),
+        "Codex requested approval approval-1"
+    );
+
+    let approval_completed = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "approval/completed",
+        "params": { "itemId": "approval-1", "decision": "approve" }
+    }))
+    .expect("approval completion normalizes");
+    assert_eq!(
+        codex_event_summary(&approval_completed),
+        "Codex approval completed approval-1"
+    );
+
+    let error = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "error",
+        "params": { "message": "auth failed for token=abc123" }
+    }))
+    .expect("error normalizes");
+    assert_eq!(
+        codex_event_summary(&error),
+        "Codex app-server error: auth failed for token=[redacted]"
+    );
 }
 
 #[test]

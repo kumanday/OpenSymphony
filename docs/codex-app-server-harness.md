@@ -22,6 +22,9 @@ The Rust module provides:
   `turn/start`, plus resume, cancel, and approval responses,
 - normalization of thread, turn, item, approval, cancellation, error, and
   unknown notifications while preserving the raw payload,
+- bounded human-readable summaries for high-value notifications such as
+  assistant deltas, command output deltas, diff updates, token usage, and
+  lifecycle events,
 - mapping existing OpenSymphony model and credential setting profiles to Codex
   app-server use,
 - a concrete `HarnessAdapter` implementation for the local stdio capability.
@@ -34,6 +37,27 @@ default.
 
 The companion benchmark script issues `thread/loaded/list` requests directly so
 throughput can be measured without starting model-backed turns.
+
+## Event Summaries
+
+Codex runtime notifications are retained as raw payloads on runtime events and
+event-journal records for diagnostics. The human-facing summary field is
+separate and bounded before it reaches TUI conversation activity, desktop
+inspector activity, or gateway event consumers.
+
+The shared Codex summary helper extracts short previews for:
+
+- `item/agentMessage/delta` as assistant text,
+- `item/commandExecution/outputDelta` as command output,
+- `turn/diff/updated` as a diff summary or changed-file count,
+- `thread/tokenUsage/updated` as input/output/cache token counts,
+- thread, turn, item, approval, status, and error lifecycle events.
+
+Preview text is whitespace-normalized, control characters are removed, and the
+summary is truncated to a fixed character budget. Common inline credential
+patterns such as `api_key=...`, `token: ...`, `password: ...`, and
+`Authorization: ...` render as `[redacted]` in summaries. Unknown or
+unsupported methods still use the stable fallback `Codex event: <method>`.
 
 ## Full-Automation Profile
 
