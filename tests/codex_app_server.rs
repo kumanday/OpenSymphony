@@ -482,6 +482,22 @@ fn codex_event_summaries_extract_bounded_redacted_previews() {
         "Codex command output: login password:[redacted]"
     );
 
+    let multi_word_password = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-password-phrase",
+            "delta": "login password: my secret value"
+        }
+    }))
+    .expect("multi-word password command output normalizes");
+    assert_eq!(
+        codex_event_summary(&multi_word_password),
+        "Codex command output: login password:[redacted]"
+    );
+
     let long_output = normalize_server_notification(json!({
         "jsonrpc": "2.0",
         "method": "item/commandExecution/outputDelta",
@@ -649,12 +665,12 @@ fn codex_event_summaries_cover_lifecycle_and_item_branches() {
     let error = normalize_server_notification(json!({
         "jsonrpc": "2.0",
         "method": "error",
-        "params": { "message": "missing login" }
+        "params": { "message": "auth failed for token=abc123" }
     }))
     .expect("error normalizes");
     assert_eq!(
         codex_event_summary(&error),
-        "Codex app-server error: missing login"
+        "Codex app-server error: auth failed for token=[redacted]"
     );
 }
 

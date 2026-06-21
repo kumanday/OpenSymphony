@@ -1205,13 +1205,8 @@ fn bounded_redacted_preview(raw: &str) -> Option<String> {
 
     let mut redacted = Vec::with_capacity(words.len());
     let mut redact_next = false;
-    let mut drop_next = false;
     for word in words {
         let lower = word.to_ascii_lowercase();
-        if drop_next {
-            drop_next = matches!(lower.as_str(), "bearer" | "basic");
-            continue;
-        }
         if redact_next {
             redacted.push("[redacted]".to_string());
             redact_next = false;
@@ -1219,17 +1214,15 @@ fn bounded_redacted_preview(raw: &str) -> Option<String> {
         }
         if lower.ends_with(':') {
             let key = lower.trim_end_matches(':');
-            if key == "authorization" {
+            if key == "authorization" || secret_key(key) {
                 redacted.push(format!("{word}[redacted]"));
                 break;
             }
-            if secret_key(key) {
-                redacted.push(format!("{word}[redacted]"));
-                drop_next = true;
-                continue;
-            }
         }
-        if lower == "bearer" || matches!(lower.as_str(), "authorization" | "password" | "secret") {
+        if matches!(
+            lower.as_str(),
+            "authorization" | "bearer" | "basic" | "token" | "password" | "secret"
+        ) {
             redacted.push(word.to_string());
             redact_next = true;
             continue;
@@ -1292,7 +1285,7 @@ fn id_suffix(id: Option<&str>) -> String {
 fn error_summary(event: &NormalizedCodexEvent) -> Option<String> {
     let params = event.raw.get("params")?;
     let message = params.get("message")?.as_str()?;
-    Some(format!("Codex app-server error: {message}"))
+    bounded_redacted_preview(message).map(|preview| format!("Codex app-server error: {preview}"))
 }
 
 fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
