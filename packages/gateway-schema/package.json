@@ -1,6 +1,6 @@
 {
   "name": "@opensymphony/gateway-schema",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "TypeScript gateway schema types aligned with opensymphony-gateway-schema v1",
   "type": "module",
   "main": "./dist/index.js",

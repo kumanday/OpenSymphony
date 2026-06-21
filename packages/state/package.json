@@ -1,6 +1,6 @@
 {
   "name": "@opensymphony/state",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Reducer-driven state management for OpenSymphony clients",
   "type": "module",
   "main": "./dist/index.js",

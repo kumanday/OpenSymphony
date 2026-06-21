@@ -255,7 +255,12 @@ This sequencing gives the project the fastest path to a working developer-focuse
 
 ## Current model
 
-- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
+- COE-253 contributed: PR #19: COE-253: OpenHands Runtime Adapter (merge `911b0b4`)
+- COE-256 contributed: PR #1: COE-257: tighten hosted deployment guidance
+- COE-261 contributed: PR #83: Add memory init and mapped docs sync
+- COE-262 contributed: PR #34: COE-262: Harden OpenHands REST client contract (merge `0e2be26`)
+- COE-265 contributed: PR #36: COE-265: WebSocket event stream, reconciliation, and recovery (merge `d78a8ce`)
+- COE-266 contributed: PR #40: Implement issue session runner (merge `326361f`)
 
 ## Important invariants
 
@@ -272,10 +277,74 @@ This sequencing gives the project the fastest path to a working developer-focuse
 
 ## Recent changes
 
+- COE-253: OpenHands Runtime Adapter
+- COE-256: Validation and Local Operations
+- COE-261: Local agent-server supervisor
+- COE-262: REST client and conversation contract
+- COE-265: WebSocket event stream, reconciliation, and recovery
+- COE-266: Issue session runner
+- COE-272: Fake OpenHands server and protocol contract suite
+- COE-273: Live local end-to-end suite
+- COE-274: CLI packaging, doctor, and local operations docs
+- COE-275: Remote agent-server mode and auth hardening
+- COE-280: Support workflow-owned OpenHands auth, provider, and launcher overrides at runtime
+- COE-281: Support path-bearing OpenHands base URLs and MCP config at runtime
+- COE-282: Support workflow-owned OpenHands conversation reuse policy at runtime
+- COE-294: Detect LLM config changes and rehydrate conversations with updated env vars
+- COE-382: Add supply-chain and security audits to CI
+- COE-383: Decompose oversized session and TUI modules into focused submodules
+- COE-384: Expand error-path tests for Linear client and workspace hooks
+- COE-385: Resolve runtime tracking TODO in OpenHands session runner
+- COE-386: Wire cargo-llvm-cov coverage reporting and regression floor into CI
+- COE-387: Audit tracing spans and diagnostics for secret leakage
+- COE-394: Frontend Workspace And Shared Schemas
+- COE-397: Gateway API Client, Transport Adapters, And Reducers
+- COE-398: Tauri Shell And Security Capabilities
+- COE-401: Web App Entry And Deployment Modes
+- COE-402: App Shell, Dashboard, Task Graph, And Run Views
+- COE-403: Terminal And Log Renderer Prototype
+- COE-404: Desktop Connection Profiles And Daemon Management
+- COE-407: Browser Transport And Remote Stream Protocols
+- COE-409: Desktop Settings, Keychain, And Native Actions
+- COE-410: Desktop Local Stream Optimization
 - COE-419: Hosted Auth Placeholders And Web Parity
+- COE-449: Desktop alpha recovery: replace stubs with functional app
+- COE-473: Desktop task graph dependency and run detail parity
 
 ## Source refs
 
+- COE-253
+- COE-256
+- COE-261
+- COE-262
+- COE-265
+- COE-266
+- COE-272
+- COE-273
+- COE-274
+- COE-275
+- COE-280
+- COE-281
+- COE-282
+- COE-294
+- COE-382
+- COE-383
+- COE-384
+- COE-385
+- COE-386
+- COE-387
+- COE-394
+- COE-397
+- COE-398
+- COE-401
+- COE-402
+- COE-403
+- COE-404
+- COE-407
+- COE-409
+- COE-410
 - COE-419
+- COE-449
+- COE-473
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

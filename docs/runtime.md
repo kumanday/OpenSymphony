@@ -1,21 +1,17 @@
 ---
 type: topic-doc
-area: developer-experience
+area: runtime
 visibility: public
-last_memory_sync: 2026-06-14T22:09:16.647708+00:00
+last_memory_sync: 2026-06-21T19:11:22.264899+00:00
 ---
 
-# Developer Experience
+# Runtime
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 
 ## Current model
 
-- COE-452 contributed: PR #122: COE-452: Add DuckDB prebuilt developer build mode (merge `6ce8edd`)
-- COE-453 contributed: PR #123: M9.5: Add non-interactive init automation (merge `3200ed6`)
-- COE-479 contributed: PR #138: Resume Codex debug sessions (merge `0841adb`)
 - COE-480 contributed: PR #140: Show truthful run detail metrics (merge `ec2dc04`)
-- COE-481 contributed: PR #139: Refresh OpenAI model profile defaults (merge `0f2a74f`)
 - COE-482 contributed: PR #143: Fix Codex token usage accounting in TUI (merge `d48ad13`)
 
 ## Important invariants
@@ -33,24 +29,12 @@ last_memory_sync: 2026-06-14T22:09:16.647708+00:00
 
 ## Recent changes
 
-- COE-452: DuckDB Prebuilt Developer Build Mode
-- COE-453: Non-Interactive Init For Automation
-- COE-479: Codex Debug Session Resume
 - COE-480: Run Detail Metrics And Density
-- COE-481: Model Configuration Codex Subscription Follow-Up
 - COE-482: TUI Codex Token Usage Accounting
-- COE-483: Codex Event Content Summaries
-- COE-484: Desktop Live Snapshot And Run Detail Refresh
 
 ## Source refs
 
-- COE-452
-- COE-453
-- COE-479
 - COE-480
-- COE-481
 - COE-482
-- COE-483
-- COE-484
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

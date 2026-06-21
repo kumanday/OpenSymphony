@@ -482,7 +482,12 @@ Remaining follow-up work:
 
 ## Current model
 
-- COE-429 contributed: PR #137: Implement Codex approvals and harness/model selection (merge `ba53548`)
+- COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
+- COE-428 contributed: PR #133: Add alpha model configuration UI (merge `6f6b94e`)
+- COE-429 contributed: PR #136: Enable local Codex app-server harness (merge `303ab81`)
+- COE-475 contributed: PR #134: Expose Codex ChatGPT login readiness (merge `124ac40`)
+- COE-476 contributed: PR #136: Enable local Codex app-server harness (merge `303ab81`)
+- COE-478 contributed: PR #135: COE-478: Persist and validate model profiles (merge `3e2dab5`)
 
 ## Important invariants
 
@@ -499,10 +504,32 @@ Remaining follow-up work:
 
 ## Recent changes
 
+- COE-426: Codex App-Server Prototype And Benchmarks
+- COE-428: Model Configuration UI And Routing Metadata
 - COE-429: Codex Approvals And Harness/Model Selection
+- COE-475: ChatGPT OAuth For Codex Harness
+- COE-476: Codex Production Harness Enablement
+- COE-478: Harden model profile storage and validation follow-ups
+- COE-479: Codex Debug Session Resume
+- COE-480: Run Detail Metrics And Density
+- COE-481: Model Configuration Codex Subscription Follow-Up
+- COE-482: TUI Codex Token Usage Accounting
+- COE-483: Codex Event Content Summaries
+- COE-484: Desktop Live Snapshot And Run Detail Refresh
 
 ## Source refs
 
+- COE-426
+- COE-428
 - COE-429
+- COE-475
+- COE-476
+- COE-478
+- COE-479
+- COE-480
+- COE-481
+- COE-482
+- COE-483
+- COE-484
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -63,11 +63,19 @@ areas:
       linear_labels:
       - area:build
       - area:cli
+      - area:codex
+      - area:desktop
       - area:developer-experience
+      - area:gateway
       - area:memory
+      - area:model-configuration
       - area:operations
+      - area:runtime
+      - area:tui
+      - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10: Web Client And External Gateway'
       - 'M9.5: Developer Build Acceleration'
   cli:
@@ -83,11 +91,40 @@ areas:
       - docs/cli.md
       linear_labels:
       - area:cli
+      - area:codex
+      - area:desktop
       - area:developer-experience
+      - area:gateway
+      - area:model-configuration
       - area:operations
+      - area:runtime
+      - area:tui
+      - area:ui
       - cli
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M9.5: Developer Build Acceleration'
+  codex:
+    title: Codex
+    docs_target: docs/codex.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - codex
+    source_refs:
+      linear_labels:
+      - area:codex
+      - area:desktop
+      - area:gateway
+      - area:model-configuration
+      - area:runtime
+      - area:tui
+      - area:ui
+      linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
   codex-app-server:
     title: Codex App-Server Harness
     docs_target: docs/codex-app-server-harness.md
@@ -106,6 +143,7 @@ areas:
       - docs/codex-app-server-harness.md
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
   configuration:
     title: Configuration
     docs_target: docs/configuration.md
@@ -121,6 +159,7 @@ areas:
       - configuration
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -141,6 +180,26 @@ areas:
       linear_milestones:
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
+  desktop:
+    title: Desktop
+    docs_target: docs/desktop.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - desktop
+    source_refs:
+      linear_labels:
+      - area:codex
+      - area:desktop
+      - area:gateway
+      - area:model-configuration
+      - area:runtime
+      - area:tui
+      - area:ui
+      linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
   developer-experience:
     title: Developer Experience
     docs_target: docs/developer-experience.md
@@ -154,10 +213,19 @@ areas:
       linear_labels:
       - area:build
       - area:cli
+      - area:codex
+      - area:desktop
       - area:developer-experience
+      - area:gateway
       - area:memory
+      - area:model-configuration
       - area:operations
+      - area:runtime
+      - area:tui
+      - area:ui
       linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M9.5: Developer Build Acceleration'
   development:
     title: Development Guide
@@ -175,6 +243,7 @@ areas:
       - development
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M7: Shared Client And Desktop Alpha'
@@ -203,6 +272,23 @@ areas:
     source_refs:
       docs:
       - docs/elixir-hierarchy-changes.md
+  gateway:
+    title: Gateway
+    docs_target: docs/gateway.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - gateway
+    source_refs:
+      linear_labels:
+      - area:desktop
+      - area:gateway
+      - area:runtime
+      - area:ui
+      linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
   host-client-architecture:
     title: OpenSymphony Host-Client Architecture
     docs_target: docs/host-client-architecture.md
@@ -312,11 +398,19 @@ areas:
       linear_labels:
       - area:build
       - area:cli
+      - area:codex
+      - area:desktop
       - area:developer-experience
+      - area:gateway
       - area:memory
+      - area:model-configuration
       - area:operations
+      - area:runtime
+      - area:tui
+      - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -335,6 +429,20 @@ areas:
     source_refs:
       docs:
       - docs/migration-1.0.0.md
+  model-configuration:
+    title: Model Configuration
+    docs_target: docs/model-configuration.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - model configuration
+    - model-configuration
+    source_refs:
+      linear_labels:
+      - area:model-configuration
+      linear_milestones:
+      - 'M10.4: Desktop Live Operations And Model Polish'
   openhands-agent-server:
     title: OpenHands Agent-Server Integration
     docs_target: docs/openhands-agent-server.md
@@ -373,10 +481,18 @@ areas:
       docs:
       - docs/operations.md
       linear_labels:
+      - area:codex
+      - area:desktop
+      - area:gateway
+      - area:model-configuration
       - area:operations
+      - area:runtime
+      - area:tui
+      - area:ui
       - operations
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -415,6 +531,22 @@ areas:
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M9.5: Developer Build Acceleration'
+  runtime:
+    title: Runtime
+    docs_target: docs/runtime.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - runtime
+    source_refs:
+      linear_labels:
+      - area:codex
+      - area:runtime
+      - area:tui
+      - area:ui
+      linear_milestones:
+      - 'M10.4: Desktop Live Operations And Model Polish'
   sources:
     title: Sources and Trust Notes
     docs_target: docs/sources.md
@@ -429,6 +561,7 @@ areas:
       - docs/sources.md
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M9: Collaborative Planning Alpha'
@@ -459,12 +592,50 @@ areas:
       - testing-and-operations
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
+  tui:
+    title: Tui
+    docs_target: docs/tui.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - tui
+    source_refs:
+      linear_labels:
+      - area:codex
+      - area:desktop
+      - area:gateway
+      - area:model-configuration
+      - area:runtime
+      - area:tui
+      - area:ui
+      linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
+  ui:
+    title: Ui
+    docs_target: docs/ui.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - ui
+    source_refs:
+      linear_labels:
+      - area:desktop
+      - area:gateway
+      - area:runtime
+      - area:ui
+      linear_milestones:
+      - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.4: Desktop Live Operations And Model Polish'
   ui-frankentui:
     title: FrankenTUI Operator UI
     docs_target: docs/ui-frankentui.md
