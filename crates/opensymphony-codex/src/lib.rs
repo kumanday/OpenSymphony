@@ -1085,16 +1085,21 @@ pub fn codex_event_summary(event: &NormalizedCodexEvent) -> String {
             .unwrap_or_else(|| format!("Codex event: {}", event.method)),
         NormalizedCodexEventKind::CommandExecutionOutputDelta => {
             let params = event.raw.get("params").unwrap_or(&Value::Null);
-            first_string_param(
-                params,
-                &["delta", "output", "stdout", "stderr", "text", "content"],
-            )
-            .or_else(|| nested_string_param(params, &["output", "delta"]))
-            .or_else(|| nested_string_param(params, &["output", "text"]))
-            .as_deref()
-            .and_then(bounded_redacted_preview)
-            .map(|preview| format!("Codex command output: {preview}"))
-            .unwrap_or_else(|| format!("Codex event: {}", event.method))
+            event
+                .message_delta
+                .clone()
+                .or_else(|| {
+                    first_string_param(
+                        params,
+                        &["delta", "output", "stdout", "stderr", "text", "content"],
+                    )
+                })
+                .or_else(|| nested_string_param(params, &["output", "delta"]))
+                .or_else(|| nested_string_param(params, &["output", "text"]))
+                .as_deref()
+                .and_then(bounded_redacted_preview)
+                .map(|preview| format!("Codex command output: {preview}"))
+                .unwrap_or_else(|| format!("Codex event: {}", event.method))
         }
         NormalizedCodexEventKind::PlanDelta => event
             .message_delta
@@ -1204,7 +1209,7 @@ fn bounded_redacted_preview(raw: &str) -> Option<String> {
     for word in words {
         let lower = word.to_ascii_lowercase();
         if drop_next {
-            drop_next = false;
+            drop_next = matches!(lower.as_str(), "bearer" | "basic");
             continue;
         }
         if redact_next {
