@@ -929,6 +929,9 @@ See [COE-123](/issues/COE-123.md).
         assert!(matches!(escaped, Err(MemoryError::InvalidInput(_))));
         let absolute = OkfConcept::new("/tmp/escape.md", frontmatter.clone(), "");
         assert!(matches!(absolute, Err(MemoryError::InvalidInput(_))));
+        let contained = OkfConcept::new("./areas/./runtime.md", frontmatter.clone(), "")
+            .expect("curdir components should normalize away");
+        assert_eq!(contained.path.as_path(), Path::new("areas/runtime.md"));
         let not_markdown = OkfConcept::new("areas/runtime.txt", frontmatter, "");
         assert!(matches!(not_markdown, Err(MemoryError::InvalidInput(_))));
     }
@@ -973,6 +976,29 @@ legacy_number: 7
             .expect("CRLF frontmatter should parse");
 
         assert_eq!(concept.frontmatter.concept_type, "topic-doc");
+        assert_eq!(concept.body, "# Runtime\n");
+    }
+
+    #[test]
+    fn okf_frontmatter_does_not_close_on_indented_yaml_delimiter() {
+        let repo = TempDir::new().expect("temp repo");
+        let contents = r#"---
+type: topic-doc
+description: |
+  ---
+  YAML literal content
+---
+
+# Runtime
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), contents)
+            .expect("indented yaml delimiter should not close frontmatter");
+
+        assert_eq!(
+            concept.frontmatter.description.as_deref(),
+            Some("---\nYAML literal content\n")
+        );
         assert_eq!(concept.body, "# Runtime\n");
     }
 

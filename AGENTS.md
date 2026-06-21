@@ -146,6 +146,14 @@ OpenHands event schemas can evolve. Implement:
 - compatibility tests against the pinned version
 - version notes in `docs/sources.md`
 
+### Keep OKF memory compatibility local to memory
+
+OKF bundle parsing, legacy capsule mapping, bundle-relative path validation, and
+unknown frontmatter preservation belong in `opensymphony-memory`. Keep the
+logical bundle layout and migration model documented in `docs/memory.md` and
+`docs/okf-memory-spec.md`. Do not move the durable `.opensymphony/memory/` store
+to the final OKF layout unless a task explicitly includes that migration.
+
 ### Separate Symphony hooks from OpenHands hooks
 
 Symphony workspace hooks:

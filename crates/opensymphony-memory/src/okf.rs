@@ -8,10 +8,11 @@ pub struct OkfBundlePath {
 impl OkfBundlePath {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self, MemoryError> {
         let path = path.into();
-        let mut has_component = false;
+        let mut normalized = PathBuf::new();
         for component in path.components() {
             match component {
-                std::path::Component::Normal(_) => has_component = true,
+                std::path::Component::CurDir => {}
+                std::path::Component::Normal(part) => normalized.push(part),
                 _ => {
                     return Err(MemoryError::InvalidInput(format!(
                         "OKF concept path `{}` must be bundle-relative and contained",
@@ -20,13 +21,17 @@ impl OkfBundlePath {
                 }
             }
         }
-        if !has_component || path.extension().and_then(OsStr::to_str) != Some("md") {
+        if normalized.as_os_str().is_empty()
+            || normalized.extension().and_then(OsStr::to_str) != Some("md")
+        {
             return Err(MemoryError::InvalidInput(format!(
                 "OKF concept path `{}` must name a Markdown file",
                 path.display()
             )));
         }
-        Ok(Self { relative: path })
+        Ok(Self {
+            relative: normalized,
+        })
     }
 
     pub fn as_path(&self) -> &Path {
@@ -43,7 +48,6 @@ impl OkfBundlePath {
             })
             .collect::<Vec<_>>()
             .join("/")
-            .replace('\\', "/")
     }
 
     pub fn reserved_file(&self) -> Option<OkfReservedFile> {
@@ -223,7 +227,7 @@ fn split_okf_frontmatter(path: &Path, contents: &str) -> Result<(String, String)
             .map(|index| offset + index + 1)
             .unwrap_or(normalized.len());
         let line = &normalized[offset..next_end];
-        if line.trim() == "---" {
+        if line.trim_end() == "---" {
             let body = &normalized[next_end..];
             return Ok((
                 frontmatter,
