@@ -300,7 +300,7 @@ impl HarnessCapability {
                 preserve_unknown_events: true,
             },
             notes: vec![
-                "Supported local adapter path using `codex app-server --stdio`.".into(),
+                "Supported local adapter path using `codex --dangerously-bypass-hook-trust app-server --stdio` with installed-schema validation.".into(),
                 "Requires a compatible Codex CLI with ChatGPT login available to the operator-owned Codex home.".into(),
             ],
             feature_gaps: vec![

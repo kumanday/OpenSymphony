@@ -8,7 +8,8 @@ use std::{
 };
 
 use crate::opensymphony_codex::{
-    CodexAppServerAdapter, CodexJsonRpcSession, NormalizedCodexEvent, NormalizedCodexEventKind,
+    CodexAppServerAdapter, CodexAppServerSchemaValidator, CodexContractGeneration,
+    CodexJsonRpcSession, JsonRpcRequestEnvelope, NormalizedCodexEvent, NormalizedCodexEventKind,
     codex_approval_request_from_event, normalize_server_notification,
 };
 use crate::opensymphony_domain::{
@@ -39,7 +40,7 @@ use thiserror::Error;
 use tokio::{
     fs,
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{ChildStderr, Command},
+    process::{ChildStderr, ChildStdin, Command},
     sync::{mpsc, oneshot},
     task::JoinHandle,
     time::timeout,
@@ -1084,6 +1085,7 @@ async fn try_run_codex_stdio_issue(
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
     let adapter =
         CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
+    let schema_validator = load_installed_codex_schema_validator(codex_bin).await?;
     let (program, args) = adapter.launch().to_command();
     let mut child = Command::new(&program)
         .args(args)
@@ -1093,7 +1095,11 @@ async fn try_run_codex_stdio_issue(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|source| format!("failed to launch `{program} app-server --stdio`: {source}"))?;
+        .map_err(|source| {
+            format!(
+                "failed to launch `{program} --dangerously-bypass-hook-trust app-server --stdio`: {source}"
+            )
+        })?;
     let mut stdin = child.stdin.take().ok_or("Codex child stdin missing")?;
     let stdout = child.stdout.take().ok_or("Codex child stdout missing")?;
     let stderr = child.stderr.take().ok_or("Codex child stderr missing")?;
@@ -1108,19 +1114,14 @@ async fn try_run_codex_stdio_issue(
     let mut pending_terminal = None;
 
     let initialize = session.initialize();
-    stdin
-        .write_all(
-            CodexJsonRpcSession::encode_line(&initialize)
-                .map_err(|source| source.to_string())?
-                .as_bytes(),
-        )
-        .await
-        .map_err(|source| {
-            with_codex_stderr(
-                format!("failed to write Codex initialize request: {source}"),
-                &stderr_tail,
-            )
-        })?;
+    write_codex_request(
+        &mut stdin,
+        &schema_validator,
+        &initialize,
+        "initialize",
+        &stderr_tail,
+    )
+    .await?;
     read_response_line(
         &mut reader,
         initialize.id,
@@ -1137,12 +1138,11 @@ async fn try_run_codex_stdio_issue(
         .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
         .map_err(|source| format!("failed to render workflow prompt for Codex route: {source}"))?;
     let model = codex_model_from_route(route);
-    let start = adapter
-        .start_issue_request(
+    let thread_start = adapter
+        .start_issue_thread_request(
             &mut session,
             workspace.workspace_path().display().to_string(),
             model.clone(),
-            prompt,
             serde_json::json!({
                 "opensymphonyRoute": {
                     "harness": &route.harness_kind,
@@ -1153,22 +1153,17 @@ async fn try_run_codex_stdio_issue(
             }),
         )
         .map_err(|source| format!("failed to build Codex thread/start request: {source}"))?;
-    stdin
-        .write_all(
-            CodexJsonRpcSession::encode_line(&start.request)
-                .map_err(|source| source.to_string())?
-                .as_bytes(),
-        )
-        .await
-        .map_err(|source| {
-            with_codex_stderr(
-                format!("failed to write Codex thread/start request: {source}"),
-                &stderr_tail,
-            )
-        })?;
-    let start_response = read_response_line(
+    write_codex_request(
+        &mut stdin,
+        &schema_validator,
+        &thread_start.request,
+        "thread/start",
+        &stderr_tail,
+    )
+    .await?;
+    let thread_start_response = read_response_line(
         &mut reader,
-        start.request.id,
+        thread_start.request.id,
         updates_tx,
         &run.worker_id.to_string(),
         issue,
@@ -1177,13 +1172,41 @@ async fn try_run_codex_stdio_issue(
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
-    let conversation_id = codex_thread_id_from_start_response(&start_response)
+    let conversation_id = codex_thread_id_from_start_response(&thread_start_response)
         .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
     if let Some(sender) = launch_tx.take() {
         let _ = sender.send(LaunchReport::Conversation(Box::new(
-            codex_conversation_metadata(conversation_id, route),
+            codex_conversation_metadata(conversation_id.clone(), route),
         )));
     }
+    let turn_start = adapter
+        .start_issue_turn_request(
+            &mut session,
+            conversation_id.clone(),
+            workspace.workspace_path().display().to_string(),
+            model,
+            prompt,
+        )
+        .map_err(|source| format!("failed to build Codex turn/start request: {source}"))?;
+    write_codex_request(
+        &mut stdin,
+        &schema_validator,
+        &turn_start.request,
+        "turn/start",
+        &stderr_tail,
+    )
+    .await?;
+    read_response_line(
+        &mut reader,
+        turn_start.request.id,
+        updates_tx,
+        &run.worker_id.to_string(),
+        issue,
+        run,
+        &mut pending_terminal,
+    )
+    .await
+    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
 
     let terminal = read_until_codex_terminal(
         &mut reader,
@@ -1205,6 +1228,67 @@ async fn try_run_codex_stdio_issue(
         WorkerOutcomeRecord::from_run(run, terminal.outcome, now_timestamp(), Some(summary), None),
         terminal.status,
     ))
+}
+
+async fn load_installed_codex_schema_validator(
+    codex_bin: &str,
+) -> Result<CodexAppServerSchemaValidator, String> {
+    let schema_dir = tempfile::tempdir()
+        .map_err(|source| format!("failed to create Codex schema tempdir: {source}"))?;
+    let generation =
+        CodexContractGeneration::json_schema_with_program(codex_bin, schema_dir.path());
+    let (program, args) = generation.to_command();
+    let output = Command::new(&program)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|source| {
+            format!(
+                "failed to generate Codex app-server JSON schema with `{program} {}`: {source}. Update Codex to a build that supports `codex app-server generate-json-schema`.",
+                args.join(" ")
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "Codex app-server JSON schema generation failed with status {} and {} stderr byte(s). Update Codex to a compatible app-server build.",
+            output.status,
+            output.stderr.len()
+        ));
+    }
+    let schema_path = schema_dir
+        .path()
+        .join("codex_app_server_protocol.v2.schemas.json");
+    CodexAppServerSchemaValidator::from_schema_file(&schema_path).map_err(|source| {
+        format!(
+            "failed to compile installed Codex app-server schema from {}: {source}",
+            schema_path.display()
+        )
+    })
+}
+
+async fn write_codex_request(
+    stdin: &mut ChildStdin,
+    schema_validator: &CodexAppServerSchemaValidator,
+    request: &JsonRpcRequestEnvelope,
+    request_name: &str,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+) -> Result<(), String> {
+    schema_validator
+        .validate_request(request)
+        .map_err(|source| with_codex_stderr(source.to_string(), stderr_tail))?;
+    stdin
+        .write_all(
+            CodexJsonRpcSession::encode_line(request)
+                .map_err(|source| source.to_string())?
+                .as_bytes(),
+        )
+        .await
+        .map_err(|source| {
+            with_codex_stderr(
+                format!("failed to write Codex {request_name} request: {source}"),
+                stderr_tail,
+            )
+        })
 }
 
 struct AbortOnDrop<T> {
@@ -1245,10 +1329,18 @@ fn codex_thread_id_from_start_response(value: &serde_json::Value) -> Result<Stri
                 .get("threadId")
                 .or_else(|| result.get("thread_id"))
                 .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    result
+                        .get("thread")
+                        .and_then(|thread| thread.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                })
         })
         .filter(|thread_id| !thread_id.trim().is_empty())
         .ok_or_else(|| {
-            format!("Codex thread/start response missing non-empty threadId/thread_id: {value}")
+            format!(
+                "Codex thread/start response missing non-empty threadId/thread_id or thread.id: {value}"
+            )
         })?;
     Ok(thread_id.to_string())
 }
@@ -1961,9 +2053,10 @@ mod tests {
             "PWD={}",
             ensured.handle.workspace_path().display()
         )));
-        assert!(log.contains("ARGS=app-server --stdio"));
+        assert!(log.contains("ARGS=--dangerously-bypass-hook-trust app-server --stdio"));
         assert!(log.contains("\"method\":\"initialize\""));
         assert!(log.contains("\"method\":\"thread/start\""));
+        assert!(log.contains("\"method\":\"turn/start\""));
         assert!(
             std::iter::from_fn(|| updates_rx.try_recv().ok()).any(|update| {
                 matches!(
@@ -2685,6 +2778,8 @@ Run the scheduler.
         }
     }
 
+    const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"oneOf":[{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize"]},"params":{"type":"object"}}},{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["thread/start"]},"params":{"type":"object","required":["approvalPolicy","cwd","sandbox"],"properties":{"approvalPolicy":{"enum":["never"]},"cwd":{"type":"string"},"sandbox":{"enum":["danger-full-access"]}}}}},{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["turn/start"]},"params":{"type":"object","required":["approvalPolicy","cwd","input","sandboxPolicy","threadId"],"properties":{"approvalPolicy":{"enum":["never"]},"cwd":{"type":"string"},"input":{"type":"array"},"sandboxPolicy":{"type":"object","required":["type"],"properties":{"type":{"enum":["dangerFullAccess"]}},"additionalProperties":false},"threadId":{"type":"string"}}}}}]}}}"#;
+
     #[cfg(unix)]
     fn write_fake_codex_child(path: &Path, log_path: &Path) {
         write_executable(
@@ -2692,6 +2787,14 @@ Run the scheduler.
             &format!(
                 r#"#!/usr/bin/env bash
 set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
 printf 'PWD=%s\n' "$PWD" > "{log}"
 printf 'ARGS=%s\n' "$*" >> "{log}"
 while IFS= read -r line; do
@@ -2702,13 +2805,17 @@ while IFS= read -r line; do
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
       ;;
     *'"method":"thread/start"'*)
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"threadId":"fake-thread"}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
       printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
       ;;
   esac
 done
 "#,
-                log = log_path.display()
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
             ),
         );
     }
@@ -2720,6 +2827,14 @@ done
             &format!(
                 r#"#!/usr/bin/env bash
 set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
 printf 'PWD=%s\n' "$PWD" > "{log}"
 printf 'ARGS=%s\n' "$*" >> "{log}"
 while IFS= read -r line; do
@@ -2730,13 +2845,17 @@ while IFS= read -r line; do
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
       ;;
     *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
       printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
-      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"threadId":"fake-thread"}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
       ;;
   esac
 done
 "#,
-                log = log_path.display()
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
             ),
         );
     }
@@ -2748,6 +2867,14 @@ done
             &format!(
                 r#"#!/usr/bin/env bash
 set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
 printf 'PWD=%s\n' "$PWD" > "{log}"
 printf 'ARGS=%s\n' "$*" >> "{log}"
 while IFS= read -r line; do
@@ -2758,7 +2885,8 @@ while IFS= read -r line; do
   exit 0
 done
 "#,
-                log = log_path.display()
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
             ),
         );
     }

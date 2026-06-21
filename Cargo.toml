@@ -36,6 +36,7 @@ lru.workspace = true
 duckdb.workspace = true
 ftui.workspace = true
 futures-util.workspace = true
+jsonschema.workspace = true
 liquid.workspace = true
 reqwest.workspace = true
 reqwest-eventsource.workspace = true
@@ -91,6 +92,7 @@ duckdb = { version = "=1.10503.1", default-features = false }
 ftui = { version = "0.2.1", features = ["crossterm"] }
 lru = "0.16"
 futures-util = "0.3"
+jsonschema = { version = "0.46.5", default-features = false }
 libc = "0.2"
 liquid = "0.26"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }

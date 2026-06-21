@@ -266,11 +266,15 @@ workspaces, logs, workflow files, Linear comments, or browser payloads. Gateway
 readiness checks are cached briefly and have bounded per-command timeouts so
 operator UI polling cannot hang on a stalled local Codex command.
 
-The local Codex app-server harness path uses `codex app-server --stdio` and is
-advertised as available when clients read `/api/v1/capabilities`. Unsupported
-or logged-out Codex installations must fail with the readiness guidance above
-instead of partially starting an issue. Loopback WebSocket and hosted Codex
-worker pools remain non-production paths.
+The local Codex app-server harness path launches
+`codex --dangerously-bypass-hook-trust app-server --stdio` and is advertised as
+available when clients read `/api/v1/capabilities`. Before starting a run,
+OpenSymphony generates the JSON Schema from the installed Codex CLI and
+validates its full-automation `thread/start` and `turn/start` payloads. If the
+installed schema rejects those payloads, update Codex before running the Codex
+harness. Unsupported or logged-out Codex installations must fail with the
+readiness guidance above instead of partially starting an issue. Loopback
+WebSocket and hosted Codex worker pools remain non-production paths.
 
 For cross-harness route testing, run `opensymphony run --dry-run`.
 OpenSymphony will still poll Linear and prepare workspaces, but the worker

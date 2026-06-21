@@ -51,7 +51,12 @@ Map Codex approval events into the OpenSymphony approval center and let
       execution when the operator/workflow selects it.
 - [ ] Selected models are passed to the selected harness where supported:
       OpenHands receives the selected model as its conversation LLM model, and
-      Codex receives an explicit `thread/start` model only when one is selected.
+      Codex receives an explicit `thread/start` and `turn/start` model only when
+      one is selected.
+- [ ] Codex app-server execution uses the full-automation profile: hook trust
+      bypass at server launch plus `approvalPolicy: "never"` and
+      `dangerFullAccess` turn sandbox policy validated against the installed
+      Codex schema.
 - [ ] Dry-runs explain the selected harness, model, and model profile.
 
 ## Test Plan
@@ -61,6 +66,9 @@ Map Codex approval events into the OpenSymphony approval center and let
   dispatches through the selected harness backend.
 - Run route decision tests for selected harness/model, environment overrides,
   and unavailable-harness cases.
+- Run Codex lifecycle tests that prove OpenSymphony generates the installed
+  app-server schema, validates outbound automation payloads, creates a thread,
+  and starts a turn without human approval waits.
 
 ## Context
 

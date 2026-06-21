@@ -5,7 +5,11 @@
 //! benchmark tooling still compares IDs by string so it can report future Codex
 //! response-shape changes cleanly.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -32,6 +36,90 @@ use crate::{
 pub const CODEX_APP_SERVER_KIND: &str = "codex_app_server";
 pub const CODEX_APP_SERVER_CONTRACT: &str = "codex-app-server-json-rpc-v2";
 pub const CODEX_DEFAULT_MODEL_PROVIDER: &str = "openai";
+
+#[derive(Debug, thiserror::Error)]
+pub enum CodexSchemaValidationError {
+    #[error("failed to read installed Codex app-server schema at {path}: {source}")]
+    SchemaRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse installed Codex app-server schema JSON: {0}")]
+    SchemaParse(#[from] serde_json::Error),
+    #[error("installed Codex app-server schema has unexpected shape: {0}")]
+    SchemaShape(String),
+    #[error("failed to compile installed Codex app-server schema: {0}")]
+    SchemaCompile(String),
+    #[error("failed to serialize Codex JSON-RPC request for schema validation: {0}")]
+    Serialize(String),
+    #[error(
+        "installed Codex app-server schema rejected `{method}` request: {errors}. Update Codex, or update OpenSymphony's Codex adapter if the installed schema is newer and incompatible."
+    )]
+    Invalid { method: String, errors: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexAppServerSchemaValidator {
+    validator: jsonschema::Validator,
+}
+
+impl CodexAppServerSchemaValidator {
+    pub fn from_schema_file(path: impl AsRef<Path>) -> Result<Self, CodexSchemaValidationError> {
+        let path = path.as_ref();
+        let schema =
+            fs::read_to_string(path).map_err(|source| CodexSchemaValidationError::SchemaRead {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Self::from_schema_str(&schema)
+    }
+
+    pub fn from_schema_str(schema: &str) -> Result<Self, CodexSchemaValidationError> {
+        Self::from_schema_json(serde_json::from_str(schema)?)
+    }
+
+    pub fn from_schema_json(schema: Value) -> Result<Self, CodexSchemaValidationError> {
+        let definitions = schema.get("definitions").cloned().ok_or_else(|| {
+            CodexSchemaValidationError::SchemaShape("missing top-level definitions object".into())
+        })?;
+        if definitions.get("ClientRequest").is_none() {
+            return Err(CodexSchemaValidationError::SchemaShape(
+                "missing definitions.ClientRequest".into(),
+            ));
+        }
+        let client_request_schema = json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "$ref": "#/definitions/ClientRequest",
+            "definitions": definitions,
+        });
+        let validator = jsonschema::validator_for(&client_request_schema)
+            .map_err(|error| CodexSchemaValidationError::SchemaCompile(error.to_string()))?;
+        Ok(Self { validator })
+    }
+
+    pub fn validate_request(
+        &self,
+        request: &JsonRpcRequestEnvelope,
+    ) -> Result<(), CodexSchemaValidationError> {
+        let value = serde_json::to_value(request)
+            .map_err(|error| CodexSchemaValidationError::Serialize(error.to_string()))?;
+        let errors = self
+            .validator
+            .iter_errors(&value)
+            .take(5)
+            .map(|error| format!("{error} at {}", error.instance_path()))
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CodexSchemaValidationError::Invalid {
+                method: request.method.clone(),
+                errors: errors.join("; "),
+            })
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexContractArtifact {
@@ -126,26 +214,52 @@ impl CodexAppServerAdapter {
         CodexJsonRpcSession::new(self.client_name.clone(), self.client_version.clone())
     }
 
-    pub fn start_issue_request(
+    pub fn start_issue_thread_request(
         &self,
         session: &mut CodexJsonRpcSession,
         cwd: impl Into<String>,
         model: Option<String>,
-        workflow_prompt: impl Into<String>,
         config: Value,
     ) -> Result<CodexHarnessRequest, serde_json::Error> {
         Ok(CodexHarnessRequest {
             lifecycle: CodexLifecycleRequest::Start,
             request: session.thread_start(CodexThreadStartParams {
+                approval_policy: Some(CodexApprovalPolicy::Never),
                 cwd: Some(cwd.into()),
                 model,
                 // Codex CLI app-server currently exposes OpenAI/ChatGPT-backed
                 // model ids through this local harness path.
                 model_provider: Some(CODEX_DEFAULT_MODEL_PROVIDER.into()),
-                base_instructions: Some(workflow_prompt.into()),
+                base_instructions: None,
                 developer_instructions: None,
                 ephemeral: Some(false),
+                sandbox: Some(CodexThreadSandboxMode::DangerFullAccess),
                 config: Some(config),
+            })?,
+        })
+    }
+
+    pub fn start_issue_turn_request(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        thread_id: impl Into<String>,
+        cwd: impl Into<String>,
+        model: Option<String>,
+        workflow_prompt: impl Into<String>,
+    ) -> Result<CodexHarnessRequest, serde_json::Error> {
+        Ok(CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::Start,
+            request: session.turn_start(CodexTurnStartParams {
+                thread_id: thread_id.into(),
+                input: vec![CodexUserInput::Text {
+                    text: workflow_prompt.into(),
+                    text_elements: Vec::new(),
+                }],
+                approval_policy: Some(CodexApprovalPolicy::Never),
+                cwd: Some(cwd.into()),
+                model,
+                sandbox_policy: Some(CodexSandboxPolicy::danger_full_access()),
+                client_user_message_id: None,
             })?,
         })
     }
@@ -165,8 +279,10 @@ impl CodexAppServerAdapter {
                     text: continuation.into(),
                     text_elements: Vec::new(),
                 }],
+                approval_policy: Some(CodexApprovalPolicy::Never),
                 cwd: Some(cwd.into()),
                 model: None,
+                sandbox_policy: Some(CodexSandboxPolicy::danger_full_access()),
                 client_user_message_id: None,
             })?,
         })
@@ -331,7 +447,10 @@ impl CodexAppServerLaunch {
     /// prototype runs to local trusted environments and avoid real shared-host
     /// secrets.
     pub fn command_args(&self) -> Vec<String> {
-        let mut args = vec!["app-server".into()];
+        let mut args = vec![
+            "--dangerously-bypass-hook-trust".into(),
+            "app-server".into(),
+        ];
         args.extend(self.extra_args.clone());
         match &self.transport {
             CodexAppServerTransport::Stdio => args.push("--stdio".into()),
@@ -499,6 +618,8 @@ impl CodexJsonRpcSession {
 #[serde(rename_all = "camelCase")]
 pub struct CodexThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<CodexApprovalPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -511,7 +632,41 @@ pub struct CodexThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ephemeral: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<CodexThreadSandboxMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodexApprovalPolicy {
+    #[serde(rename = "never")]
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodexThreadSandboxMode {
+    #[serde(rename = "danger-full-access")]
+    DangerFullAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexSandboxPolicy {
+    #[serde(rename = "type")]
+    pub policy_type: CodexSandboxPolicyType,
+}
+
+impl CodexSandboxPolicy {
+    pub fn danger_full_access() -> Self {
+        Self {
+            policy_type: CodexSandboxPolicyType::DangerFullAccess,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodexSandboxPolicyType {
+    #[serde(rename = "dangerFullAccess")]
+    DangerFullAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,9 +675,13 @@ pub struct CodexTurnStartParams {
     pub thread_id: String,
     pub input: Vec<CodexUserInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<CodexApprovalPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<CodexSandboxPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_user_message_id: Option<String>,
 }

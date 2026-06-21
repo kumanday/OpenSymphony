@@ -131,8 +131,8 @@ This keeps one canonical Linear API surface for the agent path.
   - OpenHands transport and session runner
 - `opensymphony_codex`
   - local Codex app-server stdio adapter, JSON-RPC lifecycle requests, event
-    normalization, credential reuse, and benchmark helpers for experimental
-    transports
+    normalization, installed-schema validation, credential reuse, and benchmark
+    helpers for experimental transports
 - `opensymphony_orchestrator`
   - scheduler loop, route decisions, and reconciliation
 - `opensymphony_control`
