@@ -25,15 +25,21 @@ The Rust module provides:
   app-server use,
 - a concrete `HarnessAdapter` implementation for the local stdio capability.
 
+The current request builder defaults `modelProvider` to `openai` because Codex
+CLI app-server exposes local OpenAI/ChatGPT-backed model ids on this path. If a
+future Codex CLI adds provider-neutral model routing, OpenSymphony should pass
+that provider through the harness adapter instead of treating it as a local
+default.
+
 The companion benchmark script issues `thread/loaded/list` requests directly so
 throughput can be measured without starting model-backed turns.
 
 ## Local Testing
 
 Codex app-server local stdio support is compiled into normal OpenSymphony
-builds. The `codex-app-server-prototype` Cargo feature remains for compatibility
-with older benchmark workflows, but it is not required for adapter contract
-tests.
+builds. The old `codex-app-server-prototype` Cargo feature has been removed;
+adapter contract and benchmark tests run through the normal local harness
+module.
 
 Use the system DuckDB developer aliases for quick local verification:
 

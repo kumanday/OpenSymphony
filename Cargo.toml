@@ -21,7 +21,6 @@ resolver = "2"
 
 [features]
 default = ["duckdb-bundled"]
-codex-app-server-prototype = []
 duckdb-bundled = ["duckdb/bundled"]
 duckdb-prebuilt = []
 openhands-subscription-credentials = []

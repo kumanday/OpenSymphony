@@ -229,9 +229,9 @@ cargo test-system-duckdb \
 cargo test-system-duckdb --test codex_app_server
 ```
 
-The `codex-app-server-prototype` feature remains as a compatibility switch for
-older benchmark workflows, but it is no longer required for local stdio harness
-capability, lifecycle, or normalization tests.
+The old `codex-app-server-prototype` feature has been removed; local stdio
+harness capability, lifecycle, normalization, and benchmark checks run through
+normal OpenSymphony builds.
 
 To install a local `opensymphony` binary with subscription credentials enabled
 while using the system DuckDB development path:

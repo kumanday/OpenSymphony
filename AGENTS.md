@@ -131,12 +131,11 @@ The runtime client must:
 The local Codex app-server harness uses the `opensymphony_codex` internal module
 boundary and is advertised as an available local stdio capability. Keep Codex
 app-server launch, JSON-RPC lifecycle, event-normalization, generated-contract,
-and benchmark evidence documented in `docs/codex-app-server-prototype.md`. The
-`codex-app-server-prototype` feature is retained only as a compatibility switch
-for older benchmark workflows; local stdio harness capability must stay
-available without that feature. Do not advertise hosted worker pools, remote
-routing, or loopback WebSocket as production-ready until those paths have their
-own hardening evidence.
+and benchmark evidence documented in `docs/codex-app-server-harness.md`. The old
+`codex-app-server-prototype` Cargo feature has been removed; local stdio harness
+capability must stay available in normal builds. Do not advertise hosted worker
+pools, remote routing, or loopback WebSocket as production-ready until those
+paths have their own hardening evidence.
 
 ### Preserve forward compatibility
 
@@ -289,7 +288,7 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 - `docs/architecture.md`: runtime architecture
 - `docs/symphony-spec-alignment.md`: upstream spec mapping
 - `docs/openhands-agent-server.md`: agent-server integration choices
-- `docs/codex-app-server-prototype.md`: local Codex app-server stdio harness,
+- `docs/codex-app-server-harness.md`: local Codex app-server stdio harness,
   launch contract, JSON-RPC lifecycle evidence, and benchmark results
 - `docs/websocket-runtime.md`: wire contract and recovery behavior
 - `docs/workspace-and-lifecycle.md`: workspace ownership and hooks

@@ -49,9 +49,9 @@ can render Codex activity through the same surfaces used by other harnesses.
 COE-426 added the benchmark/prototype evidence. COE-476 promotes the local
 stdio path into capability discovery: `codex_app_server` is advertised as
 available with runtime contract `codex-app-server-json-rpc-v2`,
-`json_rpc_2_0` transport, and `stdio` mode. The
-`codex-app-server-prototype` feature remains as a compatibility switch for
-older benchmark workflows; it is not required for the local adapter tests.
+`json_rpc_2_0` transport, and `stdio` mode. The old
+`codex-app-server-prototype` Cargo feature has been removed; local adapter and
+benchmark tests run through normal builds.
 
 Codex ChatGPT subscription readiness is advertised as a Codex CLI login
 reference rather than an OpenSymphony-owned secret. Capability discovery lists
@@ -62,8 +62,8 @@ model-settings response probes `codex --version`,
 logged-out, expired, unsupported, permission-denied, or unknown states without
 reading private Codex credential files.
 
-Benchmark and contract evidence lives in
-`docs/codex-app-server-prototype.md`. The companion script
+Benchmark and contract evidence lives in `docs/codex-app-server-harness.md`.
+The companion script
 `scripts/codex_app_server_benchmark.mjs` exercises stdio initialize, loopback
 WebSocket throughput, queued request behavior, reconnect, and secure exposure
 flags against the installed Codex CLI.

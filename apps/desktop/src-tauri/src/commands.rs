@@ -1209,6 +1209,9 @@ pub struct GatewayConnectionInfo {
 /// Used by the frontend transport factory to select the optimal profile.
 #[command]
 pub async fn gateway_capabilities() -> CommandResult<GatewayCapabilities> {
+    // Desktop exposes the same loopback gateway capability truth consumed by
+    // the frontend. Harness execution still routes through the gateway/runtime,
+    // not a separate desktop-side Codex launcher.
     Ok(GatewayCapabilities {
         schema_version: SchemaVersion::v1(),
         gateway_version: env!("CARGO_PKG_VERSION").to_string(),

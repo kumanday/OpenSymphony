@@ -473,9 +473,9 @@ That document covers:
 - COE-475 contributed: PR #134: Expose Codex ChatGPT login readiness (merge `124ac40`)
 - COE-476 promoted the local stdio Codex app-server path to a supported
   harness capability. Use `cargo test-system-duckdb --test codex_app_server`
-  for adapter lifecycle and event-normalization coverage; add
-  `--features codex-app-server-prototype` only for legacy benchmark workflows
-  that still request that compatibility flag.
+  for adapter lifecycle and event-normalization coverage; run benchmark
+  evidence through normal builds because the old prototype feature has been
+  removed.
 
 ## Important invariants
 

@@ -23,9 +23,9 @@ use crate::{
     },
 };
 
-pub const CODEX_APP_SERVER_FEATURE: &str = "codex-app-server-prototype";
 pub const CODEX_APP_SERVER_KIND: &str = "codex_app_server";
 pub const CODEX_APP_SERVER_CONTRACT: &str = "codex-app-server-json-rpc-v2";
+pub const CODEX_DEFAULT_MODEL_PROVIDER: &str = "openai";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexContractArtifact {
@@ -133,7 +133,9 @@ impl CodexAppServerAdapter {
             request: session.thread_start(CodexThreadStartParams {
                 cwd: Some(cwd.into()),
                 model: Some(model.into()),
-                model_provider: Some("openai".into()),
+                // Codex CLI app-server currently exposes OpenAI/ChatGPT-backed
+                // model ids through this local harness path.
+                model_provider: Some(CODEX_DEFAULT_MODEL_PROVIDER.into()),
                 base_instructions: Some(workflow_prompt.into()),
                 developer_instructions: None,
                 ephemeral: Some(false),
@@ -628,7 +630,9 @@ pub fn normalized_event_to_journal_record(
 fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventKind, String) {
     match event.kind {
         NormalizedCodexEventKind::ThreadStarted => (
-            EventKind::RunStarted,
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
             format!(
                 "Codex thread started{}",
                 id_suffix(event.thread_id.as_deref())
@@ -641,7 +645,9 @@ fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventK
             format!("Codex turn started{}", id_suffix(event.turn_id.as_deref())),
         ),
         NormalizedCodexEventKind::TurnCompleted => (
-            EventKind::RunCompleted,
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
             format!(
                 "Codex turn completed{}",
                 id_suffix(event.turn_id.as_deref())
@@ -672,11 +678,14 @@ fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventK
             EventKind::RunFailed,
             error_summary(event).unwrap_or_else(|| "Codex app-server reported an error".into()),
         ),
+        NormalizedCodexEventKind::ThreadStatusChanged => (
+            thread_status_kind(event),
+            format!("Codex event: {}", event.method),
+        ),
         NormalizedCodexEventKind::ItemStarted
         | NormalizedCodexEventKind::ItemCompleted
         | NormalizedCodexEventKind::AgentMessageDelta
-        | NormalizedCodexEventKind::PlanDelta
-        | NormalizedCodexEventKind::ThreadStatusChanged => (
+        | NormalizedCodexEventKind::PlanDelta => (
             EventKind::HarnessEventNormalized {
                 source_kind: event.method.clone(),
             },
@@ -716,9 +725,26 @@ fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
         Some("approve" | "approved" | "grant" | "granted" | "allow" | "allowed") => {
             EventKind::ApprovalGranted
         }
-        Some("reject" | "rejected" | "deny" | "denied" | "disallow" | "cancelled" | "canceled") => {
-            EventKind::ApprovalDenied
+        Some("reject" | "rejected" | "deny" | "denied" | "disallow") => EventKind::ApprovalDenied,
+        _ => EventKind::HarnessEventNormalized {
+            source_kind: event.method.clone(),
+        },
+    }
+}
+
+fn thread_status_kind(event: &NormalizedCodexEvent) -> EventKind {
+    let params = event.raw.get("params").unwrap_or(&Value::Null);
+    let status = ["status", "state", "execution_status"]
+        .into_iter()
+        .filter_map(|key| params.get(key)?.as_str())
+        .map(str::to_ascii_lowercase)
+        .next();
+    match status.as_deref() {
+        Some("completed" | "complete" | "succeeded" | "success" | "done") => {
+            EventKind::RunCompleted
         }
+        Some("failed" | "failure" | "error") => EventKind::RunFailed,
+        Some("cancelled" | "canceled") => EventKind::RunCancelled,
         _ => EventKind::HarnessEventNormalized {
             source_kind: event.method.clone(),
         },

@@ -147,6 +147,7 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
     assert_eq!(start.request.method, "thread/start");
     assert_eq!(start.request.params["cwd"], "/tmp/issue-workspace");
     assert_eq!(start.request.params["baseInstructions"], "workflow prompt");
+    assert_eq!(start.request.params["modelProvider"], "openai");
 
     let resume = adapter
         .resume_issue_request(&mut session, "thread-1", "/tmp/issue-workspace", "continue")
@@ -236,7 +237,24 @@ fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
     }))
     .expect("completion normalizes");
     let completed_record = normalized_event_to_journal_record("COE-476", 8, &completed);
-    assert_eq!(completed_record.kind, EventKind::RunCompleted);
+    assert_eq!(
+        completed_record.kind,
+        EventKind::HarnessEventNormalized {
+            source_kind: "turn/completed".into()
+        }
+    );
+
+    let terminal = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/status/changed",
+        "params": {
+            "threadId": "thread-1",
+            "status": "completed"
+        }
+    }))
+    .expect("terminal thread status normalizes");
+    let terminal_record = normalized_event_to_journal_record("COE-476", 14, &terminal);
+    assert_eq!(terminal_record.kind, EventKind::RunCompleted);
 
     let failed = normalize_server_notification(json!({
         "jsonrpc": "2.0",
@@ -308,6 +326,25 @@ fn codex_approval_completed_maps_decisions_without_guessing() {
     let unknown_record = normalized_event_to_journal_record("COE-476", 13, &unknown);
     assert_eq!(
         unknown_record.kind,
+        EventKind::HarnessEventNormalized {
+            source_kind: "approval/completed".into()
+        }
+    );
+
+    let cancelled = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "approval/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-4",
+            "decision": "cancelled"
+        }
+    }))
+    .expect("cancelled completion normalizes");
+    let cancelled_record = normalized_event_to_journal_record("COE-476", 15, &cancelled);
+    assert_eq!(
+        cancelled_record.kind,
         EventKind::HarnessEventNormalized {
             source_kind: "approval/completed".into()
         }
