@@ -1060,11 +1060,11 @@ async fn try_run_codex_stdio_issue(
     let stdout = child.stdout.take().ok_or("Codex child stdout missing")?;
     let stderr = child.stderr.take().ok_or("Codex child stderr missing")?;
     let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
-    let stderr_task = tokio::spawn(drain_codex_stderr(
+    let mut stderr_task = AbortOnDrop::new(tokio::spawn(drain_codex_stderr(
         stderr,
         run.worker_id.to_string(),
         Arc::clone(&stderr_tail),
-    ));
+    )));
     let mut reader = BufReader::new(stdout).lines();
     let mut session = adapter.session();
 
@@ -1135,16 +1135,8 @@ async fn try_run_codex_stdio_issue(
     )
     .await
     .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
-    let conversation_id = start_response
-        .get("result")
-        .and_then(|result| {
-            result
-                .get("threadId")
-                .or_else(|| result.get("thread_id"))
-                .and_then(serde_json::Value::as_str)
-        })
-        .unwrap_or("codex-thread")
-        .to_string();
+    let conversation_id = codex_thread_id_from_start_response(&start_response)
+        .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
     if let Some(sender) = launch_tx.take() {
         let _ = sender.send(LaunchReport::Conversation(Box::new(
             codex_conversation_metadata(conversation_id, route),
@@ -1172,6 +1164,30 @@ async fn try_run_codex_stdio_issue(
     ))
 }
 
+struct AbortOnDrop<T> {
+    handle: Option<JoinHandle<T>>,
+}
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn abort(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
 fn codex_model_from_route(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
 ) -> String {
@@ -1179,6 +1195,22 @@ fn codex_model_from_route(
         Some("codex-chatgpt-local-keychain") | None => "openai/chatgpt-codex-subscription".into(),
         Some(model_or_profile) => model_or_profile.into(),
     }
+}
+
+fn codex_thread_id_from_start_response(value: &serde_json::Value) -> Result<String, String> {
+    let thread_id = value
+        .get("result")
+        .and_then(|result| {
+            result
+                .get("threadId")
+                .or_else(|| result.get("thread_id"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|thread_id| !thread_id.trim().is_empty())
+        .ok_or_else(|| {
+            format!("Codex thread/start response missing non-empty threadId/thread_id: {value}")
+        })?;
+    Ok(thread_id.to_string())
 }
 
 async fn drain_codex_stderr(
@@ -1656,6 +1688,37 @@ mod tests {
 
         assert!(error.contains("response id 4"));
         assert!(error.contains("not logged in"));
+    }
+
+    #[test]
+    fn codex_start_response_requires_real_thread_id() {
+        let thread_id = codex_thread_id_from_start_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {
+                "threadId": "thread-7"
+            }
+        }))
+        .expect("threadId should be accepted");
+        assert_eq!(thread_id, "thread-7");
+
+        let missing = codex_thread_id_from_start_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {}
+        }))
+        .expect_err("missing thread id should fail launch");
+        assert!(missing.contains("missing non-empty threadId/thread_id"));
+
+        let empty = codex_thread_id_from_start_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {
+                "thread_id": "  "
+            }
+        }))
+        .expect_err("empty thread id should fail launch");
+        assert!(empty.contains("missing non-empty threadId/thread_id"));
     }
 
     #[test]
