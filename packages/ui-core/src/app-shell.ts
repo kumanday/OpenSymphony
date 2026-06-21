@@ -2699,7 +2699,7 @@ function modelProfilesWithDefaults(
 
 function modelCredentialSummary(profile: ModelConfigurationProfile): string {
   if (profile.mode === "api_key") {
-    return `API key ${redactCredentialRef(profile.apiKeyRef).toLowerCase()}`;
+    return profile.apiKeyRef?.trim() ? "API key configured" : "API key not configured";
   }
   const authDirectoryEnv = profile.subscriptionCredential?.authDirectoryEnv?.trim();
   const codexReady = profile.harnesses.includes("codex_app_server")
