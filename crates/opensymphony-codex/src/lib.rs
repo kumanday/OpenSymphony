@@ -1217,10 +1217,17 @@ fn bounded_redacted_preview(raw: &str) -> Option<String> {
             redact_next = false;
             continue;
         }
-        if lower.ends_with(':') && secret_key(lower.trim_end_matches(':')) {
-            redacted.push(format!("{word}[redacted]"));
-            drop_next = true;
-            continue;
+        if lower.ends_with(':') {
+            let key = lower.trim_end_matches(':');
+            if key == "authorization" {
+                redacted.push(format!("{word}[redacted]"));
+                break;
+            }
+            if secret_key(key) {
+                redacted.push(format!("{word}[redacted]"));
+                drop_next = true;
+                continue;
+            }
         }
         if lower == "bearer" || matches!(lower.as_str(), "authorization" | "password" | "secret") {
             redacted.push(word.to_string());

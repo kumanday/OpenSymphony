@@ -56,7 +56,7 @@ The shared Codex summary helper extracts short previews for:
 Preview text is whitespace-normalized, control characters are removed, and the
 summary is truncated to a fixed character budget. Common inline credential
 patterns such as `api_key=...`, `token: ...`, `password: ...`, and
-`Authorization: Bearer ...` render as `[redacted]` in summaries. Unknown or
+`Authorization: ...` render as `[redacted]` in summaries. Unknown or
 unsupported methods still use the stable fallback `Codex event: <method>`.
 
 ## Full-Automation Profile
