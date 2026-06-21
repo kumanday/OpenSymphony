@@ -665,6 +665,41 @@ fn harness_capability_roundtrips_future_adapters() {
 }
 
 #[test]
+fn codex_future_capability_shape_is_stable() {
+    let future = HarnessCapability::codex_app_server_future();
+    let json = must_serialize(&future);
+    let back: HarnessCapability = must_deserialize(&json);
+
+    assert_eq!(back.kind, "codex_app_server");
+    assert_eq!(back.display_name, "Codex app-server");
+    assert!(!back.available);
+    assert_eq!(back.adapter_contract_version, "harness-adapter-v1");
+    assert_eq!(back.runtime_contract_version, None);
+    assert!(back.actions.start_run);
+    assert!(back.actions.approve);
+    assert!(back.actions.comment);
+    assert!(back.event_streams.runtime_events);
+    assert_eq!(
+        back.event_streams.delivery_modes,
+        vec!["json_rpc_notifications", "websocket_experimental"]
+    );
+    assert_eq!(back.transport.protocol, "json_rpc_2_0");
+    assert_eq!(
+        back.transport.modes,
+        vec!["stdio", "websocket_experimental"]
+    );
+    assert!(back.transport.local);
+    assert!(back.transport.remote);
+    assert!(!back.history.fetch_history);
+    assert!(!back.history.reconnect_and_replay);
+    assert!(
+        back.feature_gaps
+            .iter()
+            .any(|gap| gap.contains("Production hosted or remote Codex routing"))
+    );
+}
+
+#[test]
 fn fake_harness_optional_capability_combinations_roundtrip() {
     let mut fake = HarnessCapability::rust_native_future();
     fake.kind = "fake_minimal".into();

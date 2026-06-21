@@ -248,7 +248,7 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
     assert_eq!(cancel.request.method, "turn/cancel");
     assert_eq!(cancel.request.params["turnId"], "turn-1");
 
-    let approve = adapter.approval_request(
+    let approve = adapter.approval_response(
         &mut session,
         "approval-1",
         CodexApprovalDecision::Approve,
@@ -258,7 +258,7 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
     assert_eq!(approve.request.method, "approval/respond");
     assert_eq!(approve.request.params["decision"], "approve");
 
-    let reject = adapter.approval_request(
+    let reject = adapter.approval_response(
         &mut session,
         "approval-2",
         CodexApprovalDecision::Reject,

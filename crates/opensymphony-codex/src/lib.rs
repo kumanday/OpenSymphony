@@ -177,7 +177,7 @@ impl CodexAppServerAdapter {
         }
     }
 
-    pub fn approval_request(
+    pub fn approval_response(
         &self,
         session: &mut CodexJsonRpcSession,
         approval_id: impl Into<String>,
