@@ -229,6 +229,33 @@ fn codex_schema_validator_rejects_drifted_automation_payloads() {
 }
 
 #[test]
+fn codex_schema_validator_accepts_defs_client_request_shape() {
+    let schema = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$defs": {
+            "ClientRequest": {
+                "type": "object",
+                "required": ["jsonrpc", "id", "method", "params"],
+                "properties": {
+                    "jsonrpc": { "const": "2.0" },
+                    "id": { "type": "integer" },
+                    "method": { "enum": ["initialize"] },
+                    "params": { "type": "object" }
+                }
+            }
+        }
+    });
+    let validator = CodexAppServerSchemaValidator::from_schema_json(schema)
+        .expect("$defs schema should compile");
+    let mut session = CodexJsonRpcSession::new("opensymphony-test", "0.0.0");
+    let initialize = session.initialize();
+
+    validator
+        .validate_request(&initialize)
+        .expect("initialize should match $defs ClientRequest schema");
+}
+
+#[test]
 fn codex_installed_schema_accepts_automation_payloads_when_requested() {
     if std::env::var_os("OPENSYMPHONY_CODEX_LIVE_SCHEMA").is_none() {
         eprintln!("set OPENSYMPHONY_CODEX_LIVE_SCHEMA=1 to validate against installed Codex");

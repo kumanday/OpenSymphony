@@ -80,12 +80,18 @@ impl CodexAppServerSchemaValidator {
     }
 
     pub fn from_schema_json(schema: Value) -> Result<Self, CodexSchemaValidationError> {
-        let definitions = schema.get("definitions").cloned().ok_or_else(|| {
-            CodexSchemaValidationError::SchemaShape("missing top-level definitions object".into())
-        })?;
+        let definitions = schema
+            .get("definitions")
+            .or_else(|| schema.get("$defs"))
+            .cloned()
+            .ok_or_else(|| {
+                CodexSchemaValidationError::SchemaShape(
+                    "missing top-level definitions or $defs object".into(),
+                )
+            })?;
         if definitions.get("ClientRequest").is_none() {
             return Err(CodexSchemaValidationError::SchemaShape(
-                "missing definitions.ClientRequest".into(),
+                "missing definitions/$defs ClientRequest schema".into(),
             ));
         }
         let client_request_schema = json!({

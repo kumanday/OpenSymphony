@@ -1369,8 +1369,9 @@ fn codex_schema_stderr_preview(stderr: &[u8]) -> Option<String> {
         return None;
     }
     let decoded = String::from_utf8_lossy(stderr);
-    let mut preview = decoded
-        .chars()
+    let mut chars = decoded.chars();
+    let mut preview = chars
+        .by_ref()
         .take(CODEX_SCHEMA_STDERR_PREVIEW_CHARS)
         .map(|character| match character {
             '\n' | '\t' => character,
@@ -1378,7 +1379,7 @@ fn codex_schema_stderr_preview(stderr: &[u8]) -> Option<String> {
             character => character,
         })
         .collect::<String>();
-    if decoded.chars().count() > CODEX_SCHEMA_STDERR_PREVIEW_CHARS {
+    if chars.next().is_some() {
         preview.push_str("...");
     }
     Some(format!("{preview:?}"))
@@ -1620,13 +1621,24 @@ fn emit_codex_notification(
         timestamp_to_datetime(observed_at),
         &event,
     ) {
+        let payload = match serde_json::to_value(&approval) {
+            Ok(payload) => Some(payload),
+            Err(error) => {
+                tracing::warn!(
+                    approval_id = %approval.approval_id,
+                    %error,
+                    "failed to serialize Codex approval request payload"
+                );
+                None
+            }
+        };
         let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
             worker_id,
             observed_at,
             event_id: Some(format!("approval:{}", approval.approval_id)),
             event_kind: Some("approval.requested".into()),
             summary: Some(format!("Approval requested: {}", approval.title)),
-            payload: serde_json::to_value(&approval).ok(),
+            payload,
         });
     }
     Some(event)
