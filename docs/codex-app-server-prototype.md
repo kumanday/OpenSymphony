@@ -359,8 +359,7 @@ test path. Production enablement should wait for:
 
 ## Current model
 
-- COE-428 contributed: PR #133: Add alpha model configuration UI (merge `6f6b94e`)
-- COE-475 contributed: PR #134: Expose Codex ChatGPT login readiness (merge `124ac40`)
+- COE-478 contributed: PR #135: COE-478: Persist and validate model profiles (merge `3e2dab5`)
 
 ## Important invariants
 
@@ -377,12 +376,10 @@ test path. Production enablement should wait for:
 
 ## Recent changes
 
-- COE-428: Model Configuration UI And Routing Metadata
-- COE-475: ChatGPT OAuth For Codex Harness
+- COE-478: Harden model profile storage and validation follow-ups
 
 ## Source refs
 
-- COE-428
-- COE-475
+- COE-478
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
