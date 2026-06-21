@@ -1557,6 +1557,14 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const audit = this.state.auditTrail.length
       ? `<div class="os-audit-trail" data-testid="audit-trail">${this.state.auditTrail.map(renderAuditTrailEntry).join("")}</div>`
       : "";
+    const turns = run.max_turns > 0
+      ? `${run.turn_count} / ${run.max_turns}`
+      : run.turn_count > 0
+        ? `${run.turn_count}`
+        : "unknown";
+    const runtime = run.runtime_seconds > 0 || (run.started_at && run.status === "running")
+      ? `${run.runtime_seconds}s`
+      : "unknown";
     return panel(
       "Run Detail",
       `
@@ -1575,8 +1583,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         <div class="os-run-grid">
           <div><span>Phase</span><strong>${escapeHtml(phase)}</strong></div>
           <div><span>Stream</span><strong>${escapeHtml(stream)}</strong></div>
-          <div><span>Turns</span><strong>${run.turn_count} / ${run.max_turns}</strong></div>
-          <div><span>Runtime</span><strong>${run.runtime_seconds}s</strong></div>
+          <div><span>Turns</span><strong>${turns}</strong></div>
+          <div><span>Runtime</span><strong>${runtime}</strong></div>
           ${run.diagnostics?.cancel_acknowledged ? `<div><span>Cancel</span><strong class="os-cancel-acknowledged" data-testid="cancel-acknowledged">acknowledged</strong></div>` : ""}
           ${run.diagnostics?.cancel_failed ? `<div><span>Cancel</span><strong class="os-cancel-failed" data-testid="cancel-failed">failed</strong></div>` : ""}
         </div>
@@ -3343,9 +3351,10 @@ function appShellStyles(): string {
     .os-run-detail-panel button { min-height: 30px; padding: 5px 8px; font-size: 12px; }
     .os-run-detail-panel .os-run-head { padding: 8px 10px; margin-bottom: 8px; }
     .os-run-detail-panel .os-run-head strong { font-size: 14px; }
-    .os-run-detail-panel .os-run-grid { gap: 8px; margin-bottom: 8px; }
-    .os-run-detail-panel .os-run-grid div { padding: 8px; }
-    .os-run-detail-panel .os-run-grid strong { font-size: 15px; }
+    .os-run-detail-panel .os-run-grid { grid-template-columns: repeat(auto-fit, minmax(82px, 1fr)); gap: 6px; margin-bottom: 8px; }
+    .os-run-detail-panel .os-run-grid div { min-height: 42px; padding: 6px 7px; }
+    .os-run-detail-panel .os-run-grid strong { font-size: 13px; line-height: 1.2; white-space: nowrap; }
+    .os-run-detail-panel .os-run-grid span { font-size: 10px; line-height: 1.2; margin-top: 0; }
     .os-run-action-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
     .os-action-item { display: flex; align-items: center; gap: 8px; }
     .os-action-warning { color: #b45309; font-size: 12px; }

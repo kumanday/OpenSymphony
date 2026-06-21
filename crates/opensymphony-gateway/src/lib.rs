@@ -2658,31 +2658,19 @@ async fn get_run_detail(
             worker_id: "default-worker".into(),
             status,
             lifecycle_state,
-            // Use published timestamp so it does not drift on every event.
-            claimed_at: envelope.published_at,
-            // started_at is meaningful only when the run is actively running.
-            started_at: matches!(
-                issue.runtime_state,
-                ControlPlaneIssueRuntimeState::Running | ControlPlaneIssueRuntimeState::Releasing
-            )
-            .then(|| envelope.published_at),
-            // finished_at is set for terminal states using the snapshot timestamp
-            // since the control plane does not yet track exact completion time.
-            finished_at: matches!(
-                issue.runtime_state,
-                ControlPlaneIssueRuntimeState::Completed | ControlPlaneIssueRuntimeState::Failed
-            )
-            .then(|| envelope.published_at),
+            claimed_at: issue.claimed_at.unwrap_or(envelope.published_at),
+            started_at: issue.started_at,
+            finished_at: issue.finished_at,
             release_reason,
-            // retry_count and turn_count are distinct concepts; the snapshot
-            // currently only tracks retries.
-            turn_count: 0,
-            max_turns: issue.retry_count.saturating_add(1).max(1),
+            turn_count: issue.turn_count,
+            // 0 means unknown: older snapshots and terminal rows may not have
+            // retained the active run's configured max-turn budget.
+            max_turns: issue.max_turns,
             retry_attempt: (issue.retry_count > 0).then_some(issue.retry_count),
             input_tokens: issue.input_tokens,
             output_tokens: issue.output_tokens,
             cache_read_tokens: issue.cache_read_tokens,
-            runtime_seconds: 0,
+            runtime_seconds: issue.runtime_seconds,
             // Emit conversation_id whenever a suffix is available regardless of
             // whether a server URL is configured.
             conversation_id: (!issue.conversation_id_suffix.is_empty())
@@ -4044,6 +4032,12 @@ exit 2
                 String::new()
             },
             retry_count: 0,
+            claimed_at: None,
+            started_at: None,
+            finished_at: None,
+            turn_count: 0,
+            max_turns: 0,
+            runtime_seconds: 0,
             blocked: false,
             blocked_by: Vec::new(),
             server_base_url: if flags.harness {
