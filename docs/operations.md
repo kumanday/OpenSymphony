@@ -179,6 +179,16 @@ cargo test --test update
 ./scripts/smoke_local.sh
 ```
 
+Dependency audit notes:
+
+- COE-429 adds `jsonschema = 0.46.5` as the runtime validator for installed
+  Codex app-server JSON Schema payload checks. Release provenance was checked
+  against the `Cargo.lock` crates.io source/checksum entries for `jsonschema`
+  and its called-out transitive crates (`fancy-regex`, `fluent-uri`, and
+  `fraction`), the dependency tree was reviewed with `cargo tree -p jsonschema
+  --depth 2`, and `cargo audit` exited successfully against the current lockfile
+  on 2026-06-21. Re-run those checks when upgrading `jsonschema`.
+
 Useful runtime checks:
 
 ```bash
