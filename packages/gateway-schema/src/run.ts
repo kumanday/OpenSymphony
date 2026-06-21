@@ -127,6 +127,10 @@ export interface RunDetail {
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
+  /**
+   * Elapsed runtime in whole seconds. A value of 0 means runtime is unknown
+   * unless the run is actively running and has a start timestamp.
+   */
   runtime_seconds: number;
   conversation_id?: string;
   /** Logical workspace identifier for hosted mode. */

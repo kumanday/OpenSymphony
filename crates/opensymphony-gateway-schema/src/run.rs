@@ -41,6 +41,8 @@ pub struct RunDetail {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
+    /// Elapsed runtime in whole seconds. A value of 0 means runtime is unknown
+    /// unless the run is actively running and has a start timestamp.
     pub runtime_seconds: u64,
     pub conversation_id: Option<String>,
     /// Logical workspace identifier for hosted mode.
