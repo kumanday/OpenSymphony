@@ -310,17 +310,25 @@ export function createDesktopModelProfileController(): ModelProfileController | 
   const tauriInvoke = invoke;
 
   const quarantineMessages: string[] = [];
+  const recordQuarantine = (reason: string) => {
+    quarantineMessages.push(reason);
+  };
   const store = createAsyncModelProfileStore({
     defaults: defaultModelProfiles(),
-    onQuarantine: (reason) => {
-      quarantineMessages.push(reason);
-    },
+    onQuarantine: recordQuarantine,
     async load() {
       const response = await tauriInvoke<NativeSettingResponse>("get_setting", {
         req: { key: MODEL_PROFILE_SETTINGS_KEY },
       });
       const value = response.value;
-      return value?.type === "Text" ? value.value : null;
+      if (!value) {
+        return null;
+      }
+      if (value.type !== "Text") {
+        recordQuarantine("Dropped malformed desktop model profile setting: expected Text value");
+        return null;
+      }
+      return value.value;
     },
     async save(value) {
       await tauriInvoke("set_setting", {

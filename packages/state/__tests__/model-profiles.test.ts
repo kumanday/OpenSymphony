@@ -92,7 +92,7 @@ describe("createModelProfileStore", () => {
       active: true,
       model: "provider/freeform-model",
       apiKeyRef: "local_keychain:custom-secret",
-      harnesses: ["openhands_agent_server", "custom_harness"],
+      harnesses: ["openhands_agent_server", "codex_app_server"],
     };
 
     await store.storeProfile(profile);
@@ -103,7 +103,7 @@ describe("createModelProfileStore", () => {
     const saved = profiles.find((candidate) => candidate.id === profile.id);
 
     expect(saved?.model).toBe("provider/freeform-model");
-    expect(saved?.harnesses).toContain("custom_harness");
+    expect(saved?.harnesses).toContain("codex_app_server");
     expect(profiles.find((candidate) => candidate.id === profile.id)?.active).toBe(true);
 
     await reloaded.removeProfile(profile.id);
@@ -169,6 +169,8 @@ describe("createModelProfileStore", () => {
       apiKeyRef: "local_keychain:safe-api-key",
       active: true,
       routingPolicy: { tier: "fast" },
+      providerConfig: { apiKey: "sk-secret-nested", region: "us-east-1" },
+      nestedList: [{ oauthToken: "oauth-secret", label: "kept" }],
       rawTokenMetadata: "should-not-survive",
     };
     storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
@@ -202,6 +204,12 @@ describe("createModelProfileStore", () => {
     expect((profiles[0] as ModelConfigurationProfile & { routingPolicy?: unknown }).routingPolicy).toEqual({
       tier: "fast",
     });
+    expect((profiles[0] as ModelConfigurationProfile & { providerConfig?: unknown }).providerConfig).toEqual({
+      region: "us-east-1",
+    });
+    expect((profiles[0] as ModelConfigurationProfile & { nestedList?: unknown }).nestedList).toEqual([
+      { label: "kept" },
+    ]);
     expect((profiles[0] as ModelConfigurationProfile & { rawTokenMetadata?: unknown }).rawTokenMetadata).toBeUndefined();
     expect(quarantineReasons).toEqual(expect.arrayContaining([
       expect.stringContaining("raw-secret"),
@@ -226,6 +234,32 @@ describe("createModelProfileStore", () => {
 
     expect(profiles.length).toBeGreaterThan(0);
     expect(quarantineReasons).toContain("Dropped malformed model profile list from durable storage");
+  });
+
+  it("drops profiles when persisted harnesses contain no known harness kinds", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
+      profiles: [{
+        ...createModelProfile("api_key"),
+        id: "invalid-harnesses",
+        harnesses: ["openhands_agent_server_typo"],
+      }],
+    }));
+    const quarantineReasons: string[] = [];
+    const store = createModelProfileStore({
+      storage,
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+
+    const profiles = await store.listProfiles();
+
+    expect(profiles.map((profile) => profile.id)).toEqual(
+      defaultModelProfiles().map((profile) => profile.id),
+    );
+    expect(quarantineReasons).toEqual(expect.arrayContaining([
+      expect.stringContaining("invalid-harnesses"),
+      "Dropped malformed model profile from durable storage",
+    ]));
   });
 
   it("uses the same CRUD path for async durable storage", async () => {

@@ -159,6 +159,11 @@ const authMethods = new Set<SubscriptionCredentialAuthMethod>([
   "device_code",
   "cached",
 ]);
+const harnessKinds = new Set<ModelHarnessKind>([
+  "openhands_agent_server",
+  "codex_app_server",
+  "rust_native",
+]);
 
 const modelProfileKnownFields = new Set([
   "id",
@@ -355,7 +360,7 @@ export function sanitizeModelProfiles(
     return [];
   }
   return value.flatMap((profile) => {
-    const sanitized = sanitizeModelProfile(profile);
+    const sanitized = sanitizeModelProfile(profile, onQuarantine);
     if (!sanitized) {
       onQuarantine?.("Dropped malformed model profile from durable storage");
       return [];
@@ -369,7 +374,10 @@ export function sanitizeModelProfiles(
   });
 }
 
-function sanitizeModelProfile(value: unknown): ModelConfigurationProfile | null {
+function sanitizeModelProfile(
+  value: unknown,
+  onQuarantine?: (reason: string) => void,
+): ModelConfigurationProfile | null {
   const record = objectRecord(value);
   if (!record) {
     return null;
@@ -399,6 +407,10 @@ function sanitizeModelProfile(value: unknown): ModelConfigurationProfile | null 
     ? nullableString(record.apiKeyRef)
     : null;
   const extraMetadata = safeExtraMetadata(record);
+  const harnesses = sanitizeHarnesses(record.harnesses, template.harnesses, id, onQuarantine);
+  if (!harnesses) {
+    return null;
+  }
 
   return {
     ...extraMetadata,
@@ -412,7 +424,7 @@ function sanitizeModelProfile(value: unknown): ModelConfigurationProfile | null 
     apiKeyRef,
     subscriptionCredential,
     credentialStorage,
-    harnesses: stringList(record.harnesses) ?? [...template.harnesses],
+    harnesses,
   } as ModelConfigurationProfile;
 }
 
@@ -469,14 +481,35 @@ function stringUnion<T extends string>(
     : null;
 }
 
-function stringList(value: unknown): ModelHarnessKind[] | null {
+function sanitizeHarnesses(
+  value: unknown,
+  defaults: ModelHarnessKind[],
+  profileId: string,
+  onQuarantine?: (reason: string) => void,
+): ModelHarnessKind[] | null {
   if (!Array.isArray(value)) {
+    return [...defaults];
+  }
+  const invalidItems: string[] = [];
+  const items = value.flatMap((item) => {
+    if (typeof item !== "string") {
+      invalidItems.push(String(item));
+      return [];
+    }
+    const trimmed = item.trim();
+    if (!trimmed || !harnessKinds.has(trimmed as ModelHarnessKind)) {
+      invalidItems.push(trimmed || "<empty>");
+      return [];
+    }
+    return [trimmed as ModelHarnessKind];
+  });
+  if (invalidItems.length > 0) {
+    onQuarantine?.(`Dropped invalid model profile harnesses for ${profileId}: ${invalidItems.join(", ")}`);
+  }
+  if (items.length === 0) {
     return null;
   }
-  const items = value
-    .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-    .map((item) => item.trim() as ModelHarnessKind);
-  return items.length > 0 ? items : null;
+  return Array.from(new Set(items));
 }
 
 function safeExtraMetadata(record: Record<string, unknown>): Record<string, unknown> {
@@ -485,9 +518,27 @@ function safeExtraMetadata(record: Record<string, unknown>): Record<string, unkn
     if (modelProfileKnownFields.has(key) || looksSecretBearingKey(key)) {
       continue;
     }
-    extra[key] = value;
+    extra[key] = stripSecretMetadata(value);
   }
   return extra;
+}
+
+function stripSecretMetadata(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripSecretMetadata);
+  }
+  const record = objectRecord(value);
+  if (!record) {
+    return value;
+  }
+  const stripped: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) {
+    if (looksSecretBearingKey(key)) {
+      continue;
+    }
+    stripped[key] = stripSecretMetadata(child);
+  }
+  return stripped;
 }
 
 function looksSecretBearingKey(key: string): boolean {

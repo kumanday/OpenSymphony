@@ -251,6 +251,37 @@ describe("desktop app shell render", () => {
     ]);
   });
 
+  it("records quarantine warnings for non-text desktop model settings", async () => {
+    const settings = new Map<string, unknown>();
+    settings.set("opensymphony.desktop.modelProfiles.v1", {
+      type: "Flag",
+      value: true,
+    });
+    (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
+      core: {
+        async invoke(command: string, args?: Record<string, unknown>) {
+          if (command === "get_setting") {
+            const req = args?.req as { key: string };
+            return { value: settings.get(req.key) ?? null };
+          }
+          if (command === "set_setting") {
+            const req = args?.req as { key: string; value: unknown };
+            settings.set(req.key, req.value);
+            return { persisted: true };
+          }
+          throw new Error(`unexpected command ${command}`);
+        },
+      },
+    };
+
+    const controller = createDesktopModelProfileController();
+    await controller!.listProfiles();
+
+    expect(controller?.quarantineMessages).toEqual([
+      "Dropped malformed desktop model profile setting: expected Text value",
+    ]);
+  });
+
   it("uses native Tauri commands for desktop gateway reads", async () => {
     const calls: TauriInvokeCall[] = [];
     (globalThis as unknown as { __TAURI__: unknown }).__TAURI__ = {
