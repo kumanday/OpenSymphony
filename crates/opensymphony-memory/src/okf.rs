@@ -193,8 +193,10 @@ pub fn parse_okf_concept(
         })?;
     require_okf_type(&frontmatter.concept_type)?;
     let derived_opensymphony = frontmatter.opensymphony.is_none();
-    let legacy = legacy_frontmatter_to_opensymphony_metadata(&frontmatter);
-    merge_opensymphony_metadata(&mut frontmatter, legacy);
+    if derived_opensymphony {
+        let legacy = legacy_frontmatter_to_opensymphony_metadata(&frontmatter);
+        frontmatter.opensymphony = Some(legacy);
+    }
     let mut concept = OkfConcept::new(relative_path, frontmatter, body.to_string())?;
     concept.derived_opensymphony = derived_opensymphony;
     Ok(concept)
@@ -206,6 +208,8 @@ pub fn render_okf_concept(concept: &OkfConcept) -> Result<String, MemoryError> {
     let mut frontmatter = concept.frontmatter.clone();
     if concept.derived_opensymphony {
         frontmatter.opensymphony = None;
+    } else if frontmatter.opensymphony.is_some() {
+        remove_legacy_opensymphony_fields(&mut frontmatter.extra);
     }
     let frontmatter =
         serde_yaml::to_string(&frontmatter).map_err(|source| MemoryError::ParseYaml {
@@ -328,32 +332,24 @@ fn legacy_frontmatter_to_opensymphony_metadata(
     metadata
 }
 
-fn merge_opensymphony_metadata(
-    frontmatter: &mut OkfFrontmatter,
-    legacy: OpenSymphonyOkfMetadata,
-) {
-    match &mut frontmatter.opensymphony {
-        Some(existing) => {
-            if existing.visibility.is_none() {
-                existing.visibility = legacy.visibility;
-            }
-            if existing.kind.is_none() {
-                existing.kind = legacy.kind;
-            }
-            if existing.schema_version.is_none() {
-                existing.schema_version = legacy.schema_version;
-            }
-            for scope_ref in legacy.scope_refs {
-                push_scope_ref(&mut existing.scope_refs, scope_ref);
-            }
-            for source_ref in legacy.source_refs {
-                push_source_ref(&mut existing.source_refs, source_ref);
-            }
-            if existing.docs_sync.is_none() {
-                existing.docs_sync = legacy.docs_sync;
-            }
-        }
-        None => frontmatter.opensymphony = Some(legacy),
+fn remove_legacy_opensymphony_fields(extra: &mut BTreeMap<String, serde_yaml::Value>) {
+    for key in [
+        "area",
+        "areas",
+        "docs_sync",
+        "issue",
+        "linear_url",
+        "milestone",
+        "milestone_id",
+        "project",
+        "project_id",
+        "prs",
+        "repo",
+        "repository",
+        "source_refs",
+        "visibility",
+    ] {
+        extra.remove(key);
     }
 }
 

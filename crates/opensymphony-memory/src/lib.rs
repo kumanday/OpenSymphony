@@ -865,10 +865,16 @@ See [runtime docs](/areas/openhands-runtime.md).
         let repo = TempDir::new().expect("temp repo");
         let original = r#"---
 type: topic-doc
+area: legacy-area
+visibility: private
+legacy_custom: keep-me
 opensymphony:
   visibility: public
   kind: curated_topic
   schema_version: 7
+  scope_refs:
+    - kind: area
+      id: explicit-area
 ---
 
 # Runtime
@@ -881,6 +887,10 @@ opensymphony:
         let rendered = render_okf_concept(&concept).expect("concept should render");
         assert!(rendered.contains("opensymphony:"));
         assert!(rendered.contains("curated_topic"));
+        assert!(rendered.contains("explicit-area"));
+        assert!(rendered.contains("legacy_custom: keep-me"));
+        assert!(!rendered.contains("legacy-area"));
+        assert!(!rendered.contains("visibility: private"));
     }
 
     #[test]
