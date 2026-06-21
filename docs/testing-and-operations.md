@@ -468,15 +468,7 @@ That document covers:
 
 ## Current model
 
-- COE-426 contributed: PR #131: Add Codex app-server prototype benchmark (merge `90ce68d`)
-- COE-428 contributed: PR #133: Add alpha model configuration UI (merge `6f6b94e`)
-- COE-475 contributed: PR #134: Expose Codex ChatGPT login readiness (merge `124ac40`)
-- COE-476 promoted the local stdio Codex app-server path to a supported
-  harness capability. Use `cargo test-system-duckdb --test codex_app_server`
-  for adapter lifecycle and event-normalization coverage; run benchmark
-  evidence through normal builds because the old prototype feature has been
-  removed.
-- COE-478 contributed: PR #135: COE-478: Persist and validate model profiles (merge `3e2dab5`)
+- COE-476 contributed: PR #136: Enable local Codex app-server harness (merge `303ab81`)
 
 ## Important invariants
 
@@ -493,10 +485,10 @@ That document covers:
 
 ## Recent changes
 
-- COE-478: Harden model profile storage and validation follow-ups
+- COE-476: Codex Production Harness Enablement
 
 ## Source refs
 
-- COE-478
+- COE-476
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

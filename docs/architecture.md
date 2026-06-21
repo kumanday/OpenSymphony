@@ -230,7 +230,7 @@ Notable removals:
 
 ## Current model
 
-- COE-478 contributed: PR #135: COE-478: Persist and validate model profiles (merge `3e2dab5`)
+- COE-476 contributed: PR #136: Enable local Codex app-server harness (merge `303ab81`)
 
 ## Important invariants
 
@@ -247,10 +247,10 @@ Notable removals:
 
 ## Recent changes
 
-- COE-478: Harden model profile storage and validation follow-ups
+- COE-476: Codex Production Harness Enablement
 
 ## Source refs
 
-- COE-478
+- COE-476
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

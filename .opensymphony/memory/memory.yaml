@@ -89,8 +89,8 @@ areas:
       linear_milestones:
       - 'M9.5: Developer Build Acceleration'
   codex-app-server:
-    title: Codex App-Server Prototype
-    docs_target: docs/codex-app-server-prototype.md
+    title: Codex App-Server Harness
+    docs_target: docs/codex-app-server-harness.md
     visibility: public
     status: stable
     confidence: 90
@@ -98,11 +98,12 @@ areas:
     - codex app server
     - codex app-server
     - codex app-server prototype
+    - codex app-server harness
     - codex-app-server
     - codex_app_server
     source_refs:
       docs:
-      - docs/codex-app-server-prototype.md
+      - docs/codex-app-server-harness.md
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
   configuration:
