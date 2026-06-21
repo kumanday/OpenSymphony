@@ -121,6 +121,7 @@ export interface RunDetail {
   finished_at?: string;
   release_reason?: ReleaseReason;
   turn_count: number;
+  /** Configured turn budget. A value of 0 means the budget is unknown. */
   max_turns: number;
   retry_attempt?: number;
   input_tokens: number;

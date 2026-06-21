@@ -35,6 +35,7 @@ pub struct RunDetail {
     pub finished_at: Option<DateTime<Utc>>,
     pub release_reason: Option<ReleaseReason>,
     pub turn_count: u32,
+    /// Configured turn budget. A value of 0 means the budget is unknown.
     pub max_turns: u32,
     pub retry_attempt: Option<u32>,
     pub input_tokens: u64,

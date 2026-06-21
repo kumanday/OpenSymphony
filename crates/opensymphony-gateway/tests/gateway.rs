@@ -212,6 +212,12 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             conversation_id_suffix: "c0e255".to_owned(),
             workspace_path_suffix: "COE-255".to_owned(),
             retry_count: 0,
+            claimed_at: Some(now - chrono::Duration::seconds(80)),
+            started_at: Some(now - chrono::Duration::seconds(75)),
+            finished_at: None,
+            turn_count: 3,
+            max_turns: 8,
+            runtime_seconds: 75,
             blocked: false,
             blocked_by: Vec::new(),
             server_base_url: Some("http://127.0.0.1:3000".to_owned()),
@@ -286,6 +292,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 conversation_id_suffix: String::new(),
                 workspace_path_suffix: String::new(),
                 retry_count: 0,
+                claimed_at: None,
+                started_at: None,
+                finished_at: None,
+                turn_count: 0,
+                max_turns: 0,
+                runtime_seconds: 0,
                 blocked: false,
                 blocked_by: Vec::new(),
                 server_base_url: None,
@@ -313,6 +325,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 conversation_id_suffix: "c0e301".to_owned(),
                 workspace_path_suffix: "COE-301".to_owned(),
                 retry_count: 0,
+                claimed_at: Some(now - chrono::Duration::seconds(90)),
+                started_at: Some(now - chrono::Duration::seconds(80)),
+                finished_at: Some(now - chrono::Duration::seconds(10)),
+                turn_count: 2,
+                max_turns: 0,
+                runtime_seconds: 70,
                 blocked: false,
                 blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3001".to_owned()),
@@ -391,6 +409,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 conversation_id_suffix: "c0e302".to_owned(),
                 workspace_path_suffix: "COE-302".to_owned(),
                 retry_count: 0,
+                claimed_at: Some(now - chrono::Duration::seconds(30)),
+                started_at: Some(now - chrono::Duration::seconds(25)),
+                finished_at: Some(now - chrono::Duration::seconds(5)),
+                turn_count: 1,
+                max_turns: 0,
+                runtime_seconds: 20,
                 blocked: false,
                 blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3002".to_owned()),
@@ -418,6 +442,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 conversation_id_suffix: "c0e303".to_owned(),
                 workspace_path_suffix: "COE-303".to_owned(),
                 retry_count: 1,
+                claimed_at: None,
+                started_at: None,
+                finished_at: None,
+                turn_count: 0,
+                max_turns: 0,
+                runtime_seconds: 0,
                 blocked: false,
                 blocked_by: Vec::new(),
                 server_base_url: Some("http://127.0.0.1:3003".to_owned()),
@@ -445,6 +475,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 conversation_id_suffix: String::new(),
                 workspace_path_suffix: String::new(),
                 retry_count: 0,
+                claimed_at: None,
+                started_at: None,
+                finished_at: None,
+                turn_count: 0,
+                max_turns: 0,
+                runtime_seconds: 0,
                 blocked: true,
                 blocked_by: vec!["COE-300".to_owned()],
                 server_base_url: None,
@@ -1634,6 +1670,9 @@ async fn gateway_serves_run_detail() {
 
     assert_eq!(response.run_id, "COE-255");
     assert_eq!(response.issue_identifier, "COE-255");
+    assert_eq!(response.turn_count, 3);
+    assert_eq!(response.max_turns, 8);
+    assert_eq!(response.runtime_seconds, 75);
     assert_eq!(
         response.status,
         opensymphony::opensymphony_gateway_schema::run::RunStatus::Running
@@ -2440,6 +2479,9 @@ async fn gateway_run_detail_failed_without_retries() {
     );
     // Finished at should be set for terminal states
     assert!(response.finished_at.is_some());
+    assert_eq!(response.turn_count, 1);
+    assert_eq!(response.max_turns, 0);
+    assert_eq!(response.runtime_seconds, 20);
 
     server_task.abort();
 }
@@ -2475,6 +2517,9 @@ async fn gateway_run_detail_completed_state() {
         Some(opensymphony::opensymphony_gateway_schema::run::ReleaseReason::Completed)
     );
     assert!(response.finished_at.is_some());
+    assert_eq!(response.turn_count, 2);
+    assert_eq!(response.max_turns, 0);
+    assert_eq!(response.runtime_seconds, 70);
 
     server_task.abort();
 }

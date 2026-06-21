@@ -122,6 +122,29 @@ fn map_issue(
                 .map(|outcome| timestamp_to_datetime(outcome.finished_at))
         })
         .unwrap_or(generated_at);
+    let worker = issue.runtime.worker.as_ref();
+    let last_worker_outcome = issue.last_worker_outcome.as_ref();
+    let started_at = issue
+        .runtime
+        .started_at
+        .or_else(|| last_worker_outcome.map(|outcome| outcome.started_at))
+        .map(timestamp_to_datetime);
+    let finished_at = issue
+        .runtime
+        .released_at
+        .or_else(|| last_worker_outcome.map(|outcome| outcome.finished_at))
+        .map(timestamp_to_datetime);
+    let runtime_seconds = issue
+        .conversation
+        .as_ref()
+        .map(|conversation| conversation.runtime_seconds)
+        .unwrap_or(0)
+        .max(runtime_seconds_from_timestamps(
+            started_at,
+            finished_at,
+            generated_at,
+            runtime_state,
+        ));
 
     IssueSnapshot {
         identifier: issue.issue.identifier.to_string(),
@@ -145,6 +168,15 @@ fn map_issue(
             .as_ref()
             .map(|retry| retry.normal_retry_count)
             .unwrap_or(0),
+        claimed_at: issue.runtime.claimed_at.map(timestamp_to_datetime),
+        started_at,
+        finished_at,
+        turn_count: worker
+            .map(|worker| worker.turn_count)
+            .or_else(|| last_worker_outcome.map(|outcome| outcome.turn_count))
+            .unwrap_or(0),
+        max_turns: worker.map(|worker| worker.max_turns).unwrap_or(0),
+        runtime_seconds,
         blocked: issue.issue.blocked_by.iter().any(|blocker| {
             blocker
                 .state
@@ -222,6 +254,33 @@ fn map_issue(
         cancel_acknowledged: false,
         cancel_failed: false,
     }
+}
+
+fn runtime_seconds_from_timestamps(
+    started_at: Option<DateTime<Utc>>,
+    finished_at: Option<DateTime<Utc>>,
+    generated_at: DateTime<Utc>,
+    runtime_state: IssueRuntimeState,
+) -> u64 {
+    let Some(started_at) = started_at else {
+        return 0;
+    };
+    let end = match runtime_state {
+        IssueRuntimeState::Running | IssueRuntimeState::Releasing => generated_at,
+        IssueRuntimeState::Completed | IssueRuntimeState::Failed => match finished_at {
+            Some(finished_at) => finished_at,
+            None => return 0,
+        },
+        _ => return 0,
+    };
+    elapsed_seconds(started_at, end)
+}
+
+fn elapsed_seconds(started_at: DateTime<Utc>, ended_at: DateTime<Utc>) -> u64 {
+    ended_at
+        .signed_duration_since(started_at)
+        .num_seconds()
+        .max(0) as u64
 }
 
 fn map_worker_outcome(
@@ -357,11 +416,11 @@ mod tests {
         HealthStatus, IssueId, IssueIdentifier, IssueRef, IssueSnapshot as DomainIssueSnapshot,
         IssueState, IssueStateCategory, NormalizedIssue, OrchestratorSnapshot,
         RuntimeStateSnapshot, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, TimestampMs,
-        WorkspaceKey, WorkspaceRecord,
+        WorkerAttemptSnapshot, WorkerId, WorkspaceKey, WorkspaceRecord,
     };
     use serde_json::json;
 
-    use super::{map_snapshot, terminal_state_set};
+    use super::{map_snapshot, terminal_state_set, timestamp_to_datetime};
 
     fn must<T, E: std::fmt::Display>(result: Result<T, E>) -> T {
         match result {
@@ -399,7 +458,7 @@ tracker:
     }
 
     #[test]
-    fn map_snapshot_preserves_full_recent_conversation_window() {
+    fn map_snapshot_preserves_recent_events_and_run_metrics() {
         let recent_activity = (0..12)
             .map(
                 |index| crate::opensymphony_domain::ConversationActivityEvent {
@@ -446,11 +505,17 @@ tracker:
                 },
                 runtime: RuntimeStateSnapshot {
                     state: SchedulerStatus::Running,
-                    claimed_at: None,
-                    started_at: None,
+                    claimed_at: Some(ts(900)),
+                    started_at: Some(ts(1_000)),
                     released_at: None,
                     release_reason: None,
-                    worker: None,
+                    worker: Some(WorkerAttemptSnapshot {
+                        worker_id: must(WorkerId::new("worker-352")),
+                        attempt: None,
+                        normal_retry_count: 0,
+                        turn_count: 3,
+                        max_turns: 8,
+                    }),
                     last_event_at: Some(ts(1_011)),
                     stalled_at: None,
                 },
@@ -511,5 +576,16 @@ tracker:
             mapped.issues[0].recent_events[11].payload,
             Some(json!({"command": "npm test"}))
         );
+        assert_eq!(
+            mapped.issues[0].claimed_at,
+            Some(timestamp_to_datetime(ts(900)))
+        );
+        assert_eq!(
+            mapped.issues[0].started_at,
+            Some(timestamp_to_datetime(ts(1_000)))
+        );
+        assert_eq!(mapped.issues[0].turn_count, 3);
+        assert_eq!(mapped.issues[0].max_turns, 8);
+        assert_eq!(mapped.issues[0].runtime_seconds, 1);
     }
 }

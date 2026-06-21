@@ -94,6 +94,18 @@ pub struct ControlPlaneIssueSnapshot {
     pub conversation_id_suffix: String,
     pub workspace_path_suffix: String,
     pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub turn_count: u32,
+    #[serde(default)]
+    pub max_turns: u32,
+    #[serde(default)]
+    pub runtime_seconds: u64,
     pub blocked: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
