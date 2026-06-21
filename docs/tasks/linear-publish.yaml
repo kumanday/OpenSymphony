@@ -1,6 +1,6 @@
 planningWave: rich-client-hosted-mode
 linearProject: e7b957855cb7
-publishedAt: '2026-06-21T17:06:01Z'
+publishedAt: '2026-06-21T17:16:25Z'
 milestones:
   'M6: Gateway And Stream Contract':
     milestoneId: c32b5191-7349-4f30-bd46-6340af6da3e5
@@ -271,11 +271,11 @@ tasks:
     issueId: 1035cde4-56b5-4a37-a2d5-e18fec4f2ff2
     url: https://linear.app/trilogy-ai-coe/issue/COE-476/codex-production-harness-enablement
     file: docs/tasks/osym-767-codex-production-harness-enablement.md
-  OSYM-768:
-    issue: COE-479
-    issueId: 754caaf3-14ba-4589-b772-94e8aeed3814
-    url: https://linear.app/trilogy-ai-coe/issue/COE-479/desktop-live-snapshot-and-run-detail-refresh
-    file: docs/tasks/osym-768-desktop-live-snapshot-and-run-detail-refresh.md
+  OSYM-784:
+    issue: COE-484
+    issueId: 1b0ff7e0-fd83-4319-a5c6-bfb90a2b7ed5
+    url: https://linear.app/trilogy-ai-coe/issue/COE-484/desktop-live-snapshot-and-run-detail-refresh
+    file: docs/tasks/osym-784-desktop-live-snapshot-and-run-detail-refresh.md
   OSYM-769:
     issue: COE-480
     issueId: b5f033a5-17ec-4b3d-85fb-a79ed1360f89
