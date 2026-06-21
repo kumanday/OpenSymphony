@@ -467,6 +467,46 @@ fn codex_approval_notification_maps_to_approval_center_contract() {
 }
 
 #[test]
+fn codex_file_write_approval_has_medium_risk() {
+    let raw = json!({
+        "jsonrpc": "2.0",
+        "method": "item/permissions/requestApproval",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-2",
+            "title": "Write file",
+            "description": "Codex wants to edit source",
+            "filePath": "src/lib.rs"
+        }
+    });
+    let event = normalize_server_notification(raw).expect("approval notification normalizes");
+    let requested_at = Utc
+        .timestamp_millis_opt(1_720_000_000_000)
+        .single()
+        .expect("timestamp");
+
+    let approval =
+        codex_approval_request_from_event("run-1", "lin-429", "COE-429", requested_at, &event)
+            .expect("approval request should map");
+
+    assert_eq!(approval.kind, ApprovalKind::FileWrite);
+    assert_eq!(
+        approval.risk_summary.as_ref().expect("risk").level,
+        ApprovalRiskLevel::Medium
+    );
+    assert_eq!(
+        approval
+            .target_context
+            .as_ref()
+            .expect("target context")
+            .file_path
+            .as_deref(),
+        Some("src/lib.rs")
+    );
+}
+
+#[test]
 fn codex_approval_decision_request_and_audit_record_stay_correlated() {
     let adapter = CodexAppServerAdapter::local_stdio("codex-test", "opensymphony-test", "1.10.1");
     let mut session = adapter.session();

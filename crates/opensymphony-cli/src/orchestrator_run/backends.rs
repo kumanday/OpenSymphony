@@ -52,6 +52,9 @@ use super::{
 };
 
 const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
+const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
 
 #[derive(Debug, Error)]
@@ -848,6 +851,7 @@ impl RuntimeWorkerBackend {
         &mut self,
         worker_id: &str,
         route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+        launch_timeout: Duration,
         result: Result<
             Result<LaunchReport, oneshot::error::RecvError>,
             tokio::time::error::Elapsed,
@@ -872,8 +876,19 @@ impl RuntimeWorkerBackend {
             }
             Err(_) => {
                 self.abort_tracked_task(worker_id);
-                Err(CliWorkerError::LaunchTimeout(self.launch_timeout))
+                Err(CliWorkerError::LaunchTimeout(launch_timeout))
             }
+        }
+    }
+
+    fn launch_timeout_for_route(
+        &self,
+        route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    ) -> Duration {
+        if route.harness_kind == "codex_app_server" {
+            CODEX_WORKER_LAUNCH_TIMEOUT
+        } else {
+            self.launch_timeout
         }
     }
 }
@@ -1008,17 +1023,30 @@ async fn run_codex_stdio_issue(
     .await
     {
         Ok((outcome, status)) => {
-            finish_codex_workspace_run(workspace_manager, workspace, run_manifest, status).await;
-            outcome
+            match finish_codex_workspace_run(workspace_manager, workspace, run_manifest, status)
+                .await
+            {
+                Ok(()) => outcome,
+                Err(error) => WorkerOutcomeRecord::from_run(
+                    run,
+                    WorkerOutcomeKind::Failed,
+                    now_timestamp(),
+                    Some("Codex app-server workspace finalization failed".into()),
+                    Some(error.to_string()),
+                ),
+            }
         }
         Err(error) => {
-            finish_codex_workspace_run(
+            if let Err(finish_error) = finish_codex_workspace_run(
                 workspace_manager,
                 workspace,
                 run_manifest,
                 RunStatus::Failed,
             )
-            .await;
+            .await
+            {
+                tracing::warn!(%finish_error, "failed to finish failed Codex workspace run manifest");
+            }
             if launch_tx.is_some() {
                 report_launch_failure(launch_tx, error.clone());
             }
@@ -1273,7 +1301,7 @@ async fn read_response_line(
     pending_terminal: &mut Option<CodexTerminalOutcome>,
 ) -> Result<serde_json::Value, String> {
     loop {
-        let line = timeout(Duration::from_secs(30), reader.next_line())
+        let line = timeout(CODEX_RESPONSE_TIMEOUT, reader.next_line())
             .await
             .map_err(|_| format!("timed out waiting for Codex response id {request_id}"))?
             .map_err(|source| format!("failed reading Codex stdout: {source}"))?
@@ -1321,7 +1349,7 @@ async fn read_until_codex_terminal(
     }
 
     loop {
-        let line = timeout(Duration::from_secs(300), reader.next_line())
+        let line = timeout(CODEX_TERMINAL_TIMEOUT, reader.next_line())
             .await
             .map_err(|_| "timed out waiting for Codex terminal notification".to_string())?
             .map_err(|source| format!("failed reading Codex stdout: {source}"))?
@@ -1416,15 +1444,12 @@ async fn finish_codex_workspace_run(
     workspace: &WorkspaceHandle,
     run_manifest: &mut RunManifest,
     status: RunStatus,
-) {
+) -> Result<(), WorkspaceError> {
     run_manifest.status = status;
     run_manifest.status_detail = Some(format!("Codex app-server route ended with {status}"));
-    if let Err(error) = workspace_manager
+    workspace_manager
         .finish_run(workspace, run_manifest, status)
         .await
-    {
-        tracing::warn!(%error, "failed to finish Codex workspace run manifest");
-    }
 }
 
 fn codex_conversation_metadata(
@@ -1499,10 +1524,12 @@ impl WorkerBackend for RuntimeWorkerBackend {
         let pending = self.spawn_worker_task(request);
         let worker_id = pending.worker_id.clone();
         let route = pending.route.clone();
+        let launch_timeout = self.launch_timeout_for_route(&route);
         self.resolve_launch_result(
             &worker_id,
             &route,
-            timeout(self.launch_timeout, pending.launch_rx).await,
+            launch_timeout,
+            timeout(launch_timeout, pending.launch_rx).await,
         )
         .await
     }
@@ -1522,8 +1549,8 @@ impl WorkerBackend for RuntimeWorkerBackend {
 
         let mut waiters = Vec::with_capacity(pending.len());
         for launch in pending {
+            let timeout_duration = self.launch_timeout_for_route(&launch.route);
             let worker_id = launch.worker_id;
-            let timeout_duration = self.launch_timeout;
             let rx = launch.launch_rx;
             let worker_id_for_task = worker_id.clone();
             let handle =
@@ -1559,8 +1586,13 @@ impl WorkerBackend for RuntimeWorkerBackend {
                     "worker launch waiter finished without a result".to_string(),
                 ))));
             launches.push(
-                self.resolve_launch_result(&worker_id, &route, outcome)
-                    .await,
+                self.resolve_launch_result(
+                    &worker_id,
+                    &route,
+                    self.launch_timeout_for_route(&route),
+                    outcome,
+                )
+                .await,
             );
         }
         launches
@@ -2506,6 +2538,45 @@ Run the scheduler.
             Ok(Ok(())) | Ok(Err(_)) => {}
             Err(_) => panic!("dropping the backend should abort tracked tasks"),
         }
+    }
+
+    #[tokio::test]
+    async fn codex_route_uses_launch_timeout_buffer() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+        );
+        let codex_route = codex_test_route(false);
+        let openhands_route = crate::opensymphony_orchestrator::HarnessRouteDecision {
+            task_type: "issue_execution".into(),
+            harness_kind: "openhands_agent_server".into(),
+            model: None,
+            model_profile: None,
+            reason: "test default route".into(),
+            dry_run: false,
+            user_override: false,
+        };
+
+        assert_eq!(
+            backend.launch_timeout_for_route(&codex_route),
+            CODEX_WORKER_LAUNCH_TIMEOUT
+        );
+        assert_eq!(
+            backend.launch_timeout_for_route(&openhands_route),
+            DEFAULT_WORKER_LAUNCH_TIMEOUT
+        );
+        assert!(CODEX_WORKER_LAUNCH_TIMEOUT > CODEX_RESPONSE_TIMEOUT * 2);
     }
 
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {

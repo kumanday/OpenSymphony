@@ -749,8 +749,9 @@ fn codex_approval_risk_summary(params: &Value) -> ApprovalRiskSummary {
     let mut reasons = Vec::new();
     let command = first_string_param(params, &["command", "shellCommand", "toolCommand"]);
     let normalized_command = command.as_ref().map(|command| command.to_ascii_lowercase());
-    let level = match normalized_command.as_deref() {
-        Some(command)
+    let file_path = first_string_param(params, &["filePath", "path"]);
+    let level = match (normalized_command.as_deref(), file_path.as_deref()) {
+        (Some(command), _)
             if command.contains("sudo")
                 || command.contains("rm -rf")
                 || command.contains("chmod")
@@ -759,11 +760,15 @@ fn codex_approval_risk_summary(params: &Value) -> ApprovalRiskSummary {
             reasons.push("Command can mutate privileged or destructive host state.".into());
             ApprovalRiskLevel::High
         }
-        Some(_) => {
+        (Some(_), _) => {
             reasons.push("Command execution requires explicit operator approval.".into());
             ApprovalRiskLevel::Medium
         }
-        None => ApprovalRiskLevel::Unknown,
+        (None, Some(_)) => {
+            reasons.push("File write can mutate workspace or host state.".into());
+            ApprovalRiskLevel::Medium
+        }
+        (None, None) => ApprovalRiskLevel::Unknown,
     };
     ApprovalRiskSummary { level, reasons }
 }
