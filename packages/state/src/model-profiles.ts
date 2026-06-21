@@ -218,10 +218,10 @@ export function createModelProfileStore(
 
   function write(state: ModelProfileState): ModelProfileState {
     const normalized = normalizeModelProfileState(state);
-    fallback = normalized;
     if (storage) {
       storage.setItem(storageKey, JSON.stringify(normalized));
     }
+    fallback = normalized;
     return normalized;
   }
 
@@ -265,8 +265,8 @@ export function createAsyncModelProfileStore(
 
   async function write(state: ModelProfileState): Promise<ModelProfileState> {
     const normalized = normalizeModelProfileState(state);
-    fallback = normalized;
     await options.save(JSON.stringify(normalized));
+    fallback = normalized;
     return normalized;
   }
 
@@ -502,6 +502,9 @@ function sanitizeHarnesses(
   onQuarantine?: (reason: string) => void,
 ): ModelHarnessKind[] | null {
   if (!Array.isArray(value)) {
+    if (value !== undefined) {
+      onQuarantine?.(`Dropped malformed model profile harnesses for ${profileId}: expected array`);
+    }
     return [...defaults];
   }
   const invalidItems: string[] = [];

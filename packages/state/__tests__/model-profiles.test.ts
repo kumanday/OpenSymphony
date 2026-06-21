@@ -14,12 +14,16 @@ import {
 
 class MemoryStorage implements Pick<Storage, "getItem" | "setItem" | "removeItem"> {
   private readonly values = new Map<string, string>();
+  failWrites = false;
 
   getItem(key: string): string | null {
     return this.values.get(key) ?? null;
   }
 
   setItem(key: string, value: string): void {
+    if (this.failWrites) {
+      throw new Error("storage write failed");
+    }
     this.values.set(key, value);
   }
 
@@ -273,6 +277,34 @@ describe("createModelProfileStore", () => {
     ]);
   });
 
+  it("does not update sync fallback when durable writes fail", async () => {
+    const storage = new MemoryStorage();
+    const originalProfile = {
+      ...createModelProfile("api_key"),
+      id: "saved-before-write-failure",
+      model: "provider/original",
+    };
+    storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
+      profiles: [originalProfile],
+      activeProfileId: originalProfile.id,
+    }));
+    const store = createModelProfileStore({ storage });
+
+    await expect(store.listProfiles()).resolves.toEqual([
+      expect.objectContaining({ id: originalProfile.id }),
+    ]);
+    storage.failWrites = true;
+    await expect(store.storeProfile({
+      ...originalProfile,
+      model: "provider/not-saved",
+    })).rejects.toThrow("storage write failed");
+    storage.failWrites = false;
+
+    await expect(store.listProfiles()).resolves.toEqual([
+      expect.objectContaining({ id: originalProfile.id, model: "provider/original" }),
+    ]);
+  });
+
   it("quarantines profiles with conflicting mode-specific credential fields", async () => {
     const storage = new MemoryStorage();
     storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
@@ -334,6 +366,30 @@ describe("createModelProfileStore", () => {
     ]));
   });
 
+  it("warns and uses defaults when persisted harnesses are not an array", async () => {
+    const storage = new MemoryStorage();
+    storage.setItem("opensymphony.modelProfiles.v1", JSON.stringify({
+      profiles: [{
+        ...createModelProfile("api_key"),
+        id: "non-array-harnesses",
+        harnesses: "openhands_agent_server",
+      }],
+    }));
+    const quarantineReasons: string[] = [];
+    const store = createModelProfileStore({
+      storage,
+      onQuarantine: (reason) => quarantineReasons.push(reason),
+    });
+
+    const profiles = await store.listProfiles();
+    const saved = profiles.find((profile) => profile.id === "non-array-harnesses");
+
+    expect(saved?.harnesses).toEqual(["openhands_agent_server"]);
+    expect(quarantineReasons).toContain(
+      "Dropped malformed model profile harnesses for non-array-harnesses: expected array",
+    );
+  });
+
   it("uses the same CRUD path for async durable storage", async () => {
     let stored: string | null = null;
     const quarantineReasons: string[] = [];
@@ -377,6 +433,45 @@ describe("createModelProfileStore", () => {
     });
     expect(saved?.harnesses).toEqual(["openhands_agent_server", "codex_app_server"]);
     expect(quarantineReasons).toEqual([]);
+  });
+
+  it("does not update async fallback when durable writes fail", async () => {
+    let stored: string | null = null;
+    let failWrites = false;
+    const originalProfile = {
+      ...createModelProfile("subscription"),
+      id: "async-before-write-failure",
+      model: "codex-original",
+    };
+    stored = JSON.stringify({
+      profiles: [originalProfile],
+      activeProfileId: originalProfile.id,
+    });
+    const store = createAsyncModelProfileStore({
+      async load() {
+        return stored;
+      },
+      async save(value) {
+        if (failWrites) {
+          throw new Error("async write failed");
+        }
+        stored = value;
+      },
+    });
+
+    await expect(store.listProfiles()).resolves.toEqual([
+      expect.objectContaining({ id: originalProfile.id }),
+    ]);
+    failWrites = true;
+    await expect(store.storeProfile({
+      ...originalProfile,
+      model: "codex-not-saved",
+    })).rejects.toThrow("async write failed");
+    failWrites = false;
+
+    await expect(store.listProfiles()).resolves.toEqual([
+      expect.objectContaining({ id: originalProfile.id, model: "codex-original" }),
+    ]);
   });
 
   it("allows the active model profile to be deactivated", async () => {
