@@ -477,7 +477,7 @@ That document covers:
 
 ## Current model
 
-- COE-476 contributed: PR #136: Enable local Codex app-server harness (merge `303ab81`)
+- COE-429 contributed: PR #137: Implement Codex approvals and harness/model selection (merge `ba53548`)
 
 ## Important invariants
 
@@ -494,10 +494,10 @@ That document covers:
 
 ## Recent changes
 
-- COE-476: Codex Production Harness Enablement
+- COE-429: Codex Approvals And Harness/Model Selection
 
 ## Source refs
 
-- COE-476
+- COE-429
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -279,7 +279,7 @@ Breaking changes in this line include:
 
 ## Current model
 
-- COE-419 contributed: PR #126: Load desktop task graph dependencies from Linear (merge `64242a6`)
+- COE-429 contributed: PR #137: Implement Codex approvals and harness/model selection (merge `ba53548`)
 
 ## Important invariants
 
@@ -296,10 +296,10 @@ Breaking changes in this line include:
 
 ## Recent changes
 
-- COE-419: Hosted Auth Placeholders And Web Parity
+- COE-429: Codex Approvals And Harness/Model Selection
 
 ## Source refs
 
-- COE-419
+- COE-429
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
