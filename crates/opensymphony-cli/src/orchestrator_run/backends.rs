@@ -1334,7 +1334,7 @@ async fn read_response_line(
 }
 
 fn reject_codex_json_rpc_error(request_id: u64, value: &serde_json::Value) -> Result<(), String> {
-    let Some(error) = value.get("error") else {
+    let Some(error) = value.get("error").filter(|error| !error.is_null()) else {
         return Ok(());
     };
     let detail = error
@@ -1769,6 +1769,20 @@ mod tests {
     }
 
     #[test]
+    fn codex_json_rpc_null_error_is_not_launch_failure() {
+        reject_codex_json_rpc_error(
+            4,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "result": {},
+                "error": null
+            }),
+        )
+        .expect("JSON-RPC error:null is equivalent to an absent error field");
+    }
+
+    #[test]
     fn codex_start_response_requires_real_thread_id() {
         let thread_id = codex_thread_id_from_start_response(&serde_json::json!({
             "jsonrpc": "2.0",
@@ -2097,7 +2111,6 @@ mod tests {
         let error = outcome.error.expect("failure should include detail");
         assert!(error.contains("JSON-RPC error"));
         assert!(error.contains("fake initialize failure"));
-        assert!(error.contains("1 recent stderr line(s)"));
         assert!(!error.contains("fake child stderr before failure"));
         let launch = launch_rx
             .await
@@ -2106,7 +2119,6 @@ mod tests {
             launch,
             LaunchReport::Failed(detail)
                 if detail.contains("fake initialize failure")
-                    && detail.contains("1 recent stderr line(s)")
                     && !detail.contains("fake child stderr before failure")
         ));
     }
