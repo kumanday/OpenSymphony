@@ -357,9 +357,14 @@ Codex app-server stdio is the supported local harness path. It still requires
 an installed compatible Codex CLI and an active ChatGPT login. The gateway
 surfaces unsupported CLI output, missing app-server support, logged-out,
 expired, permission-denied, and unknown states as actionable non-ready statuses.
+Capability discovery reports the local adapter contract and stdio runtime
+surface, but `opensymphony run` still dispatches through OpenHands until the
+cross-harness runtime-routing work lands.
 
 Remaining follow-up work:
 
+- scheduler/runtime dispatch selection for `opensymphony run` so a workflow can
+  route issue execution to the Codex worker backend,
 - a checked-in generated schema artifact policy for future Codex protocol bumps,
 - replay/history semantics beyond the local stdio request lifecycle,
 - security review of non-loopback WebSocket exposure with capability-token and

@@ -51,7 +51,10 @@ stdio path into capability discovery: `codex_app_server` is advertised as
 available with runtime contract `codex-app-server-json-rpc-v2`,
 `json_rpc_2_0` transport, and `stdio` mode. The old
 `codex-app-server-prototype` Cargo feature has been removed; local adapter and
-benchmark tests run through normal builds.
+benchmark tests run through normal builds. `opensymphony run` still dispatches
+through the OpenHands worker backend until cross-harness runtime routing is
+wired, so capability clients must read the `feature_gaps` list before exposing
+Codex as an executable route.
 
 Codex ChatGPT subscription readiness is advertised as a Codex CLI login
 reference rather than an OpenSymphony-owned secret. Capability discovery lists

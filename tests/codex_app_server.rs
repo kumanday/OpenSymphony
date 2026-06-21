@@ -12,6 +12,53 @@ use opensymphony::opensymphony_gateway_schema::model_settings::{
 };
 use serde_json::json;
 
+#[tokio::test]
+async fn codex_live_stdio_initializes_when_requested() {
+    if std::env::var_os("OPENSYMPHONY_CODEX_LIVE_STDIO").is_none() {
+        eprintln!("set OPENSYMPHONY_CODEX_LIVE_STDIO=1 to launch the local Codex CLI");
+        return;
+    }
+
+    let codex = std::env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into());
+    let adapter = CodexAppServerAdapter::local_stdio(&codex, "opensymphony-live-test", "0.0.0");
+    let (program, args) = adapter.launch().to_command();
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("launch codex app-server --stdio");
+
+    let mut session = adapter.session();
+    let initialize = session.initialize();
+    let line = CodexJsonRpcSession::encode_line(&initialize).expect("encode initialize");
+    let mut stdin = child.stdin.take().expect("child stdin");
+    tokio::io::AsyncWriteExt::write_all(&mut stdin, line.as_bytes())
+        .await
+        .expect("write initialize");
+
+    let stdout = child.stdout.take().expect("child stdout");
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut response = String::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response),
+    )
+    .await
+    .expect("initialize response timeout")
+    .expect("read initialize response");
+
+    child.kill().await.ok();
+    let response: serde_json::Value =
+        serde_json::from_str(response.trim()).expect("initialize response is json");
+    assert_eq!(response["id"], initialize.id);
+    assert!(
+        response.get("result").is_some(),
+        "initialize should return a JSON-RPC result: {response}"
+    );
+}
+
 #[test]
 fn codex_stdio_launch_and_json_rpc_request_shape_are_stable() {
     let launch = CodexAppServerLaunch::stdio_with_program("codex-test");

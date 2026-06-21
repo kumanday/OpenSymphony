@@ -260,6 +260,8 @@ impl HarnessCapability {
                 "Requires a compatible Codex CLI with ChatGPT login available to the operator-owned Codex home.".into(),
             ],
             feature_gaps: vec![
+                "`opensymphony run` dispatch still defaults to OpenHands until cross-harness runtime routing is wired."
+                    .into(),
                 "Pause/resume semantics need protocol confirmation before being advertised as available."
                     .into(),
                 "Hosted Codex worker pools and remote transport remain out of scope for the local adapter."
