@@ -1027,13 +1027,23 @@ async fn run_codex_stdio_issue(
                 .await
             {
                 Ok(()) => outcome,
-                Err(error) => WorkerOutcomeRecord::from_run(
-                    run,
-                    WorkerOutcomeKind::Failed,
-                    now_timestamp(),
-                    Some("Codex app-server workspace finalization failed".into()),
-                    Some(error.to_string()),
-                ),
+                Err(error) => {
+                    let detail = record_codex_finish_failure(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        status,
+                        error,
+                    )
+                    .await;
+                    WorkerOutcomeRecord::from_run(
+                        run,
+                        WorkerOutcomeKind::Failed,
+                        now_timestamp(),
+                        Some("Codex app-server workspace finalization failed".into()),
+                        Some(detail),
+                    )
+                }
             }
         }
         Err(error) => {
@@ -1280,8 +1290,10 @@ fn with_codex_stderr(error: String, tail: &Arc<Mutex<VecDeque<String>>>) -> Stri
     if tail.is_empty() {
         return error;
     }
-    let stderr = tail.iter().cloned().collect::<Vec<_>>().join("\n");
-    format!("{error}; recent Codex stderr:\n{stderr}")
+    format!(
+        "{error}; Codex emitted {} recent stderr line(s); raw stderr is kept in debug logs only",
+        tail.len()
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1450,6 +1462,27 @@ async fn finish_codex_workspace_run(
     workspace_manager
         .finish_run(workspace, run_manifest, status)
         .await
+}
+
+async fn record_codex_finish_failure(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    attempted_status: RunStatus,
+    error: WorkspaceError,
+) -> String {
+    let detail = format!("failed to finish Codex workspace run as {attempted_status}: {error}");
+    run_manifest.status = RunStatus::Failed;
+    run_manifest.status_detail = Some(format!(
+        "Codex app-server workspace finalization failed after {attempted_status}"
+    ));
+    if let Err(failed_error) = workspace_manager
+        .finish_run(workspace, run_manifest, RunStatus::Failed)
+        .await
+    {
+        return format!("{detail}; additionally failed to persist failed status: {failed_error}");
+    }
+    detail
 }
 
 fn codex_conversation_metadata(
@@ -1767,7 +1800,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_stderr_tail_is_bounded_and_added_to_worker_errors() {
+    fn codex_stderr_tail_is_counted_but_not_persisted_in_worker_errors() {
         let tail = Arc::new(Mutex::new(VecDeque::new()));
         for line in 0..25 {
             push_codex_stderr_tail(&tail, format!("stderr-line-{line}"));
@@ -1775,10 +1808,11 @@ mod tests {
 
         let error = with_codex_stderr("Codex stdout closed".into(), &tail);
 
-        assert!(error.contains("recent Codex stderr"));
+        assert!(error.contains("20 recent stderr line(s)"));
+        assert!(error.contains("debug logs only"));
         assert!(!error.contains("stderr-line-4"));
-        assert!(error.contains("stderr-line-5"));
-        assert!(error.contains("stderr-line-24"));
+        assert!(!error.contains("stderr-line-5"));
+        assert!(!error.contains("stderr-line-24"));
     }
 
     #[test]
@@ -2063,8 +2097,8 @@ mod tests {
         let error = outcome.error.expect("failure should include detail");
         assert!(error.contains("JSON-RPC error"));
         assert!(error.contains("fake initialize failure"));
-        assert!(error.contains("recent Codex stderr"));
-        assert!(error.contains("fake child stderr before failure"));
+        assert!(error.contains("1 recent stderr line(s)"));
+        assert!(!error.contains("fake child stderr before failure"));
         let launch = launch_rx
             .await
             .expect("launch failure should be reported to caller");
@@ -2072,7 +2106,8 @@ mod tests {
             launch,
             LaunchReport::Failed(detail)
                 if detail.contains("fake initialize failure")
-                    && detail.contains("fake child stderr before failure")
+                    && detail.contains("1 recent stderr line(s)")
+                    && !detail.contains("fake child stderr before failure")
         ));
     }
 

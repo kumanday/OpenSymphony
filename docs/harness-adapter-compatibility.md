@@ -41,10 +41,13 @@ Known gaps:
 ## Codex App Server
 
 Codex app-server now has a supported local JSON-RPC adapter path over stdio.
-Requests map to start thread/turn, resume with user input, approve/reject, and
-cancel operations. Notifications map to OpenSymphony runtime and approval
-events with raw payload retention so run details, timelines, and event replay
-can render Codex activity through the same surfaces used by other harnesses.
+Requests map to start thread/turn, resume with user input, and cancel
+operations. Approval-response request construction exists in the adapter, but
+the local stdio capability does not advertise approve/reject actions until the
+gateway/operator forwarding loop is wired. Notifications map to OpenSymphony
+runtime and approval events with raw payload retention so run details,
+timelines, and event replay can render Codex activity through the same surfaces
+used by other harnesses.
 
 COE-426 added the benchmark/prototype evidence. COE-476 promotes the local
 stdio path into capability discovery: `codex_app_server` is advertised as

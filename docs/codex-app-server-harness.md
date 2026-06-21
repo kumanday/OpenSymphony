@@ -374,16 +374,18 @@ The local stdio worker launches the Codex binary from `OPENSYMPHONY_CODEX_BIN`,
 or `codex` when unset, inside the issue workspace path. This remains a
 trusted-environment alpha control: do not expose that environment variable to
 untrusted users or hosted tenants. The worker drains stderr to structured logs
-to avoid stdio pipe backpressure. JSON-RPC initialize/start waits currently use
+to avoid stdio pipe backpressure, but raw stderr is not copied into persisted
+worker errors or run manifests. JSON-RPC initialize/start waits currently use
 fixed alpha bounds of 30 seconds per response and 300 seconds for terminal
 notification wait.
 
 Codex approval notifications are normalized into the shared approval-center
-contract, and the Codex adapter exposes the `approval/respond` request used to
-deliver approve/reject decisions plus matching audit records. The live
+contract, and the Codex adapter exposes the `approval/respond` request shape
+plus matching audit records that the future action path will use. The live
 operator-to-Codex response command path is not yet wired into the
-`opensymphony run` local stdio worker; approval-response forwarding through the
-gateway/operator action loop remains follow-up work before approval-bearing
+`opensymphony run` local stdio worker, so local Codex capability discovery does
+not advertise approve/reject actions yet. Approval-response forwarding through
+the gateway/operator action loop remains follow-up work before approval-bearing
 Codex runs are considered production-ready.
 
 Remaining follow-up work:

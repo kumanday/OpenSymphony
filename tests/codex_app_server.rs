@@ -205,7 +205,8 @@ fn codex_adapter_exposes_supported_local_harness_capabilities() {
     assert_eq!(capabilities.transport.modes, vec!["stdio"]);
     assert!(capabilities.actions.start_run);
     assert!(capabilities.actions.cancel);
-    assert!(capabilities.actions.approve);
+    assert!(!capabilities.actions.approve);
+    assert!(!capabilities.actions.reject);
     assert!(!capabilities.actions.comment);
     assert!(capabilities.approvals.tool_approval);
     assert!(!capabilities.history.fetch_history);

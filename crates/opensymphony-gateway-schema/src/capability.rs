@@ -250,8 +250,8 @@ impl HarnessCapability {
                 cancel: true,
                 pause: false,
                 resume: false,
-                approve: true,
-                reject: true,
+                approve: false,
+                reject: false,
                 comment: false,
             },
             event_streams: HarnessEventStreamCapability {
@@ -305,6 +305,7 @@ impl HarnessCapability {
             ],
             feature_gaps: vec![
                 "Codex issue execution remains local-stdio alpha and requires explicit harness selection.".into(),
+                "Approval decision forwarding to Codex is not wired for the local stdio adapter yet.".into(),
                 "Codex history fetch and reconnect replay cursors are not implemented for the local stdio adapter."
                     .into(),
                 "Codex stdio reconciliation after readiness is not implemented; events are consumed from the live JSON-RPC stream."

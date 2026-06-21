@@ -634,6 +634,8 @@ fn harness_capability_roundtrips_future_adapters() {
     assert!(back[0].available);
     assert_eq!(back[1].kind, "codex_app_server");
     assert_eq!(back[1].transport.protocol, "json_rpc_2_0");
+    assert!(!back[1].actions.approve);
+    assert!(!back[1].actions.reject);
     assert!(back[1].approvals.tool_approval);
     assert!(
         back[1]
