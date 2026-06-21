@@ -1,6 +1,6 @@
 planningWave: rich-client-hosted-mode
 linearProject: e7b957855cb7
-publishedAt: '2026-06-14T20:18:00Z'
+publishedAt: '2026-06-21T16:51:43Z'
 milestones:
   'M6: Gateway And Stream Contract':
     milestoneId: c32b5191-7349-4f30-bd46-6340af6da3e5
@@ -23,6 +23,9 @@ milestones:
   'M10.3: Codex And Subscription Readiness':
     milestoneId: 613f83d5-7208-47ea-9d5e-0db62bdd434c
     name: 'M10.3: Codex And Subscription Readiness'
+  'M10.4: Desktop Live Operations And Model Polish':
+    milestoneId: ccdb9d9f-7d22-4b89-a60a-fe277e7ebe96
+    name: 'M10.4: Desktop Live Operations And Model Polish'
   'M11: Hosted Alpha':
     milestoneId: 4a82a4eb-1782-47a1-8a47-7afb0210cb76
     name: 'M11: Hosted Alpha'
@@ -268,6 +271,21 @@ tasks:
     issueId: 1035cde4-56b5-4a37-a2d5-e18fec4f2ff2
     url: https://linear.app/trilogy-ai-coe/issue/COE-476/codex-production-harness-enablement
     file: docs/tasks/osym-767-codex-production-harness-enablement.md
+  OSYM-768:
+    issue: COE-479
+    issueId: 754caaf3-14ba-4589-b772-94e8aeed3814
+    url: https://linear.app/trilogy-ai-coe/issue/COE-479/desktop-live-snapshot-and-run-detail-refresh
+    file: docs/tasks/osym-768-desktop-live-snapshot-and-run-detail-refresh.md
+  OSYM-769:
+    issue: COE-480
+    issueId: b5f033a5-17ec-4b3d-85fb-a79ed1360f89
+    url: https://linear.app/trilogy-ai-coe/issue/COE-480/run-detail-metrics-and-density
+    file: docs/tasks/osym-769-run-detail-metrics-and-density.md
+  OSYM-780:
+    issue: COE-481
+    issueId: 002dc781-fe1f-47ec-9187-0c571366f6e1
+    url: https://linear.app/trilogy-ai-coe/issue/COE-481/model-configuration-codex-subscription-follow-up
+    file: docs/tasks/osym-780-model-configuration-codex-subscription-follow-up.md
   OSYM-770:
     issue: COE-430
     issueId: 73e4816c-758d-46b9-a598-3a9606961370

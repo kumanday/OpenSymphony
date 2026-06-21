@@ -102,6 +102,18 @@ Tasks:
 - OSYM-767 Codex Production Harness Enablement
 - OSYM-765 Codex Approvals And Cross-Harness Routing
 
+## M10.4: Desktop Live Operations And Model Polish
+
+Goal: Fix near-term desktop operator feedback from live Codex/OpenSymphony use before moving on to broader hosted and memory milestones.
+
+Placement: After M10.3 Codex And Subscription Readiness and before M10.5 OKF Memory Bundle Foundation.
+
+Tasks:
+
+- OSYM-768 Desktop Live Snapshot And Run Detail Refresh
+- OSYM-769 Run Detail Metrics And Density
+- OSYM-780 Model Configuration Codex Subscription Follow-Up
+
 ## M10.5: OKF Memory Bundle Foundation
 
 Goal: Evolve project memory into OKF-conformant bundles while keeping existing memory query, docs sync, and privacy behavior intact.
