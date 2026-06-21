@@ -738,12 +738,27 @@ impl RuntimeWorkerBackend {
                         dry_run_conversation_metadata(&run, &route),
                     )));
                 }
+                let finish_error = finish_route_dry_run_workspace_run(
+                    &workspace_manager,
+                    &ensured.handle,
+                    &mut run_manifest,
+                    &route,
+                )
+                .await
+                .err();
                 let outcome = WorkerOutcomeRecord::from_run(
                     &run,
-                    WorkerOutcomeKind::Succeeded,
+                    if finish_error.is_some() {
+                        WorkerOutcomeKind::Failed
+                    } else {
+                        WorkerOutcomeKind::Succeeded
+                    },
                     now_timestamp(),
-                    Some(route.summary()),
-                    None,
+                    Some(match &finish_error {
+                        Some(_) => "routing dry-run workspace finalization failed".into(),
+                        None => route.summary(),
+                    }),
+                    finish_error.map(|error| error.to_string()),
                 );
                 let _ = updates_tx.send(WorkerUpdate::Finished {
                     worker_id: finished_worker_id.clone(),
@@ -908,9 +923,9 @@ fn dry_run_conversation_metadata(
         runtime_contract_version: Some("opensymphony-routing-alpha-v1".into()),
         stream_state: RuntimeStreamState::Closed,
         last_event_id: None,
-        last_event_kind: Some("routing.decision".into()),
-        last_event_at: Some(now_timestamp()),
-        last_event_summary: Some(route.summary()),
+        last_event_kind: None,
+        last_event_at: None,
+        last_event_summary: None,
         recent_activity: Vec::new(),
         input_tokens: 0,
         output_tokens: 0,
@@ -919,6 +934,19 @@ fn dry_run_conversation_metadata(
         runtime_seconds: 0,
         next_activity_sequence: 0,
     }
+}
+
+async fn finish_route_dry_run_workspace_run(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> Result<(), WorkspaceError> {
+    run_manifest.status = RunStatus::Succeeded;
+    run_manifest.status_detail = Some(format!("routing dry-run ended: {}", route.summary()));
+    workspace_manager
+        .finish_run(workspace, run_manifest, RunStatus::Succeeded)
+        .await
 }
 
 fn inject_memory_env(
@@ -1710,6 +1738,237 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_drives_fake_child_lifecycle() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(&ensured.handle, &RunDescriptor::new("run-fake-codex", 1))
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex.log");
+        let fake_codex = tempdir.path().join("fake-codex");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &updates_tx,
+            &mut launch_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        let launch = launch_rx
+            .await
+            .expect("launch report should be sent before terminal completion");
+        match launch {
+            LaunchReport::Conversation(conversation) => {
+                assert_eq!(conversation.conversation_id.as_str(), "fake-thread");
+            }
+            LaunchReport::Failed(error) => panic!("fake child should launch: {error}"),
+        }
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(&format!(
+            "PWD={}",
+            ensured.handle.workspace_path().display()
+        )));
+        assert!(log.contains("ARGS=app-server --stdio"));
+        assert!(log.contains("\"method\":\"initialize\""));
+        assert!(log.contains("\"method\":\"thread/start\""));
+        assert!(
+            std::iter::from_fn(|| updates_rx.try_recv().ok()).any(|update| {
+                matches!(
+                    update,
+                    WorkerUpdate::RuntimeEvent {
+                        event_kind: Some(kind),
+                        ..
+                    } if kind == "codex.turn/completed"
+                )
+            }),
+            "terminal Codex notification should be forwarded as a runtime event"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_surfaces_fake_child_json_rpc_error() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-error", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-error").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex-error.log");
+        let fake_codex = tempdir.path().join("fake-codex-error");
+        write_fake_codex_error_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex error path should be utf-8"),
+            &updates_tx,
+            &mut launch_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert_eq!(run_manifest.status, RunStatus::Failed);
+        let error = outcome.error.expect("failure should include detail");
+        assert!(error.contains("JSON-RPC error"));
+        assert!(error.contains("fake initialize failure"));
+        assert!(error.contains("recent Codex stderr"));
+        assert!(error.contains("fake child stderr before failure"));
+        let launch = launch_rx
+            .await
+            .expect("launch failure should be reported to caller");
+        assert!(matches!(
+            launch,
+            LaunchReport::Failed(detail)
+                if detail.contains("fake initialize failure")
+                    && detail.contains("fake child stderr before failure")
+        ));
+    }
+
+    #[tokio::test]
+    async fn routing_dry_run_finishes_workspace_manifest_and_records_one_route_event() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            Arc::clone(&workspace_manager),
+            None,
+        );
+        let issue = sample_issue();
+        let workspace = sample_workspace(&workspace_root);
+        let run = RunAttempt::new(
+            WorkerId::new("worker-dry-run").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            workspace.path.clone(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+
+        let launch = backend
+            .start_worker(WorkerStartRequest {
+                issue: issue.clone(),
+                workspace,
+                run,
+                route: codex_test_route(true),
+            })
+            .await
+            .expect("dry-run worker should launch");
+
+        assert_eq!(
+            launch.conversation.last_event_kind.as_deref(),
+            Some("routing.decision")
+        );
+        assert_eq!(launch.conversation.recent_activity.len(), 1);
+
+        let mut saw_finished = false;
+        for _ in 0..10 {
+            let updates = backend
+                .poll_updates()
+                .await
+                .expect("dry-run updates should poll");
+            saw_finished |= updates
+                .iter()
+                .any(|update| matches!(update, WorkerUpdate::Finished { .. }));
+            if saw_finished {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(saw_finished, "dry-run worker should finish");
+
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should still be inspectable");
+        let manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        assert_eq!(manifest.status, RunStatus::Succeeded);
+        assert!(
+            manifest
+                .status_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("routing dry-run ended"))
+        );
+    }
+
     #[test]
     fn transport_port_override_reports_missing_port_separately() {
         let url = Url::parse("custom-scheme://openhands.local").expect("URL should parse");
@@ -2142,6 +2401,80 @@ Run the scheduler.
             category: IssueStateCategory::Terminal,
         };
         issue
+    }
+
+    fn codex_test_route(dry_run: bool) -> crate::opensymphony_orchestrator::HarnessRouteDecision {
+        crate::opensymphony_orchestrator::HarnessRouteDecision {
+            task_type: "issue_execution".into(),
+            harness_kind: "codex_app_server".into(),
+            model_profile: Some("codex-chatgpt-local-keychain".into()),
+            reason: "test codex route".into(),
+            required_capabilities: vec!["start_run".into(), "tool_approval".into()],
+            dry_run,
+            user_override: false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"threadId":"fake-thread"}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
+      ;;
+  esac
+done
+"#,
+                log = log_path.display()
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_error_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  printf 'fake child stderr before failure\n' >&2
+  printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32000,"message":"fake initialize failure"}}}}\n' "$id"
+  exit 0
+done
+"#,
+                log = log_path.display()
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, contents).expect("fake executable should be written");
+        let mut permissions = fs::metadata(path)
+            .expect("fake executable metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("fake executable should be executable");
     }
 
     fn sample_issue_conversation_manifest(
