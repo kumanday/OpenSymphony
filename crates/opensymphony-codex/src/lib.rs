@@ -716,12 +716,15 @@ pub enum CodexUserInput {
 pub enum NormalizedCodexEventKind {
     ThreadStarted,
     ThreadStatusChanged,
+    ThreadTokenUsageUpdated,
     TurnStarted,
     TurnCompleted,
     TurnCancelled,
+    TurnDiffUpdated,
     ItemStarted,
     ItemCompleted,
     AgentMessageDelta,
+    CommandExecutionOutputDelta,
     PlanDelta,
     ApprovalRequested,
     ApprovalCompleted,
@@ -751,12 +754,17 @@ pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent>
     let kind = match method.as_str() {
         "thread/started" => NormalizedCodexEventKind::ThreadStarted,
         "thread/status/changed" => NormalizedCodexEventKind::ThreadStatusChanged,
+        "thread/tokenUsage/updated" => NormalizedCodexEventKind::ThreadTokenUsageUpdated,
         "turn/started" => NormalizedCodexEventKind::TurnStarted,
         "turn/completed" => NormalizedCodexEventKind::TurnCompleted,
         "turn/cancelled" | "turn/canceled" => NormalizedCodexEventKind::TurnCancelled,
+        "turn/diff/updated" => NormalizedCodexEventKind::TurnDiffUpdated,
         "item/started" => NormalizedCodexEventKind::ItemStarted,
         "item/completed" => NormalizedCodexEventKind::ItemCompleted,
         "item/agentMessage/delta" => NormalizedCodexEventKind::AgentMessageDelta,
+        "item/commandExecution/outputDelta" => {
+            NormalizedCodexEventKind::CommandExecutionOutputDelta
+        }
         "item/plan/delta" => NormalizedCodexEventKind::PlanDelta,
         "item/permissions/requestApproval" => NormalizedCodexEventKind::ApprovalRequested,
         "approval/completed" => NormalizedCodexEventKind::ApprovalCompleted,
@@ -777,6 +785,14 @@ pub fn normalize_server_notification(raw: Value) -> Option<NormalizedCodexEvent>
 
 fn string_param(params: &Value, key: &str) -> Option<String> {
     params.get(key)?.as_str().map(str::to_owned)
+}
+
+fn nested_string_param(params: &Value, keys: &[&str]) -> Option<String> {
+    let mut value = params;
+    for key in keys {
+        value = value.get(*key)?;
+    }
+    value.as_str().map(str::to_owned)
 }
 
 pub fn normalized_event_to_journal_record(
@@ -1000,18 +1016,25 @@ fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventK
             EventKind::RunFailed,
             error_summary(event).unwrap_or_else(|| "Codex app-server reported an error".into()),
         ),
-        NormalizedCodexEventKind::ThreadStatusChanged => (
-            thread_status_kind(event),
-            format!("Codex event: {}", event.method),
+        NormalizedCodexEventKind::ThreadTokenUsageUpdated => (
+            EventKind::HarnessEventNormalized {
+                source_kind: event.method.clone(),
+            },
+            codex_event_summary(event),
         ),
+        NormalizedCodexEventKind::ThreadStatusChanged => {
+            (thread_status_kind(event), codex_event_summary(event))
+        }
         NormalizedCodexEventKind::ItemStarted
         | NormalizedCodexEventKind::ItemCompleted
         | NormalizedCodexEventKind::AgentMessageDelta
+        | NormalizedCodexEventKind::CommandExecutionOutputDelta
+        | NormalizedCodexEventKind::TurnDiffUpdated
         | NormalizedCodexEventKind::PlanDelta => (
             EventKind::HarnessEventNormalized {
                 source_kind: event.method.clone(),
             },
-            format!("Codex event: {}", event.method),
+            codex_event_summary(event),
         ),
         NormalizedCodexEventKind::Unknown => (
             EventKind::Unknown {
@@ -1020,6 +1043,234 @@ fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventK
             format!("Codex event: {}", event.method),
         ),
     }
+}
+
+pub fn codex_event_summary(event: &NormalizedCodexEvent) -> String {
+    match event.kind {
+        NormalizedCodexEventKind::ThreadStarted => format!(
+            "Codex thread started{}",
+            id_suffix(event.thread_id.as_deref())
+        ),
+        NormalizedCodexEventKind::TurnStarted => {
+            format!("Codex turn started{}", id_suffix(event.turn_id.as_deref()))
+        }
+        NormalizedCodexEventKind::TurnCompleted => {
+            format!(
+                "Codex turn completed{}",
+                id_suffix(event.turn_id.as_deref())
+            )
+        }
+        NormalizedCodexEventKind::TurnCancelled => {
+            format!(
+                "Codex turn cancelled{}",
+                id_suffix(event.turn_id.as_deref())
+            )
+        }
+        NormalizedCodexEventKind::ApprovalRequested => format!(
+            "Codex requested approval{}",
+            id_suffix(event.item_id.as_deref())
+        ),
+        NormalizedCodexEventKind::ApprovalCompleted => format!(
+            "Codex approval completed{}",
+            id_suffix(event.item_id.as_deref())
+        ),
+        NormalizedCodexEventKind::Error => {
+            error_summary(event).unwrap_or_else(|| "Codex app-server reported an error".into())
+        }
+        NormalizedCodexEventKind::AgentMessageDelta => event
+            .message_delta
+            .as_deref()
+            .and_then(bounded_redacted_preview)
+            .map(|preview| format!("Codex assistant: {preview}"))
+            .unwrap_or_else(|| format!("Codex event: {}", event.method)),
+        NormalizedCodexEventKind::CommandExecutionOutputDelta => {
+            let params = event.raw.get("params").unwrap_or(&Value::Null);
+            first_string_param(
+                params,
+                &["delta", "output", "stdout", "stderr", "text", "content"],
+            )
+            .or_else(|| nested_string_param(params, &["output", "delta"]))
+            .or_else(|| nested_string_param(params, &["output", "text"]))
+            .as_deref()
+            .and_then(bounded_redacted_preview)
+            .map(|preview| format!("Codex command output: {preview}"))
+            .unwrap_or_else(|| format!("Codex event: {}", event.method))
+        }
+        NormalizedCodexEventKind::PlanDelta => event
+            .message_delta
+            .as_deref()
+            .or_else(|| {
+                event
+                    .raw
+                    .get("params")
+                    .and_then(|params| params.get("text").and_then(Value::as_str))
+            })
+            .and_then(bounded_redacted_preview)
+            .map(|preview| format!("Codex plan: {preview}"))
+            .unwrap_or_else(|| format!("Codex event: {}", event.method)),
+        NormalizedCodexEventKind::TurnDiffUpdated => {
+            let params = event.raw.get("params").unwrap_or(&Value::Null);
+            first_string_param(params, &["summary", "path", "filePath", "file"])
+                .and_then(|value| bounded_redacted_preview(&value))
+                .map(|preview| format!("Codex diff updated: {preview}"))
+                .or_else(|| {
+                    params
+                        .get("files")
+                        .and_then(Value::as_array)
+                        .map(|files| format!("Codex diff updated: {} file(s)", files.len()))
+                })
+                .unwrap_or_else(|| "Codex diff updated".into())
+        }
+        NormalizedCodexEventKind::ThreadTokenUsageUpdated => {
+            token_usage_summary(event).unwrap_or_else(|| format!("Codex event: {}", event.method))
+        }
+        NormalizedCodexEventKind::ThreadStatusChanged => {
+            let params = event.raw.get("params").unwrap_or(&Value::Null);
+            first_string_param(params, &["status"])
+                .and_then(|status| bounded_redacted_preview(&status))
+                .map(|status| format!("Codex thread status: {status}"))
+                .unwrap_or_else(|| format!("Codex event: {}", event.method))
+        }
+        NormalizedCodexEventKind::ItemStarted | NormalizedCodexEventKind::ItemCompleted => {
+            item_summary(event).unwrap_or_else(|| format!("Codex event: {}", event.method))
+        }
+        NormalizedCodexEventKind::Unknown => format!("Codex event: {}", event.method),
+    }
+}
+
+fn item_summary(event: &NormalizedCodexEvent) -> Option<String> {
+    let params = event.raw.get("params").unwrap_or(&Value::Null);
+    let label = first_string_param(params, &["title", "label", "kind", "itemType", "type"])
+        .and_then(|value| bounded_redacted_preview(&value))?;
+    let verb = match event.kind {
+        NormalizedCodexEventKind::ItemStarted => "started",
+        NormalizedCodexEventKind::ItemCompleted => "completed",
+        _ => return None,
+    };
+    Some(format!("Codex item {verb}: {label}"))
+}
+
+fn token_usage_summary(event: &NormalizedCodexEvent) -> Option<String> {
+    let params = event.raw.get("params")?;
+    let usage = params.get("usage").unwrap_or(params);
+    let input = number_param(usage, &["input_tokens", "inputTokens", "prompt_tokens"])?;
+    let output = number_param(
+        usage,
+        &["output_tokens", "outputTokens", "completion_tokens"],
+    )?;
+    let cache = number_param(
+        usage,
+        &[
+            "cache_read_tokens",
+            "cacheReadTokens",
+            "cached_input_tokens",
+        ],
+    )
+    .unwrap_or(0);
+    if cache > 0 {
+        Some(format!(
+            "Codex token usage: {input} input, {output} output, {cache} cache"
+        ))
+    } else {
+        Some(format!("Codex token usage: {input} input, {output} output"))
+    }
+}
+
+fn number_param(params: &Value, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| params.get(*key)?.as_u64())
+}
+
+const CODEX_SUMMARY_PREVIEW_CHARS: usize = 160;
+
+fn bounded_redacted_preview(raw: &str) -> Option<String> {
+    let cleaned = raw
+        .chars()
+        .map(|character| {
+            if character.is_control() && !character.is_whitespace() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let words = cleaned.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return None;
+    }
+
+    let mut redacted = Vec::with_capacity(words.len());
+    let mut redact_next = false;
+    let mut drop_next = false;
+    for word in words {
+        let lower = word.to_ascii_lowercase();
+        if drop_next {
+            drop_next = false;
+            continue;
+        }
+        if redact_next {
+            redacted.push("[redacted]".to_string());
+            redact_next = false;
+            continue;
+        }
+        if lower.ends_with(':') && secret_key(lower.trim_end_matches(':')) {
+            redacted.push(format!("{word}[redacted]"));
+            drop_next = true;
+            continue;
+        }
+        if lower == "bearer" || matches!(lower.as_str(), "authorization" | "password" | "secret") {
+            redacted.push(word.to_string());
+            redact_next = true;
+            continue;
+        }
+        redacted.push(redact_inline_secret(word));
+    }
+
+    Some(truncate_chars(
+        &redacted.join(" "),
+        CODEX_SUMMARY_PREVIEW_CHARS,
+    ))
+}
+
+fn redact_inline_secret(word: &str) -> String {
+    for delimiter in ['=', ':'] {
+        let Some(index) = word.find(delimiter) else {
+            continue;
+        };
+        let (key, _) = word.split_at(index);
+        let key = key
+            .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .to_ascii_lowercase();
+        if secret_key(&key) {
+            return format!("{}{}[redacted]", &word[..index], delimiter);
+        }
+    }
+    word.to_string()
+}
+
+fn secret_key(key: &str) -> bool {
+    matches!(
+        key,
+        "api_key"
+            | "apikey"
+            | "access_token"
+            | "refresh_token"
+            | "authorization"
+            | "password"
+            | "secret"
+            | "token"
+    )
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut preview = value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    preview.push_str("...");
+    preview
 }
 
 fn id_suffix(id: Option<&str>) -> String {

@@ -5,7 +5,7 @@ use opensymphony::opensymphony_codex::{
     CodexJsonRpcSession, CodexLifecycleRequest, CodexSandboxPolicy, CodexThreadSandboxMode,
     CodexThreadStartParams, CodexTurnStartParams, CodexUserInput, CodexWebSocketAuth,
     NormalizedCodexEventKind, codex_approval_decision_audit_record,
-    codex_approval_request_from_event, normalize_server_notification,
+    codex_approval_request_from_event, codex_event_summary, normalize_server_notification,
     normalized_event_to_journal_record, websocket_benchmark_requirements,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
@@ -377,6 +377,100 @@ fn codex_notification_normalization_preserves_thread_turn_and_raw_payload() {
         }))
         .is_none()
     );
+}
+
+#[test]
+fn codex_event_summaries_extract_bounded_redacted_previews() {
+    let message = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/agentMessage/delta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "item-1",
+            "delta": "Here is the answer\napi_key=sk-live-secret"
+        }
+    }))
+    .expect("message delta normalizes");
+    assert_eq!(
+        codex_event_summary(&message),
+        "Codex assistant: Here is the answer api_key=[redacted]"
+    );
+    let message_record = normalized_event_to_journal_record("COE-483", 1, &message);
+    assert_eq!(
+        message_record.summary,
+        "Codex assistant: Here is the answer api_key=[redacted]"
+    );
+
+    let command = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-1",
+            "delta": "running tests with Authorization: bearer-token"
+        }
+    }))
+    .expect("command output normalizes");
+    assert_eq!(
+        codex_event_summary(&command),
+        "Codex command output: running tests with Authorization:[redacted]"
+    );
+
+    let long_output = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "item/commandExecution/outputDelta",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "cmd-2",
+            "delta": "x".repeat(220)
+        }
+    }))
+    .expect("long command output normalizes");
+    let summary = codex_event_summary(&long_output);
+    assert!(summary.starts_with("Codex command output: "));
+    assert!(summary.ends_with("..."));
+    assert!(summary.len() < 210);
+
+    let diff = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "turn/diff/updated",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "files": ["src/main.rs", "README.md"]
+        }
+    }))
+    .expect("diff update normalizes");
+    assert_eq!(codex_event_summary(&diff), "Codex diff updated: 2 file(s)");
+
+    let usage = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "thread/tokenUsage/updated",
+        "params": {
+            "threadId": "thread-1",
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 8,
+                "cache_read_tokens": 4
+            }
+        }
+    }))
+    .expect("token usage normalizes");
+    assert_eq!(
+        codex_event_summary(&usage),
+        "Codex token usage: 12 input, 8 output, 4 cache"
+    );
+
+    let unknown = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "future/event",
+        "params": { "threadId": "thread-2" }
+    }))
+    .expect("unknown normalizes");
+    assert_eq!(codex_event_summary(&unknown), "Codex event: future/event");
 }
 
 #[test]
