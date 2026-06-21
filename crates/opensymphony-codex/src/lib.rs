@@ -722,8 +722,8 @@ fn approval_completed_kind(event: &NormalizedCodexEvent) -> EventKind {
         .map(str::to_ascii_lowercase)
         .next();
     match decision.as_deref() {
-        Some("approved") => EventKind::ApprovalGranted,
-        Some("rejected") => EventKind::ApprovalDenied,
+        Some("approve" | "approved") => EventKind::ApprovalGranted,
+        Some("reject" | "rejected") => EventKind::ApprovalDenied,
         _ => EventKind::HarnessEventNormalized {
             source_kind: event.method.clone(),
         },
@@ -738,11 +738,9 @@ fn thread_status_kind(event: &NormalizedCodexEvent) -> EventKind {
         .map(str::to_ascii_lowercase)
         .next();
     match status.as_deref() {
-        Some("completed" | "complete" | "succeeded" | "success" | "done") => {
-            EventKind::RunCompleted
-        }
-        Some("failed" | "failure" | "error") => EventKind::RunFailed,
-        Some("cancelled" | "canceled") => EventKind::RunCancelled,
+        Some("completed") => EventKind::RunCompleted,
+        Some("failed") => EventKind::RunFailed,
+        Some("cancelled") => EventKind::RunCancelled,
         _ => EventKind::HarnessEventNormalized {
             source_kind: event.method.clone(),
         },

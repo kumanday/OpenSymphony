@@ -55,7 +55,8 @@ benchmark tests run through normal builds. `opensymphony run` still dispatches
 through the OpenHands worker backend until cross-harness runtime routing is
 wired, so capability clients must read the `feature_gaps` list before exposing
 Codex as an executable route. History fetch and reconnect replay are also
-marked unavailable until Codex cursor/replay storage is implemented.
+marked unavailable until Codex cursor/replay storage is implemented, and stdio
+readiness reconciliation is unavailable until a real backlog mechanism exists.
 
 Codex ChatGPT subscription readiness is advertised as a Codex CLI login
 reference rather than an OpenSymphony-owned secret. Capability discovery lists

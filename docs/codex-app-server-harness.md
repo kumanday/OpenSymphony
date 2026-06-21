@@ -367,7 +367,8 @@ Remaining follow-up work:
   route issue execution to the Codex worker backend,
 - a checked-in generated schema artifact policy for future Codex protocol bumps,
 - replay/history semantics beyond the local stdio request lifecycle (capability
-  metadata currently marks history fetch and reconnect replay unavailable),
+  metadata currently marks history fetch, reconnect replay, and stdio
+  reconciliation unavailable),
 - security review of non-loopback WebSocket exposure with capability-token and
   signed-bearer modes,
 - hosted Codex worker pools and hosted credential broker integration.

@@ -12,6 +12,16 @@ use opensymphony::opensymphony_gateway_schema::model_settings::{
 };
 use serde_json::json;
 
+async fn terminate_codex_child(
+    mut child: tokio::process::Child,
+    stderr_task: tokio::task::JoinHandle<String>,
+) -> (Option<std::process::ExitStatus>, String) {
+    child.kill().await.ok();
+    let status = child.wait().await.ok();
+    let stderr = stderr_task.await.unwrap_or_default();
+    (status, stderr)
+}
+
 #[tokio::test]
 async fn codex_live_stdio_initializes_when_requested() {
     if std::env::var_os("OPENSYMPHONY_CODEX_LIVE_STDIO").is_none() {
@@ -47,24 +57,31 @@ async fn codex_live_stdio_initializes_when_requested() {
     let stdout = child.stdout.take().expect("child stdout");
     let mut reader = tokio::io::BufReader::new(stdout);
     let mut response = String::new();
-    tokio::time::timeout(
+    let read = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut response),
     )
-    .await
-    .expect("initialize response timeout")
-    .expect("read initialize response");
+    .await;
+    match read {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            let (status, stderr) = terminate_codex_child(child, stderr_task).await;
+            panic!("read initialize response: {error}; status={status:?}; stderr={stderr}");
+        }
+        Err(error) => {
+            let (status, stderr) = terminate_codex_child(child, stderr_task).await;
+            panic!("initialize response timeout: {error}; status={status:?}; stderr={stderr}");
+        }
+    }
 
     drop(stdin);
-    child.kill().await.ok();
-    let status = child.wait().await.expect("wait for codex child");
-    let stderr = stderr_task.await.expect("stderr reader joins");
+    let (status, stderr) = terminate_codex_child(child, stderr_task).await;
     let response: serde_json::Value = serde_json::from_str(response.trim())
         .unwrap_or_else(|error| panic!("initialize response is json: {error}; stderr={stderr}"));
     assert_eq!(response["id"], initialize.id);
     assert!(
         response.get("result").is_some(),
-        "initialize should return a JSON-RPC result: {response}; status={status}; stderr={stderr}"
+        "initialize should return a JSON-RPC result: {response}; status={status:?}; stderr={stderr}"
     );
 }
 
@@ -180,8 +197,10 @@ fn codex_adapter_exposes_supported_local_harness_capabilities() {
     assert!(capabilities.actions.start_run);
     assert!(capabilities.actions.cancel);
     assert!(capabilities.actions.approve);
+    assert!(!capabilities.actions.comment);
     assert!(capabilities.approvals.tool_approval);
     assert!(!capabilities.history.fetch_history);
+    assert!(!capabilities.history.reconcile_after_ready);
     assert!(!capabilities.history.reconnect_and_replay);
     assert!(capabilities.history.preserve_unknown_events);
     assert!(!capabilities.transport.remote);
@@ -356,7 +375,7 @@ fn codex_approval_completed_maps_decisions_without_guessing() {
             "threadId": "thread-1",
             "turnId": "turn-1",
             "itemId": "approval-1",
-            "decision": "approved"
+            "decision": "approve"
         }
     }))
     .expect("approved completion normalizes");
@@ -370,7 +389,7 @@ fn codex_approval_completed_maps_decisions_without_guessing() {
             "threadId": "thread-1",
             "turnId": "turn-1",
             "itemId": "approval-2",
-            "decision": "rejected"
+            "decision": "reject"
         }
     }))
     .expect("rejected completion normalizes");

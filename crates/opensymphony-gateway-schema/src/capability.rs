@@ -208,7 +208,7 @@ impl HarnessCapability {
                 resume: false,
                 approve: true,
                 reject: true,
-                comment: true,
+                comment: false,
             },
             event_streams: HarnessEventStreamCapability {
                 runtime_events: true,
@@ -251,7 +251,7 @@ impl HarnessCapability {
             },
             history: HarnessHistoryCapability {
                 fetch_history: false,
-                reconcile_after_ready: true,
+                reconcile_after_ready: false,
                 reconnect_and_replay: false,
                 preserve_unknown_events: true,
             },
@@ -263,6 +263,10 @@ impl HarnessCapability {
                 "`opensymphony run` dispatch still defaults to OpenHands until cross-harness runtime routing is wired."
                     .into(),
                 "Codex history fetch and reconnect replay cursors are not implemented for the local stdio adapter."
+                    .into(),
+                "Codex stdio reconciliation after readiness is not implemented; events are consumed from the live JSON-RPC stream."
+                    .into(),
+                "Harness-native comments are not implemented; tracker comments remain orchestrator-owned."
                     .into(),
                 "Pause/resume semantics need protocol confirmation before being advertised as available."
                     .into(),
