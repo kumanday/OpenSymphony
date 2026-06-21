@@ -119,7 +119,8 @@ This keeps one canonical Linear API surface for the agent path.
 - `opensymphony_domain`
   - domain models and scheduler transitions
 - `opensymphony_workflow`
-  - workflow loading, config resolution, prompt rendering
+  - workflow loading, config resolution, prompt rendering, and alpha harness/model
+    selection
 - `opensymphony_workspace`
   - workspace management and manifests
 - `opensymphony_linear`
@@ -130,10 +131,10 @@ This keeps one canonical Linear API surface for the agent path.
   - OpenHands transport and session runner
 - `opensymphony_codex`
   - local Codex app-server stdio adapter, JSON-RPC lifecycle requests, event
-    normalization, credential reuse, and benchmark helpers for experimental
-    transports
+    normalization, installed-schema validation, credential reuse, and benchmark
+    helpers for experimental transports
 - `opensymphony_orchestrator`
-  - scheduler loop and reconciliation
+  - scheduler loop, route decisions, and reconciliation
 - `opensymphony_control`
   - control-plane snapshot store and compatibility API
 - `opensymphony_gateway`
@@ -170,11 +171,20 @@ opensymphony run
   ├─ linear adapter
   ├─ openhands REST client
   ├─ openhands WebSocket client
+  ├─ optional Codex app-server stdio worker
   ├─ gateway API
   ├─ control-plane compatibility API
   └─ local server supervisor
        └─ python -m openhands.agent_server
 ```
+
+The scheduler attaches a `HarnessRouteDecision` to each worker start request.
+The default route remains `openhands_agent_server`. Workflow `routing.harness`
+or the `OPENSYMPHONY_HARNESS` environment override can select the local
+`codex_app_server` route when that harness is available and can start runs.
+Route decisions are emitted as `routing.decision` runtime audit events so dry-run
+previews and real dispatches show the selected harness, model, and model
+profile.
 
 Other processes:
 

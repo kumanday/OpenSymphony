@@ -1,11 +1,17 @@
+use chrono::{TimeZone, Utc};
 use opensymphony::opensymphony_codex::{
-    CodexAppServerAdapter, CodexAppServerLaunch, CodexApprovalDecision, CodexContractArtifact,
-    CodexContractGeneration, CodexJsonRpcSession, CodexLifecycleRequest, CodexThreadStartParams,
-    CodexTurnStartParams, CodexUserInput, CodexWebSocketAuth, NormalizedCodexEventKind,
-    normalize_server_notification, normalized_event_to_journal_record,
-    websocket_benchmark_requirements,
+    CodexAppServerAdapter, CodexAppServerLaunch, CodexAppServerSchemaValidator,
+    CodexApprovalDecision, CodexApprovalPolicy, CodexContractArtifact, CodexContractGeneration,
+    CodexJsonRpcSession, CodexLifecycleRequest, CodexSandboxPolicy, CodexThreadSandboxMode,
+    CodexThreadStartParams, CodexTurnStartParams, CodexUserInput, CodexWebSocketAuth,
+    NormalizedCodexEventKind, codex_approval_decision_audit_record,
+    codex_approval_request_from_event, normalize_server_notification,
+    normalized_event_to_journal_record, websocket_benchmark_requirements,
 };
 use opensymphony::opensymphony_domain::HarnessAdapter;
+use opensymphony::opensymphony_gateway_schema::approval::{
+    ApprovalKind, ApprovalRiskLevel, ApprovalStatus,
+};
 use opensymphony::opensymphony_gateway_schema::event_journal::EventKind;
 use opensymphony::opensymphony_gateway_schema::model_settings::{
     CredentialReferenceKind, CredentialStorageMode, ModelSettingsResponse,
@@ -38,7 +44,7 @@ async fn codex_live_stdio_initializes_when_requested() {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("launch codex app-server --stdio");
+        .expect("launch codex app-server stdio");
 
     let mut session = adapter.session();
     let initialize = session.initialize();
@@ -94,9 +100,15 @@ fn codex_stdio_launch_and_json_rpc_request_shape_are_stable() {
     let launch = CodexAppServerLaunch::stdio_with_program("codex-test");
     let (program, args) = launch.to_command();
     assert_eq!(program, "codex-test");
-    assert_eq!(args, vec!["app-server", "--stdio"]);
+    assert_eq!(
+        args,
+        vec!["--dangerously-bypass-hook-trust", "app-server", "--stdio"]
+    );
     assert_eq!(launch.program(), "codex-test");
-    assert_eq!(launch.command_args(), vec!["app-server", "--stdio"]);
+    assert_eq!(
+        launch.command_args(),
+        vec!["--dangerously-bypass-hook-trust", "app-server", "--stdio"]
+    );
 
     let mut session = CodexJsonRpcSession::new("opensymphony-test", "0.0.0");
     let initialize = session.initialize();
@@ -106,19 +118,23 @@ fn codex_stdio_launch_and_json_rpc_request_shape_are_stable() {
 
     let thread = session
         .thread_start(CodexThreadStartParams {
+            approval_policy: Some(CodexApprovalPolicy::Never),
             cwd: Some("/tmp/issue-workspace".into()),
             model: Some("gpt-5-codex".into()),
             model_provider: Some("openai".into()),
             base_instructions: Some("OpenSymphony workflow prompt".into()),
             developer_instructions: None,
             ephemeral: Some(true),
+            sandbox: Some(CodexThreadSandboxMode::DangerFullAccess),
             config: Some(json!({ "model": "gpt-5-codex" })),
         })
         .expect("serialize thread/start request");
     assert_eq!(thread.id, 2);
     assert_eq!(thread.method, "thread/start");
+    assert_eq!(thread.params["approvalPolicy"], "never");
     assert_eq!(thread.params["cwd"], "/tmp/issue-workspace");
     assert_eq!(thread.params["model"], "gpt-5-codex");
+    assert_eq!(thread.params["sandbox"], "danger-full-access");
 
     let turn = session
         .turn_start(CodexTurnStartParams {
@@ -127,18 +143,199 @@ fn codex_stdio_launch_and_json_rpc_request_shape_are_stable() {
                 text: "continue".into(),
                 text_elements: Vec::new(),
             }],
+            approval_policy: Some(CodexApprovalPolicy::Never),
             cwd: Some("/tmp/issue-workspace".into()),
             model: Some("gpt-5-codex".into()),
+            sandbox_policy: Some(CodexSandboxPolicy::danger_full_access()),
             client_user_message_id: Some("client-msg-1".into()),
         })
         .expect("serialize turn/start request");
     assert_eq!(turn.id, 3);
     assert_eq!(turn.method, "turn/start");
     assert_eq!(turn.params["threadId"], "thread-1");
+    assert_eq!(turn.params["approvalPolicy"], "never");
+    assert_eq!(turn.params["sandboxPolicy"]["type"], "dangerFullAccess");
+    assert!(turn.params["sandboxPolicy"].get("networkAccess").is_none());
 
     let encoded = CodexJsonRpcSession::encode_line(&turn).expect("encode JSON-RPC request");
     assert!(encoded.ends_with('\n'));
     assert!(encoded.contains("\"jsonrpc\":\"2.0\""));
+}
+
+#[test]
+fn codex_schema_validator_rejects_drifted_automation_payloads() {
+    let schema = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "definitions": {
+            "ClientRequest": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "required": ["jsonrpc", "id", "method", "params"],
+                        "properties": {
+                            "jsonrpc": { "const": "2.0" },
+                            "id": { "type": "integer" },
+                            "method": { "enum": ["turn/start"] },
+                            "params": {
+                                "type": "object",
+                                "required": ["approvalPolicy", "sandboxPolicy", "threadId", "input"],
+                                "properties": {
+                                    "approvalPolicy": { "enum": ["never"] },
+                                    "threadId": { "type": "string" },
+                                    "input": { "type": "array" },
+                                    "sandboxPolicy": {
+                                        "type": "object",
+                                        "required": ["type"],
+                                        "properties": {
+                                            "type": { "enum": ["dangerFullAccess"] }
+                                        },
+                                        "additionalProperties": false
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+    });
+    let validator =
+        CodexAppServerSchemaValidator::from_schema_json(schema).expect("schema should compile");
+    let mut session = CodexJsonRpcSession::new("opensymphony-test", "0.0.0");
+    let turn = session
+        .turn_start(CodexTurnStartParams {
+            thread_id: "thread-1".into(),
+            input: vec![CodexUserInput::Text {
+                text: "continue".into(),
+                text_elements: Vec::new(),
+            }],
+            approval_policy: Some(CodexApprovalPolicy::Never),
+            cwd: Some("/tmp/issue-workspace".into()),
+            model: Some("gpt-5-codex".into()),
+            sandbox_policy: Some(CodexSandboxPolicy::danger_full_access()),
+            client_user_message_id: None,
+        })
+        .expect("turn/start serializes");
+    validator
+        .validate_request(&turn)
+        .expect("maximum-permission turn/start shape should match schema");
+
+    let mut drifted = turn.clone();
+    drifted.params["sandboxPolicy"]["networkAccess"] = json!(true);
+    let error = validator
+        .validate_request(&drifted)
+        .expect_err("dangerFullAccess must not carry networkAccess");
+    assert!(error.to_string().contains("Update Codex"));
+}
+
+#[test]
+fn codex_schema_validator_accepts_defs_client_request_shape() {
+    let schema = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "$defs": {
+            "JsonRpcVersion": { "const": "2.0" },
+            "ClientRequest": {
+                "type": "object",
+                "required": ["jsonrpc", "id", "method", "params"],
+                "properties": {
+                    "jsonrpc": { "$ref": "#/$defs/JsonRpcVersion" },
+                    "id": { "type": "integer" },
+                    "method": { "enum": ["initialize"] },
+                    "params": { "type": "object" }
+                }
+            }
+        }
+    });
+    let validator = CodexAppServerSchemaValidator::from_schema_json(schema)
+        .expect("$defs schema should compile");
+    let mut session = CodexJsonRpcSession::new("opensymphony-test", "0.0.0");
+    let initialize = session.initialize();
+
+    validator
+        .validate_request(&initialize)
+        .expect("initialize should match $defs ClientRequest schema");
+}
+
+#[test]
+fn codex_installed_schema_accepts_automation_payloads_when_requested() {
+    if std::env::var_os("OPENSYMPHONY_CODEX_LIVE_SCHEMA").is_none() {
+        eprintln!("set OPENSYMPHONY_CODEX_LIVE_SCHEMA=1 to validate against installed Codex");
+        return;
+    }
+
+    let codex = std::env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into());
+    let schema_dir = tempfile::tempdir().expect("schema tempdir should exist");
+    let generation = CodexContractGeneration::json_schema_with_program(&codex, schema_dir.path());
+    let (program, args) = generation.to_command();
+    let output = std::process::Command::new(&program)
+        .args(&args)
+        .output()
+        .expect("codex schema generation should launch");
+    assert!(
+        output.status.success(),
+        "schema generation should succeed; status={}; stderr-bytes={}",
+        output.status,
+        output.stderr.len()
+    );
+    let validator = CodexAppServerSchemaValidator::from_schema_file(
+        schema_dir
+            .path()
+            .join("codex_app_server_protocol.v2.schemas.json"),
+    )
+    .expect("installed schema should compile");
+
+    let adapter = CodexAppServerAdapter::local_stdio(&codex, "opensymphony-live-test", "0.0.0");
+    let mut session = adapter.session();
+    let initialize = session.initialize();
+    validator
+        .validate_request(&initialize)
+        .expect("initialize should match installed schema");
+    let thread = adapter
+        .start_issue_thread_request(
+            &mut session,
+            "/tmp/issue-workspace",
+            Some("gpt-5-codex".into()),
+            json!({ "opensymphonyRoute": { "harness": "codex_app_server" } }),
+        )
+        .expect("thread/start should serialize");
+    assert!(
+        thread.request.params.get("modelProvider").is_none(),
+        "selected model should not force a Codex provider"
+    );
+    validator
+        .validate_request(&thread.request)
+        .expect("thread/start should match installed schema");
+    let turn = adapter
+        .start_issue_turn_request(
+            &mut session,
+            "thread-1",
+            "/tmp/issue-workspace",
+            Some("gpt-5-codex".into()),
+            "workflow prompt",
+        )
+        .expect("turn/start should serialize");
+    validator
+        .validate_request(&turn.request)
+        .expect("turn/start should match installed schema");
+    let default_thread = adapter
+        .start_issue_thread_request(
+            &mut session,
+            "/tmp/issue-workspace",
+            None,
+            json!({ "opensymphonyRoute": { "harness": "codex_app_server" } }),
+        )
+        .expect("thread/start without selected model should serialize");
+    assert!(
+        default_thread.request.params.get("model").is_none(),
+        "omitted model should leave Codex model selection to its own config"
+    );
+    assert!(
+        default_thread.request.params.get("modelProvider").is_none(),
+        "omitted model should not force a Codex provider"
+    );
+    validator
+        .validate_request(&default_thread.request)
+        .expect("thread/start without model should match installed schema");
 }
 
 #[test]
@@ -188,7 +385,7 @@ fn codex_adapter_exposes_supported_local_harness_capabilities() {
     assert_eq!(adapter.harness_kind(), "codex_app_server");
     assert_eq!(
         adapter.launch().command_args(),
-        vec!["app-server", "--stdio"]
+        vec!["--dangerously-bypass-hook-trust", "app-server", "--stdio"]
     );
 
     let capabilities = adapter.capabilities();
@@ -200,7 +397,8 @@ fn codex_adapter_exposes_supported_local_harness_capabilities() {
     assert_eq!(capabilities.transport.modes, vec!["stdio"]);
     assert!(capabilities.actions.start_run);
     assert!(capabilities.actions.cancel);
-    assert!(capabilities.actions.approve);
+    assert!(!capabilities.actions.approve);
+    assert!(!capabilities.actions.reject);
     assert!(!capabilities.actions.comment);
     assert!(capabilities.approvals.tool_approval);
     assert!(!capabilities.history.fetch_history);
@@ -221,20 +419,76 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
     let adapter = CodexAppServerAdapter::local_stdio("codex-test", "opensymphony-test", "1.10.1");
     let mut session = adapter.session();
 
-    let start = adapter
-        .start_issue_request(
+    let thread_start = adapter
+        .start_issue_thread_request(
             &mut session,
             "/tmp/issue-workspace",
-            "gpt-5-codex",
-            "workflow prompt",
-            json!({ "approvalPolicy": "on-request" }),
+            Some("gpt-5-codex".into()),
+            json!({ "opensymphonyRoute": { "harness": "codex_app_server" } }),
         )
-        .expect("start request serializes");
-    assert_eq!(start.lifecycle, CodexLifecycleRequest::Start);
-    assert_eq!(start.request.method, "thread/start");
-    assert_eq!(start.request.params["cwd"], "/tmp/issue-workspace");
-    assert_eq!(start.request.params["baseInstructions"], "workflow prompt");
-    assert_eq!(start.request.params["modelProvider"], "openai");
+        .expect("thread/start request serializes");
+    assert_eq!(thread_start.lifecycle, CodexLifecycleRequest::Start);
+    assert_eq!(thread_start.request.method, "thread/start");
+    assert_eq!(thread_start.request.params["approvalPolicy"], "never");
+    assert_eq!(thread_start.request.params["cwd"], "/tmp/issue-workspace");
+    assert!(
+        thread_start
+            .request
+            .params
+            .get("baseInstructions")
+            .is_none()
+    );
+    assert_eq!(thread_start.request.params["model"], "gpt-5-codex");
+    assert!(
+        thread_start.request.params.get("modelProvider").is_none(),
+        "selected Codex model should not force a provider"
+    );
+    assert_eq!(
+        thread_start.request.params["sandbox"],
+        json!("danger-full-access")
+    );
+
+    let turn_start = adapter
+        .start_issue_turn_request(
+            &mut session,
+            "thread-1",
+            "/tmp/issue-workspace",
+            Some("gpt-5-codex".into()),
+            "workflow prompt",
+        )
+        .expect("turn/start request serializes");
+    assert_eq!(turn_start.lifecycle, CodexLifecycleRequest::Start);
+    assert_eq!(turn_start.request.method, "turn/start");
+    assert_eq!(turn_start.request.params["threadId"], "thread-1");
+    assert_eq!(
+        turn_start.request.params["input"][0]["text"],
+        "workflow prompt"
+    );
+    assert_eq!(turn_start.request.params["approvalPolicy"], "never");
+    assert_eq!(
+        turn_start.request.params["sandboxPolicy"],
+        json!({ "type": "dangerFullAccess" })
+    );
+
+    let start_with_codex_default = adapter
+        .start_issue_thread_request(&mut session, "/tmp/issue-workspace", None, json!({}))
+        .expect("start request without selected model serializes");
+    assert!(
+        start_with_codex_default
+            .request
+            .params
+            .get("model")
+            .is_none(),
+        "omitting selected model should let Codex use its own configured default"
+    );
+    assert!(
+        start_with_codex_default
+            .request
+            .params
+            .get("modelProvider")
+            .is_none(),
+        "omitting selected model should not force Codex's configured provider"
+    );
 
     let resume = adapter
         .resume_issue_request(&mut session, "thread-1", "/tmp/issue-workspace", "continue")
@@ -242,6 +496,11 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
     assert_eq!(resume.lifecycle, CodexLifecycleRequest::Resume);
     assert_eq!(resume.request.method, "turn/start");
     assert_eq!(resume.request.params["threadId"], "thread-1");
+    assert_eq!(resume.request.params["approvalPolicy"], "never");
+    assert_eq!(
+        resume.request.params["sandboxPolicy"],
+        json!({ "type": "dangerFullAccess" })
+    );
 
     let cancel = adapter.cancel_turn_request(&mut session, "turn-1");
     assert_eq!(cancel.lifecycle, CodexLifecycleRequest::Cancel);
@@ -389,6 +648,126 @@ fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
         EventKind::HarnessEventNormalized {
             source_kind: "turn/cancelled".into()
         }
+    );
+}
+
+#[test]
+fn codex_approval_notification_maps_to_approval_center_contract() {
+    let raw = json!({
+        "jsonrpc": "2.0",
+        "method": "item/permissions/requestApproval",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-1",
+            "title": "Run shell command",
+            "description": "Codex wants to inspect the repo",
+            "command": "rg approval crates"
+        }
+    });
+    let event = normalize_server_notification(raw).expect("approval notification normalizes");
+    let requested_at = Utc
+        .timestamp_millis_opt(1_720_000_000_000)
+        .single()
+        .expect("timestamp");
+
+    let approval =
+        codex_approval_request_from_event("run-1", "lin-429", "COE-429", requested_at, &event)
+            .expect("approval request should map");
+
+    assert_eq!(approval.approval_id, "approval-1");
+    assert_eq!(approval.run_id, "run-1");
+    assert_eq!(approval.issue_id, "lin-429");
+    assert_eq!(approval.kind, ApprovalKind::CommandExecution);
+    assert_eq!(approval.status, ApprovalStatus::Pending);
+    assert_eq!(approval.correlation_id, "thread-1:turn-1:approval-1");
+    assert_eq!(
+        approval.actor.as_ref().expect("actor").actor_id,
+        "codex_app_server"
+    );
+    assert_eq!(
+        approval
+            .target_context
+            .as_ref()
+            .expect("target context")
+            .command
+            .as_deref(),
+        Some("rg approval crates")
+    );
+    assert_eq!(
+        approval.risk_summary.as_ref().expect("risk").level,
+        ApprovalRiskLevel::Medium
+    );
+    assert!(approval.proposed_action.is_some());
+}
+
+#[test]
+fn codex_file_write_approval_has_medium_risk() {
+    let raw = json!({
+        "jsonrpc": "2.0",
+        "method": "item/permissions/requestApproval",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "itemId": "approval-2",
+            "title": "Write file",
+            "description": "Codex wants to edit source",
+            "filePath": "src/lib.rs"
+        }
+    });
+    let event = normalize_server_notification(raw).expect("approval notification normalizes");
+    let requested_at = Utc
+        .timestamp_millis_opt(1_720_000_000_000)
+        .single()
+        .expect("timestamp");
+
+    let approval =
+        codex_approval_request_from_event("run-1", "lin-429", "COE-429", requested_at, &event)
+            .expect("approval request should map");
+
+    assert_eq!(approval.kind, ApprovalKind::FileWrite);
+    assert_eq!(
+        approval.risk_summary.as_ref().expect("risk").level,
+        ApprovalRiskLevel::Medium
+    );
+    assert_eq!(
+        approval
+            .target_context
+            .as_ref()
+            .expect("target context")
+            .file_path
+            .as_deref(),
+        Some("src/lib.rs")
+    );
+}
+
+#[test]
+fn codex_approval_decision_request_and_audit_record_stay_correlated() {
+    let adapter = CodexAppServerAdapter::local_stdio("codex-test", "opensymphony-test", "1.10.1");
+    let mut session = adapter.session();
+
+    let response = adapter.approval_response(
+        &mut session,
+        "approval-1",
+        CodexApprovalDecision::Approve,
+        Some("operator accepted command".into()),
+    );
+    let audit = codex_approval_decision_audit_record(
+        "run-1",
+        42,
+        "approval-1",
+        CodexApprovalDecision::Approve,
+        Some("operator accepted command".into()),
+    );
+
+    assert_eq!(response.request.method, "approval/respond");
+    assert_eq!(response.request.params["approvalId"], "approval-1");
+    assert_eq!(response.request.params["decision"], "approve");
+    assert_eq!(audit.kind, EventKind::ApprovalGranted);
+    assert_eq!(audit.actor.actor_id(), "opensymphony_approval_bridge");
+    assert_eq!(
+        audit.raw_payload_ref.as_deref(),
+        Some("codex:run-1:approval-decision:42")
     );
 }
 
@@ -576,7 +955,7 @@ fn codex_websocket_auth_and_benchmark_dimensions_are_explicit() {
     });
     assert_eq!(
         stdio_with_auth.command_args(),
-        vec!["app-server", "--stdio"]
+        vec!["--dangerously-bypass-hook-trust", "app-server", "--stdio"]
     );
 
     let mut launch = CodexAppServerLaunch::loopback_websocket(18765);

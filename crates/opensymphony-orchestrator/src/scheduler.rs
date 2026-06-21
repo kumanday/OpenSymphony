@@ -11,7 +11,8 @@ use crate::opensymphony_domain::{
     SchedulerStatus, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueStateSnapshot,
     TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
-use crate::opensymphony_workflow::ResolvedWorkflow;
+use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
+use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::{
@@ -23,6 +24,7 @@ use tracing::{debug, warn};
 use super::filter_issues_for_dispatch;
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
+const ROUTING_TASK_ISSUE_EXECUTION: &str = "issue_execution";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
@@ -34,6 +36,7 @@ pub struct SchedulerConfig {
     pub stall_timeout_ms: Option<u64>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
+    pub routing: RoutingConfig,
 }
 
 impl SchedulerConfig {
@@ -81,6 +84,7 @@ impl SchedulerConfig {
             stall_timeout_ms: workflow.config.agent.stall_timeout_ms,
             active_states: workflow.config.tracker.active_states.clone(),
             terminal_states: workflow.config.tracker.terminal_states.clone(),
+            routing: workflow.config.routing.clone(),
         })
     }
 
@@ -101,6 +105,33 @@ pub struct WorkerStartRequest {
     pub issue: NormalizedIssue,
     pub workspace: WorkspaceRecord,
     pub run: RunAttempt,
+    pub route: HarnessRouteDecision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessRouteDecision {
+    pub task_type: String,
+    pub harness_kind: String,
+    pub model: Option<String>,
+    pub model_profile: Option<String>,
+    pub reason: String,
+    pub dry_run: bool,
+    pub user_override: bool,
+}
+
+impl HarnessRouteDecision {
+    pub fn summary(&self) -> String {
+        let profile = self
+            .model_profile
+            .as_deref()
+            .unwrap_or("<default model profile>");
+        let model = self.model.as_deref().unwrap_or("<harness default model>");
+        let mode = if self.dry_run { "dry-run " } else { "" };
+        format!(
+            "{mode}selected harness `{}` with model `{model}` and profile `{profile}`: {}",
+            self.harness_kind, self.reason
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -692,6 +723,7 @@ where
                 previous_retry,
                 self.config.max_turns,
             );
+            let route = decide_issue_route(&normalized, &self.config)?;
 
             let mut execution = self
                 .remove_execution(&issue_id)
@@ -708,6 +740,7 @@ where
                 issue: normalized.clone(),
                 workspace,
                 run: claimed_run.clone(),
+                route,
             };
 
             *planned_running_by_state.entry(state_key).or_default() += 1;
@@ -1081,6 +1114,65 @@ impl TrackerSnapshot {
     fn terminal_state_name(&self, issue_id: &str) -> Option<&str> {
         self.terminal_state_by_id.get(issue_id).map(String::as_str)
     }
+}
+
+pub fn decide_issue_route(
+    _issue: &NormalizedIssue,
+    config: &SchedulerConfig,
+) -> Result<HarnessRouteDecision, SchedulerError> {
+    let capability = harness_capability(&config.routing.harness)?;
+    if !capability.available || !capability.actions.start_run {
+        return Err(SchedulerError::InvalidConfiguration {
+            detail: format!(
+                "selected harness `{}` cannot start issue execution",
+                config.routing.harness
+            ),
+        });
+    }
+
+    Ok(HarnessRouteDecision {
+        task_type: ROUTING_TASK_ISSUE_EXECUTION.into(),
+        harness_kind: config.routing.harness.clone(),
+        model: config.routing.model.clone(),
+        model_profile: config.routing.model_profile.clone(),
+        reason: routing_reason(&config.routing),
+        dry_run: config.routing.dry_run,
+        user_override: config.routing.harness_from_env
+            || config.routing.model_from_env
+            || config.routing.model_profile_from_env,
+    })
+}
+
+fn routing_reason(routing: &RoutingConfig) -> String {
+    let mut parts = Vec::new();
+    parts.push(if routing.harness_from_env {
+        format!("harness selected by {}", routing.harness_env)
+    } else {
+        "harness selected by workflow routing.harness".into()
+    });
+    if routing.model.is_some() {
+        parts.push(if routing.model_from_env {
+            format!("model selected by {}", routing.model_env)
+        } else {
+            "model selected by workflow routing.model".into()
+        });
+    }
+    if routing.model_profile.is_some() {
+        parts.push(if routing.model_profile_from_env {
+            format!("model profile selected by {}", routing.model_profile_env)
+        } else {
+            "model profile selected by workflow routing.model_profile".into()
+        });
+    }
+    parts.join("; ")
+}
+
+fn harness_capability(kind: &str) -> Result<HarnessCapability, SchedulerError> {
+    HarnessKind::parse(kind)
+        .map(HarnessKind::capability)
+        .ok_or_else(|| SchedulerError::InvalidConfiguration {
+            detail: format!("unknown routing harness `{kind}`"),
+        })
 }
 
 fn normalize_tracker_issue(

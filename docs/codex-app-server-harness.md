@@ -8,9 +8,10 @@ scope.
 ## Local Harness Scope
 
 - Runtime kind: `codex_app_server`.
-- Supported local transport: `codex app-server --stdio`.
+- Supported local transport:
+  `codex --dangerously-bypass-hook-trust app-server --stdio`.
 - Experimental loopback WebSocket transport:
-  `codex app-server --listen ws://127.0.0.1:<port>`.
+  `codex --dangerously-bypass-hook-trust app-server --listen ws://127.0.0.1:<port>`.
 - Contract source: generated Codex app-server JSON Schema and TypeScript
   bindings from the installed Codex CLI.
 
@@ -33,6 +34,41 @@ default.
 
 The companion benchmark script issues `thread/loaded/list` requests directly so
 throughput can be measured without starting model-backed turns.
+
+## Full-Automation Profile
+
+OpenSymphony targets a trusted local automation profile for Codex app-server.
+The server process is launched with hook trust bypass as a Codex CLI argument;
+this is not prompt text and not a `turn/start` JSON field:
+
+```bash
+codex --dangerously-bypass-hook-trust app-server --stdio
+```
+
+The run then creates the Codex thread with the selected working directory,
+selected model when present, `approvalPolicy: "never"`, and the installed
+schema's thread sandbox value `sandbox: "danger-full-access"`. OpenSymphony
+starts the actual task through `turn/start` with the rendered workflow prompt as
+input plus the maximum-permission turn profile:
+
+```json
+{
+  "approvalPolicy": "never",
+  "sandboxPolicy": {
+    "type": "dangerFullAccess"
+  }
+}
+```
+
+`approvalPolicy: "never"` means OpenSymphony does not wait for human approval
+callbacks from Codex. Execution failures are streamed back through Codex and
+handled by the model loop. `dangerFullAccess` intentionally carries no
+`networkAccess` field; effective network access comes from the host/container
+environment because Codex is not applying its normal sandbox boundary.
+
+This profile is only appropriate when OpenSymphony itself is running Codex
+inside an externally isolated environment such as a disposable workspace,
+container, VM, or equivalent trusted local runner.
 
 ## Local Testing
 
@@ -170,7 +206,7 @@ Options include --listen <URL>, --stdio, --ws-auth <MODE>,
 A local stdio probe successfully started a JSON-RPC session:
 
 ```text
-$ codex app-server --stdio
+$ codex --dangerously-bypass-hook-trust app-server --stdio
 request: {"jsonrpc":"2.0","id":1,"method":"initialize",...}
 response: {"id":1,"result":{"userAgent":"opensymphony-probe/0.138.0 ...",
 "codexHome":"/home/user/.codex","platformFamily":"unix","platformOs":"macos"}}
@@ -180,12 +216,18 @@ Codex CLI `0.138.0` omits the `jsonrpc` field in successful responses. The
 benchmark rejects unsupported `jsonrpc` values when the field is present and
 otherwise validates the observed `id` plus `result` response shape.
 
-Schema generation is supported:
+Schema generation is required during runtime compatibility checks:
 
 ```text
 codex app-server generate-json-schema --out <dir>
 codex app-server generate-ts --out <dir>
 ```
+
+OpenSymphony does not pin or vendor a Codex binary. It asks the installed Codex
+CLI to generate its current app-server JSON Schema, validates outbound
+`initialize`, `thread/start`, and `turn/start` requests against that schema, and
+fails with update guidance if the installed Codex is too old or incompatible
+with the required automation fields.
 
 The generated protocol includes `initialize`, `thread/start`, `turn/start`,
 `thread/started`, `turn/started`, `turn/completed`,
@@ -329,8 +371,8 @@ codex app-server (WebSockets)
 
 The production recommendation is to keep WebSocket feature-gated until CI or a
 repeatable developer benchmark records stable throughput, queue, reconnect,
-runtime localhost exposure, and runtime authenticated-listener behavior for the
-pinned Codex version.
+runtime localhost exposure, authenticated-listener behavior, and schema
+compatibility for the supported Codex version range.
 
 ## Model And Credential Reuse
 
@@ -341,8 +383,12 @@ subscription credentials. The current mapping is:
   reference for desktop/local Codex app-server use.
 - `hosted-openai-subscription-broker`: hosted broker reference for future
   hosted Codex app-server or OpenHands subscription use.
-- literal model references are converted into Codex config overrides where the
-  app-server supports them.
+- selected model strings from `routing.model` or `OPENSYMPHONY_MODEL` are
+  passed to Codex `thread/start` and `turn/start` where the installed app-server
+  supports per-session/per-turn model overrides.
+- when no model is selected for the Codex harness, OpenSymphony omits the model
+  field and lets the Codex CLI/app-server use its own configured default, such
+  as `~/.codex/config.toml`.
 
 Gaps:
 
@@ -358,14 +404,39 @@ an installed compatible Codex CLI and an active ChatGPT login. The gateway
 surfaces unsupported CLI output, missing app-server support, logged-out,
 expired, permission-denied, and unknown states as actionable non-ready statuses.
 Capability discovery reports the local adapter contract and stdio runtime
-surface, but `opensymphony run` still dispatches through OpenHands until the
-cross-harness runtime-routing work lands in COE-429.
+surface. `opensymphony run` now attaches an alpha route decision to each worker
+launch. Workflow `routing.harness: codex_app_server` or
+`OPENSYMPHONY_HARNESS=codex_app_server` can select the local Codex app-server
+stdio worker when the harness is available. `routing.model` or
+`OPENSYMPHONY_MODEL` can pass an explicit model; otherwise Codex uses its own
+configured default. Set `opensymphony run --dry-run` to emit a route preview
+without launching a model-backed Codex session.
+
+The local stdio worker launches the Codex binary from `OPENSYMPHONY_CODEX_BIN`,
+or `codex` when unset, inside the issue workspace path. This remains a
+trusted-environment alpha control: do not expose that environment variable to
+untrusted users or hosted tenants. Before launching the worker, OpenSymphony
+generates the app-server schema from that installed binary and validates the
+outbound lifecycle requests. The worker drains stderr to structured logs to
+avoid stdio pipe backpressure, but raw stderr is not copied into persisted
+worker errors or run manifests. JSON-RPC initialize/start waits currently use
+fixed alpha bounds of 30 seconds per response and 300 seconds for terminal
+notification wait.
+
+Codex approval notifications are normalized into the shared approval-center
+contract, and the Codex adapter exposes the `approval/respond` request shape
+plus matching audit records that the future action path will use. The live
+operator-to-Codex response command path is not yet wired into the
+`opensymphony run` local stdio worker, so local Codex capability discovery does
+not advertise approve/reject actions yet. Approval-response forwarding through
+the gateway/operator action loop remains follow-up work before approval-bearing
+Codex runs are considered production-ready.
 
 Remaining follow-up work:
 
-- COE-429 scheduler/runtime dispatch selection for `opensymphony run` so a
-  workflow can route issue execution to the Codex worker backend,
 - a checked-in generated schema artifact policy for future Codex protocol bumps,
+- gateway/operator action wiring that forwards approval decisions to the live
+  Codex stdio session,
 - replay/history semantics beyond the local stdio request lifecycle (capability
   metadata currently marks history fetch, reconnect replay, and stdio
   reconciliation unavailable),

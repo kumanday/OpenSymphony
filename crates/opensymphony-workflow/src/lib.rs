@@ -21,9 +21,9 @@ pub use model::{
     OpenHandsSubscriptionCredentialConfig, OpenHandsSubscriptionCredentialFrontMatter,
     OpenHandsTransportConfig, OpenHandsTransportFrontMatter, OpenHandsWebSocketConfig,
     OpenHandsWebSocketFrontMatter, PollingConfig, PollingFrontMatter, ProcessEnvironment,
-    PromptContext, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter, TrackerKind,
-    WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkflowFrontMatter, WorkspaceConfig,
-    WorkspaceFrontMatter,
+    PromptContext, ResolvedWorkflow, RoutingConfig, RoutingFrontMatter, TrackerConfig,
+    TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions,
+    WorkflowFrontMatter, WorkspaceConfig, WorkspaceFrontMatter,
 };
 
 pub const CRATE_NAME: &str = "opensymphony-workflow";
@@ -2421,6 +2421,88 @@ agent:
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn resolves_selected_harness_model_and_environment_overrides() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: openhands_agent_server
+  model: workflow-model
+  model_profile: workflow-profile
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([
+            ("LINEAR_API_KEY", "linear-token"),
+            ("OPENSYMPHONY_HARNESS", "codex_app_server"),
+            ("OPENSYMPHONY_MODEL", "env-model"),
+            ("OPENSYMPHONY_MODEL_PROFILE", "env-profile"),
+        ]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("routing selection should resolve");
+
+        assert_eq!(resolved.config.routing.harness, "codex_app_server");
+        assert_eq!(resolved.config.routing.model.as_deref(), Some("env-model"));
+        assert_eq!(
+            resolved.config.routing.model_profile.as_deref(),
+            Some("env-profile")
+        );
+        assert!(resolved.config.routing.harness_from_env);
+        assert!(resolved.config.routing.model_from_env);
+        assert!(resolved.config.routing.model_profile_from_env);
+    }
+
+    #[test]
+    fn selected_openhands_model_overrides_conversation_model() {
+        let workflow = WorkflowDefinition::parse(
+            r#"---
+tracker:
+  kind: linear
+  project_slug: sample-project
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+routing:
+  harness: openhands_agent_server
+  model: selected-openhands-model
+openhands:
+  conversation:
+    agent:
+      llm:
+        model: workflow-openhands-model
+---
+{{ issue.identifier }}
+"#,
+        )
+        .expect("workflow should parse");
+        let env = env([("LINEAR_API_KEY", "linear-token")]);
+
+        let resolved = workflow
+            .resolve(Path::new("/repo"), &env)
+            .expect("selected OpenHands model should resolve");
+
+        let llm = resolved
+            .extensions
+            .openhands
+            .conversation
+            .agent
+            .llm
+            .expect("llm config should exist");
+        assert_eq!(llm.model.as_deref(), Some("selected-openhands-model"));
     }
 
     fn env<const N: usize>(pairs: [(&str, &str); N]) -> BTreeMap<String, String> {

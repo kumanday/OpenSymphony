@@ -5,8 +5,13 @@
 //! benchmark tooling still compares IDs by string so it can report future Codex
 //! response-shape changes cleanly.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -17,15 +22,121 @@ use crate::opensymphony_gateway_schema::model_settings::{
 use crate::{
     opensymphony_domain::HarnessAdapter,
     opensymphony_gateway_schema::{
+        approval::{
+            ApprovalActor, ApprovalKind, ApprovalRequest, ApprovalRiskLevel, ApprovalRiskSummary,
+            ApprovalStatus, ApprovalTargetContext,
+        },
         capability::HarnessCapability,
         envelope::EntityRef,
         event_journal::{EventActor, EventKind, EventRecord},
+        version::SchemaVersion,
     },
 };
 
 pub const CODEX_APP_SERVER_KIND: &str = "codex_app_server";
 pub const CODEX_APP_SERVER_CONTRACT: &str = "codex-app-server-json-rpc-v2";
-pub const CODEX_DEFAULT_MODEL_PROVIDER: &str = "openai";
+
+#[derive(Debug, thiserror::Error)]
+pub enum CodexSchemaValidationError {
+    #[error("failed to read installed Codex app-server schema at {path}: {source}")]
+    SchemaRead {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse installed Codex app-server schema JSON: {0}")]
+    SchemaParse(#[from] serde_json::Error),
+    #[error("installed Codex app-server schema has unexpected shape: {0}")]
+    SchemaShape(String),
+    #[error("failed to compile installed Codex app-server schema: {0}")]
+    SchemaCompile(String),
+    #[error("failed to serialize Codex JSON-RPC request for schema validation: {0}")]
+    Serialize(String),
+    #[error(
+        "installed Codex app-server schema rejected `{method}` request: {errors}. Update Codex, or update OpenSymphony's Codex adapter if the installed schema is newer and incompatible."
+    )]
+    Invalid { method: String, errors: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexAppServerSchemaValidator {
+    validator: jsonschema::Validator,
+}
+
+impl CodexAppServerSchemaValidator {
+    pub fn from_schema_file(path: impl AsRef<Path>) -> Result<Self, CodexSchemaValidationError> {
+        let path = path.as_ref();
+        let schema =
+            fs::read_to_string(path).map_err(|source| CodexSchemaValidationError::SchemaRead {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        Self::from_schema_str(&schema)
+    }
+
+    pub fn from_schema_str(schema: &str) -> Result<Self, CodexSchemaValidationError> {
+        Self::from_schema_json(serde_json::from_str(schema)?)
+    }
+
+    pub fn from_schema_json(schema: Value) -> Result<Self, CodexSchemaValidationError> {
+        let (definitions_key, definitions) = schema
+            .get("definitions")
+            .map(|definitions| ("definitions", definitions))
+            .or_else(|| {
+                schema
+                    .get("$defs")
+                    .map(|definitions| ("$defs", definitions))
+            })
+            .ok_or_else(|| {
+                CodexSchemaValidationError::SchemaShape(
+                    "missing top-level definitions or $defs object".into(),
+                )
+            })?;
+        if definitions.get("ClientRequest").is_none() {
+            return Err(CodexSchemaValidationError::SchemaShape(
+                "missing definitions/$defs ClientRequest schema".into(),
+            ));
+        }
+        let mut client_request_schema = serde_json::Map::new();
+        if let Some(schema_uri) = schema.get("$schema") {
+            client_request_schema.insert("$schema".into(), schema_uri.clone());
+        }
+        if let Some(schema_id) = schema.get("$id") {
+            client_request_schema.insert("$id".into(), schema_id.clone());
+        }
+        client_request_schema.insert(
+            "$ref".into(),
+            Value::String(format!("#/{definitions_key}/ClientRequest")),
+        );
+        client_request_schema.insert(definitions_key.into(), definitions.clone());
+        let client_request_schema = Value::Object(client_request_schema);
+        let validator = jsonschema::validator_for(&client_request_schema)
+            .map_err(|error| CodexSchemaValidationError::SchemaCompile(error.to_string()))?;
+        Ok(Self { validator })
+    }
+
+    pub fn validate_request(
+        &self,
+        request: &JsonRpcRequestEnvelope,
+    ) -> Result<(), CodexSchemaValidationError> {
+        let value = serde_json::to_value(request)
+            .map_err(|error| CodexSchemaValidationError::Serialize(error.to_string()))?;
+        let errors = self
+            .validator
+            .iter_errors(&value)
+            .take(5)
+            .map(|error| format!("{error} at {}", error.instance_path()))
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(CodexSchemaValidationError::Invalid {
+                method: request.method.clone(),
+                errors: errors.join("; "),
+            })
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodexContractArtifact {
@@ -120,26 +231,50 @@ impl CodexAppServerAdapter {
         CodexJsonRpcSession::new(self.client_name.clone(), self.client_version.clone())
     }
 
-    pub fn start_issue_request(
+    pub fn start_issue_thread_request(
         &self,
         session: &mut CodexJsonRpcSession,
         cwd: impl Into<String>,
-        model: impl Into<String>,
-        workflow_prompt: impl Into<String>,
+        model: Option<String>,
         config: Value,
     ) -> Result<CodexHarnessRequest, serde_json::Error> {
         Ok(CodexHarnessRequest {
             lifecycle: CodexLifecycleRequest::Start,
             request: session.thread_start(CodexThreadStartParams {
+                approval_policy: Some(CodexApprovalPolicy::Never),
                 cwd: Some(cwd.into()),
-                model: Some(model.into()),
-                // Codex CLI app-server currently exposes OpenAI/ChatGPT-backed
-                // model ids through this local harness path.
-                model_provider: Some(CODEX_DEFAULT_MODEL_PROVIDER.into()),
-                base_instructions: Some(workflow_prompt.into()),
+                model,
+                model_provider: None,
+                base_instructions: None,
                 developer_instructions: None,
                 ephemeral: Some(false),
+                sandbox: Some(CodexThreadSandboxMode::DangerFullAccess),
                 config: Some(config),
+            })?,
+        })
+    }
+
+    pub fn start_issue_turn_request(
+        &self,
+        session: &mut CodexJsonRpcSession,
+        thread_id: impl Into<String>,
+        cwd: impl Into<String>,
+        model: Option<String>,
+        workflow_prompt: impl Into<String>,
+    ) -> Result<CodexHarnessRequest, serde_json::Error> {
+        Ok(CodexHarnessRequest {
+            lifecycle: CodexLifecycleRequest::Start,
+            request: session.turn_start(CodexTurnStartParams {
+                thread_id: thread_id.into(),
+                input: vec![CodexUserInput::Text {
+                    text: workflow_prompt.into(),
+                    text_elements: Vec::new(),
+                }],
+                approval_policy: Some(CodexApprovalPolicy::Never),
+                cwd: Some(cwd.into()),
+                model,
+                sandbox_policy: Some(CodexSandboxPolicy::danger_full_access()),
+                client_user_message_id: None,
             })?,
         })
     }
@@ -159,8 +294,10 @@ impl CodexAppServerAdapter {
                     text: continuation.into(),
                     text_elements: Vec::new(),
                 }],
+                approval_policy: Some(CodexApprovalPolicy::Never),
                 cwd: Some(cwd.into()),
                 model: None,
+                sandbox_policy: Some(CodexSandboxPolicy::danger_full_access()),
                 client_user_message_id: None,
             })?,
         })
@@ -325,7 +462,10 @@ impl CodexAppServerLaunch {
     /// prototype runs to local trusted environments and avoid real shared-host
     /// secrets.
     pub fn command_args(&self) -> Vec<String> {
-        let mut args = vec!["app-server".into()];
+        let mut args = vec![
+            "--dangerously-bypass-hook-trust".into(),
+            "app-server".into(),
+        ];
         args.extend(self.extra_args.clone());
         match &self.transport {
             CodexAppServerTransport::Stdio => args.push("--stdio".into()),
@@ -493,6 +633,8 @@ impl CodexJsonRpcSession {
 #[serde(rename_all = "camelCase")]
 pub struct CodexThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<CodexApprovalPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -505,7 +647,41 @@ pub struct CodexThreadStartParams {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ephemeral: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<CodexThreadSandboxMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub config: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodexApprovalPolicy {
+    #[serde(rename = "never")]
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodexThreadSandboxMode {
+    #[serde(rename = "danger-full-access")]
+    DangerFullAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexSandboxPolicy {
+    #[serde(rename = "type")]
+    pub policy_type: CodexSandboxPolicyType,
+}
+
+impl CodexSandboxPolicy {
+    pub fn danger_full_access() -> Self {
+        Self {
+            policy_type: CodexSandboxPolicyType::DangerFullAccess,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodexSandboxPolicyType {
+    #[serde(rename = "dangerFullAccess")]
+    DangerFullAccess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,9 +690,13 @@ pub struct CodexTurnStartParams {
     pub thread_id: String,
     pub input: Vec<CodexUserInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<CodexApprovalPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sandbox_policy: Option<CodexSandboxPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_user_message_id: Option<String>,
 }
@@ -623,6 +803,148 @@ pub fn normalized_event_to_journal_record(
         .payload(payload)
         .raw_payload_ref(format!("codex:{run_id}:{sequence}"))
         .build()
+}
+
+pub fn codex_approval_request_from_event(
+    run_id: impl Into<String>,
+    issue_id: impl Into<String>,
+    issue_identifier: impl Into<String>,
+    requested_at: DateTime<Utc>,
+    event: &NormalizedCodexEvent,
+) -> Option<ApprovalRequest> {
+    if event.kind != NormalizedCodexEventKind::ApprovalRequested {
+        return None;
+    }
+    let run_id = run_id.into();
+    let issue_id = issue_id.into();
+    let issue_identifier = issue_identifier.into();
+    let params = event.raw.get("params").unwrap_or(&Value::Null);
+    let approval_id =
+        first_string_param(params, &["approvalId", "approval_id", "itemId", "item_id"])
+            .or_else(|| event.item_id.clone())?;
+    let command = first_string_param(params, &["command", "shellCommand", "toolCommand"]);
+    let file_path = first_string_param(params, &["filePath", "path"]);
+    let title = first_string_param(params, &["title", "label"])
+        .or_else(|| {
+            command
+                .as_ref()
+                .map(|command| format!("Approve command `{command}`"))
+        })
+        .unwrap_or_else(|| "Codex approval request".into());
+    let description = first_string_param(params, &["description", "message", "reason"])
+        .unwrap_or_else(|| "Codex requested operator approval before continuing.".into());
+    let kind = if command.is_some() {
+        ApprovalKind::CommandExecution
+    } else if file_path.is_some() {
+        ApprovalKind::FileWrite
+    } else {
+        ApprovalKind::ToolUse
+    };
+    let correlation_id = [
+        event.thread_id.as_deref(),
+        event.turn_id.as_deref(),
+        Some(approval_id.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(":");
+
+    Some(ApprovalRequest {
+        schema_version: SchemaVersion::v1(),
+        approval_id,
+        run_id: run_id.clone(),
+        issue_id: issue_id.clone(),
+        kind,
+        title,
+        description,
+        proposed_action: params.as_object().map(|_| params.clone()),
+        actor: Some(ApprovalActor {
+            actor_id: CODEX_APP_SERVER_KIND.into(),
+            actor_kind: "harness".into(),
+            display_name: Some("Codex app-server".into()),
+        }),
+        target_context: Some(ApprovalTargetContext {
+            file_path,
+            command,
+            issue_id: Some(issue_id),
+            issue_identifier: Some(issue_identifier),
+            run_id: Some(run_id),
+        }),
+        risk_summary: Some(codex_approval_risk_summary(params)),
+        requested_at,
+        expires_at: None,
+        status: ApprovalStatus::Pending,
+        correlation_id,
+        decided_at: None,
+    })
+}
+
+pub fn codex_approval_decision_audit_record(
+    run_id: impl Into<String>,
+    sequence: u64,
+    approval_id: impl Into<String>,
+    decision: CodexApprovalDecision,
+    message: Option<String>,
+) -> EventRecord {
+    let run_id = run_id.into();
+    let approval_id = approval_id.into();
+    let (kind, summary) = match decision {
+        CodexApprovalDecision::Approve => (
+            EventKind::ApprovalGranted,
+            format!("Codex approval {approval_id} decision recorded for gateway forwarding"),
+        ),
+        CodexApprovalDecision::Reject => (
+            EventKind::ApprovalDenied,
+            format!("Codex approval {approval_id} rejection recorded for gateway forwarding"),
+        ),
+    };
+    EventRecord::builder()
+        .sequence(sequence)
+        .actor(EventActor::system("opensymphony_approval_bridge"))
+        .entity_ref(EntityRef::run(run_id.clone()))
+        .summary(summary)
+        .kind(kind)
+        .payload(json!({
+            "approval_id": approval_id,
+            "decision": decision.as_protocol_value(),
+            "message": message,
+            "harness_kind": CODEX_APP_SERVER_KIND,
+        }))
+        .raw_payload_ref(format!("codex:{run_id}:approval-decision:{sequence}"))
+        .build()
+}
+
+fn first_string_param(params: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| string_param(params, key))
+}
+
+fn codex_approval_risk_summary(params: &Value) -> ApprovalRiskSummary {
+    let mut reasons = Vec::new();
+    let command = first_string_param(params, &["command", "shellCommand", "toolCommand"]);
+    let normalized_command = command.as_ref().map(|command| command.to_ascii_lowercase());
+    let file_path = first_string_param(params, &["filePath", "path"]);
+    let level = match (normalized_command.as_deref(), file_path.as_deref()) {
+        (Some(command), _)
+            if command.contains("sudo")
+                || command.contains("rm -rf")
+                || command.contains("chmod")
+                || command.contains("chown") =>
+        {
+            reasons.push("Command can mutate privileged or destructive host state.".into());
+            ApprovalRiskLevel::High
+        }
+        (Some(_), _) => {
+            reasons.push("Command execution requires explicit operator approval.".into());
+            ApprovalRiskLevel::Medium
+        }
+        (None, Some(_)) => {
+            reasons.push("File write can mutate workspace or host state.".into());
+            ApprovalRiskLevel::Medium
+        }
+        (None, None) => ApprovalRiskLevel::Unknown,
+    };
+    ApprovalRiskSummary { level, reasons }
 }
 
 fn codex_event_journal_kind_and_summary(event: &NormalizedCodexEvent) -> (EventKind, String) {

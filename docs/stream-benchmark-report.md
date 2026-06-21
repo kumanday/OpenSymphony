@@ -56,7 +56,8 @@ For Codex app-server specifically, stdio remains the preferred local prototype
 transport. Loopback WebSocket is experimental and must keep secure exposure
 controls enabled before any non-local use: localhost-only by default,
 capability-token or signed-bearer authentication for exposed listeners, and
-repeatable reconnect/queue throughput evidence for the pinned Codex version.
+repeatable reconnect/queue throughput evidence for the supported Codex version
+range.
 
 ### Stream split
 

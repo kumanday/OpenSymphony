@@ -1461,18 +1461,19 @@ Output:
 - Codex approval bridge.
 - Approval contract tests.
 
-#### P9.8 Implement cross-harness routing policy alpha
+#### P9.8 Implement cross-harness selection alpha
 
-- Define routing rules by task type, model profile, harness capability, cost, speed, and user policy.
-- Add explicit user override.
+- Let operators select the harness, model, and model profile explicitly.
+- Add environment overrides so a launcher or UI can pass the active model profile
+  into `opensymphony run`.
 - Add route decision audit events.
-- Add dry-run route preview.
+- Add `opensymphony run --dry-run` route preview.
 
 Depends on: P9.1, P9.4, P9.5 if Codex routing is enabled.
 
 Output:
 
-- Routing policy engine alpha.
+- Harness/model selection alpha.
 - Route decision tests.
 
 ### Exit criteria
@@ -1727,8 +1728,8 @@ Success criteria:
 - Subscription credentials work as a feature-gated credential path for OpenHands agent-server, starting with OpenAI ChatGPT/Codex.
 - Codex app-server prototype is feature-gated.
 - Model and credential settings preserve API-compatible `LLM_BASE_URL`, `LLM_MODEL`, and `LLM_API_KEY` configuration.
-- Model configuration metadata supports routing by configured base URL, model string, and harness capability.
-- Cross-harness routing policy is defined.
+- Model configuration metadata supports explicit selection by configured base URL, model string, and harness.
+- Cross-harness selection is defined.
 
 ## 16. Recommended first implementation cut
 

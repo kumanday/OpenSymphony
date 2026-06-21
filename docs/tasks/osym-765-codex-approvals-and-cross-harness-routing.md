@@ -11,21 +11,22 @@ parent: null
 
 ## Summary
 
-Map Codex approval events into the OpenSymphony approval center and add an alpha routing policy model across harnesses and model profiles.
+Map Codex approval events into the OpenSymphony approval center and let
+`opensymphony run` execute issues with the selected harness and model.
 
 ## Scope
 
 ### In scope
 
 - Map Codex approval requests to OpenSymphony approval requests.
-- Send approval decisions back to Codex.
-- Audit approval decisions.
-- Define routing rules by task type, model profile, harness capability, cost, speed, and user policy.
-- Wire scheduler/runtime dispatch selection for `opensymphony run` so workflow
-  policy can route issue execution to the Codex worker backend.
-- Add explicit user override.
+- Build Codex approval decision requests for `approval/respond`.
+- Audit approval decisions with correlation back to the request/run.
+- Support explicit harness and model selection through workflow config and
+  operator/launcher environment overrides.
+- Wire scheduler/runtime dispatch selection for `opensymphony run` so selected
+  Codex harness execution uses the Codex worker backend.
 - Add route decision audit events.
-- Add dry-run route preview.
+- Add `opensymphony run --dry-run` route preview.
 
 ### Out of scope
 
@@ -37,24 +38,37 @@ Map Codex approval events into the OpenSymphony approval center and add an alpha
 
 - Codex approval bridge.
 - Approval contract tests.
-- Routing policy engine alpha.
+- Harness/model selection alpha.
 - Route decision tests.
 - Dry-run route preview.
 
 ## Acceptance Criteria
 
 - [ ] Codex approval requests appear in the same approval center contract as OpenHands-supported approvals.
-- [ ] Approval decisions are delivered back to Codex and audited.
+- [ ] Codex approval decision requests serialize to `approval/respond`, and the
+      audit record stays correlated with the approval ID and run.
 - [ ] `opensymphony run` can select the Codex app-server harness for issue
-      execution when workflow policy and capability checks choose it.
-- [ ] Routing dry-runs explain selected harness, model profile, and policy reason.
+      execution when the operator/workflow selects it.
+- [ ] Selected models are passed to the selected harness where supported:
+      OpenHands receives the selected model as its conversation LLM model, and
+      Codex receives an explicit `thread/start` and `turn/start` model only when
+      one is selected.
+- [ ] Codex app-server execution uses the full-automation profile: hook trust
+      bypass at server launch plus `approvalPolicy: "never"` and
+      `dangerFullAccess` turn sandbox policy validated against the installed
+      Codex schema.
+- [ ] Dry-runs explain the selected harness, model, and model profile.
 
 ## Test Plan
 
 - Run Codex approval bridge tests with fake JSON-RPC notifications.
 - Run scheduler/runtime route selection tests that prove `opensymphony run`
   dispatches through the selected harness backend.
-- Run route decision tests for task type, capability, user override, and missing-capability cases.
+- Run route decision tests for selected harness/model, environment overrides,
+  and unavailable-harness cases.
+- Run Codex lifecycle tests that prove OpenSymphony generates the installed
+  app-server schema, validates outbound automation payloads, creates a thread,
+  and starts a turn without human approval waits.
 
 ## Context
 

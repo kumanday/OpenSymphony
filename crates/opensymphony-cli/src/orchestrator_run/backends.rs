@@ -1,16 +1,22 @@
 //! Runtime backend adapters for tracker, workspace, and worker orchestration.
 
 use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    sync::Arc,
-    time::Duration,
+    collections::{HashMap, HashSet, VecDeque},
+    env,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::{Duration, UNIX_EPOCH},
 };
 
+use crate::opensymphony_codex::{
+    CodexAppServerAdapter, CodexAppServerSchemaValidator, CodexContractGeneration,
+    CodexJsonRpcSession, JsonRpcRequestEnvelope, NormalizedCodexEvent, NormalizedCodexEventKind,
+    codex_approval_request_from_event, normalize_server_notification,
+};
 use crate::opensymphony_domain::{
-    ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-    NormalizedIssue, TimestampMs, TrackerIssue, WorkerOutcomeKind, WorkerOutcomeRecord,
-    WorkspaceKey,
+    ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
+    NormalizedIssue, RuntimeStreamState, TimestampMs, TrackerIssue, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -27,16 +33,18 @@ use crate::opensymphony_orchestrator::{
 };
 use crate::opensymphony_workflow::{ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
-    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunStatus,
-    WorkspaceError, WorkspaceManager, WorkspaceManagerConfig,
+    CleanupConfig, HookConfig, HookDefinition, IssueDescriptor, RunDescriptor, RunManifest,
+    RunStatus, WorkspaceError, WorkspaceHandle, WorkspaceManager, WorkspaceManagerConfig,
 };
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::{
     fs,
-    sync::{mpsc, oneshot},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{ChildStderr, ChildStdin, Command},
+    sync::{Mutex as AsyncMutex, mpsc, oneshot},
     task::JoinHandle,
-    time::timeout,
+    time::{timeout, timeout_at},
 };
 use url::Url;
 
@@ -46,6 +54,12 @@ use super::{
 };
 
 const DEFAULT_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
+const CODEX_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_WORKER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(75);
+const CODEX_SCHEMA_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
+const CODEX_STDERR_TAIL_LINES: usize = 20;
+const CODEX_SCHEMA_STDERR_PREVIEW_CHARS: usize = 500;
 
 #[derive(Debug, Error)]
 pub(super) enum CliWorkspaceError {
@@ -124,11 +138,15 @@ pub(super) struct RuntimeWorkerBackend {
     workspace_manager: Arc<WorkspaceManager>,
     runner_config: IssueSessionRunnerConfig,
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
+    codex_bin: String,
+    codex_schema_validators: CodexSchemaValidatorCache,
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
     tasks: HashMap<String, ActiveWorkerTask>,
 }
+
+type CodexSchemaValidatorCache = Arc<AsyncMutex<HashMap<String, CodexAppServerSchemaValidator>>>;
 
 struct ActiveWorkerTask {
     handle: JoinHandle<()>,
@@ -137,6 +155,7 @@ struct ActiveWorkerTask {
 
 struct PendingLaunch {
     worker_id: String,
+    route: crate::opensymphony_orchestrator::HarnessRouteDecision,
     launch_rx: oneshot::Receiver<LaunchReport>,
 }
 
@@ -648,6 +667,8 @@ impl RuntimeWorkerBackend {
             runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
                 .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
             workpad_comment_source,
+            codex_bin: env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
+            codex_schema_validators: Arc::new(AsyncMutex::new(HashMap::new())),
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
@@ -689,6 +710,10 @@ impl RuntimeWorkerBackend {
         let finished_worker_id = worker_id.clone();
         let (launch_tx, launch_rx) = oneshot::channel();
         let run = request.run.clone();
+        let route = request.route.clone();
+        let pending_route = route.clone();
+        let codex_bin = self.codex_bin.clone();
+        let codex_schema_validators = Arc::clone(&self.codex_schema_validators);
         let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
@@ -718,6 +743,63 @@ impl RuntimeWorkerBackend {
                     return;
                 }
             };
+
+            if route.dry_run {
+                if let Some(sender) = launch_tx.take() {
+                    let _ = sender.send(LaunchReport::Conversation(Box::new(
+                        dry_run_conversation_metadata(&run, &route),
+                    )));
+                }
+                let finish_error = finish_route_dry_run_workspace_run(
+                    &workspace_manager,
+                    &ensured.handle,
+                    &mut run_manifest,
+                    &route,
+                )
+                .await
+                .err();
+                let outcome = WorkerOutcomeRecord::from_run(
+                    &run,
+                    if finish_error.is_some() {
+                        WorkerOutcomeKind::Failed
+                    } else {
+                        WorkerOutcomeKind::Succeeded
+                    },
+                    now_timestamp(),
+                    Some(match &finish_error {
+                        Some(_) => "routing dry-run workspace finalization failed".into(),
+                        None => route.summary(),
+                    }),
+                    finish_error.map(|error| error.to_string()),
+                );
+                let _ = updates_tx.send(WorkerUpdate::Finished {
+                    worker_id: finished_worker_id.clone(),
+                    outcome,
+                });
+                return;
+            }
+
+            if route.harness_kind == "codex_app_server" {
+                let outcome = run_codex_stdio_issue(
+                    &route,
+                    &workspace_manager,
+                    &ensured.handle,
+                    &mut run_manifest,
+                    &issue,
+                    &run,
+                    &workflow,
+                    &codex_bin,
+                    &codex_schema_validators,
+                    &updates_tx,
+                    &mut launch_tx,
+                )
+                .await;
+                let _ = updates_tx.send(WorkerUpdate::Finished {
+                    worker_id: finished_worker_id.clone(),
+                    outcome,
+                });
+                return;
+            }
 
             let mut observer = SchedulerObserver {
                 worker_id: observer_worker_id.to_string(),
@@ -770,6 +852,7 @@ impl RuntimeWorkerBackend {
 
         PendingLaunch {
             worker_id: worker_id.to_string(),
+            route: pending_route,
             launch_rx,
         }
     }
@@ -777,15 +860,18 @@ impl RuntimeWorkerBackend {
     async fn resolve_launch_result(
         &mut self,
         worker_id: &str,
+        route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+        launch_timeout: Duration,
         result: Result<
             Result<LaunchReport, oneshot::error::RecvError>,
             tokio::time::error::Elapsed,
         >,
     ) -> Result<WorkerLaunch, CliWorkerError> {
         match result {
-            Ok(Ok(LaunchReport::Conversation(conversation))) => Ok(WorkerLaunch {
-                conversation: *conversation,
-            }),
+            Ok(Ok(LaunchReport::Conversation(conversation))) => {
+                let conversation = annotate_route_decision(*conversation, worker_id, route);
+                Ok(WorkerLaunch { conversation })
+            }
             Ok(Ok(LaunchReport::Failed(detail))) => {
                 if let Some(task) = self.tasks.remove(worker_id) {
                     task.handle.await?;
@@ -800,10 +886,92 @@ impl RuntimeWorkerBackend {
             }
             Err(_) => {
                 self.abort_tracked_task(worker_id);
-                Err(CliWorkerError::LaunchTimeout(self.launch_timeout))
+                Err(CliWorkerError::LaunchTimeout(launch_timeout))
             }
         }
     }
+
+    fn launch_timeout_for_route(
+        &self,
+        route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    ) -> Duration {
+        if route.harness_kind == "codex_app_server" {
+            CODEX_WORKER_LAUNCH_TIMEOUT
+        } else {
+            self.launch_timeout
+        }
+    }
+}
+
+fn annotate_route_decision(
+    mut conversation: ConversationMetadata,
+    worker_id: &str,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> ConversationMetadata {
+    conversation.observe_event(
+        now_timestamp(),
+        Some(format!("route-{worker_id}-{}", route.harness_kind)),
+        Some("routing.decision".into()),
+        Some(route.summary()),
+        Some(route_decision_payload(route)),
+    );
+    conversation
+}
+
+fn route_decision_payload(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> serde_json::Value {
+    serde_json::json!({
+        "task_type": &route.task_type,
+        "harness_kind": &route.harness_kind,
+        "model": &route.model,
+        "model_profile": &route.model_profile,
+        "reason": &route.reason,
+        "dry_run": route.dry_run,
+        "user_override": route.user_override,
+    })
+}
+
+fn dry_run_conversation_metadata(
+    run: &crate::opensymphony_domain::RunAttempt,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> ConversationMetadata {
+    ConversationMetadata {
+        conversation_id: ConversationId::new(format!("route-preview-{}", run.worker_id))
+            .expect("route preview conversation id should not be empty"),
+        server_base_url: None,
+        transport_target: Some(route.harness_kind.clone()),
+        http_auth_mode: None,
+        websocket_auth_mode: None,
+        websocket_query_param_name: None,
+        fresh_conversation: true,
+        runtime_contract_version: Some("opensymphony-routing-alpha-v1".into()),
+        stream_state: RuntimeStreamState::Closed,
+        last_event_id: None,
+        last_event_kind: None,
+        last_event_at: None,
+        last_event_summary: None,
+        recent_activity: Vec::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: 0,
+        runtime_seconds: 0,
+        next_activity_sequence: 0,
+    }
+}
+
+async fn finish_route_dry_run_workspace_run(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> Result<(), WorkspaceError> {
+    run_manifest.status = RunStatus::Succeeded;
+    run_manifest.status_detail = Some(format!("routing dry-run ended: {}", route.summary()));
+    workspace_manager
+        .finish_run(workspace, run_manifest, RunStatus::Succeeded)
+        .await
 }
 
 fn inject_memory_env(
@@ -843,6 +1011,746 @@ fn memory_access_from_runtime(memory: &RuntimeMemoryEnv) -> MemoryWorkerAccess {
 impl Drop for RuntimeWorkerBackend {
     fn drop(&mut self) {
         self.abort_all_tracked_tasks();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_codex_stdio_issue(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    workflow: &ResolvedWorkflow,
+    codex_bin: &str,
+    codex_schema_validators: &CodexSchemaValidatorCache,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+) -> WorkerOutcomeRecord {
+    match try_run_codex_stdio_issue(
+        route,
+        workspace,
+        issue,
+        run,
+        workflow,
+        codex_bin,
+        codex_schema_validators,
+        updates_tx,
+        launch_tx,
+    )
+    .await
+    {
+        Ok((outcome, status)) => {
+            match finish_codex_workspace_run(workspace_manager, workspace, run_manifest, status)
+                .await
+            {
+                Ok(()) => outcome,
+                Err(error) => {
+                    let detail = record_codex_finish_failure(
+                        workspace_manager,
+                        workspace,
+                        run_manifest,
+                        status,
+                        error,
+                    )
+                    .await;
+                    WorkerOutcomeRecord::from_run(
+                        run,
+                        WorkerOutcomeKind::Failed,
+                        now_timestamp(),
+                        Some("Codex app-server workspace finalization failed".into()),
+                        Some(detail),
+                    )
+                }
+            }
+        }
+        Err(error) => {
+            let mut detail = error.clone();
+            if let Err(finish_error) = finish_codex_workspace_run(
+                workspace_manager,
+                workspace,
+                run_manifest,
+                RunStatus::Failed,
+            )
+            .await
+            {
+                let finish_detail = record_codex_finish_failure(
+                    workspace_manager,
+                    workspace,
+                    run_manifest,
+                    RunStatus::Failed,
+                    finish_error,
+                )
+                .await;
+                detail = format!("{detail}; {finish_detail}");
+            }
+            if launch_tx.is_some() {
+                report_launch_failure(launch_tx, detail.clone());
+            }
+            WorkerOutcomeRecord::from_run(
+                run,
+                WorkerOutcomeKind::Failed,
+                now_timestamp(),
+                Some("Codex app-server worker failed".into()),
+                Some(detail),
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_run_codex_stdio_issue(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+    workspace: &WorkspaceHandle,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    workflow: &ResolvedWorkflow,
+    codex_bin: &str,
+    codex_schema_validators: &CodexSchemaValidatorCache,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
+) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
+    let adapter =
+        CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
+    let schema_validator =
+        cached_installed_codex_schema_validator(codex_schema_validators, codex_bin).await?;
+    let (program, args) = adapter.launch().to_command();
+    let mut child = Command::new(&program)
+        .args(args)
+        .current_dir(workspace.workspace_path())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|source| {
+            format!(
+                "failed to launch `{program} --dangerously-bypass-hook-trust app-server --stdio`: {source}"
+            )
+        })?;
+    let mut stdin = child.stdin.take().ok_or("Codex child stdin missing")?;
+    let stdout = child.stdout.take().ok_or("Codex child stdout missing")?;
+    let stderr = child.stderr.take().ok_or("Codex child stderr missing")?;
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::new()));
+    let mut stderr_task = AbortOnDrop::new(tokio::spawn(drain_codex_stderr(
+        stderr,
+        run.worker_id.to_string(),
+        Arc::clone(&stderr_tail),
+    )));
+    let mut reader = BufReader::new(stdout).lines();
+    let mut session = adapter.session();
+    let mut pending_terminal = None;
+
+    let initialize = session.initialize();
+    write_codex_request(
+        &mut stdin,
+        &schema_validator,
+        &initialize,
+        "initialize",
+        &stderr_tail,
+    )
+    .await?;
+    read_response_line(
+        &mut reader,
+        initialize.id,
+        updates_tx,
+        &run.worker_id.to_string(),
+        issue,
+        run,
+        &mut pending_terminal,
+    )
+    .await
+    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+
+    let prompt = workflow
+        .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
+        .map_err(|source| format!("failed to render workflow prompt for Codex route: {source}"))?;
+    let model = codex_model_from_route(route);
+    let thread_start = adapter
+        .start_issue_thread_request(
+            &mut session,
+            workspace.workspace_path().display().to_string(),
+            model.clone(),
+            serde_json::json!({
+                "opensymphonyRoute": {
+                    "harness": &route.harness_kind,
+                    "model": &model,
+                    "modelProfile": &route.model_profile,
+                    "reason": &route.reason,
+                }
+            }),
+        )
+        .map_err(|source| format!("failed to build Codex thread/start request: {source}"))?;
+    write_codex_request(
+        &mut stdin,
+        &schema_validator,
+        &thread_start.request,
+        "thread/start",
+        &stderr_tail,
+    )
+    .await?;
+    let thread_start_response = read_response_line(
+        &mut reader,
+        thread_start.request.id,
+        updates_tx,
+        &run.worker_id.to_string(),
+        issue,
+        run,
+        &mut pending_terminal,
+    )
+    .await
+    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    let conversation_id = codex_thread_id_from_start_response(&thread_start_response)
+        .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    if let Some(sender) = launch_tx.take() {
+        let _ = sender.send(LaunchReport::Conversation(Box::new(
+            codex_conversation_metadata(conversation_id.clone(), route),
+        )));
+    }
+    let turn_start = adapter
+        .start_issue_turn_request(
+            &mut session,
+            conversation_id.clone(),
+            workspace.workspace_path().display().to_string(),
+            model,
+            prompt,
+        )
+        .map_err(|source| format!("failed to build Codex turn/start request: {source}"))?;
+    write_codex_request(
+        &mut stdin,
+        &schema_validator,
+        &turn_start.request,
+        "turn/start",
+        &stderr_tail,
+    )
+    .await?;
+    read_response_line(
+        &mut reader,
+        turn_start.request.id,
+        updates_tx,
+        &run.worker_id.to_string(),
+        issue,
+        run,
+        &mut pending_terminal,
+    )
+    .await
+    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+
+    let terminal = read_until_codex_terminal(
+        &mut reader,
+        updates_tx,
+        &run.worker_id.to_string(),
+        issue,
+        run,
+        &mut pending_terminal,
+    )
+    .await
+    .map_err(|error| with_codex_stderr(error, &stderr_tail))?;
+    let summary = format!(
+        "Codex app-server route completed with terminal event {:?}",
+        terminal.event_kind
+    );
+    let _ = child.kill().await;
+    stderr_task.abort();
+    Ok((
+        WorkerOutcomeRecord::from_run(run, terminal.outcome, now_timestamp(), Some(summary), None),
+        terminal.status,
+    ))
+}
+
+async fn cached_installed_codex_schema_validator(
+    cache: &CodexSchemaValidatorCache,
+    codex_bin: &str,
+) -> Result<CodexAppServerSchemaValidator, String> {
+    let key = codex_schema_cache_key(codex_bin).await;
+    if let Some(validator) = cache.lock().await.get(&key).cloned() {
+        return Ok(validator);
+    }
+
+    let validator = load_installed_codex_schema_validator(codex_bin).await?;
+    let mut validators = cache.lock().await;
+    let validator = validators.entry(key).or_insert(validator);
+    Ok(validator.clone())
+}
+
+async fn codex_schema_cache_key(codex_bin: &str) -> String {
+    let Some(fingerprint) = codex_binary_fingerprint(codex_bin).await else {
+        return format!("{codex_bin}|unfingerprinted");
+    };
+    format!("{codex_bin}|{fingerprint}")
+}
+
+async fn codex_binary_fingerprint(codex_bin: &str) -> Option<String> {
+    let executable = resolve_executable_path(codex_bin)?;
+    let metadata = fs::metadata(&executable).await.ok()?;
+    let canonical = fs::canonicalize(&executable).await.unwrap_or(executable);
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    Some(format!(
+        "{}:{}:{modified}",
+        canonical.display(),
+        metadata.len()
+    ))
+}
+
+fn resolve_executable_path(program: &str) -> Option<PathBuf> {
+    let path = Path::new(program);
+    if path.is_absolute() || program.contains('/') || program.contains('\\') {
+        return Some(path.to_path_buf());
+    }
+
+    for dir in env::split_paths(&env::var_os("PATH")?) {
+        let candidate = dir.join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            let Some(pathext) = env::var_os("PATHEXT") else {
+                continue;
+            };
+            for extension in env::split_paths(&pathext) {
+                let candidate = dir.join(format!("{program}{}", extension.to_string_lossy()));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn load_installed_codex_schema_validator(
+    codex_bin: &str,
+) -> Result<CodexAppServerSchemaValidator, String> {
+    let schema_dir = tempfile::tempdir()
+        .map_err(|source| format!("failed to create Codex schema tempdir: {source}"))?;
+    let generation =
+        CodexContractGeneration::json_schema_with_program(codex_bin, schema_dir.path());
+    let (program, args) = generation.to_command();
+    let output = timeout(CODEX_SCHEMA_GENERATION_TIMEOUT, async {
+        let mut command = Command::new(&program);
+        command.args(&args).kill_on_drop(true);
+        command.output().await
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out after {}s generating Codex app-server JSON schema with `{program} {}`. Update Codex to a compatible app-server build.",
+            CODEX_SCHEMA_GENERATION_TIMEOUT.as_secs(),
+            args.join(" ")
+        )
+    })?
+        .map_err(|source| {
+            format!(
+                "failed to generate Codex app-server JSON schema with `{program} {}`: {source}. Update Codex to a build that supports `codex app-server generate-json-schema`.",
+                args.join(" ")
+            )
+        })?;
+    if !output.status.success() {
+        let stderr_preview = codex_schema_stderr_preview(&output.stderr)
+            .map(|preview| format!(" stderr preview: {preview}."))
+            .unwrap_or_default();
+        return Err(format!(
+            "Codex app-server JSON schema generation failed with status {} and {} stderr byte(s).{} Update Codex to a compatible app-server build.",
+            output.status,
+            output.stderr.len(),
+            stderr_preview
+        ));
+    }
+    let schema_path = schema_dir
+        .path()
+        .join("codex_app_server_protocol.v2.schemas.json");
+    CodexAppServerSchemaValidator::from_schema_file(&schema_path).map_err(|source| {
+        format!(
+            "failed to compile installed Codex app-server schema from {}: {source}",
+            schema_path.display()
+        )
+    })
+}
+
+fn codex_schema_stderr_preview(stderr: &[u8]) -> Option<String> {
+    if stderr.is_empty() {
+        return None;
+    }
+    let decoded = String::from_utf8_lossy(stderr);
+    let mut chars = decoded.chars();
+    let mut preview = chars
+        .by_ref()
+        .take(CODEX_SCHEMA_STDERR_PREVIEW_CHARS)
+        .map(|character| match character {
+            '\n' | '\t' => character,
+            character if character.is_control() => ' ',
+            character => character,
+        })
+        .collect::<String>();
+    if chars.next().is_some() {
+        preview.push_str("...");
+    }
+    Some(format!("{preview:?}"))
+}
+
+async fn write_codex_request(
+    stdin: &mut ChildStdin,
+    schema_validator: &CodexAppServerSchemaValidator,
+    request: &JsonRpcRequestEnvelope,
+    request_name: &str,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+) -> Result<(), String> {
+    schema_validator
+        .validate_request(request)
+        .map_err(|source| with_codex_stderr(source.to_string(), stderr_tail))?;
+    stdin
+        .write_all(
+            CodexJsonRpcSession::encode_line(request)
+                .map_err(|source| source.to_string())?
+                .as_bytes(),
+        )
+        .await
+        .map_err(|source| {
+            with_codex_stderr(
+                format!("failed to write Codex {request_name} request: {source}"),
+                stderr_tail,
+            )
+        })
+}
+
+struct AbortOnDrop<T> {
+    handle: Option<JoinHandle<T>>,
+}
+
+impl<T> AbortOnDrop<T> {
+    fn new(handle: JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn abort(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
+fn codex_model_from_route(
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> Option<String> {
+    route.model.clone()
+}
+
+fn codex_thread_id_from_start_response(value: &serde_json::Value) -> Result<String, String> {
+    let thread_id = value
+        .get("result")
+        .and_then(|result| {
+            result
+                .get("threadId")
+                .or_else(|| result.get("thread_id"))
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    result
+                        .get("thread")
+                        .and_then(|thread| thread.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                })
+        })
+        .filter(|thread_id| !thread_id.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "Codex thread/start response missing non-empty threadId/thread_id or thread.id: {value}"
+            )
+        })?;
+    Ok(thread_id.to_string())
+}
+
+async fn drain_codex_stderr(
+    stderr: ChildStderr,
+    worker_id: String,
+    tail: Arc<Mutex<VecDeque<String>>>,
+) {
+    let mut lines = BufReader::new(stderr).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                push_codex_stderr_tail(&tail, line.clone());
+                tracing::debug!(%worker_id, stderr = %line, "Codex app-server stderr");
+            }
+            Ok(None) => break,
+            Err(error) => {
+                tracing::warn!(%worker_id, %error, "failed to drain Codex app-server stderr");
+                break;
+            }
+        }
+    }
+}
+
+fn push_codex_stderr_tail(tail: &Arc<Mutex<VecDeque<String>>>, line: String) {
+    if let Ok(mut tail) = tail.lock() {
+        if tail.len() == CODEX_STDERR_TAIL_LINES {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+    }
+}
+
+fn with_codex_stderr(error: String, tail: &Arc<Mutex<VecDeque<String>>>) -> String {
+    let Ok(tail) = tail.lock() else {
+        return error;
+    };
+    if tail.is_empty() {
+        return error;
+    }
+    format!(
+        "{error}; Codex emitted {} recent stderr line(s); raw stderr is kept in debug logs only",
+        tail.len()
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CodexTerminalOutcome {
+    event_kind: NormalizedCodexEventKind,
+    outcome: WorkerOutcomeKind,
+    status: RunStatus,
+}
+
+async fn read_response_line(
+    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    request_id: u64,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &str,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    pending_terminal: &mut Option<CodexTerminalOutcome>,
+) -> Result<serde_json::Value, String> {
+    let deadline = tokio::time::Instant::now() + CODEX_RESPONSE_TIMEOUT;
+    loop {
+        let line = timeout_at(deadline, reader.next_line())
+            .await
+            .map_err(|_| format!("timed out waiting for Codex response id {request_id}"))?
+            .map_err(|source| format!("failed reading Codex stdout: {source}"))?
+            .ok_or_else(|| format!("Codex stdout closed before response id {request_id}"))?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|source| format!("invalid Codex JSON: {source}"))?;
+        if codex_response_id_matches(&value, request_id) {
+            reject_codex_json_rpc_error(request_id, &value)?;
+            return Ok(value);
+        }
+        if let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value)
+            && pending_terminal.is_none()
+            && let Some(outcome) = codex_terminal_outcome(&event)
+        {
+            *pending_terminal = Some(outcome);
+        }
+    }
+}
+
+fn codex_response_id_matches(value: &serde_json::Value, request_id: u64) -> bool {
+    let Some(id) = value.get("id") else {
+        return false;
+    };
+    id.as_u64() == Some(request_id) || id.as_str().is_some_and(|id| id == request_id.to_string())
+}
+
+fn reject_codex_json_rpc_error(request_id: u64, value: &serde_json::Value) -> Result<(), String> {
+    let Some(error) = value.get("error").filter(|error| !error.is_null()) else {
+        return Ok(());
+    };
+    let detail = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| error.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    Err(format!(
+        "Codex response id {request_id} returned JSON-RPC error: {detail}"
+    ))
+}
+
+async fn read_until_codex_terminal(
+    reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &str,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    pending_terminal: &mut Option<CodexTerminalOutcome>,
+) -> Result<CodexTerminalOutcome, String> {
+    if let Some(outcome) = pending_terminal.take() {
+        return Ok(outcome);
+    }
+
+    loop {
+        let line = timeout(CODEX_TERMINAL_TIMEOUT, reader.next_line())
+            .await
+            .map_err(|_| "timed out waiting for Codex terminal notification".to_string())?
+            .map_err(|source| format!("failed reading Codex stdout: {source}"))?
+            .ok_or("Codex stdout closed before terminal notification")?;
+        let value: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|source| format!("invalid Codex JSON: {source}"))?;
+        if let Some(event) = emit_codex_notification(updates_tx, worker_id, issue, run, value)
+            && let Some(outcome) = codex_terminal_outcome(&event)
+        {
+            return Ok(outcome);
+        }
+    }
+}
+
+fn emit_codex_notification(
+    updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
+    worker_id: &str,
+    issue: &NormalizedIssue,
+    run: &crate::opensymphony_domain::RunAttempt,
+    value: serde_json::Value,
+) -> Option<NormalizedCodexEvent> {
+    let event = normalize_server_notification(value)?;
+    let Ok(worker_id) = crate::opensymphony_domain::WorkerId::new(worker_id.to_string()) else {
+        return Some(event);
+    };
+    let observed_at = now_timestamp();
+    let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
+        worker_id: worker_id.clone(),
+        observed_at,
+        event_id: event.item_id.clone().or_else(|| event.turn_id.clone()),
+        event_kind: Some(format!("codex.{}", event.method)),
+        summary: Some(format!("Codex event: {}", event.method)),
+        payload: Some(event.raw.clone()),
+    });
+    if let Some(approval) = codex_approval_request_from_event(
+        run.worker_id.as_str(),
+        issue.id.as_str(),
+        issue.identifier.as_str(),
+        timestamp_to_datetime(observed_at),
+        &event,
+    ) {
+        let payload = match serde_json::to_value(&approval) {
+            Ok(payload) => Some(payload),
+            Err(error) => {
+                tracing::warn!(
+                    approval_id = %approval.approval_id,
+                    %error,
+                    "failed to serialize Codex approval request payload"
+                );
+                None
+            }
+        };
+        let _ = updates_tx.send(WorkerUpdate::RuntimeEvent {
+            worker_id,
+            observed_at,
+            event_id: Some(format!("approval:{}", approval.approval_id)),
+            event_kind: Some("approval.requested".into()),
+            summary: Some(format!("Approval requested: {}", approval.title)),
+            payload,
+        });
+    }
+    Some(event)
+}
+
+fn codex_terminal_outcome(event: &NormalizedCodexEvent) -> Option<CodexTerminalOutcome> {
+    let (outcome, status) = match event.kind {
+        NormalizedCodexEventKind::TurnCompleted => {
+            (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+        }
+        NormalizedCodexEventKind::TurnCancelled => {
+            (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
+        }
+        NormalizedCodexEventKind::Error => (WorkerOutcomeKind::Failed, RunStatus::Failed),
+        NormalizedCodexEventKind::ThreadStatusChanged => {
+            let status = event
+                .raw
+                .get("params")
+                .and_then(|params| params.get("status"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_ascii_lowercase);
+            match status.as_deref() {
+                Some("completed" | "succeeded" | "success") => {
+                    (WorkerOutcomeKind::Succeeded, RunStatus::Succeeded)
+                }
+                Some("failed" | "error") => (WorkerOutcomeKind::Failed, RunStatus::Failed),
+                Some("cancelled" | "canceled") => {
+                    (WorkerOutcomeKind::Cancelled, RunStatus::Cancelled)
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(CodexTerminalOutcome {
+        event_kind: event.kind,
+        outcome,
+        status,
+    })
+}
+
+async fn finish_codex_workspace_run(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    status: RunStatus,
+) -> Result<(), WorkspaceError> {
+    run_manifest.status = status;
+    run_manifest.status_detail = Some(format!("Codex app-server route ended with {status}"));
+    workspace_manager
+        .finish_run(workspace, run_manifest, status)
+        .await
+}
+
+async fn record_codex_finish_failure(
+    workspace_manager: &WorkspaceManager,
+    workspace: &WorkspaceHandle,
+    run_manifest: &mut RunManifest,
+    attempted_status: RunStatus,
+    error: WorkspaceError,
+) -> String {
+    let detail = format!("failed to finish Codex workspace run as {attempted_status}: {error}");
+    run_manifest.status = RunStatus::Failed;
+    run_manifest.status_detail = Some(format!(
+        "Codex app-server workspace finalization failed after {attempted_status}"
+    ));
+    if let Err(failed_error) = workspace_manager
+        .finish_run(workspace, run_manifest, RunStatus::Failed)
+        .await
+    {
+        return format!("{detail}; additionally failed to persist failed status: {failed_error}");
+    }
+    detail
+}
+
+fn codex_conversation_metadata(
+    conversation_id: String,
+    route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
+) -> ConversationMetadata {
+    ConversationMetadata {
+        conversation_id: ConversationId::new(conversation_id)
+            .expect("Codex conversation id should not be empty"),
+        server_base_url: None,
+        transport_target: Some(route.harness_kind.clone()),
+        http_auth_mode: None,
+        websocket_auth_mode: None,
+        websocket_query_param_name: None,
+        fresh_conversation: true,
+        runtime_contract_version: Some("codex-app-server-json-rpc-v2".into()),
+        stream_state: RuntimeStreamState::Closed,
+        last_event_id: None,
+        last_event_kind: None,
+        last_event_at: None,
+        last_event_summary: Some(route.summary()),
+        recent_activity: Vec::new(),
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        total_tokens: 0,
+        runtime_seconds: 0,
+        next_activity_sequence: 0,
     }
 }
 
@@ -888,9 +1796,13 @@ impl WorkerBackend for RuntimeWorkerBackend {
     ) -> Result<WorkerLaunch, Self::Error> {
         let pending = self.spawn_worker_task(request);
         let worker_id = pending.worker_id.clone();
+        let route = pending.route.clone();
+        let launch_timeout = self.launch_timeout_for_route(&route);
         self.resolve_launch_result(
             &worker_id,
-            timeout(self.launch_timeout, pending.launch_rx).await,
+            &route,
+            launch_timeout,
+            timeout(launch_timeout, pending.launch_rx).await,
         )
         .await
     }
@@ -903,15 +1815,15 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .into_iter()
             .map(|request| self.spawn_worker_task(request))
             .collect::<Vec<_>>();
-        let ordered_worker_ids = pending
+        let ordered_launches = pending
             .iter()
-            .map(|launch| launch.worker_id.clone())
+            .map(|launch| (launch.worker_id.clone(), launch.route.clone()))
             .collect::<Vec<_>>();
 
         let mut waiters = Vec::with_capacity(pending.len());
         for launch in pending {
+            let timeout_duration = self.launch_timeout_for_route(&launch.route);
             let worker_id = launch.worker_id;
-            let timeout_duration = self.launch_timeout;
             let rx = launch.launch_rx;
             let worker_id_for_task = worker_id.clone();
             let handle =
@@ -939,14 +1851,22 @@ impl WorkerBackend for RuntimeWorkerBackend {
             }
         }
 
-        let mut launches = Vec::with_capacity(ordered_worker_ids.len());
-        for worker_id in ordered_worker_ids {
+        let mut launches = Vec::with_capacity(ordered_launches.len());
+        for (worker_id, route) in ordered_launches {
             let outcome = completed
                 .remove(&worker_id)
                 .unwrap_or(Ok(Ok(LaunchReport::Failed(
                     "worker launch waiter finished without a result".to_string(),
                 ))));
-            launches.push(self.resolve_launch_result(&worker_id, outcome).await);
+            launches.push(
+                self.resolve_launch_result(
+                    &worker_id,
+                    &route,
+                    self.launch_timeout_for_route(&route),
+                    outcome,
+                )
+                .await,
+            );
         }
         launches
     }
@@ -1057,7 +1977,12 @@ fn issue_descriptor(issue: &NormalizedIssue) -> IssueDescriptor {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, fs, future::pending, path::Path};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        fs,
+        future::pending,
+        path::Path,
+    };
 
     use crate::opensymphony_domain::{
         ConversationId, IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt,
@@ -1068,6 +1993,638 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    fn empty_codex_schema_cache() -> CodexSchemaValidatorCache {
+        Arc::new(AsyncMutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn codex_json_rpc_error_response_is_launch_failure() {
+        let error = reject_codex_json_rpc_error(
+            4,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "error": {
+                    "code": -32000,
+                    "message": "not logged in"
+                }
+            }),
+        )
+        .expect_err("JSON-RPC error envelopes must fail the worker launch path");
+
+        assert!(error.contains("response id 4"));
+        assert!(error.contains("not logged in"));
+    }
+
+    #[test]
+    fn codex_json_rpc_null_error_is_not_launch_failure() {
+        reject_codex_json_rpc_error(
+            4,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "result": {},
+                "error": null
+            }),
+        )
+        .expect("JSON-RPC error:null is equivalent to an absent error field");
+    }
+
+    #[test]
+    fn codex_response_id_matches_numbers_and_equivalent_strings() {
+        assert!(codex_response_id_matches(
+            &serde_json::json!({ "id": 7 }),
+            7
+        ));
+        assert!(codex_response_id_matches(
+            &serde_json::json!({ "id": "7" }),
+            7
+        ));
+        assert!(!codex_response_id_matches(
+            &serde_json::json!({ "id": "07" }),
+            7
+        ));
+        assert!(!codex_response_id_matches(
+            &serde_json::json!({ "id": "turn-7" }),
+            7
+        ));
+    }
+
+    #[test]
+    fn codex_schema_stderr_preview_is_bounded_and_sanitized() {
+        let stderr = format!(
+            "schema failed\u{0000}{}",
+            "x".repeat(CODEX_SCHEMA_STDERR_PREVIEW_CHARS + 20)
+        );
+
+        let preview = codex_schema_stderr_preview(stderr.as_bytes())
+            .expect("non-empty stderr should produce preview");
+
+        assert!(preview.contains("schema failed"));
+        assert!(preview.contains("..."));
+        assert!(!preview.contains('\u{0000}'));
+        assert!(preview.len() < CODEX_SCHEMA_STDERR_PREVIEW_CHARS + 80);
+    }
+
+    #[test]
+    fn codex_start_response_requires_real_thread_id() {
+        let thread_id = codex_thread_id_from_start_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {
+                "threadId": "thread-7"
+            }
+        }))
+        .expect("threadId should be accepted");
+        assert_eq!(thread_id, "thread-7");
+
+        let missing = codex_thread_id_from_start_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {}
+        }))
+        .expect_err("missing thread id should fail launch");
+        assert!(missing.contains("missing non-empty threadId/thread_id"));
+
+        let empty = codex_thread_id_from_start_response(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "result": {
+                "thread_id": "  "
+            }
+        }))
+        .expect_err("empty thread id should fail launch");
+        assert!(empty.contains("missing non-empty threadId/thread_id"));
+    }
+
+    #[test]
+    fn codex_stderr_tail_is_counted_but_not_persisted_in_worker_errors() {
+        let tail = Arc::new(Mutex::new(VecDeque::new()));
+        for line in 0..25 {
+            push_codex_stderr_tail(&tail, format!("stderr-line-{line}"));
+        }
+
+        let error = with_codex_stderr("Codex stdout closed".into(), &tail);
+
+        assert!(error.contains("20 recent stderr line(s)"));
+        assert!(error.contains("debug logs only"));
+        assert!(!error.contains("stderr-line-4"));
+        assert!(!error.contains("stderr-line-5"));
+        assert!(!error.contains("stderr-line-24"));
+    }
+
+    #[test]
+    fn codex_notification_emits_approval_center_runtime_event() {
+        let issue = sample_issue();
+        let run = RunAttempt::new(
+            WorkerId::new("worker-approval").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            PathBuf::from("/tmp/opensymphony-worker-approval"),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+
+        let event = emit_codex_notification(
+            &updates_tx,
+            run.worker_id.as_str(),
+            &issue,
+            &run,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "item/permissions/requestApproval",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "itemId": "approval-1",
+                    "command": "rg approval crates"
+                }
+            }),
+        )
+        .expect("Codex approval notification should normalize");
+
+        assert_eq!(event.kind, NormalizedCodexEventKind::ApprovalRequested);
+        let raw_event = updates_rx
+            .try_recv()
+            .expect("raw Codex runtime event should be emitted");
+        let approval_event = updates_rx
+            .try_recv()
+            .expect("approval-center runtime event should be emitted");
+
+        assert!(matches!(
+            raw_event,
+            WorkerUpdate::RuntimeEvent {
+                event_kind: Some(kind),
+                ..
+            } if kind == "codex.item/permissions/requestApproval"
+        ));
+        match approval_event {
+            WorkerUpdate::RuntimeEvent {
+                event_id,
+                event_kind,
+                payload,
+                ..
+            } => {
+                assert_eq!(event_id.as_deref(), Some("approval:approval-1"));
+                assert_eq!(event_kind.as_deref(), Some("approval.requested"));
+                let payload = payload.expect("approval payload should serialize");
+                assert_eq!(payload["approval_id"], "approval-1");
+                assert_eq!(payload["run_id"], "worker-approval");
+                assert_eq!(payload["status"], "pending");
+            }
+            other => panic!("expected runtime event, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_drives_fake_child_lifecycle() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(&ensured.handle, &RunDescriptor::new("run-fake-codex", 1))
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex.log");
+        let fake_codex = tempdir.path().join("fake-codex");
+        write_fake_codex_child(&fake_codex, &log_path);
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &updates_tx,
+            &mut launch_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        let launch = launch_rx
+            .await
+            .expect("launch report should be sent before terminal completion");
+        match launch {
+            LaunchReport::Conversation(conversation) => {
+                assert_eq!(conversation.conversation_id.as_str(), "fake-thread");
+                assert_eq!(conversation.stream_state, RuntimeStreamState::Closed);
+            }
+            LaunchReport::Failed(error) => panic!("fake child should launch: {error}"),
+        }
+        let log = fs::read_to_string(&log_path).expect("fake child log should exist");
+        assert!(log.contains(&format!(
+            "PWD={}",
+            ensured.handle.workspace_path().display()
+        )));
+        assert!(log.contains("ARGS=--dangerously-bypass-hook-trust app-server --stdio"));
+        assert!(log.contains("\"method\":\"initialize\""));
+        assert!(log.contains("\"method\":\"thread/start\""));
+        assert!(log.contains("\"method\":\"turn/start\""));
+        assert!(
+            std::iter::from_fn(|| updates_rx.try_recv().ok()).any(|update| {
+                matches!(
+                    update,
+                    WorkerUpdate::RuntimeEvent {
+                        event_kind: Some(kind),
+                        ..
+                    } if kind == "codex.turn/completed"
+                )
+            }),
+            "terminal Codex notification should be forwarded as a runtime event"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_keeps_terminal_notification_seen_before_start_response() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-out-of-order", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-out-of-order").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex-out-of-order.log");
+        let fake_codex = tempdir.path().join("fake-codex-out-of-order");
+        write_fake_codex_terminal_before_response_child(&fake_codex, &log_path);
+        let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex path should be utf-8"),
+            &codex_schema_validators,
+            &updates_tx,
+            &mut launch_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Succeeded);
+        assert_eq!(run_manifest.status, RunStatus::Succeeded);
+        let launch = launch_rx.await.expect("launch report should still be sent");
+        assert!(matches!(
+            launch,
+            LaunchReport::Conversation(conversation)
+                if conversation.conversation_id.as_str() == "fake-thread"
+        ));
+        assert!(
+            std::iter::from_fn(|| updates_rx.try_recv().ok()).any(|update| {
+                matches!(
+                    update,
+                    WorkerUpdate::RuntimeEvent {
+                        event_kind: Some(kind),
+                        ..
+                    } if kind == "codex.turn/completed"
+                )
+            }),
+            "out-of-order terminal notification should still be forwarded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_worker_surfaces_fake_child_json_rpc_error() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-error", 1),
+            )
+            .await
+            .expect("run should start");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-error").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex-error.log");
+        let fake_codex = tempdir.path().join("fake-codex-error");
+        write_fake_codex_error_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex error path should be utf-8"),
+            &codex_schema_validators,
+            &updates_tx,
+            &mut launch_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert_eq!(run_manifest.status, RunStatus::Failed);
+        let error = outcome.error.expect("failure should include detail");
+        assert!(error.contains("JSON-RPC error"));
+        assert!(error.contains("fake initialize failure"));
+        assert!(!error.contains("fake child stderr before failure"));
+        let launch = launch_rx
+            .await
+            .expect("launch failure should be reported to caller");
+        assert!(matches!(
+            launch,
+            LaunchReport::Failed(detail)
+                if detail.contains("fake initialize failure")
+                    && !detail.contains("fake child stderr before failure")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_stdio_error_path_records_workspace_finalization_failure() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspaces");
+        let workflow = sample_workflow(tempdir.path(), &workspace_root);
+        let workspace_manager = WorkspaceManager::new(build_workspace_manager_config(&workflow))
+            .expect("workspace manager should be constructed");
+        let issue = sample_issue();
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should be ensured");
+        let mut run_manifest = workspace_manager
+            .start_run(
+                &ensured.handle,
+                &RunDescriptor::new("run-fake-codex-error-finish", 1),
+            )
+            .await
+            .expect("run should start");
+        let run_manifest_path = ensured.handle.run_manifest_path();
+        fs::remove_file(&run_manifest_path).expect("run manifest file should be removable");
+        fs::create_dir(&run_manifest_path)
+            .expect("run manifest path should be replaceable by a directory");
+        let run = RunAttempt::new(
+            WorkerId::new("worker-fake-codex-error-finish").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            ensured.handle.workspace_path().to_path_buf(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+        let route = codex_test_route(false);
+        let log_path = tempdir.path().join("fake-codex-error-finish.log");
+        let fake_codex = tempdir.path().join("fake-codex-error-finish");
+        write_fake_codex_error_child(&fake_codex, &log_path);
+        let (updates_tx, _updates_rx) = mpsc::unbounded_channel();
+        let (launch_tx, launch_rx) = oneshot::channel();
+        let mut launch_tx = Some(launch_tx);
+        let codex_schema_validators = empty_codex_schema_cache();
+
+        let outcome = run_codex_stdio_issue(
+            &route,
+            &workspace_manager,
+            &ensured.handle,
+            &mut run_manifest,
+            &issue,
+            &run,
+            &workflow,
+            fake_codex
+                .to_str()
+                .expect("fake codex error path should be utf-8"),
+            &codex_schema_validators,
+            &updates_tx,
+            &mut launch_tx,
+        )
+        .await;
+
+        assert_eq!(outcome.outcome, WorkerOutcomeKind::Failed);
+        assert_eq!(run_manifest.status, RunStatus::Failed);
+        let error = outcome.error.expect("failure should include detail");
+        assert!(error.contains("fake initialize failure"));
+        assert!(error.contains("failed to finish Codex workspace run as failed"));
+        assert!(error.contains("additionally failed to persist failed status"));
+        let launch = launch_rx
+            .await
+            .expect("launch failure should be reported to caller");
+        assert!(matches!(
+            launch,
+            LaunchReport::Failed(detail)
+                if detail.contains("fake initialize failure")
+                    && detail.contains("failed to finish Codex workspace run as failed")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_schema_validator_cache_reuses_compiled_installed_schema() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let fake_codex = tempdir.path().join("fake-codex-schema");
+        let count_path = tempdir.path().join("schema-count.log");
+        write_fake_codex_schema_generator(&fake_codex, &count_path);
+        let cache = empty_codex_schema_cache();
+        let codex_bin = fake_codex
+            .to_str()
+            .expect("fake codex schema path should be utf-8");
+
+        cached_installed_codex_schema_validator(&cache, codex_bin)
+            .await
+            .expect("first schema load should compile");
+        cached_installed_codex_schema_validator(&cache, codex_bin)
+            .await
+            .expect("second schema load should use cache");
+
+        let generations =
+            fs::read_to_string(&count_path).expect("schema generation count should exist");
+        assert_eq!(
+            generations.lines().count(),
+            1,
+            "schema generation should run once per Codex binary path"
+        );
+        assert_eq!(cache.lock().await.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_schema_validator_cache_invalidates_when_binary_changes() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let fake_codex = tempdir.path().join("fake-codex-schema-changing");
+        let count_path = tempdir.path().join("schema-count-changing.log");
+        write_fake_codex_schema_generator_with_marker(&fake_codex, &count_path, "first");
+        let cache = empty_codex_schema_cache();
+        let codex_bin = fake_codex
+            .to_str()
+            .expect("fake codex schema path should be utf-8");
+
+        cached_installed_codex_schema_validator(&cache, codex_bin)
+            .await
+            .expect("first schema load should compile");
+        write_fake_codex_schema_generator_with_marker(&fake_codex, &count_path, "second marker");
+        cached_installed_codex_schema_validator(&cache, codex_bin)
+            .await
+            .expect("changed binary should force a second schema load");
+
+        let generations =
+            fs::read_to_string(&count_path).expect("schema generation count should exist");
+        assert_eq!(
+            generations.lines().count(),
+            2,
+            "schema generation should run again after the Codex binary changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn routing_dry_run_finishes_workspace_manifest_and_records_one_route_event() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            Arc::clone(&workspace_manager),
+            None,
+        );
+        let issue = sample_issue();
+        let workspace = sample_workspace(&workspace_root);
+        let run = RunAttempt::new(
+            WorkerId::new("worker-dry-run").expect("worker id should be valid"),
+            issue.id.clone(),
+            issue.identifier.clone(),
+            workspace.path.clone(),
+            TimestampMs::new(1),
+            None,
+            8,
+        );
+
+        let launch = backend
+            .start_worker(WorkerStartRequest {
+                issue: issue.clone(),
+                workspace,
+                run,
+                route: codex_test_route(true),
+            })
+            .await
+            .expect("dry-run worker should launch");
+
+        assert_eq!(
+            launch.conversation.last_event_kind.as_deref(),
+            Some("routing.decision")
+        );
+        assert_eq!(launch.conversation.recent_activity.len(), 1);
+
+        let mut saw_finished = false;
+        for _ in 0..10 {
+            let updates = backend
+                .poll_updates()
+                .await
+                .expect("dry-run updates should poll");
+            saw_finished |= updates
+                .iter()
+                .any(|update| matches!(update, WorkerUpdate::Finished { .. }));
+            if saw_finished {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(saw_finished, "dry-run worker should finish");
+
+        let ensured = workspace_manager
+            .ensure(&issue_descriptor(&issue))
+            .await
+            .expect("workspace should still be inspectable");
+        let manifest = workspace_manager
+            .load_run_manifest(&ensured.handle)
+            .await
+            .expect("run manifest should load")
+            .expect("run manifest should exist");
+        assert_eq!(manifest.status, RunStatus::Succeeded);
+        assert!(
+            manifest
+                .status_detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("routing dry-run ended"))
+        );
+    }
 
     #[test]
     fn transport_port_override_reports_missing_port_separately() {
@@ -1153,6 +2710,15 @@ mod tests {
                 issue,
                 workspace,
                 run,
+                route: crate::opensymphony_orchestrator::HarnessRouteDecision {
+                    task_type: "issue_execution".into(),
+                    harness_kind: "openhands_agent_server".into(),
+                    model: None,
+                    model_profile: None,
+                    reason: "test default route".into(),
+                    dry_run: false,
+                    user_override: false,
+                },
             })
             .await
             .expect_err("workspace setup failure should fail the launch immediately");
@@ -1447,6 +3013,45 @@ Run the scheduler.
         }
     }
 
+    #[tokio::test]
+    async fn codex_route_uses_launch_timeout_buffer() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+        );
+        let codex_route = codex_test_route(false);
+        let openhands_route = crate::opensymphony_orchestrator::HarnessRouteDecision {
+            task_type: "issue_execution".into(),
+            harness_kind: "openhands_agent_server".into(),
+            model: None,
+            model_profile: None,
+            reason: "test default route".into(),
+            dry_run: false,
+            user_override: false,
+        };
+
+        assert_eq!(
+            backend.launch_timeout_for_route(&codex_route),
+            CODEX_WORKER_LAUNCH_TIMEOUT
+        );
+        assert_eq!(
+            backend.launch_timeout_for_route(&openhands_route),
+            DEFAULT_WORKER_LAUNCH_TIMEOUT
+        );
+        assert!(CODEX_WORKER_LAUNCH_TIMEOUT > CODEX_RESPONSE_TIMEOUT * 2);
+    }
+
     fn sample_workflow(base_dir: &Path, workspace_root: &Path) -> ResolvedWorkflow {
         let source = format!(
             "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  api_key: test-linear-key\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n",
@@ -1494,9 +3099,178 @@ Run the scheduler.
         issue
     }
 
+    fn codex_test_route(dry_run: bool) -> crate::opensymphony_orchestrator::HarnessRouteDecision {
+        crate::opensymphony_orchestrator::HarnessRouteDecision {
+            task_type: "issue_execution".into(),
+            harness_kind: "codex_app_server".into(),
+            model: None,
+            model_profile: Some("codex-chatgpt-local-keychain".into()),
+            reason: "test codex route".into(),
+            dry_run,
+            user_override: false,
+        }
+    }
+
+    const FAKE_CODEX_SCHEMA: &str = r#"{"$schema":"http://json-schema.org/draft-07/schema#","definitions":{"ClientRequest":{"oneOf":[{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["initialize"]},"params":{"type":"object"}}},{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["thread/start"]},"params":{"type":"object","required":["approvalPolicy","cwd","sandbox"],"properties":{"approvalPolicy":{"enum":["never"]},"cwd":{"type":"string"},"sandbox":{"enum":["danger-full-access"]}}}}},{"type":"object","required":["jsonrpc","id","method","params"],"properties":{"jsonrpc":{"const":"2.0"},"id":{"type":"integer"},"method":{"enum":["turn/start"]},"params":{"type":"object","required":["approvalPolicy","cwd","input","sandboxPolicy","threadId"],"properties":{"approvalPolicy":{"enum":["never"]},"cwd":{"type":"string"},"input":{"type":"array"},"sandboxPolicy":{"type":"object","required":["type"],"properties":{"type":{"enum":["dangerFullAccess"]}},"additionalProperties":false},"threadId":{"type":"string"}}}}}]}}}"#;
+
+    #[cfg(unix)]
+    fn write_fake_codex_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_terminal_before_response_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
+      ;;
+    *'"method":"thread/start"'*)
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"thread":{{"id":"fake-thread"}}}}}}\n' "$id"
+      ;;
+    *'"method":"turn/start"'*)
+      printf '{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"fake-thread","turnId":"turn-1"}}}}\n'
+      printf '{{"jsonrpc":"2.0","id":%s,"result":{{"turn":{{"id":"turn-1","items":[],"status":"inProgress"}}}}}}\n' "$id"
+      ;;
+  esac
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_error_child(path: &Path, log_path: &Path) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+printf 'PWD=%s\n' "$PWD" > "{log}"
+printf 'ARGS=%s\n' "$*" >> "{log}"
+while IFS= read -r line; do
+  printf 'STDIN=%s\n' "$line" >> "{log}"
+  id=$(printf '%s\n' "$line" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  printf 'fake child stderr before failure\n' >&2
+  printf '{{"jsonrpc":"2.0","id":%s,"error":{{"code":-32000,"message":"fake initialize failure"}}}}\n' "$id"
+  exit 0
+done
+"#,
+                log = log_path.display(),
+                schema = FAKE_CODEX_SCHEMA
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_schema_generator(path: &Path, count_path: &Path) {
+        write_fake_codex_schema_generator_with_marker(path, count_path, "default");
+    }
+
+    #[cfg(unix)]
+    fn write_fake_codex_schema_generator_with_marker(path: &Path, count_path: &Path, marker: &str) {
+        write_executable(
+            path,
+            &format!(
+                r#"#!/usr/bin/env bash
+# {marker}
+set -euo pipefail
+if [ "${{1:-}}" = "app-server" ] && [ "${{2:-}}" = "generate-json-schema" ]; then
+  printf 'generated\n' >> "{count}"
+  out_dir="${{4:-}}"
+  mkdir -p "$out_dir"
+  cat > "$out_dir/codex_app_server_protocol.v2.schemas.json" <<'JSON'
+{schema}
+JSON
+  exit 0
+fi
+echo "unexpected fake codex invocation: $*" >&2
+exit 64
+"#,
+                count = count_path.display(),
+                marker = marker,
+                schema = FAKE_CODEX_SCHEMA
+            ),
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(path, contents).expect("fake executable should be written");
+        let mut permissions = fs::metadata(path)
+            .expect("fake executable metadata should load")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).expect("fake executable should be executable");
+    }
+
     fn sample_issue_conversation_manifest(
         issue: &NormalizedIssue,
-        workspace: &crate::opensymphony_workspace::WorkspaceHandle,
+        workspace: &WorkspaceHandle,
         conversation_id: Uuid,
     ) -> IssueConversationManifest {
         let now = chrono::Utc::now();

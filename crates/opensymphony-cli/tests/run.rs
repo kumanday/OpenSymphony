@@ -2,7 +2,7 @@ use std::{process::Stdio, time::Duration};
 
 use crate::opensymphony_testkit::FakeOpenHandsServer;
 use axum::{Json, Router, routing::post};
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
@@ -107,6 +107,37 @@ async fn run_accepts_existing_repo_config_shape_with_extra_doctor_fields() {
     terminate_child(&mut child).await;
 }
 
+#[tokio::test]
+async fn run_routing_dry_run_selects_codex_and_emits_route_decision() {
+    let openhands = FakeOpenHandsServer::start()
+        .await
+        .expect("fake OpenHands server should start");
+    let linear = MockLinearGraphqlServer::start_with_active_issue().await;
+    let project = TempDir::new().expect("temp project should exist");
+    let bind_addr = reserve_socket_addr();
+
+    write_project_files_with_workflow_extra(
+        project.path(),
+        linear.base_url(),
+        openhands.base_url(),
+        format!("control_plane:\n  bind: {bind_addr}\n"),
+        r#"routing:
+  harness: codex_app_server
+  model: gpt-5-codex-test
+  model_profile: codex-chatgpt-local-keychain
+"#,
+    );
+    write_memory_config(project.path());
+
+    let mut child = spawn_run_child(project.path(), &["--dry-run"]);
+
+    wait_for_dry_run_route_decision(&format!("http://{bind_addr}/api/v1/snapshot"))
+        .await
+        .expect("dry-run route decision should appear in the control snapshot");
+
+    terminate_child(&mut child).await;
+}
+
 #[test]
 fn run_fails_with_install_guidance_when_managed_local_tooling_is_missing() {
     let project = TempDir::new().expect("temp project should exist");
@@ -184,10 +215,26 @@ fn write_project_files(
     openhands_base_url: &str,
     config_contents: String,
 ) {
+    write_project_files_with_workflow_extra(
+        project_root,
+        linear_base_url,
+        openhands_base_url,
+        config_contents,
+        "",
+    );
+}
+
+fn write_project_files_with_workflow_extra(
+    project_root: &std::path::Path,
+    linear_base_url: &str,
+    openhands_base_url: &str,
+    config_contents: String,
+    workflow_extra: &str,
+) {
     std::fs::write(
         project_root.join("WORKFLOW.md"),
         format!(
-            "---\ntracker:\n  kind: linear\n  endpoint: {linear_base_url}\n  project_slug: test-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: ./var/workspaces\nopenhands:\n  transport:\n    base_url: {openhands_base_url}\n    session_api_key_env: OPENHANDS_API_KEY\n---\n\n# Test Workflow\n\nRun the scheduler.\n"
+            "---\ntracker:\n  kind: linear\n  endpoint: {linear_base_url}\n  project_slug: test-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: ./var/workspaces\nopenhands:\n  transport:\n    base_url: {openhands_base_url}\n    session_api_key_env: OPENHANDS_API_KEY\n{workflow_extra}---\n\n# Test Workflow\n\nRun the scheduler.\n"
         ),
     )
     .expect("workflow should be written");
@@ -231,6 +278,41 @@ async fn health_endpoint_ready(url: &str) -> bool {
     http_endpoint_ready(url).await
 }
 
+async fn wait_for_dry_run_route_decision(url: &str) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(response) = client.get(url).send().await
+            && response.status().is_success()
+            && let Ok(snapshot) = response.json::<Value>().await
+            && route_decision_visible(&snapshot)
+        {
+            return Ok(());
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    Err(format!(
+        "timed out waiting for dry-run route decision at {url}"
+    ))
+}
+
+fn route_decision_visible(envelope: &Value) -> bool {
+    envelope["snapshot"]["issues"]
+        .as_array()
+        .and_then(|issues| issues.iter().find(|issue| issue["identifier"] == "COE-429"))
+        .is_some_and(|issue| {
+            issue["transport_target"] == "codex_app_server"
+                && issue["recent_events"].as_array().is_some_and(|events| {
+                    events.iter().any(|event| {
+                        event["kind"] == "routing.decision"
+                            && event["payload"]["harness_kind"] == "codex_app_server"
+                            && event["payload"]["model"] == "gpt-5-codex-test"
+                            && event["payload"]["model_profile"] == "codex-chatgpt-local-keychain"
+                    })
+                })
+        })
+}
+
 async fn http_endpoint_ready(url: &str) -> bool {
     match reqwest::Client::new().get(url).send().await {
         Ok(response) => response.status().is_success(),
@@ -250,7 +332,17 @@ struct MockLinearGraphqlServer {
 
 impl MockLinearGraphqlServer {
     async fn start() -> Self {
-        let app = Router::new().route("/graphql", post(handle_graphql));
+        Self::start_with_active_issue_flag(false).await
+    }
+
+    async fn start_with_active_issue() -> Self {
+        Self::start_with_active_issue_flag(true).await
+    }
+
+    async fn start_with_active_issue_flag(active_issue: bool) -> Self {
+        let app = Router::new()
+            .route("/graphql", post(handle_graphql))
+            .with_state(active_issue);
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("mock Linear listener should bind");
@@ -280,11 +372,50 @@ impl Drop for MockLinearGraphqlServer {
     }
 }
 
-async fn handle_graphql() -> Json<serde_json::Value> {
+async fn handle_graphql(
+    axum::extract::State(active_issue): axum::extract::State<bool>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let active_query = body["variables"]["stateNames"]
+        .as_array()
+        .is_some_and(|states| states.iter().any(|state| state == "In Progress"));
+    let nodes = if active_issue && active_query {
+        vec![json!({
+            "id": "issue-429",
+            "identifier": "COE-429",
+            "url": "https://linear.app/trilogy-ai-coe/issue/COE-429/codex-approvals-and-cross-harness-routing",
+            "title": "Codex approvals and cross-harness routing",
+            "description": "Dry-run route proof",
+            "priority": 1.0,
+            "createdAt": "2026-06-21T00:00:00Z",
+            "updatedAt": "2026-06-21T00:00:00Z",
+            "state": {
+                "id": "state-started",
+                "name": "In Progress",
+                "type": "started"
+            },
+            "parent": null,
+            "children": {
+                "nodes": []
+            },
+            "labels": {
+                "nodes": []
+            },
+            "inverseRelations": {
+                "nodes": [],
+                "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                }
+            }
+        })]
+    } else {
+        Vec::new()
+    };
     Json(json!({
         "data": {
             "issues": {
-                "nodes": [],
+                "nodes": nodes,
                 "pageInfo": {
                     "hasNextPage": false,
                     "endCursor": null

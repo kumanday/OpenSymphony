@@ -3,6 +3,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use crate::opensymphony_gateway_schema::capability::HarnessKind;
 use url::{Host, Url};
 
 use super::{
@@ -18,10 +19,11 @@ use super::{
         DEFAULT_OPENHANDS_QUERY_PARAM_NAME, DEFAULT_OPENHANDS_READINESS_PROBE_PATH,
         DEFAULT_OPENHANDS_READY_TIMEOUT_MS, DEFAULT_OPENHANDS_RECONNECT_INITIAL_MS,
         DEFAULT_OPENHANDS_RECONNECT_MAX_MS, DEFAULT_OPENHANDS_STARTUP_TIMEOUT_MS,
-        DEFAULT_POLL_INTERVAL_MS, DEFAULT_STALL_TIMEOUT_MS, DEFAULT_WORKSPACE_ROOT, Environment,
-        HooksConfig, HooksFrontMatter, IntegerLike, OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY,
-        OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION, OpenHandsConfig,
-        OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
+        DEFAULT_POLL_INTERVAL_MS, DEFAULT_ROUTING_HARNESS, DEFAULT_ROUTING_HARNESS_ENV,
+        DEFAULT_ROUTING_MODEL_ENV, DEFAULT_ROUTING_MODEL_PROFILE_ENV, DEFAULT_STALL_TIMEOUT_MS,
+        DEFAULT_WORKSPACE_ROOT, Environment, HooksConfig, HooksFrontMatter, IntegerLike,
+        OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY, OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION,
+        OpenHandsConfig, OpenHandsConfirmationPolicy, OpenHandsConfirmationPolicyFrontMatter,
         OpenHandsConversationAgentConfig, OpenHandsConversationAgentFrontMatter,
         OpenHandsConversationCondenserConfig, OpenHandsConversationCondenserFrontMatter,
         OpenHandsConversationConfig, OpenHandsConversationFrontMatter,
@@ -29,9 +31,9 @@ use super::{
         OpenHandsLlmFrontMatter, OpenHandsLocalServerConfig, OpenHandsLocalServerFrontMatter,
         OpenHandsSubscriptionCredentialConfig, OpenHandsSubscriptionCredentialFrontMatter,
         OpenHandsTransportConfig, OpenHandsWebSocketConfig, OpenHandsWebSocketFrontMatter,
-        PollingConfig, PollingFrontMatter, ResolvedWorkflow, TrackerConfig, TrackerFrontMatter,
-        TrackerKind, WorkflowConfig, WorkflowDefinition, WorkflowExtensions, WorkspaceConfig,
-        WorkspaceFrontMatter,
+        PollingConfig, PollingFrontMatter, ResolvedWorkflow, RoutingConfig, RoutingFrontMatter,
+        TrackerConfig, TrackerFrontMatter, TrackerKind, WorkflowConfig, WorkflowDefinition,
+        WorkflowExtensions, WorkspaceConfig, WorkspaceFrontMatter,
     },
 };
 
@@ -40,19 +42,36 @@ pub(crate) fn resolve_workflow<E: Environment>(
     base_dir: &Path,
     env: &E,
 ) -> Result<ResolvedWorkflow, WorkflowConfigError> {
+    let config = WorkflowConfig {
+        tracker: resolve_tracker(&workflow.front_matter.tracker, env)?,
+        polling: resolve_polling(&workflow.front_matter.polling)?,
+        workspace: resolve_workspace(&workflow.front_matter.workspace, base_dir, env)?,
+        hooks: resolve_hooks(&workflow.front_matter.hooks)?,
+        agent: resolve_agent(&workflow.front_matter.agent)?,
+        routing: resolve_routing(&workflow.front_matter.routing, env)?,
+    };
+    let mut extensions = WorkflowExtensions {
+        openhands: resolve_openhands(&workflow.front_matter.openhands, base_dir, env)?,
+    };
+    apply_selected_model_to_openhands(&config.routing, &mut extensions.openhands);
+
     Ok(ResolvedWorkflow {
-        config: WorkflowConfig {
-            tracker: resolve_tracker(&workflow.front_matter.tracker, env)?,
-            polling: resolve_polling(&workflow.front_matter.polling)?,
-            workspace: resolve_workspace(&workflow.front_matter.workspace, base_dir, env)?,
-            hooks: resolve_hooks(&workflow.front_matter.hooks)?,
-            agent: resolve_agent(&workflow.front_matter.agent)?,
-        },
-        extensions: WorkflowExtensions {
-            openhands: resolve_openhands(&workflow.front_matter.openhands, base_dir, env)?,
-        },
+        config,
+        extensions,
         prompt_template: workflow.prompt_template.clone(),
     })
+}
+
+fn apply_selected_model_to_openhands(routing: &RoutingConfig, openhands: &mut OpenHandsConfig) {
+    if routing.harness != DEFAULT_ROUTING_HARNESS {
+        return;
+    }
+    let Some(model) = routing.model.as_ref() else {
+        return;
+    };
+    if let Some(llm) = openhands.conversation.agent.llm.as_mut() {
+        llm.model = Some(model.clone());
+    }
 }
 
 fn resolve_tracker<E: Environment>(
@@ -167,6 +186,114 @@ fn resolve_agent(agent: &AgentFrontMatter) -> Result<AgentConfig, WorkflowConfig
             agent.max_concurrent_agents_by_state.as_ref(),
         )?,
     })
+}
+
+fn resolve_routing<E: Environment>(
+    routing: &RoutingFrontMatter,
+    env: &E,
+) -> Result<RoutingConfig, WorkflowConfigError> {
+    let harness_env = resolve_string_or_default(
+        routing.harness_env.as_deref(),
+        env,
+        "routing.harness_env",
+        DEFAULT_ROUTING_HARNESS_ENV,
+    )?;
+    validate_env_name(&harness_env, "routing.harness_env")?;
+
+    let model_env = resolve_string_or_default(
+        routing.model_env.as_deref(),
+        env,
+        "routing.model_env",
+        DEFAULT_ROUTING_MODEL_ENV,
+    )?;
+    validate_env_name(&model_env, "routing.model_env")?;
+
+    let model_profile_env = resolve_string_or_default(
+        routing.model_profile_env.as_deref(),
+        env,
+        "routing.model_profile_env",
+        DEFAULT_ROUTING_MODEL_PROFILE_ENV,
+    )?;
+    validate_env_name(&model_profile_env, "routing.model_profile_env")?;
+
+    let configured_harness = resolve_string_or_default(
+        routing.harness.as_deref(),
+        env,
+        "routing.harness",
+        DEFAULT_ROUTING_HARNESS,
+    )?;
+    let harness_override = env.get(&harness_env).and_then(normalize_optional_owned);
+    let harness_from_env = harness_override.is_some();
+    let harness = harness_override.unwrap_or(configured_harness);
+    validate_harness_kind(&harness, "routing.harness")?;
+
+    let configured_model = routing
+        .model
+        .as_deref()
+        .map(|value| resolve_string(value, env, "routing.model"))
+        .transpose()?
+        .and_then(normalize_optional_owned);
+    let model_override = env.get(&model_env).and_then(normalize_optional_owned);
+    let model_from_env = model_override.is_some();
+    let model = model_override.or(configured_model);
+
+    let configured_model_profile = routing
+        .model_profile
+        .as_deref()
+        .map(|value| resolve_string(value, env, "routing.model_profile"))
+        .transpose()?
+        .and_then(normalize_optional_owned);
+    let model_profile_override = env
+        .get(&model_profile_env)
+        .and_then(normalize_optional_owned);
+    let model_profile_from_env = model_profile_override.is_some();
+    let model_profile = model_profile_override.or(configured_model_profile);
+
+    Ok(RoutingConfig {
+        harness,
+        model,
+        model_profile,
+        harness_env,
+        model_env,
+        model_profile_env,
+        harness_from_env,
+        model_from_env,
+        model_profile_from_env,
+        dry_run: false,
+    })
+}
+
+fn validate_harness_kind(value: &str, field: &'static str) -> Result<(), WorkflowConfigError> {
+    if HarnessKind::parse(value).is_some() {
+        Ok(())
+    } else {
+        Err(WorkflowConfigError::InvalidField {
+            field,
+            message: format!(
+                "must be one of `{}`",
+                HarnessKind::supported_names().join("`, `")
+            ),
+        })
+    }
+}
+
+fn validate_env_name(value: &str, field: &'static str) -> Result<(), WorkflowConfigError> {
+    let valid = !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+        && value
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase() || character == '_');
+    if valid {
+        Ok(())
+    } else {
+        Err(WorkflowConfigError::InvalidField {
+            field,
+            message: "must be an environment variable name such as OPENSYMPHONY_HARNESS".to_owned(),
+        })
+    }
 }
 
 fn resolve_stall_timeout(

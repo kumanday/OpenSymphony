@@ -123,6 +123,50 @@ pub struct HarnessHistoryCapability {
     pub preserve_unknown_events: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HarnessKind {
+    OpenHandsAgentServer,
+    CodexAppServer,
+    RustNative,
+}
+
+impl HarnessKind {
+    pub const ALL: [Self; 3] = [
+        Self::OpenHandsAgentServer,
+        Self::CodexAppServer,
+        Self::RustNative,
+    ];
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "openhands_agent_server" => Some(Self::OpenHandsAgentServer),
+            "codex_app_server" => Some(Self::CodexAppServer),
+            "rust_native" => Some(Self::RustNative),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenHandsAgentServer => "openhands_agent_server",
+            Self::CodexAppServer => "codex_app_server",
+            Self::RustNative => "rust_native",
+        }
+    }
+
+    pub fn supported_names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|kind| kind.as_str()).collect()
+    }
+
+    pub fn capability(self) -> HarnessCapability {
+        match self {
+            Self::OpenHandsAgentServer => HarnessCapability::openhands_agent_server(),
+            Self::CodexAppServer => HarnessCapability::codex_app_server_local(),
+            Self::RustNative => HarnessCapability::rust_native_future(),
+        }
+    }
+}
+
 impl HarnessCapability {
     pub fn openhands_agent_server() -> Self {
         Self {
@@ -206,8 +250,8 @@ impl HarnessCapability {
                 cancel: true,
                 pause: false,
                 resume: false,
-                approve: true,
-                reject: true,
+                approve: false,
+                reject: false,
                 comment: false,
             },
             event_streams: HarnessEventStreamCapability {
@@ -256,12 +300,12 @@ impl HarnessCapability {
                 preserve_unknown_events: true,
             },
             notes: vec![
-                "Supported local adapter path using `codex app-server --stdio`.".into(),
+                "Supported local adapter path using `codex --dangerously-bypass-hook-trust app-server --stdio` with installed-schema validation.".into(),
                 "Requires a compatible Codex CLI with ChatGPT login available to the operator-owned Codex home.".into(),
             ],
             feature_gaps: vec![
-                "`opensymphony run` dispatch still defaults to OpenHands until COE-429 wires cross-harness runtime routing."
-                    .into(),
+                "Codex issue execution remains local-stdio alpha and requires explicit harness selection.".into(),
+                "Approval decision forwarding to Codex is not wired for the local stdio adapter yet.".into(),
                 "Codex history fetch and reconnect replay cursors are not implemented for the local stdio adapter."
                     .into(),
                 "Codex stdio reconciliation after readiness is not implemented; events are consumed from the live JSON-RPC stream."

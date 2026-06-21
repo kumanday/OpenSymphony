@@ -29,6 +29,10 @@ pub const DEFAULT_OPENHANDS_AUTH_MODE: &str = "auto";
 pub const DEFAULT_OPENHANDS_QUERY_PARAM_NAME: &str = "session_api_key";
 pub const DEFAULT_OPENHANDS_LLM_MODEL: &str = "openai/gpt-5.4";
 pub const DEFAULT_OPENHANDS_LLM_CREDENTIAL_MODE: &str = "api_key";
+pub const DEFAULT_ROUTING_HARNESS: &str = "openhands_agent_server";
+pub const DEFAULT_ROUTING_HARNESS_ENV: &str = "OPENSYMPHONY_HARNESS";
+pub const DEFAULT_ROUTING_MODEL_ENV: &str = "OPENSYMPHONY_MODEL";
+pub const DEFAULT_ROUTING_MODEL_PROFILE_ENV: &str = "OPENSYMPHONY_MODEL_PROFILE";
 pub const OPENHANDS_LLM_CREDENTIAL_MODE_API_KEY: &str = "api_key";
 pub const OPENHANDS_LLM_CREDENTIAL_MODE_OPENAI_SUBSCRIPTION: &str = "openai_subscription";
 pub const DEFAULT_OPENHANDS_CONDENSER_MAX_SIZE: u64 = 240;
@@ -54,6 +58,8 @@ pub struct WorkflowFrontMatter {
     pub agent: AgentFrontMatter,
     #[serde(default)]
     pub openhands: OpenHandsFrontMatter,
+    #[serde(default)]
+    pub routing: RoutingFrontMatter,
     #[serde(default)]
     pub codex: Option<BTreeMap<String, serde_yaml::Value>>,
     #[serde(default)]
@@ -103,6 +109,17 @@ pub struct AgentFrontMatter {
     pub max_retry_backoff_ms: Option<IntegerLike>,
     pub stall_timeout_ms: Option<IntegerLike>,
     pub max_concurrent_agents_by_state: Option<BTreeMap<String, IntegerLike>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingFrontMatter {
+    pub harness: Option<String>,
+    pub model: Option<String>,
+    pub model_profile: Option<String>,
+    pub harness_env: Option<String>,
+    pub model_env: Option<String>,
+    pub model_profile_env: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -244,6 +261,7 @@ pub struct WorkflowConfig {
     pub workspace: WorkspaceConfig,
     pub hooks: HooksConfig,
     pub agent: AgentConfig,
+    pub routing: RoutingConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -292,6 +310,20 @@ pub struct AgentConfig {
     pub max_retry_backoff_ms: u64,
     pub stall_timeout_ms: Option<u64>,
     pub max_concurrent_agents_by_state: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingConfig {
+    pub harness: String,
+    pub model: Option<String>,
+    pub model_profile: Option<String>,
+    pub harness_env: String,
+    pub model_env: String,
+    pub model_profile_env: String,
+    pub harness_from_env: bool,
+    pub model_from_env: bool,
+    pub model_profile_from_env: bool,
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

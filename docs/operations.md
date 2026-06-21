@@ -179,6 +179,16 @@ cargo test --test update
 ./scripts/smoke_local.sh
 ```
 
+Dependency audit notes:
+
+- COE-429 adds `jsonschema = 0.46.5` as the runtime validator for installed
+  Codex app-server JSON Schema payload checks. Release provenance was checked
+  against the `Cargo.lock` crates.io source/checksum entries for `jsonschema`
+  and its called-out transitive crates (`fancy-regex`, `fluent-uri`, and
+  `fraction`), the dependency tree was reviewed with `cargo tree -p jsonschema
+  --depth 2`, and `cargo audit` exited successfully against the current lockfile
+  on 2026-06-21. Re-run those checks when upgrading `jsonschema`.
+
 Useful runtime checks:
 
 ```bash
@@ -266,11 +276,31 @@ workspaces, logs, workflow files, Linear comments, or browser payloads. Gateway
 readiness checks are cached briefly and have bounded per-command timeouts so
 operator UI polling cannot hang on a stalled local Codex command.
 
-The local Codex app-server harness path uses `codex app-server --stdio` and is
-advertised as available when clients read `/api/v1/capabilities`. Unsupported
-or logged-out Codex installations must fail with the readiness guidance above
-instead of partially starting an issue. Loopback WebSocket and hosted Codex
-worker pools remain non-production paths.
+The local Codex app-server harness path launches
+`codex --dangerously-bypass-hook-trust app-server --stdio` and is advertised as
+available when clients read `/api/v1/capabilities`. Before starting a run,
+OpenSymphony generates the JSON Schema from the installed Codex CLI and
+validates its full-automation `thread/start` and `turn/start` payloads. If the
+installed schema rejects those payloads, update Codex before running the Codex
+harness. Unsupported or logged-out Codex installations must fail with the
+readiness guidance above instead of partially starting an issue. Loopback
+WebSocket and hosted Codex worker pools remain non-production paths.
+
+For cross-harness route testing, run `opensymphony run --dry-run`.
+OpenSymphony will still poll Linear and prepare workspaces, but the worker
+returns a route preview instead of launching a model-backed harness. The preview
+is recorded as a `routing.decision` runtime event and includes the selected
+harness, model, and model profile. To force a local process override without
+editing workflow config, start the daemon with `OPENSYMPHONY_HARNESS`, and pass
+`OPENSYMPHONY_MODEL` / `OPENSYMPHONY_MODEL_PROFILE` when a launcher wants to use
+the active model profile selected in the desktop or web UI.
+
+The Codex local stdio route executes the configured Codex binary with
+`cwd == issue_workspace_path`. `OPENSYMPHONY_CODEX_BIN` is a trusted local
+operator override and must not be treated as a hosted or multi-tenant input.
+Approval requests are surfaced through normalized runtime events and shared
+approval-center data models, but approval decisions are not yet forwarded from
+the operator action plane into a live Codex stdio session in this alpha route.
 
 The alpha model configuration panel exposed by the web and desktop shells uses
 the shared model profile state store, but those entrypoints currently construct
