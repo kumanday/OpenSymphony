@@ -176,10 +176,9 @@ files.
 
 Workflow routing is configured with the alpha `routing` front-matter section.
 When omitted, `opensymphony run` keeps the default `openhands_agent_server`
-route. This is explicit workflow/operator selection, not automatic complexity
-scoring or per-operation model choice. A workflow can opt a task type into the
-local Codex app-server harness by requiring public harness capabilities and
-naming the model profile that supplies the credential/runtime source:
+route. A workflow can opt a task type into the local Codex app-server harness
+by requiring public harness capabilities and naming the model profile that the
+route should use:
 
 ```yaml
 routing:
@@ -199,13 +198,6 @@ routing:
       cost: subscription
       speed: local
 ```
-
-For the local Codex app-server route, `model_profile:
-codex-chatgpt-local-keychain` identifies the local Codex CLI ChatGPT login
-profile. The concrete model sent to `thread/start` comes from the already
-resolved workflow LLM model, such as `openhands.conversation.agent.llm.model:
-${LLM_MODEL}`. Literal non-profile `model_profile` values remain an alpha
-escape hatch for direct Codex app-server model IDs.
 
 Set `routing.dry_run: true` to preview route selection without launching a
 model-backed worker. Set `OPENSYMPHONY_HARNESS=codex_app_server` to force an

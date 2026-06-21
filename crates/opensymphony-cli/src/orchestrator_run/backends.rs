@@ -1098,18 +1098,17 @@ async fn try_run_codex_stdio_issue(
     let prompt = workflow
         .render_prompt(issue, run.attempt.map(|attempt| attempt.get()))
         .map_err(|source| format!("failed to render workflow prompt for Codex route: {source}"))?;
-    let model = codex_model_for_route(route, workflow);
+    let model = codex_model_from_route(route);
     let start = adapter
         .start_issue_request(
             &mut session,
             workspace.workspace_path().display().to_string(),
-            model.clone(),
+            model,
             prompt,
             serde_json::json!({
                 "opensymphonyRoute": {
                     "harness": &route.harness_kind,
                     "modelProfile": &route.model_profile,
-                    "model": &model,
                     "reason": &route.reason,
                 }
             }),
@@ -1193,23 +1192,11 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-fn codex_model_for_route(
+fn codex_model_from_route(
     route: &crate::opensymphony_orchestrator::HarnessRouteDecision,
-    workflow: &ResolvedWorkflow,
 ) -> String {
     match route.model_profile.as_deref() {
-        Some("codex-chatgpt-local-keychain") | None => workflow
-            .extensions
-            .openhands
-            .conversation
-            .agent
-            .llm
-            .as_ref()
-            .and_then(|llm| llm.model.as_deref())
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-            .unwrap_or("openai/chatgpt-codex-subscription")
-            .into(),
+        Some("codex-chatgpt-local-keychain") | None => "openai/chatgpt-codex-subscription".into(),
         Some(model_or_profile) => model_or_profile.into(),
     }
 }
@@ -1762,32 +1749,6 @@ mod tests {
         assert!(!error.contains("stderr-line-4"));
         assert!(error.contains("stderr-line-5"));
         assert!(error.contains("stderr-line-24"));
-    }
-
-    #[test]
-    fn codex_local_profile_uses_resolved_workflow_model() {
-        let tempdir = TempDir::new().expect("tempdir should exist");
-        let workspace_root = tempdir.path().join("workspaces");
-        let source = format!(
-            "---\ntracker:\n  kind: linear\n  endpoint: http://127.0.0.1:3001/graphql\n  api_key: test-linear-key\n  project_slug: sample-project\n  active_states:\n    - In Progress\n  terminal_states:\n    - Done\nworkspace:\n  root: {}\nopenhands:\n  transport:\n    base_url: http://127.0.0.1:1\n  conversation:\n    agent:\n      llm:\n        model: gpt-5-codex-from-workflow\n---\n\n# Test Workflow\n",
-            workspace_root.display()
-        );
-        let workflow = WorkflowDefinition::parse(&source)
-            .expect("workflow should parse")
-            .resolve_with_process_env(tempdir.path())
-            .expect("workflow should resolve");
-        let mut route = codex_test_route(false);
-
-        assert_eq!(
-            codex_model_for_route(&route, &workflow),
-            "gpt-5-codex-from-workflow"
-        );
-
-        route.model_profile = Some("gpt-5-codex-literal".into());
-        assert_eq!(
-            codex_model_for_route(&route, &workflow),
-            "gpt-5-codex-literal"
-        );
     }
 
     #[test]

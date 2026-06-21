@@ -341,11 +341,8 @@ subscription credentials. The current mapping is:
   reference for desktop/local Codex app-server use.
 - `hosted-openai-subscription-broker`: hosted broker reference for future
   hosted Codex app-server or OpenHands subscription use.
-- for the local Codex CLI login profile, the concrete `thread/start` model is
-  taken from the resolved workflow LLM model, including `${LLM_MODEL}` when the
-  workflow uses that environment indirection.
-- literal non-profile model references are converted into Codex request model
-  values where the app-server supports them.
+- literal model references are converted into Codex config overrides where the
+  app-server supports them.
 
 Gaps:
 
@@ -364,10 +361,8 @@ Capability discovery reports the local adapter contract and stdio runtime
 surface. `opensymphony run` now attaches an alpha route decision to each worker
 launch. Workflow `routing.rules` or `OPENSYMPHONY_HARNESS=codex_app_server`
 can select the local Codex app-server stdio worker when capability checks pass.
-This selection is explicit policy matching for task type, requested harness,
-and required public capabilities; it does not infer task complexity or
-automatically switch models inside a task. Set `routing.dry_run: true` to emit
-a route preview without launching a model-backed Codex session.
+Set `routing.dry_run: true` to emit a route preview without launching a
+model-backed Codex session.
 
 The local stdio worker launches the Codex binary from `OPENSYMPHONY_CODEX_BIN`,
 or `codex` when unset, inside the issue workspace path. This remains a
