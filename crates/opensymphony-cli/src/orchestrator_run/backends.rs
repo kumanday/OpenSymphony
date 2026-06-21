@@ -130,6 +130,7 @@ pub(super) struct RuntimeWorkerBackend {
     workspace_manager: Arc<WorkspaceManager>,
     runner_config: IssueSessionRunnerConfig,
     workpad_comment_source: Option<Arc<dyn WorkpadCommentSource>>,
+    codex_bin: String,
     launch_timeout: Duration,
     updates_tx: mpsc::UnboundedSender<WorkerUpdate>,
     updates_rx: mpsc::UnboundedReceiver<WorkerUpdate>,
@@ -655,6 +656,7 @@ impl RuntimeWorkerBackend {
             runner_config: IssueSessionRunnerConfig::from_workflow(&workflow)
                 .with_memory(memory_env.as_ref().map(memory_access_from_runtime)),
             workpad_comment_source,
+            codex_bin: std::env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
             launch_timeout: DEFAULT_WORKER_LAUNCH_TIMEOUT,
             updates_tx,
             updates_rx,
@@ -698,6 +700,7 @@ impl RuntimeWorkerBackend {
         let run = request.run.clone();
         let route = request.route.clone();
         let pending_route = route.clone();
+        let codex_bin = self.codex_bin.clone();
         let issue = request.issue.clone();
         let launch_worker_id = worker_id.clone();
         let handle = tokio::spawn(async move {
@@ -757,6 +760,7 @@ impl RuntimeWorkerBackend {
                     &issue,
                     &run,
                     &workflow,
+                    &codex_bin,
                     &updates_tx,
                     &mut launch_tx,
                 )
@@ -965,11 +969,12 @@ async fn run_codex_stdio_issue(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
+    codex_bin: &str,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
 ) -> WorkerOutcomeRecord {
     match try_run_codex_stdio_issue(
-        route, workspace, issue, run, workflow, updates_tx, launch_tx,
+        route, workspace, issue, run, workflow, codex_bin, updates_tx, launch_tx,
     )
     .await
     {
@@ -1006,12 +1011,12 @@ async fn try_run_codex_stdio_issue(
     issue: &NormalizedIssue,
     run: &crate::opensymphony_domain::RunAttempt,
     workflow: &ResolvedWorkflow,
+    codex_bin: &str,
     updates_tx: &mpsc::UnboundedSender<WorkerUpdate>,
     launch_tx: &mut Option<oneshot::Sender<LaunchReport>>,
 ) -> Result<(WorkerOutcomeRecord, RunStatus), String> {
-    let codex = std::env::var("OPENSYMPHONY_CODEX_BIN").unwrap_or_else(|_| "codex".into());
     let adapter =
-        CodexAppServerAdapter::local_stdio(&codex, "opensymphony", env!("CARGO_PKG_VERSION"));
+        CodexAppServerAdapter::local_stdio(codex_bin, "opensymphony", env!("CARGO_PKG_VERSION"));
     let (program, args) = adapter.launch().to_command();
     let mut child = Command::new(&program)
         .args(args)
@@ -1157,10 +1162,26 @@ async fn read_response_line(
         let value: serde_json::Value = serde_json::from_str(&line)
             .map_err(|source| format!("invalid Codex JSON: {source}"))?;
         if value.get("id").and_then(serde_json::Value::as_u64) == Some(request_id) {
+            reject_codex_json_rpc_error(request_id, &value)?;
             return Ok(value);
         }
         emit_codex_notification(updates_tx, worker_id, value);
     }
+}
+
+fn reject_codex_json_rpc_error(request_id: u64, value: &serde_json::Value) -> Result<(), String> {
+    let Some(error) = value.get("error") else {
+        return Ok(());
+    };
+    let detail = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| error.as_str())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| error.to_string());
+    Err(format!(
+        "Codex response id {request_id} returned JSON-RPC error: {detail}"
+    ))
 }
 
 async fn read_until_codex_terminal(
@@ -1512,6 +1533,25 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn codex_json_rpc_error_response_is_launch_failure() {
+        let error = reject_codex_json_rpc_error(
+            4,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "error": {
+                    "code": -32000,
+                    "message": "not logged in"
+                }
+            }),
+        )
+        .expect_err("JSON-RPC error envelopes must fail the worker launch path");
+
+        assert!(error.contains("response id 4"));
+        assert!(error.contains("not logged in"));
+    }
 
     #[test]
     fn transport_port_override_reports_missing_port_separately() {
