@@ -1477,7 +1477,7 @@ Visible [[real-target|Real Target]].
 ```
 
 <!-- [[commented]] -->
-\[[escaped]]
+\[\[escaped\]\]
 "#,
         );
 
