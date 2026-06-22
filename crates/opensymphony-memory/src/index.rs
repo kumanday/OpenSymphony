@@ -1,3 +1,5 @@
+const UNDATED_LOG_DATE: &str = "1970-01-01";
+
 fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
     let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
@@ -478,7 +480,7 @@ fn issue_log_date(issue: &IndexedIssue) -> String {
         .as_deref()
         .and_then(iso_date_prefix)
         .or_else(|| iso_date_prefix(&issue.captured_at))
-        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| UNDATED_LOG_DATE.to_string())
 }
 
 fn iso_date_prefix(value: &str) -> Option<String> {
@@ -851,4 +853,32 @@ fn all_known_areas(config: &MemoryConfig, issues: &[IndexedIssue]) -> Vec<AreaCo
         .into_iter()
         .map(|slug| config.area_or_default(&slug))
         .collect()
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    #[test]
+    fn issue_log_date_uses_stable_sentinel_for_malformed_timestamps() {
+        let issue = IndexedIssue {
+            issue_key: "COE-999".to_string(),
+            title: "Malformed timestamps".to_string(),
+            state: None,
+            milestone: None,
+            labels: Vec::new(),
+            areas: Vec::new(),
+            capsule_path: PathBuf::from(".opensymphony/memory/issues/COE-999.md"),
+            visibility: MemoryVisibility::Private,
+            source_hash: String::new(),
+            warning_count: 0,
+            docs_sync_status: "pending".to_string(),
+            completion_time: Some("not-a-date".to_string()),
+            captured_at: "also-not-a-date".to_string(),
+            changed_files: Vec::new(),
+            body: String::new(),
+        };
+
+        assert_eq!(issue_log_date(&issue), UNDATED_LOG_DATE);
+    }
 }

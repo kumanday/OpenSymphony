@@ -244,6 +244,7 @@ fn memory_admin_commands_can_use_mcp_endpoint() {
     let repo = TempDir::new().expect("temp repo should exist");
     let server = TinyGraphqlServer::start([
         r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"findingCount":0,"findings":[]}}"#,
+        r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"findingCount":0,"findings":[]}}"#,
     ]);
 
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
@@ -255,24 +256,32 @@ fn memory_admin_commands_can_use_mcp_endpoint() {
         .expect("command should run");
 
     assert_success(&output, "remote memory lint");
+    let okf_output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["memory", "lint", "--okf", "fixtures/okf-migration"])
+        .current_dir(repo.path())
+        .env("OPENSYMPHONY_MEMORY_ENDPOINT", &server.base_url)
+        .env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN", "admin-token")
+        .output()
+        .expect("command should run");
+
+    assert_success(&okf_output, "remote okf memory lint");
     let requests = server.requests();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(requests[0].contains("\"name\":\"memory.lint\""));
     assert!(requests[0].contains("\"publicDocs\":true"));
+    assert!(requests[1].contains("\"name\":\"memory.lint\""));
+    assert!(requests[1].contains("\"okf\":true"));
+    assert!(requests[1].contains("\"bundleRoot\":\"fixtures/okf-migration\""));
 }
 
 #[test]
 fn memory_lint_okf_reports_fixture_diagnostics() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
-    let fixture = okf_fixture("okf-migration");
+    let fixture = repo.path().join("fixtures/okf-migration");
+    copy_dir_recursive(&okf_fixture("okf-migration"), &fixture);
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
-        .args([
-            "memory",
-            "lint",
-            "--okf",
-            fixture.to_str().expect("fixture path should be utf-8"),
-        ])
+        .args(["memory", "lint", "--okf", "fixtures/okf-migration"])
         .current_dir(repo.path())
         .output()
         .expect("command should run");
@@ -961,6 +970,24 @@ fn okf_fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("crates/opensymphony-memory/tests/fixtures")
         .join(name)
+}
+
+fn copy_dir_recursive(source: &std::path::Path, destination: &std::path::Path) {
+    fs::create_dir_all(destination).expect("destination directory should be created");
+    for entry in fs::read_dir(source).expect("source directory should be readable") {
+        let entry = entry.expect("source entry should be readable");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .expect("source entry type should be readable")
+            .is_dir()
+        {
+            copy_dir_recursive(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("fixture file should copy");
+        }
+    }
 }
 
 fn write_memory_config(repo: &std::path::Path) {

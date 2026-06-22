@@ -288,10 +288,9 @@ fn split_okf_frontmatter(path: &Path, contents: &str) -> Result<(String, String)
         .map(|index| index + 1)
         .unwrap_or(normalized.len());
     if normalized[..first_end].trim() != "---" {
-        return Err(MemoryError::InvalidInput(format!(
-            "{} lacks OKF YAML frontmatter",
-            path.display()
-        )));
+        return Err(MemoryError::OkfMissingFrontmatter {
+            path: path.to_path_buf(),
+        });
     };
 
     let mut offset = first_end;
@@ -313,10 +312,9 @@ fn split_okf_frontmatter(path: &Path, contents: &str) -> Result<(String, String)
         offset = next_end;
     }
 
-    Err(MemoryError::InvalidInput(format!(
-        "{} has unterminated OKF YAML frontmatter",
-        path.display()
-    )))
+    Err(MemoryError::OkfUnterminatedFrontmatter {
+        path: path.to_path_buf(),
+    })
 }
 
 fn collect_okf_markdown_files(
@@ -710,13 +708,12 @@ fn has_okf_frontmatter(contents: &str) -> bool {
 }
 
 fn okf_frontmatter_lint_message(error: &MemoryError) -> String {
-    let message = error.to_string();
-    if message.contains("lacks OKF YAML frontmatter") {
-        "lacks OKF YAML frontmatter".to_string()
-    } else if message.contains("has unterminated OKF YAML frontmatter") {
-        "has unterminated OKF YAML frontmatter".to_string()
-    } else {
-        message
+    match error {
+        MemoryError::OkfMissingFrontmatter { .. } => "lacks OKF YAML frontmatter".to_string(),
+        MemoryError::OkfUnterminatedFrontmatter { .. } => {
+            "has unterminated OKF YAML frontmatter".to_string()
+        }
+        _ => error.to_string(),
     }
 }
 
@@ -830,18 +827,37 @@ fn normalized_wiki_link_id(target: &str) -> String {
 
 fn extract_wiki_links(body: &str) -> Vec<String> {
     let mut links = Vec::new();
-    let mut offset = 0;
-    while let Some(start) = body[offset..].find("[[") {
-        let content_start = offset + start + 2;
-        let Some(end) = body[content_start..].find("]]") else {
+    let mut index = 0;
+    while index < body.len() {
+        let Some((current, next)) = char_at(body, index) else {
             break;
         };
-        let content_end = content_start + end;
-        let link = body[content_start..content_end].trim();
-        if !link.is_empty() {
-            links.push(link.to_string());
+        if body[index..].starts_with("<!--") {
+            index = skip_html_comment(body, index);
+            continue;
         }
-        offset = content_end + 2;
+        if is_fenced_code_start(body, index) {
+            index = skip_fenced_code_block(body, index);
+            continue;
+        }
+        match current {
+            '`' => index = skip_code_span(body, index),
+            '\\' => index = skip_escaped_char(body, next),
+            '[' if body[index..].starts_with("[[") => {
+                let content_start = index + 2;
+                let Some(end) = body[content_start..].find("]]") else {
+                    index = next;
+                    continue;
+                };
+                let content_end = content_start + end;
+                let link = body[content_start..content_end].trim();
+                if !link.is_empty() {
+                    links.push(link.to_string());
+                }
+                index = content_end + 2;
+            }
+            _ => index = next,
+        }
     }
     links
 }
@@ -1442,4 +1458,29 @@ fn reference_link_targets(body: &str) -> BTreeMap<String, String> {
 
 fn normalize_reference_label(label: &str) -> String {
     label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+#[cfg(test)]
+mod okf_tests {
+    use super::*;
+
+    #[test]
+    fn wiki_link_extraction_ignores_code_and_comments() {
+        let links = extract_wiki_links(
+            r#"
+Visible [[real-target|Real Target]].
+
+`[[inline-code]]`
+
+```text
+[[fenced-code]]
+```
+
+<!-- [[commented]] -->
+\[[escaped]]
+"#,
+        );
+
+        assert_eq!(links, vec!["real-target|Real Target"]);
+    }
 }

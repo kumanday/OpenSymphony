@@ -50,6 +50,10 @@ pub enum MemoryError {
         #[source]
         source: serde_yaml::Error,
     },
+    #[error("{path} lacks OKF YAML frontmatter")]
+    OkfMissingFrontmatter { path: PathBuf },
+    #[error("{path} has unterminated OKF YAML frontmatter")]
+    OkfUnterminatedFrontmatter { path: PathBuf },
     #[error("failed to encode JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed to update DuckDB index {path}: {source}")]

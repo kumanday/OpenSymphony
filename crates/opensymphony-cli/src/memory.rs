@@ -1209,13 +1209,9 @@ fn run_lint(config: &MemoryConfig, args: LintArgs) -> Result<(), MemoryError> {
     let report = if args.okf {
         let bundle_root = args
             .bundle
-            .map(|path| {
-                if path.is_absolute() {
-                    path
-                } else {
-                    config.repo_root.join(path)
-                }
-            })
+            .as_deref()
+            .map(|path| repo_existing_path_from_path(config, path))
+            .transpose()?
             .unwrap_or_else(|| config.memory_root.clone());
         lint_okf_bundle(&bundle_root, args.public_docs)?
     } else {
@@ -1926,9 +1922,15 @@ fn paths_for_json(config: &MemoryConfig, paths: &[PathBuf]) -> Vec<String> {
 }
 
 fn repo_existing_path(config: &MemoryConfig, value: &str) -> Result<PathBuf, MemoryError> {
-    let path = PathBuf::from(value);
+    repo_existing_path_from_path(config, Path::new(value))
+}
+
+fn repo_existing_path_from_path(
+    config: &MemoryConfig,
+    path: &Path,
+) -> Result<PathBuf, MemoryError> {
     let candidate = if path.is_absolute() {
-        path
+        path.to_path_buf()
     } else {
         config.repo_root.join(path)
     };
