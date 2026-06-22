@@ -74,6 +74,8 @@ pub enum MemoryError {
     InvalidInput(String),
     #[error("{path} is outside the repository root {repo_root}")]
     PathOutsideRepo { path: PathBuf, repo_root: PathBuf },
+    #[error("{path} is outside the OKF bundle root {bundle_root}")]
+    PathOutsideBundle { path: PathBuf, bundle_root: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

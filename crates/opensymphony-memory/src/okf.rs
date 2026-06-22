@@ -354,9 +354,9 @@ fn collect_okf_markdown_files(
 fn bundle_relative_path(bundle_root: &Path, path: &Path) -> Result<PathBuf, MemoryError> {
     path.strip_prefix(bundle_root)
         .map(Path::to_path_buf)
-        .map_err(|_| MemoryError::PathOutsideRepo {
+        .map_err(|_| MemoryError::PathOutsideBundle {
             path: path.to_path_buf(),
-            repo_root: bundle_root.to_path_buf(),
+            bundle_root: bundle_root.to_path_buf(),
         })
 }
 
@@ -532,7 +532,7 @@ fn lint_okf_concept(
             next_command: None,
         });
     }
-    if contains_private_memory_link(contents) {
+    if contains_private_memory_link_in_markdown(contents) {
         findings.push(LintFinding {
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
@@ -803,26 +803,48 @@ fn normalize_okf_relative_path(path: &Path) -> Option<PathBuf> {
 
 fn normalized_markdown_link_id(target: &str) -> Option<String> {
     let target = local_markdown_target(target)?;
-    Some(
-        target
-            .trim_start_matches('/')
-            .trim_end_matches(".md")
-            .trim_end_matches(".MD")
-            .to_ascii_lowercase(),
-    )
+    Some(normalize_okf_link_id(target))
 }
 
 fn normalized_wiki_link_id(target: &str) -> String {
+    normalize_okf_link_id(target.split('|').next().unwrap_or(target))
+}
+
+fn normalize_okf_link_id(target: &str) -> String {
     target
-        .split('|')
-        .next()
-        .unwrap_or(target)
         .trim()
         .trim_start_matches('/')
         .trim_end_matches(".md")
         .trim_end_matches(".MD")
         .replace(' ', "-")
         .to_ascii_lowercase()
+}
+
+fn contains_private_memory_link_in_markdown(contents: &str) -> bool {
+    let mut visible = String::with_capacity(contents.len());
+    let mut index = 0;
+    while index < contents.len() {
+        let Some((current, next)) = char_at(contents, index) else {
+            break;
+        };
+        if contents[index..].starts_with("<!--") {
+            index = skip_html_comment(contents, index);
+            continue;
+        }
+        if is_fenced_code_start(contents, index) {
+            index = skip_fenced_code_block(contents, index);
+            continue;
+        }
+        match current {
+            '`' => index = skip_code_span(contents, index),
+            '\\' => index = skip_escaped_char(contents, next),
+            _ => {
+                visible.push(current);
+                index = next;
+            }
+        }
+    }
+    contains_private_memory_link(&visible)
 }
 
 fn extract_wiki_links(body: &str) -> Vec<String> {
@@ -1425,7 +1447,26 @@ fn normalize_link_target(raw: &str) -> Option<String> {
     {
         return Some(target.to_string()).filter(|target| !target.is_empty());
     }
+    if let Some(target) = markdown_target_before_optional_title(raw) {
+        return Some(target);
+    }
     raw.split_whitespace().next().map(str::to_string)
+}
+
+fn markdown_target_before_optional_title(raw: &str) -> Option<String> {
+    let mut boundary = raw.len();
+    for (index, character) in raw.char_indices() {
+        if character.is_whitespace() && raw[..index].to_ascii_lowercase().contains(".md") {
+            boundary = index;
+            break;
+        }
+    }
+    let candidate = raw[..boundary].trim();
+    candidate
+        .to_ascii_lowercase()
+        .contains(".md")
+        .then(|| candidate.to_string())
+        .filter(|candidate| !candidate.is_empty())
 }
 
 fn parse_autolink(value: &str, index: usize) -> Option<(String, usize)> {
@@ -1482,5 +1523,48 @@ Visible [[real-target|Real Target]].
         );
 
         assert_eq!(links, vec!["real-target|Real Target"]);
+    }
+
+    #[test]
+    fn wiki_link_matches_markdown_target_with_spaces() {
+        let frontmatter = OkfFrontmatter::new("issue-capsule").expect("frontmatter should build");
+        let concept = OkfConcept::new(
+            "issues/COE-123.md",
+            frontmatter,
+            "[Some Page](Some Page.md)\n[[Some Page]]\n",
+        )
+        .expect("concept should build");
+        let mut findings = Vec::new();
+
+        lint_okf_links(
+            Path::new("."),
+            &concept,
+            Path::new("issues/COE-123.md"),
+            &mut findings,
+        );
+
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.message.contains("wiki-only link")),
+            "matching Markdown link should suppress wiki-only warning: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn private_memory_link_scan_ignores_code_and_comments() {
+        let visible = "See .opensymphony/memory/issues/COE-123.md";
+        let hidden = r#"
+` .opensymphony/memory/issues/COE-123.md `
+
+```text
+.opensymphony/memory/issues/COE-123.md
+```
+
+<!-- .opensymphony/memory/issues/COE-123.md -->
+"#;
+
+        assert!(contains_private_memory_link_in_markdown(visible));
+        assert!(!contains_private_memory_link_in_markdown(hidden));
     }
 }

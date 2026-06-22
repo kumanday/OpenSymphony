@@ -9,4 +9,4 @@ timestamp: 2026-06-14T18:00:00Z
 
 # Private leak
 
-Do not publish `.opensymphony/memory/issues/COE-999.md`.
+Do not publish .opensymphony/memory/issues/COE-999.md.
