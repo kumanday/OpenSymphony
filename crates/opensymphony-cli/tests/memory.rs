@@ -262,6 +262,38 @@ fn memory_admin_commands_can_use_mcp_endpoint() {
 }
 
 #[test]
+fn memory_lint_okf_reports_fixture_diagnostics() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let fixture = okf_fixture("okf-migration");
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args([
+            "memory",
+            "lint",
+            "--okf",
+            fixture.to_str().expect("fixture path should be utf-8"),
+        ])
+        .current_dir(repo.path())
+        .output()
+        .expect("command should run");
+
+    assert_success(&output, "okf lint fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[error]"));
+    assert!(stdout.contains("frontmatter lacks non-empty `type`"));
+    assert!(stdout.contains("reserved log.md must use ISO date headings"));
+    assert!(stdout.contains("private export leak"));
+    assert!(stdout.contains("[warn]"));
+    assert!(stdout.contains("missing recommended field(s)"));
+    assert!(stdout.contains("broken Markdown link"));
+    assert!(stdout.contains("wiki-only link"));
+    assert!(stdout.contains("missing generated index.md"));
+    assert!(stdout.contains("citation section missing"));
+    assert!(stdout.contains("[info]"));
+    assert!(stdout.contains("legacy field(s) retained"));
+}
+
+#[test]
 fn memory_search_defaults_cross_repo_and_repo_filters_by_changed_paths() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
@@ -540,6 +572,38 @@ fn memory_lint_related_paths_and_from_memory_archive_cover_private_doc_links() {
     let stdout = String::from_utf8_lossy(&archive.stdout);
     assert!(stdout.contains("COE-123"));
     assert!(stdout.contains("eligible"));
+}
+
+#[test]
+fn memory_import_generates_date_grouped_log_newest_first() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    fs::write(repo.path().join("source.yaml"), sample_two_issue_source())
+        .expect("source evidence should write");
+
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "--issues",
+                "COE-123,COE-124",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture two dated issues",
+    );
+
+    let log = fs::read_to_string(repo.path().join(".opensymphony/memory/indexes/log.md"))
+        .expect("log should be readable");
+    assert!(log.contains("## 2026-06-14"));
+    assert!(log.contains("## 2026-06-13"));
+    assert!(
+        log.find("## 2026-06-14").expect("newer heading")
+            < log.find("## 2026-06-13").expect("older heading")
+    );
 }
 
 #[test]
@@ -891,6 +955,12 @@ fn assert_failure(output: &std::process::Output, label: &str) {
 fn write_memory_fixture(repo: &std::path::Path) {
     write_memory_config(repo);
     fs::write(repo.join("source.yaml"), sample_source()).expect("source evidence should write");
+}
+
+fn okf_fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/opensymphony-memory/tests/fixtures")
+        .join(name)
 }
 
 fn write_memory_config(repo: &std::path::Path) {
@@ -1413,6 +1483,7 @@ issues:
     url: https://linear.app/example/issue/COE-123
     description: First completed issue.
     state: Done
+    completed_at: 2026-06-13T17:00:00Z
     labels:
       - runtime
     linked_prs:
@@ -1422,6 +1493,7 @@ issues:
     url: https://linear.app/example/issue/COE-124
     description: Second completed issue.
     state: Done
+    completed_at: 2026-06-14T17:00:00Z
     labels:
       - runtime
     linked_prs:

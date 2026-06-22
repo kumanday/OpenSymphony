@@ -323,7 +323,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
 
     let mut statement = connection
         .prepare(
-            "SELECT issue_key, title, state, milestone, labels_json, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body FROM issues ORDER BY issue_key",
+            "SELECT issue_key, title, state, milestone, labels_json, capsule_path, visibility, source_hash, warning_count, docs_sync_status, completion_time, captured_at, body FROM issues ORDER BY issue_key",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -347,8 +347,10 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 source_hash: row.get(7)?,
                 warning_count: row.get::<_, i64>(8)? as usize,
                 docs_sync_status: row.get(9)?,
+                completion_time: row.get(10)?,
+                captured_at: row.get(11)?,
                 changed_files: Vec::new(),
-                body: row.get(10)?,
+                body: row.get(12)?,
             })
         })
         .map_err(|source| MemoryError::DuckDb {
@@ -444,7 +446,22 @@ fn write_markdown_indexes(config: &MemoryConfig) -> Result<Vec<PathBuf>, MemoryE
 
     let mut log = String::new();
     log.push_str("# OpenSymphony Memory Log\n\n");
-    for issue in issues.iter().rev() {
+    let mut log_entries = issues.iter().collect::<Vec<_>>();
+    log_entries.sort_by(|left, right| {
+        issue_log_date(right)
+            .cmp(&issue_log_date(left))
+            .then_with(|| right.issue_key.cmp(&left.issue_key))
+    });
+    let mut current_date = String::new();
+    for issue in log_entries {
+        let date = issue_log_date(issue);
+        if date != current_date {
+            if !current_date.is_empty() {
+                log.push('\n');
+            }
+            log.push_str(&format!("## {date}\n\n"));
+            current_date = date;
+        }
         log.push_str(&format!(
             "- {}: {} [{}]\n",
             issue.issue_key, issue.title, issue.docs_sync_status
@@ -453,6 +470,21 @@ fn write_markdown_indexes(config: &MemoryConfig) -> Result<Vec<PathBuf>, MemoryE
     write_file(&log_path, &log)?;
 
     Ok(vec![index_path, log_path])
+}
+
+fn issue_log_date(issue: &IndexedIssue) -> String {
+    issue
+        .completion_time
+        .as_deref()
+        .and_then(iso_date_prefix)
+        .or_else(|| iso_date_prefix(&issue.captured_at))
+        .unwrap_or_else(|| Utc::now().format("%Y-%m-%d").to_string())
+}
+
+fn iso_date_prefix(value: &str) -> Option<String> {
+    let candidate = value.get(..10)?;
+    NaiveDate::parse_from_str(candidate, "%Y-%m-%d").ok()?;
+    Some(candidate.to_string())
 }
 
 pub fn refresh_memory_index(config: &MemoryConfig) -> Result<MemoryReindexReport, MemoryError> {
