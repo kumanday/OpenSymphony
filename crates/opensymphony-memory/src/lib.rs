@@ -899,6 +899,34 @@ opensymphony:
     }
 
     #[test]
+    fn okf_partial_explicit_opensymphony_preserves_unrepresented_legacy_fields() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+area: legacy-area
+visibility: private
+issue: COE-123
+legacy_custom: keep-me
+opensymphony:
+  kind: curated_topic
+---
+
+# Runtime
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), original)
+            .expect("concept should parse");
+
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        assert!(rendered.contains("opensymphony:"));
+        assert!(rendered.contains("kind: curated_topic"));
+        assert!(rendered.contains("area: legacy-area"));
+        assert!(rendered.contains("visibility: private"));
+        assert!(rendered.contains("issue: COE-123"));
+        assert!(rendered.contains("legacy_custom: keep-me"));
+    }
+
+    #[test]
     fn okf_null_opensymphony_uses_legacy_source_of_truth() {
         let repo = TempDir::new().expect("temp repo");
         let original = r#"---
@@ -1021,6 +1049,12 @@ See [COE-123](/issues/COE-123.md).
         let contained = OkfConcept::new("./areas/./runtime.md", frontmatter.clone(), "")
             .expect("curdir components should normalize away");
         assert_eq!(contained.path.as_path(), Path::new("areas/runtime.md"));
+        let uppercase_markdown = OkfConcept::new("areas/runtime.MD", frontmatter.clone(), "")
+            .expect("markdown extension should be case-insensitive");
+        assert_eq!(
+            uppercase_markdown.path.as_path(),
+            Path::new("areas/runtime.MD")
+        );
         let not_markdown = OkfConcept::new("areas/runtime.txt", frontmatter, "");
         assert!(matches!(not_markdown, Err(MemoryError::InvalidInput(_))));
     }
@@ -1103,6 +1137,11 @@ type: topic-doc
 \[escaped](/ignored.md)
 [text [nested]](/issues/COE-123.md)
 [paren](/issues/COE-124.md?query=(ok))
+\![escaped image marker](/issues/COE-125.md)
+[reference link][runtime-ref]
+<https://example.com/okf>
+
+[runtime-ref]: /areas/runtime.md
 "#;
 
         let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), contents)
@@ -1114,7 +1153,13 @@ type: topic-doc
                 .iter()
                 .map(|link| link.target.as_str())
                 .collect::<Vec<_>>(),
-            vec!["/issues/COE-123.md", "/issues/COE-124.md?query=(ok)"]
+            vec![
+                "/issues/COE-123.md",
+                "/issues/COE-124.md?query=(ok)",
+                "/issues/COE-125.md",
+                "/areas/runtime.md",
+                "https://example.com/okf",
+            ]
         );
     }
 

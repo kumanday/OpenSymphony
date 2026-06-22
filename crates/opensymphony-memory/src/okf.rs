@@ -21,9 +21,11 @@ impl OkfBundlePath {
                 }
             }
         }
-        if normalized.as_os_str().is_empty()
-            || normalized.extension().and_then(OsStr::to_str) != Some("md")
-        {
+        let markdown_extension = normalized
+            .extension()
+            .and_then(OsStr::to_str)
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"));
+        if normalized.as_os_str().is_empty() || !markdown_extension {
             return Err(MemoryError::InvalidInput(format!(
                 "OKF concept path `{}` must name a Markdown file",
                 path.display()
@@ -208,8 +210,8 @@ pub fn render_okf_concept(concept: &OkfConcept) -> Result<String, MemoryError> {
     let mut frontmatter = concept.frontmatter.clone();
     if concept.derived_opensymphony {
         frontmatter.opensymphony = None;
-    } else if frontmatter.opensymphony.is_some() {
-        remove_legacy_opensymphony_fields(&mut frontmatter.extra);
+    } else if let Some(metadata) = frontmatter.opensymphony.clone() {
+        remove_represented_legacy_opensymphony_fields(&mut frontmatter.extra, &metadata);
     }
     let frontmatter =
         serde_yaml::to_string(&frontmatter).map_err(|source| MemoryError::ParseYaml {
@@ -332,25 +334,70 @@ fn legacy_frontmatter_to_opensymphony_metadata(
     metadata
 }
 
-fn remove_legacy_opensymphony_fields(extra: &mut BTreeMap<String, serde_yaml::Value>) {
-    for key in [
-        "area",
-        "areas",
-        "docs_sync",
-        "issue",
-        "linear_url",
-        "milestone",
-        "milestone_id",
-        "project",
-        "project_id",
-        "prs",
-        "repo",
-        "repository",
-        "source_refs",
-        "visibility",
-    ] {
-        extra.remove(key);
+fn remove_represented_legacy_opensymphony_fields(
+    extra: &mut BTreeMap<String, serde_yaml::Value>,
+    metadata: &OpenSymphonyOkfMetadata,
+) {
+    if metadata.visibility.is_some() {
+        extra.remove("visibility");
     }
+    if metadata.docs_sync.is_some() {
+        extra.remove("docs_sync");
+    }
+    if has_scope_ref(metadata, &KnowledgeScopeKind::WorkItem) {
+        extra.remove("issue");
+    }
+    if has_scope_ref(metadata, &KnowledgeScopeKind::Milestone) {
+        extra.remove("milestone");
+        extra.remove("milestone_id");
+    }
+    if has_scope_ref(metadata, &KnowledgeScopeKind::Project) {
+        extra.remove("project");
+        extra.remove("project_id");
+    }
+    if has_scope_ref(metadata, &KnowledgeScopeKind::Area) {
+        extra.remove("area");
+        extra.remove("areas");
+    }
+    if has_scope_ref(metadata, &KnowledgeScopeKind::Repository) {
+        extra.remove("repo");
+        extra.remove("repository");
+    }
+    if metadata
+        .source_refs
+        .iter()
+        .any(|source_ref| source_ref.kind == "linear_issue" && source_ref.url.is_some())
+    {
+        extra.remove("linear_url");
+    }
+
+    let legacy_refs = legacy_source_refs_from_extra(extra);
+    if !legacy_refs.is_empty()
+        && legacy_refs
+            .iter()
+            .all(|legacy_ref| source_ref_is_represented(metadata, legacy_ref))
+    {
+        extra.remove("prs");
+        extra.remove("source_refs");
+    }
+}
+
+fn has_scope_ref(metadata: &OpenSymphonyOkfMetadata, kind: &KnowledgeScopeKind) -> bool {
+    metadata
+        .scope_refs
+        .iter()
+        .any(|scope_ref| &scope_ref.kind == kind)
+}
+
+fn source_ref_is_represented(
+    metadata: &OpenSymphonyOkfMetadata,
+    legacy_ref: &MemorySourceRef,
+) -> bool {
+    metadata.source_refs.iter().any(|source_ref| {
+        source_ref.kind == legacy_ref.kind
+            && source_ref.id == legacy_ref.id
+            && (legacy_ref.url.is_none() || source_ref.url == legacy_ref.url)
+    })
 }
 
 fn legacy_visibility(frontmatter: &OkfFrontmatter) -> Option<MemoryVisibility> {
@@ -405,8 +452,14 @@ fn push_scope_ref(refs: &mut Vec<KnowledgeScope>, scope_ref: KnowledgeScope) {
 }
 
 fn legacy_source_refs(frontmatter: &OkfFrontmatter) -> Vec<MemorySourceRef> {
+    legacy_source_refs_from_extra(&frontmatter.extra)
+}
+
+fn legacy_source_refs_from_extra(
+    extra: &BTreeMap<String, serde_yaml::Value>,
+) -> Vec<MemorySourceRef> {
     let mut refs = Vec::new();
-    if let Some(serde_yaml::Value::Mapping(source_refs)) = frontmatter.extra.get("source_refs") {
+    if let Some(serde_yaml::Value::Mapping(source_refs)) = extra.get("source_refs") {
         for (key, value) in source_refs {
             let Some(kind) = value_as_string(key) else {
                 continue;
@@ -427,7 +480,7 @@ fn legacy_source_refs(frontmatter: &OkfFrontmatter) -> Vec<MemorySourceRef> {
             }
         }
     }
-    if let Some(serde_yaml::Value::Sequence(prs)) = frontmatter.extra.get("prs") {
+    if let Some(serde_yaml::Value::Sequence(prs)) = extra.get("prs") {
         for pr in prs {
             let serde_yaml::Value::Mapping(pr) = pr else {
                 continue;
@@ -510,6 +563,7 @@ fn push_source_ref(refs: &mut Vec<MemorySourceRef>, source_ref: MemorySourceRef)
 
 fn extract_markdown_links(body: &str) -> Vec<OkfLink> {
     let mut links = Vec::new();
+    let references = reference_link_targets(body);
     let mut index = 0;
     while index < body.len() {
         let Some((current, next)) = char_at(body, index) else {
@@ -518,26 +572,59 @@ fn extract_markdown_links(body: &str) -> Vec<OkfLink> {
         match current {
             '`' => index = skip_code_span(body, index),
             '\\' => index = skip_escaped_char(body, next),
+            '<' => {
+                let Some((target, after_target)) = parse_autolink(body, next) else {
+                    index = next;
+                    continue;
+                };
+                links.push(OkfLink {
+                    target,
+                    label: None,
+                });
+                index = after_target;
+            }
             '[' if !is_image_marker(body, index) => {
                 let Some((label, after_label)) = parse_link_label(body, next) else {
                     index = next;
                     continue;
                 };
-                let Some(('(', after_open)) = char_at(body, after_label) else {
-                    index = after_label;
-                    continue;
-                };
-                let Some((target, after_target)) = parse_link_target(body, after_open) else {
-                    index = after_open;
-                    continue;
-                };
-                if !target.is_empty() {
-                    links.push(OkfLink {
-                        target,
-                        label: Some(label).filter(|label| !label.is_empty()),
-                    });
+                match char_at(body, after_label) {
+                    Some(('(', after_open)) => {
+                        let Some((target, after_target)) = parse_link_target(body, after_open)
+                        else {
+                            index = after_open;
+                            continue;
+                        };
+                        if !target.is_empty() {
+                            links.push(OkfLink {
+                                target,
+                                label: Some(label).filter(|label| !label.is_empty()),
+                            });
+                        }
+                        index = after_target;
+                    }
+                    Some(('[', after_ref_open)) => {
+                        let Some((reference, after_reference)) =
+                            parse_link_label(body, after_ref_open)
+                        else {
+                            index = after_ref_open;
+                            continue;
+                        };
+                        let key = if reference.is_empty() {
+                            label.as_str()
+                        } else {
+                            reference.as_str()
+                        };
+                        if let Some(target) = references.get(&normalize_reference_label(key)) {
+                            links.push(OkfLink {
+                                target: target.clone(),
+                                label: Some(label).filter(|label| !label.is_empty()),
+                            });
+                        }
+                        index = after_reference;
+                    }
+                    _ => index = after_label,
                 }
-                index = after_target;
             }
             _ => index = next,
         }
@@ -578,7 +665,20 @@ fn skip_code_span(value: &str, index: usize) -> usize {
 }
 
 fn is_image_marker(value: &str, index: usize) -> bool {
-    value[..index].ends_with('!')
+    value[..index].ends_with('!') && !is_escaped(value, index - 1)
+}
+
+fn is_escaped(value: &str, index: usize) -> bool {
+    let mut slash_count = 0;
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        if value.as_bytes()[cursor] != b'\\' {
+            break;
+        }
+        slash_count += 1;
+    }
+    slash_count % 2 == 1
 }
 
 fn parse_link_label(value: &str, mut index: usize) -> Option<(String, usize)> {
@@ -642,4 +742,36 @@ fn normalize_link_target(raw: &str) -> Option<String> {
         return Some(target.to_string()).filter(|target| !target.is_empty());
     }
     raw.split_whitespace().next().map(str::to_string)
+}
+
+fn parse_autolink(value: &str, index: usize) -> Option<(String, usize)> {
+    let end = value[index..].find('>')? + index;
+    let target = &value[index..end];
+    if target.starts_with("http://") || target.starts_with("https://") {
+        Some((target.to_string(), end + 1))
+    } else {
+        None
+    }
+}
+
+fn reference_link_targets(body: &str) -> BTreeMap<String, String> {
+    let mut references = BTreeMap::new();
+    for line in body.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix('[') else {
+            continue;
+        };
+        let Some((label, target)) = rest.split_once("]:") else {
+            continue;
+        };
+        let Some(target) = normalize_link_target(target) else {
+            continue;
+        };
+        references.insert(normalize_reference_label(label), target);
+    }
+    references
+}
+
+fn normalize_reference_label(label: &str) -> String {
+    label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
