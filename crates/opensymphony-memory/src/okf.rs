@@ -1456,15 +1456,14 @@ fn normalize_link_target(raw: &str) -> Option<String> {
 fn markdown_target_before_optional_title(raw: &str) -> Option<String> {
     let mut boundary = raw.len();
     for (index, character) in raw.char_indices() {
-        if character.is_whitespace() && raw[..index].to_ascii_lowercase().contains(".md") {
+        if character.is_whitespace() && local_markdown_target(&raw[..index]).is_some() {
             boundary = index;
             break;
         }
     }
     let candidate = raw[..boundary].trim();
-    candidate
-        .to_ascii_lowercase()
-        .contains(".md")
+    local_markdown_target(candidate)
+        .is_some()
         .then(|| candidate.to_string())
         .filter(|candidate| !candidate.is_empty())
 }
@@ -1548,6 +1547,18 @@ Visible [[real-target|Real Target]].
                 .iter()
                 .any(|finding| finding.message.contains("wiki-only link")),
             "matching Markdown link should suppress wiki-only warning: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_target_with_optional_title_requires_md_suffix() {
+        assert_eq!(
+            markdown_target_before_optional_title("Some Page.md \"Title\"").as_deref(),
+            Some("Some Page.md")
+        );
+        assert_eq!(
+            markdown_target_before_optional_title("assets/image.md.png \"Title\""),
+            None
         );
     }
 
