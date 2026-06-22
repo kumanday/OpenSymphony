@@ -186,7 +186,7 @@ workflow.
 ```yaml
 routing:
   harness: codex_app_server
-  model: gpt-5-codex
+  model: gpt-5.5
   model_profile: codex-chatgpt-local-keychain
 ```
 

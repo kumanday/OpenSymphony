@@ -1,6 +1,6 @@
 # OpenSymphony
 
-OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) for issue tracking and uses [OpenHands](https://github.com/OpenHands/OpenHands) as the agent runtime.
+OpenSymphony is a Rust implementation of the [OpenAI Symphony](https://github.com/openai/symphony) specification for orchestrating AI coding agents. It connects to [Linear](https://linear.app) for issue tracking and can run issues through either the managed [OpenHands](https://github.com/OpenHands/OpenHands) agent-server or the local Codex app-server harness.
 
 ![OpenSymphony desktop app showing the task graph, run detail, changed files, and diff inspector](docs/images/opensymphony-app.png)
 
@@ -10,7 +10,7 @@ OpenSymphony automates software development workflows by:
 
 1. **Polling Linear** for issues in active states (Todo, In Progress, etc.)
 2. **Creating isolated workspaces** for each issue with lifecycle hooks
-3. **Dispatching AI agents** via OpenHands to work on issues autonomously
+3. **Dispatching AI agents** via OpenHands or Codex to work on issues autonomously
 4. **Managing retries, reconciliation, and cleanup** based on issue state changes
 5. **Providing a terminal UI** (FrankenTUI) for monitoring and operator control
 
@@ -21,6 +21,7 @@ OpenSymphony automates software development workflows by:
 - **Per-issue workspaces**: Deterministic, isolated directories with lifecycle hooks
 - **GraphQL-only Linear integration**: Agent-side Linear reads and writes through checked-in helper/query assets
 - **Conversation reuse policies**: Default per-issue reuse with optional fresh-per-run resets
+- **Harness selection**: Default OpenHands agent-server execution, plus local Codex app-server support for ChatGPT subscription-backed runs
 - **Local-first MVP**: Trusted-machine deployment with optional hosted mode
 
 OpenSymphony `1.0.0` is the compatibility boundary for the GraphQL-only Linear
@@ -37,9 +38,9 @@ not separately published crates.
 ### Prerequisites
 
 - Rust toolchain (stable)
-- Python 3.13.12 with `uv` for OpenHands server
 - Linear API key (for tracker integration)
-- LLM API key (any LiteLLM-compatible provider: OpenAI, Anthropic, Fireworks, etc.)
+- For OpenHands: Python 3.13.12 with `uv`, plus an LLM API key for an OpenAI-compatible/LiteLLM provider
+- For Codex: a Codex CLI with `app-server` support and a working ChatGPT login
 
 For platform-specific Rust and Python/`uv` setup steps, see [Prerequisites](docs/prerequisites.md).
 
@@ -49,10 +50,18 @@ For platform-specific Rust and Python/`uv` setup steps, see [Prerequisites](docs
 cargo install opensymphony
 ```
 
-OpenSymphony manages a local OpenHands agent-server; install the pinned runtime like this:
+For OpenHands runs, install the pinned local OpenHands agent-server runtime:
 
 ```bash
 opensymphony install openhands
+```
+
+For Codex runs, install or select a Codex CLI that supports app-server mode:
+
+```bash
+codex --version
+codex app-server --help
+codex login status
 ```
 
 To refresh the installed CLI later, run:
@@ -65,29 +74,58 @@ When you run `opensymphony update` from a target-repo root that already has
 `WORKFLOW.md` and `config.yaml`, it also refreshes the template-managed
 `.agents/skills/` tree without rerunning the full `init` flow.
 
-### Required Environment
+### Common Environment
 
-Before running `opensymphony run`, add the required tracker and OpenHands secret
-values to your shell startup file, such as `~/.zshrc` or `~/.bashrc`:
+Before running `opensymphony run`, add your Linear key to your shell startup
+file, such as `~/.zshrc` or `~/.bashrc`:
 
 ```bash
 export LINEAR_API_KEY="lin_api_..."
-export OH_SECRET_KEY='any-random-key'
 ```
 
-Use your real Linear API key for `LINEAR_API_KEY`. `OH_SECRET_KEY` can be any
-random secret string for the local OpenHands runtime.
+Use your real Linear API key for `LINEAR_API_KEY`.
 
-Also export your provider settings for the OpenHands conversation agent:
+### OpenHands Runtime Environment
+
+OpenHands is the default harness. For the managed local OpenHands runtime, also
+set a local agent-server secret and provider credentials:
 
 ```bash
+export OH_SECRET_KEY='any-random-key'
 export LLM_MODEL="openai/accounts/fireworks/models/glm-5p1"
 export LLM_API_KEY="fw-..."
 export LLM_BASE_URL="https://api.fireworks.ai/inference/v1"
 ```
 
-These `LLM_*` variables are required unless your target repo's `WORKFLOW.md`
-has been customized to resolve the LLM configuration some other way.
+`OH_SECRET_KEY` can be any random secret string for the local OpenHands runtime.
+The `LLM_*` variables are required for API-key OpenHands runs unless your target
+repo's `WORKFLOW.md` has been customized to resolve the LLM configuration some
+other way.
+
+### Codex Runtime Environment
+
+For local Codex app-server runs, authenticate the Codex CLI with ChatGPT:
+
+```bash
+codex login status
+codex login --device-auth
+```
+
+If ChatGPT blocks device-code login, enable **Security and login -> Enable
+device code authorization for Codex** in ChatGPT settings, then retry the login.
+
+Then select the Codex harness for OpenSymphony:
+
+```bash
+export OPENSYMPHONY_HARNESS="codex_app_server"
+export OPENSYMPHONY_MODEL="gpt-5.5"
+export OPENSYMPHONY_MODEL_PROFILE="codex-chatgpt-local-keychain"
+export OPENSYMPHONY_CODEX_BIN="$(command -v codex)"
+```
+
+`OPENSYMPHONY_CODEX_BIN` is optional when `codex` is already on `PATH`. In
+Codex mode, OpenSymphony uses the operator-owned Codex CLI login; it does not
+need `LLM_API_KEY`/`LLM_BASE_URL` for the Codex worker.
 
 The model configuration panel in the alpha web and desktop shells records model
 strings, API-compatible endpoint metadata, subscription bootstrap metadata, and
@@ -214,7 +252,7 @@ flowchart TB
         orchestrator["Orchestrator Scheduler"]
         workspace["Workspace Manager"]
         control["Gateway + Control API<br/>GET /healthz, /api/v1/snapshot, /api/v1/capabilities"]
-        runtime["OpenHands Runtime Client<br/>(REST + WebSocket)"]
+        runtime["Harness Runtime Client<br/>OpenHands REST/WebSocket or Codex stdio"]
         linear_read["Linear Read Adapter"]
 
         orchestrator --> workspace
@@ -226,7 +264,7 @@ flowchart TB
     subgraph execution["Execution Environment"]
         direction TB
         issue_ws["Per-issue Workspace"]
-        agent["OpenHands Agent Runtime"]
+        agent["Agent Runtime"]
         graphql["GraphQL Helper + Query Assets"]
 
         agent --> issue_ws
@@ -235,11 +273,14 @@ flowchart TB
 
     linear["Linear"]
     openhands["OpenHands Agent-Server"]
+    codex["Codex App-Server"]
 
     operator --> control
     workspace --> issue_ws
     runtime --> openhands
+    runtime --> codex
     openhands --> agent
+    codex --> agent
     linear_read -->|read issues| linear
     graphql -->|agent-side writes| linear
 ```
@@ -321,7 +362,7 @@ Each issue gets a deterministic workspace:
 
 ## Debugging Sessions
 
-Use `opensymphony debug <issue-id>` to reopen the OpenHands conversation that OpenSymphony used for that issue:
+Use `opensymphony debug <issue-id>` to reopen the harness conversation that OpenSymphony used for that issue:
 
 ```bash
 cd /path/to/target-repo
@@ -331,7 +372,7 @@ opensymphony debug COE-284
 The command resolves the issue reference to its managed workspace, reads
 `.opensymphony/conversation.json`, and resumes the same `conversation_id` from the
 original working directory. The conversation registry persists the issue reference,
-stable OpenHands conversation ID, timestamps, transport details, and the launch
+stable harness conversation ID, timestamps, transport details, and the launch
 profile that created the session so a missing-but-recoverable thread can be
 rehydrated without losing continuity.
 
@@ -379,7 +420,7 @@ cargo test-dev
 # Static validation
 opensymphony doctor
 
-# Live tests (requires OpenHands server)
+# Live tests for OpenHands server
 OPENSYMPHONY_LIVE_OPENHANDS=1 cargo test --test live_local_suite -- --ignored --nocapture --test-threads=1
 
 # Smoke test
@@ -429,5 +470,5 @@ and provisioned with `opensymphony install openhands`.
 ## Acknowledgments
 
 - [OpenAI Symphony](https://github.com/openai/symphony) - The specification this implements
-- [OpenHands](https://github.com/OpenHands/OpenHands) - The agent runtime
-- [FrankenTUI](https://github.com/Dicklesworthstone/frankentui) - Terminal UI framework
+- [OpenHands](https://github.com/OpenHands/OpenHands) - Managed local agent-server runtime
+- [Codex app-server](https://github.com/openai/codex/tree/main/codex-rs/app-server) - Local app-server harness runtime

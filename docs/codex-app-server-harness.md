@@ -58,6 +58,9 @@ summary is truncated to a fixed character budget. Common inline credential
 patterns such as `api_key=...`, `token: ...`, `password: ...`, and
 `Authorization: ...` render as `[redacted]` in summaries. Unknown or
 unsupported methods still use the stable fallback `Codex event: <method>`.
+Consecutive `item/agentMessage/delta` events for the same Codex item update one
+activity row so TUI and desktop views can show a streaming assistant message
+instead of one row per token fragment.
 
 ## Full-Automation Profile
 

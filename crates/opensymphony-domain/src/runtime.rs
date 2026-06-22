@@ -592,6 +592,16 @@ impl ConversationMetadata {
         self.last_event_summary = summary.clone();
 
         if let (Some(event_id), Some(event_kind), Some(summary)) = (event_id, event_kind, summary) {
+            if let Some(last) = self.recent_activity.last_mut()
+                && should_coalesce_codex_agent_delta(last, &event_id, &event_kind)
+            {
+                last.happened_at = event_at;
+                last.summary = coalesced_codex_agent_summary(&last.summary, &summary);
+                last.payload = payload;
+                self.last_event_summary = Some(last.summary.clone());
+                return;
+            }
+
             let sequence = self.next_activity_sequence;
             self.next_activity_sequence += 1;
             self.recent_activity.push(ConversationActivityEvent {
@@ -632,6 +642,48 @@ impl ConversationMetadata {
     pub fn add_runtime_seconds(&mut self, seconds: u64) {
         self.runtime_seconds += seconds;
     }
+}
+
+fn should_coalesce_codex_agent_delta(
+    last: &ConversationActivityEvent,
+    event_id: &str,
+    event_kind: &str,
+) -> bool {
+    event_kind == "codex.item/agentMessage/delta"
+        && last.kind == event_kind
+        && last.event_id == event_id
+}
+
+fn coalesced_codex_agent_summary(existing: &str, next: &str) -> String {
+    const PREFIX: &str = "Codex assistant: ";
+    let existing_text = existing.strip_prefix(PREFIX).unwrap_or(existing);
+    let next_text = next.strip_prefix(PREFIX).unwrap_or(next).trim();
+    if next_text.is_empty() {
+        return existing.to_owned();
+    }
+    if existing_text.trim().is_empty() {
+        return format!("{PREFIX}{next_text}");
+    }
+
+    let separator = if codex_delta_needs_space(existing_text, next_text) {
+        " "
+    } else {
+        ""
+    };
+    format!("{PREFIX}{}{separator}{next_text}", existing_text.trim_end())
+}
+
+fn codex_delta_needs_space(existing: &str, next: &str) -> bool {
+    let Some(previous) = existing.chars().rev().find(|ch| !ch.is_whitespace()) else {
+        return false;
+    };
+    let Some(first) = next.chars().next() else {
+        return false;
+    };
+    !matches!(
+        first,
+        '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '\'' | '’'
+    ) && !matches!(previous, '(' | '[' | '{' | '/' | '$')
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -936,5 +988,83 @@ pub enum ReleaseReason {
 impl ReleaseReason {
     pub const fn preserves_reactivation_state(self) -> bool {
         matches!(self, Self::TrackerInactive)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn must<T, E: fmt::Display>(result: Result<T, E>) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    fn conversation() -> ConversationMetadata {
+        ConversationMetadata {
+            conversation_id: must(ConversationId::new("conv_1")),
+            server_base_url: None,
+            transport_target: None,
+            http_auth_mode: None,
+            websocket_auth_mode: None,
+            websocket_query_param_name: None,
+            fresh_conversation: true,
+            runtime_contract_version: None,
+            stream_state: RuntimeStreamState::Ready,
+            last_event_id: None,
+            last_event_kind: None,
+            last_event_at: None,
+            last_event_summary: None,
+            recent_activity: Vec::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_tokens: 0,
+            total_tokens: 0,
+            runtime_seconds: 0,
+            next_activity_sequence: 0,
+        }
+    }
+
+    #[test]
+    fn codex_agent_deltas_stream_into_one_activity_row() {
+        let mut conversation = conversation();
+
+        for (offset, summary) in [
+            "Codex assistant: poll",
+            "Codex assistant: is",
+            "Codex assistant: still",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            conversation.observe_event(
+                TimestampMs::new(1_000 + offset as u64),
+                Some("item-1".to_owned()),
+                Some("codex.item/agentMessage/delta".to_owned()),
+                Some(summary.to_owned()),
+                None,
+            );
+        }
+
+        assert_eq!(conversation.recent_activity.len(), 1);
+        assert_eq!(
+            conversation.recent_activity[0].summary,
+            "Codex assistant: poll is still"
+        );
+        assert_eq!(
+            conversation.last_event_summary.as_deref(),
+            Some("Codex assistant: poll is still")
+        );
+
+        conversation.observe_event(
+            TimestampMs::new(2_000),
+            Some("item-1".to_owned()),
+            Some("codex.item/completed".to_owned()),
+            Some("Codex item completed".to_owned()),
+            None,
+        );
+        assert_eq!(conversation.recent_activity.len(), 2);
     }
 }
