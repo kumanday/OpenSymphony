@@ -737,6 +737,7 @@ struct IndexedIssue {
 }
 
 include!("config.rs");
+include!("okf.rs");
 include!("capture.rs");
 include!("query.rs");
 include!("docs_sync.rs");
@@ -774,6 +775,399 @@ mod tests {
 
         assert_eq!(second.config, MemoryInitFileChange::Unchanged);
         assert_eq!(second.gitignore, MemoryInitFileChange::Unchanged);
+    }
+
+    #[test]
+    fn okf_parses_legacy_issue_capsule_without_losing_metadata() {
+        let repo = TempDir::new().expect("temp repo");
+        let capsule = r#"---
+type: issue-capsule
+visibility: private
+issue: COE-123
+title: "COE-123: WebSocket reconnect recovery"
+milestone: "M3: Runtime"
+milestone_id: milestone-3
+linear_url: https://linear.app/example/issue/COE-123
+areas:
+  - openhands-runtime
+repository: OpenSymphony
+prs:
+  - number: 456
+    url: https://github.com/example/repo/pull/456
+    merge_sha: abcdef1234567890
+source_refs:
+  linear_issue: linear:COE-123
+  github_prs:
+    - github:pr:456
+docs_sync:
+  status: pending
+legacy_custom: keep-me
+---
+
+# COE-123: WebSocket reconnect recovery
+
+See [runtime docs](/areas/openhands-runtime.md).
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("issues/COE-123.md"), capsule)
+            .expect("legacy issue capsule should parse");
+
+        assert_eq!(concept.id, "issues/COE-123");
+        assert_eq!(concept.frontmatter.concept_type, "issue-capsule");
+        assert_eq!(
+            concept.frontmatter.extra.get("legacy_custom"),
+            Some(&serde_yaml::Value::String("keep-me".to_string()))
+        );
+        assert!(concept.frontmatter.extra.contains_key("source_refs"));
+        let metadata = concept
+            .frontmatter
+            .opensymphony
+            .as_ref()
+            .expect("legacy fields should map to OpenSymphony metadata");
+        assert_eq!(metadata.visibility, Some(MemoryVisibility::Private));
+        assert_eq!(metadata.kind.as_deref(), Some("issue_capsule"));
+        assert!(
+            metadata.scope_refs.iter().any(|scope| {
+                scope.kind == KnowledgeScopeKind::WorkItem && scope.id == "COE-123"
+            })
+        );
+        assert!(metadata.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Milestone && scope.id == "milestone-3"
+        }));
+        assert!(metadata.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Area && scope.id == "openhands-runtime"
+        }));
+        assert!(metadata.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Repository && scope.id == "OpenSymphony"
+        }));
+        assert!(
+            metadata
+                .source_refs
+                .iter()
+                .any(|source| { source.kind == "linear_issue" && source.id == "COE-123" })
+        );
+        assert!(
+            metadata
+                .source_refs
+                .iter()
+                .any(|source| { source.kind == "github_pr" && source.id == "456" })
+        );
+        assert!(metadata.source_refs.iter().any(|source| {
+            source.kind == "github_pr"
+                && source.id == "456"
+                && source.url.as_deref() == Some("https://github.com/example/repo/pull/456")
+        }));
+        assert_eq!(concept.links[0].target, "/areas/openhands-runtime.md");
+
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        assert!(rendered.contains("legacy_custom: keep-me"));
+        assert!(rendered.contains("issue: COE-123"));
+        assert!(!rendered.contains("opensymphony:"));
+    }
+
+    #[test]
+    fn okf_explicit_opensymphony_metadata_round_trips() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+area: legacy-area
+visibility: private
+legacy_custom: keep-me
+opensymphony:
+  visibility: public
+  kind: curated_topic
+  schema_version: 7
+  scope_refs:
+    - kind: area
+      id: explicit-area
+---
+
+# Runtime
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), original)
+            .expect("concept should parse");
+        assert!(!concept.derived_opensymphony);
+
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        assert!(rendered.contains("opensymphony:"));
+        assert!(rendered.contains("curated_topic"));
+        assert!(rendered.contains("explicit-area"));
+        assert!(rendered.contains("legacy_custom: keep-me"));
+        assert!(!rendered.contains("legacy-area"));
+        assert!(!rendered.contains("visibility: private"));
+    }
+
+    #[test]
+    fn okf_partial_explicit_opensymphony_preserves_unrepresented_legacy_fields() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+area: legacy-area
+visibility: private
+issue: COE-123
+legacy_custom: keep-me
+opensymphony:
+  kind: curated_topic
+---
+
+# Runtime
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), original)
+            .expect("concept should parse");
+
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        assert!(rendered.contains("opensymphony:"));
+        assert!(rendered.contains("kind: curated_topic"));
+        assert!(rendered.contains("area: legacy-area"));
+        assert!(rendered.contains("visibility: private"));
+        assert!(rendered.contains("issue: COE-123"));
+        assert!(rendered.contains("legacy_custom: keep-me"));
+    }
+
+    #[test]
+    fn okf_null_opensymphony_uses_legacy_source_of_truth() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+area: legacy-area
+visibility: public
+opensymphony: ~
+---
+
+# Runtime
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), original)
+            .expect("concept should parse");
+        assert!(concept.derived_opensymphony);
+
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        assert!(rendered.contains("area: legacy-area"));
+        assert!(rendered.contains("visibility: public"));
+        assert!(!rendered.contains("opensymphony:"));
+    }
+
+    #[test]
+    fn okf_demo_parse_render_preserves_legacy_source_of_truth() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+area: openhands-runtime
+visibility: public
+docs_sync:
+  status: pending
+---
+
+# Runtime
+
+See [COE-123](/issues/COE-123.md).
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("./areas/./runtime.md"), original)
+            .expect("concept should parse");
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        println!("{rendered}");
+
+        assert_eq!(concept.path.as_path(), Path::new("areas/runtime.md"));
+        assert!(concept.derived_opensymphony);
+        assert!(rendered.contains("visibility: public"));
+        assert!(rendered.contains("docs_sync:"));
+        assert!(!rendered.contains("opensymphony:"));
+    }
+
+    #[test]
+    fn okf_parses_milestone_and_topic_doc_fixtures() {
+        let repo = TempDir::new().expect("temp repo");
+        let milestone = parse_okf_concept(
+            repo.path(),
+            Path::new("milestones/m3-runtime.md"),
+            r#"---
+type: milestone-memory-node
+milestone: "M3: Runtime"
+updated_at: 2026-06-13T17:00:00Z
+---
+
+# M3: Runtime
+
+- [COE-123](/issues/COE-123.md)
+"#,
+        )
+        .expect("milestone node should parse");
+        let milestone_metadata = milestone
+            .frontmatter
+            .opensymphony
+            .as_ref()
+            .expect("milestone should map legacy fields");
+        assert_eq!(
+            milestone_metadata.kind.as_deref(),
+            Some("milestone_memory_node")
+        );
+        assert!(milestone_metadata.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Milestone && scope.id == "M3: Runtime"
+        }));
+
+        let topic = parse_okf_concept(
+            repo.path(),
+            Path::new("areas/openhands-runtime.md"),
+            r#"---
+type: topic-doc
+area: openhands-runtime
+visibility: public
+last_memory_sync: 2026-06-13T17:00:00Z
+---
+
+# OpenHands Runtime
+
+See [COE-123](/issues/COE-123.md).
+"#,
+        )
+        .expect("topic doc should parse");
+        let topic_metadata = topic
+            .frontmatter
+            .opensymphony
+            .as_ref()
+            .expect("topic should map legacy fields");
+        assert_eq!(topic_metadata.visibility, Some(MemoryVisibility::Public));
+        assert!(topic_metadata.scope_refs.iter().any(|scope| {
+            scope.kind == KnowledgeScopeKind::Area && scope.id == "openhands-runtime"
+        }));
+        assert_eq!(topic.links[0].target, "/issues/COE-123.md");
+    }
+
+    #[test]
+    fn okf_rejects_empty_type_and_escaping_paths() {
+        let empty_type = OkfFrontmatter::new("");
+        assert!(matches!(empty_type, Err(MemoryError::InvalidInput(_))));
+
+        let frontmatter = OkfFrontmatter::new("topic-doc").expect("frontmatter");
+        let escaped = OkfConcept::new("../escape.md", frontmatter.clone(), "");
+        assert!(matches!(escaped, Err(MemoryError::InvalidInput(_))));
+        let absolute = OkfConcept::new("/tmp/escape.md", frontmatter.clone(), "");
+        assert!(matches!(absolute, Err(MemoryError::InvalidInput(_))));
+        let contained = OkfConcept::new("./areas/./runtime.md", frontmatter.clone(), "")
+            .expect("curdir components should normalize away");
+        assert_eq!(contained.path.as_path(), Path::new("areas/runtime.md"));
+        let uppercase_markdown = OkfConcept::new("areas/runtime.MD", frontmatter.clone(), "")
+            .expect("markdown extension should be case-insensitive");
+        assert_eq!(
+            uppercase_markdown.path.as_path(),
+            Path::new("areas/runtime.MD")
+        );
+        let not_markdown = OkfConcept::new("areas/runtime.txt", frontmatter, "");
+        assert!(matches!(not_markdown, Err(MemoryError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn okf_unknown_fields_round_trip_through_writer() {
+        let repo = TempDir::new().expect("temp repo");
+        let original = r#"---
+type: topic-doc
+title: Runtime
+x_unknown:
+  nested: true
+legacy_number: 7
+---
+
+# Runtime
+"#;
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), original)
+            .expect("concept should parse");
+        let rendered = render_okf_concept(&concept).expect("concept should render");
+        let reparsed = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), &rendered)
+            .expect("rendered concept should parse");
+
+        assert_eq!(
+            reparsed.frontmatter.extra.get("x_unknown"),
+            concept.frontmatter.extra.get("x_unknown")
+        );
+        assert_eq!(
+            reparsed.frontmatter.extra.get("legacy_number"),
+            concept.frontmatter.extra.get("legacy_number")
+        );
+        assert_eq!(reparsed.body, "# Runtime\n");
+    }
+
+    #[test]
+    fn okf_frontmatter_accepts_real_markdown_delimiters() {
+        let repo = TempDir::new().expect("temp repo");
+        let contents =
+            "---\r\ntype: topic-doc\r\ntitle: Runtime\r\n\r\n---   \r\n\r\n# Runtime\r\n";
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), contents)
+            .expect("CRLF frontmatter should parse");
+
+        assert_eq!(concept.frontmatter.concept_type, "topic-doc");
+        assert_eq!(concept.body, "# Runtime\n");
+    }
+
+    #[test]
+    fn okf_frontmatter_does_not_close_on_indented_yaml_delimiter() {
+        let repo = TempDir::new().expect("temp repo");
+        let contents = r#"---
+type: topic-doc
+description: |
+  ---
+  YAML literal content
+---
+
+# Runtime
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), contents)
+            .expect("indented yaml delimiter should not close frontmatter");
+
+        assert_eq!(
+            concept.frontmatter.description.as_deref(),
+            Some("---\nYAML literal content\n")
+        );
+        assert_eq!(concept.body, "# Runtime\n");
+    }
+
+    #[test]
+    fn okf_markdown_links_skip_images_code_and_escapes() {
+        let repo = TempDir::new().expect("temp repo");
+        let contents = r#"---
+type: topic-doc
+---
+
+![diagram](/images/runtime.png)
+`[code](/ignored.md)`
+\[escaped](/ignored.md)
+[text [nested]](/issues/COE-123.md)
+[paren](/issues/COE-124.md?query=(ok))
+\![escaped image marker](/issues/COE-125.md)
+[reference link][runtime-ref]
+[shortcut link]
+<https://example.com/okf>
+```text
+[fenced](/ignored.md)
+```
+<!-- [commented](/ignored.md) -->
+
+[runtime-ref]: /areas/runtime.md
+[shortcut link]: /areas/shortcut.md
+"#;
+
+        let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), contents)
+            .expect("concept should parse");
+
+        assert_eq!(
+            concept
+                .links
+                .iter()
+                .map(|link| link.target.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "/issues/COE-123.md",
+                "/issues/COE-124.md?query=(ok)",
+                "/issues/COE-125.md",
+                "/areas/runtime.md",
+                "/areas/shortcut.md",
+                "https://example.com/okf",
+            ]
+        );
     }
 
     #[test]

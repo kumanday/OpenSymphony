@@ -38,6 +38,51 @@ The memory system has two different outputs:
   current model, invariants, gotchas, and recent changes without requiring
   readers to know which issue introduced the knowledge.
 
+## OKF Bundle Compatibility
+
+OpenSymphony treats OKF as the portable Markdown contract for memory, not as a
+replacement for the current local store. The logical bundle layout follows
+`docs/okf-memory-spec.md`:
+
+```text
+bundle-root/
+  index.md
+  log.md
+  projects/
+  milestones/
+  issues/
+  areas/
+  repositories/
+  code/
+  runs/
+  references/
+```
+
+The current `.opensymphony/memory/` paths stay in place for this compatibility
+slice. Issue capsules map to `issues/<issue>.md`, milestone nodes map to
+`milestones/<slug>.md`, generated topic docs map to `areas/<slug>.md`, and
+repository memory remains a facet under `repositories/` rather than the root
+taxonomy.
+
+Every parsed OKF concept requires YAML frontmatter with a non-empty `type` and a
+contained bundle-relative Markdown path. Existing legacy top-level fields such
+as `issue`, `milestone`, `linear_url`, `areas`, `repository`, `prs`,
+`source_refs`, and `docs_sync` are preserved as data during parse/render. The
+parser also projects those fields into `opensymphony` extension metadata:
+visibility, concept kind, scope refs, source refs, and docs-sync state. Unknown
+frontmatter is kept in the raw frontmatter map so future writers can round-trip
+documents they do not fully understand. Writers emit canonical YAML and do not
+preserve the original frontmatter field order or whitespace.
+
+Migration is intentionally incremental:
+
+- Phase 1 enriches and parses existing documents as OKF concepts while keeping
+  legacy paths and fields.
+- Phase 2 can mirror or move documents into the final bundle layout and rebuild
+  the catalog from OKF concepts.
+- Phase 3 can expose graph, hosted import/export, and visibility-filtered APIs
+  from the OKF-derived catalog.
+
 The default visibility posture is private memory with optional public docs.
 Private capsules may include Linear comments, review context, and source
 snapshots, while public docs should contain public source refs such as issue
