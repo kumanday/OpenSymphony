@@ -1139,9 +1139,15 @@ type: topic-doc
 [paren](/issues/COE-124.md?query=(ok))
 \![escaped image marker](/issues/COE-125.md)
 [reference link][runtime-ref]
+[shortcut link]
 <https://example.com/okf>
+```text
+[fenced](/ignored.md)
+```
+<!-- [commented](/ignored.md) -->
 
 [runtime-ref]: /areas/runtime.md
+[shortcut link]: /areas/shortcut.md
 "#;
 
         let concept = parse_okf_concept(repo.path(), Path::new("areas/runtime.md"), contents)
@@ -1158,6 +1164,7 @@ type: topic-doc
                 "/issues/COE-124.md?query=(ok)",
                 "/issues/COE-125.md",
                 "/areas/runtime.md",
+                "/areas/shortcut.md",
                 "https://example.com/okf",
             ]
         );

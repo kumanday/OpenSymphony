@@ -569,6 +569,14 @@ fn extract_markdown_links(body: &str) -> Vec<OkfLink> {
         let Some((current, next)) = char_at(body, index) else {
             break;
         };
+        if body[index..].starts_with("<!--") {
+            index = skip_html_comment(body, index);
+            continue;
+        }
+        if is_fenced_code_start(body, index) {
+            index = skip_fenced_code_block(body, index);
+            continue;
+        }
         match current {
             '`' => index = skip_code_span(body, index),
             '\\' => index = skip_escaped_char(body, next),
@@ -623,7 +631,16 @@ fn extract_markdown_links(body: &str) -> Vec<OkfLink> {
                         }
                         index = after_reference;
                     }
-                    _ => index = after_label,
+                    Some((':', _)) => index = after_label,
+                    _ => {
+                        if let Some(target) = references.get(&normalize_reference_label(&label)) {
+                            links.push(OkfLink {
+                                target: target.clone(),
+                                label: Some(label).filter(|label| !label.is_empty()),
+                            });
+                        }
+                        index = after_label;
+                    }
                 }
             }
             _ => index = next,
@@ -662,6 +679,45 @@ fn skip_code_span(value: &str, index: usize) -> usize {
         cursor = next;
     }
     tick_end
+}
+
+fn skip_html_comment(value: &str, index: usize) -> usize {
+    value[index..]
+        .find("-->")
+        .map(|end| index + end + 3)
+        .unwrap_or(value.len())
+}
+
+fn is_fenced_code_start(value: &str, index: usize) -> bool {
+    let line_start = value[..index].rfind('\n').map(|line| line + 1).unwrap_or(0);
+    if value[line_start..index]
+        .chars()
+        .any(|character| character != ' ' && character != '\t')
+    {
+        return false;
+    }
+    value[index..].starts_with("```") || value[index..].starts_with("~~~")
+}
+
+fn skip_fenced_code_block(value: &str, index: usize) -> usize {
+    let fence = &value[index..index + 3];
+    let mut cursor = value[index..]
+        .find('\n')
+        .map(|line| index + line + 1)
+        .unwrap_or(value.len());
+    while cursor < value.len() {
+        if is_fenced_code_start(value, cursor) && value[cursor..].starts_with(fence) {
+            return value[cursor..]
+                .find('\n')
+                .map(|line| cursor + line + 1)
+                .unwrap_or(value.len());
+        }
+        cursor = value[cursor..]
+            .find('\n')
+            .map(|line| cursor + line + 1)
+            .unwrap_or(value.len());
+    }
+    value.len()
 }
 
 fn is_image_marker(value: &str, index: usize) -> bool {

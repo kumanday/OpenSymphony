@@ -67,11 +67,12 @@ taxonomy.
 Every parsed OKF concept requires YAML frontmatter with a non-empty `type` and a
 contained bundle-relative Markdown path. Existing legacy top-level fields such
 as `issue`, `milestone`, `linear_url`, `areas`, `repository`, `prs`,
-`source_refs`, and `docs_sync` are preserved exactly during parse/render. The
+`source_refs`, and `docs_sync` are preserved as data during parse/render. The
 parser also projects those fields into `opensymphony` extension metadata:
 visibility, concept kind, scope refs, source refs, and docs-sync state. Unknown
 frontmatter is kept in the raw frontmatter map so future writers can round-trip
-documents they do not fully understand.
+documents they do not fully understand. Writers emit canonical YAML and do not
+preserve the original frontmatter field order or whitespace.
 
 Migration is intentionally incremental:
 
