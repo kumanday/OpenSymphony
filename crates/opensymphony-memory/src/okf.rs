@@ -575,11 +575,16 @@ fn create_staging_dir(parent: &Path, output_path: &Path) -> Result<PathBuf, Memo
             ".{output_name}.tmp-{}-{attempt}",
             std::process::id()
         ));
-        if candidate.exists() {
-            continue;
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(MemoryError::CreateDir {
+                    path: candidate,
+                    source,
+                });
+            }
         }
-        create_dir_all(&candidate)?;
-        return Ok(candidate);
     }
     Err(MemoryError::InvalidInput(format!(
         "could not allocate a staging directory for OKF export `{}`",
@@ -743,11 +748,11 @@ where
 {
     match cleanup(path) {
         Ok(()) => error,
-        Err(cleanup_error) => MemoryError::InvalidInput(format!(
-            "{error}; additionally failed to remove OKF export staging directory `{}` after the export failure: {}; remove the staging directory manually",
-            path.display(),
-            cleanup_error
-        )),
+        Err(cleanup) => MemoryError::OkfExportStagingCleanup {
+            path: path.to_path_buf(),
+            source: Box::new(error),
+            cleanup: Box::new(cleanup),
+        },
     }
 }
 
@@ -2270,6 +2275,39 @@ Visible [[real-target|Real Target]].
         assert!(
             message.contains(staging.to_string_lossy().as_ref()),
             "error should include the recoverable staging path: {message}"
+        );
+        let MemoryError::OkfExportStagingCleanup { source, cleanup, .. } = error else {
+            panic!("error should preserve structured export and cleanup failures");
+        };
+        assert!(
+            matches!(*source, MemoryError::InvalidInput(_)),
+            "source error should preserve the original variant"
+        );
+        assert!(
+            matches!(*cleanup, MemoryError::WriteFile { .. }),
+            "cleanup error should preserve the cleanup variant"
+        );
+    }
+
+    #[test]
+    fn create_staging_dir_retries_existing_candidate() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let output = repo.path().join("okf-export-public");
+        let first_candidate = repo.path().join(format!(
+            ".okf-export-public.tmp-{}-0",
+            std::process::id()
+        ));
+        fs::create_dir(&first_candidate).expect("first candidate should exist");
+
+        let staging = create_staging_dir(repo.path(), &output).expect("staging should allocate");
+
+        assert_ne!(
+            staging, first_candidate,
+            "allocator should retry after an existing candidate"
+        );
+        assert!(
+            staging.is_dir(),
+            "allocator should create the retried candidate atomically"
         );
     }
 
