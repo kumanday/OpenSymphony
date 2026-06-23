@@ -400,6 +400,7 @@ fn pending_okf_import_files(
         OkfBundlePath::new(relative.clone())?;
         let contents = read_to_string(path)?;
         let target = target_root.join(&relative);
+        ensure_import_target_has_no_symlink_components(config, target_root, &target)?;
         if target.is_dir() {
             return Err(MemoryError::InvalidInput(format!(
                 "{} already exists as a directory and cannot be overwritten by OKF import",
@@ -430,6 +431,47 @@ fn pending_okf_import_files(
     Ok(pending)
 }
 
+fn ensure_import_target_has_no_symlink_components(
+    config: &MemoryConfig,
+    target_root: &Path,
+    target: &Path,
+) -> Result<(), MemoryError> {
+    let relative = target
+        .strip_prefix(target_root)
+        .map_err(|_| MemoryError::PathOutsideRepo {
+            path: target.to_path_buf(),
+            repo_root: target_root.to_path_buf(),
+        })?;
+    let mut cursor = target_root.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component.as_os_str());
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(MemoryError::InvalidInput(format!(
+                    "{} is a symlink and cannot be overwritten by OKF import",
+                    display_path(&config.repo_root, &cursor)
+                )));
+            }
+            Ok(_) => {}
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                break;
+            }
+            Err(source) => {
+                return Err(MemoryError::ReadFile {
+                    path: cursor,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintReport, MemoryError> {
     if !bundle_root.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
@@ -451,6 +493,7 @@ pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintRe
             Ok(path) => path,
             Err(error) => {
                 findings.push(LintFinding {
+                    code: None,
                     severity: LintSeverity::Error,
                     path: Some(path),
                     message: error.to_string(),
@@ -479,6 +522,7 @@ pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintRe
     for directory in dirs_with_concepts {
         if !dirs_with_index.contains(&directory) {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Warn,
                 path: Some(bundle_root.join(&directory)),
                 message: "missing generated index.md".to_string(),
@@ -621,7 +665,14 @@ where
     if let Some(backup_path) = backup_path
         && backup_path.exists()
     {
-        let _ = remove_dir_all(&backup_path);
+        remove_dir_all(&backup_path).map_err(|source| {
+            MemoryError::InvalidInput(format!(
+                "OKF export promoted to `{}` but failed to remove backup `{}`: {}; remove the backup manually",
+                output_path.display(),
+                backup_path.display(),
+                source
+            ))
+        })?;
     }
     Ok(())
 }
@@ -717,11 +768,11 @@ fn ignored_private_export_leak(finding: &LintFinding, ignore_private_memory_link
 }
 
 fn is_private_export_leak(finding: &LintFinding) -> bool {
-    finding.message.contains("private export leak")
+    finding.code == Some(LintCode::OkfPrivateMemoryLink)
 }
 
 fn public_export_index() -> String {
-    "---\nokf_version: \"0.1\"\n---\n\n# OpenSymphony Public Memory Export\n".to_string()
+    format!("---\nokf_version: \"{OKF_VERSION}\"\n---\n\n# OpenSymphony Public Memory Export\n")
 }
 
 fn public_export_log() -> String {
@@ -825,6 +876,7 @@ fn lint_okf_index(
         .is_none_or(|parent| parent.as_os_str().is_empty())
     {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "reserved index.md must not contain frontmatter outside the bundle root"
@@ -835,6 +887,7 @@ fn lint_okf_index(
     }
     let Ok((frontmatter, _)) = split_okf_frontmatter(path, contents) else {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "reserved index.md has invalid frontmatter".to_string(),
@@ -844,6 +897,7 @@ fn lint_okf_index(
     };
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&frontmatter) else {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "reserved index.md frontmatter is not parseable YAML".to_string(),
@@ -853,6 +907,7 @@ fn lint_okf_index(
     };
     let Some(mapping) = value.as_mapping() else {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "reserved index.md frontmatter must be a YAML mapping".to_string(),
@@ -864,6 +919,7 @@ fn lint_okf_index(
         && version != OKF_VERSION
     {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Warn,
             path: Some(bundle_root.join(relative)),
             message: format!("unknown OKF version `{version}`"),
@@ -875,6 +931,7 @@ fn lint_okf_index(
 fn lint_okf_log(path: &Path, contents: &str, findings: &mut Vec<LintFinding>) {
     if has_okf_frontmatter(contents) {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "reserved log.md must not contain frontmatter".to_string(),
@@ -898,6 +955,7 @@ fn lint_okf_log(path: &Path, contents: &str, findings: &mut Vec<LintFinding>) {
 
     if dates.is_empty() || invalid_heading || !dates.windows(2).all(|pair| pair[0] >= pair[1]) {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "reserved log.md must use ISO date headings newest first".to_string(),
@@ -918,6 +976,7 @@ fn lint_okf_concept(
         Err(error) => {
             let message = okf_frontmatter_lint_message(&error);
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Error,
                 path: Some(path.to_path_buf()),
                 message,
@@ -930,6 +989,7 @@ fn lint_okf_concept(
         Ok(value) => value,
         Err(_) => {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Error,
                 path: Some(path.to_path_buf()),
                 message: "frontmatter is not parseable YAML".to_string(),
@@ -940,6 +1000,7 @@ fn lint_okf_concept(
     };
     let Some(mapping) = value.as_mapping() else {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "frontmatter must be a YAML mapping".to_string(),
@@ -952,6 +1013,7 @@ fn lint_okf_concept(
         .is_none_or(str::is_empty)
     {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "frontmatter lacks non-empty `type`".to_string(),
@@ -964,6 +1026,7 @@ fn lint_okf_concept(
         Ok(concept) => concept,
         Err(error) => {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Error,
                 path: Some(path.to_path_buf()),
                 message: format!("frontmatter is not parseable OKF YAML: {error}"),
@@ -976,6 +1039,7 @@ fn lint_okf_concept(
     lint_okf_recommended_fields(&concept, &body, path, findings);
     if !known_okf_type(&concept.frontmatter.concept_type) {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Warn,
             path: Some(path.to_path_buf()),
             message: format!("unknown type `{}`", concept.frontmatter.concept_type),
@@ -984,6 +1048,7 @@ fn lint_okf_concept(
     }
     if contains_private_memory_link_in_markdown(contents) {
         findings.push(LintFinding {
+            code: Some(LintCode::OkfPrivateMemoryLink),
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "private export leak: document links to a private memory path".to_string(),
@@ -992,6 +1057,7 @@ fn lint_okf_concept(
     }
     if public_export && concept_visibility(&concept) == Some(MemoryVisibility::Private) {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: "public export includes a private concept".to_string(),
@@ -1000,6 +1066,7 @@ fn lint_okf_concept(
     }
     if public_export && let Some(reason) = public_export_private_material(contents) {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Error,
             path: Some(path.to_path_buf()),
             message: format!("public export contains {reason}"),
@@ -1022,6 +1089,7 @@ fn lint_okf_recommended_fields(
         missing.push("title");
         if first_heading(body).is_some() {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Info,
                 path: Some(path.to_path_buf()),
                 message: "title can be synthesized from the first heading".to_string(),
@@ -1033,6 +1101,7 @@ fn lint_okf_recommended_fields(
         missing.push("description");
         if first_paragraph(body).is_some() {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Info,
                 path: Some(path.to_path_buf()),
                 message: "description can be synthesized from the first paragraph".to_string(),
@@ -1051,6 +1120,7 @@ fn lint_okf_recommended_fields(
     }
     if !missing.is_empty() {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Warn,
             path: Some(path.to_path_buf()),
             message: format!("missing recommended field(s): {}", missing.join(", ")),
@@ -1072,6 +1142,7 @@ fn lint_okf_links(
         };
         if !resolved.exists() {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Warn,
                 path: Some(path.to_path_buf()),
                 message: format!("broken Markdown link `{}`", link.target),
@@ -1088,6 +1159,7 @@ fn lint_okf_links(
     for wiki_link in extract_wiki_links(&concept.body) {
         if !markdown_ids.contains(&normalized_wiki_link_id(&wiki_link)) {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Warn,
                 path: Some(path.to_path_buf()),
                 message: format!("wiki-only link `[[{wiki_link}]]` has no Markdown equivalent"),
@@ -1108,6 +1180,7 @@ fn lint_okf_citations(concept: &OkfConcept, path: &Path, findings: &mut Vec<Lint
         || concept.frontmatter.extra.contains_key("linear_url");
     if source_backed && !has_citations_section(&concept.body) {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Warn,
             path: Some(path.to_path_buf()),
             message: "citation section missing for source-backed claims".to_string(),
@@ -1142,6 +1215,7 @@ fn lint_okf_info(
     .collect::<Vec<_>>();
     if !retained_legacy.is_empty() {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Info,
             path: Some(path.to_path_buf()),
             message: format!("legacy field(s) retained: {}", retained_legacy.join(", ")),
@@ -1150,6 +1224,7 @@ fn lint_okf_info(
     }
     if mapping.contains_key(serde_yaml::Value::String("opensymphony".to_string())) {
         findings.push(LintFinding {
+            code: None,
             severity: LintSeverity::Info,
             path: Some(path.to_path_buf()),
             message: "bundle contains OpenSymphony extension fields".to_string(),
@@ -2110,6 +2185,42 @@ Visible [[real-target|Real Target]].
             .filter_map(Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().contains(".backup-"));
         assert!(!leaked_backup, "successful rollback should consume backup dir");
+    }
+
+    #[test]
+    fn export_promotion_reports_backup_cleanup_failure() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let staging = repo.path().join(".okf-export.tmp");
+        let output = repo.path().join("okf-export-private");
+        fs::create_dir_all(&staging).expect("staging should write");
+        fs::write(staging.join("bundle.md"), "staged bundle")
+            .expect("staged file should write");
+        fs::create_dir_all(&output).expect("existing output should write");
+
+        let result = promote_staged_export_with(
+            &staging,
+            &output,
+            |from, to| fs::rename(from, to),
+            |_path| Err(io::Error::other("injected cleanup failure")),
+        );
+
+        let error = result.expect_err("cleanup failure should be reported");
+        assert!(
+            error.to_string().contains("failed to remove backup"),
+            "error should explain backup cleanup failure: {error}"
+        );
+        assert!(
+            output.join("bundle.md").is_file(),
+            "successful promotion should leave staged bundle at output"
+        );
+        let leaked_backup = fs::read_dir(repo.path())
+            .expect("repo should list")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".backup-"));
+        assert!(
+            leaked_backup,
+            "failed cleanup should leave backup for manual operator cleanup"
+        );
     }
 
     #[cfg(unix)]

@@ -791,6 +791,7 @@ pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, Memo
     for issue in &issues {
         if issue.warning_count > 0 {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Warn,
                 path: Some(issue.capsule_path.clone()),
                 message: format!(
@@ -802,6 +803,7 @@ pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, Memo
         }
         if issue.areas().is_empty() {
             findings.push(LintFinding {
+                code: None,
                 severity: LintSeverity::Error,
                 path: Some(issue.capsule_path.clone()),
                 message: format!("{} has no learned memory area", issue.issue_key),
@@ -822,6 +824,7 @@ pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, Memo
             let contents = read_to_string(&path)?;
             if contains_private_memory_link(&contents) {
                 findings.push(LintFinding {
+                    code: None,
                     severity: LintSeverity::Error,
                     path: Some(path),
                     message: "public docs contain a private memory path".to_string(),

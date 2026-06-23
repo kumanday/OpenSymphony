@@ -687,10 +687,24 @@ pub struct LintReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LintFinding {
+    pub code: Option<LintCode>,
     pub severity: LintSeverity,
     pub path: Option<PathBuf>,
     pub message: String,
     pub next_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LintCode {
+    OkfPrivateMemoryLink,
+}
+
+impl LintCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OkfPrivateMemoryLink => "okf_private_memory_link",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

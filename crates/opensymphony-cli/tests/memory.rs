@@ -407,6 +407,35 @@ fn memory_import_okf_rejects_overlapping_source_and_target() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("must not overlap"));
 }
 
+#[cfg(unix)]
+#[test]
+fn memory_import_okf_force_rejects_target_symlink() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_import_warning_bundle(repo.path());
+    fs::create_dir_all(repo.path().join(".opensymphony/memory/issues"))
+        .expect("target issues dir should write");
+    let outside_target = repo.path().join("outside-target.md");
+    std::os::unix::fs::symlink(
+        &outside_target,
+        repo.path().join(".opensymphony/memory/issues/COE-500.md"),
+    )
+    .expect("target symlink should write");
+
+    let output = run(
+        repo.path(),
+        ["memory", "import-okf", "incoming-okf", "--force"],
+    );
+
+    assert_failure(&output, "forced OKF import should reject target symlink");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("is a symlink"));
+    assert!(
+        !outside_target.exists(),
+        "force import must not follow symlink outside memory root"
+    );
+}
+
 #[test]
 fn memory_import_okf_preflight_failure_leaves_no_partial_copy() {
     let repo = TempDir::new().expect("temp repo should exist");
