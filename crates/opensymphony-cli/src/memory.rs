@@ -318,7 +318,10 @@ struct ReindexArgs {
 struct ExportOkfArgs {
     #[arg(long, value_enum, help = "Bundle visibility to export")]
     visibility: OkfVisibilityArg,
-    #[arg(long, help = "Output directory; must be empty if it already exists")]
+    #[arg(
+        long,
+        help = "Output directory; defaults to okf-export-{visibility} under the repo root and must be empty if it already exists"
+    )]
     output: Option<PathBuf>,
 }
 

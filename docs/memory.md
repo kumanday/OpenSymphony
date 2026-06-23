@@ -83,13 +83,14 @@ provided, linting uses the configured memory root.
 
 `opensymphony memory export-okf --visibility public|private [--output DIR]`
 exports the configured memory root as a directory bundle. The output directory
+defaults to `okf-export-{visibility}` under the repository root when omitted and
 must be new or empty so stale private files cannot survive a public export.
-Export writes into a repository-contained staging directory first, runs OKF
-lint on the staged bundle, and only then promotes the completed bundle to the
+Export writes into a repository-contained staging directory first, runs OKF lint
+on the staged bundle, and only then promotes the completed bundle to the
 requested output path. Public export skips private concepts and fails if any
-remaining public concept still references private comments, private memory
-paths, or private source snapshots. Private export can include private concepts
-but still keeps normal OKF lint errors fatal.
+remaining public concept still references private comments, private memory paths,
+or private source snapshots. Private export can include private concepts but
+still keeps normal OKF lint errors fatal.
 
 The public export redaction scan is deliberately narrow and explicit: it treats
 `linear:comment:`, `.opensymphony/memory/issues`,

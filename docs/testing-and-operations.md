@@ -123,6 +123,10 @@ Focused OKF memory validation for implementation work:
 - `opensymphony memory import-okf <repo-contained-bundle>` is the import smoke
   path for warning-tolerant OKF bundles with actionable malformed-file errors,
   repository-contained sources, non-overlapping targets, and preflighted writes.
+  The documented post-preflight partial-write regression is Unix-gated because
+  it uses POSIX directory permissions to induce a deterministic mid-copy write
+  failure; add a separate Windows-native failure injection before treating that
+  path as covered on Windows.
 
 Codex ChatGPT subscription smoke testing remains opt-in on trusted local
 machines because the final exec probe can consume account quota. The supported
