@@ -22,7 +22,7 @@ pub const ISSUE_CAPSULE_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED ISSUE CAP
 pub const ISSUE_CAPSULE_END: &str = "<!-- END OPENSYMPHONY MANAGED ISSUE CAPSULE -->";
 pub const TOPIC_DOC_BEGIN: &str = "<!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->";
 pub const TOPIC_DOC_END: &str = "<!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->";
-const MEMORY_SCHEMA_VERSION: i64 = 1;
+const MEMORY_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Error)]
 pub enum MemoryError {
@@ -139,6 +139,16 @@ pub enum MemoryFreshness {
     Stale,
     #[default]
     Unknown,
+}
+
+impl MemoryFreshness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -654,6 +664,7 @@ pub struct MemoryReindexReport {
     pub issue_count: usize,
     pub index_path: PathBuf,
     pub markdown_indexes: Vec<PathBuf>,
+    pub warning_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1234,6 +1245,246 @@ type: topic-doc
             parse_okf_concept(&fixture, capsule_path, &capsule).expect("legacy fixture parses");
         let rendered = render_okf_concept(&concept).expect("legacy fixture renders");
         assert!(rendered.contains("legacy_custom: keep-me"));
+    }
+
+    #[test]
+    fn reindex_from_okf_fixture_rebuilds_catalog_with_warning_metadata() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        let bundle = repo.path().join(".opensymphony/memory");
+        copy_dir_recursive(&okf_fixture("okf-reindex"), &bundle);
+
+        let report =
+            refresh_memory_index_from_okf(&config, &bundle).expect("OKF reindex should work");
+        let related = related_by_issue(&config, "COE-123", 10).expect("related memory");
+        let search_results = search(&config, "generic concept", 10).expect("search");
+
+        assert_eq!(report.issue_count, 2);
+        assert!(
+            report.warning_count >= 2,
+            "unknown type and broken link warnings should be indexed"
+        );
+        assert_eq!(related[0].issue_key, "COE-124");
+        assert!(
+            search_results
+                .iter()
+                .any(|result| result.issue_key == "COE-124")
+        );
+
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        let (
+            concept_id,
+            concept_type,
+            description,
+            tags_json,
+            scope_refs_json,
+            source_refs_json,
+            links_json,
+            citations_json,
+            freshness,
+            warnings_json,
+        ): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = connection
+            .query_row(
+                "SELECT concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json FROM issues WHERE issue_key = 'COE-124'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .expect("generic concept should be indexed");
+
+        assert_eq!(concept_id, "issues/COE-124");
+        assert_eq!(concept_type, "generic-concept");
+        assert_eq!(description, "Unknown concept types stay query-compatible.");
+        assert!(tags_json.contains("okf"));
+        assert!(scope_refs_json.contains("COE-124"));
+        assert!(source_refs_json.contains("linear_issue"));
+        assert!(links_json.contains("missing.md"));
+        assert!(citations_json.contains("linear.app/example/issue/COE-124"));
+        assert_eq!(freshness, "stale");
+        assert!(warnings_json.contains("unknown type"));
+        assert!(warnings_json.contains("broken Markdown link"));
+
+        connection
+            .execute(
+                "INSERT INTO doc_memory_links (topic_doc, issue_key, visibility) VALUES (?, ?, ?)",
+                params!["docs/memory.md", "COE-124", "public"],
+            )
+            .expect("doc link should insert");
+        drop(connection);
+
+        refresh_memory_index_from_okf(&config, &bundle).expect("OKF reindex should repeat");
+        let connection = Connection::open(&config.index_path).expect("index should reopen");
+        let doc_link_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM doc_memory_links WHERE topic_doc = 'docs/memory.md' AND issue_key = 'COE-124'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("doc link count should query");
+        assert_eq!(doc_link_count, 1);
+    }
+
+    #[test]
+    fn migration_adds_okf_columns_with_new_table_nullability() {
+        let repo = TempDir::new().expect("temp repo");
+        let config = config_for(repo.path());
+        fs::create_dir_all(config.index_path.parent().expect("index parent"))
+            .expect("index parent should write");
+        let connection = Connection::open(&config.index_path).expect("index should open");
+        connection
+            .execute_batch(
+                r#"
+CREATE TABLE issues (
+  issue_key TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  state TEXT,
+  milestone TEXT,
+  labels_json TEXT NOT NULL,
+  completion_time TEXT,
+  archive_status TEXT NOT NULL,
+  capsule_path TEXT NOT NULL,
+  visibility TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  warning_count BIGINT NOT NULL,
+  docs_sync_status TEXT NOT NULL,
+  body TEXT NOT NULL,
+  captured_at TEXT NOT NULL
+);
+INSERT INTO issues (
+  issue_key,
+  title,
+  labels_json,
+  archive_status,
+  capsule_path,
+  visibility,
+  source_hash,
+  warning_count,
+  docs_sync_status,
+  body,
+  captured_at
+) VALUES (
+  'COE-999',
+  'Legacy row',
+  '[]',
+  'not_archived',
+  '.opensymphony/memory/issues/COE-999.md',
+  'private',
+  'hash',
+  0,
+  'pending',
+  '# Legacy row',
+  '2026-06-20T00:00:00Z'
+);
+"#,
+            )
+            .expect("legacy schema should write");
+
+        migrate_index(&connection).expect("migration should apply");
+
+        let (
+            concept_id,
+            concept_type,
+            tags_json,
+            scope_refs_json,
+            source_refs_json,
+            links_json,
+            citations_json,
+            freshness,
+            warnings_json,
+            description,
+        ): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = connection
+            .query_row(
+                "SELECT concept_id, concept_type, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json, description FROM issues WHERE issue_key = 'COE-999'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .expect("migrated row should query");
+        assert_eq!(concept_id, "");
+        assert_eq!(concept_type, "issue-capsule");
+        assert_eq!(tags_json, "[]");
+        assert_eq!(scope_refs_json, "[]");
+        assert_eq!(source_refs_json, "[]");
+        assert_eq!(links_json, "[]");
+        assert_eq!(citations_json, "[]");
+        assert_eq!(freshness, "unknown");
+        assert_eq!(warnings_json, "[]");
+        assert_eq!(description, None);
+
+        for column in [
+            "concept_id",
+            "concept_type",
+            "tags_json",
+            "scope_refs_json",
+            "source_refs_json",
+            "links_json",
+            "citations_json",
+            "freshness",
+            "warnings_json",
+        ] {
+            let is_nullable: String = connection
+                .query_row(
+                    "SELECT is_nullable FROM information_schema.columns WHERE table_name = 'issues' AND column_name = ?",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .expect("column nullability should query");
+            assert_eq!(is_nullable, "NO", "{column} should be non-nullable");
+        }
+        let description_nullable: String = connection
+            .query_row(
+                "SELECT is_nullable FROM information_schema.columns WHERE table_name = 'issues' AND column_name = 'description'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("description nullability should query");
+        assert_eq!(description_nullable, "YES");
     }
 
     #[test]
@@ -1820,6 +2071,24 @@ areas:
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("crates/opensymphony-memory/tests/fixtures")
             .join(name)
+    }
+
+    fn copy_dir_recursive(source: &Path, destination: &Path) {
+        fs::create_dir_all(destination).expect("destination directory should be created");
+        for entry in fs::read_dir(source).expect("source directory should be readable") {
+            let entry = entry.expect("source entry should be readable");
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            if entry
+                .file_type()
+                .expect("source entry type should be readable")
+                .is_dir()
+            {
+                copy_dir_recursive(&source_path, &destination_path);
+            } else {
+                fs::copy(&source_path, &destination_path).expect("fixture file should copy");
+            }
+        }
     }
 
     fn sample_source() -> SourceFile {

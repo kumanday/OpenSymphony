@@ -91,6 +91,66 @@ fn memory_capture_write_query_and_sync_docs_are_reviewable() {
 }
 
 #[test]
+fn memory_reindex_from_okf_preserves_query_commands() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_okf_reindex_fixture(repo.path());
+    let index_path = repo.path().join(".opensymphony/memory/memory.duckdb");
+    let _ = fs::remove_file(&index_path);
+
+    let reindex = run(
+        repo.path(),
+        ["memory", "reindex", "--from-okf", ".opensymphony/memory"],
+    );
+    assert_success(&reindex, "OKF reindex");
+    let stdout = String::from_utf8_lossy(&reindex.stdout);
+    assert!(stdout.contains("Indexed records: 2"));
+    assert!(stdout.contains("Indexed warnings:"));
+    assert!(index_path.is_file());
+
+    let context = run(
+        repo.path(),
+        [
+            "memory",
+            "context",
+            "--issue",
+            "COE-999",
+            "--include",
+            "COE-123",
+        ],
+    );
+    assert_success(&context, "context after OKF reindex");
+    assert!(String::from_utf8_lossy(&context.stdout).contains("COE-123: OKF catalog rebuild"));
+
+    let related = run(repo.path(), ["memory", "related", "--issue", "COE-123"]);
+    assert_success(&related, "related after OKF reindex");
+    assert!(String::from_utf8_lossy(&related.stdout).contains("COE-124"));
+
+    let search = run(repo.path(), ["memory", "search", "generic concept"]);
+    assert_success(&search, "search after OKF reindex");
+    assert!(String::from_utf8_lossy(&search.stdout).contains("COE-124"));
+
+    let docs = run(
+        repo.path(),
+        [
+            "memory",
+            "docs",
+            "--area",
+            "openhands-runtime",
+            "--issue",
+            "COE-123",
+        ],
+    );
+    assert_success(&docs, "docs after OKF reindex");
+    assert!(String::from_utf8_lossy(&docs.stdout).contains("Runtime docs from OKF"));
+
+    let help = run(repo.path(), ["memory", "reindex", "--help"]);
+    assert_success(&help, "reindex help");
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("clears derived GitHub metadata tables")
+    );
+}
+
+#[test]
 fn memory_init_creates_private_config_and_gitignore_policy() {
     let repo = TempDir::new().expect("temp repo should exist");
     fs::create_dir_all(repo.path().join("docs/tasks")).expect("tasks dir should write");
@@ -1010,6 +1070,19 @@ areas:
 "#,
     )
     .expect("memory config should write");
+}
+
+fn write_okf_reindex_fixture(repo: &std::path::Path) {
+    write_memory_config(repo);
+    fs::write(
+        repo.join("docs/openhands-runtime.md"),
+        "# OpenHands Runtime\n\nRuntime docs from OKF.\n",
+    )
+    .expect("docs should write");
+    copy_dir_recursive(
+        &okf_fixture("okf-reindex"),
+        &repo.join(".opensymphony/memory"),
+    );
 }
 
 fn write_general_memory_config(repo: &std::path::Path) {

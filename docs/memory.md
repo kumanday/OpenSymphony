@@ -341,6 +341,13 @@ mode. Read tools are `memory.context`, `memory.search`, `memory.related`,
 without a separate read token, the admin token also protects read tools.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
 to include available codebase-analysis artifacts alongside selected memory.
+`opensymphony memory reindex --from-okf [bundle-root]` rebuilds the derived
+DuckDB catalog from OKF concept documents, defaulting to the configured memory
+root. Broken links and unknown concept types are indexed as warnings; malformed
+OKF frontmatter remains fatal because those files are not parseable concepts.
+The OKF rebuild clears derived GitHub metadata tables (`pull_requests`,
+`changed_files`, `checks`, and `reviews`) because OKF concepts do not currently
+carry that capture-enrichment data.
 
 Docs sync writes stable topic docs by default and prints stat-style output with
 file paths, line counts, and changed-line totals:

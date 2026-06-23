@@ -23,10 +23,10 @@ use crate::{
         MemoryScopeFilter, SourceFile, archive_blocking_warning_count, brief,
         context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range, lint,
         lint_okf_bundle, load_source_file, mark_archived, plan_archive, plan_capture,
-        plan_docs_sync, plan_memory_init, refresh_memory_index, related_by_area_with_scope,
-        related_by_issue_with_scope, related_by_paths_with_scope, render_archive_plan,
-        render_capture_dry_run, search_with_scope, status_with_scope, write_capture_plan,
-        write_docs_sync_plan, write_memory_init_plan,
+        plan_docs_sync, plan_memory_init, refresh_memory_index, refresh_memory_index_from_okf,
+        related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
+        render_archive_plan, render_capture_dry_run, search_with_scope, status_with_scope,
+        write_capture_plan, write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
@@ -76,6 +76,8 @@ enum MemoryCommand {
     Serve(ServeArgs),
     #[command(about = "Lint memory and docs for stale or unsafe state")]
     Lint(LintArgs),
+    #[command(about = "Refresh memory catalog schema and generated indexes")]
+    Reindex(ReindexArgs),
 }
 
 #[derive(Debug, Args)]
@@ -291,6 +293,19 @@ struct LintArgs {
     #[arg(long, help = "Lint an OKF bundle")]
     okf: bool,
     #[arg(help = "OKF bundle root; defaults to the configured memory root with --okf")]
+    bundle: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(
+    after_help = "With --from-okf, reindex clears derived GitHub metadata tables \
+                  (pull_requests, changed_files, checks, reviews). OKF concepts \
+                  do not repopulate that metadata."
+)]
+struct ReindexArgs {
+    #[arg(long, help = "Rebuild the derived catalog from OKF concept documents")]
+    from_okf: bool,
+    #[arg(help = "OKF bundle root; defaults to the configured memory root")]
     bundle: Option<PathBuf>,
 }
 
@@ -628,6 +643,10 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         MemoryCommand::Lint(args) => {
             let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
             run_lint(&config, args)
+        }
+        MemoryCommand::Reindex(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_reindex(&config, args)
         }
     }
 }
@@ -969,6 +988,13 @@ fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, 
                 "bundleRoot": args.bundle.as_ref().map(|path| path.display().to_string())
             }),
         )),
+        MemoryCommand::Reindex(args) => Some((
+            "memory.reindex",
+            json!({
+                "fromOkf": args.from_okf,
+                "bundleRoot": args.bundle.as_ref().map(|path| path.display().to_string())
+            }),
+        )),
         MemoryCommand::Brief(args) => {
             Some(("memory.brief", json!({ "issue": args.issue.clone() })))
         }
@@ -1238,6 +1264,31 @@ fn run_lint(config: &MemoryConfig, args: LintArgs) -> Result<(), MemoryError> {
         }
     }
     Ok(())
+}
+
+fn run_reindex(config: &MemoryConfig, args: ReindexArgs) -> Result<(), MemoryError> {
+    let report = if args.from_okf {
+        let bundle_root = args
+            .bundle
+            .as_deref()
+            .map(|path| repo_existing_path_from_path(config, path))
+            .transpose()?
+            .unwrap_or_else(|| config.memory_root.clone());
+        refresh_memory_index_from_okf(config, &bundle_root)?
+    } else {
+        refresh_memory_index(config)?
+    };
+    print_reindex_report(report);
+    Ok(())
+}
+
+fn print_reindex_report(report: MemoryReindexReport) {
+    println!("Updated DuckDB index: {}", report.index_path.display());
+    println!("Indexed records: {}", report.issue_count);
+    println!("Indexed warnings: {}", report.warning_count);
+    for path in report.markdown_indexes {
+        println!("Updated markdown index: {}", path.display());
+    }
 }
 
 #[derive(Clone)]
@@ -1655,7 +1706,7 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
         "memory.capture" => call_memory_capture_tool(config, &arguments).await,
         "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
         "memory.lint" => call_memory_lint_tool(config, &arguments),
-        "memory.reindex" => call_memory_reindex_tool(config),
+        "memory.reindex" => call_memory_reindex_tool(config, &arguments),
         "memory.ingest_code_intel" => call_memory_ingest_code_intel_tool(config, &arguments).await,
         other => Err(MemoryError::InvalidInput(format!(
             "unsupported memory tool `{other}`"
@@ -1769,11 +1820,21 @@ fn call_memory_lint_tool(config: &MemoryConfig, arguments: &Value) -> Result<Val
     }))
 }
 
-fn call_memory_reindex_tool(config: &MemoryConfig) -> Result<Value, MemoryError> {
-    Ok(memory_reindex_report_json(
-        config,
-        refresh_memory_index(config)?,
-    ))
+fn call_memory_reindex_tool(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Value, MemoryError> {
+    let report = if bool_arg(arguments, "fromOkf") || bool_arg(arguments, "from_okf") {
+        let bundle_root = optional_string_arg(arguments, "bundleRoot")
+            .or_else(|| optional_string_arg(arguments, "bundle_root"))
+            .map(|path| repo_existing_path(config, &path))
+            .transpose()?
+            .unwrap_or_else(|| config.memory_root.clone());
+        refresh_memory_index_from_okf(config, &bundle_root)?
+    } else {
+        refresh_memory_index(config)?
+    };
+    Ok(memory_reindex_report_json(config, report))
 }
 
 async fn call_memory_ingest_code_intel_tool(
@@ -1883,6 +1944,7 @@ fn docs_sync_plan_json(config: &MemoryConfig, plan: &DocsSyncPlan) -> Value {
 fn memory_reindex_report_json(config: &MemoryConfig, report: MemoryReindexReport) -> Value {
     json!({
         "issueCount": report.issue_count,
+        "warningCount": report.warning_count,
         "indexPath": path_for_json(config, &report.index_path),
         "markdownIndexes": paths_for_json(config, &report.markdown_indexes)
     })

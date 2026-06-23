@@ -11,11 +11,14 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
             source,
-        })?;
+    })?;
     for issue_plan in &plan.selected {
         let issue_key = normalize_issue_key(&issue_plan.issue.identifier);
         let body = read_to_string(&issue_plan.capsule_path)?;
         let labels_json = serde_json::to_string(&issue_plan.issue.labels)?;
+        let warnings_json = serde_json::to_string(&issue_plan.warnings)?;
+        let empty_json = serde_json::to_string(&Vec::<String>::new())?;
+        let freshness = MemoryFreshness::Current;
         transaction
             .execute("DELETE FROM issues WHERE issue_key = ?", params![issue_key])
             .map_err(|source| MemoryError::DuckDb {
@@ -24,7 +27,7 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
             })?;
         transaction
             .execute(
-                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     issue_key,
                     issue_title(&issue_plan.issue),
@@ -44,6 +47,16 @@ fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), M
                     "pending",
                     body,
                     Utc::now().to_rfc3339(),
+                    format!("issues/{issue_key}"),
+                    "issue-capsule",
+                    issue_plan.issue.description.clone(),
+                    labels_json.clone(),
+                    empty_json.clone(),
+                    empty_json.clone(),
+                    empty_json.clone(),
+                    empty_json.clone(),
+                    freshness.as_str(),
+                    warnings_json,
                 ],
             )
             .map_err(|source| MemoryError::DuckDb {
@@ -260,8 +273,55 @@ CREATE TABLE IF NOT EXISTS issues (
   warning_count BIGINT NOT NULL,
   docs_sync_status TEXT NOT NULL,
   body TEXT NOT NULL,
-  captured_at TEXT NOT NULL
+  captured_at TEXT NOT NULL,
+  concept_id TEXT NOT NULL DEFAULT '',
+  concept_type TEXT NOT NULL DEFAULT 'issue-capsule',
+  description TEXT,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  scope_refs_json TEXT NOT NULL DEFAULT '[]',
+  source_refs_json TEXT NOT NULL DEFAULT '[]',
+  links_json TEXT NOT NULL DEFAULT '[]',
+  citations_json TEXT NOT NULL DEFAULT '[]',
+  freshness TEXT NOT NULL DEFAULT 'unknown',
+  warnings_json TEXT NOT NULL DEFAULT '[]'
 );
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS concept_id TEXT DEFAULT '';
+UPDATE issues SET concept_id = '' WHERE concept_id IS NULL;
+ALTER TABLE issues ALTER COLUMN concept_id SET DEFAULT '';
+ALTER TABLE issues ALTER COLUMN concept_id SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS concept_type TEXT DEFAULT 'issue-capsule';
+UPDATE issues SET concept_type = 'issue-capsule' WHERE concept_type IS NULL;
+ALTER TABLE issues ALTER COLUMN concept_type SET DEFAULT 'issue-capsule';
+ALTER TABLE issues ALTER COLUMN concept_type SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS tags_json TEXT DEFAULT '[]';
+UPDATE issues SET tags_json = '[]' WHERE tags_json IS NULL;
+ALTER TABLE issues ALTER COLUMN tags_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN tags_json SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS scope_refs_json TEXT DEFAULT '[]';
+UPDATE issues SET scope_refs_json = '[]' WHERE scope_refs_json IS NULL;
+ALTER TABLE issues ALTER COLUMN scope_refs_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN scope_refs_json SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS source_refs_json TEXT DEFAULT '[]';
+UPDATE issues SET source_refs_json = '[]' WHERE source_refs_json IS NULL;
+ALTER TABLE issues ALTER COLUMN source_refs_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN source_refs_json SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS links_json TEXT DEFAULT '[]';
+UPDATE issues SET links_json = '[]' WHERE links_json IS NULL;
+ALTER TABLE issues ALTER COLUMN links_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN links_json SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS citations_json TEXT DEFAULT '[]';
+UPDATE issues SET citations_json = '[]' WHERE citations_json IS NULL;
+ALTER TABLE issues ALTER COLUMN citations_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN citations_json SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS freshness TEXT DEFAULT 'unknown';
+UPDATE issues SET freshness = 'unknown' WHERE freshness IS NULL;
+ALTER TABLE issues ALTER COLUMN freshness SET DEFAULT 'unknown';
+ALTER TABLE issues ALTER COLUMN freshness SET NOT NULL;
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS warnings_json TEXT DEFAULT '[]';
+UPDATE issues SET warnings_json = '[]' WHERE warnings_json IS NULL;
+ALTER TABLE issues ALTER COLUMN warnings_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN warnings_json SET NOT NULL;
 CREATE TABLE IF NOT EXISTS pull_requests (
   issue_key TEXT NOT NULL,
   number BIGINT NOT NULL,
@@ -497,13 +557,399 @@ pub fn refresh_memory_index(config: &MemoryConfig) -> Result<MemoryReindexReport
     })?;
     drop(connection);
 
-    let issue_count = load_indexed_issues(config)?.len();
+    let issues = load_indexed_issues(config)?;
+    let issue_count = issues.len();
+    let warning_count = issues.iter().map(|issue| issue.warning_count).sum();
     let markdown_indexes = write_markdown_indexes(config)?;
     Ok(MemoryReindexReport {
         issue_count,
         index_path: config.index_path.clone(),
         markdown_indexes,
+        warning_count,
     })
+}
+
+pub fn refresh_memory_index_from_okf(
+    config: &MemoryConfig,
+    bundle_root: &Path,
+) -> Result<MemoryReindexReport, MemoryError> {
+    ensure_repo_contained(&config.repo_root, bundle_root)?;
+    let bundle_root = canonicalize_existing_path(bundle_root)?;
+    let lint = lint_okf_bundle(&bundle_root, false)?;
+    let errors = lint
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == LintSeverity::Error)
+        .map(|finding| {
+            let path = finding
+                .path
+                .as_ref()
+                .map(|path| display_path(&config.repo_root, path))
+                .unwrap_or_else(|| "bundle".to_string());
+            format!("{path}: {}", finding.message)
+        })
+        .collect::<Vec<_>>();
+    if !errors.is_empty() {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF bundle has error(s): {}",
+            errors.join("; ")
+        )));
+    }
+    let mut warnings_by_path = BTreeMap::<PathBuf, Vec<String>>::new();
+    for finding in lint
+        .findings
+        .into_iter()
+        .filter(|finding| finding.severity == LintSeverity::Warn)
+    {
+        if let Some(path) = finding.path
+            && path.is_file()
+        {
+            warnings_by_path
+                .entry(path)
+                .or_default()
+                .push(finding.message);
+        }
+    }
+
+    let mut files = Vec::new();
+    collect_okf_markdown_files(&bundle_root, &bundle_root, &mut files)?;
+    let mut rows = Vec::new();
+    for path in files {
+        let relative = bundle_relative_path(&bundle_root, &path)?;
+        let bundle_path = OkfBundlePath::new(relative)?;
+        if bundle_path.reserved_file().is_some() {
+            continue;
+        }
+        let contents = read_to_string(&path)?;
+        let concept = parse_okf_concept(&bundle_root, &path, &contents)?;
+        rows.push(OkfIndexRow::from_concept(
+            config,
+            path.clone(),
+            concept,
+            contents,
+            warnings_by_path.remove(&path).unwrap_or_default(),
+        )?);
+    }
+
+    let mut connection = open_index(config)?;
+    migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
+        path: config.index_path.clone(),
+        source,
+    })?;
+    let transaction = connection
+        .transaction()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+    for table in [
+        "issues",
+        "issue_areas",
+        "pull_requests",
+        "changed_files",
+        "checks",
+        "reviews",
+        "areas",
+    ] {
+        transaction
+            .execute(&format!("DELETE FROM {table}"), [])
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+    }
+
+    for row in &rows {
+        transaction
+            .execute(
+                "INSERT INTO issues (issue_key, title, state, milestone, labels_json, completion_time, archive_status, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body, captured_at, concept_id, concept_type, description, tags_json, scope_refs_json, source_refs_json, links_json, citations_json, freshness, warnings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    row.issue_key,
+                    row.title,
+                    row.state,
+                    row.milestone,
+                    row.labels_json,
+                    row.completion_time,
+                    "not_archived",
+                    row.capsule_path.to_string_lossy().to_string(),
+                    row.visibility.as_str(),
+                    row.source_hash,
+                    row.warning_count as i64,
+                    row.docs_sync_status,
+                    row.body,
+                    row.captured_at,
+                    row.concept_id,
+                    row.concept_type,
+                    row.description,
+                    row.tags_json,
+                    row.scope_refs_json,
+                    row.source_refs_json,
+                    row.links_json,
+                    row.citations_json,
+                    row.freshness.as_str(),
+                    row.warnings_json,
+                ],
+            )
+            .map_err(|source| MemoryError::DuckDb {
+                path: config.index_path.clone(),
+                source,
+            })?;
+        for area in &row.areas {
+            let area_config = config.area_or_default(area);
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO areas (area, display_name, docs_target) VALUES (?, ?, ?)",
+                    params![
+                        area,
+                        area_config.title,
+                        area_config.docs_target.to_string_lossy().to_string(),
+                    ],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+            transaction
+                .execute(
+                    "INSERT INTO issue_areas (issue_key, area) VALUES (?, ?)",
+                    params![row.issue_key, area],
+                )
+                .map_err(|source| MemoryError::DuckDb {
+                    path: config.index_path.clone(),
+                    source,
+                })?;
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|source| MemoryError::DuckDb {
+            path: config.index_path.clone(),
+            source,
+        })?;
+
+    let warning_count = rows.iter().map(|row| row.warning_count).sum();
+    let markdown_indexes = if config.markdown_indexes {
+        write_markdown_indexes(config)?
+    } else {
+        Vec::new()
+    };
+    Ok(MemoryReindexReport {
+        issue_count: rows.len(),
+        index_path: config.index_path.clone(),
+        markdown_indexes,
+        warning_count,
+    })
+}
+
+struct OkfIndexRow {
+    issue_key: String,
+    concept_id: String,
+    concept_type: String,
+    title: String,
+    state: Option<String>,
+    milestone: Option<String>,
+    labels_json: String,
+    completion_time: Option<String>,
+    capsule_path: PathBuf,
+    visibility: MemoryVisibility,
+    source_hash: String,
+    warning_count: usize,
+    docs_sync_status: String,
+    body: String,
+    captured_at: String,
+    description: Option<String>,
+    tags_json: String,
+    scope_refs_json: String,
+    source_refs_json: String,
+    links_json: String,
+    citations_json: String,
+    freshness: MemoryFreshness,
+    warnings_json: String,
+    areas: Vec<String>,
+}
+
+impl OkfIndexRow {
+    fn from_concept(
+        config: &MemoryConfig,
+        path: PathBuf,
+        concept: OkfConcept,
+        contents: String,
+        warnings: Vec<String>,
+    ) -> Result<Self, MemoryError> {
+        let metadata = concept.frontmatter.opensymphony.clone();
+        let scope_refs = metadata
+            .as_ref()
+            .map(|metadata| metadata.scope_refs.clone())
+            .unwrap_or_default();
+        let source_refs = metadata
+            .as_ref()
+            .map(|metadata| metadata.source_refs.clone())
+            .unwrap_or_default();
+        let links = okf_index_links(&concept, metadata.as_ref());
+        let citations = metadata
+            .as_ref()
+            .map(|metadata| metadata.citations.clone())
+            .unwrap_or_default();
+        let tags = normalize_list(concept.frontmatter.tags.clone());
+        let warning_count = archive_blocking_warning_count(&warnings);
+        let warnings_json = serde_json::to_string(&warnings)?;
+
+        Ok(Self {
+            issue_key: okf_issue_key(&concept, &scope_refs, &source_refs),
+            concept_id: concept.id.clone(),
+            concept_type: okf_index_concept_type(&concept.frontmatter.concept_type),
+            title: okf_index_title(&concept),
+            state: string_extra(&concept.frontmatter, "state"),
+            milestone: okf_index_milestone(&concept, &scope_refs),
+            labels_json: serde_json::to_string(&tags)?,
+            completion_time: concept.frontmatter.timestamp.clone(),
+            capsule_path: path,
+            visibility: metadata
+                .as_ref()
+                .and_then(|metadata| metadata.visibility)
+                .unwrap_or(config.visibility),
+            source_hash: sha256_hex(&contents),
+            warning_count,
+            docs_sync_status: metadata
+                .as_ref()
+                .and_then(|metadata| okf_docs_sync_status(metadata.docs_sync.as_ref()))
+                .unwrap_or_else(|| "pending".to_string()),
+            body: concept.body.clone(),
+            captured_at: concept
+                .frontmatter
+                .timestamp
+                .clone()
+                .unwrap_or_else(|| Utc::now().to_rfc3339()),
+            description: okf_index_description(&concept),
+            tags_json: serde_json::to_string(&tags)?,
+            scope_refs_json: serde_json::to_string(&scope_refs)?,
+            source_refs_json: serde_json::to_string(&source_refs)?,
+            links_json: serde_json::to_string(&links)?,
+            citations_json: serde_json::to_string(&citations)?,
+            freshness: okf_index_freshness(&concept),
+            warnings_json,
+            areas: okf_index_areas(&scope_refs),
+        })
+    }
+}
+
+fn okf_issue_key(
+    concept: &OkfConcept,
+    scope_refs: &[KnowledgeScope],
+    source_refs: &[MemorySourceRef],
+) -> String {
+    scope_refs
+        .iter()
+        .find(|scope| scope.kind == KnowledgeScopeKind::WorkItem)
+        .map(|scope| normalize_issue_key(&scope.id))
+        .or_else(|| string_extra(&concept.frontmatter, "issue").map(|issue| normalize_issue_key(&issue)))
+        .or_else(|| {
+            source_refs
+                .iter()
+                .find(|source| source.kind == "linear_issue")
+                .map(|source| normalize_issue_key(&source.id))
+        })
+        .unwrap_or_else(|| normalize_issue_key(&concept.id))
+}
+
+fn okf_index_concept_type(concept_type: &str) -> String {
+    if known_okf_type(concept_type) {
+        concept_type.to_string()
+    } else {
+        "generic-concept".to_string()
+    }
+}
+
+fn okf_index_title(concept: &OkfConcept) -> String {
+    concept
+        .frontmatter
+        .title
+        .as_deref()
+        .and_then(normalize_optional)
+        .or_else(|| first_heading(&concept.body).map(str::to_string))
+        .or_else(|| {
+            concept
+                .path
+                .as_path()
+                .file_stem()
+                .and_then(OsStr::to_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| concept.id.clone())
+}
+
+fn okf_index_description(concept: &OkfConcept) -> Option<String> {
+    concept
+        .frontmatter
+        .description
+        .as_deref()
+        .and_then(normalize_optional)
+        .or_else(|| first_paragraph(&concept.body).map(str::to_string))
+}
+
+fn okf_index_milestone(concept: &OkfConcept, scope_refs: &[KnowledgeScope]) -> Option<String> {
+    scope_refs
+        .iter()
+        .find(|scope| scope.kind == KnowledgeScopeKind::Milestone)
+        .and_then(|scope| scope.label.clone().or_else(|| Some(scope.id.clone())))
+        .or_else(|| string_extra(&concept.frontmatter, "milestone"))
+}
+
+fn okf_index_areas(scope_refs: &[KnowledgeScope]) -> Vec<String> {
+    let mut areas = scope_refs
+        .iter()
+        .filter(|scope| scope.kind == KnowledgeScopeKind::Area)
+        .filter_map(|scope| normalize_optional(&scope.id))
+        .map(|area| slugify(&area))
+        .collect::<Vec<_>>();
+    areas.sort();
+    areas.dedup();
+    areas
+}
+
+fn okf_index_links(
+    concept: &OkfConcept,
+    metadata: Option<&OpenSymphonyOkfMetadata>,
+) -> Vec<OkfLink> {
+    let mut links = concept.links.clone();
+    if let Some(metadata) = metadata {
+        for link in &metadata.links {
+            if !links.iter().any(|existing| existing.target == link.target) {
+                links.push(link.clone());
+            }
+        }
+    }
+    links
+}
+
+fn okf_docs_sync_status(value: Option<&serde_yaml::Value>) -> Option<String> {
+    let serde_yaml::Value::Mapping(mapping) = value? else {
+        return None;
+    };
+    mapping
+        .get(serde_yaml::Value::String("status".to_string()))
+        .and_then(value_as_string)
+}
+
+fn okf_index_freshness(concept: &OkfConcept) -> MemoryFreshness {
+    match string_extra(&concept.frontmatter, "freshness")
+        .unwrap_or_default()
+        .as_str()
+    {
+        "current" => MemoryFreshness::Current,
+        "stale" => MemoryFreshness::Stale,
+        _ => MemoryFreshness::Unknown,
+    }
+}
+
+fn sha256_hex(contents: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(contents.as_bytes());
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn write_milestone_nodes(
