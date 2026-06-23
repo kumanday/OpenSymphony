@@ -151,6 +151,162 @@ fn memory_reindex_from_okf_preserves_query_commands() {
 }
 
 #[test]
+fn memory_export_okf_public_skips_private_and_private_keeps_it() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_okf_reindex_fixture(repo.path());
+    write_public_okf_concept(repo.path(), "COE-200.md", "Public concept", "");
+
+    let public_export = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            "public-okf",
+        ],
+    );
+    assert_success(&public_export, "public OKF export");
+    assert!(repo.path().join("public-okf/issues/COE-200.md").is_file());
+    assert!(!repo.path().join("public-okf/issues/COE-123.md").exists());
+    assert!(repo.path().join("public-okf/index.md").is_file());
+    assert!(repo.path().join("public-okf/log.md").is_file());
+    let stdout = String::from_utf8_lossy(&public_export.stdout);
+    assert!(stdout.contains("Visibility: public"));
+    assert!(stdout.contains("Skipped private files: 2"));
+
+    let lint = run(
+        repo.path(),
+        ["memory", "lint", "--okf", "--public-docs", "public-okf"],
+    );
+    assert_success(&lint, "public export lint");
+    assert!(!String::from_utf8_lossy(&lint.stdout).contains("[error]"));
+
+    let private_export = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "private",
+            "--output",
+            "private-okf",
+        ],
+    );
+    assert_success(&private_export, "private OKF export");
+    assert!(repo.path().join("private-okf/issues/COE-123.md").is_file());
+    assert!(repo.path().join("private-okf/issues/COE-200.md").is_file());
+}
+
+#[test]
+fn memory_export_okf_public_fails_on_private_material_in_public_concepts() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_public_okf_concept(
+        repo.path(),
+        "COE-201.md",
+        "Leaky comment",
+        "Private comment source: linear:comment:abc123.\n",
+    );
+    write_public_okf_concept(
+        repo.path(),
+        "COE-202.md",
+        "Leaky snapshot",
+        "Private snapshot: .opensymphony/memory/source-snapshots/COE-202.md.\n",
+    );
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            "public-okf",
+        ],
+    );
+
+    assert_failure(&output, "public OKF export redaction");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("public export contains private comment references"));
+    assert!(stderr.contains("public export contains private source snapshots"));
+    assert!(stderr.contains("COE-201.md"));
+    assert!(stderr.contains("COE-202.md"));
+}
+
+#[test]
+fn memory_export_okf_public_skips_private_concepts_with_private_paths() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_public_okf_concept(repo.path(), "COE-210.md", "Safe public concept", "");
+    write_private_okf_concept(
+        repo.path(),
+        "COE-211.md",
+        "Private leaky concept",
+        "Private path: .opensymphony/memory/issues/COE-211.md.\n",
+    );
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            "public-okf",
+        ],
+    );
+
+    assert_success(&output, "public OKF export skips private leaky concept");
+    assert!(repo.path().join("public-okf/issues/COE-210.md").is_file());
+    assert!(!repo.path().join("public-okf/issues/COE-211.md").exists());
+}
+
+#[test]
+fn memory_import_okf_tolerates_warnings_and_preserves_unknown_fields() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_import_warning_bundle(repo.path());
+
+    let output = run(repo.path(), ["memory", "import-okf", "incoming-okf"]);
+
+    assert_success(&output, "OKF import with warnings");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Copied files: 1"));
+    assert!(stdout.contains("Indexed records: 1"));
+    let imported = fs::read_to_string(repo.path().join(".opensymphony/memory/issues/COE-500.md"))
+        .expect("imported concept should read");
+    assert!(imported.contains("x_unknown: keep-me"));
+    assert!(imported.contains("type: surprise-concept"));
+
+    let search = run(repo.path(), ["memory", "search", "warning-friendly"]);
+    assert_success(&search, "search imported OKF");
+    assert!(String::from_utf8_lossy(&search.stdout).contains("COE-500"));
+}
+
+#[test]
+fn memory_import_okf_reports_malformed_concept_paths() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    fs::create_dir_all(repo.path().join("incoming-okf/issues")).expect("bundle dir should write");
+    fs::write(
+        repo.path().join("incoming-okf/issues/broken.md"),
+        "---\ntype: [unterminated\n---\n\n# Broken\n",
+    )
+    .expect("broken fixture should write");
+
+    let output = run(repo.path(), ["memory", "import-okf", "incoming-okf"]);
+
+    assert_failure(&output, "malformed OKF import");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("incoming-okf/issues/broken.md"));
+    assert!(stderr.contains("frontmatter is not parseable YAML"));
+}
+
+#[test]
 fn memory_init_creates_private_config_and_gitignore_policy() {
     let repo = TempDir::new().expect("temp repo should exist");
     fs::create_dir_all(repo.path().join("docs/tasks")).expect("tasks dir should write");
@@ -1083,6 +1239,81 @@ fn write_okf_reindex_fixture(repo: &std::path::Path) {
         &okf_fixture("okf-reindex"),
         &repo.join(".opensymphony/memory"),
     );
+}
+
+fn write_public_okf_concept(repo: &std::path::Path, file_name: &str, title: &str, body: &str) {
+    fs::create_dir_all(repo.join(".opensymphony/memory/issues")).expect("issues dir should write");
+    fs::write(
+        repo.join(".opensymphony/memory/issues").join(file_name),
+        format!(
+            r#"---
+type: topic-doc
+title: "{title}"
+description: Public OKF fixture.
+resource: https://example.com/{file_name}
+tags: [memory, okf]
+timestamp: 2026-06-22T10:00:00Z
+opensymphony:
+  visibility: public
+  kind: topic_doc
+---
+
+# {title}
+
+{body}
+"#
+        ),
+    )
+    .expect("public OKF concept should write");
+}
+
+fn write_private_okf_concept(repo: &std::path::Path, file_name: &str, title: &str, body: &str) {
+    fs::create_dir_all(repo.join(".opensymphony/memory/issues")).expect("issues dir should write");
+    fs::write(
+        repo.join(".opensymphony/memory/issues").join(file_name),
+        format!(
+            r#"---
+type: issue-capsule
+title: "{title}"
+description: Private OKF fixture.
+resource: https://example.com/{file_name}
+tags: [memory, okf]
+timestamp: 2026-06-22T10:00:00Z
+opensymphony:
+  visibility: private
+  kind: issue_capsule
+---
+
+# {title}
+
+{body}
+"#
+        ),
+    )
+    .expect("private OKF concept should write");
+}
+
+fn write_import_warning_bundle(repo: &std::path::Path) {
+    fs::create_dir_all(repo.join("incoming-okf/issues")).expect("incoming dir should write");
+    fs::write(
+        repo.join("incoming-okf/issues/COE-500.md"),
+        r#"---
+type: surprise-concept
+title: "COE-500: Warning-friendly import"
+x_unknown: keep-me
+opensymphony:
+  visibility: private
+  scope_refs:
+    - kind: work_item
+      id: COE-500
+---
+
+# COE-500: Warning-friendly import
+
+This warning-friendly concept has a [broken link](missing.md).
+"#,
+    )
+    .expect("warning import fixture should write");
 }
 
 fn write_general_memory_config(repo: &std::path::Path) {

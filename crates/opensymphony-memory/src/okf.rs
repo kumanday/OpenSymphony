@@ -151,6 +151,23 @@ pub struct OkfConcept {
     pub derived_opensymphony: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfExportReport {
+    pub output_path: PathBuf,
+    pub copied_files: Vec<PathBuf>,
+    pub skipped_private_files: Vec<PathBuf>,
+    pub finding_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfImportReport {
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+    pub copied_files: Vec<PathBuf>,
+    pub finding_count: usize,
+    pub reindex: MemoryReindexReport,
+}
+
 impl OkfConcept {
     pub fn new(
         path: impl Into<PathBuf>,
@@ -221,6 +238,148 @@ pub fn render_okf_concept(concept: &OkfConcept) -> Result<String, MemoryError> {
     Ok(format!("---\n{frontmatter}---\n\n{}", concept.body))
 }
 
+pub fn export_okf_bundle(
+    config: &MemoryConfig,
+    visibility: MemoryVisibility,
+    output: Option<&Path>,
+) -> Result<OkfExportReport, MemoryError> {
+    ensure_repo_contained(&config.repo_root, &config.memory_root)?;
+    let source_root = canonicalize_existing_path(&config.memory_root)?;
+    if !source_root.is_dir() {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF source bundle `{}` is not a directory",
+            source_root.display()
+        )));
+    }
+    let output_path = output
+        .map(|path| resolve_path(&config.repo_root, path))
+        .unwrap_or_else(|| config.repo_root.join(format!("okf-export-{visibility}")));
+    ensure_repo_contained(&config.repo_root, &output_path)?;
+    let output_path = canonicalize_existing_prefix(&output_path)?;
+    if output_path == source_root || output_path.starts_with(&source_root) {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF export output `{}` must not be inside the source bundle `{}`",
+            output_path.display(),
+            source_root.display()
+        )));
+    }
+    ensure_empty_output_dir(&output_path)?;
+
+    let mut files = Vec::new();
+    collect_okf_markdown_files(&source_root, &source_root, &mut files)?;
+    let public = visibility == MemoryVisibility::Public;
+    let private_source_paths = if public {
+        private_okf_concept_paths(&source_root, &files)?
+    } else {
+        BTreeSet::new()
+    };
+    let lint = lint_okf_bundle(&source_root, false)?;
+    let errors = lint_errors_for_export(config, "OKF source bundle", &lint, &private_source_paths);
+    if !errors.is_empty() {
+        return Err(MemoryError::InvalidInput(errors));
+    }
+
+    let mut writes = Vec::<(PathBuf, String)>::new();
+    let mut copied_files = Vec::new();
+    let mut skipped_private_files = Vec::new();
+    let mut redaction_errors = Vec::new();
+
+    for path in files {
+        let relative = bundle_relative_path(&source_root, &path)?;
+        let bundle_path = OkfBundlePath::new(relative.clone())?;
+        let contents = read_to_string(&path)?;
+        if bundle_path.reserved_file().is_some() {
+            if !public {
+                writes.push((output_path.join(&relative), contents));
+                copied_files.push(relative);
+            }
+            continue;
+        }
+
+        let concept = parse_okf_concept(&source_root, &path, &contents)?;
+        if public && concept_visibility(&concept) == Some(MemoryVisibility::Private) {
+            skipped_private_files.push(relative);
+            continue;
+        }
+        if public && let Some(reason) = public_export_private_material(&contents) {
+            redaction_errors.push(format!(
+                "{}: public export contains {reason}",
+                display_path(&config.repo_root, &path)
+            ));
+            continue;
+        }
+        writes.push((output_path.join(&relative), contents));
+        copied_files.push(relative);
+    }
+
+    if !redaction_errors.is_empty() {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF public export redaction error(s): {}",
+            redaction_errors.join("; ")
+        )));
+    }
+    if public {
+        writes.push((output_path.join("index.md"), public_export_index()));
+        writes.push((output_path.join("log.md"), public_export_log()));
+        copied_files.push(PathBuf::from("index.md"));
+        copied_files.push(PathBuf::from("log.md"));
+    }
+    for (path, contents) in writes {
+        write_file(&path, &contents)?;
+    }
+    let exported_lint = lint_okf_bundle(&output_path, public)?;
+    let errors = lint_errors(config, "exported OKF bundle", &exported_lint);
+    if !errors.is_empty() {
+        return Err(MemoryError::InvalidInput(errors));
+    }
+
+    Ok(OkfExportReport {
+        output_path,
+        copied_files,
+        skipped_private_files,
+        finding_count: exported_lint.findings.len(),
+    })
+}
+
+pub fn import_okf_bundle(
+    config: &MemoryConfig,
+    source: &Path,
+) -> Result<OkfImportReport, MemoryError> {
+    ensure_repo_contained(&config.repo_root, source)?;
+    let source_path = canonicalize_existing_path(&resolve_path(&config.repo_root, source))?;
+    if !source_path.is_dir() {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF import source `{}` is not a directory",
+            source_path.display()
+        )));
+    }
+    let lint = lint_okf_bundle(&source_path, false)?;
+    let errors = lint_errors(config, "OKF import bundle", &lint);
+    if !errors.is_empty() {
+        return Err(MemoryError::InvalidInput(errors));
+    }
+
+    let mut files = Vec::new();
+    collect_okf_markdown_files(&source_path, &source_path, &mut files)?;
+    let mut copied_files = Vec::new();
+    for path in files {
+        let relative = bundle_relative_path(&source_path, &path)?;
+        OkfBundlePath::new(relative.clone())?;
+        let contents = read_to_string(&path)?;
+        write_file(&config.memory_root.join(&relative), &contents)?;
+        copied_files.push(relative);
+    }
+
+    let reindex = refresh_memory_index_from_okf(config, &config.memory_root)?;
+    Ok(OkfImportReport {
+        source_path,
+        target_path: config.memory_root.clone(),
+        copied_files,
+        finding_count: lint.findings.len(),
+        reindex,
+    })
+}
+
 pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintReport, MemoryError> {
     if !bundle_root.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
@@ -279,6 +438,102 @@ pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintRe
     }
 
     Ok(LintReport { findings })
+}
+
+fn ensure_empty_output_dir(path: &Path) -> Result<(), MemoryError> {
+    if path.exists() {
+        if !path.is_dir() {
+            return Err(MemoryError::InvalidInput(format!(
+                "OKF export output `{}` exists and is not a directory",
+                path.display()
+            )));
+        }
+        let mut entries = fs::read_dir(path).map_err(|source| MemoryError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if entries.next().is_some() {
+            return Err(MemoryError::InvalidInput(format!(
+                "OKF export output `{}` must be empty",
+                path.display()
+            )));
+        }
+    } else {
+        create_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn lint_errors(config: &MemoryConfig, label: &str, report: &LintReport) -> String {
+    lint_errors_for_export(config, label, report, &BTreeSet::new())
+}
+
+fn lint_errors_for_export(
+    config: &MemoryConfig,
+    label: &str,
+    report: &LintReport,
+    ignored_private_paths: &BTreeSet<PathBuf>,
+) -> String {
+    let errors = report
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == LintSeverity::Error)
+        .filter(|finding| !ignored_private_export_leak(finding, ignored_private_paths))
+        .map(|finding| {
+            let path = finding
+                .path
+                .as_ref()
+                .map(|path| display_path(&config.repo_root, path))
+                .unwrap_or_else(|| "bundle".to_string());
+            format!("{path}: {}", finding.message)
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        String::new()
+    } else {
+        format!("{label} has error(s): {}", errors.join("; "))
+    }
+}
+
+fn ignored_private_export_leak(
+    finding: &LintFinding,
+    ignored_private_paths: &BTreeSet<PathBuf>,
+) -> bool {
+    finding.message.contains("private export leak")
+        && finding
+            .path
+            .as_ref()
+            .is_some_and(|path| ignored_private_paths.contains(path))
+}
+
+fn private_okf_concept_paths(
+    bundle_root: &Path,
+    files: &[PathBuf],
+) -> Result<BTreeSet<PathBuf>, MemoryError> {
+    let mut private = BTreeSet::new();
+    for path in files {
+        let relative = bundle_relative_path(bundle_root, path)?;
+        let bundle_path = OkfBundlePath::new(relative)?;
+        if bundle_path.reserved_file().is_some() {
+            continue;
+        }
+        let contents = read_to_string(path)?;
+        if let Ok(concept) = parse_okf_concept(bundle_root, path, &contents)
+            && concept_visibility(&concept) == Some(MemoryVisibility::Private)
+        {
+            private.insert(path.clone());
+        }
+    }
+    Ok(private)
+}
+
+fn public_export_index() -> String {
+    "---\nokf_version: \"0.1\"\n---\n\n# OpenSymphony Public Memory Export\n".to_string()
+}
+
+fn public_export_log() -> String {
+    "# OpenSymphony Public Memory Export Log\n\n## 1970-01-01\n\n- Public export generated.\n"
+        .to_string()
 }
 
 fn split_okf_frontmatter(path: &Path, contents: &str) -> Result<(String, String), MemoryError> {
@@ -845,6 +1100,27 @@ fn contains_private_memory_link_in_markdown(contents: &str) -> bool {
         }
     }
     contains_private_memory_link(&visible)
+}
+
+fn public_export_private_material(contents: &str) -> Option<&'static str> {
+    let contents = contents.to_ascii_lowercase();
+    if contents.contains("linear:comment:") {
+        return Some("private comment references");
+    }
+    if contents.contains(".opensymphony/memory/issues")
+        || contents.contains(".opensymphony\\memory\\issues")
+        || contents.contains("../.opensymphony/memory/issues")
+    {
+        return Some("private local paths");
+    }
+    if contents.contains(".opensymphony/memory/source")
+        || contents.contains(".opensymphony\\memory\\source")
+        || contents.contains(".opensymphony/memory/snapshot")
+        || contents.contains(".opensymphony\\memory\\snapshot")
+    {
+        return Some("private source snapshots");
+    }
+    None
 }
 
 fn extract_wiki_links(body: &str) -> Vec<String> {

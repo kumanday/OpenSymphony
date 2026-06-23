@@ -81,6 +81,21 @@ canonicalized and must stay inside the repository root, matching the containment
 policy used by other memory admin file arguments. When no bundle root is
 provided, linting uses the configured memory root.
 
+`opensymphony memory export-okf --visibility public|private [--output DIR]`
+exports the configured memory root as a directory bundle. The output directory
+must be new or empty so stale private files cannot survive a public export.
+Public export skips private concepts and fails if any remaining public concept
+still references private comments, private memory paths, or private source
+snapshots. Private export can include private concepts but still keeps normal
+OKF lint errors fatal.
+
+`opensymphony memory import-okf <bundle-root>` validates an OKF directory bundle,
+copies its Markdown concepts into the configured memory root without rewriting
+frontmatter, and rebuilds the derived DuckDB catalog from the imported bundle.
+Unknown concept types, unknown frontmatter fields, missing optional fields,
+broken links, and missing generated indexes are warning-level import inputs;
+malformed concepts remain errors with file paths in the diagnostic.
+
 OKF lint diagnostics are intentionally actionable. Errors cover missing or
 invalid concept frontmatter, missing `type`, malformed reserved files,
 containment failures, and public-export leaks of private memory. Warnings cover
@@ -131,6 +146,8 @@ opensymphony memory brief COE-123
 opensymphony memory related --area openhands-runtime
 opensymphony memory sync-docs --since-last-sync
 opensymphony memory serve --addr 127.0.0.1:8765
+opensymphony memory export-okf --visibility public --output public-okf
+opensymphony memory import-okf public-okf
 opensymphony linear archive --issues COE-123
 ```
 
