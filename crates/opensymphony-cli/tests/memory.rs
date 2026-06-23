@@ -279,6 +279,37 @@ fn memory_export_okf_rejects_output_that_contains_source_bundle() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("must not overlap"));
 }
 
+#[cfg(unix)]
+#[test]
+fn memory_export_okf_rejects_output_parent_symlink() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_public_okf_concept(repo.path(), "COE-206.md", "Public concept", "");
+    fs::create_dir(repo.path().join("real-exports")).expect("real export dir should write");
+    std::os::unix::fs::symlink(
+        repo.path().join("real-exports"),
+        repo.path().join("export-link"),
+    )
+    .expect("export parent symlink should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            "export-link/public-okf",
+        ],
+    );
+
+    assert_failure(&output, "symlinked parent OKF export output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("symlink component"));
+    assert!(!repo.path().join("real-exports/public-okf").exists());
+}
+
 #[test]
 fn memory_export_okf_public_ignores_private_patterns_in_markdown_code() {
     let repo = TempDir::new().expect("temp repo should exist");

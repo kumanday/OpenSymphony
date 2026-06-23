@@ -302,6 +302,7 @@ pub fn export_okf_bundle(
         .map(|path| resolve_path(&config.repo_root, path))
         .unwrap_or_else(|| config.repo_root.join(format!("okf-export-{visibility}")));
     ensure_repo_contained(&config.repo_root, &output_path)?;
+    ensure_export_output_has_no_symlink_components(config, &output_path)?;
     let output_path = canonicalize_existing_prefix(&output_path)?;
     ensure_output_target_not_symlink(&output_path)?;
     if paths_overlap(&output_path, &source_root) {
@@ -640,6 +641,62 @@ fn ensure_output_target_not_symlink(path: &Path) -> Result<(), MemoryError> {
             "OKF export output `{}` must not be a symlink",
             path.display()
         )));
+    }
+    Ok(())
+}
+
+fn ensure_export_output_has_no_symlink_components(
+    config: &MemoryConfig,
+    path: &Path,
+) -> Result<(), MemoryError> {
+    let repo_root = canonicalize_existing_path(&config.repo_root)?;
+    let output_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    };
+    let relative = output_path
+        .strip_prefix(&repo_root)
+        .map_err(|_| MemoryError::PathOutsideRepo {
+            path: output_path.clone(),
+            repo_root: repo_root.clone(),
+        })?;
+    let mut cursor = repo_root;
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => continue,
+            std::path::Component::Normal(part) => cursor.push(part),
+            _ => {
+                return Err(MemoryError::PathOutsideRepo {
+                    path: output_path,
+                    repo_root: config.repo_root.clone(),
+                });
+            }
+        }
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(MemoryError::InvalidInput(format!(
+                    "OKF export output `{}` must not include symlink component `{}`",
+                    display_path(&config.repo_root, path),
+                    display_path(&config.repo_root, &cursor)
+                )));
+            }
+            Ok(_) => {}
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                break;
+            }
+            Err(source) => {
+                return Err(MemoryError::ReadFile {
+                    path: cursor,
+                    source,
+                });
+            }
+        }
     }
     Ok(())
 }
