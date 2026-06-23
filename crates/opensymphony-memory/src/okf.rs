@@ -346,9 +346,14 @@ pub fn export_okf_bundle(
             continue;
         }
 
-        if public && raw_okf_visibility(&contents) == Some(MemoryVisibility::Private) {
-            skipped_private_files.push(relative);
-            continue;
+        if public {
+            match raw_okf_visibility(&contents) {
+                Some(MemoryVisibility::Public) => {}
+                Some(MemoryVisibility::Private) | None => {
+                    skipped_private_files.push(relative);
+                    continue;
+                }
+            }
         }
 
         let concept = parse_okf_concept(&source_root, &path, &contents)?;

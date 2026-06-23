@@ -324,9 +324,9 @@ fn memory_export_okf_source_lint_failure_leaves_no_staging_dir() {
             "memory",
             "export-okf",
             "--visibility",
-            "public",
+            "private",
             "--output",
-            "public-okf",
+            "private-okf",
         ],
     );
 
@@ -338,7 +338,7 @@ fn memory_export_okf_source_lint_failure_leaves_no_staging_dir() {
             entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with(".public-okf.tmp-")
+                .starts_with(".private-okf.tmp-")
         });
     assert!(
         !leaked_staging,
@@ -392,6 +392,16 @@ opensymphony:
 "#,
     )
     .expect("malformed private concept should write");
+    fs::write(
+        repo.path().join(".opensymphony/memory/issues/COE-214.md"),
+        r#"---
+opensymphony: [
+---
+
+# Private malformed concept with invalid YAML
+"#,
+    )
+    .expect("invalid YAML private concept should write");
 
     let output = run(
         repo.path(),
@@ -408,6 +418,7 @@ opensymphony:
     assert_success(&output, "public OKF export skips malformed private concept");
     assert!(repo.path().join("public-okf/issues/COE-212.md").is_file());
     assert!(!repo.path().join("public-okf/issues/COE-213.md").exists());
+    assert!(!repo.path().join("public-okf/issues/COE-214.md").exists());
 }
 
 #[test]
