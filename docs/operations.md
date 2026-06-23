@@ -358,6 +358,10 @@ opensymphony memory brief COE-123
 opensymphony memory related --paths crates/opensymphony-openhands
 opensymphony memory sync-docs --since-last-sync
 opensymphony memory lint --public-docs
+opensymphony memory lint --okf
+opensymphony memory reindex --from-okf
+opensymphony memory export-okf --visibility public --output public-okf
+opensymphony memory import-okf public-okf
 ```
 
 Add `--dry-run` to write commands when an operator wants a non-writing preview.
@@ -380,8 +384,10 @@ Memory capture does not archive Linear issues.
 
 Read commands such as `memory status`, `memory brief`, `memory related`, and
 `memory context` open the DuckDB index in read-only mode and do not run schema
-migrations. Run capture, import, docs sync, or reindex-style admin operations
-serially if a local DuckDB writer is active.
+migrations. Run capture, import, OKF import/export, docs sync, or reindex-style
+admin operations serially if a local DuckDB writer is active. Prefer the CLI or
+MCP admin surface for maintenance; direct file or DuckDB access is an offline
+recovery and diagnostics fallback only.
 
 For worker or tool access, `opensymphony run` starts the read-only memory server
 when memory is initialized and `memory.serve` is not disabled. The supervised
@@ -392,10 +398,11 @@ operation is also available with `opensymphony memory serve --addr
 127.0.0.1:8765`, which exposes MCP-style `initialize`, `tools/list`, and
 `tools/call` JSON-RPC methods at `/mcp`. Set `OPENSYMPHONY_MEMORY_TOKEN` or
 pass `--token` to require bearer-token access for read tools. Admin tools
-(`memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`, and
-`memory.ingest_code_intel`) require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or
-`--admin-token`. When only the admin token is configured, it also gates read
-tools; do not inject that token into ordinary worker environments.
+(`memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`,
+`memory.export_okf`, `memory.import_okf`, and `memory.ingest_code_intel`)
+require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token`. When only the
+admin token is configured, it also gates read tools; do not inject that token
+into ordinary worker environments.
 
 Linear archival is a separate command and is guarded by captured memory:
 
