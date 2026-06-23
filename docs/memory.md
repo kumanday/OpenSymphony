@@ -84,26 +84,32 @@ provided, linting uses the configured memory root.
 `opensymphony memory export-okf --visibility public|private [--output DIR]`
 exports the configured memory root as a directory bundle. The output directory
 must be new or empty so stale private files cannot survive a public export.
-Public export skips private concepts and fails if any remaining public concept
-still references private comments, private memory paths, or private source
-snapshots. Private export can include private concepts but still keeps normal
-OKF lint errors fatal.
+Export writes into a repository-contained staging directory first, runs OKF
+lint on the staged bundle, and only then promotes the completed bundle to the
+requested output path. Public export skips private concepts and fails if any
+remaining public concept still references private comments, private memory
+paths, or private source snapshots. Private export can include private concepts
+but still keeps normal OKF lint errors fatal.
 
 The public export redaction scan is deliberately narrow and explicit: it treats
 `linear:comment:`, `.opensymphony/memory/issues`,
 `.opensymphony/memory/source*`, `.opensymphony/memory/snapshot*`, and their
 Windows-path variants as private material when they appear in exported public
-concepts.
+concepts. The scan uses the same markdown-visible text extraction as private
+memory link linting, so fenced code blocks, inline code spans, escaped text, and
+HTML comments do not create public export false positives.
 
 `opensymphony memory import-okf <bundle-root> [--force]` validates an OKF
 directory bundle, copies its Markdown concepts into the configured memory root
 without rewriting frontmatter, and rebuilds the derived DuckDB catalog from the
-imported bundle. The target memory root is checked against the repository
-containment policy, and existing Markdown files are not overwritten unless
-`--force` is supplied. Unknown concept types, unknown frontmatter fields,
-missing optional fields, broken links, and missing generated indexes are
-warning-level import inputs; malformed concepts remain errors with file paths
-in the diagnostic.
+imported bundle. The import source and target memory root are canonicalized,
+checked against the repository containment policy, and rejected when they
+overlap. Import preflights the full copy set before writing so predictable
+target conflicts do not leave partially imported Markdown files. Existing
+Markdown files are not overwritten unless `--force` is supplied. Unknown concept
+types, unknown frontmatter fields, missing optional fields, broken links, and
+missing generated indexes are warning-level import inputs; malformed concepts
+remain errors with file paths in the diagnostic.
 
 OKF lint diagnostics are intentionally actionable. Errors cover missing or
 invalid concept frontmatter, missing `type`, malformed reserved files,

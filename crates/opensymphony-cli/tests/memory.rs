@@ -242,6 +242,37 @@ fn memory_export_okf_public_fails_on_private_material_in_public_concepts() {
     assert!(stderr.contains("COE-201.md"));
     assert!(stderr.contains("COE-202.md"));
     assert!(stderr.contains("COE-203.md"));
+    assert!(
+        !repo.path().join("public-okf").exists(),
+        "failed public export should not leave partial output"
+    );
+}
+
+#[test]
+fn memory_export_okf_public_ignores_private_patterns_in_markdown_code() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_public_okf_concept(
+        repo.path(),
+        "COE-204.md",
+        "Code samples are not private links",
+        "Inline sample: `.opensymphony/memory/issues/COE-204.md`.\n\n```text\nlinear:comment:abc123\n.opensymphony/memory/source-snapshots/COE-204.md\n```\n\n<!-- .opensymphony/memory/issues/COE-204.md -->\n",
+    );
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            "public-okf",
+        ],
+    );
+
+    assert_success(&output, "public OKF export ignores code/comment samples");
+    assert!(repo.path().join("public-okf/issues/COE-204.md").is_file());
 }
 
 #[test]
@@ -305,6 +336,66 @@ fn memory_import_okf_tolerates_warnings_and_preserves_unknown_fields() {
         ["memory", "import-okf", "incoming-okf", "--force"],
     );
     assert_success(&forced, "forced OKF import");
+}
+
+#[test]
+fn memory_import_okf_rejects_overlapping_source_and_target() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_import_warning_bundle(repo.path());
+    copy_dir_recursive(
+        &repo.path().join("incoming-okf"),
+        &repo.path().join(".opensymphony/memory/incoming-okf"),
+    );
+
+    let output = run(
+        repo.path(),
+        ["memory", "import-okf", ".opensymphony/memory/incoming-okf"],
+    );
+
+    assert_failure(&output, "overlapping OKF import source");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must not overlap"));
+}
+
+#[test]
+fn memory_import_okf_preflight_failure_leaves_no_partial_copy() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_import_warning_bundle(repo.path());
+    fs::create_dir_all(repo.path().join("incoming-okf/issues/nested"))
+        .expect("nested source dir should write");
+    fs::write(
+        repo.path().join("incoming-okf/issues/nested/COE-501.md"),
+        r#"---
+type: issue-capsule
+title: "COE-501: Nested import"
+opensymphony:
+  visibility: private
+---
+
+# COE-501: Nested import
+"#,
+    )
+    .expect("nested import fixture should write");
+    fs::create_dir_all(repo.path().join(".opensymphony/memory/issues"))
+        .expect("target issues dir should write");
+    fs::write(
+        repo.path().join(".opensymphony/memory/issues/nested"),
+        "blocking file",
+    )
+    .expect("blocking target should write");
+
+    let output = run(repo.path(), ["memory", "import-okf", "incoming-okf"]);
+
+    assert_failure(&output, "preflight OKF import failure");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("blocks OKF import"));
+    assert!(
+        !repo
+            .path()
+            .join(".opensymphony/memory/issues/COE-500.md")
+            .exists(),
+        "preflight failure should not copy earlier files"
+    );
 }
 
 #[test]

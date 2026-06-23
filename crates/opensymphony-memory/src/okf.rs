@@ -168,6 +168,12 @@ pub struct OkfImportReport {
     pub reindex: MemoryReindexReport,
 }
 
+struct OkfPendingFile {
+    relative: PathBuf,
+    target: PathBuf,
+    contents: String,
+}
+
 impl OkfConcept {
     pub fn new(
         path: impl Into<PathBuf>,
@@ -263,7 +269,15 @@ pub fn export_okf_bundle(
             source_root.display()
         )));
     }
-    ensure_empty_output_dir(&output_path)?;
+    ensure_empty_output_target(&output_path)?;
+    let output_parent = output_path.parent().ok_or_else(|| {
+        MemoryError::InvalidInput(format!(
+            "OKF export output `{}` has no parent directory",
+            output_path.display()
+        ))
+    })?;
+    create_dir_all(output_parent)?;
+    let staging_path = create_staging_dir(output_parent, &output_path)?;
 
     let mut files = Vec::new();
     collect_okf_markdown_files(&source_root, &source_root, &mut files)?;
@@ -277,7 +291,6 @@ pub fn export_okf_bundle(
     let mut writes = Vec::<(PathBuf, String)>::new();
     let mut copied_files = Vec::new();
     let mut skipped_private_files = Vec::new();
-    let mut redaction_errors = Vec::new();
 
     for path in files {
         let relative = bundle_relative_path(&source_root, &path)?;
@@ -285,7 +298,7 @@ pub fn export_okf_bundle(
         let contents = read_to_string(&path)?;
         if bundle_path.reserved_file().is_some() {
             if !public {
-                writes.push((output_path.join(&relative), contents));
+                writes.push((staging_path.join(&relative), contents));
                 copied_files.push(relative);
             }
             continue;
@@ -296,36 +309,26 @@ pub fn export_okf_bundle(
             skipped_private_files.push(relative);
             continue;
         }
-        if public && let Some(reason) = public_export_private_material(&contents) {
-            redaction_errors.push(format!(
-                "{}: public export contains {reason}",
-                display_path(&config.repo_root, &path)
-            ));
-            continue;
-        }
-        writes.push((output_path.join(&relative), contents));
+        writes.push((staging_path.join(&relative), contents));
         copied_files.push(relative);
     }
 
-    if !redaction_errors.is_empty() {
-        return Err(MemoryError::InvalidInput(format!(
-            "OKF public export redaction error(s): {}",
-            redaction_errors.join("; ")
-        )));
-    }
     if public {
-        writes.push((output_path.join("index.md"), public_export_index()));
-        writes.push((output_path.join("log.md"), public_export_log()));
+        writes.push((staging_path.join("index.md"), public_export_index()));
+        writes.push((staging_path.join("log.md"), public_export_log()));
         copied_files.push(PathBuf::from("index.md"));
         copied_files.push(PathBuf::from("log.md"));
     }
-    for (path, contents) in writes {
-        write_file(&path, &contents)?;
-    }
-    let exported_lint = lint_okf_bundle(&output_path, public)?;
-    let errors = lint_errors(config, "exported OKF bundle", &exported_lint);
-    if !errors.is_empty() {
-        return Err(MemoryError::InvalidInput(errors));
+    let exported_lint = match write_and_lint_staged_export(config, &staging_path, writes, public) {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = cleanup_staging_dir(&staging_path);
+            return Err(error);
+        }
+    };
+    if let Err(error) = promote_staged_export(&staging_path, &output_path) {
+        let _ = cleanup_staging_dir(&staging_path);
+        return Err(error);
     }
 
     Ok(OkfExportReport {
@@ -341,15 +344,22 @@ pub fn import_okf_bundle(
     source: &Path,
     force: bool,
 ) -> Result<OkfImportReport, MemoryError> {
-    ensure_repo_contained(&config.repo_root, source)?;
+    let source_path = canonicalize_existing_path(&resolve_path(&config.repo_root, source))?;
+    ensure_repo_contained(&config.repo_root, &source_path)?;
     ensure_repo_contained(&config.repo_root, &config.memory_root)?;
     create_dir_all(&config.memory_root)?;
     let target_root = canonicalize_existing_path(&config.memory_root)?;
-    let source_path = canonicalize_existing_path(&resolve_path(&config.repo_root, source))?;
     if !source_path.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
             "OKF import source `{}` is not a directory",
             source_path.display()
+        )));
+    }
+    if paths_overlap(&source_path, &target_root) {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF import source `{}` must not overlap the target memory root `{}`",
+            source_path.display(),
+            target_root.display()
         )));
     }
     let lint = lint_okf_bundle(&source_path, false)?;
@@ -360,20 +370,13 @@ pub fn import_okf_bundle(
 
     let mut files = Vec::new();
     collect_okf_markdown_files(&source_path, &source_path, &mut files)?;
-    let mut copied_files = Vec::new();
-    for path in files {
-        let relative = bundle_relative_path(&source_path, &path)?;
-        OkfBundlePath::new(relative.clone())?;
-        let contents = read_to_string(&path)?;
-        let target = target_root.join(&relative);
-        if target.exists() && !force {
-            return Err(MemoryError::InvalidInput(format!(
-                "{} already exists; rerun with --force to overwrite it",
-                display_path(&config.repo_root, &target)
-            )));
-        }
-        write_file(&target, &contents)?;
-        copied_files.push(relative);
+    let pending = pending_okf_import_files(config, &source_path, &target_root, &files, force)?;
+    let copied_files = pending
+        .iter()
+        .map(|file| file.relative.clone())
+        .collect::<Vec<_>>();
+    for file in pending {
+        write_file(&file.target, &file.contents)?;
     }
 
     let reindex = refresh_memory_index_from_okf(config, &target_root)?;
@@ -384,6 +387,49 @@ pub fn import_okf_bundle(
         finding_count: lint.findings.len(),
         reindex,
     })
+}
+
+fn pending_okf_import_files(
+    config: &MemoryConfig,
+    source_path: &Path,
+    target_root: &Path,
+    files: &[PathBuf],
+    force: bool,
+) -> Result<Vec<OkfPendingFile>, MemoryError> {
+    let mut pending = Vec::new();
+    for path in files {
+        let relative = bundle_relative_path(source_path, path)?;
+        OkfBundlePath::new(relative.clone())?;
+        let contents = read_to_string(path)?;
+        let target = target_root.join(&relative);
+        if target.is_dir() {
+            return Err(MemoryError::InvalidInput(format!(
+                "{} already exists as a directory and cannot be overwritten by OKF import",
+                display_path(&config.repo_root, &target)
+            )));
+        }
+        if let Some(parent) = target.parent()
+            && parent.exists()
+            && !parent.is_dir()
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "{} already exists and blocks OKF import",
+                display_path(&config.repo_root, parent)
+            )));
+        }
+        if target.exists() && !force {
+            return Err(MemoryError::InvalidInput(format!(
+                "{} already exists; rerun with --force to overwrite it",
+                display_path(&config.repo_root, &target)
+            )));
+        }
+        pending.push(OkfPendingFile {
+            relative,
+            target,
+            contents,
+        });
+    }
+    Ok(pending)
 }
 
 pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintReport, MemoryError> {
@@ -446,7 +492,7 @@ pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintRe
     Ok(LintReport { findings })
 }
 
-fn ensure_empty_output_dir(path: &Path) -> Result<(), MemoryError> {
+fn ensure_empty_output_target(path: &Path) -> Result<(), MemoryError> {
     if path.exists() {
         if !path.is_dir() {
             return Err(MemoryError::InvalidInput(format!(
@@ -464,10 +510,75 @@ fn ensure_empty_output_dir(path: &Path) -> Result<(), MemoryError> {
                 path.display()
             )));
         }
-    } else {
-        create_dir_all(path)?;
     }
     Ok(())
+}
+
+fn create_staging_dir(parent: &Path, output_path: &Path) -> Result<PathBuf, MemoryError> {
+    let output_name = output_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("okf-export");
+    for attempt in 0..100 {
+        let candidate = parent.join(format!(
+            ".{output_name}.tmp-{}-{attempt}",
+            std::process::id()
+        ));
+        if candidate.exists() {
+            continue;
+        }
+        create_dir_all(&candidate)?;
+        return Ok(candidate);
+    }
+    Err(MemoryError::InvalidInput(format!(
+        "could not allocate a staging directory for OKF export `{}`",
+        output_path.display()
+    )))
+}
+
+fn write_and_lint_staged_export(
+    config: &MemoryConfig,
+    staging_path: &Path,
+    writes: Vec<(PathBuf, String)>,
+    public: bool,
+) -> Result<LintReport, MemoryError> {
+    for (path, contents) in writes {
+        write_file(&path, &contents)?;
+    }
+    let exported_lint = lint_okf_bundle(staging_path, public)?;
+    let errors = lint_errors(config, "exported OKF bundle", &exported_lint);
+    if errors.is_empty() {
+        Ok(exported_lint)
+    } else {
+        Err(MemoryError::InvalidInput(errors))
+    }
+}
+
+fn promote_staged_export(staging_path: &Path, output_path: &Path) -> Result<(), MemoryError> {
+    if output_path.exists() {
+        fs::remove_dir(output_path).map_err(|source| MemoryError::WriteFile {
+            path: output_path.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::rename(staging_path, output_path).map_err(|source| MemoryError::WriteFile {
+        path: output_path.to_path_buf(),
+        source,
+    })
+}
+
+fn cleanup_staging_dir(path: &Path) -> Result<(), MemoryError> {
+    if path.exists() {
+        fs::remove_dir_all(path).map_err(|source| MemoryError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 fn lint_errors(config: &MemoryConfig, label: &str, report: &LintReport) -> String {
@@ -781,6 +892,14 @@ fn lint_okf_concept(
             next_command: None,
         });
     }
+    if public_export && let Some(reason) = public_export_private_material(contents) {
+        findings.push(LintFinding {
+            severity: LintSeverity::Error,
+            path: Some(path.to_path_buf()),
+            message: format!("public export contains {reason}"),
+            next_command: None,
+        });
+    }
     lint_okf_links(bundle_root, &concept, path, findings);
     lint_okf_citations(&concept, path, findings);
     lint_okf_info(&concept, mapping, path, findings);
@@ -1054,6 +1173,11 @@ fn normalize_okf_link_id(target: &str) -> String {
 }
 
 fn contains_private_memory_link_in_markdown(contents: &str) -> bool {
+    let visible = markdown_visible_text(contents);
+    contains_private_memory_link(&visible)
+}
+
+fn markdown_visible_text(contents: &str) -> String {
     let mut visible = String::with_capacity(contents.len());
     let mut index = 0;
     while index < contents.len() {
@@ -1077,7 +1201,7 @@ fn contains_private_memory_link_in_markdown(contents: &str) -> bool {
             }
         }
     }
-    contains_private_memory_link(&visible)
+    visible
 }
 
 const PUBLIC_PRIVATE_COMMENT_PATTERNS: &[&str] = &["linear:comment:"];
@@ -1094,13 +1218,14 @@ const PUBLIC_PRIVATE_SOURCE_PATTERNS: &[&str] = &[
 ];
 
 fn public_export_private_material(contents: &str) -> Option<&'static str> {
-    if contains_any_ascii_case_insensitive(contents, PUBLIC_PRIVATE_COMMENT_PATTERNS) {
+    let visible = markdown_visible_text(contents);
+    if contains_any_ascii_case_insensitive(&visible, PUBLIC_PRIVATE_COMMENT_PATTERNS) {
         return Some("private comment references");
     }
-    if contains_any_ascii_case_insensitive(contents, PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS) {
+    if contains_any_ascii_case_insensitive(&visible, PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS) {
         return Some("private local paths");
     }
-    if contains_any_ascii_case_insensitive(contents, PUBLIC_PRIVATE_SOURCE_PATTERNS) {
+    if contains_any_ascii_case_insensitive(&visible, PUBLIC_PRIVATE_SOURCE_PATTERNS) {
         return Some("private source snapshots");
     }
     None
