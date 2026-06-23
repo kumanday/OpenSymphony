@@ -50,6 +50,10 @@ pub enum MemoryError {
         #[source]
         source: serde_yaml::Error,
     },
+    #[error("{path} lacks OKF YAML frontmatter")]
+    OkfMissingFrontmatter { path: PathBuf },
+    #[error("{path} has unterminated OKF YAML frontmatter")]
+    OkfUnterminatedFrontmatter { path: PathBuf },
     #[error("failed to encode JSON: {0}")]
     Json(#[from] serde_json::Error),
     #[error("failed to update DuckDB index {path}: {source}")]
@@ -70,6 +74,8 @@ pub enum MemoryError {
     InvalidInput(String),
     #[error("{path} is outside the repository root {repo_root}")]
     PathOutsideRepo { path: PathBuf, repo_root: PathBuf },
+    #[error("{path} is outside the OKF bundle root {bundle_root}")]
+    PathOutsideBundle { path: PathBuf, bundle_root: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -678,6 +684,7 @@ pub struct LintFinding {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LintSeverity {
+    Info,
     Warn,
     Error,
 }
@@ -732,6 +739,8 @@ struct IndexedIssue {
     source_hash: String,
     warning_count: usize,
     docs_sync_status: String,
+    completion_time: Option<String>,
+    captured_at: String,
     changed_files: Vec<PathBuf>,
     body: String,
 }
@@ -1168,6 +1177,63 @@ type: topic-doc
                 "https://example.com/okf",
             ]
         );
+    }
+
+    #[test]
+    fn okf_lint_fixture_reports_errors_warnings_and_info() {
+        let report = lint_okf_bundle(&okf_fixture("okf-migration"), false).expect("lint");
+        let has = |severity, text: &str| {
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.severity == severity && finding.message.contains(text))
+        };
+
+        assert!(has(LintSeverity::Error, "lacks OKF YAML frontmatter"));
+        assert!(has(
+            LintSeverity::Error,
+            "frontmatter is not parseable YAML"
+        ));
+        assert!(has(
+            LintSeverity::Error,
+            "frontmatter lacks non-empty `type`"
+        ));
+        assert!(has(
+            LintSeverity::Error,
+            "reserved log.md must use ISO date headings"
+        ));
+        assert!(has(LintSeverity::Error, "private export leak"));
+        assert!(has(LintSeverity::Warn, "missing recommended field(s)"));
+        assert!(has(LintSeverity::Warn, "broken Markdown link"));
+        assert!(has(LintSeverity::Warn, "wiki-only link"));
+        assert!(has(LintSeverity::Warn, "missing generated index.md"));
+        assert!(has(LintSeverity::Warn, "citation section missing"));
+        assert!(has(LintSeverity::Warn, "unknown type"));
+        assert!(has(LintSeverity::Info, "title can be synthesized"));
+        assert!(has(LintSeverity::Info, "description can be synthesized"));
+        assert!(has(LintSeverity::Info, "legacy field(s) retained"));
+        assert!(has(
+            LintSeverity::Info,
+            "bundle contains OpenSymphony extension fields"
+        ));
+
+        let public_report =
+            lint_okf_bundle(&okf_fixture("okf-migration"), true).expect("public lint");
+        assert!(public_report.findings.iter().any(|finding| {
+            finding.severity == LintSeverity::Error
+                && finding
+                    .message
+                    .contains("public export includes a private concept")
+        }));
+
+        let fixture = okf_fixture("okf-migration");
+        let capsule_path = Path::new("issues/COE-123.md");
+        let capsule =
+            fs::read_to_string(fixture.join(capsule_path)).expect("fixture capsule should read");
+        let concept =
+            parse_okf_concept(&fixture, capsule_path, &capsule).expect("legacy fixture parses");
+        let rendered = render_okf_concept(&concept).expect("legacy fixture renders");
+        assert!(rendered.contains("legacy_custom: keep-me"));
     }
 
     #[test]
@@ -1748,6 +1814,12 @@ areas:
         )
         .expect("config");
         MemoryConfig::load(repo_root, Some(&config_path)).expect("memory config")
+    }
+
+    fn okf_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/opensymphony-memory/tests/fixtures")
+            .join(name)
     }
 
     fn sample_source() -> SourceFile {

@@ -312,6 +312,18 @@ opensymphony memory export-okf --visibility private --output memory-bundle.zip
 opensymphony memory import-okf path/to/bundle
 ```
 
+The implemented first slice supports:
+
+```bash
+opensymphony memory lint --okf [bundle-root]
+```
+
+The optional `bundle-root` is resolved with the same repository-containment
+check used by memory admin file arguments. Absolute paths are allowed only when
+their canonical path remains inside the repository root. Relative paths are
+resolved from the repository root. The memory MCP admin surface accepts the same
+operation through `memory.lint` with `okf: true` and optional `bundleRoot`.
+
 Existing commands keep their behavior:
 
 ```bash
@@ -340,8 +352,9 @@ Warnings:
 
 - Missing recommended fields.
 - Unknown type.
-- Broken Markdown link.
-- Wiki-only link with no Markdown equivalent.
+- Broken Markdown link outside code spans, code fences, and HTML comments.
+- Wiki-only link with no Markdown equivalent outside code spans, code fences,
+  and HTML comments.
 - Missing generated index.
 - Citation section missing for source-backed claims.
 - Unknown OKF version.
@@ -350,8 +363,13 @@ Info:
 
 - Synthesized title.
 - Synthesized description.
-- Legacy field retained.
-- Bundle contains implementation-specific extension fields.
+- Retained legacy fields.
+- OpenSymphony extension metadata.
+
+Generated `log.md` files must use ISO `## YYYY-MM-DD` headings in newest-first
+order. OpenSymphony derives the date from completion time, then capture time, and
+uses a stable ISO sentinel for malformed legacy timestamps so regeneration does
+not depend on wall-clock time.
 
 ## 11. Migration Plan
 

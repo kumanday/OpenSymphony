@@ -244,6 +244,7 @@ fn memory_admin_commands_can_use_mcp_endpoint() {
     let repo = TempDir::new().expect("temp repo should exist");
     let server = TinyGraphqlServer::start([
         r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"findingCount":0,"findings":[]}}"#,
+        r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"findingCount":0,"findings":[]}}"#,
     ]);
 
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
@@ -255,10 +256,50 @@ fn memory_admin_commands_can_use_mcp_endpoint() {
         .expect("command should run");
 
     assert_success(&output, "remote memory lint");
+    let okf_output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["memory", "lint", "--okf", "fixtures/okf-migration"])
+        .current_dir(repo.path())
+        .env("OPENSYMPHONY_MEMORY_ENDPOINT", &server.base_url)
+        .env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN", "admin-token")
+        .output()
+        .expect("command should run");
+
+    assert_success(&okf_output, "remote okf memory lint");
     let requests = server.requests();
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     assert!(requests[0].contains("\"name\":\"memory.lint\""));
     assert!(requests[0].contains("\"publicDocs\":true"));
+    assert!(requests[1].contains("\"name\":\"memory.lint\""));
+    assert!(requests[1].contains("\"okf\":true"));
+    assert!(requests[1].contains("\"bundleRoot\":\"fixtures/okf-migration\""));
+}
+
+#[test]
+fn memory_lint_okf_reports_fixture_diagnostics() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    let fixture = repo.path().join("fixtures/okf-migration");
+    copy_dir_recursive(&okf_fixture("okf-migration"), &fixture);
+    let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["memory", "lint", "--okf", "fixtures/okf-migration"])
+        .current_dir(repo.path())
+        .output()
+        .expect("command should run");
+
+    assert_success(&output, "okf lint fixture");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[error]"));
+    assert!(stdout.contains("frontmatter lacks non-empty `type`"));
+    assert!(stdout.contains("reserved log.md must use ISO date headings"));
+    assert!(stdout.contains("private export leak"));
+    assert!(stdout.contains("[warn]"));
+    assert!(stdout.contains("missing recommended field(s)"));
+    assert!(stdout.contains("broken Markdown link"));
+    assert!(stdout.contains("wiki-only link"));
+    assert!(stdout.contains("missing generated index.md"));
+    assert!(stdout.contains("citation section missing"));
+    assert!(stdout.contains("[info]"));
+    assert!(stdout.contains("legacy field(s) retained"));
 }
 
 #[test]
@@ -540,6 +581,38 @@ fn memory_lint_related_paths_and_from_memory_archive_cover_private_doc_links() {
     let stdout = String::from_utf8_lossy(&archive.stdout);
     assert!(stdout.contains("COE-123"));
     assert!(stdout.contains("eligible"));
+}
+
+#[test]
+fn memory_import_generates_date_grouped_log_newest_first() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    fs::write(repo.path().join("source.yaml"), sample_two_issue_source())
+        .expect("source evidence should write");
+
+    assert_success(
+        &run(
+            repo.path(),
+            [
+                "memory",
+                "import",
+                "--issues",
+                "COE-123,COE-124",
+                "--source-file",
+                "source.yaml",
+            ],
+        ),
+        "capture two dated issues",
+    );
+
+    let log = fs::read_to_string(repo.path().join(".opensymphony/memory/indexes/log.md"))
+        .expect("log should be readable");
+    assert!(log.contains("## 2026-06-14"));
+    assert!(log.contains("## 2026-06-13"));
+    assert!(
+        log.find("## 2026-06-14").expect("newer heading")
+            < log.find("## 2026-06-13").expect("older heading")
+    );
 }
 
 #[test]
@@ -891,6 +964,30 @@ fn assert_failure(output: &std::process::Output, label: &str) {
 fn write_memory_fixture(repo: &std::path::Path) {
     write_memory_config(repo);
     fs::write(repo.join("source.yaml"), sample_source()).expect("source evidence should write");
+}
+
+fn okf_fixture(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/opensymphony-memory/tests/fixtures")
+        .join(name)
+}
+
+fn copy_dir_recursive(source: &std::path::Path, destination: &std::path::Path) {
+    fs::create_dir_all(destination).expect("destination directory should be created");
+    for entry in fs::read_dir(source).expect("source directory should be readable") {
+        let entry = entry.expect("source entry should be readable");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry
+            .file_type()
+            .expect("source entry type should be readable")
+            .is_dir()
+        {
+            copy_dir_recursive(&source_path, &destination_path);
+        } else {
+            fs::copy(&source_path, &destination_path).expect("fixture file should copy");
+        }
+    }
 }
 
 fn write_memory_config(repo: &std::path::Path) {
@@ -1413,6 +1510,7 @@ issues:
     url: https://linear.app/example/issue/COE-123
     description: First completed issue.
     state: Done
+    completed_at: 2026-06-13T17:00:00Z
     labels:
       - runtime
     linked_prs:
@@ -1422,6 +1520,7 @@ issues:
     url: https://linear.app/example/issue/COE-124
     description: Second completed issue.
     state: Done
+    completed_at: 2026-06-14T17:00:00Z
     labels:
       - runtime
     linked_prs:

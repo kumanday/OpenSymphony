@@ -3544,12 +3544,14 @@ exit 64
     fn write_executable(path: &Path, contents: &str) {
         use std::os::unix::fs::PermissionsExt;
 
-        fs::write(path, contents).expect("fake executable should be written");
-        let mut permissions = fs::metadata(path)
+        let temp_path = path.with_extension(format!("tmp-{}", std::process::id()));
+        fs::write(&temp_path, contents).expect("fake executable should be written");
+        let mut permissions = fs::metadata(&temp_path)
             .expect("fake executable metadata should load")
             .permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(path, permissions).expect("fake executable should be executable");
+        fs::set_permissions(&temp_path, permissions).expect("fake executable should be executable");
+        fs::rename(&temp_path, path).expect("fake executable should be replaced atomically");
     }
 
     fn sample_issue_conversation_manifest(

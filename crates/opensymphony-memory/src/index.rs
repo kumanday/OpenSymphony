@@ -1,3 +1,5 @@
+const UNDATED_LOG_DATE: &str = "1970-01-01";
+
 fn index_capture_plan(config: &MemoryConfig, plan: &CapturePlan) -> Result<(), MemoryError> {
     let mut connection = open_index(config)?;
     migrate_index(&connection).map_err(|source| MemoryError::DuckDb {
@@ -323,7 +325,7 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
 
     let mut statement = connection
         .prepare(
-            "SELECT issue_key, title, state, milestone, labels_json, capsule_path, visibility, source_hash, warning_count, docs_sync_status, body FROM issues ORDER BY issue_key",
+            "SELECT issue_key, title, state, milestone, labels_json, capsule_path, visibility, source_hash, warning_count, docs_sync_status, completion_time, captured_at, body FROM issues ORDER BY issue_key",
         )
         .map_err(|source| MemoryError::DuckDb {
             path: config.index_path.clone(),
@@ -347,8 +349,10 @@ fn load_indexed_issues(config: &MemoryConfig) -> Result<Vec<IndexedIssue>, Memor
                 source_hash: row.get(7)?,
                 warning_count: row.get::<_, i64>(8)? as usize,
                 docs_sync_status: row.get(9)?,
+                completion_time: row.get(10)?,
+                captured_at: row.get(11)?,
                 changed_files: Vec::new(),
-                body: row.get(10)?,
+                body: row.get(12)?,
             })
         })
         .map_err(|source| MemoryError::DuckDb {
@@ -444,7 +448,22 @@ fn write_markdown_indexes(config: &MemoryConfig) -> Result<Vec<PathBuf>, MemoryE
 
     let mut log = String::new();
     log.push_str("# OpenSymphony Memory Log\n\n");
-    for issue in issues.iter().rev() {
+    let mut log_entries = issues.iter().collect::<Vec<_>>();
+    log_entries.sort_by(|left, right| {
+        issue_log_date(right)
+            .cmp(&issue_log_date(left))
+            .then_with(|| right.issue_key.cmp(&left.issue_key))
+    });
+    let mut current_date = String::new();
+    for issue in log_entries {
+        let date = issue_log_date(issue);
+        if date != current_date {
+            if !current_date.is_empty() {
+                log.push('\n');
+            }
+            log.push_str(&format!("## {date}\n\n"));
+            current_date = date;
+        }
         log.push_str(&format!(
             "- {}: {} [{}]\n",
             issue.issue_key, issue.title, issue.docs_sync_status
@@ -453,6 +472,21 @@ fn write_markdown_indexes(config: &MemoryConfig) -> Result<Vec<PathBuf>, MemoryE
     write_file(&log_path, &log)?;
 
     Ok(vec![index_path, log_path])
+}
+
+fn issue_log_date(issue: &IndexedIssue) -> String {
+    issue
+        .completion_time
+        .as_deref()
+        .and_then(iso_date_prefix)
+        .or_else(|| iso_date_prefix(&issue.captured_at))
+        .unwrap_or_else(|| UNDATED_LOG_DATE.to_string())
+}
+
+fn iso_date_prefix(value: &str) -> Option<String> {
+    let candidate = value.get(..10)?;
+    NaiveDate::parse_from_str(candidate, "%Y-%m-%d").ok()?;
+    Some(candidate.to_string())
 }
 
 pub fn refresh_memory_index(config: &MemoryConfig) -> Result<MemoryReindexReport, MemoryError> {
@@ -819,4 +853,32 @@ fn all_known_areas(config: &MemoryConfig, issues: &[IndexedIssue]) -> Vec<AreaCo
         .into_iter()
         .map(|slug| config.area_or_default(&slug))
         .collect()
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+
+    #[test]
+    fn issue_log_date_uses_stable_sentinel_for_malformed_timestamps() {
+        let issue = IndexedIssue {
+            issue_key: "COE-999".to_string(),
+            title: "Malformed timestamps".to_string(),
+            state: None,
+            milestone: None,
+            labels: Vec::new(),
+            areas: Vec::new(),
+            capsule_path: PathBuf::from(".opensymphony/memory/issues/COE-999.md"),
+            visibility: MemoryVisibility::Private,
+            source_hash: String::new(),
+            warning_count: 0,
+            docs_sync_status: "pending".to_string(),
+            completion_time: Some("not-a-date".to_string()),
+            captured_at: "also-not-a-date".to_string(),
+            changed_files: Vec::new(),
+            body: String::new(),
+        };
+
+        assert_eq!(issue_log_date(&issue), UNDATED_LOG_DATE);
+    }
 }

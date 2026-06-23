@@ -74,6 +74,23 @@ frontmatter is kept in the raw frontmatter map so future writers can round-trip
 documents they do not fully understand. Writers emit canonical YAML and do not
 preserve the original frontmatter field order or whitespace.
 
+`opensymphony memory lint --okf [bundle-root]` validates an OKF bundle from the
+CLI, and the memory MCP admin path accepts the equivalent `memory.lint` request
+with `okf` plus `bundleRoot` arguments. A user-supplied bundle root is
+canonicalized and must stay inside the repository root, matching the containment
+policy used by other memory admin file arguments. When no bundle root is
+provided, linting uses the configured memory root.
+
+OKF lint diagnostics are intentionally actionable. Errors cover missing or
+invalid concept frontmatter, missing `type`, malformed reserved files,
+containment failures, and public-export leaks of private memory. Warnings cover
+missing recommended fields, unknown types, broken Markdown links, wiki-only
+links without Markdown equivalents, missing generated indexes, missing
+citations for source-backed claims, and unknown OKF versions. Info diagnostics
+call out synthesized title/description data, retained legacy fields, and
+OpenSymphony extension metadata. Warning-level findings remain nonfatal;
+private-data leakage and containment breakage are reported as errors.
+
 Migration is intentionally incremental:
 
 - Phase 1 enriches and parses existing documents as OKF concepts while keeping
@@ -90,6 +107,11 @@ identifiers, PR URLs, and commit SHAs. Public docs must not link directly to
 private capsule paths. Public memory is supported only by explicit
 configuration, and generated indexes such as DuckDB should remain local unless a
 project deliberately publishes them.
+
+Generated memory `indexes/log.md` output groups entries under `## YYYY-MM-DD`
+headings with newest dates first. The date comes from indexed completion time
+when available, then capture time, and finally a stable ISO sentinel for
+malformed legacy rows so regeneration is deterministic.
 
 Areas bridge issue memory and topic docs. Area inference uses Linear narrative,
 labels, milestones, active Workpad content, PR narrative, review summaries, and

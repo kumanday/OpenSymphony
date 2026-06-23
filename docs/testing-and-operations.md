@@ -96,13 +96,24 @@ Current implementation:
 - `tests/issue_session_runner.rs` now covers continuation reuse, already-running conversation wait/retry behavior, launch reporting for reused running conversations before prior-turn drain completes, delayed `/run` conflicts that surface an active prior turn only after attach, missing-conversation recreation that stays on continuation guidance, **simplified conversation resumption that reuses conversations as-is without LLM config drift checks**, configured `persistence_dir_relative` handling, terminal-error normalization, and temp-repo smoke execution
 - `tests/supervisor.rs` now covers startup rejection when a foreign ready server is already bound to the supervised target port
 - `tests/update.rs` covers the new `opensymphony update` maintenance flow: skipping `cargo install opensymphony` when the running CLI already matches the newest published release, running the install when a newer release exists, refreshing template-managed skill files in place for an existing target repo, and skipping that skill refresh outside a repo that lacks `WORKFLOW.md` plus `config.yaml`
-- `tests/memory.rs` covers the first memory workflow: capture dry runs, capsule writes, DuckDB indexing, compact briefs, search, docs-sync dry-run diffs, public/private link handling, and Linear archive eligibility gating
+- `tests/memory.rs` covers the first memory workflow: capture dry runs, capsule writes, DuckDB indexing, compact briefs, search, docs-sync dry-run diffs, public/private link handling, OKF lint fixture diagnostics, OKF MCP admin payloads, date-grouped generated memory logs, and Linear archive eligibility gating
 - `opensymphony-gateway-schema/tests/gateway_schema.rs` and
   `opensymphony-gateway/tests/gateway.rs` cover Codex local readiness rendering
   with fake command outputs for installed, logged-out, unsupported, and
   permission-denied states. These tests assert that the gateway exposes only
   safe status metadata and `codex_cli_login` references, never raw OAuth access
   or refresh material.
+
+Focused OKF memory validation for implementation work:
+
+- `cargo test-system-duckdb okf_lint_fixture_reports_errors_warnings_and_info`
+  verifies OKF lint errors, warnings, info diagnostics, and metadata
+  preservation for the migration fixture corpus.
+- `cargo test-system-duckdb --test memory` runs the CLI-facing OKF fixture test,
+  MCP `memory.lint` argument coverage for `okf` and `bundleRoot`, generated
+  `log.md` date grouping, and the rest of the memory integration suite.
+- `opensymphony memory lint --okf <repo-contained-bundle>` is the manual CLI
+  smoke path for a generated or fixture OKF bundle.
 
 Codex ChatGPT subscription smoke testing remains opt-in on trusted local
 machines because the final exec probe can consume account quota. The supported

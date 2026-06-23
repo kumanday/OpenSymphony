@@ -1,0 +1,5 @@
+---
+type: [
+---
+
+# Invalid YAML

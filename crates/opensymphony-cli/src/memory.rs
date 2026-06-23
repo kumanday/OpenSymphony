@@ -22,8 +22,8 @@ use crate::{
         LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError, MemoryReindexReport,
         MemoryScopeFilter, SourceFile, archive_blocking_warning_count, brief,
         context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range, lint,
-        load_source_file, mark_archived, plan_archive, plan_capture, plan_docs_sync,
-        plan_memory_init, refresh_memory_index, related_by_area_with_scope,
+        lint_okf_bundle, load_source_file, mark_archived, plan_archive, plan_capture,
+        plan_docs_sync, plan_memory_init, refresh_memory_index, related_by_area_with_scope,
         related_by_issue_with_scope, related_by_paths_with_scope, render_archive_plan,
         render_capture_dry_run, search_with_scope, status_with_scope, write_capture_plan,
         write_docs_sync_plan, write_memory_init_plan,
@@ -288,6 +288,10 @@ struct ServeArgs {
 struct LintArgs {
     #[arg(long, help = "Check public docs for private memory links")]
     public_docs: bool,
+    #[arg(long, help = "Lint an OKF bundle")]
+    okf: bool,
+    #[arg(help = "OKF bundle root; defaults to the configured memory root with --okf")]
+    bundle: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -957,9 +961,14 @@ fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, 
                 "withDiagrams": args.with_diagrams
             }),
         )),
-        MemoryCommand::Lint(args) => {
-            Some(("memory.lint", json!({ "publicDocs": args.public_docs })))
-        }
+        MemoryCommand::Lint(args) => Some((
+            "memory.lint",
+            json!({
+                "publicDocs": args.public_docs,
+                "okf": args.okf,
+                "bundleRoot": args.bundle.as_ref().map(|path| path.display().to_string())
+            }),
+        )),
         MemoryCommand::Brief(args) => {
             Some(("memory.brief", json!({ "issue": args.issue.clone() })))
         }
@@ -1197,13 +1206,24 @@ fn with_scope_json(scope: &ScopeArgs, mut arguments: Value) -> Value {
 }
 
 fn run_lint(config: &MemoryConfig, args: LintArgs) -> Result<(), MemoryError> {
-    let report = lint(config, args.public_docs)?;
+    let report = if args.okf {
+        let bundle_root = args
+            .bundle
+            .as_deref()
+            .map(|path| repo_existing_path_from_path(config, path))
+            .transpose()?
+            .unwrap_or_else(|| config.memory_root.clone());
+        lint_okf_bundle(&bundle_root, args.public_docs)?
+    } else {
+        lint(config, args.public_docs)?
+    };
     if report.findings.is_empty() {
         println!("Memory lint passed.");
         return Ok(());
     }
     for finding in report.findings {
         let severity = match finding.severity {
+            LintSeverity::Info => "info",
             LintSeverity::Warn => "warn",
             LintSeverity::Error => "error",
         };
@@ -1721,15 +1741,23 @@ fn call_memory_sync_docs_tool(
 }
 
 fn call_memory_lint_tool(config: &MemoryConfig, arguments: &Value) -> Result<Value, MemoryError> {
-    let report = lint(
-        config,
-        bool_arg(arguments, "publicDocs") || bool_arg(arguments, "public_docs"),
-    )?;
+    let public_docs = bool_arg(arguments, "publicDocs") || bool_arg(arguments, "public_docs");
+    let report = if bool_arg(arguments, "okf") {
+        let bundle_root = optional_string_arg(arguments, "bundleRoot")
+            .or_else(|| optional_string_arg(arguments, "bundle_root"))
+            .map(|path| repo_existing_path(config, &path))
+            .transpose()?
+            .unwrap_or_else(|| config.memory_root.clone());
+        lint_okf_bundle(&bundle_root, public_docs)?
+    } else {
+        lint(config, public_docs)?
+    };
     Ok(json!({
         "findingCount": report.findings.len(),
         "findings": report.findings.into_iter().map(|finding| {
             json!({
                 "severity": match finding.severity {
+                    LintSeverity::Info => "info",
                     LintSeverity::Warn => "warn",
                     LintSeverity::Error => "error",
                 },
@@ -1894,9 +1922,15 @@ fn paths_for_json(config: &MemoryConfig, paths: &[PathBuf]) -> Vec<String> {
 }
 
 fn repo_existing_path(config: &MemoryConfig, value: &str) -> Result<PathBuf, MemoryError> {
-    let path = PathBuf::from(value);
+    repo_existing_path_from_path(config, Path::new(value))
+}
+
+fn repo_existing_path_from_path(
+    config: &MemoryConfig,
+    path: &Path,
+) -> Result<PathBuf, MemoryError> {
     let candidate = if path.is_absolute() {
-        path
+        path.to_path_buf()
     } else {
         config.repo_root.join(path)
     };
