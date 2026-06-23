@@ -297,6 +297,11 @@ struct LintArgs {
 }
 
 #[derive(Debug, Args)]
+#[command(
+    after_help = "With --from-okf, reindex clears derived GitHub metadata tables \
+                  (pull_requests, changed_files, checks, reviews). OKF concepts \
+                  do not repopulate that metadata."
+)]
 struct ReindexArgs {
     #[arg(long, help = "Rebuild the derived catalog from OKF concept documents")]
     from_okf: bool,
@@ -1263,7 +1268,12 @@ fn run_lint(config: &MemoryConfig, args: LintArgs) -> Result<(), MemoryError> {
 
 fn run_reindex(config: &MemoryConfig, args: ReindexArgs) -> Result<(), MemoryError> {
     let report = if args.from_okf {
-        let bundle_root = args.bundle.unwrap_or_else(|| config.memory_root.clone());
+        let bundle_root = args
+            .bundle
+            .as_deref()
+            .map(|path| repo_existing_path_from_path(config, path))
+            .transpose()?
+            .unwrap_or_else(|| config.memory_root.clone());
         refresh_memory_index_from_okf(config, &bundle_root)?
     } else {
         refresh_memory_index(config)?

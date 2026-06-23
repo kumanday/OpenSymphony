@@ -97,7 +97,10 @@ fn memory_reindex_from_okf_preserves_query_commands() {
     let index_path = repo.path().join(".opensymphony/memory/memory.duckdb");
     let _ = fs::remove_file(&index_path);
 
-    let reindex = run(repo.path(), ["memory", "reindex", "--from-okf"]);
+    let reindex = run(
+        repo.path(),
+        ["memory", "reindex", "--from-okf", ".opensymphony/memory"],
+    );
     assert_success(&reindex, "OKF reindex");
     let stdout = String::from_utf8_lossy(&reindex.stdout);
     assert!(stdout.contains("Indexed records: 2"));
@@ -139,6 +142,12 @@ fn memory_reindex_from_okf_preserves_query_commands() {
     );
     assert_success(&docs, "docs after OKF reindex");
     assert!(String::from_utf8_lossy(&docs.stdout).contains("Runtime docs from OKF"));
+
+    let help = run(repo.path(), ["memory", "reindex", "--help"]);
+    assert_success(&help, "reindex help");
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("clears derived GitHub metadata tables")
+    );
 }
 
 #[test]

@@ -345,6 +345,9 @@ to include available codebase-analysis artifacts alongside selected memory.
 DuckDB catalog from OKF concept documents, defaulting to the configured memory
 root. Broken links and unknown concept types are indexed as warnings; malformed
 OKF frontmatter remains fatal because those files are not parseable concepts.
+The OKF rebuild clears derived GitHub metadata tables (`pull_requests`,
+`changed_files`, `checks`, and `reviews`) because OKF concepts do not currently
+carry that capture-enrichment data.
 
 Docs sync writes stable topic docs by default and prints stat-style output with
 file paths, line counts, and changed-line totals:
