@@ -623,7 +623,6 @@ pub fn refresh_memory_index_from_okf(
         "checks",
         "reviews",
         "areas",
-        "doc_memory_links",
     ] {
         transaction
             .execute(&format!("DELETE FROM {table}"), [])
@@ -648,7 +647,7 @@ pub fn refresh_memory_index_from_okf(
                     row.capsule_path.to_string_lossy().to_string(),
                     row.visibility.as_str(),
                     row.source_hash,
-                    row.warnings.len() as i64,
+                    row.warning_count as i64,
                     row.docs_sync_status,
                     row.body,
                     row.captured_at,
@@ -701,7 +700,7 @@ pub fn refresh_memory_index_from_okf(
             source,
         })?;
 
-    let warning_count = rows.iter().map(|row| row.warnings.len()).sum();
+    let warning_count = rows.iter().map(|row| row.warning_count).sum();
     let markdown_indexes = if config.markdown_indexes {
         write_markdown_indexes(config)?
     } else {
@@ -727,6 +726,7 @@ struct OkfIndexRow {
     capsule_path: PathBuf,
     visibility: MemoryVisibility,
     source_hash: String,
+    warning_count: usize,
     docs_sync_status: String,
     body: String,
     captured_at: String,
@@ -737,7 +737,6 @@ struct OkfIndexRow {
     links_json: String,
     citations_json: String,
     freshness: MemoryFreshness,
-    warnings: Vec<String>,
     warnings_json: String,
     areas: Vec<String>,
 }
@@ -765,6 +764,7 @@ impl OkfIndexRow {
             .map(|metadata| metadata.citations.clone())
             .unwrap_or_default();
         let tags = normalize_list(concept.frontmatter.tags.clone());
+        let warning_count = archive_blocking_warning_count(&warnings);
         let warnings_json = serde_json::to_string(&warnings)?;
 
         Ok(Self {
@@ -782,6 +782,7 @@ impl OkfIndexRow {
                 .and_then(|metadata| metadata.visibility)
                 .unwrap_or(config.visibility),
             source_hash: sha256_hex(&contents),
+            warning_count,
             docs_sync_status: metadata
                 .as_ref()
                 .and_then(|metadata| okf_docs_sync_status(metadata.docs_sync.as_ref()))
@@ -793,13 +794,12 @@ impl OkfIndexRow {
                 .clone()
                 .unwrap_or_else(|| Utc::now().to_rfc3339()),
             description: okf_index_description(&concept),
-            tags_json: serde_json::to_string(&concept.frontmatter.tags)?,
+            tags_json: serde_json::to_string(&tags)?,
             scope_refs_json: serde_json::to_string(&scope_refs)?,
             source_refs_json: serde_json::to_string(&source_refs)?,
             links_json: serde_json::to_string(&links)?,
             citations_json: serde_json::to_string(&citations)?,
             freshness: okf_index_freshness(&concept),
-            warnings,
             warnings_json,
             areas: okf_index_areas(&scope_refs),
         })

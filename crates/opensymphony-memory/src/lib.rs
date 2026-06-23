@@ -1326,6 +1326,25 @@ type: topic-doc
         assert_eq!(freshness, "stale");
         assert!(warnings_json.contains("unknown type"));
         assert!(warnings_json.contains("broken Markdown link"));
+
+        connection
+            .execute(
+                "INSERT INTO doc_memory_links (topic_doc, issue_key, visibility) VALUES (?, ?, ?)",
+                params!["docs/memory.md", "COE-124", "public"],
+            )
+            .expect("doc link should insert");
+        drop(connection);
+
+        refresh_memory_index_from_okf(&config, &bundle).expect("OKF reindex should repeat");
+        let connection = Connection::open(&config.index_path).expect("index should reopen");
+        let doc_link_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM doc_memory_links WHERE topic_doc = 'docs/memory.md' AND issue_key = 'COE-124'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("doc link count should query");
+        assert_eq!(doc_link_count, 1);
     }
 
     #[test]
