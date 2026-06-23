@@ -1946,8 +1946,6 @@ fn call_memory_import_okf_tool(
     arguments: &Value,
 ) -> Result<Value, MemoryError> {
     let bundle = optional_string_arg(arguments, "bundleRoot")
-        .or_else(|| optional_string_arg(arguments, "bundle_root"))
-        .or_else(|| optional_string_arg(arguments, "bundle"))
         .map(PathBuf::from)
         .ok_or_else(|| {
             MemoryError::InvalidInput("missing string argument `bundleRoot`".to_string())
