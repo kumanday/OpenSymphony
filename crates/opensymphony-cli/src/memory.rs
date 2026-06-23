@@ -326,6 +326,8 @@ struct ExportOkfArgs {
 struct ImportOkfArgs {
     #[arg(help = "OKF bundle directory to import")]
     bundle: PathBuf,
+    #[arg(long, help = "Overwrite existing imported OKF Markdown files")]
+    force: bool,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -1342,7 +1344,7 @@ fn run_export_okf(config: &MemoryConfig, args: ExportOkfArgs) -> Result<(), Memo
 }
 
 fn run_import_okf(config: &MemoryConfig, args: ImportOkfArgs) -> Result<(), MemoryError> {
-    let report = import_okf_bundle(config, &args.bundle)?;
+    let report = import_okf_bundle(config, &args.bundle, args.force)?;
     println!("Imported OKF bundle: {}", report.source_path.display());
     println!("Target memory root: {}", report.target_path.display());
     println!("Copied files: {}", report.copied_files.len());

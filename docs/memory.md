@@ -89,12 +89,21 @@ still references private comments, private memory paths, or private source
 snapshots. Private export can include private concepts but still keeps normal
 OKF lint errors fatal.
 
-`opensymphony memory import-okf <bundle-root>` validates an OKF directory bundle,
-copies its Markdown concepts into the configured memory root without rewriting
-frontmatter, and rebuilds the derived DuckDB catalog from the imported bundle.
-Unknown concept types, unknown frontmatter fields, missing optional fields,
-broken links, and missing generated indexes are warning-level import inputs;
-malformed concepts remain errors with file paths in the diagnostic.
+The public export redaction scan is deliberately narrow and explicit: it treats
+`linear:comment:`, `.opensymphony/memory/issues`,
+`.opensymphony/memory/source*`, `.opensymphony/memory/snapshot*`, and their
+Windows-path variants as private material when they appear in exported public
+concepts.
+
+`opensymphony memory import-okf <bundle-root> [--force]` validates an OKF
+directory bundle, copies its Markdown concepts into the configured memory root
+without rewriting frontmatter, and rebuilds the derived DuckDB catalog from the
+imported bundle. The target memory root is checked against the repository
+containment policy, and existing Markdown files are not overwritten unless
+`--force` is supplied. Unknown concept types, unknown frontmatter fields,
+missing optional fields, broken links, and missing generated indexes are
+warning-level import inputs; malformed concepts remain errors with file paths
+in the diagnostic.
 
 OKF lint diagnostics are intentionally actionable. Errors cover missing or
 invalid concept frontmatter, missing `type`, malformed reserved files,

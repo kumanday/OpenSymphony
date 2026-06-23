@@ -268,13 +268,8 @@ pub fn export_okf_bundle(
     let mut files = Vec::new();
     collect_okf_markdown_files(&source_root, &source_root, &mut files)?;
     let public = visibility == MemoryVisibility::Public;
-    let private_source_paths = if public {
-        private_okf_concept_paths(&source_root, &files)?
-    } else {
-        BTreeSet::new()
-    };
     let lint = lint_okf_bundle(&source_root, false)?;
-    let errors = lint_errors_for_export(config, "OKF source bundle", &lint, &private_source_paths);
+    let errors = lint_errors_for_export(config, "OKF source bundle", &lint, public);
     if !errors.is_empty() {
         return Err(MemoryError::InvalidInput(errors));
     }
@@ -344,8 +339,12 @@ pub fn export_okf_bundle(
 pub fn import_okf_bundle(
     config: &MemoryConfig,
     source: &Path,
+    force: bool,
 ) -> Result<OkfImportReport, MemoryError> {
     ensure_repo_contained(&config.repo_root, source)?;
+    ensure_repo_contained(&config.repo_root, &config.memory_root)?;
+    create_dir_all(&config.memory_root)?;
+    let target_root = canonicalize_existing_path(&config.memory_root)?;
     let source_path = canonicalize_existing_path(&resolve_path(&config.repo_root, source))?;
     if !source_path.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
@@ -366,14 +365,21 @@ pub fn import_okf_bundle(
         let relative = bundle_relative_path(&source_path, &path)?;
         OkfBundlePath::new(relative.clone())?;
         let contents = read_to_string(&path)?;
-        write_file(&config.memory_root.join(&relative), &contents)?;
+        let target = target_root.join(&relative);
+        if target.exists() && !force {
+            return Err(MemoryError::InvalidInput(format!(
+                "{} already exists; rerun with --force to overwrite it",
+                display_path(&config.repo_root, &target)
+            )));
+        }
+        write_file(&target, &contents)?;
         copied_files.push(relative);
     }
 
-    let reindex = refresh_memory_index_from_okf(config, &config.memory_root)?;
+    let reindex = refresh_memory_index_from_okf(config, &target_root)?;
     Ok(OkfImportReport {
         source_path,
-        target_path: config.memory_root.clone(),
+        target_path: target_root,
         copied_files,
         finding_count: lint.findings.len(),
         reindex,
@@ -465,20 +471,20 @@ fn ensure_empty_output_dir(path: &Path) -> Result<(), MemoryError> {
 }
 
 fn lint_errors(config: &MemoryConfig, label: &str, report: &LintReport) -> String {
-    lint_errors_for_export(config, label, report, &BTreeSet::new())
+    lint_errors_for_export(config, label, report, false)
 }
 
 fn lint_errors_for_export(
     config: &MemoryConfig,
     label: &str,
     report: &LintReport,
-    ignored_private_paths: &BTreeSet<PathBuf>,
+    ignore_private_export_leaks: bool,
 ) -> String {
     let errors = report
         .findings
         .iter()
         .filter(|finding| finding.severity == LintSeverity::Error)
-        .filter(|finding| !ignored_private_export_leak(finding, ignored_private_paths))
+        .filter(|finding| !ignored_private_export_leak(finding, ignore_private_export_leaks))
         .map(|finding| {
             let path = finding
                 .path
@@ -495,36 +501,8 @@ fn lint_errors_for_export(
     }
 }
 
-fn ignored_private_export_leak(
-    finding: &LintFinding,
-    ignored_private_paths: &BTreeSet<PathBuf>,
-) -> bool {
-    finding.message.contains("private export leak")
-        && finding
-            .path
-            .as_ref()
-            .is_some_and(|path| ignored_private_paths.contains(path))
-}
-
-fn private_okf_concept_paths(
-    bundle_root: &Path,
-    files: &[PathBuf],
-) -> Result<BTreeSet<PathBuf>, MemoryError> {
-    let mut private = BTreeSet::new();
-    for path in files {
-        let relative = bundle_relative_path(bundle_root, path)?;
-        let bundle_path = OkfBundlePath::new(relative)?;
-        if bundle_path.reserved_file().is_some() {
-            continue;
-        }
-        let contents = read_to_string(path)?;
-        if let Ok(concept) = parse_okf_concept(bundle_root, path, &contents)
-            && concept_visibility(&concept) == Some(MemoryVisibility::Private)
-        {
-            private.insert(path.clone());
-        }
-    }
-    Ok(private)
+fn ignored_private_export_leak(finding: &LintFinding, ignore_private_export_leaks: bool) -> bool {
+    ignore_private_export_leaks && finding.message.contains("private export leak")
 }
 
 fn public_export_index() -> String {
@@ -1102,25 +1080,45 @@ fn contains_private_memory_link_in_markdown(contents: &str) -> bool {
     contains_private_memory_link(&visible)
 }
 
+const PUBLIC_PRIVATE_COMMENT_PATTERNS: &[&str] = &["linear:comment:"];
+const PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS: &[&str] = &[
+    ".opensymphony/memory/issues",
+    ".opensymphony\\memory\\issues",
+    "../.opensymphony/memory/issues",
+];
+const PUBLIC_PRIVATE_SOURCE_PATTERNS: &[&str] = &[
+    ".opensymphony/memory/source",
+    ".opensymphony\\memory\\source",
+    ".opensymphony/memory/snapshot",
+    ".opensymphony\\memory\\snapshot",
+];
+
 fn public_export_private_material(contents: &str) -> Option<&'static str> {
-    let contents = contents.to_ascii_lowercase();
-    if contents.contains("linear:comment:") {
+    if contains_any_ascii_case_insensitive(contents, PUBLIC_PRIVATE_COMMENT_PATTERNS) {
         return Some("private comment references");
     }
-    if contents.contains(".opensymphony/memory/issues")
-        || contents.contains(".opensymphony\\memory\\issues")
-        || contents.contains("../.opensymphony/memory/issues")
-    {
+    if contains_any_ascii_case_insensitive(contents, PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS) {
         return Some("private local paths");
     }
-    if contents.contains(".opensymphony/memory/source")
-        || contents.contains(".opensymphony\\memory\\source")
-        || contents.contains(".opensymphony/memory/snapshot")
-        || contents.contains(".opensymphony\\memory\\snapshot")
-    {
+    if contains_any_ascii_case_insensitive(contents, PUBLIC_PRIVATE_SOURCE_PATTERNS) {
         return Some("private source snapshots");
     }
     None
+}
+
+fn contains_any_ascii_case_insensitive(contents: &str, patterns: &[&str]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| contains_ascii_case_insensitive(contents, pattern))
+}
+
+fn contains_ascii_case_insensitive(contents: &str, pattern: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    !pattern.is_empty()
+        && contents
+            .as_bytes()
+            .windows(pattern.len())
+            .any(|window| window.eq_ignore_ascii_case(pattern))
 }
 
 fn extract_wiki_links(body: &str) -> Vec<String> {

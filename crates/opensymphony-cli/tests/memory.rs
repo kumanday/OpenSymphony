@@ -215,6 +215,12 @@ fn memory_export_okf_public_fails_on_private_material_in_public_concepts() {
         "Leaky snapshot",
         "Private snapshot: .opensymphony/memory/source-snapshots/COE-202.md.\n",
     );
+    write_public_okf_concept(
+        repo.path(),
+        "COE-203.md",
+        "Leaky path",
+        "Private path: .opensymphony/memory/issues/COE-203.md.\n",
+    );
 
     let output = run(
         repo.path(),
@@ -232,8 +238,10 @@ fn memory_export_okf_public_fails_on_private_material_in_public_concepts() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("public export contains private comment references"));
     assert!(stderr.contains("public export contains private source snapshots"));
+    assert!(stderr.contains("public export contains private local paths"));
     assert!(stderr.contains("COE-201.md"));
     assert!(stderr.contains("COE-202.md"));
+    assert!(stderr.contains("COE-203.md"));
 }
 
 #[test]
@@ -285,6 +293,18 @@ fn memory_import_okf_tolerates_warnings_and_preserves_unknown_fields() {
     let search = run(repo.path(), ["memory", "search", "warning-friendly"]);
     assert_success(&search, "search imported OKF");
     assert!(String::from_utf8_lossy(&search.stdout).contains("COE-500"));
+
+    let duplicate = run(repo.path(), ["memory", "import-okf", "incoming-okf"]);
+    assert_failure(&duplicate, "duplicate OKF import");
+    let stderr = String::from_utf8_lossy(&duplicate.stderr);
+    assert!(stderr.contains("already exists"));
+    assert!(stderr.contains("--force"));
+
+    let forced = run(
+        repo.path(),
+        ["memory", "import-okf", "incoming-okf", "--force"],
+    );
+    assert_success(&forced, "forced OKF import");
 }
 
 #[test]
