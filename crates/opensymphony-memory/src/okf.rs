@@ -262,6 +262,7 @@ pub fn export_okf_bundle(
         .unwrap_or_else(|| config.repo_root.join(format!("okf-export-{visibility}")));
     ensure_repo_contained(&config.repo_root, &output_path)?;
     let output_path = canonicalize_existing_prefix(&output_path)?;
+    ensure_output_target_not_symlink(&output_path)?;
     if output_path == source_root || output_path.starts_with(&source_root) {
         return Err(MemoryError::InvalidInput(format!(
             "OKF export output `{}` must not be inside the source bundle `{}`",
@@ -275,7 +276,7 @@ pub fn export_okf_bundle(
     collect_okf_markdown_files(&source_root, &source_root, &mut files)?;
     let public = visibility == MemoryVisibility::Public;
     let lint = lint_okf_bundle(&source_root, false)?;
-    let errors = lint_errors_for_export(config, "OKF source bundle", &lint, true);
+    let errors = filtered_lint_errors(config, "OKF source bundle", &lint, true);
     if !errors.is_empty() {
         return Err(MemoryError::InvalidInput(errors));
     }
@@ -326,10 +327,7 @@ pub fn export_okf_bundle(
             return Err(error);
         }
     };
-    if let Err(error) = promote_staged_export(&staging_path, &output_path) {
-        let _ = cleanup_staging_dir(&staging_path);
-        return Err(error);
-    }
+    promote_staged_export(&staging_path, &output_path)?;
 
     Ok(OkfExportReport {
         output_path,
@@ -363,7 +361,7 @@ pub fn import_okf_bundle(
         )));
     }
     let lint = lint_okf_bundle(&source_path, false)?;
-    let errors = lint_errors_for_export(config, "OKF import bundle", &lint, true);
+    let errors = filtered_lint_errors(config, "OKF import bundle", &lint, true);
     if !errors.is_empty() {
         return Err(MemoryError::InvalidInput(errors));
     }
@@ -514,6 +512,18 @@ fn ensure_empty_output_target(path: &Path) -> Result<(), MemoryError> {
     Ok(())
 }
 
+fn ensure_output_target_not_symlink(path: &Path) -> Result<(), MemoryError> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF export output `{}` must not be a symlink",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn create_staging_dir(parent: &Path, output_path: &Path) -> Result<PathBuf, MemoryError> {
     let output_name = output_path
         .file_name()
@@ -546,8 +556,7 @@ fn write_and_lint_staged_export(
         write_file(&path, &contents)?;
     }
     let exported_lint = lint_okf_bundle(staging_path, public)?;
-    let errors =
-        lint_errors_for_export(config, "exported OKF bundle", &exported_lint, !public);
+    let errors = filtered_lint_errors(config, "exported OKF bundle", &exported_lint, !public);
     if errors.is_empty() {
         Ok(exported_lint)
     } else {
@@ -556,16 +565,110 @@ fn write_and_lint_staged_export(
 }
 
 fn promote_staged_export(staging_path: &Path, output_path: &Path) -> Result<(), MemoryError> {
-    if output_path.exists() {
-        fs::remove_dir(output_path).map_err(|source| MemoryError::WriteFile {
-            path: output_path.to_path_buf(),
-            source,
+    promote_staged_export_with(
+        staging_path,
+        output_path,
+        |from, to| fs::rename(from, to),
+        |path| fs::remove_dir_all(path),
+    )
+}
+
+fn promote_staged_export_with<R, D>(
+    staging_path: &Path,
+    output_path: &Path,
+    mut rename: R,
+    mut remove_dir_all: D,
+) -> Result<(), MemoryError>
+where
+    R: FnMut(&Path, &Path) -> io::Result<()>,
+    D: FnMut(&Path) -> io::Result<()>,
+{
+    let backup_path = if output_path.exists() {
+        let backup_path = create_promotion_backup_path(output_path)?;
+        rename(output_path, &backup_path).map_err(|source| {
+            promotion_failure(output_path, staging_path, None, source, "backing up existing output")
         })?;
+        Some(backup_path)
+    } else {
+        None
+    };
+
+    if let Err(source) = rename(staging_path, output_path) {
+        let rollback = if let Some(backup_path) = backup_path.as_ref() {
+            match rename(backup_path, output_path) {
+                Ok(()) => format!(
+                    "previous output was restored from `{}`",
+                    backup_path.display()
+                ),
+                Err(rollback_source) => format!(
+                    "previous output remains at `{}` because rollback failed: {}",
+                    backup_path.display(),
+                    rollback_source
+                ),
+            }
+        } else {
+            "no previous output existed".to_string()
+        };
+        return Err(promotion_failure(
+            output_path,
+            staging_path,
+            Some(rollback),
+            source,
+            "moving staged bundle into place",
+        ));
     }
-    fs::rename(staging_path, output_path).map_err(|source| MemoryError::WriteFile {
-        path: output_path.to_path_buf(),
+
+    if let Some(backup_path) = backup_path
+        && backup_path.exists()
+    {
+        let _ = remove_dir_all(&backup_path);
+    }
+    Ok(())
+}
+
+fn create_promotion_backup_path(output_path: &Path) -> Result<PathBuf, MemoryError> {
+    let parent = output_path.parent().ok_or_else(|| {
+        MemoryError::InvalidInput(format!(
+            "OKF export output `{}` has no parent directory",
+            output_path.display()
+        ))
+    })?;
+    let output_name = output_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("okf-export");
+    for attempt in 0..100 {
+        let candidate = parent.join(format!(
+            ".{output_name}.backup-{}-{attempt}",
+            std::process::id()
+        ));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(MemoryError::InvalidInput(format!(
+        "could not allocate a backup directory for OKF export `{}`",
+        output_path.display()
+    )))
+}
+
+fn promotion_failure(
+    output_path: &Path,
+    staging_path: &Path,
+    recovery_detail: Option<String>,
+    source: io::Error,
+    action: &str,
+) -> MemoryError {
+    let recovery_detail = recovery_detail
+        .map(|detail| format!("; {detail}"))
+        .unwrap_or_default();
+    MemoryError::InvalidInput(format!(
+        "failed to promote OKF export to `{}` while {action}: {}; staged bundle preserved at `{}`{}",
+        output_path.display(),
         source,
-    })
+        staging_path.display(),
+        recovery_detail
+    ))
 }
 
 fn cleanup_staging_dir(path: &Path) -> Result<(), MemoryError> {
@@ -582,17 +685,17 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-fn lint_errors_for_export(
+fn filtered_lint_errors(
     config: &MemoryConfig,
     label: &str,
     report: &LintReport,
-    ignore_private_export_leaks: bool,
+    ignore_private_memory_links: bool,
 ) -> String {
     let errors = report
         .findings
         .iter()
         .filter(|finding| finding.severity == LintSeverity::Error)
-        .filter(|finding| !ignored_private_export_leak(finding, ignore_private_export_leaks))
+        .filter(|finding| !ignored_private_export_leak(finding, ignore_private_memory_links))
         .map(|finding| {
             let path = finding
                 .path
@@ -609,8 +712,8 @@ fn lint_errors_for_export(
     }
 }
 
-fn ignored_private_export_leak(finding: &LintFinding, ignore_private_export_leaks: bool) -> bool {
-    ignore_private_export_leaks && is_private_export_leak(finding)
+fn ignored_private_export_leak(finding: &LintFinding, ignore_private_memory_links: bool) -> bool {
+    ignore_private_memory_links && is_private_export_leak(finding)
 }
 
 fn is_private_export_leak(finding: &LintFinding) -> bool {
@@ -622,8 +725,10 @@ fn public_export_index() -> String {
 }
 
 fn public_export_log() -> String {
-    "# OpenSymphony Public Memory Export Log\n\n## 1970-01-01\n\n- Public export generated.\n"
-        .to_string()
+    format!(
+        "# OpenSymphony Public Memory Export Log\n\n## {}\n\n- Public export generated.\n",
+        Utc::now().date_naive()
+    )
 }
 
 fn split_okf_frontmatter(path: &Path, contents: &str) -> Result<(String, String), MemoryError> {
@@ -1960,6 +2065,64 @@ Visible [[real-target|Real Target]].
             markdown_target_before_optional_title("assets/image.md.png \"Title\""),
             None
         );
+    }
+
+    #[test]
+    fn export_promotion_failure_restores_output_and_preserves_staging() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let staging = repo.path().join(".okf-export.tmp");
+        let output = repo.path().join("okf-export-private");
+        fs::create_dir_all(&staging).expect("staging should write");
+        fs::write(staging.join("bundle.md"), "staged bundle")
+            .expect("staged file should write");
+        fs::create_dir_all(&output).expect("existing output should write");
+
+        let staging_for_failure = staging.clone();
+        let output_for_failure = output.clone();
+        let result = promote_staged_export_with(
+            &staging,
+            &output,
+            |from, to| {
+                if from == staging_for_failure.as_path() && to == output_for_failure.as_path() {
+                    Err(io::Error::other("injected rename failure"))
+                } else {
+                    fs::rename(from, to)
+                }
+            },
+            |path| fs::remove_dir_all(path),
+        );
+
+        let error = result.expect_err("promotion should fail");
+        assert!(
+            error.to_string().contains("staged bundle preserved"),
+            "error should explain recovery path: {error}"
+        );
+        assert!(
+            staging.join("bundle.md").is_file(),
+            "failed promotion should preserve staged bundle"
+        );
+        assert!(
+            output.is_dir(),
+            "failed promotion should restore previous output directory"
+        );
+        let leaked_backup = fs::read_dir(repo.path())
+            .expect("repo should list")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".backup-"));
+        assert!(!leaked_backup, "successful rollback should consume backup dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_output_target_rejects_final_symlink() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let output = repo.path().join("public-okf");
+        std::os::unix::fs::symlink(repo.path().join("missing-target"), &output)
+            .expect("symlink should write");
+
+        let result = ensure_output_target_not_symlink(&output);
+
+        assert!(matches!(result, Err(MemoryError::InvalidInput(_))));
     }
 
     #[test]

@@ -87,11 +87,13 @@ defaults to `okf-export-{visibility}` under the repository root when omitted and
 must be new or empty so stale private files cannot survive a public export.
 Export writes into a repository-contained staging directory first, runs OKF lint
 on the staged bundle, and only then promotes the completed bundle to the
-requested output path. Public export skips private concepts and fails if any
-remaining public concept still references private comments, private memory paths,
-or private source snapshots. Private export can include private concepts but
-still keeps normal OKF lint errors fatal except for visible links back into the
-private memory store, which are expected in private round-trip bundles.
+requested output path. If final promotion fails, OpenSymphony preserves the
+lint-clean staged bundle for recovery and restores the previous empty output
+directory when possible. Public export skips private concepts and fails if any
+remaining public concept still references private comments, private memory
+paths, or private source snapshots. Private export can include private concepts
+but still keeps normal OKF lint errors fatal except for visible links back into
+the private memory store, which are expected in private round-trip bundles.
 
 The public export redaction scan is deliberately narrow and explicit: it treats
 `linear:comment:`, `.opensymphony/memory/issues`,
