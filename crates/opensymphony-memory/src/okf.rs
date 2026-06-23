@@ -270,14 +270,6 @@ pub fn export_okf_bundle(
         )));
     }
     ensure_empty_output_target(&output_path)?;
-    let output_parent = output_path.parent().ok_or_else(|| {
-        MemoryError::InvalidInput(format!(
-            "OKF export output `{}` has no parent directory",
-            output_path.display()
-        ))
-    })?;
-    create_dir_all(output_parent)?;
-    let staging_path = create_staging_dir(output_parent, &output_path)?;
 
     let mut files = Vec::new();
     collect_okf_markdown_files(&source_root, &source_root, &mut files)?;
@@ -287,6 +279,14 @@ pub fn export_okf_bundle(
     if !errors.is_empty() {
         return Err(MemoryError::InvalidInput(errors));
     }
+    let output_parent = output_path.parent().ok_or_else(|| {
+        MemoryError::InvalidInput(format!(
+            "OKF export output `{}` has no parent directory",
+            output_path.display()
+        ))
+    })?;
+    create_dir_all(output_parent)?;
+    let staging_path = create_staging_dir(output_parent, &output_path)?;
 
     let mut writes = Vec::<(PathBuf, String)>::new();
     let mut copied_files = Vec::new();

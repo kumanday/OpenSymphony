@@ -276,6 +276,46 @@ fn memory_export_okf_public_ignores_private_patterns_in_markdown_code() {
 }
 
 #[test]
+fn memory_export_okf_source_lint_failure_leaves_no_staging_dir() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    fs::create_dir_all(repo.path().join(".opensymphony/memory/issues"))
+        .expect("issues dir should write");
+    fs::write(
+        repo.path().join(".opensymphony/memory/issues/broken.md"),
+        "---\ntype: [unterminated\n---\n\n# Broken\n",
+    )
+    .expect("broken source concept should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            "public-okf",
+        ],
+    );
+
+    assert_failure(&output, "source lint failure before OKF export staging");
+    let leaked_staging = fs::read_dir(repo.path())
+        .expect("repo should list")
+        .filter_map(Result::ok)
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".public-okf.tmp-")
+        });
+    assert!(
+        !leaked_staging,
+        "source lint failure should not leak staging dir"
+    );
+}
+
+#[test]
 fn memory_export_okf_public_skips_private_concepts_with_private_paths() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
