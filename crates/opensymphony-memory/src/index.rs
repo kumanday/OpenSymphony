@@ -286,15 +286,42 @@ CREATE TABLE IF NOT EXISTS issues (
   warnings_json TEXT NOT NULL DEFAULT '[]'
 );
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS concept_id TEXT DEFAULT '';
+UPDATE issues SET concept_id = '' WHERE concept_id IS NULL;
+ALTER TABLE issues ALTER COLUMN concept_id SET DEFAULT '';
+ALTER TABLE issues ALTER COLUMN concept_id SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS concept_type TEXT DEFAULT 'issue-capsule';
+UPDATE issues SET concept_type = 'issue-capsule' WHERE concept_type IS NULL;
+ALTER TABLE issues ALTER COLUMN concept_type SET DEFAULT 'issue-capsule';
+ALTER TABLE issues ALTER COLUMN concept_type SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS description TEXT;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS tags_json TEXT DEFAULT '[]';
+UPDATE issues SET tags_json = '[]' WHERE tags_json IS NULL;
+ALTER TABLE issues ALTER COLUMN tags_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN tags_json SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS scope_refs_json TEXT DEFAULT '[]';
+UPDATE issues SET scope_refs_json = '[]' WHERE scope_refs_json IS NULL;
+ALTER TABLE issues ALTER COLUMN scope_refs_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN scope_refs_json SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS source_refs_json TEXT DEFAULT '[]';
+UPDATE issues SET source_refs_json = '[]' WHERE source_refs_json IS NULL;
+ALTER TABLE issues ALTER COLUMN source_refs_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN source_refs_json SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS links_json TEXT DEFAULT '[]';
+UPDATE issues SET links_json = '[]' WHERE links_json IS NULL;
+ALTER TABLE issues ALTER COLUMN links_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN links_json SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS citations_json TEXT DEFAULT '[]';
+UPDATE issues SET citations_json = '[]' WHERE citations_json IS NULL;
+ALTER TABLE issues ALTER COLUMN citations_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN citations_json SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS freshness TEXT DEFAULT 'unknown';
+UPDATE issues SET freshness = 'unknown' WHERE freshness IS NULL;
+ALTER TABLE issues ALTER COLUMN freshness SET DEFAULT 'unknown';
+ALTER TABLE issues ALTER COLUMN freshness SET NOT NULL;
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS warnings_json TEXT DEFAULT '[]';
+UPDATE issues SET warnings_json = '[]' WHERE warnings_json IS NULL;
+ALTER TABLE issues ALTER COLUMN warnings_json SET DEFAULT '[]';
+ALTER TABLE issues ALTER COLUMN warnings_json SET NOT NULL;
 CREATE TABLE IF NOT EXISTS pull_requests (
   issue_key TEXT NOT NULL,
   number BIGINT NOT NULL,
