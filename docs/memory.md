@@ -90,7 +90,8 @@ on the staged bundle, and only then promotes the completed bundle to the
 requested output path. Public export skips private concepts and fails if any
 remaining public concept still references private comments, private memory paths,
 or private source snapshots. Private export can include private concepts but
-still keeps normal OKF lint errors fatal.
+still keeps normal OKF lint errors fatal except for visible links back into the
+private memory store, which are expected in private round-trip bundles.
 
 The public export redaction scan is deliberately narrow and explicit: it treats
 `linear:comment:`, `.opensymphony/memory/issues`,
@@ -107,10 +108,12 @@ imported bundle. The import source and target memory root are canonicalized,
 checked against the repository containment policy, and rejected when they
 overlap. Import preflights the full copy set before writing so predictable
 target conflicts do not leave partially imported Markdown files. Existing
-Markdown files are not overwritten unless `--force` is supplied. Unknown concept
-types, unknown frontmatter fields, missing optional fields, broken links, and
-missing generated indexes are warning-level import inputs; malformed concepts
-remain errors with file paths in the diagnostic.
+Markdown files are not overwritten unless `--force` is supplied. Because
+`import-okf` restores both public and private bundles, visible private memory
+links are allowed during import and preserved in the copied Markdown. Unknown
+concept types, unknown frontmatter fields, missing optional fields, broken
+links, and missing generated indexes are warning-level import inputs; malformed
+concepts remain errors with file paths in the diagnostic.
 
 Import is not transactional after the preflight succeeds. A filesystem write or
 DuckDB reindex failure can leave already-copied Markdown files in the memory

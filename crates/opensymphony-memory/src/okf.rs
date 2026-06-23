@@ -275,7 +275,7 @@ pub fn export_okf_bundle(
     collect_okf_markdown_files(&source_root, &source_root, &mut files)?;
     let public = visibility == MemoryVisibility::Public;
     let lint = lint_okf_bundle(&source_root, false)?;
-    let errors = lint_errors_for_export(config, "OKF source bundle", &lint, public);
+    let errors = lint_errors_for_export(config, "OKF source bundle", &lint, true);
     if !errors.is_empty() {
         return Err(MemoryError::InvalidInput(errors));
     }
@@ -363,7 +363,7 @@ pub fn import_okf_bundle(
         )));
     }
     let lint = lint_okf_bundle(&source_path, false)?;
-    let errors = lint_errors(config, "OKF import bundle", &lint);
+    let errors = lint_errors_for_export(config, "OKF import bundle", &lint, true);
     if !errors.is_empty() {
         return Err(MemoryError::InvalidInput(errors));
     }
@@ -546,7 +546,8 @@ fn write_and_lint_staged_export(
         write_file(&path, &contents)?;
     }
     let exported_lint = lint_okf_bundle(staging_path, public)?;
-    let errors = lint_errors(config, "exported OKF bundle", &exported_lint);
+    let errors =
+        lint_errors_for_export(config, "exported OKF bundle", &exported_lint, !public);
     if errors.is_empty() {
         Ok(exported_lint)
     } else {
@@ -581,10 +582,6 @@ fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
 
-fn lint_errors(config: &MemoryConfig, label: &str, report: &LintReport) -> String {
-    lint_errors_for_export(config, label, report, false)
-}
-
 fn lint_errors_for_export(
     config: &MemoryConfig,
     label: &str,
@@ -613,7 +610,11 @@ fn lint_errors_for_export(
 }
 
 fn ignored_private_export_leak(finding: &LintFinding, ignore_private_export_leaks: bool) -> bool {
-    ignore_private_export_leaks && finding.message.contains("private export leak")
+    ignore_private_export_leaks && is_private_export_leak(finding)
+}
+
+fn is_private_export_leak(finding: &LintFinding) -> bool {
+    finding.message.contains("private export leak")
 }
 
 fn public_export_index() -> String {

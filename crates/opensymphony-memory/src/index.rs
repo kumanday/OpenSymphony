@@ -580,6 +580,7 @@ pub fn refresh_memory_index_from_okf(
         .findings
         .iter()
         .filter(|finding| finding.severity == LintSeverity::Error)
+        .filter(|finding| !is_private_export_leak(finding))
         .map(|finding| {
             let path = finding
                 .path

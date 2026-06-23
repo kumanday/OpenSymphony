@@ -155,6 +155,12 @@ fn memory_export_okf_public_skips_private_and_private_keeps_it() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_okf_reindex_fixture(repo.path());
     write_public_okf_concept(repo.path(), "COE-200.md", "Public concept", "");
+    write_private_okf_concept(
+        repo.path(),
+        "COE-201.md",
+        "Private linked concept",
+        "See .opensymphony/memory/issues/COE-201.md for private capture details.\n",
+    );
 
     let public_export = run(
         repo.path(),
@@ -174,7 +180,7 @@ fn memory_export_okf_public_skips_private_and_private_keeps_it() {
     assert!(repo.path().join("public-okf/log.md").is_file());
     let stdout = String::from_utf8_lossy(&public_export.stdout);
     assert!(stdout.contains("Visibility: public"));
-    assert!(stdout.contains("Skipped private files: 2"));
+    assert!(stdout.contains("Skipped private files: 3"));
 
     let lint = run(
         repo.path(),
@@ -196,6 +202,9 @@ fn memory_export_okf_public_skips_private_and_private_keeps_it() {
     );
     assert_success(&private_export, "private OKF export");
     assert!(repo.path().join("private-okf/issues/COE-123.md").is_file());
+    let private_linked = fs::read_to_string(repo.path().join("private-okf/issues/COE-201.md"))
+        .expect("private linked concept should export");
+    assert!(private_linked.contains(".opensymphony/memory/issues/COE-201.md"));
     assert!(repo.path().join("private-okf/issues/COE-200.md").is_file());
 }
 
@@ -360,6 +369,7 @@ fn memory_import_okf_tolerates_warnings_and_preserves_unknown_fields() {
         .expect("imported concept should read");
     assert!(imported.contains("x_unknown: keep-me"));
     assert!(imported.contains("type: surprise-concept"));
+    assert!(imported.contains(".opensymphony/memory/issues/COE-500.md"));
 
     let search = run(repo.path(), ["memory", "search", "warning-friendly"]);
     assert_success(&search, "search imported OKF");
@@ -1509,6 +1519,7 @@ opensymphony:
 # COE-500: Warning-friendly import
 
 This warning-friendly concept has a [broken link](missing.md).
+It also preserves a private round-trip link to .opensymphony/memory/issues/COE-500.md.
 "#,
     )
     .expect("warning import fixture should write");
