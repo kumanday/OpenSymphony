@@ -222,7 +222,7 @@ fn memory_export_okf_public_fails_on_private_material_in_public_concepts() {
         repo.path(),
         "COE-202.md",
         "Leaky snapshot",
-        "Private snapshot: .opensymphony/memory/source-snapshots/COE-202.md.\n",
+        "Private snapshot: ../.opensymphony/memory/source-snapshots/COE-202.md.\n",
     );
     write_public_okf_concept(
         repo.path(),
@@ -255,6 +255,28 @@ fn memory_export_okf_public_fails_on_private_material_in_public_concepts() {
         !repo.path().join("public-okf").exists(),
         "failed public export should not leave partial output"
     );
+}
+
+#[test]
+fn memory_export_okf_rejects_output_that_contains_source_bundle() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_public_okf_concept(repo.path(), "COE-205.md", "Public concept", "");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            ".opensymphony",
+        ],
+    );
+
+    assert_failure(&output, "overlapping OKF export output");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must not overlap"));
 }
 
 #[test]

@@ -263,9 +263,9 @@ pub fn export_okf_bundle(
     ensure_repo_contained(&config.repo_root, &output_path)?;
     let output_path = canonicalize_existing_prefix(&output_path)?;
     ensure_output_target_not_symlink(&output_path)?;
-    if output_path == source_root || output_path.starts_with(&source_root) {
+    if paths_overlap(&output_path, &source_root) {
         return Err(MemoryError::InvalidInput(format!(
-            "OKF export output `{}` must not be inside the source bundle `{}`",
+            "OKF export output `{}` must not overlap the source bundle `{}`",
             output_path.display(),
             source_root.display()
         )));
@@ -440,7 +440,7 @@ fn ensure_import_target_has_no_symlink_components(
         .strip_prefix(target_root)
         .map_err(|_| MemoryError::PathOutsideRepo {
             path: target.to_path_buf(),
-            repo_root: target_root.to_path_buf(),
+            repo_root: config.repo_root.clone(),
         })?;
     let mut cursor = target_root.to_path_buf();
     for component in relative.components() {
@@ -1394,8 +1394,10 @@ const PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS: &[&str] = &[
 const PUBLIC_PRIVATE_SOURCE_PATTERNS: &[&str] = &[
     ".opensymphony/memory/source",
     ".opensymphony\\memory\\source",
+    "../.opensymphony/memory/source",
     ".opensymphony/memory/snapshot",
     ".opensymphony\\memory\\snapshot",
+    "../.opensymphony/memory/snapshot",
 ];
 
 fn public_export_private_material(contents: &str) -> Option<&'static str> {
