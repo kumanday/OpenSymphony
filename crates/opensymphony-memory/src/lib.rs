@@ -696,7 +696,6 @@ pub struct LintReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LintFinding {
-    pub code: Option<LintCode>,
     pub severity: LintSeverity,
     pub path: Option<PathBuf>,
     pub message: String,

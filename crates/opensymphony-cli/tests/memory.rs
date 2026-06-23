@@ -392,6 +392,8 @@ fn memory_import_okf_tolerates_warnings_and_preserves_unknown_fields() {
     assert!(imported.contains("x_unknown: keep-me"));
     assert!(imported.contains("type: surprise-concept"));
     assert!(imported.contains(".opensymphony/memory/issues/COE-500.md"));
+    assert!(!repo.path().join(".opensymphony/memory/index.md").exists());
+    assert!(!repo.path().join(".opensymphony/memory/log.md").exists());
 
     let search = run(repo.path(), ["memory", "search", "warning-friendly"]);
     assert_success(&search, "search imported OKF");
@@ -1554,6 +1556,16 @@ opensymphony:
 
 fn write_import_warning_bundle(repo: &std::path::Path) {
     fs::create_dir_all(repo.join("incoming-okf/issues")).expect("incoming dir should write");
+    fs::write(
+        repo.join("incoming-okf/index.md"),
+        "# Imported bundle index\n\nThis generated file should not be copied.\n",
+    )
+    .expect("incoming index should write");
+    fs::write(
+        repo.join("incoming-okf/log.md"),
+        "# Imported bundle log\n\n## 2026-06-23\n\n- Generated source log.\n",
+    )
+    .expect("incoming log should write");
     fs::write(
         repo.join("incoming-okf/issues/COE-500.md"),
         r#"---

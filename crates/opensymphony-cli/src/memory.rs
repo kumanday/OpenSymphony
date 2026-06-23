@@ -1881,7 +1881,6 @@ fn call_memory_lint_tool(config: &MemoryConfig, arguments: &Value) -> Result<Val
         "findingCount": report.findings.len(),
         "findings": report.findings.into_iter().map(|finding| {
             json!({
-                "code": finding.code.map(|code| code.as_str()),
                 "severity": match finding.severity {
                     LintSeverity::Info => "info",
                     LintSeverity::Warn => "warn",

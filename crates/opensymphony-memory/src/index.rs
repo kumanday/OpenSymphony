@@ -575,7 +575,7 @@ pub fn refresh_memory_index_from_okf(
 ) -> Result<MemoryReindexReport, MemoryError> {
     ensure_repo_contained(&config.repo_root, bundle_root)?;
     let bundle_root = canonicalize_existing_path(bundle_root)?;
-    let lint = lint_okf_bundle(&bundle_root, false)?;
+    let lint = lint_okf_bundle_with_codes(&bundle_root, false)?;
     let errors = lint
         .findings
         .iter()
