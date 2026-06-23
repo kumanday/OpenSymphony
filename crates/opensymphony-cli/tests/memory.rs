@@ -376,6 +376,41 @@ fn memory_export_okf_public_skips_private_concepts_with_private_paths() {
 }
 
 #[test]
+fn memory_export_okf_public_skips_malformed_private_concepts() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_public_okf_concept(repo.path(), "COE-212.md", "Public survivor", "");
+    fs::write(
+        repo.path().join(".opensymphony/memory/issues/COE-213.md"),
+        r#"---
+title: "COE-213: Private malformed concept"
+opensymphony:
+  visibility: private
+---
+
+# Private malformed concept
+"#,
+    )
+    .expect("malformed private concept should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            "public-okf",
+        ],
+    );
+
+    assert_success(&output, "public OKF export skips malformed private concept");
+    assert!(repo.path().join("public-okf/issues/COE-212.md").is_file());
+    assert!(!repo.path().join("public-okf/issues/COE-213.md").exists());
+}
+
+#[test]
 fn memory_import_okf_tolerates_warnings_and_preserves_unknown_fields() {
     let repo = TempDir::new().expect("temp repo should exist");
     write_memory_config(repo.path());
@@ -457,6 +492,39 @@ fn memory_import_okf_force_rejects_target_symlink() {
     assert!(
         !outside_target.exists(),
         "force import must not follow symlink outside memory root"
+    );
+}
+
+#[test]
+fn memory_import_okf_preflights_existing_target_lint_errors() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_import_warning_bundle(repo.path());
+    fs::create_dir_all(repo.path().join(".opensymphony/memory/issues"))
+        .expect("target issues dir should write");
+    fs::write(
+        repo.path().join(".opensymphony/memory/issues/BAD.md"),
+        r#"---
+title: "Existing malformed target concept"
+---
+
+# Existing malformed target concept
+"#,
+    )
+    .expect("malformed target concept should write");
+
+    let output = run(repo.path(), ["memory", "import-okf", "incoming-okf"]);
+
+    assert_failure(&output, "OKF import should preflight target lint");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("OKF import target"));
+    assert!(stderr.contains("BAD.md"));
+    assert!(
+        !repo
+            .path()
+            .join(".opensymphony/memory/issues/COE-500.md")
+            .exists(),
+        "target lint failure must happen before copying imported files"
     );
 }
 

@@ -316,10 +316,12 @@ pub fn export_okf_bundle(
     let mut files = Vec::new();
     collect_okf_markdown_files(&source_root, &source_root, &mut files)?;
     let public = visibility == MemoryVisibility::Public;
-    let lint = lint_okf_bundle_with_codes(&source_root, false)?;
-    let errors = filtered_lint_errors(config, "OKF source bundle", &lint, true);
-    if !errors.is_empty() {
-        return Err(MemoryError::InvalidInput(errors));
+    if !public {
+        let lint = lint_okf_bundle_with_codes(&source_root, false)?;
+        let errors = filtered_lint_errors(config, "OKF source bundle", &lint, true);
+        if !errors.is_empty() {
+            return Err(MemoryError::InvalidInput(errors));
+        }
     }
     let output_parent = output_path.parent().ok_or_else(|| {
         MemoryError::InvalidInput(format!(
@@ -327,8 +329,6 @@ pub fn export_okf_bundle(
             output_path.display()
         ))
     })?;
-    create_dir_all(output_parent)?;
-    let staging_path = create_staging_dir(output_parent, &output_path)?;
 
     let mut writes = Vec::<(PathBuf, String)>::new();
     let mut copied_files = Vec::new();
@@ -340,9 +340,14 @@ pub fn export_okf_bundle(
         let contents = read_to_string(&path)?;
         if bundle_path.reserved_file().is_some() {
             if !public {
-                writes.push((staging_path.join(&relative), contents));
+                writes.push((relative.clone(), contents));
                 copied_files.push(relative);
             }
+            continue;
+        }
+
+        if public && raw_okf_visibility(&contents) == Some(MemoryVisibility::Private) {
+            skipped_private_files.push(relative);
             continue;
         }
 
@@ -351,16 +356,22 @@ pub fn export_okf_bundle(
             skipped_private_files.push(relative);
             continue;
         }
-        writes.push((staging_path.join(&relative), contents));
+        writes.push((relative.clone(), contents));
         copied_files.push(relative);
     }
 
     if public {
-        writes.push((staging_path.join("index.md"), public_export_index()));
-        writes.push((staging_path.join("log.md"), public_export_log()));
+        writes.push((PathBuf::from("index.md"), public_export_index()));
+        writes.push((PathBuf::from("log.md"), public_export_log()));
         copied_files.push(PathBuf::from("index.md"));
         copied_files.push(PathBuf::from("log.md"));
     }
+    create_dir_all(output_parent)?;
+    let staging_path = create_staging_dir(output_parent, &output_path)?;
+    let writes = writes
+        .into_iter()
+        .map(|(relative, contents)| (staging_path.join(relative), contents))
+        .collect::<Vec<_>>();
     let exported_lint = match write_and_lint_staged_export(config, &staging_path, writes, public) {
         Ok(report) => report,
         Err(error) => return Err(cleanup_staging_after_export_failure(&staging_path, error)),
@@ -397,6 +408,11 @@ pub fn import_okf_bundle(
             source_path.display(),
             target_root.display()
         )));
+    }
+    let target_lint = lint_okf_bundle_with_codes(&target_root, false)?;
+    let target_errors = filtered_lint_errors(config, "OKF import target", &target_lint, true);
+    if !target_errors.is_empty() {
+        return Err(MemoryError::InvalidInput(target_errors));
     }
     let lint = lint_okf_bundle_with_codes(&source_path, false)?;
     let errors = filtered_lint_errors(config, "OKF import bundle", &lint, true);
@@ -1347,6 +1363,26 @@ fn mapping_string(mapping: &serde_yaml::Mapping, key: &str) -> Option<String> {
         .get(serde_yaml::Value::String(key.to_string()))
         .and_then(value_as_string)
         .filter(|value| !value.trim().is_empty())
+}
+
+fn raw_okf_visibility(contents: &str) -> Option<MemoryVisibility> {
+    let (frontmatter, _) = split_okf_frontmatter(Path::new("okf-concept.md"), contents).ok()?;
+    let value = serde_yaml::from_str::<serde_yaml::Value>(&frontmatter).ok()?;
+    let mapping = value.as_mapping()?;
+    mapping_visibility(mapping).or_else(|| {
+        mapping
+            .get(serde_yaml::Value::String("opensymphony".to_string()))
+            .and_then(|value| value.as_mapping())
+            .and_then(mapping_visibility)
+    })
+}
+
+fn mapping_visibility(mapping: &serde_yaml::Mapping) -> Option<MemoryVisibility> {
+    match mapping_string(mapping, "visibility")?.as_str() {
+        "private" => Some(MemoryVisibility::Private),
+        "public" => Some(MemoryVisibility::Public),
+        _ => None,
+    }
 }
 
 fn known_okf_type(concept_type: &str) -> bool {
