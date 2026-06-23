@@ -322,10 +322,7 @@ pub fn export_okf_bundle(
     }
     let exported_lint = match write_and_lint_staged_export(config, &staging_path, writes, public) {
         Ok(report) => report,
-        Err(error) => {
-            let _ = cleanup_staging_dir(&staging_path);
-            return Err(error);
-        }
+        Err(error) => return Err(cleanup_staging_after_export_failure(&staging_path, error)),
     };
     promote_staged_export(&staging_path, &output_path)?;
 
@@ -732,6 +729,28 @@ fn cleanup_staging_dir(path: &Path) -> Result<(), MemoryError> {
     Ok(())
 }
 
+fn cleanup_staging_after_export_failure(path: &Path, error: MemoryError) -> MemoryError {
+    cleanup_staging_after_export_failure_with(path, error, cleanup_staging_dir)
+}
+
+fn cleanup_staging_after_export_failure_with<D>(
+    path: &Path,
+    error: MemoryError,
+    mut cleanup: D,
+) -> MemoryError
+where
+    D: FnMut(&Path) -> Result<(), MemoryError>,
+{
+    match cleanup(path) {
+        Ok(()) => error,
+        Err(cleanup_error) => MemoryError::InvalidInput(format!(
+            "{error}; additionally failed to remove OKF export staging directory `{}` after the export failure: {}; remove the staging directory manually",
+            path.display(),
+            cleanup_error
+        )),
+    }
+}
+
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     left == right || left.starts_with(right) || right.starts_with(left)
 }
@@ -1046,7 +1065,8 @@ fn lint_okf_concept(
             next_command: None,
         });
     }
-    if contains_private_memory_link_in_markdown(contents) {
+    let visible_text = markdown_visible_text(contents);
+    if contains_private_memory_link(&visible_text) {
         findings.push(LintFinding {
             code: Some(LintCode::OkfPrivateMemoryLink),
             severity: LintSeverity::Error,
@@ -1064,7 +1084,7 @@ fn lint_okf_concept(
             next_command: None,
         });
     }
-    if public_export && let Some(reason) = public_export_private_material(contents) {
+    if public_export && let Some(reason) = public_export_private_material(&visible_text) {
         findings.push(LintFinding {
             code: None,
             severity: LintSeverity::Error,
@@ -1353,6 +1373,7 @@ fn normalize_okf_link_id(target: &str) -> String {
         .to_ascii_lowercase()
 }
 
+#[cfg(test)]
 fn contains_private_memory_link_in_markdown(contents: &str) -> bool {
     let visible = markdown_visible_text(contents);
     contains_private_memory_link(&visible)
@@ -1400,15 +1421,14 @@ const PUBLIC_PRIVATE_SOURCE_PATTERNS: &[&str] = &[
     "../.opensymphony/memory/snapshot",
 ];
 
-fn public_export_private_material(contents: &str) -> Option<&'static str> {
-    let visible = markdown_visible_text(contents);
-    if contains_any_ascii_case_insensitive(&visible, PUBLIC_PRIVATE_COMMENT_PATTERNS) {
+fn public_export_private_material(visible: &str) -> Option<&'static str> {
+    if contains_any_ascii_case_insensitive(visible, PUBLIC_PRIVATE_COMMENT_PATTERNS) {
         return Some("private comment references");
     }
-    if contains_any_ascii_case_insensitive(&visible, PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS) {
+    if contains_any_ascii_case_insensitive(visible, PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS) {
         return Some("private local paths");
     }
-    if contains_any_ascii_case_insensitive(&visible, PUBLIC_PRIVATE_SOURCE_PATTERNS) {
+    if contains_any_ascii_case_insensitive(visible, PUBLIC_PRIVATE_SOURCE_PATTERNS) {
         return Some("private source snapshots");
     }
     None
@@ -2222,6 +2242,34 @@ Visible [[real-target|Real Target]].
         assert!(
             leaked_backup,
             "failed cleanup should leave backup for manual operator cleanup"
+        );
+    }
+
+    #[test]
+    fn export_failure_reports_staging_cleanup_failure() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let staging = repo.path().join(".okf-export.tmp");
+        let original = MemoryError::InvalidInput("exported OKF bundle has error(s)".to_string());
+
+        let error = cleanup_staging_after_export_failure_with(&staging, original, |path| {
+            Err(MemoryError::WriteFile {
+                path: path.to_path_buf(),
+                source: io::Error::other("injected cleanup failure"),
+            })
+        });
+
+        let message = error.to_string();
+        assert!(
+            message.contains("exported OKF bundle has error(s)"),
+            "error should preserve the original export failure: {message}"
+        );
+        assert!(
+            message.contains("failed to remove OKF export staging directory"),
+            "error should report the failed staging cleanup: {message}"
+        );
+        assert!(
+            message.contains(staging.to_string_lossy().as_ref()),
+            "error should include the recoverable staging path: {message}"
         );
     }
 
