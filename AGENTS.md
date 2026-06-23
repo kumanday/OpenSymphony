@@ -72,6 +72,17 @@ Do not silently invent behavior when the upstream spec or chosen integration con
 - `opensymphony run` is the real local orchestrator entrypoint.
 - `opensymphony daemon` is demo-only and exists for smoke tests or UI-focused development.
 - When documenting, validating, or operating the system, prefer `opensymphony run` unless the task is specifically about the demo control-plane publisher.
+- `opensymphony memory export-okf --visibility public|private [--output DIR]`
+  exports a directory OKF bundle. Public export skips private concepts, runs
+  public redaction checks through OKF lint, stages output before promotion, and
+  requires the output directory to be new or empty.
+- `opensymphony memory import-okf <bundle-root> [--force]` imports a
+  repo-contained, non-overlapping directory OKF bundle into the configured
+  memory root while preserving unknown concept types and frontmatter fields. It
+  preflights target conflicts before copying and does not overwrite existing
+  Markdown files unless `--force` is supplied. Import is not transactional after
+  preflight: a write or reindex failure can leave already-copied Markdown files,
+  so document recovery guidance in `docs/memory.md` when changing this path.
 
 ## Design rules
 

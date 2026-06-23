@@ -81,6 +81,47 @@ canonicalized and must stay inside the repository root, matching the containment
 policy used by other memory admin file arguments. When no bundle root is
 provided, linting uses the configured memory root.
 
+`opensymphony memory export-okf --visibility public|private [--output DIR]`
+exports the configured memory root as a directory bundle. The output directory
+defaults to `okf-export-{visibility}` under the repository root when omitted and
+must be new or empty so stale private files cannot survive a public export.
+Export writes into a repository-contained staging directory first, runs OKF lint
+on the staged bundle, and only then promotes the completed bundle to the
+requested output path. If final promotion fails, OpenSymphony preserves the
+lint-clean staged bundle for recovery and restores the previous empty output
+directory when possible. Public export skips private concepts and fails if any
+remaining public concept still references private comments, private memory
+paths, or private source snapshots. Private export can include private concepts
+but still keeps normal OKF lint errors fatal except for visible links back into
+the private memory store, which are expected in private round-trip bundles.
+
+The public export redaction scan is deliberately narrow and explicit: it treats
+`linear:comment:`, `.opensymphony/memory/issues`,
+`.opensymphony/memory/source*`, `.opensymphony/memory/snapshot*`, and their
+Windows-path variants as private material when they appear in exported public
+concepts. The scan uses the same markdown-visible text extraction as private
+memory link linting, so fenced code blocks, inline code spans, escaped text, and
+HTML comments do not create public export false positives.
+
+`opensymphony memory import-okf <bundle-root> [--force]` validates an OKF
+directory bundle, copies its Markdown concepts into the configured memory root
+without rewriting frontmatter, and rebuilds the derived DuckDB catalog from the
+imported bundle. The import source and target memory root are canonicalized,
+checked against the repository containment policy, and rejected when they
+overlap. Import preflights the full copy set before writing so predictable
+target conflicts do not leave partially imported Markdown files. Existing
+Markdown files are not overwritten unless `--force` is supplied. Because
+`import-okf` restores both public and private bundles, visible private memory
+links are allowed during import and preserved in the copied Markdown. Unknown
+concept types, unknown frontmatter fields, missing optional fields, broken
+links, and missing generated indexes are warning-level import inputs; malformed
+concepts remain errors with file paths in the diagnostic.
+
+Import is not transactional after the preflight succeeds. A filesystem write or
+DuckDB reindex failure can leave already-copied Markdown files in the memory
+root. Fix the underlying failure, inspect the partially copied files, and rerun
+with `--force` only when replacing those files is intentional.
+
 OKF lint diagnostics are intentionally actionable. Errors cover missing or
 invalid concept frontmatter, missing `type`, malformed reserved files,
 containment failures, and public-export leaks of private memory. Warnings cover
@@ -131,6 +172,8 @@ opensymphony memory brief COE-123
 opensymphony memory related --area openhands-runtime
 opensymphony memory sync-docs --since-last-sync
 opensymphony memory serve --addr 127.0.0.1:8765
+opensymphony memory export-okf --visibility public --output public-okf
+opensymphony memory import-okf public-okf
 opensymphony linear archive --issues COE-123
 ```
 

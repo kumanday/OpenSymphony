@@ -8,7 +8,7 @@ use std::{
 };
 
 use chrono::{NaiveDate, Utc};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -20,13 +20,14 @@ use crate::{
         ArchivePlan, CodeIntelArtifact, CodeIntelIndex, CommentEvidence, DocsSyncPlan,
         IssueEvidence, IssueLinkEvidence, IssueSelection, KnowledgeScope, KnowledgeScopeKind,
         LintSeverity, MemoryConfig, MemoryContextOptions, MemoryError, MemoryReindexReport,
-        MemoryScopeFilter, SourceFile, archive_blocking_warning_count, brief,
-        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range, lint,
-        lint_okf_bundle, load_source_file, mark_archived, plan_archive, plan_capture,
-        plan_docs_sync, plan_memory_init, refresh_memory_index, refresh_memory_index_from_okf,
-        related_by_area_with_scope, related_by_issue_with_scope, related_by_paths_with_scope,
-        render_archive_plan, render_capture_dry_run, search_with_scope, status_with_scope,
-        write_capture_plan, write_docs_sync_plan, write_memory_init_plan,
+        MemoryScopeFilter, MemoryVisibility, SourceFile, archive_blocking_warning_count, brief,
+        context_for_issue_with_options, docs_for_area_with_scope, expand_issue_range,
+        export_okf_bundle, import_okf_bundle, lint, lint_okf_bundle, load_source_file,
+        mark_archived, plan_archive, plan_capture, plan_docs_sync, plan_memory_init,
+        refresh_memory_index, refresh_memory_index_from_okf, related_by_area_with_scope,
+        related_by_issue_with_scope, related_by_paths_with_scope, render_archive_plan,
+        render_capture_dry_run, search_with_scope, status_with_scope, write_capture_plan,
+        write_docs_sync_plan, write_memory_init_plan,
     },
     opensymphony_openhands::{
         ConversationMoveOutcome, ConversationStoreKind, IssueConversationManifest,
@@ -78,6 +79,10 @@ enum MemoryCommand {
     Lint(LintArgs),
     #[command(about = "Refresh memory catalog schema and generated indexes")]
     Reindex(ReindexArgs),
+    #[command(name = "export-okf", about = "Export an OKF memory bundle")]
+    ExportOkf(ExportOkfArgs),
+    #[command(name = "import-okf", about = "Import an OKF memory bundle")]
+    ImportOkf(ImportOkfArgs),
 }
 
 #[derive(Debug, Args)]
@@ -307,6 +312,40 @@ struct ReindexArgs {
     from_okf: bool,
     #[arg(help = "OKF bundle root; defaults to the configured memory root")]
     bundle: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ExportOkfArgs {
+    #[arg(long, value_enum, help = "Bundle visibility to export")]
+    visibility: OkfVisibilityArg,
+    #[arg(
+        long,
+        help = "Output directory; defaults to okf-export-{visibility} under the repo root and must be empty if it already exists"
+    )]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct ImportOkfArgs {
+    #[arg(help = "OKF bundle directory to import")]
+    bundle: PathBuf,
+    #[arg(long, help = "Overwrite existing imported OKF Markdown files")]
+    force: bool,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OkfVisibilityArg {
+    Public,
+    Private,
+}
+
+impl From<OkfVisibilityArg> for MemoryVisibility {
+    fn from(value: OkfVisibilityArg) -> Self {
+        match value {
+            OkfVisibilityArg::Public => MemoryVisibility::Public,
+            OkfVisibilityArg::Private => MemoryVisibility::Private,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -647,6 +686,14 @@ async fn run_memory(args: MemoryArgs) -> Result<(), MemoryError> {
         MemoryCommand::Reindex(args) => {
             let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
             run_reindex(&config, args)
+        }
+        MemoryCommand::ExportOkf(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_export_okf(&config, args)
+        }
+        MemoryCommand::ImportOkf(args) => {
+            let config = MemoryConfig::load(&repo_root, config_path.as_deref())?;
+            run_import_okf(&config, args)
         }
     }
 }
@@ -1279,6 +1326,33 @@ fn run_reindex(config: &MemoryConfig, args: ReindexArgs) -> Result<(), MemoryErr
         refresh_memory_index(config)?
     };
     print_reindex_report(report);
+    Ok(())
+}
+
+fn run_export_okf(config: &MemoryConfig, args: ExportOkfArgs) -> Result<(), MemoryError> {
+    let visibility = MemoryVisibility::from(args.visibility);
+    let report = export_okf_bundle(config, visibility, args.output.as_deref())?;
+    println!("Exported OKF bundle: {}", report.output_path.display());
+    println!("Visibility: {visibility}");
+    println!("Copied files: {}", report.copied_files.len());
+    println!(
+        "Skipped private files: {}",
+        report.skipped_private_files.len()
+    );
+    println!("Lint findings: {}", report.finding_count);
+    for path in report.copied_files {
+        println!("- {}", path.display());
+    }
+    Ok(())
+}
+
+fn run_import_okf(config: &MemoryConfig, args: ImportOkfArgs) -> Result<(), MemoryError> {
+    let report = import_okf_bundle(config, &args.bundle, args.force)?;
+    println!("Imported OKF bundle: {}", report.source_path.display());
+    println!("Target memory root: {}", report.target_path.display());
+    println!("Copied files: {}", report.copied_files.len());
+    println!("Lint findings: {}", report.finding_count);
+    print_reindex_report(report.reindex);
     Ok(())
 }
 

@@ -76,6 +76,15 @@ pub enum MemoryError {
     PathOutsideRepo { path: PathBuf, repo_root: PathBuf },
     #[error("{path} is outside the OKF bundle root {bundle_root}")]
     PathOutsideBundle { path: PathBuf, bundle_root: PathBuf },
+    #[error(
+        "{source}; additionally failed to remove OKF export staging directory `{path}` after the export failure: {cleanup}; remove the staging directory manually"
+    )]
+    OkfExportStagingCleanup {
+        path: PathBuf,
+        #[source]
+        source: Box<MemoryError>,
+        cleanup: Box<MemoryError>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -691,6 +700,11 @@ pub struct LintFinding {
     pub path: Option<PathBuf>,
     pub message: String,
     pub next_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LintCode {
+    OkfPrivateMemoryLink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

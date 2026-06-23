@@ -111,9 +111,22 @@ Focused OKF memory validation for implementation work:
   preservation for the migration fixture corpus.
 - `cargo test-system-duckdb --test memory` runs the CLI-facing OKF fixture test,
   MCP `memory.lint` argument coverage for `okf` and `bundleRoot`, generated
-  `log.md` date grouping, and the rest of the memory integration suite.
+  `log.md` date grouping, OKF import/export redaction checks, import preflight
+  failure coverage, documented non-transactional mid-copy import behavior,
+  source/target overlap rejection, and the rest of the memory integration
+  suite.
 - `opensymphony memory lint --okf <repo-contained-bundle>` is the manual CLI
   smoke path for a generated or fixture OKF bundle.
+- `opensymphony memory export-okf --visibility public --output <empty-dir>`
+  followed by `opensymphony memory lint --okf --public-docs <empty-dir>` is the
+  public export redaction smoke path.
+- `opensymphony memory import-okf <repo-contained-bundle>` is the import smoke
+  path for warning-tolerant OKF bundles with actionable malformed-file errors,
+  repository-contained sources, non-overlapping targets, and preflighted writes.
+  The documented post-preflight partial-write regression is Unix-gated because
+  it uses POSIX directory permissions to induce a deterministic mid-copy write
+  failure; add a separate Windows-native failure injection before treating that
+  path as covered on Windows.
 
 Codex ChatGPT subscription smoke testing remains opt-in on trusted local
 machines because the final exec probe can consume account quota. The supported

@@ -67,6 +67,47 @@ pub enum OkfReservedFile {
     Log,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OkfLintReport {
+    findings: Vec<OkfLintFinding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OkfLintFinding {
+    code: Option<LintCode>,
+    severity: LintSeverity,
+    path: Option<PathBuf>,
+    message: String,
+    next_command: Option<String>,
+}
+
+impl OkfLintFinding {
+    fn into_public(self) -> LintFinding {
+        LintFinding {
+            severity: self.severity,
+            path: self.path,
+            message: self.message,
+            next_command: self.next_command,
+        }
+    }
+}
+
+fn okf_lint_finding(
+    code: Option<LintCode>,
+    severity: LintSeverity,
+    path: Option<PathBuf>,
+    message: impl Into<String>,
+    next_command: Option<String>,
+) -> OkfLintFinding {
+    OkfLintFinding {
+        code,
+        severity,
+        path,
+        message: message.into(),
+        next_command,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OkfFrontmatter {
     #[serde(rename = "type")]
@@ -151,6 +192,29 @@ pub struct OkfConcept {
     pub derived_opensymphony: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfExportReport {
+    pub output_path: PathBuf,
+    pub copied_files: Vec<PathBuf>,
+    pub skipped_private_files: Vec<PathBuf>,
+    pub finding_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OkfImportReport {
+    pub source_path: PathBuf,
+    pub target_path: PathBuf,
+    pub copied_files: Vec<PathBuf>,
+    pub finding_count: usize,
+    pub reindex: MemoryReindexReport,
+}
+
+struct OkfPendingFile {
+    relative: PathBuf,
+    target: PathBuf,
+    contents: String,
+}
+
 impl OkfConcept {
     pub fn new(
         path: impl Into<PathBuf>,
@@ -221,7 +285,271 @@ pub fn render_okf_concept(concept: &OkfConcept) -> Result<String, MemoryError> {
     Ok(format!("---\n{frontmatter}---\n\n{}", concept.body))
 }
 
+pub fn export_okf_bundle(
+    config: &MemoryConfig,
+    visibility: MemoryVisibility,
+    output: Option<&Path>,
+) -> Result<OkfExportReport, MemoryError> {
+    ensure_repo_contained(&config.repo_root, &config.memory_root)?;
+    let source_root = canonicalize_existing_path(&config.memory_root)?;
+    if !source_root.is_dir() {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF source bundle `{}` is not a directory",
+            source_root.display()
+        )));
+    }
+    let output_path = output
+        .map(|path| resolve_path(&config.repo_root, path))
+        .unwrap_or_else(|| config.repo_root.join(format!("okf-export-{visibility}")));
+    ensure_repo_contained(&config.repo_root, &output_path)?;
+    ensure_export_output_has_no_symlink_components(config, &output_path)?;
+    let output_path = canonicalize_existing_prefix(&output_path)?;
+    ensure_output_target_not_symlink(&output_path)?;
+    if paths_overlap(&output_path, &source_root) {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF export output `{}` must not overlap the source bundle `{}`",
+            output_path.display(),
+            source_root.display()
+        )));
+    }
+    ensure_empty_output_target(&output_path)?;
+
+    let mut files = Vec::new();
+    collect_okf_markdown_files(&source_root, &source_root, &mut files)?;
+    let public = visibility == MemoryVisibility::Public;
+    if !public {
+        let lint = lint_okf_bundle_with_codes(&source_root, false)?;
+        let errors = filtered_lint_errors(config, "OKF source bundle", &lint, true);
+        if !errors.is_empty() {
+            return Err(MemoryError::InvalidInput(errors));
+        }
+    }
+    let output_parent = output_path.parent().ok_or_else(|| {
+        MemoryError::InvalidInput(format!(
+            "OKF export output `{}` has no parent directory",
+            output_path.display()
+        ))
+    })?;
+
+    let mut writes = Vec::<(PathBuf, String)>::new();
+    let mut copied_files = Vec::new();
+    let mut skipped_private_files = Vec::new();
+
+    for path in files {
+        let relative = bundle_relative_path(&source_root, &path)?;
+        let bundle_path = OkfBundlePath::new(relative.clone())?;
+        let contents = read_to_string(&path)?;
+        if bundle_path.reserved_file().is_some() {
+            if !public {
+                writes.push((relative.clone(), contents));
+                copied_files.push(relative);
+            }
+            continue;
+        }
+
+        if public {
+            match raw_okf_visibility(&contents) {
+                Some(MemoryVisibility::Public) => {}
+                Some(MemoryVisibility::Private) | None => {
+                    skipped_private_files.push(relative);
+                    continue;
+                }
+            }
+        }
+
+        let concept = parse_okf_concept(&source_root, &path, &contents)?;
+        if public && concept_visibility(&concept) == Some(MemoryVisibility::Private) {
+            skipped_private_files.push(relative);
+            continue;
+        }
+        writes.push((relative.clone(), contents));
+        copied_files.push(relative);
+    }
+
+    if public {
+        writes.push((PathBuf::from("index.md"), public_export_index()));
+        writes.push((PathBuf::from("log.md"), public_export_log()));
+        copied_files.push(PathBuf::from("index.md"));
+        copied_files.push(PathBuf::from("log.md"));
+    }
+    create_dir_all(output_parent)?;
+    let staging_path = create_staging_dir(output_parent, &output_path)?;
+    let writes = writes
+        .into_iter()
+        .map(|(relative, contents)| (staging_path.join(relative), contents))
+        .collect::<Vec<_>>();
+    let exported_lint = match write_and_lint_staged_export(config, &staging_path, writes, public) {
+        Ok(report) => report,
+        Err(error) => return Err(cleanup_staging_after_export_failure(&staging_path, error)),
+    };
+    promote_staged_export(&staging_path, &output_path)?;
+
+    Ok(OkfExportReport {
+        output_path,
+        copied_files,
+        skipped_private_files,
+        finding_count: exported_lint.findings.len(),
+    })
+}
+
+pub fn import_okf_bundle(
+    config: &MemoryConfig,
+    source: &Path,
+    force: bool,
+) -> Result<OkfImportReport, MemoryError> {
+    let source_path = canonicalize_existing_path(&resolve_path(&config.repo_root, source))?;
+    ensure_repo_contained(&config.repo_root, &source_path)?;
+    ensure_repo_contained(&config.repo_root, &config.memory_root)?;
+    create_dir_all(&config.memory_root)?;
+    let target_root = canonicalize_existing_path(&config.memory_root)?;
+    if !source_path.is_dir() {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF import source `{}` is not a directory",
+            source_path.display()
+        )));
+    }
+    if paths_overlap(&source_path, &target_root) {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF import source `{}` must not overlap the target memory root `{}`",
+            source_path.display(),
+            target_root.display()
+        )));
+    }
+    let target_lint = lint_okf_bundle_with_codes(&target_root, false)?;
+    let target_errors = filtered_lint_errors(config, "OKF import target", &target_lint, true);
+    if !target_errors.is_empty() {
+        return Err(MemoryError::InvalidInput(target_errors));
+    }
+    let lint = lint_okf_bundle_with_codes(&source_path, false)?;
+    let errors = filtered_lint_errors(config, "OKF import bundle", &lint, true);
+    if !errors.is_empty() {
+        return Err(MemoryError::InvalidInput(errors));
+    }
+
+    let mut files = Vec::new();
+    collect_okf_markdown_files(&source_path, &source_path, &mut files)?;
+    let pending = pending_okf_import_files(config, &source_path, &target_root, &files, force)?;
+    let copied_files = pending
+        .iter()
+        .map(|file| file.relative.clone())
+        .collect::<Vec<_>>();
+    for file in pending {
+        write_file(&file.target, &file.contents)?;
+    }
+
+    let reindex = refresh_memory_index_from_okf(config, &target_root)?;
+    Ok(OkfImportReport {
+        source_path,
+        target_path: target_root,
+        copied_files,
+        finding_count: lint.findings.len(),
+        reindex,
+    })
+}
+
+fn pending_okf_import_files(
+    config: &MemoryConfig,
+    source_path: &Path,
+    target_root: &Path,
+    files: &[PathBuf],
+    force: bool,
+) -> Result<Vec<OkfPendingFile>, MemoryError> {
+    let mut pending = Vec::new();
+    for path in files {
+        let relative = bundle_relative_path(source_path, path)?;
+        let bundle_path = OkfBundlePath::new(relative.clone())?;
+        if bundle_path.reserved_file().is_some() {
+            continue;
+        }
+        let contents = read_to_string(path)?;
+        let target = target_root.join(&relative);
+        ensure_import_target_has_no_symlink_components(config, target_root, &target)?;
+        if target.is_dir() {
+            return Err(MemoryError::InvalidInput(format!(
+                "{} already exists as a directory and cannot be overwritten by OKF import",
+                display_path(&config.repo_root, &target)
+            )));
+        }
+        if let Some(parent) = target.parent()
+            && parent.exists()
+            && !parent.is_dir()
+        {
+            return Err(MemoryError::InvalidInput(format!(
+                "{} already exists and blocks OKF import",
+                display_path(&config.repo_root, parent)
+            )));
+        }
+        if target.exists() && !force {
+            return Err(MemoryError::InvalidInput(format!(
+                "{} already exists; rerun with --force to overwrite it",
+                display_path(&config.repo_root, &target)
+            )));
+        }
+        pending.push(OkfPendingFile {
+            relative,
+            target,
+            contents,
+        });
+    }
+    Ok(pending)
+}
+
+fn ensure_import_target_has_no_symlink_components(
+    config: &MemoryConfig,
+    target_root: &Path,
+    target: &Path,
+) -> Result<(), MemoryError> {
+    let relative = target
+        .strip_prefix(target_root)
+        .map_err(|_| MemoryError::PathOutsideRepo {
+            path: target.to_path_buf(),
+            repo_root: config.repo_root.clone(),
+        })?;
+    let mut cursor = target_root.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component.as_os_str());
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(MemoryError::InvalidInput(format!(
+                    "{} is a symlink and cannot be overwritten by OKF import",
+                    display_path(&config.repo_root, &cursor)
+                )));
+            }
+            Ok(_) => {}
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                break;
+            }
+            Err(source) => {
+                return Err(MemoryError::ReadFile {
+                    path: cursor,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintReport, MemoryError> {
+    let report = lint_okf_bundle_with_codes(bundle_root, public_export)?;
+    Ok(LintReport {
+        findings: report
+            .findings
+            .into_iter()
+            .map(OkfLintFinding::into_public)
+            .collect(),
+    })
+}
+
+fn lint_okf_bundle_with_codes(
+    bundle_root: &Path,
+    public_export: bool,
+) -> Result<OkfLintReport, MemoryError> {
     if !bundle_root.is_dir() {
         return Err(MemoryError::InvalidInput(format!(
             "OKF bundle root `{}` is not a directory",
@@ -241,12 +569,13 @@ pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintRe
         let bundle_path = match OkfBundlePath::new(relative.clone()) {
             Ok(path) => path,
             Err(error) => {
-                findings.push(LintFinding {
-                    severity: LintSeverity::Error,
-                    path: Some(path),
-                    message: error.to_string(),
-                    next_command: None,
-                });
+                findings.push(okf_lint_finding(
+                    None,
+                    LintSeverity::Error,
+                    Some(path),
+                    error.to_string(),
+                    None,
+                ));
                 continue;
             }
         };
@@ -269,16 +598,357 @@ pub fn lint_okf_bundle(bundle_root: &Path, public_export: bool) -> Result<LintRe
 
     for directory in dirs_with_concepts {
         if !dirs_with_index.contains(&directory) {
-            findings.push(LintFinding {
-                severity: LintSeverity::Warn,
-                path: Some(bundle_root.join(&directory)),
-                message: "missing generated index.md".to_string(),
-                next_command: Some("opensymphony memory reindex".to_string()),
-            });
+            findings.push(okf_lint_finding(
+                None,
+                LintSeverity::Warn,
+                Some(bundle_root.join(&directory)),
+                "missing generated index.md".to_string(),
+                Some("opensymphony memory reindex".to_string()),
+            ));
         }
     }
 
-    Ok(LintReport { findings })
+    Ok(OkfLintReport { findings })
+}
+
+fn ensure_empty_output_target(path: &Path) -> Result<(), MemoryError> {
+    if path.exists() {
+        if !path.is_dir() {
+            return Err(MemoryError::InvalidInput(format!(
+                "OKF export output `{}` exists and is not a directory",
+                path.display()
+            )));
+        }
+        let mut entries = fs::read_dir(path).map_err(|source| MemoryError::ReadFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if entries.next().is_some() {
+            return Err(MemoryError::InvalidInput(format!(
+                "OKF export output `{}` must be empty",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_output_target_not_symlink(path: &Path) -> Result<(), MemoryError> {
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(MemoryError::InvalidInput(format!(
+            "OKF export output `{}` must not be a symlink",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_export_output_has_no_symlink_components(
+    config: &MemoryConfig,
+    path: &Path,
+) -> Result<(), MemoryError> {
+    let repo_root = canonicalize_existing_path(&config.repo_root)?;
+    let output_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        repo_root.join(path)
+    };
+    let relative = output_path
+        .strip_prefix(&repo_root)
+        .map_err(|_| MemoryError::PathOutsideRepo {
+            path: output_path.clone(),
+            repo_root: repo_root.clone(),
+        })?;
+    let mut cursor = repo_root;
+    for component in relative.components() {
+        match component {
+            std::path::Component::CurDir => continue,
+            std::path::Component::Normal(part) => cursor.push(part),
+            _ => {
+                return Err(MemoryError::PathOutsideRepo {
+                    path: output_path,
+                    repo_root: config.repo_root.clone(),
+                });
+            }
+        }
+        match fs::symlink_metadata(&cursor) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(MemoryError::InvalidInput(format!(
+                    "OKF export output `{}` must not include symlink component `{}`",
+                    display_path(&config.repo_root, path),
+                    display_path(&config.repo_root, &cursor)
+                )));
+            }
+            Ok(_) => {}
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                break;
+            }
+            Err(source) => {
+                return Err(MemoryError::ReadFile {
+                    path: cursor,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn create_staging_dir(parent: &Path, output_path: &Path) -> Result<PathBuf, MemoryError> {
+    let output_name = output_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("okf-export");
+    for attempt in 0..100 {
+        let candidate = parent.join(format!(
+            ".{output_name}.tmp-{}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(source) => {
+                return Err(MemoryError::CreateDir {
+                    path: candidate,
+                    source,
+                });
+            }
+        }
+    }
+    Err(MemoryError::InvalidInput(format!(
+        "could not allocate a staging directory for OKF export `{}`",
+        output_path.display()
+    )))
+}
+
+fn write_and_lint_staged_export(
+    config: &MemoryConfig,
+    staging_path: &Path,
+    writes: Vec<(PathBuf, String)>,
+    public: bool,
+) -> Result<OkfLintReport, MemoryError> {
+    for (path, contents) in writes {
+        write_file(&path, &contents)?;
+    }
+    let exported_lint = lint_okf_bundle_with_codes(staging_path, public)?;
+    let errors = filtered_lint_errors(config, "exported OKF bundle", &exported_lint, !public);
+    if errors.is_empty() {
+        Ok(exported_lint)
+    } else {
+        Err(MemoryError::InvalidInput(errors))
+    }
+}
+
+fn promote_staged_export(staging_path: &Path, output_path: &Path) -> Result<(), MemoryError> {
+    promote_staged_export_with(
+        staging_path,
+        output_path,
+        |from, to| fs::rename(from, to),
+        |path| fs::remove_dir_all(path),
+    )
+}
+
+fn promote_staged_export_with<R, D>(
+    staging_path: &Path,
+    output_path: &Path,
+    mut rename: R,
+    mut remove_dir_all: D,
+) -> Result<(), MemoryError>
+where
+    R: FnMut(&Path, &Path) -> io::Result<()>,
+    D: FnMut(&Path) -> io::Result<()>,
+{
+    let backup_path = if output_path.exists() {
+        let backup_path = create_promotion_backup_path(output_path)?;
+        rename(output_path, &backup_path).map_err(|source| {
+            promotion_failure(
+                output_path,
+                staging_path,
+                None,
+                source,
+                "backing up existing output",
+            )
+        })?;
+        Some(backup_path)
+    } else {
+        None
+    };
+
+    if let Err(source) = rename(staging_path, output_path) {
+        let rollback = if let Some(backup_path) = backup_path.as_ref() {
+            match rename(backup_path, output_path) {
+                Ok(()) => format!(
+                    "previous output was restored from `{}`",
+                    backup_path.display()
+                ),
+                Err(rollback_source) => format!(
+                    "previous output remains at `{}` because rollback failed: {}",
+                    backup_path.display(),
+                    rollback_source
+                ),
+            }
+        } else {
+            "no previous output existed".to_string()
+        };
+        return Err(promotion_failure(
+            output_path,
+            staging_path,
+            Some(rollback),
+            source,
+            "moving staged bundle into place",
+        ));
+    }
+
+    if let Some(backup_path) = backup_path
+        && backup_path.exists()
+    {
+        remove_dir_all(&backup_path).map_err(|source| {
+            MemoryError::InvalidInput(format!(
+                "OKF export promoted to `{}` but failed to remove backup `{}`: {}; remove the backup manually",
+                output_path.display(),
+                backup_path.display(),
+                source
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn create_promotion_backup_path(output_path: &Path) -> Result<PathBuf, MemoryError> {
+    let parent = output_path.parent().ok_or_else(|| {
+        MemoryError::InvalidInput(format!(
+            "OKF export output `{}` has no parent directory",
+            output_path.display()
+        ))
+    })?;
+    let output_name = output_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("okf-export");
+    for attempt in 0..100 {
+        let candidate = parent.join(format!(
+            ".{output_name}.backup-{}-{attempt}",
+            std::process::id()
+        ));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(MemoryError::InvalidInput(format!(
+        "could not allocate a backup directory for OKF export `{}`",
+        output_path.display()
+    )))
+}
+
+fn promotion_failure(
+    output_path: &Path,
+    staging_path: &Path,
+    recovery_detail: Option<String>,
+    source: io::Error,
+    action: &str,
+) -> MemoryError {
+    let recovery_detail = recovery_detail
+        .map(|detail| format!("; {detail}"))
+        .unwrap_or_default();
+    MemoryError::InvalidInput(format!(
+        "failed to promote OKF export to `{}` while {action}: {}; staged bundle preserved at `{}`{}",
+        output_path.display(),
+        source,
+        staging_path.display(),
+        recovery_detail
+    ))
+}
+
+fn cleanup_staging_dir(path: &Path) -> Result<(), MemoryError> {
+    if path.exists() {
+        fs::remove_dir_all(path).map_err(|source| MemoryError::WriteFile {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn cleanup_staging_after_export_failure(path: &Path, error: MemoryError) -> MemoryError {
+    cleanup_staging_after_export_failure_with(path, error, cleanup_staging_dir)
+}
+
+fn cleanup_staging_after_export_failure_with<D>(
+    path: &Path,
+    error: MemoryError,
+    mut cleanup: D,
+) -> MemoryError
+where
+    D: FnMut(&Path) -> Result<(), MemoryError>,
+{
+    match cleanup(path) {
+        Ok(()) => error,
+        Err(cleanup) => MemoryError::OkfExportStagingCleanup {
+            path: path.to_path_buf(),
+            source: Box::new(error),
+            cleanup: Box::new(cleanup),
+        },
+    }
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn filtered_lint_errors(
+    config: &MemoryConfig,
+    label: &str,
+    report: &OkfLintReport,
+    ignore_private_memory_links: bool,
+) -> String {
+    let errors = report
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == LintSeverity::Error)
+        .filter(|finding| !ignored_private_export_leak(finding, ignore_private_memory_links))
+        .map(|finding| {
+            let path = finding
+                .path
+                .as_ref()
+                .map(|path| display_path(&config.repo_root, path))
+                .unwrap_or_else(|| "bundle".to_string());
+            format!("{path}: {}", finding.message)
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        String::new()
+    } else {
+        format!("{label} has error(s): {}", errors.join("; "))
+    }
+}
+
+fn ignored_private_export_leak(
+    finding: &OkfLintFinding,
+    ignore_private_memory_links: bool,
+) -> bool {
+    ignore_private_memory_links && is_private_export_leak(finding)
+}
+
+fn is_private_export_leak(finding: &OkfLintFinding) -> bool {
+    finding.code == Some(LintCode::OkfPrivateMemoryLink)
+}
+
+fn public_export_index() -> String {
+    format!("---\nokf_version: \"{OKF_VERSION}\"\n---\n\n# OpenSymphony Public Memory Export\n")
+}
+
+fn public_export_log() -> String {
+    format!(
+        "# OpenSymphony Public Memory Export Log\n\n## {}\n\n- Public export generated.\n",
+        Utc::now().date_naive()
+    )
 }
 
 fn split_okf_frontmatter(path: &Path, contents: &str) -> Result<(String, String), MemoryError> {
@@ -365,7 +1035,7 @@ fn lint_okf_index(
     path: &Path,
     relative: &Path,
     contents: &str,
-    findings: &mut Vec<LintFinding>,
+    findings: &mut Vec<OkfLintFinding>,
 ) {
     if !has_okf_frontmatter(contents) {
         return;
@@ -374,62 +1044,67 @@ fn lint_okf_index(
         .parent()
         .is_none_or(|parent| parent.as_os_str().is_empty())
     {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "reserved index.md must not contain frontmatter outside the bundle root"
-                .to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "reserved index.md must not contain frontmatter outside the bundle root".to_string(),
+            None,
+        ));
         return;
     }
     let Ok((frontmatter, _)) = split_okf_frontmatter(path, contents) else {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "reserved index.md has invalid frontmatter".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "reserved index.md has invalid frontmatter".to_string(),
+            None,
+        ));
         return;
     };
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&frontmatter) else {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "reserved index.md frontmatter is not parseable YAML".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "reserved index.md frontmatter is not parseable YAML".to_string(),
+            None,
+        ));
         return;
     };
     let Some(mapping) = value.as_mapping() else {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "reserved index.md frontmatter must be a YAML mapping".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "reserved index.md frontmatter must be a YAML mapping".to_string(),
+            None,
+        ));
         return;
     };
     if let Some(version) = mapping_string(mapping, "okf_version")
         && version != OKF_VERSION
     {
-        findings.push(LintFinding {
-            severity: LintSeverity::Warn,
-            path: Some(bundle_root.join(relative)),
-            message: format!("unknown OKF version `{version}`"),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Warn,
+            Some(bundle_root.join(relative)),
+            format!("unknown OKF version `{version}`"),
+            None,
+        ));
     }
 }
 
-fn lint_okf_log(path: &Path, contents: &str, findings: &mut Vec<LintFinding>) {
+fn lint_okf_log(path: &Path, contents: &str, findings: &mut Vec<OkfLintFinding>) {
     if has_okf_frontmatter(contents) {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "reserved log.md must not contain frontmatter".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "reserved log.md must not contain frontmatter".to_string(),
+            None,
+        ));
     }
 
     let mut dates = Vec::new();
@@ -447,12 +1122,13 @@ fn lint_okf_log(path: &Path, contents: &str, findings: &mut Vec<LintFinding>) {
     }
 
     if dates.is_empty() || invalid_heading || !dates.windows(2).all(|pair| pair[0] >= pair[1]) {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "reserved log.md must use ISO date headings newest first".to_string(),
-            next_command: Some("opensymphony memory reindex".to_string()),
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "reserved log.md must use ISO date headings newest first".to_string(),
+            Some("opensymphony memory reindex".to_string()),
+        ));
     }
 }
 
@@ -461,92 +1137,110 @@ fn lint_okf_concept(
     path: &Path,
     contents: &str,
     public_export: bool,
-    findings: &mut Vec<LintFinding>,
+    findings: &mut Vec<OkfLintFinding>,
 ) {
     let (frontmatter, body) = match split_okf_frontmatter(path, contents) {
         Ok(parts) => parts,
         Err(error) => {
             let message = okf_frontmatter_lint_message(&error);
-            findings.push(LintFinding {
-                severity: LintSeverity::Error,
-                path: Some(path.to_path_buf()),
+            findings.push(okf_lint_finding(
+                None,
+                LintSeverity::Error,
+                Some(path.to_path_buf()),
                 message,
-                next_command: None,
-            });
+                None,
+            ));
             return;
         }
     };
     let value = match serde_yaml::from_str::<serde_yaml::Value>(&frontmatter) {
         Ok(value) => value,
         Err(_) => {
-            findings.push(LintFinding {
-                severity: LintSeverity::Error,
-                path: Some(path.to_path_buf()),
-                message: "frontmatter is not parseable YAML".to_string(),
-                next_command: None,
-            });
+            findings.push(okf_lint_finding(
+                None,
+                LintSeverity::Error,
+                Some(path.to_path_buf()),
+                "frontmatter is not parseable YAML".to_string(),
+                None,
+            ));
             return;
         }
     };
     let Some(mapping) = value.as_mapping() else {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "frontmatter must be a YAML mapping".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "frontmatter must be a YAML mapping".to_string(),
+            None,
+        ));
         return;
     };
     if mapping_string(mapping, "type")
         .as_deref()
         .is_none_or(str::is_empty)
     {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "frontmatter lacks non-empty `type`".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "frontmatter lacks non-empty `type`".to_string(),
+            None,
+        ));
         return;
     }
 
     let concept = match parse_okf_concept(bundle_root, path, contents) {
         Ok(concept) => concept,
         Err(error) => {
-            findings.push(LintFinding {
-                severity: LintSeverity::Error,
-                path: Some(path.to_path_buf()),
-                message: format!("frontmatter is not parseable OKF YAML: {error}"),
-                next_command: None,
-            });
+            findings.push(okf_lint_finding(
+                None,
+                LintSeverity::Error,
+                Some(path.to_path_buf()),
+                format!("frontmatter is not parseable OKF YAML: {error}"),
+                None,
+            ));
             return;
         }
     };
 
     lint_okf_recommended_fields(&concept, &body, path, findings);
     if !known_okf_type(&concept.frontmatter.concept_type) {
-        findings.push(LintFinding {
-            severity: LintSeverity::Warn,
-            path: Some(path.to_path_buf()),
-            message: format!("unknown type `{}`", concept.frontmatter.concept_type),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Warn,
+            Some(path.to_path_buf()),
+            format!("unknown type `{}`", concept.frontmatter.concept_type),
+            None,
+        ));
     }
-    if contains_private_memory_link_in_markdown(contents) {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "private export leak: document links to a private memory path".to_string(),
-            next_command: None,
-        });
+    let visible_text = markdown_visible_text(contents);
+    if contains_private_memory_link(&visible_text) {
+        findings.push(okf_lint_finding(
+            Some(LintCode::OkfPrivateMemoryLink),
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "private export leak: document links to a private memory path".to_string(),
+            None,
+        ));
     }
     if public_export && concept_visibility(&concept) == Some(MemoryVisibility::Private) {
-        findings.push(LintFinding {
-            severity: LintSeverity::Error,
-            path: Some(path.to_path_buf()),
-            message: "public export includes a private concept".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            "public export includes a private concept".to_string(),
+            None,
+        ));
+    }
+    if public_export && let Some(reason) = public_export_private_material(&visible_text) {
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Error,
+            Some(path.to_path_buf()),
+            format!("public export contains {reason}"),
+            None,
+        ));
     }
     lint_okf_links(bundle_root, &concept, path, findings);
     lint_okf_citations(&concept, path, findings);
@@ -557,29 +1251,31 @@ fn lint_okf_recommended_fields(
     concept: &OkfConcept,
     body: &str,
     path: &Path,
-    findings: &mut Vec<LintFinding>,
+    findings: &mut Vec<OkfLintFinding>,
 ) {
     let mut missing = Vec::new();
     if concept.frontmatter.title.is_none() {
         missing.push("title");
         if first_heading(body).is_some() {
-            findings.push(LintFinding {
-                severity: LintSeverity::Info,
-                path: Some(path.to_path_buf()),
-                message: "title can be synthesized from the first heading".to_string(),
-                next_command: None,
-            });
+            findings.push(okf_lint_finding(
+                None,
+                LintSeverity::Info,
+                Some(path.to_path_buf()),
+                "title can be synthesized from the first heading".to_string(),
+                None,
+            ));
         }
     }
     if concept.frontmatter.description.is_none() {
         missing.push("description");
         if first_paragraph(body).is_some() {
-            findings.push(LintFinding {
-                severity: LintSeverity::Info,
-                path: Some(path.to_path_buf()),
-                message: "description can be synthesized from the first paragraph".to_string(),
-                next_command: None,
-            });
+            findings.push(okf_lint_finding(
+                None,
+                LintSeverity::Info,
+                Some(path.to_path_buf()),
+                "description can be synthesized from the first paragraph".to_string(),
+                None,
+            ));
         }
     }
     if concept.frontmatter.resource.is_none() {
@@ -592,12 +1288,13 @@ fn lint_okf_recommended_fields(
         missing.push("timestamp");
     }
     if !missing.is_empty() {
-        findings.push(LintFinding {
-            severity: LintSeverity::Warn,
-            path: Some(path.to_path_buf()),
-            message: format!("missing recommended field(s): {}", missing.join(", ")),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Warn,
+            Some(path.to_path_buf()),
+            format!("missing recommended field(s): {}", missing.join(", ")),
+            None,
+        ));
     }
 }
 
@@ -605,20 +1302,22 @@ fn lint_okf_links(
     bundle_root: &Path,
     concept: &OkfConcept,
     path: &Path,
-    findings: &mut Vec<LintFinding>,
+    findings: &mut Vec<OkfLintFinding>,
 ) {
     for link in &concept.links {
-        let Some(resolved) = resolve_okf_markdown_link(bundle_root, concept.path.as_path(), &link.target)
+        let Some(resolved) =
+            resolve_okf_markdown_link(bundle_root, concept.path.as_path(), &link.target)
         else {
             continue;
         };
         if !resolved.exists() {
-            findings.push(LintFinding {
-                severity: LintSeverity::Warn,
-                path: Some(path.to_path_buf()),
-                message: format!("broken Markdown link `{}`", link.target),
-                next_command: None,
-            });
+            findings.push(okf_lint_finding(
+                None,
+                LintSeverity::Warn,
+                Some(path.to_path_buf()),
+                format!("broken Markdown link `{}`", link.target),
+                None,
+            ));
         }
     }
 
@@ -629,17 +1328,18 @@ fn lint_okf_links(
         .collect::<BTreeSet<_>>();
     for wiki_link in extract_wiki_links(&concept.body) {
         if !markdown_ids.contains(&normalized_wiki_link_id(&wiki_link)) {
-            findings.push(LintFinding {
-                severity: LintSeverity::Warn,
-                path: Some(path.to_path_buf()),
-                message: format!("wiki-only link `[[{wiki_link}]]` has no Markdown equivalent"),
-                next_command: None,
-            });
+            findings.push(okf_lint_finding(
+                None,
+                LintSeverity::Warn,
+                Some(path.to_path_buf()),
+                format!("wiki-only link `[[{wiki_link}]]` has no Markdown equivalent"),
+                None,
+            ));
         }
     }
 }
 
-fn lint_okf_citations(concept: &OkfConcept, path: &Path, findings: &mut Vec<LintFinding>) {
+fn lint_okf_citations(concept: &OkfConcept, path: &Path, findings: &mut Vec<OkfLintFinding>) {
     let source_backed = concept
         .frontmatter
         .opensymphony
@@ -649,12 +1349,13 @@ fn lint_okf_citations(concept: &OkfConcept, path: &Path, findings: &mut Vec<Lint
         || concept.frontmatter.extra.contains_key("prs")
         || concept.frontmatter.extra.contains_key("linear_url");
     if source_backed && !has_citations_section(&concept.body) {
-        findings.push(LintFinding {
-            severity: LintSeverity::Warn,
-            path: Some(path.to_path_buf()),
-            message: "citation section missing for source-backed claims".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Warn,
+            Some(path.to_path_buf()),
+            "citation section missing for source-backed claims".to_string(),
+            None,
+        ));
     }
 }
 
@@ -662,7 +1363,7 @@ fn lint_okf_info(
     concept: &OkfConcept,
     mapping: &serde_yaml::Mapping,
     path: &Path,
-    findings: &mut Vec<LintFinding>,
+    findings: &mut Vec<OkfLintFinding>,
 ) {
     let retained_legacy = [
         "issue",
@@ -683,20 +1384,22 @@ fn lint_okf_info(
     .filter(|key| concept.frontmatter.extra.contains_key(*key))
     .collect::<Vec<_>>();
     if !retained_legacy.is_empty() {
-        findings.push(LintFinding {
-            severity: LintSeverity::Info,
-            path: Some(path.to_path_buf()),
-            message: format!("legacy field(s) retained: {}", retained_legacy.join(", ")),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Info,
+            Some(path.to_path_buf()),
+            format!("legacy field(s) retained: {}", retained_legacy.join(", ")),
+            None,
+        ));
     }
     if mapping.contains_key(serde_yaml::Value::String("opensymphony".to_string())) {
-        findings.push(LintFinding {
-            severity: LintSeverity::Info,
-            path: Some(path.to_path_buf()),
-            message: "bundle contains OpenSymphony extension fields".to_string(),
-            next_command: None,
-        });
+        findings.push(okf_lint_finding(
+            None,
+            LintSeverity::Info,
+            Some(path.to_path_buf()),
+            "bundle contains OpenSymphony extension fields".to_string(),
+            None,
+        ));
     }
 }
 
@@ -722,6 +1425,26 @@ fn mapping_string(mapping: &serde_yaml::Mapping, key: &str) -> Option<String> {
         .get(serde_yaml::Value::String(key.to_string()))
         .and_then(value_as_string)
         .filter(|value| !value.trim().is_empty())
+}
+
+fn raw_okf_visibility(contents: &str) -> Option<MemoryVisibility> {
+    let (frontmatter, _) = split_okf_frontmatter(Path::new("okf-concept.md"), contents).ok()?;
+    let value = serde_yaml::from_str::<serde_yaml::Value>(&frontmatter).ok()?;
+    let mapping = value.as_mapping()?;
+    mapping_visibility(mapping).or_else(|| {
+        mapping
+            .get(serde_yaml::Value::String("opensymphony".to_string()))
+            .and_then(|value| value.as_mapping())
+            .and_then(mapping_visibility)
+    })
+}
+
+fn mapping_visibility(mapping: &serde_yaml::Mapping) -> Option<MemoryVisibility> {
+    match mapping_string(mapping, "visibility")?.as_str() {
+        "private" => Some(MemoryVisibility::Private),
+        "public" => Some(MemoryVisibility::Public),
+        _ => None,
+    }
 }
 
 fn known_okf_type(concept_type: &str) -> bool {
@@ -757,10 +1480,7 @@ fn resolve_okf_markdown_link(
     let relative = if let Some(stripped) = target.strip_prefix('/') {
         PathBuf::from(stripped)
     } else {
-        concept_path
-            .parent()
-            .unwrap_or(Path::new(""))
-            .join(target)
+        concept_path.parent().unwrap_or(Path::new("")).join(target)
     };
     let normalized = normalize_okf_relative_path(&relative)?;
     Some(bundle_root.join(normalized))
@@ -820,7 +1540,13 @@ fn normalize_okf_link_id(target: &str) -> String {
         .to_ascii_lowercase()
 }
 
+#[cfg(test)]
 fn contains_private_memory_link_in_markdown(contents: &str) -> bool {
+    let visible = markdown_visible_text(contents);
+    contains_private_memory_link(&visible)
+}
+
+fn markdown_visible_text(contents: &str) -> String {
     let mut visible = String::with_capacity(contents.len());
     let mut index = 0;
     while index < contents.len() {
@@ -844,7 +1570,50 @@ fn contains_private_memory_link_in_markdown(contents: &str) -> bool {
             }
         }
     }
-    contains_private_memory_link(&visible)
+    visible
+}
+
+const PUBLIC_PRIVATE_COMMENT_PATTERNS: &[&str] = &["linear:comment:"];
+const PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS: &[&str] = &[
+    ".opensymphony/memory/issues",
+    ".opensymphony\\memory\\issues",
+    "../.opensymphony/memory/issues",
+];
+const PUBLIC_PRIVATE_SOURCE_PATTERNS: &[&str] = &[
+    ".opensymphony/memory/source",
+    ".opensymphony\\memory\\source",
+    "../.opensymphony/memory/source",
+    ".opensymphony/memory/snapshot",
+    ".opensymphony\\memory\\snapshot",
+    "../.opensymphony/memory/snapshot",
+];
+
+fn public_export_private_material(visible: &str) -> Option<&'static str> {
+    if contains_any_ascii_case_insensitive(visible, PUBLIC_PRIVATE_COMMENT_PATTERNS) {
+        return Some("private comment references");
+    }
+    if contains_any_ascii_case_insensitive(visible, PUBLIC_PRIVATE_LOCAL_PATH_PATTERNS) {
+        return Some("private local paths");
+    }
+    if contains_any_ascii_case_insensitive(visible, PUBLIC_PRIVATE_SOURCE_PATTERNS) {
+        return Some("private source snapshots");
+    }
+    None
+}
+
+fn contains_any_ascii_case_insensitive(contents: &str, patterns: &[&str]) -> bool {
+    patterns
+        .iter()
+        .any(|pattern| contains_ascii_case_insensitive(contents, pattern))
+}
+
+fn contains_ascii_case_insensitive(contents: &str, pattern: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    !pattern.is_empty()
+        && contents
+            .as_bytes()
+            .windows(pattern.len())
+            .any(|window| window.eq_ignore_ascii_case(pattern))
 }
 
 fn extract_wiki_links(body: &str) -> Vec<String> {
@@ -892,14 +1661,12 @@ fn first_heading(body: &str) -> Option<&str> {
 }
 
 fn first_paragraph(body: &str) -> Option<&str> {
-    body.lines()
-        .map(str::trim)
-        .find(|line| {
-            !line.is_empty()
-                && !line.starts_with('#')
-                && !line.starts_with('-')
-                && !line.starts_with("```")
-        })
+    body.lines().map(str::trim).find(|line| {
+        !line.is_empty()
+            && !line.starts_with('#')
+            && !line.starts_with('-')
+            && !line.starts_with("```")
+    })
 }
 
 fn has_citations_section(body: &str) -> bool {
@@ -943,7 +1710,8 @@ fn legacy_frontmatter_to_opensymphony_metadata(
     push_scope(
         &mut metadata.scope_refs,
         KnowledgeScopeKind::Milestone,
-        string_extra(frontmatter, "milestone_id").or_else(|| string_extra(frontmatter, "milestone")),
+        string_extra(frontmatter, "milestone_id")
+            .or_else(|| string_extra(frontmatter, "milestone")),
         string_extra(frontmatter, "milestone"),
     );
     push_scope(
@@ -1307,9 +2075,7 @@ fn char_at(value: &str, index: usize) -> Option<(char, usize)> {
 }
 
 fn skip_escaped_char(value: &str, index: usize) -> usize {
-    char_at(value, index)
-        .map(|(_, next)| next)
-        .unwrap_or(index)
+    char_at(value, index).map(|(_, next)| next).unwrap_or(index)
 }
 
 fn skip_code_span(value: &str, index: usize) -> usize {
@@ -1497,7 +2263,11 @@ fn reference_link_targets(body: &str) -> BTreeMap<String, String> {
 }
 
 fn normalize_reference_label(label: &str) -> String {
-    label.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    label
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 #[cfg(test)]
@@ -1560,6 +2330,164 @@ Visible [[real-target|Real Target]].
             markdown_target_before_optional_title("assets/image.md.png \"Title\""),
             None
         );
+    }
+
+    #[test]
+    fn export_promotion_failure_restores_output_and_preserves_staging() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let staging = repo.path().join(".okf-export.tmp");
+        let output = repo.path().join("okf-export-private");
+        fs::create_dir_all(&staging).expect("staging should write");
+        fs::write(staging.join("bundle.md"), "staged bundle").expect("staged file should write");
+        fs::create_dir_all(&output).expect("existing output should write");
+
+        let staging_for_failure = staging.clone();
+        let output_for_failure = output.clone();
+        let result = promote_staged_export_with(
+            &staging,
+            &output,
+            |from, to| {
+                if from == staging_for_failure.as_path() && to == output_for_failure.as_path() {
+                    Err(io::Error::other("injected rename failure"))
+                } else {
+                    fs::rename(from, to)
+                }
+            },
+            |path| fs::remove_dir_all(path),
+        );
+
+        let error = result.expect_err("promotion should fail");
+        assert!(
+            error.to_string().contains("staged bundle preserved"),
+            "error should explain recovery path: {error}"
+        );
+        assert!(
+            staging.join("bundle.md").is_file(),
+            "failed promotion should preserve staged bundle"
+        );
+        assert!(
+            output.is_dir(),
+            "failed promotion should restore previous output directory"
+        );
+        let leaked_backup = fs::read_dir(repo.path())
+            .expect("repo should list")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".backup-"));
+        assert!(
+            !leaked_backup,
+            "successful rollback should consume backup dir"
+        );
+    }
+
+    #[test]
+    fn export_promotion_reports_backup_cleanup_failure() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let staging = repo.path().join(".okf-export.tmp");
+        let output = repo.path().join("okf-export-private");
+        fs::create_dir_all(&staging).expect("staging should write");
+        fs::write(staging.join("bundle.md"), "staged bundle").expect("staged file should write");
+        fs::create_dir_all(&output).expect("existing output should write");
+
+        let result = promote_staged_export_with(
+            &staging,
+            &output,
+            |from, to| fs::rename(from, to),
+            |_path| Err(io::Error::other("injected cleanup failure")),
+        );
+
+        let error = result.expect_err("cleanup failure should be reported");
+        assert!(
+            error.to_string().contains("failed to remove backup"),
+            "error should explain backup cleanup failure: {error}"
+        );
+        assert!(
+            output.join("bundle.md").is_file(),
+            "successful promotion should leave staged bundle at output"
+        );
+        let leaked_backup = fs::read_dir(repo.path())
+            .expect("repo should list")
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".backup-"));
+        assert!(
+            leaked_backup,
+            "failed cleanup should leave backup for manual operator cleanup"
+        );
+    }
+
+    #[test]
+    fn export_failure_reports_staging_cleanup_failure() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let staging = repo.path().join(".okf-export.tmp");
+        let original = MemoryError::InvalidInput("exported OKF bundle has error(s)".to_string());
+
+        let error = cleanup_staging_after_export_failure_with(&staging, original, |path| {
+            Err(MemoryError::WriteFile {
+                path: path.to_path_buf(),
+                source: io::Error::other("injected cleanup failure"),
+            })
+        });
+
+        let message = error.to_string();
+        assert!(
+            message.contains("exported OKF bundle has error(s)"),
+            "error should preserve the original export failure: {message}"
+        );
+        assert!(
+            message.contains("failed to remove OKF export staging directory"),
+            "error should report the failed staging cleanup: {message}"
+        );
+        assert!(
+            message.contains(staging.to_string_lossy().as_ref()),
+            "error should include the recoverable staging path: {message}"
+        );
+        let MemoryError::OkfExportStagingCleanup {
+            source, cleanup, ..
+        } = error
+        else {
+            panic!("error should preserve structured export and cleanup failures");
+        };
+        assert!(
+            matches!(*source, MemoryError::InvalidInput(_)),
+            "source error should preserve the original variant"
+        );
+        assert!(
+            matches!(*cleanup, MemoryError::WriteFile { .. }),
+            "cleanup error should preserve the cleanup variant"
+        );
+    }
+
+    #[test]
+    fn create_staging_dir_retries_existing_candidate() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let output = repo.path().join("okf-export-public");
+        let first_candidate = repo
+            .path()
+            .join(format!(".okf-export-public.tmp-{}-0", std::process::id()));
+        fs::create_dir(&first_candidate).expect("first candidate should exist");
+
+        let staging = create_staging_dir(repo.path(), &output).expect("staging should allocate");
+
+        assert_ne!(
+            staging, first_candidate,
+            "allocator should retry after an existing candidate"
+        );
+        assert!(
+            staging.is_dir(),
+            "allocator should create the retried candidate atomically"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_output_target_rejects_final_symlink() {
+        let repo = tempfile::TempDir::new().expect("temp repo should exist");
+        let output = repo.path().join("public-okf");
+        std::os::unix::fs::symlink(repo.path().join("missing-target"), &output)
+            .expect("symlink should write");
+
+        let result = ensure_output_target_not_symlink(&output);
+
+        assert!(matches!(result, Err(MemoryError::InvalidInput(_))));
     }
 
     #[test]
