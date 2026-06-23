@@ -112,8 +112,9 @@ Focused OKF memory validation for implementation work:
 - `cargo test-system-duckdb --test memory` runs the CLI-facing OKF fixture test,
   MCP `memory.lint` argument coverage for `okf` and `bundleRoot`, generated
   `log.md` date grouping, OKF import/export redaction checks, import preflight
-  failure coverage, source/target overlap rejection, and the rest of the memory
-  integration suite.
+  failure coverage, documented non-transactional mid-copy import behavior,
+  source/target overlap rejection, and the rest of the memory integration
+  suite.
 - `opensymphony memory lint --okf <repo-contained-bundle>` is the manual CLI
   smoke path for a generated or fixture OKF bundle.
 - `opensymphony memory export-okf --visibility public --output <empty-dir>`

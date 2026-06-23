@@ -111,6 +111,11 @@ types, unknown frontmatter fields, missing optional fields, broken links, and
 missing generated indexes are warning-level import inputs; malformed concepts
 remain errors with file paths in the diagnostic.
 
+Import is not transactional after the preflight succeeds. A filesystem write or
+DuckDB reindex failure can leave already-copied Markdown files in the memory
+root. Fix the underlying failure, inspect the partially copied files, and rerun
+with `--force` only when replacing those files is intentional.
+
 OKF lint diagnostics are intentionally actionable. Errors cover missing or
 invalid concept frontmatter, missing `type`, malformed reserved files,
 containment failures, and public-export leaks of private memory. Warnings cover

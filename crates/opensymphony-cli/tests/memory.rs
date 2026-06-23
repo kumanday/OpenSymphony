@@ -398,6 +398,53 @@ opensymphony:
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn memory_import_okf_mid_copy_failure_documents_partial_state() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TempDir::new().expect("temp repo should exist");
+    write_memory_config(repo.path());
+    write_import_warning_bundle(repo.path());
+    fs::create_dir_all(repo.path().join("incoming-okf/readonly"))
+        .expect("readonly source dir should write");
+    fs::write(
+        repo.path().join("incoming-okf/readonly/COE-501.md"),
+        r#"---
+type: issue-capsule
+title: "COE-501: Mid-copy import"
+opensymphony:
+  visibility: private
+---
+
+# COE-501: Mid-copy import
+"#,
+    )
+    .expect("mid-copy fixture should write");
+    let readonly_target = repo.path().join(".opensymphony/memory/readonly");
+    fs::create_dir_all(&readonly_target).expect("readonly target dir should write");
+    fs::set_permissions(&readonly_target, fs::Permissions::from_mode(0o555))
+        .expect("readonly target permissions should set");
+
+    let output = run(repo.path(), ["memory", "import-okf", "incoming-okf"]);
+
+    fs::set_permissions(&readonly_target, fs::Permissions::from_mode(0o755))
+        .expect("readonly target permissions should restore");
+    assert_failure(&output, "mid-copy OKF import failure");
+    assert!(
+        repo.path()
+            .join(".opensymphony/memory/issues/COE-500.md")
+            .exists(),
+        "post-preflight copy failure documents the current partial-update behavior"
+    );
+    assert!(
+        !repo
+            .path()
+            .join(".opensymphony/memory/readonly/COE-501.md")
+            .exists()
+    );
+}
+
 #[test]
 fn memory_import_okf_reports_malformed_concept_paths() {
     let repo = TempDir::new().expect("temp repo should exist");
