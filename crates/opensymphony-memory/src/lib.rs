@@ -1992,6 +1992,19 @@ Reviews are triggered when you open a pull request for review.
     }
 
     #[test]
+    fn private_link_guard_ignores_markdown_examples() {
+        let hidden = "Inline sample: `.opensymphony/memory/issues/COE-123.md`.\n\n\
+```text\n.opensymphony/memory/issues/COE-123.md\n```\n\n\
+<!-- .opensymphony/memory/issues/COE-123.md -->\n";
+        assert!(!contains_private_memory_link(&markdown_visible_text(
+            hidden
+        )));
+        assert!(contains_private_memory_link(&markdown_visible_text(
+            "See .opensymphony/memory/issues/COE-123.md for private details."
+        )));
+    }
+
+    #[test]
     fn docs_sync_summary_reports_changed_line_counts() {
         let diff = render_diff_stat(
             "alpha\nshared\nold\nomega\n",

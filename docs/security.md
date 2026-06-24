@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: developer-experience
+area: security
 visibility: public
-last_memory_sync: 2026-06-14T22:09:16.647708+00:00
+last_memory_sync: 2026-06-23T15:32:29.524342+00:00
 ---
 
-# Developer Experience
+# Security
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

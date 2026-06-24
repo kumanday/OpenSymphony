@@ -11,8 +11,7 @@ last_memory_sync: 2026-06-21T19:11:22.264899+00:00
 
 ## Current model
 
-- COE-480 contributed: PR #140: Show truthful run detail metrics (merge `ec2dc04`)
-- COE-482 contributed: PR #143: Fix Codex token usage accounting in TUI (merge `d48ad13`)
+- COE-463 contributed: PR #149: Add OKF memory admin MCP parity (merge `f5f4809`)
 
 ## Important invariants
 
@@ -29,12 +28,10 @@ last_memory_sync: 2026-06-21T19:11:22.264899+00:00
 
 ## Recent changes
 
-- COE-480: Run Detail Metrics And Density
-- COE-482: TUI Codex Token Usage Accounting
+- COE-463: Docs Sync And MCP Admin Parity For OKF
 
 ## Source refs
 
-- COE-480
-- COE-482
+- COE-463
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

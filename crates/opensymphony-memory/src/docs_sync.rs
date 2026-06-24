@@ -57,7 +57,7 @@ pub fn plan_docs_sync(
         let after = render_topic_doc(config, &area, &issues, before.as_deref(), with_diagrams);
         if area.visibility == MemoryVisibility::Public
             && config.docs.deny_private_links
-            && contains_private_memory_link(&after)
+            && contains_private_memory_link(&markdown_visible_text(&after))
         {
             warnings.push(format!(
                 "{} would contain private memory links",

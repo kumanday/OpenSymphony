@@ -11,7 +11,7 @@ last_memory_sync: 2026-06-21T19:11:22.261830+00:00
 
 ## Current model
 
-- COE-481 contributed: PR #139: Refresh OpenAI model profile defaults (merge `0f2a74f`)
+- COE-463 contributed: PR #149: Add OKF memory admin MCP parity (merge `f5f4809`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-06-21T19:11:22.261830+00:00
 
 ## Recent changes
 
-- COE-481: Model Configuration Codex Subscription Follow-Up
+- COE-463: Docs Sync And MCP Admin Parity For OKF
 
 ## Source refs
 
-- COE-481
+- COE-463
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

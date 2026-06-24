@@ -820,7 +820,7 @@ pub fn lint(config: &MemoryConfig, public_docs: bool) -> Result<LintReport, Memo
                 continue;
             }
             let contents = read_to_string(&path)?;
-            if contains_private_memory_link(&contents) {
+            if contains_private_memory_link(&markdown_visible_text(&contents)) {
                 findings.push(LintFinding {
                     severity: LintSeverity::Error,
                     path: Some(path),

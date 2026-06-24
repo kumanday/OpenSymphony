@@ -11,12 +11,7 @@ last_memory_sync: 2026-05-16T07:06:20.437326+00:00
 
 ## Current model
 
-- COE-284 contributed: PR #47: Add installable opensymphony run command (merge `51821f0`)
-- COE-285 contributed: PR #53: Refactor opensymphony run runtime modules (merge `696a32f`)
-- COE-453 contributed: PR #123: M9.5: Add non-interactive init automation (merge `3200ed6`)
-- COE-479 contributed: PR #138: Resume Codex debug sessions (merge `0841adb`)
-- COE-480 contributed: PR #140: Show truthful run detail metrics (merge `ec2dc04`)
-- COE-481 contributed: PR #139: Refresh OpenAI model profile defaults (merge `0f2a74f`)
+- COE-463 contributed: PR #149: Add OKF memory admin MCP parity (merge `f5f4809`)
 
 ## Important invariants
 
@@ -33,26 +28,10 @@ last_memory_sync: 2026-05-16T07:06:20.437326+00:00
 
 ## Recent changes
 
-- COE-284: Add orchestrator run command to CLI and make it installable
-- COE-285: Refactor orchestrator_run.rs into smaller CLI runtime modules
-- COE-453: Non-Interactive Init For Automation
-- COE-479: Codex Debug Session Resume
-- COE-480: Run Detail Metrics And Density
-- COE-481: Model Configuration Codex Subscription Follow-Up
-- COE-482: TUI Codex Token Usage Accounting
-- COE-483: Codex Event Content Summaries
-- COE-484: Desktop Live Snapshot And Run Detail Refresh
+- COE-463: Docs Sync And MCP Admin Parity For OKF
 
 ## Source refs
 
-- COE-284
-- COE-285
-- COE-453
-- COE-479
-- COE-480
-- COE-481
-- COE-482
-- COE-483
-- COE-484
+- COE-463
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

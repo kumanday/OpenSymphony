@@ -66,16 +66,21 @@ areas:
       - area:codex
       - area:desktop
       - area:developer-experience
+      - area:docs
       - area:gateway
+      - area:mcp
       - area:memory
       - area:model-configuration
+      - area:okf
       - area:operations
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
       - 'M10: Web Client And External Gateway'
       - 'M9.5: Developer Build Acceleration'
   cli:
@@ -94,16 +99,22 @@ areas:
       - area:codex
       - area:desktop
       - area:developer-experience
+      - area:docs
       - area:gateway
+      - area:mcp
+      - area:memory
       - area:model-configuration
+      - area:okf
       - area:operations
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       - cli
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
       - 'M9.5: Developer Build Acceleration'
   codex:
     title: Codex
@@ -117,14 +128,20 @@ areas:
       linear_labels:
       - area:codex
       - area:desktop
+      - area:docs
       - area:gateway
+      - area:mcp
+      - area:memory
       - area:model-configuration
+      - area:okf
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
   codex-app-server:
     title: Codex App-Server Harness
     docs_target: docs/codex-app-server-harness.md
@@ -160,6 +177,7 @@ areas:
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -192,14 +210,20 @@ areas:
       linear_labels:
       - area:codex
       - area:desktop
+      - area:docs
       - area:gateway
+      - area:mcp
+      - area:memory
       - area:model-configuration
+      - area:okf
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
   developer-experience:
     title: Developer Experience
     docs_target: docs/developer-experience.md
@@ -216,16 +240,21 @@ areas:
       - area:codex
       - area:desktop
       - area:developer-experience
+      - area:docs
       - area:gateway
+      - area:mcp
       - area:memory
       - area:model-configuration
+      - area:okf
       - area:operations
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
       - 'M9.5: Developer Build Acceleration'
   development:
     title: Development Guide
@@ -261,6 +290,22 @@ areas:
     source_refs:
       docs:
       - docs/devex.md
+  docs:
+    title: Docs
+    docs_target: docs/docs.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - docs
+    source_refs:
+      linear_labels:
+      - area:docs
+      - area:mcp
+      - area:memory
+      - area:okf
+      linear_milestones:
+      - 'M10.5: OKF Memory Bundle Foundation'
   elixir-hierarchy-changes:
     title: Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
     docs_target: docs/elixir-hierarchy-changes.md
@@ -283,12 +328,18 @@ areas:
     source_refs:
       linear_labels:
       - area:desktop
+      - area:docs
       - area:gateway
+      - area:mcp
+      - area:memory
+      - area:okf
       - area:runtime
+      - area:security
       - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
   host-client-architecture:
     title: OpenSymphony Host-Client Architecture
     docs_target: docs/host-client-architecture.md
@@ -380,6 +431,21 @@ areas:
       - docs/linear-and-tools.md
       linear_milestones:
       - 'M10: Web Client And External Gateway'
+  mcp:
+    title: Mcp
+    docs_target: docs/mcp.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - mcp
+    source_refs:
+      linear_labels:
+      - area:mcp
+      - area:memory
+      - area:okf
+      linear_milestones:
+      - 'M10.5: OKF Memory Bundle Foundation'
   memory:
     title: Project Memory
     docs_target: docs/memory.md
@@ -401,16 +467,21 @@ areas:
       - area:codex
       - area:desktop
       - area:developer-experience
+      - area:docs
       - area:gateway
+      - area:mcp
       - area:memory
       - area:model-configuration
+      - area:okf
       - area:operations
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -440,9 +511,32 @@ areas:
     - model-configuration
     source_refs:
       linear_labels:
+      - area:docs
+      - area:mcp
+      - area:memory
       - area:model-configuration
+      - area:okf
+      - area:security
       linear_milestones:
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
+  okf:
+    title: Okf
+    docs_target: docs/okf.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - okf
+    source_refs:
+      linear_labels:
+      - area:docs
+      - area:mcp
+      - area:memory
+      - area:okf
+      - area:security
+      linear_milestones:
+      - 'M10.5: OKF Memory Bundle Foundation'
   openhands-agent-server:
     title: OpenHands Agent-Server Integration
     docs_target: docs/openhands-agent-server.md
@@ -483,16 +577,22 @@ areas:
       linear_labels:
       - area:codex
       - area:desktop
+      - area:docs
       - area:gateway
+      - area:mcp
+      - area:memory
       - area:model-configuration
+      - area:okf
       - area:operations
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       - operations
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -542,11 +642,34 @@ areas:
     source_refs:
       linear_labels:
       - area:codex
+      - area:docs
+      - area:mcp
+      - area:memory
+      - area:okf
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       linear_milestones:
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
+  security:
+    title: Security
+    docs_target: docs/security.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - security
+    source_refs:
+      linear_labels:
+      - area:docs
+      - area:mcp
+      - area:memory
+      - area:okf
+      - area:security
+      linear_milestones:
+      - 'M10.5: OKF Memory Bundle Foundation'
   sources:
     title: Sources and Trust Notes
     docs_target: docs/sources.md
@@ -593,6 +716,7 @@ areas:
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -611,14 +735,20 @@ areas:
       linear_labels:
       - area:codex
       - area:desktop
+      - area:docs
       - area:gateway
+      - area:mcp
+      - area:memory
       - area:model-configuration
+      - area:okf
       - area:runtime
+      - area:security
       - area:tui
       - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
   ui:
     title: Ui
     docs_target: docs/ui.md
@@ -630,12 +760,18 @@ areas:
     source_refs:
       linear_labels:
       - area:desktop
+      - area:docs
       - area:gateway
+      - area:mcp
+      - area:memory
+      - area:okf
       - area:runtime
+      - area:security
       - area:ui
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
+      - 'M10.5: OKF Memory Bundle Foundation'
   ui-frankentui:
     title: FrankenTUI Operator UI
     docs_target: docs/ui-frankentui.md
