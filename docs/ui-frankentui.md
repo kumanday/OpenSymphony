@@ -87,7 +87,7 @@ Columns:
 
 The issue list may add a compact dependency gutter and inline dependency suffix
 without adding issue-list rows. See
-[TUI Dependency Gutter Specification](tui-dependency-gutter-spec.md).
+[TUI Dependency Gutter Specification](specs/tui-dependency-gutter-spec.md).
 
 ## 4.3 Issue detail
 

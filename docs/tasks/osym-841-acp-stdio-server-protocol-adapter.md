@@ -54,7 +54,7 @@ Add `opensymphony debug --acp-stdio` as a noninteractive ACP JSON-RPC server tha
 ## Context
 
 - Builds on OSYM-840.
-- Read `docs/opensymphony-acp-debugging-spec.md` command surface, ACP method behavior, event mapping, concurrency, and failure sections.
+- Read `docs/specs/opensymphony-acp-debugging-spec.md` command surface, ACP method behavior, event mapping, concurrency, and failure sections.
 - Keep protocol output off human-readable stdout.
 
 ## Definition of Ready

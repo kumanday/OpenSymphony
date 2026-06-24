@@ -53,7 +53,7 @@ Implement the human-readable concept inspector, command/search workflows, filter
 ## Context
 
 - Builds on OSYM-821 and OSYM-822.
-- Read `docs/llm-wiki-graph-view-spec.md` sections 10, 11, 12, and 13.
+- Read `docs/specs/llm-wiki-graph-view-spec.md` sections 10, 11, 12, and 13.
 - UI should remain dense, calm, and operational.
 
 ## Definition of Ready

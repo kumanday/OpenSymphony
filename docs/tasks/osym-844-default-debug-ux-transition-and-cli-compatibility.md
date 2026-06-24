@@ -53,7 +53,7 @@ Transition `opensymphony debug <issue-key>` toward the IDE-oriented debug workfl
 ## Context
 
 - Builds on OSYM-840, OSYM-842, and OSYM-843.
-- Read `docs/opensymphony-acp-debugging-spec.md` command surface and default debug UX transition sections.
+- Read `docs/specs/opensymphony-acp-debugging-spec.md` command surface and default debug UX transition sections.
 - Respect AGENTS.md: OpenSymphony targets SDK agent-server REST plus WebSocket, not web-app Socket.IO.
 
 ## Definition of Ready

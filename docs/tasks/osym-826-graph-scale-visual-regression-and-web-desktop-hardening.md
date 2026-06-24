@@ -53,7 +53,7 @@ Harden the graph view across scale, browser, desktop, accessibility, and visual 
 ## Context
 
 - Builds on OSYM-823, OSYM-824, and OSYM-825.
-- Read `docs/llm-wiki-graph-view-spec.md` sections 14, 16, and 17.
+- Read `docs/specs/llm-wiki-graph-view-spec.md` sections 14, 16, and 17.
 - This milestone prepares the graph view for M13 release-quality validation.
 
 ## Definition of Ready

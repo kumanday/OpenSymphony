@@ -6,9 +6,10 @@ This milestone index covers the new rich client, hosted mode, collaborative plan
 - `docs/hosted-client-PRD.md`
 - `docs/host-client-architecture.md`
 - `docs/host-client-implementation_plan.md`
-- `docs/okf-memory-spec.md`
-- `docs/llm-wiki-graph-view-spec.md`
-- `docs/opensymphony-acp-debugging-spec.md`
+- `docs/specs/okf-memory-spec.md`
+- `docs/specs/llm-wiki-graph-view-spec.md`
+- `docs/specs/opensymphony-acp-debugging-spec.md`
+- `docs/specs/desktop-run-detail-operations-spec.md`
 
 ## M6: Gateway And Stream Contract
 

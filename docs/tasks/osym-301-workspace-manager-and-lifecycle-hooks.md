@@ -18,7 +18,7 @@ project_context:
   - AGENTS.md
   - README.md
   - docs/workspace-and-lifecycle.md
-  - docs/symphony-spec-alignment.md
+  - docs/specs/symphony-spec-alignment.md
 repo_paths:
   - crates/opensymphony-workspace/
 definition_of_ready:

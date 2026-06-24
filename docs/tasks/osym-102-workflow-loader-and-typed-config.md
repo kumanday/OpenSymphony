@@ -16,7 +16,7 @@ blocks:
 project_context:
   - AGENTS.md
   - README.md
-  - docs/symphony-spec-alignment.md
+  - docs/specs/symphony-spec-alignment.md
   - docs/architecture.md
   - WORKFLOW.example.md
 repo_paths:

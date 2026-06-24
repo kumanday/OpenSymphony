@@ -52,7 +52,7 @@ Create the shared frontend graph package used by both web and Tauri clients, wit
 ## Context
 
 - Builds on OSYM-820.
-- Read `docs/llm-wiki-graph-view-spec.md` sections 5, 7, 8, and 10.
+- Read `docs/specs/llm-wiki-graph-view-spec.md` sections 5, 7, 8, and 10.
 - Existing shared client work lives in the M7 and M10 task areas.
 
 ## Definition of Ready

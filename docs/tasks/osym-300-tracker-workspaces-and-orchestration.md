@@ -23,7 +23,7 @@ project_context:
   - README.md
   - docs/workspace-and-lifecycle.md
   - docs/linear-and-tools.md
-  - docs/symphony-spec-alignment.md
+  - docs/specs/symphony-spec-alignment.md
   - docs/implementation-plan.md
 repo_paths:
   - crates/opensymphony-workspace/

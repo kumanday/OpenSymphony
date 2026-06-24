@@ -53,7 +53,7 @@ Add OKF-aware writing, linting, and migration fixtures so OpenSymphony can produ
 ## Context
 
 - Builds on OSYM-800.
-- Source spec: `docs/okf-memory-spec.md` sections 4, 6, 10, and 11.
+- Source spec: `docs/specs/okf-memory-spec.md` sections 4, 6, 10, and 11.
 - Preserve private memory boundaries from `docs/memory.md`.
 
 ## Definition of Ready

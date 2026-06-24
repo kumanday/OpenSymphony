@@ -162,7 +162,7 @@ OpenHands event schemas can evolve. Implement:
 OKF bundle parsing, legacy capsule mapping, bundle-relative path validation, and
 unknown frontmatter preservation belong in `opensymphony-memory`. Keep the
 logical bundle layout and migration model documented in `docs/memory.md` and
-`docs/okf-memory-spec.md`. Do not move the durable `.opensymphony/memory/` store
+`docs/specs/okf-memory-spec.md`. Do not move the durable `.opensymphony/memory/` store
 to the final OKF layout unless a task explicitly includes that migration.
 
 ### Separate Symphony hooks from OpenHands hooks
@@ -305,7 +305,7 @@ When changing the pinned OpenHands assumptions, update `docs/sources.md`.
 
 - `README.md`: project summary and implementation path
 - `docs/architecture.md`: runtime architecture
-- `docs/symphony-spec-alignment.md`: upstream spec mapping
+- `docs/specs/symphony-spec-alignment.md`: upstream spec mapping
 - `docs/openhands-agent-server.md`: agent-server integration choices
 - `docs/codex-app-server-harness.md`: local Codex app-server stdio harness,
   launch contract, JSON-RPC lifecycle evidence, and benchmark results

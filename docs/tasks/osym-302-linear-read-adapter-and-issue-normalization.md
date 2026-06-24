@@ -18,7 +18,7 @@ project_context:
   - AGENTS.md
   - README.md
   - docs/linear-and-tools.md
-  - docs/symphony-spec-alignment.md
+  - docs/specs/symphony-spec-alignment.md
 repo_paths:
   - crates/opensymphony-linear/
 definition_of_ready:

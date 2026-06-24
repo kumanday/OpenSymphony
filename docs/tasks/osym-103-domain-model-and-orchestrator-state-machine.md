@@ -19,7 +19,7 @@ blocks:
 project_context:
   - AGENTS.md
   - README.md
-  - docs/symphony-spec-alignment.md
+  - docs/specs/symphony-spec-alignment.md
   - docs/architecture.md
 repo_paths:
   - crates/opensymphony-domain/

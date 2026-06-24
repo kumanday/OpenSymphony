@@ -21,7 +21,7 @@ project_context:
   - AGENTS.md
   - README.md
   - docs/architecture.md
-  - docs/symphony-spec-alignment.md
+  - docs/specs/symphony-spec-alignment.md
   - docs/workspace-and-lifecycle.md
 repo_paths:
   - crates/opensymphony-orchestrator/

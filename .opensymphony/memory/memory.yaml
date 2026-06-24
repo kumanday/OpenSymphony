@@ -23,7 +23,7 @@ areas:
       - docs/ai-pr-review-human-setup.md
   ai-pr-review-system-spec:
     title: Provider-agnostic AI PR review system for GitHub using OpenHands
-    docs_target: docs/ai-pr-review-system-spec.md
+    docs_target: docs/specs/ai-pr-review-system-spec.md
     visibility: public
     status: stable
     confidence: 85
@@ -31,7 +31,7 @@ areas:
     - provider-agnostic ai pr review system for github using openhands
     source_refs:
       docs:
-      - docs/ai-pr-review-system-spec.md
+      - docs/specs/ai-pr-review-system-spec.md
   architecture:
     title: Architecture
     docs_target: docs/architecture.md
@@ -690,7 +690,7 @@ areas:
       - 'M9: Collaborative Planning Alpha'
   symphony-spec-alignment:
     title: Symphony Spec Alignment
-    docs_target: docs/symphony-spec-alignment.md
+    docs_target: docs/specs/symphony-spec-alignment.md
     visibility: public
     status: stable
     confidence: 85
@@ -698,7 +698,7 @@ areas:
     - symphony spec alignment
     source_refs:
       docs:
-      - docs/symphony-spec-alignment.md
+      - docs/specs/symphony-spec-alignment.md
   testing-and-operations:
     title: Testing
     docs_target: docs/testing-and-operations.md

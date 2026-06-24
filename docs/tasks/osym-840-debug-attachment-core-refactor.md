@@ -52,7 +52,7 @@ Extract reusable debug attachment primitives from the current terminal debug com
 
 ## Context
 
-- Read `docs/opensymphony-acp-debugging-spec.md`.
+- Read `docs/specs/opensymphony-acp-debugging-spec.md`.
 - Grounding files include `crates/opensymphony-cli/src/debug_session.rs`, `crates/opensymphony-openhands/src/conversation_store.rs`, and `crates/opensymphony-workspace/src/models.rs`.
 - Existing debug command COE work is already delivered; this task refactors it for ACP.
 

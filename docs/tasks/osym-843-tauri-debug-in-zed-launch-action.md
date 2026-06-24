@@ -53,7 +53,7 @@ Wire the desktop app debug action to resolve an issue key to the exact issue wor
 ## Context
 
 - Builds on OSYM-840 and OSYM-842.
-- Read `docs/opensymphony-acp-debugging-spec.md` Tauri integration and workspace selection sections.
+- Read `docs/specs/opensymphony-acp-debugging-spec.md` Tauri integration and workspace selection sections.
 - Existing desktop action surfaces live near the shared client and Tauri shell code.
 
 ## Definition of Ready

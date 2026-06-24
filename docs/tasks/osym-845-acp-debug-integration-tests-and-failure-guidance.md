@@ -53,7 +53,7 @@ Add end-to-end ACP debug coverage and polish failure guidance for invalid worksp
 ## Context
 
 - Builds on OSYM-840, OSYM-841, OSYM-843, and OSYM-844.
-- Read `docs/opensymphony-acp-debugging-spec.md` failure behavior, test plan, and acceptance criteria.
+- Read `docs/specs/opensymphony-acp-debugging-spec.md` failure behavior, test plan, and acceptance criteria.
 - Keep legacy flat, active, and archived OpenHands stores supported.
 
 ## Definition of Ready

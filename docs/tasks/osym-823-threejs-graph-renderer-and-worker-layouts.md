@@ -53,7 +53,7 @@ Build the graph canvas renderer with Three.js, worker-based layouts, GPU-friendl
 ## Context
 
 - Builds on OSYM-821 and OSYM-822.
-- Read `docs/llm-wiki-graph-view-spec.md` sections 8, 9, and 14.
+- Read `docs/specs/llm-wiki-graph-view-spec.md` sections 8, 9, and 14.
 - Follow frontend guidance for Three.js scenes and visual verification.
 
 ## Definition of Ready

@@ -53,7 +53,7 @@ Make the memory catalog rebuildable from OKF concepts while preserving existing 
 ## Context
 
 - Builds on OSYM-800 and OSYM-801.
-- Read `docs/okf-memory-spec.md` sections 7 and 8.
+- Read `docs/specs/okf-memory-spec.md` sections 7 and 8.
 - Current memory server behavior is described in `docs/memory.md`.
 
 ## Definition of Ready

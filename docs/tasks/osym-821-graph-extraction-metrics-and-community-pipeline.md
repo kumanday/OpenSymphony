@@ -52,7 +52,7 @@ Extract graph nodes, edges, metrics, and communities from OKF concepts so client
 ## Context
 
 - Builds on OSYM-820.
-- Read `docs/llm-wiki-graph-view-spec.md` sections 6 and 9.
+- Read `docs/specs/llm-wiki-graph-view-spec.md` sections 6 and 9.
 - Graph relationships remain derived; memory documents are the source of truth.
 
 ## Definition of Ready

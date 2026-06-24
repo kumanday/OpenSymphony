@@ -54,7 +54,7 @@ Route docs sync and memory admin surfaces through OKF-derived data where appropr
 ## Context
 
 - Builds on OSYM-801, OSYM-802, and OSYM-803.
-- Read `docs/okf-memory-spec.md` sections 6, 9, and 12.
+- Read `docs/specs/okf-memory-spec.md` sections 6, 9, and 12.
 - Existing docs sync behavior is documented in `docs/memory.md`.
 
 ## Definition of Ready

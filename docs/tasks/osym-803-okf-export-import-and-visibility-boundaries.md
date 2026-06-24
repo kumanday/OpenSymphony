@@ -53,7 +53,7 @@ Add OKF import and export flows with explicit public/private variants and redact
 ## Context
 
 - Builds on OSYM-801 and OSYM-802.
-- Read `docs/okf-memory-spec.md` sections 5, 6, 9, and 12.
+- Read `docs/specs/okf-memory-spec.md` sections 5, 6, 9, and 12.
 - Public docs must not link directly to private bundle paths.
 
 ## Definition of Ready

@@ -53,7 +53,7 @@ Document and surface the one-time Zed external-agent configuration needed to sta
 ## Context
 
 - Builds on OSYM-841.
-- Read `docs/opensymphony-acp-debugging-spec.md` Zed integration and desired UX sections.
+- Read `docs/specs/opensymphony-acp-debugging-spec.md` Zed integration and desired UX sections.
 - The expected static command is `opensymphony debug --acp-stdio`.
 
 ## Definition of Ready

@@ -34,7 +34,7 @@ Define the OpenSymphony OKF bundle schema and map the current memory capsule, mi
 
 - OKF concept and bundle schema types in the memory implementation boundary.
 - Legacy capsule to OKF mapping helpers.
-- Documentation updates to `docs/memory.md` referencing `docs/okf-memory-spec.md`.
+- Documentation updates to `docs/memory.md` referencing `docs/specs/okf-memory-spec.md`.
 
 ## Acceptance Criteria
 
@@ -51,7 +51,7 @@ Define the OpenSymphony OKF bundle schema and map the current memory capsule, mi
 
 ## Context
 
-- Read `docs/okf-memory-spec.md` before implementation.
+- Read `docs/specs/okf-memory-spec.md` before implementation.
 - Inspect `docs/memory.md` and current memory capsule generation paths.
 - Existing M6.5 memory-server work is a prerequisite foundation, but this task package tracks only the new OKF wave.
 

@@ -52,7 +52,7 @@ Define and expose versioned memory graph DTOs for bundles, graph snapshots, conc
 
 ## Context
 
-- Read `docs/llm-wiki-graph-view-spec.md` sections 6 and 7.
+- Read `docs/specs/llm-wiki-graph-view-spec.md` sections 6 and 7.
 - Builds on OSYM-800 and OSYM-802.
 - The client should not parse private files directly during normal operation.
 

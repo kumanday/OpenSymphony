@@ -12,7 +12,7 @@ depends_on:
   - OSYM-304
 project_context:
   - docs/architecture.md
-  - docs/symphony-spec-alignment.md
+  - docs/specs/symphony-spec-alignment.md
   - docs/tasks/osym-103-domain-model-and-orchestrator-state-machine.md
   - docs/tasks/osym-304-orchestrator-scheduler-retries-and-reconciliation.md
 repo_paths:
