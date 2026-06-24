@@ -129,6 +129,21 @@ Tasks:
 - OSYM-803 OKF Export, Import, And Visibility Boundaries
 - OSYM-804 Docs Sync And MCP Admin Parity For OKF
 
+## M10.6: Desktop Run Detail Operations And Interrupts
+
+Goal: Make desktop run operations truthful and useful by adding real harness interruption, Human Review to Merging supersede handling, Run Detail action cleanup, TUI-parity run data, and a lazy desktop launcher command.
+
+Tasks:
+
+- OSYM-805 Harness Interrupt Contract And Run Diagnostics
+- OSYM-806 OpenHands Agent-Server Interrupt Adapter
+- OSYM-807 Codex App-Server Turn Interrupt Adapter
+- OSYM-808 Merging Supersedes Human Review Polling
+- OSYM-809 Desktop Run Detail Action Wiring And Cleanup
+- OSYM-810 Desktop Run Detail TUI Parity
+- OSYM-811 Lazy Desktop Launcher Command
+- OSYM-812 Desktop Operations Integration Hardening
+
 ## M11: Hosted Alpha
 
 Goal: Add hosted multi-user execution where server-owned runs continue after clients disconnect and permissions, secrets, workspaces, audit, and administration are enforced centrally.

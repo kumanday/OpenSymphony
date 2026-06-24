@@ -192,6 +192,7 @@ milestones instead of broadening the existing hardening milestone:
 | M10.3 Codex And Subscription Readiness | after M10 web client/external gateway work, before M10.5 OKF memory and M11 hosted alpha | local Codex app-server support and ChatGPT subscription credential foundations before full hosted mode |
 | M10.4 Desktop Live Operations And Model Polish | after M10.3 Codex readiness, before M10.5 OKF memory | desktop live refresh, truthful run-detail metrics, and Codex subscription model-configuration cleanup from first operator use |
 | M10.5 OKF Memory Bundle Foundation | after M10 web/client transport, before M11 hosted visibility depends on portable memory documents | OKF concept schema, writer/lint, catalog reindex, import/export, docs sync and MCP/admin parity |
+| M10.6 Desktop Run Detail Operations And Interrupts | after M10.5 OKF memory, before M11 hosted alpha | harness interrupt contract, OpenHands/Codex cancel wiring, Human Review to Merging supersede, Run Detail action cleanup, TUI parity, lazy desktop launcher |
 | M11.5 LLM Wiki Graph View | after M11 hosted identity and visibility foundations, before provider/harness readiness | memory graph DTOs, graph extraction, shared frontend package, Three.js renderer, inspector/accessibility, live privacy gates |
 | M12.5 ACP Debugging And IDE Attach | after M12 harness/model seams, before M13 release hardening | debug attachment refactor, ACP stdio server, Zed setup, Tauri Debug in Zed action, default debug UX transition, integration tests |
 
@@ -208,10 +209,15 @@ Detail metrics, model configuration defaults/auth-status cleanup for Codex
 subscription profiles, Codex token usage accounting, and more useful Codex
 event summaries.
 
-The planning source for this wave is
-`docs/tasks/advanced-knowledge-debug-task-package.yaml`. The existing
-`docs/tasks/task-package.yaml` remains the published source for the
-rich-client-hosted-mode wave.
+M10.6 follows the desktop operations spec with the smallest set of issue-ready
+tasks for real cancellation, same-conversation Human Review to Merging
+supersede handling, Run Detail button cleanup, TUI parity, and the lazy desktop
+launcher command.
+
+The current default planning source is `docs/tasks/task-package.yaml` for the
+M10.6 desktop-run-detail-operations wave. The ACP debugging wave remains in
+`docs/tasks/advanced-knowledge-debug-task-package.yaml`, and
+`docs/tasks/linear-publish.yaml` records the latest published planning wave.
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

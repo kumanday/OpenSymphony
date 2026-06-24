@@ -2,8 +2,9 @@
 
 The task files in this directory are designed to map directly into Linear issues.
 
-For the OSYM-700+ planning wave, `task-package.yaml` is the machine-readable
-manifest and `linear-publish.yaml` records the published Linear mapping.
+`task-package.yaml` is the current machine-readable manifest for the next
+planning wave to convert. `linear-publish.yaml` records the most recent
+published Linear mapping.
 
 Parent issues:
 
@@ -23,6 +24,7 @@ Rich client, hosted mode, collaborative planning, subscription-auth, and future 
 - OSYM-750 Hosted alpha
 - OSYM-760 Provider, harness, and model readiness
 - OSYM-770 Hardening and release quality
+- OSYM-805 Desktop run detail operations and interrupts
 
 See `milestones.md` for the new task set and `../host-client-implementation_plan.md` for the source implementation strategy.
 

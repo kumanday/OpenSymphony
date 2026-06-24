@@ -33,12 +33,12 @@ packages/*/dist/
 *.tsbuildinfo
 package-lock.json
 apps/desktop/src-tauri/gen/
+
+# Codex-specific instructions for local use
+.codex
 .opensymphony*
 !.opensymphony/
 .opensymphony/*
 !.opensymphony/memory/
 .opensymphony/memory/*
 !.opensymphony/memory/memory.yaml
-
-# Codex-specific instructions for local use
-.codex
