@@ -1042,6 +1042,20 @@ fn remote_memory_tool_request(command: &MemoryCommand) -> Option<(&'static str, 
                 "bundleRoot": args.bundle.as_ref().map(|path| path.display().to_string())
             }),
         )),
+        MemoryCommand::ExportOkf(args) => Some((
+            "memory.export_okf",
+            json!({
+                "visibility": MemoryVisibility::from(args.visibility).as_str(),
+                "output": args.output.as_ref().map(|path| path.display().to_string())
+            }),
+        )),
+        MemoryCommand::ImportOkf(args) => Some((
+            "memory.import_okf",
+            json!({
+                "bundleRoot": args.bundle.display().to_string(),
+                "force": args.force
+            }),
+        )),
         MemoryCommand::Brief(args) => {
             Some(("memory.brief", json!({ "issue": args.issue.clone() })))
         }
@@ -1577,6 +1591,8 @@ fn memory_tool_descriptors() -> Vec<Value> {
         json!({ "name": "memory.sync_docs", "description": "Sync captured memory into topic docs", "access": "admin" }),
         json!({ "name": "memory.lint", "description": "Lint memory and docs", "access": "admin" }),
         json!({ "name": "memory.reindex", "description": "Refresh memory catalog schema and generated indexes", "access": "admin" }),
+        json!({ "name": "memory.export_okf", "description": "Export an OKF memory bundle", "access": "admin" }),
+        json!({ "name": "memory.import_okf", "description": "Import an OKF memory bundle", "access": "admin" }),
         json!({ "name": "memory.ingest_code_intel", "description": "Generate code-intelligence artifacts for future ingestion", "access": "admin" }),
     ]
 }
@@ -1588,6 +1604,8 @@ fn is_admin_memory_tool(name: &str) -> bool {
             | "memory.sync_docs"
             | "memory.lint"
             | "memory.reindex"
+            | "memory.export_okf"
+            | "memory.import_okf"
             | "memory.ingest_code_intel"
     )
 }
@@ -1781,6 +1799,8 @@ async fn call_memory_tool(config: &MemoryConfig, params: Value) -> Result<Value,
         "memory.sync_docs" => call_memory_sync_docs_tool(config, &arguments),
         "memory.lint" => call_memory_lint_tool(config, &arguments),
         "memory.reindex" => call_memory_reindex_tool(config, &arguments),
+        "memory.export_okf" => call_memory_export_okf_tool(config, &arguments),
+        "memory.import_okf" => call_memory_import_okf_tool(config, &arguments),
         "memory.ingest_code_intel" => call_memory_ingest_code_intel_tool(config, &arguments).await,
         other => Err(MemoryError::InvalidInput(format!(
             "unsupported memory tool `{other}`"
@@ -1911,6 +1931,29 @@ fn call_memory_reindex_tool(
     Ok(memory_reindex_report_json(config, report))
 }
 
+fn call_memory_export_okf_tool(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Value, MemoryError> {
+    let visibility = memory_visibility_arg(arguments)?;
+    let output = optional_string_arg(arguments, "output").map(PathBuf::from);
+    let report = export_okf_bundle(config, visibility, output.as_deref())?;
+    Ok(okf_export_report_json(config, visibility, report))
+}
+
+fn call_memory_import_okf_tool(
+    config: &MemoryConfig,
+    arguments: &Value,
+) -> Result<Value, MemoryError> {
+    let bundle = optional_string_arg(arguments, "bundleRoot")
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            MemoryError::InvalidInput("missing string argument `bundleRoot`".to_string())
+        })?;
+    let report = import_okf_bundle(config, &bundle, bool_arg(arguments, "force"))?;
+    Ok(okf_import_report_json(config, report))
+}
+
 async fn call_memory_ingest_code_intel_tool(
     config: &MemoryConfig,
     arguments: &Value,
@@ -2021,6 +2064,33 @@ fn memory_reindex_report_json(config: &MemoryConfig, report: MemoryReindexReport
         "warningCount": report.warning_count,
         "indexPath": path_for_json(config, &report.index_path),
         "markdownIndexes": paths_for_json(config, &report.markdown_indexes)
+    })
+}
+
+fn okf_export_report_json(
+    config: &MemoryConfig,
+    visibility: MemoryVisibility,
+    report: crate::opensymphony_memory::OkfExportReport,
+) -> Value {
+    json!({
+        "outputPath": path_for_json(config, &report.output_path),
+        "visibility": visibility.as_str(),
+        "copiedFiles": paths_for_json(config, &report.copied_files),
+        "skippedPrivateFiles": paths_for_json(config, &report.skipped_private_files),
+        "findingCount": report.finding_count
+    })
+}
+
+fn okf_import_report_json(
+    config: &MemoryConfig,
+    report: crate::opensymphony_memory::OkfImportReport,
+) -> Value {
+    json!({
+        "sourcePath": path_for_json(config, &report.source_path),
+        "targetPath": path_for_json(config, &report.target_path),
+        "copiedFiles": paths_for_json(config, &report.copied_files),
+        "findingCount": report.finding_count,
+        "reindex": memory_reindex_report_json(config, report.reindex)
     })
 }
 
@@ -2336,6 +2406,19 @@ fn path_for_json(config: &MemoryConfig, path: &Path) -> String {
 fn required_string_arg(arguments: &Value, key: &str) -> Result<String, MemoryError> {
     optional_string_arg(arguments, key)
         .ok_or_else(|| MemoryError::InvalidInput(format!("missing string argument `{key}`")))
+}
+
+fn memory_visibility_arg(arguments: &Value) -> Result<MemoryVisibility, MemoryError> {
+    match required_string_arg(arguments, "visibility")?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "public" => Ok(MemoryVisibility::Public),
+        "private" => Ok(MemoryVisibility::Private),
+        value => Err(MemoryError::InvalidInput(format!(
+            "invalid visibility `{value}`; expected public or private"
+        ))),
+    }
 }
 
 fn optional_string_arg(arguments: &Value, key: &str) -> Option<String> {
@@ -3437,7 +3520,7 @@ fn print_search_results(
 mod tests {
     use super::{
         LINEAR_MEMORY_STATUS_BEGIN, LINEAR_MEMORY_STATUS_END, MemoryMcpRequest, MemoryServerAccess,
-        MemoryServerAuth, authorize_memory_request, context_source_from_mcp,
+        MemoryServerAuth, authorize_memory_request, call_memory_tool, context_source_from_mcp,
         memory_server_health_payload, memory_tool_descriptors, origin_is_localhost,
         parse_remote_memory_response, remote_memory_tool_token, replace_or_append_managed_section,
         required_access_for_request, resolve_code_intel_repo, trim_auto_memory_status_log,
@@ -3462,6 +3545,8 @@ mod tests {
         assert!(names.contains(&"memory.capture".to_string()));
         assert!(names.contains(&"memory.sync_docs".to_string()));
         assert!(names.contains(&"memory.reindex".to_string()));
+        assert!(names.contains(&"memory.export_okf".to_string()));
+        assert!(names.contains(&"memory.import_okf".to_string()));
         assert!(!names.iter().any(|name| name.contains("code_context")));
         assert!(!names.iter().any(|name| name.contains("code-context")));
     }
@@ -3478,6 +3563,11 @@ mod tests {
             method: "tools/call".to_string(),
             params: json!({ "name": "memory.capture" }),
         };
+        let okf_export_request = MemoryMcpRequest {
+            id: json!("test"),
+            method: "tools/call".to_string(),
+            params: json!({ "name": "memory.export_okf" }),
+        };
 
         assert_eq!(
             required_access_for_request(&read_request),
@@ -3486,6 +3576,86 @@ mod tests {
         assert_eq!(
             required_access_for_request(&admin_request),
             MemoryServerAccess::Admin
+        );
+        assert_eq!(
+            required_access_for_request(&okf_export_request),
+            MemoryServerAccess::Admin
+        );
+    }
+
+    #[tokio::test]
+    async fn okf_export_import_tools_dispatch_through_mcp() {
+        let repo = TempDir::new().expect("temp repo");
+        let repo_root = repo.path().canonicalize().expect("canonical repo");
+        let memory_dir = repo_root.join(".opensymphony/memory/issues");
+        std::fs::create_dir_all(&memory_dir).expect("memory dir");
+        std::fs::write(
+            memory_dir.join("COE-1.md"),
+            r#"---
+type: topic-doc
+title: "COE-1: Public OKF concept"
+description: Public concept.
+tags: [memory, okf]
+timestamp: 2026-06-23T10:00:00Z
+opensymphony:
+  visibility: public
+  scope_refs:
+    - kind: work_item
+      id: COE-1
+---
+
+# COE-1: Public OKF concept
+
+Public memory concept.
+"#,
+        )
+        .expect("concept");
+        let config = MemoryConfig::load(&repo_root, None).expect("config");
+
+        let export = call_memory_tool(
+            &config,
+            json!({
+                "name": "memory.export_okf",
+                "arguments": {
+                    "visibility": "public",
+                    "output": "public-okf"
+                }
+            }),
+        )
+        .await
+        .expect("export okf tool");
+
+        assert_eq!(export["outputPath"], "public-okf");
+        assert_eq!(export["visibility"], "public");
+        assert!(
+            export["copiedFiles"]
+                .as_array()
+                .expect("copied files")
+                .iter()
+                .any(|path| path == "issues/COE-1.md")
+        );
+
+        let import = call_memory_tool(
+            &config,
+            json!({
+                "name": "memory.import_okf",
+                "arguments": {
+                    "bundleRoot": "public-okf",
+                    "force": true
+                }
+            }),
+        )
+        .await
+        .expect("import okf tool");
+
+        assert_eq!(import["sourcePath"], "public-okf");
+        assert_eq!(import["targetPath"], ".opensymphony/memory");
+        assert!(
+            import["copiedFiles"]
+                .as_array()
+                .expect("copied files")
+                .iter()
+                .any(|path| path == "issues/COE-1.md")
         );
     }
 
@@ -3582,7 +3752,7 @@ mod tests {
 
     #[test]
     fn remote_admin_tool_requires_admin_token_without_read_fallback() {
-        let error = remote_memory_tool_token("memory.capture", |name| match name {
+        let error = remote_memory_tool_token("memory.export_okf", |name| match name {
             "OPENSYMPHONY_MEMORY_TOKEN" => Some("read-token".to_string()),
             _ => None,
         })

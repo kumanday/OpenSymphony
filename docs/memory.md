@@ -103,6 +103,11 @@ concepts. The scan uses the same markdown-visible text extraction as private
 memory link linting, so fenced code blocks, inline code spans, escaped text, and
 HTML comments do not create public export false positives.
 
+The memory MCP admin surface exposes the same export operation as
+`memory.export_okf` with `visibility` (`public` or `private`) and optional
+`output` arguments. It uses the same repository containment, staging, lint, and
+public redaction checks as the CLI command.
+
 `opensymphony memory import-okf <bundle-root> [--force]` validates an OKF
 directory bundle, copies its Markdown concepts into the configured memory root
 without rewriting frontmatter, and rebuilds the derived DuckDB catalog from the
@@ -121,6 +126,11 @@ Import is not transactional after the preflight succeeds. A filesystem write or
 DuckDB reindex failure can leave already-copied Markdown files in the memory
 root. Fix the underlying failure, inspect the partially copied files, and rerun
 with `--force` only when replacing those files is intentional.
+
+The memory MCP admin surface exposes the same import operation as
+`memory.import_okf` with `bundleRoot` and optional `force` arguments. Prefer the
+CLI or MCP admin tools for normal maintenance; direct file or DuckDB inspection
+is an offline fallback for recovery and diagnostics only.
 
 OKF lint diagnostics are intentionally actionable. Errors cover missing or
 invalid concept frontmatter, missing `type`, malformed reserved files,
@@ -378,10 +388,11 @@ Streamable HTTP JSON-RPC endpoint at `/mcp`. CLI commands call that endpoint
 when `OPENSYMPHONY_MEMORY_ENDPOINT` is set; otherwise they use offline direct
 mode. Read tools are `memory.context`, `memory.search`, `memory.related`,
 `memory.brief`, `memory.docs`, and `memory.status`. Admin tools are
-`memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`, and
-`memory.ingest_code_intel`; these require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or
-`--admin-token` on `opensymphony memory serve`. If an admin token is configured
-without a separate read token, the admin token also protects read tools.
+`memory.capture`, `memory.sync_docs`, `memory.lint`, `memory.reindex`,
+`memory.export_okf`, `memory.import_okf`, and `memory.ingest_code_intel`; these
+require `OPENSYMPHONY_MEMORY_ADMIN_TOKEN` or `--admin-token` on
+`opensymphony memory serve`. If an admin token is configured without a separate
+read token, the admin token also protects read tools.
 `memory.context` builds the agent kickoff bundle. Add `--include-code-intel`
 to include available codebase-analysis artifacts alongside selected memory.
 `opensymphony memory reindex --from-okf [bundle-root]` rebuilds the derived

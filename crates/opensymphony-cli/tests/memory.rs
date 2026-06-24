@@ -143,6 +143,13 @@ fn memory_reindex_from_okf_preserves_query_commands() {
     assert_success(&docs, "docs after OKF reindex");
     assert!(String::from_utf8_lossy(&docs.stdout).contains("Runtime docs from OKF"));
 
+    let sync_docs = run(repo.path(), ["memory", "sync-docs", "--issues", "COE-123"]);
+    assert_success(&sync_docs, "sync-docs after OKF reindex");
+    let synced_docs =
+        fs::read_to_string(repo.path().join("docs/openhands-runtime.md")).expect("synced docs");
+    assert!(synced_docs.contains("OKF catalog rebuild"));
+    assert!(!synced_docs.contains(".opensymphony/memory/issues"));
+
     let help = run(repo.path(), ["memory", "reindex", "--help"]);
     assert_success(&help, "reindex help");
     assert!(
@@ -832,6 +839,8 @@ fn memory_admin_commands_can_use_mcp_endpoint() {
     let server = TinyGraphqlServer::start([
         r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"findingCount":0,"findings":[]}}"#,
         r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"findingCount":0,"findings":[]}}"#,
+        r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"outputPath":"public-okf","visibility":"public","copiedFiles":["issues/COE-123.md"],"skippedPrivateFiles":[],"findingCount":0}}"#,
+        r#"{"jsonrpc":"2.0","id":"opensymphony-cli","result":{"sourcePath":"incoming-okf","targetPath":".opensymphony/memory","copiedFiles":["issues/COE-500.md"],"findingCount":0,"reindex":{"issueCount":1,"warningCount":0,"indexPath":".opensymphony/memory/memory.duckdb","markdownIndexes":[]}}}"#,
     ]);
 
     let output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
@@ -852,13 +861,44 @@ fn memory_admin_commands_can_use_mcp_endpoint() {
         .expect("command should run");
 
     assert_success(&okf_output, "remote okf memory lint");
+    let export_output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args([
+            "memory",
+            "export-okf",
+            "--visibility",
+            "public",
+            "--output",
+            "public-okf",
+        ])
+        .current_dir(repo.path())
+        .env("OPENSYMPHONY_MEMORY_ENDPOINT", &server.base_url)
+        .env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN", "admin-token")
+        .output()
+        .expect("command should run");
+
+    assert_success(&export_output, "remote okf memory export");
+    let import_output = Command::new(env!("CARGO_BIN_EXE_opensymphony"))
+        .args(["memory", "import-okf", "incoming-okf", "--force"])
+        .current_dir(repo.path())
+        .env("OPENSYMPHONY_MEMORY_ENDPOINT", &server.base_url)
+        .env("OPENSYMPHONY_MEMORY_ADMIN_TOKEN", "admin-token")
+        .output()
+        .expect("command should run");
+
+    assert_success(&import_output, "remote okf memory import");
     let requests = server.requests();
-    assert_eq!(requests.len(), 2);
+    assert_eq!(requests.len(), 4);
     assert!(requests[0].contains("\"name\":\"memory.lint\""));
     assert!(requests[0].contains("\"publicDocs\":true"));
     assert!(requests[1].contains("\"name\":\"memory.lint\""));
     assert!(requests[1].contains("\"okf\":true"));
     assert!(requests[1].contains("\"bundleRoot\":\"fixtures/okf-migration\""));
+    assert!(requests[2].contains("\"name\":\"memory.export_okf\""));
+    assert!(requests[2].contains("\"visibility\":\"public\""));
+    assert!(requests[2].contains("\"output\":\"public-okf\""));
+    assert!(requests[3].contains("\"name\":\"memory.import_okf\""));
+    assert!(requests[3].contains("\"bundleRoot\":\"incoming-okf\""));
+    assert!(requests[3].contains("\"force\":true"));
 }
 
 #[test]
