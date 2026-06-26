@@ -10,6 +10,7 @@ This milestone index covers the new rich client, hosted mode, collaborative plan
 - `docs/specs/llm-wiki-graph-view-spec.md`
 - `docs/specs/opensymphony-acp-debugging-spec.md`
 - `docs/specs/desktop-run-detail-operations-spec.md`
+- `docs/specs/tui-dependency-gutter-spec.md`
 
 ## M6: Gateway And Stream Contract
 
@@ -143,6 +144,17 @@ Tasks:
 - OSYM-810 Desktop Run Detail TUI Parity
 - OSYM-811 Lazy Desktop Launcher Command
 - OSYM-812 Desktop Operations Integration Hardening
+
+## M10.7: Project Grouping And Dependency Signals
+
+Goal: Let operators scan active work by Linear project in the TUI and desktop app while keeping dependency signals compact and read-only.
+
+Tasks:
+
+- OSYM-813 Project Metadata For Operator Issue Snapshots
+- OSYM-814 FrankenTUI Project Headers And Dependency Gutter
+- OSYM-815 Desktop Project Grouping And Collapse
+- OSYM-816 Project Grouping Integration Hardening
 
 ## M11: Hosted Alpha
 
