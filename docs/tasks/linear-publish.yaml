@@ -1,48 +1,28 @@
-planningWave: desktop-run-detail-operations
-linearProject: e7b957855cb7
-publishedAt: '2026-06-24T13:58:02.120911+00:00'
+planningWave: project-grouping-dependency-signals
+linearProject: opensymphony-bootstrap-e7b957855cb7
+publishedAt: '2026-06-26T19:57:41.321093+00:00'
 milestones:
-  'M10.6: Desktop Run Detail Operations And Interrupts':
-    milestoneId: ae6b74ce-e01e-4599-b4d7-6fdabbaf06a0
-    name: 'M10.6: Desktop Run Detail Operations And Interrupts'
+  'M10.7: Project Grouping And Dependency Signals':
+    milestoneId: d5d7dbf1-8235-45b5-917b-6794adc940fa
+    name: 'M10.7: Project Grouping And Dependency Signals'
 tasks:
-  OSYM-805:
-    issue: COE-486
-    issueId: 0153eeb7-a122-4ec0-8bb7-50f88f6c6825
-    url: https://linear.app/trilogy-ai-coe/issue/COE-486/harness-interrupt-contract-and-run-diagnostics
-    file: docs/tasks/osym-805-harness-interrupt-contract-and-run-diagnostics.md
-  OSYM-810:
-    issue: COE-487
-    issueId: 76f93fc5-f0e9-4e75-9196-bccc7afa286c
-    url: https://linear.app/trilogy-ai-coe/issue/COE-487/desktop-run-detail-tui-parity
-    file: docs/tasks/osym-810-desktop-run-detail-tui-parity.md
-  OSYM-811:
-    issue: COE-488
-    issueId: 0196d5f6-c192-4c35-b6c7-c014f8487414
-    url: https://linear.app/trilogy-ai-coe/issue/COE-488/lazy-desktop-launcher-command
-    file: docs/tasks/osym-811-lazy-desktop-launcher-command.md
-  OSYM-806:
-    issue: COE-489
-    issueId: e6bc44da-865c-42ca-a3b7-c7f2d5b34dae
-    url: https://linear.app/trilogy-ai-coe/issue/COE-489/openhands-agent-server-interrupt-adapter
-    file: docs/tasks/osym-806-openhands-agent-server-interrupt-adapter.md
-  OSYM-807:
-    issue: COE-490
-    issueId: b4510ab0-353a-4557-954c-5689e2a9ed4a
-    url: https://linear.app/trilogy-ai-coe/issue/COE-490/codex-app-server-turn-interrupt-adapter
-    file: docs/tasks/osym-807-codex-app-server-turn-interrupt-adapter.md
-  OSYM-809:
-    issue: COE-491
-    issueId: ca0dacab-2eef-4ddd-a57e-faad3d71d5ca
-    url: https://linear.app/trilogy-ai-coe/issue/COE-491/desktop-run-detail-action-wiring-and-cleanup
-    file: docs/tasks/osym-809-desktop-run-detail-action-wiring-and-cleanup.md
-  OSYM-808:
-    issue: COE-492
-    issueId: 60fb9eb8-5ef8-44e7-bd92-37bf700cb26e
-    url: https://linear.app/trilogy-ai-coe/issue/COE-492/merging-supersedes-human-review-polling
-    file: docs/tasks/osym-808-merging-supersedes-human-review-polling.md
-  OSYM-812:
-    issue: COE-493
-    issueId: 06c4ea44-a0d2-4cfd-9eed-c2dee12f7311
-    url: https://linear.app/trilogy-ai-coe/issue/COE-493/desktop-operations-integration-hardening
-    file: docs/tasks/osym-812-desktop-operations-integration-hardening.md
+  OSYM-813:
+    issue: COE-494
+    issueId: 227fbb8a-576a-4f0b-bf02-a566de6ec4bd
+    url: https://linear.app/trilogy-ai-coe/issue/COE-494/project-metadata-for-operator-issue-snapshots
+    file: docs/tasks/osym-813-project-dependency-snapshot-fields.md
+  OSYM-814:
+    issue: COE-495
+    issueId: 777157b3-40ea-41fa-b406-4cdcf31574ca
+    url: https://linear.app/trilogy-ai-coe/issue/COE-495/frankentui-project-headers-and-dependency-gutter
+    file: docs/tasks/osym-814-frankentui-project-headers-and-dependency-gutter.md
+  OSYM-815:
+    issue: COE-496
+    issueId: f31c60a1-dcfd-46d0-a549-9b17b2bb46df
+    url: https://linear.app/trilogy-ai-coe/issue/COE-496/desktop-project-grouping-and-collapse
+    file: docs/tasks/osym-815-desktop-project-grouping-and-collapse.md
+  OSYM-816:
+    issue: COE-497
+    issueId: c98de26a-d915-450e-adc3-edfc9af1265b
+    url: https://linear.app/trilogy-ai-coe/issue/COE-497/project-grouping-integration-hardening
+    file: docs/tasks/osym-816-project-grouping-integration-hardening.md
