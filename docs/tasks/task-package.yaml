@@ -1,21 +1,13 @@
-planningWave: desktop-run-detail-operations
+planningWave: project-grouping-dependency-signals
 tasksDir: docs/tasks
 milestones:
-  - "M10.6: Desktop Run Detail Operations And Interrupts"
+  - "M10.7: Project Grouping And Dependency Signals"
 tasks:
-  - id: OSYM-805
-    file: docs/tasks/osym-805-harness-interrupt-contract-and-run-diagnostics.md
-  - id: OSYM-806
-    file: docs/tasks/osym-806-openhands-agent-server-interrupt-adapter.md
-  - id: OSYM-807
-    file: docs/tasks/osym-807-codex-app-server-turn-interrupt-adapter.md
-  - id: OSYM-808
-    file: docs/tasks/osym-808-merging-supersedes-human-review-polling.md
-  - id: OSYM-809
-    file: docs/tasks/osym-809-desktop-run-detail-action-wiring-and-cleanup.md
-  - id: OSYM-810
-    file: docs/tasks/osym-810-desktop-run-detail-tui-parity.md
-  - id: OSYM-811
-    file: docs/tasks/osym-811-lazy-desktop-launcher-command.md
-  - id: OSYM-812
-    file: docs/tasks/osym-812-desktop-operations-integration-hardening.md
+  - id: OSYM-813
+    file: docs/tasks/osym-813-project-dependency-snapshot-fields.md
+  - id: OSYM-814
+    file: docs/tasks/osym-814-frankentui-project-headers-and-dependency-gutter.md
+  - id: OSYM-815
+    file: docs/tasks/osym-815-desktop-project-grouping-and-collapse.md
+  - id: OSYM-816
+    file: docs/tasks/osym-816-project-grouping-integration-hardening.md
