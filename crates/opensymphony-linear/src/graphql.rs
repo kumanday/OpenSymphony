@@ -775,7 +775,7 @@ pub(super) struct LinearProjectNode {
     pub name: String,
     pub slug_id: String,
     #[serde(default)]
-    pub url: String,
+    pub url: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
 }
