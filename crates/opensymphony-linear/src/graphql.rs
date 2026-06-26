@@ -26,6 +26,11 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
         name
         type
       }
+      project {
+        id
+        name
+        slugId
+      }
       parent {
         id
         identifier
@@ -110,6 +115,11 @@ query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: I
         id
         name
         type
+      }
+      project {
+        id
+        name
+        slugId
       }
       parent {
         id
@@ -260,6 +270,11 @@ query IssueByIdentifier($identifier: String!, $relationFirst: Int!, $labelFirst:
       id
       name
       type
+    }
+    project {
+      id
+      name
+      slugId
     }
     parent {
       id
@@ -759,7 +774,9 @@ pub(super) struct LinearProjectNode {
     pub id: String,
     pub name: String,
     pub slug_id: String,
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub content: Option<String>,
 }
 
@@ -790,6 +807,8 @@ pub(super) struct LinearIssueNode {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub state: LinearWorkflowState,
+    #[serde(default)]
+    pub project: Option<LinearProjectNode>,
     #[serde(default)]
     pub parent: Option<LinearParentNode>,
     #[serde(default)]

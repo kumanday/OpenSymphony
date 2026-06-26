@@ -2408,6 +2408,9 @@ async fn get_task_graph(
                 state: issue.state.clone(),
                 state_category,
                 priority: issue.priority,
+                project_id: issue.project_id.clone(),
+                project_slug: issue.project_slug.clone(),
+                project_name: issue.project_name.clone(),
                 parent_id,
                 children,
                 blocked_by: issue
@@ -4031,6 +4034,10 @@ exit 2
             } else {
                 String::new()
             },
+            project_id: None,
+            project_slug: None,
+            project_name: None,
+            workspace_label: flags.workspace.then(|| "workspace".to_string()),
             retry_count: 0,
             claimed_at: None,
             started_at: None,

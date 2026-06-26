@@ -62,6 +62,9 @@ mod tests {
             branch_name: None,
             url: None,
             labels: Vec::new(),
+            project_id: None,
+            project_slug: None,
+            project_name: None,
             parent_id: None,
             blocked_by: Vec::new(),
             sub_issues: vec![IssueRef {

@@ -41,6 +41,12 @@ async fn candidate_issues_normalize_fixture_payloads() {
     assert_eq!(first.priority, Some(1));
     assert_eq!(first.state, "In Progress");
     assert_eq!(first.labels, vec!["backend", "urgent"]);
+    assert_eq!(first.project_id.as_deref(), Some("proj-open"));
+    assert_eq!(
+        first.project_slug.as_deref(),
+        Some("opensymphony-bootstrap")
+    );
+    assert_eq!(first.project_name.as_deref(), Some("OpenSymphony"));
     assert_eq!(first.parent_id, None);
     assert!(first.sub_issues.is_empty());
     assert_eq!(first.blocked_by.len(), 1);
@@ -55,6 +61,9 @@ async fn candidate_issues_normalize_fixture_payloads() {
     );
     assert_eq!(second.priority, None);
     assert_eq!(second.state, "In Progress");
+    assert_eq!(second.project_id, None);
+    assert_eq!(second.project_slug, None);
+    assert_eq!(second.project_name, None);
     assert_eq!(second.parent_id.as_deref(), Some("issue-254"));
     assert_eq!(second.sub_issues.len(), 2);
     assert_eq!(second.sub_issues[0].identifier, "COE-266");
@@ -115,6 +124,12 @@ async fn candidate_issues_normalize_fixture_payloads() {
             .as_str()
             .expect("query should be a string")
             .contains("parent {")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("project {")
     );
 }
 
