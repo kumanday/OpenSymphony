@@ -3,7 +3,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot};
+use crate::opensymphony_domain::{TrackerIssue, TrackerIssueStateSnapshot, TrackerIssueSummary};
 use reqwest::{
     Client, StatusCode,
     header::{ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER},
@@ -18,26 +18,28 @@ use super::graphql::{
     COMMENT_CREATE_MUTATION, CommentCreateData, CommentCreateInput, CommentCreateVariables,
     GraphqlEnvelope, GraphqlErrorPayload, ISSUE_ARCHIVE_MUTATION, ISSUE_BY_IDENTIFIER_QUERY,
     ISSUE_COMMENTS_QUERY, ISSUE_CREATE_MUTATION, ISSUE_INVERSE_RELATIONS_QUERY, ISSUE_LABELS_QUERY,
-    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_UPDATE_MUTATION,
-    ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables, IssueByIdentifierData,
-    IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables, IssueCreateData,
-    IssueCreateInput, IssueCreateVariables, IssueInverseRelationsData,
+    ISSUE_RELATION_CREATE_MUTATION, ISSUE_STATES_BY_IDS_QUERY, ISSUE_SUMMARIES_BY_STATE_QUERY,
+    ISSUE_UPDATE_MUTATION, ISSUES_BY_STATE_QUERY, IssueArchiveData, IssueArchiveVariables,
+    IssueByIdentifierData, IssueByIdentifierVariables, IssueCommentsData, IssueCommentsVariables,
+    IssueCreateData, IssueCreateInput, IssueCreateVariables, IssueInverseRelationsData,
     IssueInverseRelationsVariables, IssueLabelsData, IssueLabelsVariables, IssueRelationCreateData,
     IssueRelationCreateInput, IssueRelationCreateVariables, IssueRelationMutationNode,
-    IssueStatesByIdsData, IssueStatesByIdsVariables, IssueUpdateData, IssueUpdateInput,
-    IssueUpdateVariables, IssuesByStateData, IssuesByStateVariables, LinearIssueNode,
-    LinearLabelConnection, LinearProjectNode, LinearRelationConnection, PROJECT_BY_SLUG_QUERY,
-    PROJECT_ISSUES_QUERY, PROJECT_MILESTONE_CREATE_MUTATION, PROJECT_MILESTONE_UPDATE_MUTATION,
+    IssueStatesByIdsData, IssueStatesByIdsVariables, IssueSummariesByStateData,
+    IssueSummariesByStateVariables, IssueUpdateData, IssueUpdateInput, IssueUpdateVariables,
+    IssuesByStateData, IssuesByStateVariables, LinearIssueNode, LinearLabelConnection,
+    LinearProjectNode, LinearRelationConnection, PROJECT_BY_SLUG_QUERY, PROJECT_ISSUES_QUERY,
+    PROJECT_MILESTONE_CREATE_MUTATION, PROJECT_MILESTONE_UPDATE_MUTATION,
     PROJECT_UPDATE_CONTENT_MUTATION, ProjectBySlugData, ProjectBySlugVariables, ProjectIssuesData,
     ProjectIssuesVariables, ProjectMilestoneCreateData, ProjectMilestoneCreateInput,
     ProjectMilestoneCreateVariables, ProjectMilestoneUpdateData, ProjectMilestoneUpdateInput,
     ProjectMilestoneUpdateVariables, ProjectUpdateContentData, ProjectUpdateContentVariables,
 };
-use super::normalize::{normalize_issue, normalize_issue_state};
+use super::normalize::{normalize_issue, normalize_issue_state, normalize_issue_summary};
 
 const DEFAULT_BASE_URL: &str = "https://api.linear.app/graphql";
 const DEFAULT_PAGE_SIZE: usize = 50;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_INLINE_RATE_LIMIT_RETRY: Duration = Duration::from_secs(30);
 const MAX_INITIAL_RELATION_PAGE_SIZE: usize = 10;
 const MAX_INITIAL_LABEL_PAGE_SIZE: usize = 10;
 
@@ -282,6 +284,11 @@ impl LinearClient {
         self.issues_by_state_names(&self.config.active_states).await
     }
 
+    pub async fn candidate_issue_summaries(&self) -> Result<Vec<TrackerIssueSummary>, LinearError> {
+        self.issue_summaries_by_state_names(&self.config.active_states)
+            .await
+    }
+
     pub async fn terminal_issues(&self) -> Result<Vec<TrackerIssue>, LinearError> {
         self.issues_by_state_names_with_archived(&self.config.terminal_states, true)
             .await
@@ -470,6 +477,52 @@ impl LinearClient {
             after = Some(page_info.end_cursor.ok_or_else(|| {
                 LinearError::InvalidResponse(
                     "Linear issues page indicated a next page without an end cursor".to_string(),
+                )
+            })?);
+        }
+    }
+
+    async fn issue_summaries_by_state_names<S>(
+        &self,
+        state_names: &[S],
+    ) -> Result<Vec<TrackerIssueSummary>, LinearError>
+    where
+        S: AsRef<str>,
+    {
+        let state_names = normalize_strings(state_names);
+        if state_names.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut after = None;
+        let mut issues = Vec::new();
+
+        loop {
+            let variables = IssueSummariesByStateVariables {
+                project_slug: self.config.project_slug.clone(),
+                state_names: state_names.clone(),
+                include_archived: false,
+                first: self.config.page_size,
+                after: after.clone(),
+                relation_first: self.config.page_size.min(MAX_INITIAL_RELATION_PAGE_SIZE),
+            };
+            let response: IssueSummariesByStateData = self
+                .execute_graphql(ISSUE_SUMMARIES_BY_STATE_QUERY, json!(variables))
+                .await?;
+
+            let page_info = response.issues.page_info;
+            for node in response.issues.nodes {
+                issues.push(normalize_issue_summary(node)?);
+            }
+
+            if !page_info.has_next_page {
+                return Ok(issues);
+            }
+
+            after = Some(page_info.end_cursor.ok_or_else(|| {
+                LinearError::InvalidResponse(
+                    "Linear issue summaries page indicated a next page without an end cursor"
+                        .to_string(),
                 )
             })?);
         }
@@ -1018,6 +1071,18 @@ impl LinearClient {
 
     fn should_retry(&self, error: &LinearError, attempt: usize) -> bool {
         if attempt >= self.config.retry_policy.max_attempts {
+            return false;
+        }
+
+        let max_inline_rate_limit_retry = std::cmp::min(
+            self.config.retry_policy.max_backoff,
+            MAX_INLINE_RATE_LIMIT_RETRY,
+        );
+        if error.is_rate_limited()
+            && error
+                .retry_after()
+                .is_some_and(|delay| delay > max_inline_rate_limit_retry)
+        {
             return false;
         }
 

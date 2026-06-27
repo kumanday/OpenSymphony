@@ -36,6 +36,29 @@ Current workflow contract:
   the gateway task graph reader is optional and, when unavailable, causes only
   the task graph endpoint to return `503`
 
+Local scheduler polling keeps the 5s worker/snapshot tick, but Linear reads are
+cadenced separately so a busy local workstation does not burn through the shared
+Linear API quota:
+
+- running issue state is refreshed with the lightweight by-ID state query every
+  30s
+- dispatch discovery uses a lightweight active-issue summary query every 60s
+- terminal cleanup reads run at startup and then every 5 minutes
+- full-detail active issue reads run at startup, for selected dispatches, and
+  then hourly
+
+The lightweight dispatch query returns summary-shaped scheduler data only.
+Selected candidates must be reloaded through the project-scoped full-detail
+lookup before workspace creation, prompt construction, or worker launch.
+
+When Linear returns a rate-limit error with retry metadata longer than the
+client's short retry backoff, the Linear client returns the error immediately
+instead of sleeping inside the request. The inline retry boundary is the lower
+of `tracker.retry_policy.max_backoff` and 30 seconds; longer reset windows are
+handed to the scheduler. The scheduler records one shared Linear cooldown,
+skips Linear reads until it expires, and continues draining worker updates and
+publishing snapshots.
+
 Important normalization rules:
 
 - `blocked_by` is derived from `inverseRelations` entries whose relation type is
