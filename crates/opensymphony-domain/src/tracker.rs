@@ -16,6 +16,12 @@ pub struct TrackerIssue {
     pub state_kind: TrackerIssueStateKind,
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<TrackerIssueRef>,

@@ -223,6 +223,9 @@ mod tests {
             state: state.to_string(),
             state_kind: tracker_issue_state_kind_from_name(state),
             labels: vec!["backend".to_string()],
+            project_id: None,
+            project_slug: None,
+            project_name: None,
             parent_id: None,
             parent: None,
             project_milestone: Some(crate::opensymphony_domain::TrackerProjectMilestone {
