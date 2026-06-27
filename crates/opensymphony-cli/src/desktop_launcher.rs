@@ -272,9 +272,10 @@ fn home_dir_from_vars(
                 .map(PathBuf::from)
         })
         .or_else(|| {
-            let drive = homedrive.filter(|value| !value.is_empty())?;
+            let mut drive = homedrive.filter(|value| !value.is_empty())?;
             let path = homepath.filter(|value| !value.is_empty())?;
-            Some(PathBuf::from(drive).join(path))
+            drive.push(path);
+            Some(PathBuf::from(drive))
         })
 }
 
@@ -503,7 +504,7 @@ mod tests {
         )
         .expect("home should resolve");
 
-        assert_eq!(home, PathBuf::from("C:").join("\\Users\\alice"));
+        assert_eq!(home, PathBuf::from("C:\\Users\\alice"));
     }
 
     #[test]
