@@ -85,6 +85,7 @@ fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
     }
 
     Command::new(&verified.executable)
+        .current_dir(&cache_dir)
         .spawn()
         .map_err(|source| DesktopLauncherError::Launch {
             path: verified.executable.clone(),
@@ -102,7 +103,6 @@ fn ensure_verified_bundle(
         Ok(bundle) => Ok(bundle),
         Err(first_error) => {
             if let Some(bundle_dir) = bundle_dir {
-                validate_cache_dir(cache_root, cache_dir)?;
                 if cache_dir.exists() {
                     validate_cache_dir(cache_root, cache_dir)?;
                     fs::remove_dir_all(cache_dir).map_err(|source| {
