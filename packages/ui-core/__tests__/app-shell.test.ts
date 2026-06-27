@@ -693,7 +693,11 @@ describe("OpenSymphonyApp mount", () => {
   it("sorts desktop project groups and keeps mixed-metadata rows grouped", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    const alpha = projectSetTaskGraph.nodes.find((node) => node.node_id === "desktop-alpha")!;
+    const alpha = {
+      ...projectSetTaskGraph.nodes.find((node) => node.node_id === "desktop-alpha")!,
+      project_name: undefined,
+    };
+    const alphaNamed = projectSetTaskGraph.nodes.find((node) => node.node_id === "completed-prereq")!;
     const beta = projectSetTaskGraph.nodes.find((node) => node.node_id === "hosted-auth")!;
     const unassigned = {
       ...taskGraph.nodes.find((node) => node.node_id === "follow-up")!,
@@ -709,7 +713,7 @@ describe("OpenSymphonyApp mount", () => {
     };
     const mixedTaskGraph: TaskGraphSnapshot = {
       ...taskGraph,
-      nodes: [beta, unassigned, alpha, nameOnly],
+      nodes: [beta, unassigned, alpha, nameOnly, alphaNamed],
       root_ids: [],
     };
     const handle = renderOpenSymphonyApp({
@@ -728,6 +732,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(headings[1]).toContain("beta-project | Beta Project");
     expect(headings[2]).toContain("Name Only Project");
     expect(headings[3]).toContain("unassigned");
+    expect(headings[3]).not.toContain("unassigned | Unassigned");
     expect(root.querySelector("[data-project-group='Name Only Project'] [data-node-id='app-shell']")).not.toBeNull();
     expect(root.querySelector("[data-project-group='__opensymphony_unassigned__'] [data-node-id='follow-up']")).not.toBeNull();
 

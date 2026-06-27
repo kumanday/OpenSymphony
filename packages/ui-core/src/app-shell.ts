@@ -3315,6 +3315,9 @@ function buildProjectGroups(
       blockedCount: 0,
     };
     group.nodes.push(node);
+    if (!group.name && key !== unassignedProjectGroupKey && node.project_name) {
+      group.name = node.project_name;
+    }
     if (node.kind !== "milestone") {
       group.issueCount += 1;
       if (node.state_category === "in_progress") group.runningCount += 1;
@@ -3342,7 +3345,7 @@ function renderProjectGroupHeader(group: ProjectGroup, collapsed: boolean): stri
     `todo=${group.todoCount}`,
     `blocked=${group.blockedCount}`,
   ].join(" ");
-  const title = group.name && group.name !== group.slug
+  const title = group.name && group.name.toLowerCase() !== group.slug.toLowerCase()
     ? `${group.slug} | ${group.name}`
     : group.slug;
   return `
