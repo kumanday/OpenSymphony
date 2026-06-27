@@ -46,7 +46,7 @@ pub use time::{DurationMs, TimestampMs};
 pub use timeline::{TimelineBuilder, belongs_to_run, payload_run_id};
 pub use tracker::{
     TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
-    TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerProjectMilestone,
+    TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerProjectMilestone,
 };
 
 #[cfg(test)]

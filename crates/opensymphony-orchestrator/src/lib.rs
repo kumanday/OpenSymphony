@@ -11,8 +11,8 @@ pub use crate::opensymphony_domain::{
     RunAttempt, RuntimeStreamState, RuntimeUsageTotals, SchedulerState, SchedulerStatus,
     StallMetadata, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueBlocker,
     TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    TrackerStateId, TransitionAction, WorkerAttemptSnapshot, WorkerId, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
+    TrackerIssueSummary, TrackerStateId, TransitionAction, WorkerAttemptSnapshot, WorkerId,
+    WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
 };
 pub use scheduler::{
     HarnessRouteDecision, RecoveryRecord, Scheduler, SchedulerConfig, SchedulerError,
