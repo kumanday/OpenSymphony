@@ -65,6 +65,12 @@ package, not standalone published crates.
 - docs sync planning and public/private link checks
 - archive eligibility checks
 
+### `opensymphony_code_intel`
+
+- built-in Tree-sitter parser provider skeletons
+- trusted language detection, source identity, spans, symbols, and AST diagnostics
+- query packs and fixtures for built-in grammars
+
 ### `opensymphony_openhands`
 
 - local server supervision

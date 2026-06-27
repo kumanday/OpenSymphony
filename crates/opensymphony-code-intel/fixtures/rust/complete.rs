@@ -26,6 +26,7 @@ impl Widget {
 }
 
 #[test]
+/// Keeps test attribute detection working when comments sit next to attributes.
 fn exercises_widget() {
     let widget = Widget::new(1);
     assert_eq!(widget.run(), 1);

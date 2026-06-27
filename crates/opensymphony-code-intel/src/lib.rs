@@ -230,6 +230,7 @@ fn symbol_kind(node: Node<'_>, source: &[u8]) -> Option<SymbolKind> {
         "trait_item" => Some(SymbolKind::Trait),
         "function_item" if has_test_attribute(node, source) => Some(SymbolKind::Test),
         "function_item" if has_ancestor(node, "impl_item") => Some(SymbolKind::Method),
+        "function_signature_item" if has_ancestor(node, "trait_item") => Some(SymbolKind::Method),
         "function_item" => Some(SymbolKind::Function),
         _ => None,
     }
@@ -248,6 +249,10 @@ fn has_ancestor(mut node: Node<'_>, kind: &str) -> bool {
 fn has_test_attribute(node: Node<'_>, source: &[u8]) -> bool {
     let mut sibling = node.prev_named_sibling();
     while let Some(candidate) = sibling {
+        if is_comment(candidate) {
+            sibling = candidate.prev_named_sibling();
+            continue;
+        }
         if candidate.kind() != "attribute_item" {
             return false;
         }
@@ -261,6 +266,10 @@ fn has_test_attribute(node: Node<'_>, source: &[u8]) -> bool {
         sibling = candidate.prev_named_sibling();
     }
     false
+}
+
+fn is_comment(node: Node<'_>) -> bool {
+    matches!(node.kind(), "line_comment" | "block_comment")
 }
 
 fn collect_diagnostics(root: Node<'_>) -> Vec<AstDiagnostic> {
@@ -348,9 +357,11 @@ mod tests {
         assert!(symbols.contains(&(SymbolKind::Struct, "Widget", "5:1-7:2")));
         assert!(symbols.contains(&(SymbolKind::Enum, "Mode", "9:1-12:2")));
         assert!(symbols.contains(&(SymbolKind::Trait, "Runnable", "14:1-16:2")));
+        assert!(symbols.contains(&(SymbolKind::Method, "run", "15:5-15:19")));
+        assert!(symbols.contains(&(SymbolKind::Method, "new", "19:5-21:6")));
         assert!(symbols.contains(&(SymbolKind::Method, "run", "23:5-25:6")));
         assert!(
-            symbols.contains(&(SymbolKind::Test, "exercises_widget", "29:1-32:2")),
+            symbols.contains(&(SymbolKind::Test, "exercises_widget", "30:1-33:2")),
             "{symbols:?}"
         );
     }
