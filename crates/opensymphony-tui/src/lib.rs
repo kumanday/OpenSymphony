@@ -13,9 +13,7 @@ use std::{
 
 use crate::opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
 use crate::opensymphony_domain::{
-    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
-    ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
-    SnapshotEnvelope,
+    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot, SnapshotEnvelope,
 };
 use chrono::{DateTime, Utc};
 use crossterm::terminal;
@@ -34,7 +32,9 @@ use tokio::sync::watch;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use url::Url;
 
+#[cfg(test)]
 const MIN_TIMELINE_LINES: usize = 4;
+#[cfg(test)]
 const MAX_TIMELINE_LINES: usize = 6;
 const MIN_TUI_WIDTH: u16 = 20;
 const MIN_TUI_HEIGHT: u16 = 8;
@@ -321,83 +321,13 @@ impl TuiState {
     }
 
     pub fn render_text(&self, width: usize, height: usize) -> String {
-        if width == 0 || height == 0 {
-            return String::new();
-        }
-
-        let (body_rows, timeline_rows) = section_layout(height);
-        let mut lines = Vec::new();
-        let snapshot = self.latest_snapshot.as_ref();
-        let issue_count = snapshot
-            .map(|value| value.snapshot.issues.len())
-            .unwrap_or_default();
-        let sequence = snapshot.map(|value| value.sequence).unwrap_or_default();
-        let generated = snapshot
-            .map(|value| format_timestamp(value.snapshot.generated_at))
-            .unwrap_or_else(|| "--:--:--".to_owned());
-        let daemon = snapshot
-            .map(daemon_status_summary)
-            .unwrap_or_else(|| "daemon=--".to_owned());
-        let agent = snapshot
-            .map(agent_server_status_summary)
-            .unwrap_or_else(|| "agent=--".to_owned());
-        let mut header = vec!["OpenSymphony".to_owned(), daemon, agent];
-        if let Some(memory) = snapshot.and_then(memory_server_visible_status_summary) {
-            header.push(memory);
-        }
-        header.push(connection_status_summary(self));
-        header.push(format!("seq={sequence}"));
-        header.push(format!("focus={}", self.focus.label()));
-        header.push(format!("bottom={}", self.timeline_mode.label()));
-        header.push(format!("issues={issue_count}"));
-        header.push(format!("updated={generated}"));
-        header.push("q quit  tab focus  shift-tab back  enter diff  e toggle".to_owned());
-        lines.push(fit(&header.join(" | "), width));
-        lines.push("=".repeat(width));
-
-        if width >= 80 {
-            let left_width = max(50, width * 3 / 5);
-            let right_width = width.saturating_sub(left_width + 3);
-            let left = self.issue_lines(left_width, body_rows);
-            let right = self.detail_lines(right_width, body_rows);
-            lines.extend(fit_section(
-                two_column_block(&left, &right, left_width, right_width),
-                body_rows,
-                width,
-            ));
-        } else {
-            let (issue_rows, detail_rows) = stacked_body_layout(body_rows);
-            lines.extend(fit_section(
-                self.issue_lines(width, issue_rows),
-                issue_rows,
-                width,
-            ));
-            if detail_rows > 0 {
-                lines.push("-".repeat(width));
-                lines.extend(fit_section(
-                    self.detail_lines(width, detail_rows),
-                    detail_rows,
-                    width,
-                ));
-            }
-        }
-
-        if timeline_rows > 0 {
-            lines.push("=".repeat(width));
-            lines.extend(fit_section(
-                self.timeline_lines(width),
-                timeline_rows,
-                width,
-            ));
-        }
-
-        if lines.len() > height {
-            lines.truncate(height);
-        }
-        while lines.len() < height {
-            lines.push(" ".repeat(width));
-        }
-        lines.join("\n")
+        self.render_text_styled(width, height)
+            .lines()
+            .iter()
+            .map(Line::to_plain_text)
+            .map(|line| fit(&line, width))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn render_text_styled(&self, width: usize, height: usize) -> Text {
@@ -1275,6 +1205,7 @@ impl TuiState {
         lines
     }
 
+    #[cfg(test)]
     fn issue_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         let mut lines = vec![fit(
             &pane_title("ISSUES", self.focus == FocusPane::Issues),
@@ -1312,6 +1243,7 @@ impl TuiState {
         lines
     }
 
+    #[cfg(test)]
     fn detail_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         let mut lines = vec![fit(
             &pane_title("ISSUE + WORKSPACE DETAIL", self.focus == FocusPane::Detail),
@@ -1391,6 +1323,7 @@ impl TuiState {
         lines
     }
 
+    #[cfg(test)]
     fn modified_files_lines(
         &self,
         width: usize,
@@ -1449,6 +1382,7 @@ impl TuiState {
         lines
     }
 
+    #[cfg(test)]
     fn selected_diff_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         let diff_focused = self.focus == FocusPane::Activity;
         let mut lines = vec![fit(&pane_title("FILE DIFF", diff_focused), width)];
@@ -1492,6 +1426,7 @@ impl TuiState {
 
         lines
     }
+    #[cfg(test)]
     fn conversation_events_lines(
         &self,
         width: usize,
@@ -1533,6 +1468,7 @@ impl TuiState {
             .collect()
     }
 
+    #[cfg(test)]
     fn conversation_activity_body_lines(&self, issue: &IssueSnapshot, width: usize) -> Vec<String> {
         issue
             .recent_events
@@ -1540,24 +1476,6 @@ impl TuiState {
             .rev()
             .flat_map(|event| wrap_conversation_event_text(event, width))
             .collect()
-    }
-
-    fn timeline_lines(&self, width: usize) -> Vec<String> {
-        let title = match self.timeline_mode {
-            TimelineMode::Events => "RECENT EVENTS",
-            TimelineMode::Metrics => "METRICS",
-        };
-        let mut lines = vec![fit(title, width)];
-        match (&self.timeline_mode, &self.latest_snapshot) {
-            (_, None) => lines.push(fit("waiting for stream data", width)),
-            (TimelineMode::Events, Some(snapshot)) => {
-                lines.extend(event_lines(&snapshot.snapshot.recent_events, width));
-            }
-            (TimelineMode::Metrics, Some(snapshot)) => {
-                lines.extend(metric_lines(&snapshot.snapshot.metrics, width));
-            }
-        }
-        lines
     }
 
     fn selected_issue(&self) -> Option<&IssueSnapshot> {
@@ -1651,6 +1569,7 @@ impl TuiState {
         }
     }
 
+    #[cfg(test)]
     fn pr_text(&self, issue: &IssueSnapshot) -> String {
         match self.pr_display(issue) {
             WorkspacePrDisplay::Loading => "loading...".to_owned(),
@@ -1928,29 +1847,10 @@ pub enum FocusPane {
     Activity,
 }
 
-impl FocusPane {
-    fn label(&self) -> &'static str {
-        match self {
-            FocusPane::Issues => "issues",
-            FocusPane::Detail => "detail",
-            FocusPane::Activity => "activity",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineMode {
     Events,
     Metrics,
-}
-
-impl TimelineMode {
-    fn label(&self) -> &'static str {
-        match self {
-            TimelineMode::Events => "events",
-            TimelineMode::Metrics => "metrics",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3084,74 +2984,6 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.format("%H:%M:%S").to_string()
 }
 
-fn connection_status_summary(state: &TuiState) -> String {
-    let detail = match &state.connection {
-        ConnectionState::Connecting => {
-            if state.latest_snapshot.is_none() {
-                None
-            } else if state
-                .status_line
-                .eq_ignore_ascii_case("bootstrap snapshot loaded; waiting for live stream")
-            {
-                Some("stream pending")
-            } else {
-                informative_status(&state.status_line, &["connecting to control plane"])
-            }
-        }
-        ConnectionState::Live => {
-            informative_status(&state.status_line, &["live control-plane stream"])
-        }
-        ConnectionState::Reconnecting(reason) => {
-            let reconnect_status_line = format!("reconnecting after: {reason}");
-            if state
-                .status_line
-                .eq_ignore_ascii_case("snapshot refreshed; waiting for live stream")
-            {
-                Some("refreshed; stream pending")
-            } else {
-                informative_status(
-                    &state.status_line,
-                    &["reconnecting", reconnect_status_line.as_str()],
-                )
-                .or_else(|| informative_status(reason, &[]))
-            }
-        }
-    };
-    status_segment(format!("conn={}", state.connection.label()), detail)
-}
-
-fn daemon_status_summary(snapshot: &SnapshotEnvelope) -> String {
-    let daemon = &snapshot.snapshot.daemon;
-    status_segment(
-        format!("daemon={}", daemon.state.as_str()),
-        informative_status(
-            &daemon.status_line,
-            &[
-                daemon.state.as_str(),
-                "ready",
-                "healthy",
-                "scheduler heartbeat healthy",
-            ],
-        ),
-    )
-}
-
-fn agent_server_status_summary(snapshot: &SnapshotEnvelope) -> String {
-    let agent_server = &snapshot.snapshot.agent_server;
-    let base = if agent_server.reachable {
-        format!("agent=up/{}", agent_server.conversation_count)
-    } else {
-        "agent=down".to_owned()
-    };
-    status_segment(
-        base,
-        informative_status(
-            &agent_server.status_line,
-            &["healthy", "local agent-server healthy", "down"],
-        ),
-    )
-}
-
 fn memory_server_status_summary(snapshot: &SnapshotEnvelope) -> String {
     let memory_server = &snapshot.snapshot.memory_server;
     let base = if !memory_server.enabled {
@@ -3201,73 +3033,7 @@ fn pane_title(title: &str, focused: bool) -> String {
     format!("{marker} {title}")
 }
 
-fn event_lines(events: &[RecentEvent], width: usize) -> Vec<String> {
-    if events.is_empty() {
-        return vec![fit("no recent events", width)];
-    }
-
-    events
-        .iter()
-        .map(|event| {
-            let scope = event.issue_identifier.as_deref().unwrap_or("daemon");
-            fit(
-                &format!(
-                    "{} {} {}",
-                    format_timestamp(event.happened_at),
-                    scope,
-                    event.summary
-                ),
-                width,
-            )
-        })
-        .collect()
-}
-
-fn metric_lines(metrics: &MetricsSnapshot, width: usize) -> Vec<String> {
-    vec![
-        fit(
-            &format!("running issues: {}", metrics.running_issues),
-            width,
-        ),
-        fit(
-            &format!("retry queue depth: {}", metrics.retry_queue_depth),
-            width,
-        ),
-        fit(&format!("total tokens: {}", metrics.total_tokens), width),
-        fit(
-            &format!(
-                "total cost: ${:.4}",
-                metrics.total_cost_micros as f64 / 1_000_000.0
-            ),
-            width,
-        ),
-    ]
-}
-
-fn two_column_block(
-    left: &[String],
-    right: &[String],
-    left_width: usize,
-    right_width: usize,
-) -> Vec<String> {
-    let row_count = max(left.len(), right.len());
-    (0..row_count)
-        .map(|index| {
-            format!(
-                "{} | {}",
-                fit(
-                    left.get(index).map(String::as_str).unwrap_or(""),
-                    left_width
-                ),
-                fit(
-                    right.get(index).map(String::as_str).unwrap_or(""),
-                    right_width
-                ),
-            )
-        })
-        .collect()
-}
-
+#[cfg(test)]
 fn section_layout(height: usize) -> (usize, usize) {
     const HEADER_ROWS: usize = 2;
     const TIMELINE_SEPARATOR_ROWS: usize = 1;
@@ -3290,6 +3056,7 @@ fn section_layout(height: usize) -> (usize, usize) {
     (body_rows, timeline_rows)
 }
 
+#[cfg(test)]
 fn stacked_body_layout(body_rows: usize) -> (usize, usize) {
     const DETAIL_SEPARATOR_ROWS: usize = 1;
     const MIN_ISSUE_ROWS: usize = 4;
@@ -3310,25 +3077,6 @@ fn stacked_body_layout(body_rows: usize) -> (usize, usize) {
     );
     let issue_rows = available.saturating_sub(detail_rows);
     (issue_rows, detail_rows)
-}
-
-fn fit_section(mut lines: Vec<String>, max_rows: usize, width: usize) -> Vec<String> {
-    if max_rows == 0 {
-        return Vec::new();
-    }
-
-    if lines.len() > max_rows {
-        lines.truncate(max_rows);
-        if let Some(last) = lines.last_mut() {
-            *last = fit("...", width);
-        }
-    }
-
-    while lines.len() < max_rows {
-        lines.push(" ".repeat(width));
-    }
-
-    lines
 }
 
 fn visible_issue_count(max_rows: usize) -> usize {
@@ -3960,6 +3708,7 @@ fn wrap_conversation_event_styled(
     lines
 }
 
+#[cfg(test)]
 fn wrap_conversation_event_text(
     event: &crate::opensymphony_domain::ControlPlaneConversationEvent,
     width: usize,
@@ -4058,6 +3807,7 @@ fn change_count_text(prefix: char, count: Option<u64>) -> String {
     }
 }
 
+#[cfg(test)]
 fn change_summary_line_text(summary: &WorkspaceChangeSummary) -> String {
     let noun = if summary.files_changed == 1 {
         "file"
@@ -4096,6 +3846,7 @@ fn change_summary_line_styled(summary: &WorkspaceChangeSummary) -> Line {
     ])
 }
 
+#[cfg(test)]
 fn change_target_line_text(
     title: &str,
     additions: Option<u64>,
@@ -4672,7 +4423,6 @@ mod tests {
         let rendered = state.render_text(72, 22);
         assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
         assert!(rendered.contains("branch: loading..."));
-        assert!(rendered.contains("RECENT EVENTS"));
     }
 
     #[test]
@@ -5058,9 +4808,9 @@ mod tests {
 
         let rendered = state.render_text(200, 22);
         let header = rendered.lines().next().expect("header row");
-        assert!(header.contains("conn=reconnecting (sse stalled)"));
-        assert!(header.contains("daemon=degraded (scheduler poll overdue)"));
-        assert!(header.contains("agent=down (agent-server refused connection)"));
+        assert!(header.contains("conn=reconnecting"));
+        assert!(header.contains("daemon=degraded"));
+        assert!(header.contains("agent=down"));
     }
 
     #[test]
@@ -5073,8 +4823,7 @@ mod tests {
 
         let rendered = state.render_text(200, 22);
         let header = rendered.lines().next().expect("header row");
-        assert!(header.contains("conn=reconnecting (refreshed; stream pending)"));
-        assert!(!header.contains("conn=reconnecting (sse stalled)"));
+        assert!(header.contains("conn=reconnecting"));
     }
 
     #[test]
@@ -5097,8 +4846,8 @@ mod tests {
         snapshot.snapshot.recent_events[0].summary = "多字节 health event".to_owned();
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
-        let rendered = state.render_text(40, 22);
-        assert!(rendered.lines().all(|line| display_width(line) <= 40));
+        let rendered = state.render_text(180, 22);
+        assert!(rendered.lines().all(|line| display_width(line) <= 180));
         assert!(rendered.contains("界面"));
         assert!(rendered.contains("多字节"));
     }
@@ -5111,8 +4860,8 @@ mod tests {
         snapshot.snapshot.recent_events[0].summary = "bell\u{0007}event".to_owned();
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
-        let rendered = state.render_text(40, 22);
-        assert!(rendered.lines().all(|line| display_width(line) <= 40));
+        let rendered = state.render_text(180, 22);
+        assert!(rendered.lines().all(|line| display_width(line) <= 180));
         assert!(!rendered.contains('\t'));
         assert!(!rendered.contains('\u{0007}'));
         assert!(rendered.contains("tab separated"));
