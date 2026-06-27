@@ -1,5 +1,8 @@
 use std::{
-    env, fs, io,
+    env, fs,
+    fs::File,
+    io,
+    io::Read,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
 };
@@ -62,10 +65,11 @@ pub async fn run_command(args: AppArgs) -> ExitCode {
 }
 
 fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
-    let cache_root = args.cache_root.unwrap_or(default_cache_root()?);
+    let cache_root = normalize_cache_root(args.cache_root.unwrap_or(default_cache_root()?))?;
     let cache_dir = cache_root.join(desktop_version());
+    validate_cache_dir(&cache_root, &cache_dir)?;
     let bundle_dir = args.bundle_dir.as_deref();
-    let verified = ensure_verified_bundle(&cache_dir, bundle_dir)?;
+    let verified = ensure_verified_bundle(&cache_root, &cache_dir, bundle_dir)?;
 
     if args.dry_run {
         println!(
@@ -85,6 +89,7 @@ fn run_app(args: AppArgs) -> Result<PathBuf, DesktopLauncherError> {
 }
 
 fn ensure_verified_bundle(
+    cache_root: &Path,
     cache_dir: &Path,
     bundle_dir: Option<&Path>,
 ) -> Result<VerifiedBundle, DesktopLauncherError> {
@@ -92,6 +97,7 @@ fn ensure_verified_bundle(
         Ok(bundle) => Ok(bundle),
         Err(first_error) => {
             if let Some(bundle_dir) = bundle_dir {
+                validate_cache_dir(cache_root, cache_dir)?;
                 if cache_dir.exists() {
                     fs::remove_dir_all(cache_dir).map_err(|source| {
                         DesktopLauncherError::Repair {
@@ -135,7 +141,7 @@ fn verify_bundle(cache_dir: &Path) -> Result<VerifiedBundle, DesktopLauncherErro
         });
     }
 
-    let executable = cache_dir.join(&manifest.executable);
+    let executable = resolve_manifest_executable(cache_dir, &manifest.executable)?;
     let actual = file_sha256(&executable)?;
     if actual != manifest.sha256 {
         return Err(DesktopLauncherError::BadChecksum {
@@ -173,15 +179,17 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<(), DesktopLauncherError> {
             path: to.to_path_buf(),
             source,
         })?;
+        let source_path = entry.path();
         let target = to.join(entry.file_name());
-        if entry
-            .file_type()
-            .map_err(|source| DesktopLauncherError::Repair {
-                path: entry.path(),
+        let metadata =
+            fs::symlink_metadata(&source_path).map_err(|source| DesktopLauncherError::Repair {
+                path: source_path.clone(),
                 source,
-            })?
-            .is_dir()
-        {
+            })?;
+        if metadata.file_type().is_symlink() {
+            return Err(DesktopLauncherError::UnsupportedBundleEntry { path: source_path });
+        }
+        if metadata.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
         } else {
             fs::copy(entry.path(), &target).map_err(|source| DesktopLauncherError::Repair {
@@ -194,11 +202,25 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<(), DesktopLauncherError> {
 }
 
 fn file_sha256(path: &Path) -> Result<String, DesktopLauncherError> {
-    let bytes = fs::read(path).map_err(|source| DesktopLauncherError::MissingExecutable {
+    let mut file = File::open(path).map_err(|source| DesktopLauncherError::MissingExecutable {
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let read =
+            file.read(&mut buffer)
+                .map_err(|source| DesktopLauncherError::MissingExecutable {
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn default_cache_root() -> Result<PathBuf, DesktopLauncherError> {
@@ -206,6 +228,72 @@ fn default_cache_root() -> Result<PathBuf, DesktopLauncherError> {
         .map(PathBuf::from)
         .ok_or(DesktopLauncherError::MissingHome)?;
     Ok(home.join(DEFAULT_CACHE_RELATIVE))
+}
+
+fn normalize_cache_root(path: PathBuf) -> Result<PathBuf, DesktopLauncherError> {
+    let absolute = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()
+            .map_err(DesktopLauncherError::CurrentDir)?
+            .join(path)
+    };
+    if absolute.parent().is_none() {
+        return Err(DesktopLauncherError::DangerousCacheRoot { path: absolute });
+    }
+    Ok(absolute)
+}
+
+fn validate_cache_dir(cache_root: &Path, cache_dir: &Path) -> Result<(), DesktopLauncherError> {
+    if cache_root.parent().is_none()
+        || !cache_dir.starts_with(cache_root)
+        || cache_dir.file_name().and_then(|name| name.to_str()) != Some(desktop_version())
+    {
+        return Err(DesktopLauncherError::DangerousCacheRoot {
+            path: cache_root.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn resolve_manifest_executable(
+    cache_dir: &Path,
+    executable: &Path,
+) -> Result<PathBuf, DesktopLauncherError> {
+    if executable.is_absolute()
+        || executable.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(DesktopLauncherError::UnsafeExecutablePath {
+            path: executable.to_path_buf(),
+        });
+    }
+
+    let candidate = cache_dir.join(executable);
+    let canonical_cache =
+        cache_dir
+            .canonicalize()
+            .map_err(|source| DesktopLauncherError::Repair {
+                path: cache_dir.to_path_buf(),
+                source,
+            })?;
+    let canonical_executable =
+        candidate
+            .canonicalize()
+            .map_err(|source| DesktopLauncherError::MissingExecutable {
+                path: candidate.clone(),
+                source,
+            })?;
+    if !canonical_executable.starts_with(&canonical_cache) {
+        return Err(DesktopLauncherError::UnsafeExecutablePath { path: candidate });
+    }
+    Ok(canonical_executable)
 }
 
 fn desktop_version() -> &'static str {
@@ -226,6 +314,12 @@ enum DesktopLauncherError {
         "could not find HOME; set OPENSYMPHONY_DESKTOP_CACHE_ROOT to choose a desktop cache directory"
     )]
     MissingHome,
+    #[error("failed to determine current directory for desktop cache root: {0}")]
+    CurrentDir(io::Error),
+    #[error(
+        "refusing unsafe desktop cache root {path}\nRepair: choose a non-root cache directory under ~/.opensymphony/desktop or another app-owned directory."
+    )]
+    DangerousCacheRoot { path: PathBuf },
     #[error(
         "desktop bundle is not installed at {path}: {source}\nRepair: rerun with --bundle-dir <path> or set OPENSYMPHONY_DESKTOP_BUNDLE_DIR to a verified OpenSymphony desktop bundle."
     )]
@@ -241,6 +335,14 @@ enum DesktopLauncherError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error(
+        "desktop manifest executable path {path} is unsafe\nRepair: use a relative executable path that stays inside the cached bundle."
+    )]
+    UnsafeExecutablePath { path: PathBuf },
+    #[error(
+        "desktop bundle entry {path} is a symlink, which local bundle materialization does not yet preserve\nRepair: pass an expanded bundle without symlinks or use a future signed/downloaded bundle format."
+    )]
+    UnsupportedBundleEntry { path: PathBuf },
     #[error(
         "cached desktop bundle has version {actual}, expected {expected} in {path}\nRepair: remove the cached version directory and rerun with a matching bundle."
     )]
@@ -338,10 +440,16 @@ mod tests {
         .expect("write manifest");
 
         let cache_dir = cache.path().join(desktop_version());
-        let verified = ensure_verified_bundle(&cache_dir, Some(source.path()))
+        let verified = ensure_verified_bundle(cache.path(), &cache_dir, Some(source.path()))
             .expect("bundle should materialize and verify");
 
-        assert_eq!(verified.executable, cache_dir.join("OpenSymphony"));
+        assert_eq!(
+            verified.executable,
+            cache_dir
+                .join("OpenSymphony")
+                .canonicalize()
+                .expect("canonical fake executable")
+        );
     }
 
     #[test]
@@ -365,5 +473,45 @@ mod tests {
         let error = verify_bundle(cache.path()).expect_err("checksum should fail");
 
         assert!(error.to_string().contains("Repair:"));
+    }
+
+    #[test]
+    fn manifest_executable_must_stay_inside_cache() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let executable = cache.path().join("OpenSymphony");
+        fs::write(&executable, b"fake desktop").expect("write fake executable");
+        let manifest = DesktopBundleManifest {
+            version: desktop_version().to_string(),
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+            executable: PathBuf::from("../OpenSymphony"),
+            sha256: file_sha256(&executable).expect("hash fake executable"),
+        };
+        fs::write(
+            cache.path().join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let error = verify_bundle(cache.path()).expect_err("traversal should fail");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::UnsafeExecutablePath { .. }
+        ));
+    }
+
+    #[test]
+    fn cache_delete_requires_versioned_child_of_cache_root() {
+        let cache_root = TempDir::new().expect("cache root");
+        let wrong_dir = TempDir::new().expect("wrong dir");
+
+        let error = validate_cache_dir(cache_root.path(), wrong_dir.path())
+            .expect_err("wrong cache dir should fail");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::DangerousCacheRoot { .. }
+        ));
     }
 }
