@@ -46,6 +46,7 @@ pub struct ParsedDocumentSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One-based Tree-sitter points; columns are byte offsets and end positions are exclusive.
 pub struct SourceSpan {
     pub start_byte: usize,
     pub end_byte: usize,
