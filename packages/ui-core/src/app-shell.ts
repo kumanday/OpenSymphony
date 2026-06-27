@@ -3229,7 +3229,7 @@ function renderTaskGraphVisualization(
   getOverlay: (node: TaskGraphNode) => ReturnType<typeof buildRuntimeOverlay>,
   signals: Map<string, DependencySignal>,
   collapsedProjectGroups = new Set<string>(),
-  groupByProject = true,
+  groupByProject = false,
 ): string {
   if (nodes.length === 0) {
     return `<div class="os-empty">No tasks match the current filters</div>`;
@@ -3241,7 +3241,7 @@ function renderTaskGraphVisualization(
       const body = collapsed
         ? ""
         : renderTaskGraphVisualization(group.nodes, selectedNodeId, getOverlay, signals, collapsedProjectGroups, false);
-      const title = group.name && group.name !== group.slug ? `${group.slug} ${group.name}` : group.slug;
+      const title = projectGroupTitle(group);
       return `
         <section class="os-project-group" id="${escapeAttr(projectGroupDomId(group.key))}" role="region" aria-label="${escapeAttr(title)}" data-project-group="${escapeAttr(group.key)}">
           ${renderProjectGroupHeader(group, collapsed)}
@@ -3345,9 +3345,7 @@ function renderProjectGroupHeader(group: ProjectGroup, collapsed: boolean): stri
     `todo=${group.todoCount}`,
     `blocked=${group.blockedCount}`,
   ].join(" ");
-  const title = group.name && group.name.toLowerCase() !== group.slug.toLowerCase()
-    ? `${group.slug} | ${group.name}`
-    : group.slug;
+  const title = projectGroupTitle(group);
   return `
     <button type="button" class="os-project-group-header" data-project-group-toggle="${escapeAttr(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" aria-controls="${escapeAttr(controlId)}">
       <span aria-hidden="true">${collapsed ? "+" : "-"}</span>
@@ -3359,6 +3357,12 @@ function renderProjectGroupHeader(group: ProjectGroup, collapsed: boolean): stri
 
 function projectGroupDomId(key: string): string {
   return `os-project-group-${encodeURIComponent(key)}`;
+}
+
+function projectGroupTitle(group: ProjectGroup): string {
+  return group.name && group.name.toLowerCase() !== group.slug.toLowerCase()
+    ? `${group.slug} | ${group.name}`
+    : group.slug;
 }
 
 function buildTaskGraphRenderModels(
