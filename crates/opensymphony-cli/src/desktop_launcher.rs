@@ -143,7 +143,7 @@ fn verify_bundle(cache_dir: &Path) -> Result<VerifiedBundle, DesktopLauncherErro
 
     let executable = resolve_manifest_executable(cache_dir, &manifest.executable)?;
     let actual = file_sha256(&executable)?;
-    if actual != manifest.sha256 {
+    if !actual.eq_ignore_ascii_case(&manifest.sha256) {
         return Err(DesktopLauncherError::BadChecksum {
             path: executable,
             expected: manifest.sha256,
@@ -473,6 +473,29 @@ mod tests {
         let error = verify_bundle(cache.path()).expect_err("checksum should fail");
 
         assert!(error.to_string().contains("Repair:"));
+    }
+
+    #[test]
+    fn checksum_accepts_uppercase_manifest_hex() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let executable = cache.path().join("OpenSymphony");
+        fs::write(&executable, b"fake desktop").expect("write fake executable");
+        let manifest = DesktopBundleManifest {
+            version: desktop_version().to_string(),
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+            executable: PathBuf::from("OpenSymphony"),
+            sha256: file_sha256(&executable)
+                .expect("hash fake executable")
+                .to_uppercase(),
+        };
+        fs::write(
+            cache.path().join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        verify_bundle(cache.path()).expect("uppercase checksum should verify");
     }
 
     #[test]
