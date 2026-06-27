@@ -72,6 +72,14 @@ Do not silently invent behavior when the upstream spec or chosen integration con
 - `opensymphony run` is the real local orchestrator entrypoint.
 - `opensymphony daemon` is demo-only and exists for smoke tests or UI-focused development.
 - When documenting, validating, or operating the system, prefer `opensymphony run` unless the task is specifically about the demo control-plane publisher.
+- `opensymphony app` and the visible alias `opensymphony desktop` are the
+  lazy desktop bundle installer/launcher path. They must remain separate from
+  the execution-plane `opensymphony run` entrypoint.
+- The desktop launcher caches verified bundles under
+  `~/.opensymphony/desktop/<version>/` and uses a bundle manifest containing
+  version, platform, architecture, relative executable path, and executable
+  SHA-256 checksum. Local materialization must not add Tauri, npm, or platform
+  desktop build dependencies to the default Cargo install.
 - `opensymphony memory export-okf --visibility public|private [--output DIR]`
   exports a directory OKF bundle. Public export skips private concepts, runs
   public redaction checks through OKF lint, stages output before promotion, and

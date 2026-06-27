@@ -28,6 +28,14 @@ Keep system-linked or downloaded DuckDB as an optimization path:
   do not have the expected system library.
 - Release-sensitive validation still includes the default bundled path.
 
+The CLI also exposes `opensymphony app`, with visible alias
+`opensymphony desktop`, as a lazy desktop launcher. It verifies a cached desktop
+bundle under `~/.opensymphony/desktop/<version>/` and can materialize an early
+local bundle from `--bundle-dir` or `OPENSYMPHONY_DESKTOP_BUNDLE_DIR`. This
+launcher does not make `cargo install opensymphony` compile Tauri, npm, or
+platform desktop dependencies; signed/downloaded desktop bundle distribution is
+still future installer work.
+
 Do not make downloaded prebuilt DuckDB the default `cargo install` path until a
 managed installer or equivalent runtime-library strategy owns native library
 placement, loader configuration, health checks, and rollback.
