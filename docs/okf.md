@@ -11,6 +11,8 @@ last_memory_sync: 2026-06-23T15:32:29.522793+00:00
 
 ## Current model
 
+- COE-460 contributed: PR #148: Add OKF import and export CLI (merge `add8410`)
+- COE-463 contributed: PR #149: Add OKF memory admin MCP parity (merge `f5f4809`)
 - COE-494 contributed: PR #150: Expose project metadata in operator snapshots (merge `67f973a`)
 
 ## Important invariants
@@ -28,10 +30,14 @@ last_memory_sync: 2026-06-23T15:32:29.522793+00:00
 
 ## Recent changes
 
+- COE-460: OKF Export, Import, And Visibility Boundaries
+- COE-463: Docs Sync And MCP Admin Parity For OKF
 - COE-494: Project Metadata For Operator Issue Snapshots
 
 ## Source refs
 
+- COE-460
+- COE-463
 - COE-494
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
