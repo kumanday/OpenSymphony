@@ -3575,7 +3575,8 @@ fn dependency_suffix(deps: &DependencySummary) -> String {
     let mut parts = Vec::new();
     if let Some(blocker) = deps.visible_upstream.first() {
         parts.push(format!("<- {blocker}"));
-    } else if deps.hidden_upstream_count > 0 {
+    }
+    if deps.hidden_upstream_count > 0 {
         parts.push(format!("<- {} hidden", deps.hidden_upstream_count));
     }
 
@@ -4910,6 +4911,23 @@ mod tests {
 
         assert!(rendered.contains("-> COE-256"));
         assert!(rendered.contains("-> 1 hidden"));
+    }
+
+    #[test]
+    fn dependency_suffix_counts_hidden_upstream_with_visible_upstream() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 4);
+        snapshot.snapshot.issues[0].runtime_state = IssueRuntimeState::Running;
+        snapshot.snapshot.issues[2].runtime_state = IssueRuntimeState::Running;
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[1].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned(), "COE-257".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 3).join("\n");
+
+        assert!(rendered.contains("<- COE-255"));
+        assert!(rendered.contains("<- 1 hidden"));
     }
 
     #[test]
