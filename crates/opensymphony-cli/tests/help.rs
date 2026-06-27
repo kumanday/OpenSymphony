@@ -19,6 +19,7 @@ fn top_level_help_describes_commands_and_safety_posture() {
         "Initialize the current target repository with OpenSymphony files",
         "Update the installed CLI and refresh template-managed skills",
         "Install app-managed runtimes and integrations",
+        "Install or launch the cached desktop app bundle",
         "Run the real orchestrator against the current project workflow",
         "Resume an issue conversation for interactive debugging",
         "Capture, query, and sync project memory",
