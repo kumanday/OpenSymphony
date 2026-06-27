@@ -35,3 +35,10 @@ last_memory_sync: 2026-06-21T19:06:47.514408+00:00
 - COE-463
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
+
+## Task Graph Project Groups
+
+When the gateway task graph includes Linear project metadata, the desktop task
+graph groups visible issue rows under compact project headings. Operators can
+collapse a project group for the current session; collapsed state is local to
+the client and does not clear the currently selected run detail.

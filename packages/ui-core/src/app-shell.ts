@@ -197,6 +197,7 @@ interface AppState {
   activeView: "dashboard" | "planning";
   // Task graph editor state
   taskGraphFilter: TaskGraphFilter;
+  collapsedProjectGroups: Set<string>;
   inlineEdit: InlineEditState;
   createDialog: EditorDialogState;
   dependencyEdit: DependencyEditState;
@@ -286,6 +287,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       loading: true,
       activeView: "dashboard",
       taskGraphFilter: { ...defaultTaskGraphFilter },
+      collapsedProjectGroups: new Set(),
       inlineEdit: { ...emptyInlineEdit },
       createDialog: { ...emptyEditorDialog },
       dependencyEdit: { ...emptyDependencyEdit },
@@ -1681,6 +1683,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       this.state.selectedNodeId,
       getOverlay,
       dependencySignals,
+      this.state.collapsedProjectGroups,
     );
 
     const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
@@ -1933,6 +1936,18 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
             this.render();
           }
         }
+      });
+    });
+    this.options.root.querySelectorAll<HTMLElement>("[data-project-group-toggle]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const projectKey = button.dataset.projectGroupToggle;
+        if (!projectKey) return;
+        if (this.state.collapsedProjectGroups.has(projectKey)) {
+          this.state.collapsedProjectGroups.delete(projectKey);
+        } else {
+          this.state.collapsedProjectGroups.add(projectKey);
+        }
+        this.render();
       });
     });
     this.options.root.querySelectorAll<HTMLElement>("[data-open-run]").forEach((button) => {
@@ -3212,9 +3227,26 @@ function renderTaskGraphVisualization(
   selectedNodeId: string | null,
   getOverlay: (node: TaskGraphNode) => ReturnType<typeof buildRuntimeOverlay>,
   signals: Map<string, DependencySignal>,
+  collapsedProjectGroups = new Set<string>(),
+  groupByProject = true,
 ): string {
   if (nodes.length === 0) {
     return `<div class="os-empty">No tasks match the current filters</div>`;
+  }
+  const projectGroups = groupByProject ? buildProjectGroups(nodes, signals) : [];
+  if (projectGroups.length > 0) {
+    return projectGroups.map((group) => {
+      const collapsed = collapsedProjectGroups.has(group.key);
+      const body = collapsed
+        ? ""
+        : renderTaskGraphVisualization(group.nodes, selectedNodeId, getOverlay, signals, collapsedProjectGroups, false);
+      return `
+        <section class="os-project-group" data-project-group="${escapeAttr(group.key)}">
+          ${renderProjectGroupHeader(group, collapsed)}
+          ${body}
+        </section>
+      `;
+    }).join("");
   }
   const models = buildTaskGraphRenderModels(nodes, signals);
   const links = buildTaskGraphLinks(models);
@@ -3244,6 +3276,73 @@ function renderTaskGraphVisualization(
       </svg>
       <div class="os-node-list os-node-graph-list" style="min-height: ${graphHeight}px;">${renderedNodes}</div>
     </div>
+  `;
+}
+
+interface ProjectGroup {
+  key: string;
+  slug: string;
+  name: string;
+  nodes: TaskGraphNode[];
+  issueCount: number;
+  runningCount: number;
+  todoCount: number;
+  blockedCount: number;
+}
+
+function buildProjectGroups(
+  nodes: TaskGraphNode[],
+  signals: Map<string, DependencySignal>,
+): ProjectGroup[] {
+  if (!nodes.some(hasProjectMetadata)) {
+    return [];
+  }
+  const groups = new Map<string, ProjectGroup>();
+  for (const node of nodes) {
+    const key = node.project_slug ?? node.project_id ?? "__unassigned";
+    const group = groups.get(key) ?? {
+      key,
+      slug: node.project_slug ?? node.project_id ?? "unassigned",
+      name: node.project_name ?? (node.project_slug || node.project_id ? "" : "Unassigned"),
+      nodes: [],
+      issueCount: 0,
+      runningCount: 0,
+      todoCount: 0,
+      blockedCount: 0,
+    };
+    group.nodes.push(node);
+    if (node.kind !== "milestone") {
+      group.issueCount += 1;
+      if (node.state_category === "in_progress") group.runningCount += 1;
+      if (node.state_category === "todo") group.todoCount += 1;
+      const signal = signals.get(node.node_id);
+      if (signal && hasUnresolvedUpstream(signal)) group.blockedCount += 1;
+    }
+    groups.set(key, group);
+  }
+  return Array.from(groups.values());
+}
+
+function hasProjectMetadata(node: TaskGraphNode): boolean {
+  return Boolean(node.project_id || node.project_slug || node.project_name);
+}
+
+function renderProjectGroupHeader(group: ProjectGroup, collapsed: boolean): string {
+  const counts = [
+    `issues=${group.issueCount}`,
+    `running=${group.runningCount}`,
+    `todo=${group.todoCount}`,
+    `blocked=${group.blockedCount}`,
+  ].join(" ");
+  const title = group.name && group.name !== group.slug
+    ? `${group.slug} | ${group.name}`
+    : group.slug;
+  return `
+    <button type="button" class="os-project-group-header" data-project-group-toggle="${escapeAttr(group.key)}" aria-expanded="${collapsed ? "false" : "true"}">
+      <span aria-hidden="true">${collapsed ? "+" : "-"}</span>
+      <strong>${escapeHtml(title)}</strong>
+      <em>${escapeHtml(counts)}</em>
+    </button>
   `;
 }
 
@@ -3528,6 +3627,11 @@ function appShellStyles(): string {
     .os-task-graph-link-skip { opacity: 0.78; }
     .os-task-graph-links marker path { fill: #39708f; }
     .os-node-graph-list { position: relative; z-index: 1; min-width: var(--os-graph-width); gap: 8px; }
+    .os-project-group { display: grid; gap: 8px; margin-bottom: 10px; }
+    .os-project-group-header { width: 100%; min-height: 32px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 6px; background: #f8fafc; text-align: left; }
+    .os-project-group-header strong, .os-project-group-header em { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .os-project-group-header strong { color: #17202a; font-size: 12px; }
+    .os-project-group-header em { color: #667788; font-size: 11px; font-style: normal; }
     .os-node-readonly { grid-template-columns: 28px minmax(0, 1fr); align-items: center; min-height: 62px; margin-left: calc(var(--os-lane, 0) * 34px); margin-right: 8px; padding: 8px 10px; border-radius: 8px; font-size: 12px; transition-property: background-color, border-color, box-shadow, transform; transition-duration: 150ms; transition-timing-function: ease-out; }
     .os-node-readonly:active { transform: scale(0.996); }
     .os-node-gutter { width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; color: #39708f; font-size: 11px; font-weight: 800; white-space: pre; background: #e7f1f5; box-shadow: 0 0 0 1px rgba(57, 112, 143, 0.28); }
