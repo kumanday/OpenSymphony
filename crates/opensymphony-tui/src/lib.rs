@@ -768,12 +768,6 @@ impl TuiState {
         match self.selected_issue() {
             Some(issue) => {
                 let id_style = Style::new().fg(CYAN).bold();
-                lines.push(Line::from_spans(vec![
-                    Span::styled(&issue.identifier, id_style),
-                    Span::raw(" "),
-                    Span::raw(&issue.title),
-                ]));
-
                 let deps = dependency_summary(
                     self.latest_snapshot
                         .as_ref()
@@ -781,10 +775,13 @@ impl TuiState {
                         .unwrap_or_default(),
                     issue,
                 );
-                lines.push(Line::from(Span::raw(fit(
-                    &dependency_detail_text(issue, &deps),
-                    width,
-                ))));
+                lines.push(Line::from_spans(vec![
+                    Span::styled(&issue.identifier, id_style),
+                    Span::raw(" "),
+                    Span::raw(&issue.title),
+                    Span::raw(" | "),
+                    Span::raw(dependency_detail_text(issue, &deps)),
+                ]));
 
                 let runtime_style = Style::new().fg(runtime_state_color(&issue.runtime_state));
                 lines.push(Line::from_spans(vec![
@@ -1322,7 +1319,6 @@ impl TuiState {
         )];
         match self.selected_issue() {
             Some(issue) => {
-                lines.push(fit(&format!("{} {}", issue.identifier, issue.title), width));
                 let deps = dependency_summary(
                     self.latest_snapshot
                         .as_ref()
@@ -1330,7 +1326,15 @@ impl TuiState {
                         .unwrap_or_default(),
                     issue,
                 );
-                lines.push(fit(&dependency_detail_text(issue, &deps), width));
+                lines.push(fit(
+                    &format!(
+                        "{} {} | {}",
+                        issue.identifier,
+                        issue.title,
+                        dependency_detail_text(issue, &deps)
+                    ),
+                    width,
+                ));
                 lines.push(fit(
                     &format!(
                         "tracker: {} | runtime: {} | outcome: {}",

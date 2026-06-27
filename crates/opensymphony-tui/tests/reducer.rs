@@ -208,7 +208,7 @@ fn preserves_selected_issue_when_snapshot_reorders() {
     assert_eq!(state.selected_issue, 2);
 
     let rendered = state.render_text(100, 20);
-    assert!(rendered.contains("> COE-256 [running / In Progress]"));
+    assert!(rendered.contains(">    COE-256 [running / In Progress]"));
     assert!(
         rendered.contains("branch:"),
         "rendered output was: {}",
@@ -285,9 +285,9 @@ fn keeps_selected_issue_visible_when_issue_list_is_windowed() {
 
     let rendered = state.render_text(70, 22);
 
-    assert!(rendered.contains("> COE-264 [running / In Progress]"));
+    assert!(rendered.contains(">    COE-264 [running / In Progress]"));
     assert!(rendered.contains("branch: loading..."));
-    assert!(!rendered.contains("> COE-255 [running / In Progress]"));
+    assert!(!rendered.contains(">    COE-255 [running / In Progress]"));
 }
 
 #[test]
@@ -350,7 +350,7 @@ fn keeps_selected_issue_visible_in_long_issue_lists() {
 
     let rendered = state.render_text(100, 22);
 
-    assert!(rendered.contains("> COE-263 [running / In Progress]"));
+    assert!(rendered.contains(">    COE-263 [running / In Progress]"));
     assert!(rendered.contains("branch: loading..."));
 }
 
