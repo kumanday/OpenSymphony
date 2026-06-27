@@ -3164,38 +3164,40 @@ fn has_project_label(issue: &IssueSnapshot) -> bool {
             .is_some_and(|value| !value.is_empty())
 }
 
+fn project_key_value(issue: &IssueSnapshot) -> &str {
+    issue
+        .project_id
+        .as_deref()
+        .or(issue.project_slug.as_deref())
+        .or(issue.project_name.as_deref())
+        .unwrap_or("unknown-project")
+}
+
 fn project_key(issue: &IssueSnapshot) -> String {
-    issue.project_id.clone().unwrap_or_else(|| {
-        issue.project_slug.clone().unwrap_or_else(|| {
-            issue
-                .project_name
-                .clone()
-                .unwrap_or_else(|| "unknown-project".to_owned())
-        })
-    })
+    project_key_value(issue).to_owned()
 }
 
 fn project_header(all_issues: &[IssueSnapshot], issue: &IssueSnapshot) -> String {
-    let key = project_key(issue);
-    let project_issue_count = all_issues
+    let key = project_key_value(issue);
+    let mut project_issue_count = 0;
+    let mut running_count = 0;
+    let mut todo_count = 0;
+    for candidate in all_issues
         .iter()
-        .filter(|candidate| project_key(candidate) == key)
-        .count();
-    let running_count = all_issues
-        .iter()
-        .filter(|candidate| {
-            project_key(candidate) == key
-                && matches!(
-                    candidate.runtime_state,
-                    ControlPlaneIssueRuntimeState::Running
-                )
-        })
-        .count();
-    let todo_count = all_issues
-        .iter()
-        .filter(|candidate| project_key(candidate) == key && is_todo_issue(candidate))
-        .count();
-    let mut parts = vec![key.clone()];
+        .filter(|candidate| project_key_value(candidate) == key)
+    {
+        project_issue_count += 1;
+        if matches!(
+            candidate.runtime_state,
+            ControlPlaneIssueRuntimeState::Running
+        ) {
+            running_count += 1;
+        }
+        if is_todo_issue(candidate) {
+            todo_count += 1;
+        }
+    }
+    let mut parts = vec![key.to_owned()];
 
     if let Some(slug) = issue
         .project_slug
@@ -3298,10 +3300,13 @@ fn is_unfinished_dependency(issue: &IssueSnapshot) -> bool {
     !matches!(
         issue.runtime_state,
         ControlPlaneIssueRuntimeState::Completed | ControlPlaneIssueRuntimeState::Failed
-    ) && !matches!(
-        issue.tracker_state.to_ascii_lowercase().as_str(),
-        "done" | "completed" | "closed" | "canceled" | "cancelled"
-    )
+    ) && !is_terminal_tracker_state(&issue.tracker_state)
+}
+
+fn is_terminal_tracker_state(state: &str) -> bool {
+    ["done", "completed", "closed", "canceled", "cancelled"]
+        .iter()
+        .any(|terminal| state.eq_ignore_ascii_case(terminal))
 }
 
 fn is_todo_issue(issue: &IssueSnapshot) -> bool {
@@ -3425,8 +3430,12 @@ fn dependency_detail_text(issue: &IssueSnapshot, deps: &DependencySummary) -> St
             deps.failed_upstream.join(", ")
         ));
     }
-    if !deps.visible_downstream.is_empty() {
-        parts.push(format!("blocks {}", deps.visible_downstream.join(", ")));
+    if !deps.visible_downstream.is_empty() || deps.hidden_downstream_count > 0 {
+        let mut downstream = deps.visible_downstream.clone();
+        if deps.hidden_downstream_count > 0 {
+            downstream.push(format!("{} hidden", deps.hidden_downstream_count));
+        }
+        parts.push(format!("blocks {}", downstream.join(", ")));
     }
     parts.join(" | ")
 }
@@ -4072,11 +4081,12 @@ impl DaemonStateLabel for crate::opensymphony_domain::ControlPlaneDaemonState {
 mod tests {
     use super::{
         AppMessage, BLUE, BridgeHandle, BridgeMailbox, ConnectionState, ControlPlaneClientError,
-        FocusPane, OperatorApp, RunOutcome, TuiAction, TuiState, WorkspaceChangeState,
-        WorkspaceChangeSummary, WorkspaceDiffLine, WorkspaceDiffLineKind, WorkspaceFileChange,
-        WorkspaceFileDiffState, build_workspace_change_summary, display_width, fit,
-        handle_bridge_error, issue_window, load_workspace_diff, section_layout,
-        stacked_body_layout, two_column_block_styled, visible_issue_count,
+        DependencySummary, FocusPane, OperatorApp, RunOutcome, TuiAction, TuiState,
+        WorkspaceChangeState, WorkspaceChangeSummary, WorkspaceDiffLine, WorkspaceDiffLineKind,
+        WorkspaceFileChange, WorkspaceFileDiffState, build_workspace_change_summary,
+        dependency_detail_text, display_width, fit, handle_bridge_error, issue_window,
+        load_workspace_diff, section_layout, stacked_body_layout, two_column_block_styled,
+        visible_issue_count,
     };
     use crate::opensymphony_domain::{
         ControlPlaneAgentServerStatus as AgentServerStatus, ControlPlaneConversationEvent,
@@ -4714,6 +4724,20 @@ mod tests {
     }
 
     #[test]
+    fn dependency_detail_includes_hidden_downstream_count() {
+        let snapshot = fixture(8, 1);
+        let issue = &snapshot.snapshot.issues[0];
+        let deps = DependencySummary {
+            hidden_downstream_count: 2,
+            ..DependencySummary::default()
+        };
+
+        let detail = dependency_detail_text(issue, &deps);
+
+        assert!(detail.contains("blocks 2 hidden"));
+    }
+
+    #[test]
     fn failed_upstream_is_not_labeled_as_completed_blocker() {
         let mut state = TuiState::default();
         let mut snapshot = fixture(8, 2);
@@ -4846,10 +4870,12 @@ mod tests {
         snapshot.snapshot.recent_events[0].summary = "多字节 health event".to_owned();
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
-        let rendered = state.render_text(180, 22);
-        assert!(rendered.lines().all(|line| display_width(line) <= 180));
-        assert!(rendered.contains("界面"));
-        assert!(rendered.contains("多字节"));
+        let narrow = state.render_text(40, 22);
+        assert!(narrow.lines().all(|line| display_width(line) <= 40));
+        assert!(narrow.contains("界面"));
+
+        let wide = state.render_text(180, 22);
+        assert!(wide.contains("多字节"));
     }
 
     #[test]
@@ -4860,12 +4886,16 @@ mod tests {
         snapshot.snapshot.recent_events[0].summary = "bell\u{0007}event".to_owned();
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
-        let rendered = state.render_text(180, 22);
-        assert!(rendered.lines().all(|line| display_width(line) <= 180));
-        assert!(!rendered.contains('\t'));
-        assert!(!rendered.contains('\u{0007}'));
-        assert!(rendered.contains("tab separated"));
-        assert!(rendered.contains("bell event"));
+        let narrow = state.render_text(40, 22);
+        assert!(narrow.lines().all(|line| display_width(line) <= 40));
+        assert!(!narrow.contains('\t'));
+        assert!(!narrow.contains('\u{0007}'));
+        assert!(narrow.contains("tab separated"));
+
+        let wide = state.render_text(180, 22);
+        assert!(!wide.contains('\t'));
+        assert!(!wide.contains('\u{0007}'));
+        assert!(wide.contains("bell event"));
     }
 
     #[test]
