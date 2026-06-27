@@ -1516,16 +1516,17 @@ impl TuiState {
             issue_budget,
         );
         let visible = &snapshot.snapshot.issues[start..end];
+        let context = IssueListRenderContext::new(&snapshot.snapshot.issues, visible);
         let mut rows = Vec::new();
         let mut seen_projects = HashSet::new();
 
         for (offset, issue) in visible.iter().enumerate() {
             if show_project_headers {
-                let key = project_key(issue);
+                let key = project_key_value(issue);
                 if seen_projects.insert(key) {
                     rows.push(IssueListRow::ProjectHeader(project_header(
-                        &snapshot.snapshot.issues,
                         issue,
+                        context.project_stats_for(issue),
                     )));
                 }
             }
@@ -1533,7 +1534,7 @@ impl TuiState {
             rows.push(IssueListRow::Issue {
                 index: start + offset,
                 issue,
-                dependencies: list_dependency_summary(&snapshot.snapshot.issues, visible, issue),
+                dependencies: context.dependency_summary(issue),
             });
         }
 
@@ -3111,6 +3112,70 @@ enum IssueListRow<'a> {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ProjectHeaderStats {
+    issue_count: usize,
+    running_count: usize,
+    todo_count: usize,
+}
+
+struct IssueListRenderContext<'a> {
+    project_stats: HashMap<&'a str, ProjectHeaderStats>,
+    visible_ids: HashSet<&'a str>,
+    issue_by_id: HashMap<&'a str, &'a IssueSnapshot>,
+    downstream_by_blocker: HashMap<&'a str, Vec<&'a IssueSnapshot>>,
+}
+
+impl<'a> IssueListRenderContext<'a> {
+    fn new(all_issues: &'a [IssueSnapshot], visible_issues: &'a [IssueSnapshot]) -> Self {
+        let mut project_stats = HashMap::<&'a str, ProjectHeaderStats>::new();
+        let mut issue_by_id = HashMap::new();
+        let mut downstream_by_blocker = HashMap::<&'a str, Vec<&'a IssueSnapshot>>::new();
+
+        for issue in all_issues {
+            let stats = project_stats.entry(project_key_value(issue)).or_default();
+            stats.issue_count += 1;
+            if matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Running) {
+                stats.running_count += 1;
+            }
+            if is_todo_issue(issue) {
+                stats.todo_count += 1;
+            }
+
+            issue_by_id.insert(issue.identifier.as_str(), issue);
+            for blocker in &issue.blocked_by {
+                downstream_by_blocker
+                    .entry(blocker.as_str())
+                    .or_default()
+                    .push(issue);
+            }
+        }
+
+        let visible_ids = visible_issues
+            .iter()
+            .map(|issue| issue.identifier.as_str())
+            .collect();
+
+        Self {
+            project_stats,
+            visible_ids,
+            issue_by_id,
+            downstream_by_blocker,
+        }
+    }
+
+    fn project_stats_for(&self, issue: &IssueSnapshot) -> ProjectHeaderStats {
+        self.project_stats
+            .get(project_key_value(issue))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn dependency_summary(&self, issue: &IssueSnapshot) -> DependencySummary {
+        list_dependency_summary(self, issue)
+    }
+}
+
 #[derive(Debug, Default)]
 struct DependencySummary {
     visible_upstream: Vec<String>,
@@ -3173,30 +3238,8 @@ fn project_key_value(issue: &IssueSnapshot) -> &str {
         .unwrap_or("unknown-project")
 }
 
-fn project_key(issue: &IssueSnapshot) -> String {
-    project_key_value(issue).to_owned()
-}
-
-fn project_header(all_issues: &[IssueSnapshot], issue: &IssueSnapshot) -> String {
+fn project_header(issue: &IssueSnapshot, stats: ProjectHeaderStats) -> String {
     let key = project_key_value(issue);
-    let mut project_issue_count = 0;
-    let mut running_count = 0;
-    let mut todo_count = 0;
-    for candidate in all_issues
-        .iter()
-        .filter(|candidate| project_key_value(candidate) == key)
-    {
-        project_issue_count += 1;
-        if matches!(
-            candidate.runtime_state,
-            ControlPlaneIssueRuntimeState::Running
-        ) {
-            running_count += 1;
-        }
-        if is_todo_issue(candidate) {
-            todo_count += 1;
-        }
-    }
     let mut parts = vec![key.to_owned()];
 
     if let Some(slug) = issue
@@ -3227,35 +3270,27 @@ fn project_header(all_issues: &[IssueSnapshot], issue: &IssueSnapshot) -> String
     }
 
     parts.push(format!(
-        "issues={project_issue_count} running={running_count} todo={todo_count}"
+        "issues={} running={} todo={}",
+        stats.issue_count, stats.running_count, stats.todo_count
     ));
     format!("== {} ==", parts.join(" | "))
 }
 
 fn dependency_summary(issues: &[IssueSnapshot], issue: &IssueSnapshot) -> DependencySummary {
-    list_dependency_summary(issues, issues, issue)
+    IssueListRenderContext::new(issues, issues).dependency_summary(issue)
 }
 
 fn list_dependency_summary(
-    all_issues: &[IssueSnapshot],
-    visible_issues: &[IssueSnapshot],
+    context: &IssueListRenderContext<'_>,
     issue: &IssueSnapshot,
 ) -> DependencySummary {
-    let visible_ids = visible_issues
-        .iter()
-        .map(|issue| issue.identifier.as_str())
-        .collect::<HashSet<_>>();
-    let issue_by_id = all_issues
-        .iter()
-        .map(|issue| (issue.identifier.as_str(), issue))
-        .collect::<HashMap<_, _>>();
     let mut summary = DependencySummary::default();
 
     for blocker in &issue.blocked_by {
-        match issue_by_id.get(blocker.as_str()) {
+        match context.issue_by_id.get(blocker.as_str()) {
             Some(blocker_issue)
                 if is_unfinished_dependency(blocker_issue)
-                    && visible_ids.contains(blocker.as_str()) =>
+                    && context.visible_ids.contains(blocker.as_str()) =>
             {
                 summary.visible_upstream.push(blocker.clone());
             }
@@ -3275,14 +3310,10 @@ fn list_dependency_summary(
         }
     }
 
-    for candidate in all_issues {
-        if candidate
-            .blocked_by
-            .iter()
-            .any(|blocker| blocker == &issue.identifier)
-        {
+    if let Some(downstream_issues) = context.downstream_by_blocker.get(issue.identifier.as_str()) {
+        for candidate in downstream_issues {
             if is_unfinished_dependency(candidate)
-                && visible_ids.contains(candidate.identifier.as_str())
+                && context.visible_ids.contains(candidate.identifier.as_str())
             {
                 summary
                     .visible_downstream
@@ -3353,6 +3384,8 @@ fn issue_row_text(
     deps: &DependencySummary,
     width: usize,
 ) -> IssueRowText {
+    const MIN_TITLE_RESERVE: usize = 8;
+
     let suffix = dependency_suffix(deps);
     let fixed = format!(
         "{marker}{} {} [{} / {}] ",
@@ -3364,16 +3397,13 @@ fn issue_row_text(
     let fixed_width = display_width(&fixed);
     let suffix_width = display_width(&suffix);
     let title_width = width.saturating_sub(fixed_width);
-    let title = if title_width > suffix_width + 8 {
+    let suffix_fits = title_width > suffix_width + MIN_TITLE_RESERVE;
+    let title = if suffix_fits {
         fit(&issue.title, title_width - suffix_width)
     } else {
         fit(&issue.title, title_width)
     };
-    let suffix = if title_width > suffix_width + 8 {
-        suffix
-    } else {
-        String::new()
-    };
+    let suffix = if suffix_fits { suffix } else { String::new() };
 
     IssueRowText {
         marker: marker.to_owned(),
