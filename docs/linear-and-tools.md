@@ -229,6 +229,7 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 - COE-277: Implement hierarchy-aware task selection
 - COE-407: Browser Transport And Remote Stream Protocols
 - COE-419: Hosted Auth Placeholders And Web Parity
+- COE-504: Linear Polling And Rate-Limit Recovery
 
 ## Source refs
 
@@ -241,5 +242,6 @@ use the repo-local Linear GraphQL helper assets with `LINEAR_API_KEY` instead.
 - COE-277
 - COE-407
 - COE-419
+- COE-504
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

@@ -345,6 +345,7 @@ Notable removals:
 - COE-476: Codex Production Harness Enablement
 - COE-478: Harden model profile storage and validation follow-ups
 - COE-479: Codex Debug Session Resume
+- COE-504: Linear Polling And Rate-Limit Recovery
 
 ## Source refs
 
@@ -428,5 +429,6 @@ Notable removals:
 - COE-476
 - COE-478
 - COE-479
+- COE-504
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
