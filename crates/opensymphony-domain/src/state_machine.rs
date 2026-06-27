@@ -54,6 +54,7 @@ pub enum TransitionAction {
     Release,
     Reopen,
     RequestInterrupt,
+    UpdateInterrupt,
 }
 
 impl TransitionAction {
@@ -67,6 +68,7 @@ impl TransitionAction {
             Self::Release => "release",
             Self::Reopen => "reopen",
             Self::RequestInterrupt => "request_interrupt",
+            Self::UpdateInterrupt => "update_interrupt",
         }
     }
 }
@@ -569,7 +571,7 @@ impl IssueExecution {
         let Some(interrupt) = &mut self.interrupt else {
             return Err(StateTransitionError::InvalidTransition {
                 from: self.status(),
-                action: TransitionAction::RequestInterrupt,
+                action: TransitionAction::UpdateInterrupt,
             });
         };
         update(interrupt, observed_at);
