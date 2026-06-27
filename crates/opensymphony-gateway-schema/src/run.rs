@@ -50,6 +50,12 @@ pub struct RunDetail {
     /// Local filesystem path (absent in hosted mode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_path: Option<String>,
+    /// Git branch associated with the issue workspace, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+    /// Pull request URL associated with the issue workspace, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
     /// Harness type (e.g. "openhands").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_type: Option<String>,

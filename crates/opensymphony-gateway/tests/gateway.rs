@@ -214,6 +214,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             last_event_at: now,
             conversation_id_suffix: "c0e255".to_owned(),
             workspace_path_suffix: "COE-255".to_owned(),
+            branch_name: Some("feat/coe-255-observability".to_owned()),
             project_id: Some("proj-open".to_owned()),
             project_slug: Some("opensymphony-bootstrap".to_owned()),
             project_name: Some("OpenSymphony".to_owned()),
@@ -299,6 +300,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: String::new(),
                 workspace_path_suffix: String::new(),
+                branch_name: None,
                 project_id: Some("proj-alpha".to_owned()),
                 project_slug: Some("alpha-project".to_owned()),
                 project_name: Some("Alpha Project".to_owned()),
@@ -337,6 +339,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: "c0e301".to_owned(),
                 workspace_path_suffix: "COE-301".to_owned(),
+                branch_name: None,
                 project_id: Some("proj-beta".to_owned()),
                 project_slug: Some("beta-project".to_owned()),
                 project_name: Some("Beta Project".to_owned()),
@@ -426,6 +429,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: "c0e302".to_owned(),
                 workspace_path_suffix: "COE-302".to_owned(),
+                branch_name: None,
                 project_id: None,
                 project_slug: None,
                 project_name: None,
@@ -464,6 +468,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: "c0e303".to_owned(),
                 workspace_path_suffix: "COE-303".to_owned(),
+                branch_name: None,
                 project_id: Some("proj-beta".to_owned()),
                 project_slug: Some("beta-project".to_owned()),
                 project_name: Some("Beta Project".to_owned()),
@@ -502,6 +507,7 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: String::new(),
                 workspace_path_suffix: String::new(),
+                branch_name: None,
                 project_id: Some("proj-alpha".to_owned()),
                 project_slug: Some("alpha-project".to_owned()),
                 project_name: Some("Alpha Project".to_owned()),
@@ -1706,6 +1712,10 @@ async fn gateway_serves_run_detail() {
     assert_eq!(response.turn_count, 3);
     assert_eq!(response.max_turns, 8);
     assert_eq!(response.runtime_seconds, 75);
+    assert_eq!(
+        response.branch_name.as_deref(),
+        Some("feat/coe-255-observability")
+    );
     assert_eq!(
         response.status,
         opensymphony::opensymphony_gateway_schema::run::RunStatus::Running

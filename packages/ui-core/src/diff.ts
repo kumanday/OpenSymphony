@@ -25,7 +25,7 @@ export function renderChangedFileList(
       return `<button class="os-changed-file${selected}" data-path="${escapeAttr(f.path)}" data-testid="changed-file-item" data-kind="${escapeAttr(f.change_kind)}">
         <span class="os-change-kind ${kindClass}">${escapeHtml(f.change_kind)}</span>
         <span class="os-file-path">${escapeHtml(f.path)}</span>
-        <span class="os-file-stats">+${f.lines_added} -${f.lines_removed}</span>
+        <span class="os-file-stats">${renderLineStats(f.lines_added, f.lines_removed)}</span>
       </button>`;
     })
     .join("");
@@ -39,7 +39,7 @@ export function renderFileDiff(diff: FileDiffPage): string {
   }
   const header = `<div class="os-diff-header" data-testid="diff-header">
     <span class="os-diff-path">${escapeHtml(diff.file_path)}</span>
-    <span class="os-diff-stats">+${diff.total_lines_added} -${diff.total_lines_removed}</span>
+    <span class="os-diff-stats">${renderLineStats(diff.total_lines_added, diff.total_lines_removed)}</span>
   </div>`;
   const hunks = diff.hunks
     .map((hunk) => {
@@ -57,4 +57,8 @@ export function renderFileDiff(diff: FileDiffPage): string {
     })
     .join("");
   return `<div class="os-file-diff" data-testid="file-diff" data-file-path="${escapeAttr(diff.file_path)}">${header}${hunks}</div>`;
+}
+
+function renderLineStats(added: number, removed: number): string {
+  return `<span class="os-lines-added">+${added}</span> <span class="os-lines-removed">-${removed}</span>`;
 }

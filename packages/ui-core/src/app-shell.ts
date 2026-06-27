@@ -1645,13 +1645,19 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         ${escapeHtml(event.summary)}
       </li>
     `).join("");
+    const totalTokens = snapshot.metrics.total_input_tokens
+      + snapshot.metrics.total_cache_read_tokens
+      + snapshot.metrics.total_output_tokens;
     return panel(
       "Status",
       `
         <div class="os-metrics">
           <div><strong>${snapshot.metrics.running_issue_count}</strong><span>Running</span></div>
           <div><strong>${snapshot.metrics.retry_queue_depth}</strong><span>Retry Queue</span></div>
-          <div><strong>${formatNumber(snapshot.metrics.total_input_tokens + snapshot.metrics.total_output_tokens)}</strong><span>Tokens</span></div>
+          <div><strong>${formatNumber(snapshot.metrics.total_input_tokens)}</strong><span>Input</span></div>
+          <div><strong>${formatNumber(snapshot.metrics.total_cache_read_tokens)}</strong><span>Cache</span></div>
+          <div><strong>${formatNumber(snapshot.metrics.total_output_tokens)}</strong><span>Output</span></div>
+          <div><strong>${formatNumber(totalTokens)}</strong><span>Total</span></div>
         </div>
         <ol class="os-events">${events || `<li>No recent events</li>`}</ol>
       `,
@@ -1757,30 +1763,39 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     const dependencyDetail = selectedNode
       ? renderDependencyDetail(selectedNode, this.state.taskGraph?.nodes ?? [])
       : "";
-    const validation = this.state.runValidation
+    const validation = hasValidationSummary(this.state.runValidation)
       ? renderValidationSummary(this.state.runValidation)
       : "";
-    const approvals = this.state.runApprovals
+    const approvals = this.state.runApprovals?.length
       ? renderApprovalList(this.state.runApprovals, {
           onDecide: (id, decision, explanation) => {
             void this.submitApprovalDecision(id, decision, explanation);
           },
         })
       : "";
+    const runtime = run.runtime_seconds > 0 || (run.started_at && run.status === "running")
+      ? `${run.runtime_seconds}s`
+      : "unknown";
+    const detailRows = [
+      `<div><span>Phase</span><strong>${escapeHtml(phase)}</strong></div>`,
+      `<div><span>Stream</span><strong>${escapeHtml(stream)}</strong></div>`,
+      `<div><span>Turns</span><strong>${formatNumber(run.turn_count)}</strong></div>`,
+      `<div><span>Runtime</span><strong>${runtime}</strong></div>`,
+      run.branch_name ? `<div><span>Branch</span><strong>${escapeHtml(run.branch_name)}</strong></div>` : "",
+      run.pr_url ? `<div><span>PR</span><strong><a href="${escapeAttr(run.pr_url)}" target="_blank" rel="noreferrer">${escapeHtml(run.pr_url)}</a></strong></div>` : "",
+      `<div><span>Input</span><strong>${formatNumber(run.input_tokens)}</strong></div>`,
+      `<div><span>Cache</span><strong>${formatNumber(run.cache_read_tokens)}</strong></div>`,
+      `<div><span>Output</span><strong>${formatNumber(run.output_tokens)}</strong></div>`,
+      `<div><span>Total</span><strong>${formatNumber(run.input_tokens + run.cache_read_tokens + run.output_tokens)}</strong></div>`,
+      run.diagnostics?.cancel_acknowledged ? `<div><span>Cancel</span><strong class="os-cancel-acknowledged" data-testid="cancel-acknowledged">acknowledged</strong></div>` : "",
+      run.diagnostics?.cancel_failed ? `<div><span>Cancel</span><strong class="os-cancel-failed" data-testid="cancel-failed">failed</strong></div>` : "",
+    ].filter(Boolean).join("");
     const receipt = this.state.lastActionReceipt
       ? renderActionReceipt(this.state.lastActionReceipt)
       : "";
     const audit = this.state.auditTrail.length
       ? `<div class="os-audit-trail" data-testid="audit-trail">${this.state.auditTrail.map(renderAuditTrailEntry).join("")}</div>`
       : "";
-    const turns = run.max_turns > 0
-      ? `${run.turn_count} / ${run.max_turns}`
-      : run.turn_count > 0
-        ? `${run.turn_count}`
-        : "unknown";
-    const runtime = run.runtime_seconds > 0 || (run.started_at && run.status === "running")
-      ? `${run.runtime_seconds}s`
-      : "unknown";
     return panel(
       "Run Detail",
       `
@@ -1797,12 +1812,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         </div>
         ${dependencyDetail}
         <div class="os-run-grid">
-          <div><span>Phase</span><strong>${escapeHtml(phase)}</strong></div>
-          <div><span>Stream</span><strong>${escapeHtml(stream)}</strong></div>
-          <div><span>Turns</span><strong>${turns}</strong></div>
-          <div><span>Runtime</span><strong>${runtime}</strong></div>
-          ${run.diagnostics?.cancel_acknowledged ? `<div><span>Cancel</span><strong class="os-cancel-acknowledged" data-testid="cancel-acknowledged">acknowledged</strong></div>` : ""}
-          ${run.diagnostics?.cancel_failed ? `<div><span>Cancel</span><strong class="os-cancel-failed" data-testid="cancel-failed">failed</strong></div>` : ""}
+          ${detailRows}
         </div>
         ${actionBar}
         ${receipt}
@@ -1810,10 +1820,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
           <h3>Changed Files</h3>
           ${files}
         </div>
-        <div class="os-run-panels">
-          <div class="os-validation-panel">${validation}</div>
-          <div class="os-approval-panel">${approvals}</div>
-        </div>
+        ${validation || approvals ? `<div class="os-run-panels">${validation ? `<div class="os-validation-panel">${validation}</div>` : ""}${approvals ? `<div class="os-approval-panel">${approvals}</div>` : ""}</div>` : ""}
         ${audit}
         <pre>${escapeHtml(run.workspace_path ?? run.workspace_id ?? "workspace path unavailable")}</pre>
       `,
@@ -3101,6 +3108,10 @@ function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US", { notation: "compact" }).format(value);
 }
 
+function hasValidationSummary(summary: RunValidationSummary | null): summary is RunValidationSummary {
+  return Boolean(summary && (summary.commands.length > 0 || summary.evidence.length > 0));
+}
+
 interface DependencySignal {
   gutter: string;
   suffix: string;
@@ -3722,6 +3733,8 @@ function appShellStyles(): string {
     .os-changed-file.os-selected { border-color: #39708f; background: #e7f1f5; }
     .os-file-path { min-width: 0; overflow-wrap: anywhere; }
     .os-file-stats { white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
+    .os-lines-added { color: #1f9d55; }
+    .os-lines-removed { color: #c2410c; }
     .os-change-kind { text-transform: uppercase; font-size: 10px; padding: 2px 5px; border-radius: 4px; }
     .os-change-kind-created { background: #dcfce7; color: #166534; }
     .os-change-kind-modified { background: #e0f2fe; color: #0c4a6e; }
@@ -3870,6 +3883,8 @@ function appShellStyles(): string {
       .os-view-tab-active, .os-plan-tab-active, .os-changed-file.os-selected { background: #18303a; color: #f2f7fb; border-color: #5ca0b8; }
       .os-changed-file .os-file-path { color: #e6edf3; }
       .os-changed-file .os-file-stats { color: #cbd5e1; }
+      .os-lines-added { color: #86efac; }
+      .os-lines-removed { color: #fecaca; }
       .os-file-diff, .os-approval-item, .os-validation-command, .os-validation-evidence-item { background: #111820; border-color: #2a3440; }
       .os-run-section + .os-run-section { border-color: #2a3440; }
       .os-run-section h3 { color: #94a3b3; }

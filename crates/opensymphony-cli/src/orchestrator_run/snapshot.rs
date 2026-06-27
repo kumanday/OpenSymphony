@@ -163,6 +163,7 @@ fn map_issue(
             .as_ref()
             .map(|workspace| suffix_path(&workspace.path))
             .unwrap_or_else(|| "-".to_string()),
+        branch_name: issue.issue.branch_name.clone(),
         project_id: issue.issue.project_id.clone(),
         project_slug: issue.issue.project_slug.clone(),
         project_name: issue.issue.project_name.clone(),

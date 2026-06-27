@@ -81,6 +81,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             last_event_at: now,
             conversation_id_suffix: "c0e405".to_owned(),
             workspace_path_suffix: "COE-405".to_owned(),
+            branch_name: None,
             project_id: None,
             project_slug: None,
             project_name: None,

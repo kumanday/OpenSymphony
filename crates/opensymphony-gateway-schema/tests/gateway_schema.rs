@@ -424,6 +424,8 @@ fn run_detail_roundtrips() {
         runtime_seconds: 120,
         conversation_id: Some("conv-1".into()),
         workspace_path: Some("/tmp/workspaces/COE-390".into()),
+        branch_name: Some("feat/coe-390".into()),
+        pr_url: Some("https://github.com/kumanday/OpenSymphony/pull/42".into()),
         workspace_id: Some("COE-390".into()),
         harness_type: Some("openhands".into()),
         summary: Some("Processing run".into()),
@@ -442,6 +444,11 @@ fn run_detail_roundtrips() {
     assert_eq!(back.status, RunStatus::Running);
     assert_eq!(back.issue_identifier, "COE-390");
     assert_eq!(back.turn_count, 3);
+    assert_eq!(back.branch_name.as_deref(), Some("feat/coe-390"));
+    assert_eq!(
+        back.pr_url.as_deref(),
+        Some("https://github.com/kumanday/OpenSymphony/pull/42")
+    );
 }
 
 #[test]
