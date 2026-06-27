@@ -457,7 +457,34 @@ mod tests {
         assert_eq!(interrupt.status, HarnessInterruptStatus::Failed);
         assert_eq!(
             interrupt.detail.as_deref(),
-            Some("worker reported cancel_failed")
+            Some("adapter refused interrupt")
+        );
+    }
+
+    #[test]
+    fn non_cancel_outcome_does_not_infer_interrupt_terminal_status() {
+        let mut execution = running_execution();
+        must(execution.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        let run = execution.current_run().expect("active run").clone();
+        let outcome = WorkerOutcomeRecord::from_run(
+            &run,
+            WorkerOutcomeKind::Succeeded,
+            ts(70),
+            Some("worker completed before interrupt acknowledgement".to_owned()),
+            None,
+        );
+
+        let execution = must(execution.release(ts(71), ReleaseReason::Completed, Some(outcome)));
+
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Requested)
         );
     }
 

@@ -554,7 +554,12 @@ impl IssueExecution {
             && let Some(interrupt) = &mut self.interrupt
             && interrupt.status == HarnessInterruptStatus::Requested
         {
-            interrupt.fail(outcome.finished_at, "worker reported cancel_failed");
+            let detail = outcome
+                .error
+                .clone()
+                .or_else(|| outcome.summary.clone())
+                .unwrap_or_else(|| "worker reported cancel_failed".to_string());
+            interrupt.fail(outcome.finished_at, detail);
         }
         self.last_worker_outcome = Some(outcome.clone());
         if self.recent_worker_outcomes.len() == MAX_RECENT_WORKER_OUTCOMES {

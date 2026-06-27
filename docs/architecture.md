@@ -245,7 +245,9 @@ adapter-private DTOs.
 Run Detail diagnostics surface the orchestrator-owned cancel state as
 requested, acknowledged, failed, timed out, and reason fields. Terminal cancel
 states are sticky: late acknowledgements, failures, or timeouts do not overwrite
-an already terminal interrupt status.
+an already terminal interrupt status. Non-cancel worker outcomes do not infer a
+harness interrupt acknowledgement or timeout; adapters must still report the
+actual acknowledgement, failure, or timeout path.
 
 ## 8. Migration boundary
 
