@@ -9,6 +9,10 @@ authors = ["OpenSymphony Contributors"]
 edition = "2024"
 rust-version = "1.93"
 
+[[bin]]
+name = "OpenSymphony"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
