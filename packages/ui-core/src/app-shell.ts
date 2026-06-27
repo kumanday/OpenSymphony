@@ -1684,6 +1684,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       getOverlay,
       dependencySignals,
       this.state.collapsedProjectGroups,
+      this.options.mode === "desktop",
     );
 
     const filters = renderTaskGraphFilters(this.state.taskGraphFilter);
@@ -3320,7 +3321,10 @@ function buildProjectGroups(
     }
     groups.set(key, group);
   }
-  return Array.from(groups.values());
+  return Array.from(groups.values()).sort((left, right) =>
+    left.slug.localeCompare(right.slug, undefined, { sensitivity: "base" })
+      || left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
+  );
 }
 
 function hasProjectMetadata(node: TaskGraphNode): boolean {

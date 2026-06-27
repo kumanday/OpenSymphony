@@ -688,6 +688,60 @@ describe("OpenSymphonyApp mount", () => {
     await handle.destroy();
   });
 
+  it("sorts desktop project groups and keeps mixed-metadata rows grouped", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const alpha = projectSetTaskGraph.nodes.find((node) => node.node_id === "desktop-alpha")!;
+    const beta = projectSetTaskGraph.nodes.find((node) => node.node_id === "hosted-auth")!;
+    const unassigned = {
+      ...taskGraph.nodes.find((node) => node.node_id === "follow-up")!,
+      project_id: undefined,
+      project_slug: undefined,
+      project_name: undefined,
+    };
+    const mixedTaskGraph: TaskGraphSnapshot = {
+      ...taskGraph,
+      nodes: [beta, unassigned, alpha],
+      root_ids: [],
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: mixedTaskGraph }),
+    });
+
+    await flushUntil(
+      () => root.querySelectorAll(".os-project-group-header").length === 3,
+    );
+
+    const headings = Array.from(root.querySelectorAll(".os-project-group-header"))
+      .map((heading) => heading.textContent ?? "");
+    expect(headings[0]).toContain("alpha-project | Alpha Project");
+    expect(headings[1]).toContain("beta-project | Beta Project");
+    expect(headings[2]).toContain("unassigned");
+    expect(root.querySelector("[data-project-group='__unassigned'] [data-node-id='follow-up']")).not.toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("does not group web task graph rows when project metadata is present", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport({ taskGraph: projectSetTaskGraph }),
+    });
+
+    await flushUntil(
+      () => root.querySelector("[data-node-id='desktop-alpha']") !== null,
+    );
+
+    expect(root.querySelector(".os-project-group-header")).toBeNull();
+
+    await handle.destroy();
+  });
+
   it("renders a project heading for explicit single-project snapshots", async () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
