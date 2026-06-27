@@ -1567,14 +1567,32 @@ impl TuiState {
         snapshot: &'a SnapshotEnvelope,
         max_rows: usize,
     ) -> Vec<IssueListRow<'a>> {
-        let issue_budget = visible_issue_count(max_rows);
+        let row_budget = visible_issue_count(max_rows);
+        let show_project_headers = snapshot.snapshot.issues.iter().any(has_project_label);
+        let mut issue_budget = row_budget;
+
+        loop {
+            let rows =
+                self.visible_issue_rows_for_budget(snapshot, issue_budget, show_project_headers);
+            if rows.len() <= row_budget || issue_budget <= 1 {
+                return rows;
+            }
+            issue_budget = issue_budget.saturating_sub(rows.len() - row_budget).max(1);
+        }
+    }
+
+    fn visible_issue_rows_for_budget<'a>(
+        &self,
+        snapshot: &'a SnapshotEnvelope,
+        issue_budget: usize,
+        show_project_headers: bool,
+    ) -> Vec<IssueListRow<'a>> {
         let (start, end) = issue_window(
             snapshot.snapshot.issues.len(),
             self.selected_issue,
             issue_budget,
         );
         let visible = &snapshot.snapshot.issues[start..end];
-        let show_project_headers = visible.iter().any(has_project_label);
         let mut rows = Vec::new();
         let mut seen_projects = HashSet::new();
 
@@ -3343,7 +3361,7 @@ struct DependencySummary {
     hidden_upstream_count: usize,
     visible_downstream: Vec<String>,
     hidden_downstream_count: usize,
-    completed_blockers: Vec<String>,
+    completed_upstream: Vec<String>,
 }
 
 struct IssueRowText {
@@ -3492,7 +3510,7 @@ fn list_dependency_summary(
             Some(blocker_issue) if is_unfinished_dependency(blocker_issue) => {
                 summary.hidden_upstream_count += 1;
             }
-            Some(_) => summary.completed_blockers.push(blocker.clone()),
+            Some(_) => summary.completed_upstream.push(blocker.clone()),
             None => summary.hidden_upstream_count += 1,
         }
     }
@@ -3511,10 +3529,6 @@ fn list_dependency_summary(
                     .push(candidate.identifier.clone());
             } else if is_unfinished_dependency(candidate) {
                 summary.hidden_downstream_count += 1;
-            } else {
-                summary
-                    .completed_blockers
-                    .push(candidate.identifier.clone());
             }
         }
     }
@@ -3632,10 +3646,10 @@ fn dependency_detail_text(issue: &IssueSnapshot, deps: &DependencySummary) -> St
         parts.push(format!("repo: {label}"));
     }
     parts.push(format!("deps: {status}"));
-    if !deps.completed_blockers.is_empty() {
+    if !deps.completed_upstream.is_empty() {
         parts.push(format!(
             "completed blockers {}",
-            deps.completed_blockers.join(", ")
+            deps.completed_upstream.join(", ")
         ));
     }
     if !deps.visible_downstream.is_empty() {
@@ -4737,6 +4751,23 @@ mod tests {
     }
 
     #[test]
+    fn project_headers_count_against_issue_pane_row_budget() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 4);
+        for (index, issue) in snapshot.snapshot.issues.iter_mut().enumerate() {
+            issue.project_slug = Some(format!("project-{index}"));
+        }
+        state.selected_issue = 3;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.issue_lines(100, 4);
+        let rendered = lines.join("\n");
+
+        assert!(lines.len() <= 4);
+        assert!(rendered.contains("COE-258"));
+    }
+
+    #[test]
     fn single_visible_project_with_metadata_still_renders_a_header() {
         let mut state = TuiState::default();
         let mut snapshot = fixture(8, 2);
@@ -4805,6 +4836,20 @@ mod tests {
 
         assert!(!rendered.contains("<- COE-255"));
         assert!(detail.contains("completed blockers COE-255"));
+    }
+
+    #[test]
+    fn completed_downstream_is_not_labeled_as_completed_blocker() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Completed;
+        snapshot.snapshot.issues[1].tracker_state = "Done".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let detail = state.detail_lines(120, 8).join("\n");
+
+        assert!(!detail.contains("completed blockers COE-256"));
     }
 
     #[test]
