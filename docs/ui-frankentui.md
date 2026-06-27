@@ -138,6 +138,9 @@ Use pane-based layout so future views can expand without redesign.
 The implemented inline layout budgets rows per pane instead of truncating one giant body block.
 That keeps the bottom timeline visible under long issue lists, preserves the selected issue when snapshot ordering changes, and windows the issue pane around the current selection so narrower split terminals still keep the selected row and detail visible.
 Issue rows are rendered as compact single-line summaries so the default inline view can keep more issues visible before scrolling, while the detail pane still carries the full per-issue metadata.
+When issue snapshots include project metadata, the issue pane renders compact non-selectable
+project headers and a fixed dependency gutter; dependency suffixes are kept width-gated so
+narrow panes drop the suffix before corrupting titles or separators.
 The detail pane now shows a git-backed changed-file summary for the selected workspace, including
 per-file `+/-` counts. In wide layouts the lower-right pane stays on conversation activity until an
 operator expands a changed file, at which point it becomes a diff viewer for that file while the
