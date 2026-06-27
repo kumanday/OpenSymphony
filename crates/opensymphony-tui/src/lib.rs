@@ -4226,6 +4226,7 @@ mod tests {
         prelude::Model,
         text::text::{Line, Span},
     };
+    use serde::Deserialize;
     use std::{
         fs,
         path::Path,
@@ -4244,6 +4245,19 @@ mod tests {
         span::{Attributes, Record},
     };
     use url::Url;
+
+    #[derive(Deserialize)]
+    struct ProjectGroupingFixtureIssue {
+        id: String,
+        title: String,
+        runtime_state: String,
+        tracker_state: String,
+        project_id: Option<String>,
+        project_slug: Option<String>,
+        project_name: Option<String>,
+        workspace_label: Option<String>,
+        blocked_by: Vec<String>,
+    }
 
     struct EventCounter {
         events: Arc<AtomicUsize>,
@@ -4383,6 +4397,33 @@ mod tests {
                 }],
             },
         }
+    }
+
+    fn project_grouping_fixture() -> SnapshotEnvelope {
+        let cases: Vec<ProjectGroupingFixtureIssue> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/project_grouping_cases.json"
+        ))
+        .expect("project grouping fixture should decode");
+        let mut snapshot = fixture(8, cases.len());
+
+        for (issue, case) in snapshot.snapshot.issues.iter_mut().zip(cases) {
+            issue.identifier = case.id;
+            issue.title = case.title;
+            issue.runtime_state = match case.runtime_state.as_str() {
+                "running" => IssueRuntimeState::Running,
+                "completed" => IssueRuntimeState::Completed,
+                "failed" => IssueRuntimeState::Failed,
+                _ => IssueRuntimeState::Idle,
+            };
+            issue.tracker_state = case.tracker_state;
+            issue.project_id = case.project_id;
+            issue.project_slug = case.project_slug;
+            issue.project_name = case.project_name;
+            issue.workspace_label = case.workspace_label;
+            issue.blocked_by = case.blocked_by;
+        }
+
+        snapshot
     }
 
     fn run_git(repo: &Path, args: &[&str]) {
@@ -4922,6 +4963,48 @@ mod tests {
         assert!(rendered.contains(">    COE-255"));
         assert!(!rendered.contains("->"));
         assert!(!rendered.contains("<-"));
+    }
+
+    #[test]
+    fn shared_project_grouping_fixture_covers_tui_group_and_dependency_cases() {
+        let mut state = TuiState::default();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(
+            project_grouping_fixture(),
+        )));
+
+        let rendered = state.issue_lines(140, 12).join("\n");
+        assert!(rendered.contains(
+            "== proj-alpha | alpha-project | Alpha Project | OpenSymphony | issues=2 running=1 todo=1 =="
+        ));
+        assert!(rendered.contains(
+            "== proj-beta | beta-project | Beta Project | OpenSymphony | issues=3 running=0 todo=2 =="
+        ));
+        assert!(
+            rendered.contains("== unknown-project | OpenSymphony | issues=1 running=0 todo=1 ==")
+        );
+        assert!(rendered.contains("+-- COE-700"));
+        assert!(rendered.contains("-> COE-701"));
+        assert!(rendered.contains("|   COE-701"));
+        assert!(rendered.contains("<- COE-700"));
+        assert!(rendered.contains("COE-702"));
+        assert!(rendered.contains("<- 1 hidden"));
+        assert!(
+            !rendered.contains("COE-703 [idle / Todo] Beta completed blocker target <- COE-704")
+        );
+
+        state.selected_issue = state
+            .latest_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .snapshot
+                    .issues
+                    .iter()
+                    .position(|issue| issue.identifier == "COE-703")
+            })
+            .expect("COE-703 fixture issue should exist");
+        let detail = state.detail_lines(140, 8).join("\n");
+        assert!(detail.contains("completed blockers COE-704"));
     }
 
     #[test]

@@ -141,6 +141,11 @@ Issue rows are rendered as compact single-line summaries so the default inline v
 When issue snapshots include project metadata, the issue pane renders compact non-selectable
 project headers and a fixed dependency gutter; dependency suffixes are kept width-gated so
 narrow panes drop the suffix before corrupting titles or separators.
+Snapshots that contain only one visible project still show that header when project-set metadata is
+present. Missing project metadata falls back to an `unknown-project` header only when other visible
+issues carry project metadata. Hidden unfinished blockers are summarized as hidden dependency counts
+in the compact list, while completed blockers stay out of issue rows and appear in the selected
+issue detail pane.
 The detail pane now shows a git-backed changed-file summary for the selected workspace, including
 per-file `+/-` counts. In wide layouts the lower-right pane stays on conversation activity until an
 operator expands a changed file, at which point it becomes a diff viewer for that file while the

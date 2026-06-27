@@ -1,0 +1,68 @@
+[
+  {
+    "id": "COE-700",
+    "title": "Alpha active root",
+    "runtime_state": "running",
+    "tracker_state": "In Progress",
+    "project_id": "proj-alpha",
+    "project_slug": "alpha-project",
+    "project_name": "Alpha Project",
+    "workspace_label": "OpenSymphony",
+    "blocked_by": []
+  },
+  {
+    "id": "COE-701",
+    "title": "Alpha visible blocker target",
+    "runtime_state": "idle",
+    "tracker_state": "Todo",
+    "project_id": "proj-alpha",
+    "project_slug": "alpha-project",
+    "project_name": "Alpha Project",
+    "workspace_label": "OpenSymphony",
+    "blocked_by": ["COE-700"]
+  },
+  {
+    "id": "COE-702",
+    "title": "Beta hidden blocker target",
+    "runtime_state": "idle",
+    "tracker_state": "Todo",
+    "project_id": "proj-beta",
+    "project_slug": "beta-project",
+    "project_name": "Beta Project",
+    "workspace_label": "OpenSymphony",
+    "blocked_by": ["COE-999"]
+  },
+  {
+    "id": "COE-703",
+    "title": "Beta completed blocker target",
+    "runtime_state": "idle",
+    "tracker_state": "Todo",
+    "project_id": "proj-beta",
+    "project_slug": "beta-project",
+    "project_name": "Beta Project",
+    "workspace_label": "OpenSymphony",
+    "blocked_by": ["COE-704"]
+  },
+  {
+    "id": "COE-704",
+    "title": "Beta completed prerequisite",
+    "runtime_state": "completed",
+    "tracker_state": "Done",
+    "project_id": "proj-beta",
+    "project_slug": "beta-project",
+    "project_name": "Beta Project",
+    "workspace_label": "OpenSymphony",
+    "blocked_by": []
+  },
+  {
+    "id": "COE-705",
+    "title": "Missing project fallback",
+    "runtime_state": "idle",
+    "tracker_state": "Todo",
+    "project_id": null,
+    "project_slug": null,
+    "project_name": null,
+    "workspace_label": "OpenSymphony",
+    "blocked_by": []
+  }
+]
