@@ -20,6 +20,8 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         priority: normalize_priority(node.priority)?,
         state: state.name,
         state_kind: state.kind,
+        branch_name: normalize_branch_name(node.branch_name),
+        pr_url: normalize_pr_url(node.attachments.nodes),
         labels: normalize_labels(node.labels.nodes),
         project_id: node.project.as_ref().map(|project| project.id.clone()),
         project_slug: node.project.as_ref().map(|project| project.slug_id.clone()),
@@ -60,6 +62,30 @@ fn normalize_labels(labels: Vec<LinearLabelNode>) -> Vec<String> {
     labels.sort_unstable();
     labels.dedup();
     labels
+}
+
+fn normalize_branch_name(branch_name: Option<String>) -> Option<String> {
+    branch_name.and_then(|branch_name| {
+        let branch_name = branch_name.trim();
+        (!branch_name.is_empty()).then(|| branch_name.to_owned())
+    })
+}
+
+fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> Option<String> {
+    attachments
+        .into_iter()
+        .filter(|attachment| {
+            attachment
+                .source_type
+                .as_deref()
+                .map(|source_type| source_type.eq_ignore_ascii_case("github"))
+                .unwrap_or(true)
+        })
+        .map(|attachment| attachment.url)
+        .find(|url| {
+            let normalized = url.trim().to_ascii_lowercase();
+            normalized.starts_with("https://github.com/") && normalized.contains("/pull/")
+        })
 }
 
 fn normalize_blockers(relations: Vec<LinearRelationNode>) -> Vec<TrackerIssueBlocker> {

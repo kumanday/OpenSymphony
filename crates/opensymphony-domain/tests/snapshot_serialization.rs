@@ -50,6 +50,7 @@ fn fixture() -> SnapshotEnvelope {
                 conversation_id_suffix: "269-live".to_owned(),
                 workspace_path_suffix: "COE-269".to_owned(),
                 branch_name: None,
+                pr_url: None,
                 project_id: Some("proj-open".to_owned()),
                 project_slug: Some("opensymphony-bootstrap".to_owned()),
                 project_name: Some("OpenSymphony".to_owned()),

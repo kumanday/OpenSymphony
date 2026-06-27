@@ -96,6 +96,8 @@ pub struct ControlPlaneIssueSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_slug: Option<String>,

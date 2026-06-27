@@ -3777,6 +3777,7 @@ mod tests {
                 category: IssueStateCategory::Active,
             },
             branch_name: None,
+            pr_url: None,
             url: None,
             labels: vec!["area:memory".to_string()],
             project_id: None,

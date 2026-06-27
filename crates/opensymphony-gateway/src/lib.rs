@@ -2684,7 +2684,7 @@ async fn get_run_detail(
                 .then(|| issue.workspace_path_suffix.clone()),
             workspace_path: None,
             branch_name: issue.branch_name.clone(),
-            pr_url: None,
+            pr_url: issue.pr_url.clone(),
             harness_type: issue.server_base_url.as_ref().map(|_| "openhands".into()),
             summary: None,
             blocker: issue.blocked.then(|| "Blocked by dependency".into()),
@@ -4039,6 +4039,7 @@ exit 2
                 String::new()
             },
             branch_name: None,
+            pr_url: None,
             project_id: None,
             project_slug: None,
             project_name: None,

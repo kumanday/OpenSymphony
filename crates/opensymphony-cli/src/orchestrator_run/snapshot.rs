@@ -164,6 +164,7 @@ fn map_issue(
             .map(|workspace| suffix_path(&workspace.path))
             .unwrap_or_else(|| "-".to_string()),
         branch_name: issue.issue.branch_name.clone(),
+        pr_url: issue.issue.pr_url.clone(),
         project_id: issue.issue.project_id.clone(),
         project_slug: issue.issue.project_slug.clone(),
         project_name: issue.issue.project_name.clone(),
@@ -509,6 +510,7 @@ tracker:
                         category: IssueStateCategory::Active,
                     },
                     branch_name: None,
+                    pr_url: None,
                     url: None,
                     labels: Vec::new(),
                     project_id: Some("proj-open".to_owned()),

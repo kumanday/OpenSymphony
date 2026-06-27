@@ -4329,6 +4329,7 @@ mod tests {
                         conversation_id_suffix: format!("conv-{index}"),
                         workspace_path_suffix: format!("workspace-{index}"),
                         branch_name: None,
+                        pr_url: None,
                         project_id: None,
                         project_slug: None,
                         project_name: None,

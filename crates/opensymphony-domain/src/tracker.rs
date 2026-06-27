@@ -14,6 +14,10 @@ pub struct TrackerIssue {
     pub state: String,
     #[serde(default = "unknown_tracker_state_kind")]
     pub state_kind: TrackerIssueStateKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,

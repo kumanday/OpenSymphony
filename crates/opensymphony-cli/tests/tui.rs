@@ -69,6 +69,7 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             conversation_id_suffix: "conv-0".to_owned(),
             workspace_path_suffix: "workspace-0".to_owned(),
             branch_name: None,
+            pr_url: None,
             project_id: None,
             project_slug: None,
             project_name: None,
