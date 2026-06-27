@@ -298,6 +298,13 @@ fn normalize_cache_root(path: PathBuf) -> Result<PathBuf, DesktopLauncherError> 
 fn validate_cache_dir(cache_root: &Path, cache_dir: &Path) -> Result<(), DesktopLauncherError> {
     reject_parent_components(cache_root)?;
     reject_parent_components(cache_dir)?;
+    if let Ok(metadata) = fs::symlink_metadata(cache_dir)
+        && metadata.file_type().is_symlink()
+    {
+        return Err(DesktopLauncherError::DangerousCacheRoot {
+            path: cache_dir.to_path_buf(),
+        });
+    }
     if cache_root.parent().is_none()
         || !cache_dir.starts_with(cache_root)
         || cache_dir.file_name().and_then(|name| name.to_str()) != Some(desktop_version())
@@ -623,6 +630,29 @@ mod tests {
             error,
             DesktopLauncherError::DangerousCacheRoot { .. }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_delete_rejects_versioned_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let cache_root = TempDir::new().expect("cache root");
+        let outside = TempDir::new().expect("outside target");
+        let cache_dir = cache_root.path().join(desktop_version());
+        symlink(outside.path(), &cache_dir).expect("create versioned cache symlink");
+
+        let error = validate_cache_dir(cache_root.path(), &cache_dir)
+            .expect_err("versioned cache symlink should fail");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::DangerousCacheRoot { .. }
+        ));
+        assert!(
+            outside.path().exists(),
+            "validation must not remove symlink target"
+        );
     }
 
     #[test]
