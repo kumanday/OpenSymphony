@@ -16,8 +16,8 @@ use crate::opensymphony_codex::{
 };
 use crate::opensymphony_domain::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
-    NormalizedIssue, RuntimeStreamState, TimestampMs, TrackerIssue, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceKey,
+    NormalizedIssue, RuntimeStreamState, TimestampMs, TrackerErrorCategory, TrackerIssue,
+    TrackerIssueSummary, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceKey,
 };
 use crate::opensymphony_linear::{LinearClient, LinearConfig, LinearError, WorkpadComment};
 use crate::opensymphony_openhands::{
@@ -541,8 +541,19 @@ impl TrackerBackend for RuntimeTrackerBackend {
         self.client.candidate_issues().await
     }
 
+    async fn candidate_issue_summaries(&mut self) -> Result<Vec<TrackerIssueSummary>, Self::Error> {
+        self.client.candidate_issue_summaries().await
+    }
+
     async fn terminal_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
         self.client.terminal_issues().await
+    }
+
+    async fn issues_by_identifiers(
+        &mut self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, Self::Error> {
+        self.client.project_issues_by_identifiers(identifiers).await
     }
 
     async fn issue_states_by_ids(
@@ -550,6 +561,14 @@ impl TrackerBackend for RuntimeTrackerBackend {
         issue_ids: &[String],
     ) -> Result<Vec<crate::opensymphony_domain::TrackerIssueStateSnapshot>, Self::Error> {
         self.client.issue_states_by_ids(issue_ids).await
+    }
+
+    fn error_category(error: &Self::Error) -> Option<TrackerErrorCategory> {
+        Some(error.category())
+    }
+
+    fn retry_after(error: &Self::Error) -> Option<Duration> {
+        error.retry_after()
     }
 }
 

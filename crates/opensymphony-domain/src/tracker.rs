@@ -34,6 +34,23 @@ pub struct TrackerIssue {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerIssueSummary {
+    pub id: String,
+    pub identifier: String,
+    pub url: String,
+    pub title: String,
+    pub priority: Option<u8>,
+    pub state: String,
+    #[serde(default = "unknown_tracker_state_kind")]
+    pub state_kind: TrackerIssueStateKind,
+    pub blocked_by: Vec<TrackerIssueBlocker>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_issues: Vec<TrackerIssueRef>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 fn unknown_tracker_state_kind() -> TrackerIssueStateKind {
     TrackerIssueStateKind::Unknown("unknown".to_owned())
 }

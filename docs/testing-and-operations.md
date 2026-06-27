@@ -85,8 +85,9 @@ Current implementation:
   `target/duckdb-download` and reused across rebuilds in the same target
   directory.
 - `cargo test` exercises the full root package, including the fake-server contract suite from `tests/fake_server_contract.rs`
-- `cargo test --test linear_client` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
-- `cargo test --test hierarchy_selection --test scheduler` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, and manifest-backed workspace recovery against fake tracker/workspace/worker backends
+- `cargo test --test linear_client` exercises fixture-backed GraphQL normalization, parent/child hierarchy extraction, personal-API-key auth headers, required API-key/project/state configuration validation, issue URL/raw-priority preservation, full label pagination, raw workflow-state type preservation alongside normalized kinds, non-archived candidate polling, lightweight dispatch-summary reads, archived terminal cleanup reads, archived by-ID state refresh, GraphQL 400/429 rate-limit retries including reset-header handling, long rate-limit reset return-without-sleep behavior with the 30s inline cap, retryable 5xx GraphQL error envelopes, project-scoped by-ID state refresh, and tracker error mapping against a local stub server
+- `cargo test --test linear_client live_linear_client_reads_opensymphony_project -- --ignored --nocapture` is a read-only live evidence probe for PRs that need to show the actual Linear HTTP/GraphQL client path against the OpenSymphony project
+- `cargo test --test hierarchy_selection --test scheduler` exercises blocker-aware and hierarchy-aware dispatch filtering, leaf-before-parent ordering, cached per-state capacity limiting, continuation retry, exponential failure backoff, runtime-event-fed stall detection, terminal cleanup/release, active-state reconciliation, Linear cooldown behavior, separated Linear polling cadences, and manifest-backed workspace recovery against fake tracker/workspace/worker backends
 - `cargo test --lib orchestrator_run::backends::tests` covers runtime workspace-manifest recovery, in-flight run detection from `run.json`, and launch-path failure handling in the concrete CLI adapter
 - `tests/doctor.rs` runs the CLI live-probe path against the internal `opensymphony_testkit` module
 - `scripts/smoke_local.sh` runs the static doctor pass
@@ -250,13 +251,14 @@ and login -> Enable device code authorization for Codex before retrying.
 - failure retry backoff
 - continuation retry at fixed delay
 - stall detection
-- active-state refresh
+- lightweight active-state refresh cadence
+- Linear rate-limit cooldown that does not block worker updates
 - terminal cleanup
 - restart recovery from manifests
 
 Current repository implementation:
 
-- `tests/scheduler.rs` covers continuation retry, failure backoff, cached per-state dispatch limits across finish/stall/inactive/terminal/reconciliation transitions, runtime-event-fed stall detection, terminal reconciliation with cleanup, and manifest-backed workspace recovery using fake backends
+- `tests/scheduler.rs` covers continuation retry, failure backoff, cached per-state dispatch limits across finish/stall/inactive/terminal/reconciliation transitions, runtime-event-fed stall detection, terminal reconciliation with cleanup, Linear read cooldown and cadence, lightweight running-state refresh, and manifest-backed workspace recovery using fake backends
 - local restart validation should confirm that `opensymphony run` publishes a recovered snapshot before the first post-restart launch wave, so the TUI issue list repopulates even when reused conversations still take time to attach
 - `crates/opensymphony-cli/src/orchestrator_run/backends.rs` covers immediate launch-failure cleanup and abort-on-drop cleanup for tracked runtime worker tasks in the production CLI adapter
 

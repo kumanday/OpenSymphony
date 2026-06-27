@@ -319,6 +319,14 @@ Operational implications:
 
 - there is no separate local Linear bridge process to start
 - initialized target repos rely on `LINEAR_API_KEY`
+- `opensymphony run` keeps its local worker/snapshot tick every 5s, while
+  Linear reads use cheaper internal cadences: running state every 30s,
+  dispatch discovery every 60s, terminal cleanup every 5 minutes, and full
+  issue details hourly after startup/dispatch
+- if Linear returns a long rate-limit reset, the scheduler pauses all Linear
+  reads behind one shared cooldown but continues processing worker updates; the
+  Linear client only sleeps inline for short rate-limit retry windows up to the
+  lower of `tracker.retry_policy.max_backoff` and 30 seconds
 - the checked-in helper lives at
   `.agents/skills/linear/scripts/linear_graphql.py`
 - checked-in query files under `.agents/skills/linear/queries/` are the
