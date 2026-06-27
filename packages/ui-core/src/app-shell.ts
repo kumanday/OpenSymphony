@@ -3241,8 +3241,9 @@ function renderTaskGraphVisualization(
       const body = collapsed
         ? ""
         : renderTaskGraphVisualization(group.nodes, selectedNodeId, getOverlay, signals, collapsedProjectGroups, false);
+      const title = group.name && group.name !== group.slug ? `${group.slug} ${group.name}` : group.slug;
       return `
-        <section class="os-project-group" data-project-group="${escapeAttr(group.key)}">
+        <section class="os-project-group" id="${escapeAttr(projectGroupDomId(group.key))}" role="region" aria-label="${escapeAttr(title)}" data-project-group="${escapeAttr(group.key)}">
           ${renderProjectGroupHeader(group, collapsed)}
           ${body}
         </section>
@@ -3291,6 +3292,8 @@ interface ProjectGroup {
   blockedCount: number;
 }
 
+const unassignedProjectGroupKey = "__opensymphony_unassigned__";
+
 function buildProjectGroups(
   nodes: TaskGraphNode[],
   signals: Map<string, DependencySignal>,
@@ -3300,11 +3303,11 @@ function buildProjectGroups(
   }
   const groups = new Map<string, ProjectGroup>();
   for (const node of nodes) {
-    const key = node.project_slug ?? node.project_id ?? "__unassigned";
+    const key = node.project_slug ?? node.project_id ?? node.project_name ?? unassignedProjectGroupKey;
     const group = groups.get(key) ?? {
       key,
-      slug: node.project_slug ?? node.project_id ?? "unassigned",
-      name: node.project_name ?? (node.project_slug || node.project_id ? "" : "Unassigned"),
+      slug: node.project_slug ?? node.project_id ?? node.project_name ?? "unassigned",
+      name: node.project_name ?? (key === unassignedProjectGroupKey ? "Unassigned" : ""),
       nodes: [],
       issueCount: 0,
       runningCount: 0,
@@ -3332,6 +3335,7 @@ function hasProjectMetadata(node: TaskGraphNode): boolean {
 }
 
 function renderProjectGroupHeader(group: ProjectGroup, collapsed: boolean): string {
+  const controlId = projectGroupDomId(group.key);
   const counts = [
     `issues=${group.issueCount}`,
     `running=${group.runningCount}`,
@@ -3342,12 +3346,16 @@ function renderProjectGroupHeader(group: ProjectGroup, collapsed: boolean): stri
     ? `${group.slug} | ${group.name}`
     : group.slug;
   return `
-    <button type="button" class="os-project-group-header" data-project-group-toggle="${escapeAttr(group.key)}" aria-expanded="${collapsed ? "false" : "true"}">
+    <button type="button" class="os-project-group-header" data-project-group-toggle="${escapeAttr(group.key)}" aria-expanded="${collapsed ? "false" : "true"}" aria-controls="${escapeAttr(controlId)}">
       <span aria-hidden="true">${collapsed ? "+" : "-"}</span>
       <strong>${escapeHtml(title)}</strong>
       <em>${escapeHtml(counts)}</em>
     </button>
   `;
+}
+
+function projectGroupDomId(key: string): string {
+  return `os-project-group-${encodeURIComponent(key)}`;
 }
 
 function buildTaskGraphRenderModels(

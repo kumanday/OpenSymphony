@@ -681,7 +681,9 @@ describe("OpenSymphonyApp mount", () => {
       expect.stringContaining("beta-project | Beta Project"),
     ]);
     expect(headings[0]?.textContent).toContain("issues=4 running=1 todo=2");
+    expect(headings[0]?.textContent).toContain("blocked=1");
     expect(headings[1]?.textContent).toContain("issues=2 running=0 todo=2");
+    expect(headings[1]?.textContent).toContain("blocked=2");
     expect(root.querySelector("[data-project-group='alpha-project'] [data-node-id='desktop-alpha']")).not.toBeNull();
     expect(root.querySelector("[data-project-group='beta-project'] [data-node-id='hosted-auth']")).not.toBeNull();
 
@@ -699,9 +701,15 @@ describe("OpenSymphonyApp mount", () => {
       project_slug: undefined,
       project_name: undefined,
     };
+    const nameOnly = {
+      ...taskGraph.nodes.find((node) => node.node_id === "app-shell")!,
+      project_id: undefined,
+      project_slug: undefined,
+      project_name: "Name Only Project",
+    };
     const mixedTaskGraph: TaskGraphSnapshot = {
       ...taskGraph,
-      nodes: [beta, unassigned, alpha],
+      nodes: [beta, unassigned, alpha, nameOnly],
       root_ids: [],
     };
     const handle = renderOpenSymphonyApp({
@@ -711,15 +719,17 @@ describe("OpenSymphonyApp mount", () => {
     });
 
     await flushUntil(
-      () => root.querySelectorAll(".os-project-group-header").length === 3,
+      () => root.querySelectorAll(".os-project-group-header").length === 4,
     );
 
     const headings = Array.from(root.querySelectorAll(".os-project-group-header"))
       .map((heading) => heading.textContent ?? "");
     expect(headings[0]).toContain("alpha-project | Alpha Project");
     expect(headings[1]).toContain("beta-project | Beta Project");
-    expect(headings[2]).toContain("unassigned");
-    expect(root.querySelector("[data-project-group='__unassigned'] [data-node-id='follow-up']")).not.toBeNull();
+    expect(headings[2]).toContain("Name Only Project");
+    expect(headings[3]).toContain("unassigned");
+    expect(root.querySelector("[data-project-group='Name Only Project'] [data-node-id='app-shell']")).not.toBeNull();
+    expect(root.querySelector("[data-project-group='__opensymphony_unassigned__'] [data-node-id='follow-up']")).not.toBeNull();
 
     await handle.destroy();
   });
@@ -789,6 +799,8 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-project-group='beta-project'] [data-node-id='hosted-auth']")).not.toBeNull();
     expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
     expect(root.querySelector("[data-project-group-toggle='alpha-project']")?.getAttribute("aria-expanded")).toBe("false");
+    expect(root.querySelector("[data-project-group-toggle='alpha-project']")?.getAttribute("aria-controls")).toBe("os-project-group-alpha-project");
+    expect(root.querySelector("#os-project-group-alpha-project")?.getAttribute("role")).toBe("region");
 
     (root.querySelector("[data-project-group-toggle='alpha-project']") as HTMLButtonElement).click();
     await flushUntil(
