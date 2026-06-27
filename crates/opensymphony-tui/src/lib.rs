@@ -13,9 +13,7 @@ use std::{
 
 use crate::opensymphony_control::{ControlPlaneClient, ControlPlaneClientError};
 use crate::opensymphony_domain::{
-    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot,
-    ControlPlaneMetricsSnapshot as MetricsSnapshot, ControlPlaneRecentEvent as RecentEvent,
-    SnapshotEnvelope,
+    ControlPlaneIssueRuntimeState, ControlPlaneIssueSnapshot as IssueSnapshot, SnapshotEnvelope,
 };
 use chrono::{DateTime, Utc};
 use crossterm::terminal;
@@ -34,7 +32,9 @@ use tokio::sync::watch;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use url::Url;
 
+#[cfg(test)]
 const MIN_TIMELINE_LINES: usize = 4;
+#[cfg(test)]
 const MAX_TIMELINE_LINES: usize = 6;
 const MIN_TUI_WIDTH: u16 = 20;
 const MIN_TUI_HEIGHT: u16 = 8;
@@ -325,79 +325,13 @@ impl TuiState {
             return String::new();
         }
 
-        let (body_rows, timeline_rows) = section_layout(height);
-        let mut lines = Vec::new();
-        let snapshot = self.latest_snapshot.as_ref();
-        let issue_count = snapshot
-            .map(|value| value.snapshot.issues.len())
-            .unwrap_or_default();
-        let sequence = snapshot.map(|value| value.sequence).unwrap_or_default();
-        let generated = snapshot
-            .map(|value| format_timestamp(value.snapshot.generated_at))
-            .unwrap_or_else(|| "--:--:--".to_owned());
-        let daemon = snapshot
-            .map(daemon_status_summary)
-            .unwrap_or_else(|| "daemon=--".to_owned());
-        let agent = snapshot
-            .map(agent_server_status_summary)
-            .unwrap_or_else(|| "agent=--".to_owned());
-        let mut header = vec!["OpenSymphony".to_owned(), daemon, agent];
-        if let Some(memory) = snapshot.and_then(memory_server_visible_status_summary) {
-            header.push(memory);
-        }
-        header.push(connection_status_summary(self));
-        header.push(format!("seq={sequence}"));
-        header.push(format!("focus={}", self.focus.label()));
-        header.push(format!("bottom={}", self.timeline_mode.label()));
-        header.push(format!("issues={issue_count}"));
-        header.push(format!("updated={generated}"));
-        header.push("q quit  tab focus  shift-tab back  enter diff  e toggle".to_owned());
-        lines.push(fit(&header.join(" | "), width));
-        lines.push("=".repeat(width));
-
-        if width >= 80 {
-            let left_width = max(50, width * 3 / 5);
-            let right_width = width.saturating_sub(left_width + 3);
-            let left = self.issue_lines(left_width, body_rows);
-            let right = self.detail_lines(right_width, body_rows);
-            lines.extend(fit_section(
-                two_column_block(&left, &right, left_width, right_width),
-                body_rows,
-                width,
-            ));
-        } else {
-            let (issue_rows, detail_rows) = stacked_body_layout(body_rows);
-            lines.extend(fit_section(
-                self.issue_lines(width, issue_rows),
-                issue_rows,
-                width,
-            ));
-            if detail_rows > 0 {
-                lines.push("-".repeat(width));
-                lines.extend(fit_section(
-                    self.detail_lines(width, detail_rows),
-                    detail_rows,
-                    width,
-                ));
-            }
-        }
-
-        if timeline_rows > 0 {
-            lines.push("=".repeat(width));
-            lines.extend(fit_section(
-                self.timeline_lines(width),
-                timeline_rows,
-                width,
-            ));
-        }
-
-        if lines.len() > height {
-            lines.truncate(height);
-        }
-        while lines.len() < height {
-            lines.push(" ".repeat(width));
-        }
-        lines.join("\n")
+        self.render_text_styled(width, height)
+            .lines()
+            .iter()
+            .map(Line::to_plain_text)
+            .map(|line| fit(&line, width))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn render_text_styled(&self, width: usize, height: usize) -> Text {
@@ -565,10 +499,7 @@ impl TuiState {
                     Style::new().fg(BRIGHT_BLACK)
                 }
             };
-            spans.push(Span::styled(
-                format!("daemon={}", daemon.state.as_str()),
-                daemon_style,
-            ));
+            spans.push(Span::styled(daemon_status_summary(snap), daemon_style));
             spans.push(Span::raw(" | "));
 
             let agent = &snap.snapshot.agent_server;
@@ -577,10 +508,7 @@ impl TuiState {
             } else {
                 Style::new().fg(RED)
             };
-            spans.push(Span::styled(
-                format!("agent={}", if agent.reachable { "up" } else { "down" }),
-                agent_style,
-            ));
+            spans.push(Span::styled(agent_server_status_summary(snap), agent_style));
             spans.push(Span::raw(" | "));
 
             if let Some(memory) = memory_server_visible_status_summary(snap) {
@@ -604,10 +532,7 @@ impl TuiState {
             ConnectionState::Connecting => Style::new().fg(YELLOW),
             ConnectionState::Reconnecting(_) => Style::new().fg(RED),
         };
-        spans.push(Span::styled(
-            format!("conn={}", self.connection.label()),
-            conn_style,
-        ));
+        spans.push(Span::styled(connection_status_summary(self), conn_style));
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(format!("seq={sequence}"), Style::new().dim()));
         spans.push(Span::raw(" | "));
@@ -679,15 +604,24 @@ impl TuiState {
                 )));
             }
             Some(snapshot) => {
-                let (start, end) = issue_window(
-                    snapshot.snapshot.issues.len(),
-                    self.selected_issue,
-                    visible_issue_count(max_rows),
-                );
-                for (index, issue) in snapshot.snapshot.issues[start..end].iter().enumerate() {
-                    let global_index = start + index;
-                    let is_selected = global_index == self.selected_issue;
-                    lines.push(self.issue_line_styled(issue, is_selected, width));
+                for row in self.visible_issue_rows(snapshot, max_rows) {
+                    match row {
+                        IssueListRow::ProjectHeader(header) => lines.push(Line::from(
+                            Span::styled(fit(&header, width), Style::new().dim().bold()),
+                        )),
+                        IssueListRow::Issue {
+                            index,
+                            issue,
+                            dependencies,
+                        } => {
+                            lines.push(self.issue_line_styled(
+                                issue,
+                                index == self.selected_issue,
+                                width,
+                                &dependencies,
+                            ));
+                        }
+                    }
                 }
             }
             None => {
@@ -700,7 +634,13 @@ impl TuiState {
         lines
     }
 
-    fn issue_line_styled(&self, issue: &IssueSnapshot, is_selected: bool, _width: usize) -> Line {
+    fn issue_line_styled(
+        &self,
+        issue: &IssueSnapshot,
+        is_selected: bool,
+        width: usize,
+        dependencies: &DependencySummary,
+    ) -> Line {
         // Use reverse video (swap foreground/background) for selected items
         // This works on all terminals regardless of color support
         let base_style = if is_selected {
@@ -722,16 +662,19 @@ impl TuiState {
         let tracker_style = base_style.merge(&Style::new().dim());
         let title_style = base_style;
 
+        let row = issue_row_text(issue, marker, dependencies, width);
+
         Line::from_spans(vec![
-            Span::styled(marker, marker_style),
-            Span::styled(" ", base_style),
-            Span::styled(&issue.identifier, id_style),
-            Span::styled(" [", base_style),
-            Span::styled(issue.runtime_state.as_str(), state_style),
+            Span::styled(&row.marker, marker_style),
+            Span::styled(&row.gutter_prefix, base_style),
+            Span::styled(&row.identifier, id_style),
+            Span::styled(&row.state_prefix, base_style),
+            Span::styled(&row.runtime, state_style),
             Span::styled(" / ", base_style),
-            Span::styled(&issue.tracker_state, tracker_style),
+            Span::styled(&row.tracker, tracker_style),
             Span::styled("] ", base_style),
-            Span::styled(&issue.title, title_style),
+            Span::styled(&row.title, title_style),
+            Span::styled(&row.suffix, base_style),
         ])
     }
 
@@ -750,10 +693,19 @@ impl TuiState {
         match self.selected_issue() {
             Some(issue) => {
                 let id_style = Style::new().fg(CYAN).bold();
+                let deps = dependency_summary(
+                    self.latest_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.snapshot.issues.as_slice())
+                        .unwrap_or_default(),
+                    issue,
+                );
                 lines.push(Line::from_spans(vec![
                     Span::styled(&issue.identifier, id_style),
                     Span::raw(" "),
                     Span::raw(&issue.title),
+                    Span::raw(" | "),
+                    Span::raw(dependency_detail_text(issue, &deps)),
                 ]));
 
                 let runtime_style = Style::new().fg(runtime_state_color(&issue.runtime_state));
@@ -1248,6 +1200,7 @@ impl TuiState {
         lines
     }
 
+    #[cfg(test)]
     fn issue_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         let mut lines = vec![fit(
             &pane_title("ISSUES", self.focus == FocusPane::Issues),
@@ -1258,26 +1211,24 @@ impl TuiState {
                 lines.push(fit("no issues in snapshot", width));
             }
             Some(snapshot) => {
-                let (start, end) = issue_window(
-                    snapshot.snapshot.issues.len(),
-                    self.selected_issue,
-                    visible_issue_count(max_rows),
-                );
-                for (index, issue) in snapshot.snapshot.issues[start..end].iter().enumerate() {
-                    let global_index = start + index;
-                    let marker = if global_index == self.selected_issue {
-                        ">"
-                    } else {
-                        " "
-                    };
-                    let line = format!(
-                        "{marker} {} [{} / {}] {}",
-                        issue.identifier,
-                        issue.runtime_state.as_str(),
-                        issue.tracker_state,
-                        issue.title
-                    );
-                    lines.push(fit(&line, width));
+                for row in self.visible_issue_rows(snapshot, max_rows) {
+                    match row {
+                        IssueListRow::ProjectHeader(header) => lines.push(fit(&header, width)),
+                        IssueListRow::Issue {
+                            index,
+                            issue,
+                            dependencies,
+                        } => {
+                            let marker = if index == self.selected_issue {
+                                ">"
+                            } else {
+                                " "
+                            };
+                            lines.push(
+                                issue_row_text(issue, marker, &dependencies, width).to_string(),
+                            );
+                        }
+                    }
                 }
             }
             None => {
@@ -1287,6 +1238,7 @@ impl TuiState {
         lines
     }
 
+    #[cfg(test)]
     fn detail_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         let mut lines = vec![fit(
             &pane_title("ISSUE + WORKSPACE DETAIL", self.focus == FocusPane::Detail),
@@ -1294,7 +1246,22 @@ impl TuiState {
         )];
         match self.selected_issue() {
             Some(issue) => {
-                lines.push(fit(&format!("{} {}", issue.identifier, issue.title), width));
+                let deps = dependency_summary(
+                    self.latest_snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.snapshot.issues.as_slice())
+                        .unwrap_or_default(),
+                    issue,
+                );
+                lines.push(fit(
+                    &format!(
+                        "{} {} | {}",
+                        issue.identifier,
+                        issue.title,
+                        dependency_detail_text(issue, &deps)
+                    ),
+                    width,
+                ));
                 lines.push(fit(
                     &format!(
                         "tracker: {} | runtime: {} | outcome: {}",
@@ -1351,6 +1318,7 @@ impl TuiState {
         lines
     }
 
+    #[cfg(test)]
     fn modified_files_lines(
         &self,
         width: usize,
@@ -1409,6 +1377,7 @@ impl TuiState {
         lines
     }
 
+    #[cfg(test)]
     fn selected_diff_lines(&self, width: usize, max_rows: usize) -> Vec<String> {
         let diff_focused = self.focus == FocusPane::Activity;
         let mut lines = vec![fit(&pane_title("FILE DIFF", diff_focused), width)];
@@ -1452,6 +1421,7 @@ impl TuiState {
 
         lines
     }
+    #[cfg(test)]
     fn conversation_events_lines(
         &self,
         width: usize,
@@ -1493,6 +1463,7 @@ impl TuiState {
             .collect()
     }
 
+    #[cfg(test)]
     fn conversation_activity_body_lines(&self, issue: &IssueSnapshot, width: usize) -> Vec<String> {
         issue
             .recent_events
@@ -1502,28 +1473,76 @@ impl TuiState {
             .collect()
     }
 
-    fn timeline_lines(&self, width: usize) -> Vec<String> {
-        let title = match self.timeline_mode {
-            TimelineMode::Events => "RECENT EVENTS",
-            TimelineMode::Metrics => "METRICS",
-        };
-        let mut lines = vec![fit(title, width)];
-        match (&self.timeline_mode, &self.latest_snapshot) {
-            (_, None) => lines.push(fit("waiting for stream data", width)),
-            (TimelineMode::Events, Some(snapshot)) => {
-                lines.extend(event_lines(&snapshot.snapshot.recent_events, width));
-            }
-            (TimelineMode::Metrics, Some(snapshot)) => {
-                lines.extend(metric_lines(&snapshot.snapshot.metrics, width));
-            }
-        }
-        lines
-    }
-
     fn selected_issue(&self) -> Option<&IssueSnapshot> {
         self.latest_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.snapshot.issues.get(self.selected_issue))
+    }
+
+    fn visible_issue_rows<'a>(
+        &self,
+        snapshot: &'a SnapshotEnvelope,
+        max_rows: usize,
+    ) -> Vec<IssueListRow<'a>> {
+        let row_budget = visible_issue_count(max_rows);
+        let show_project_headers =
+            row_budget > 1 && snapshot.snapshot.issues.iter().any(has_project_label);
+        let context = IssueListRenderContext::new(&snapshot.snapshot.issues);
+        let mut issue_budget = row_budget;
+
+        loop {
+            let rows = self.visible_issue_rows_for_budget(
+                snapshot,
+                issue_budget,
+                show_project_headers,
+                &context,
+            );
+            if rows.len() <= row_budget || issue_budget == 0 {
+                return rows;
+            }
+            issue_budget = issue_budget.saturating_sub(1);
+        }
+    }
+
+    fn visible_issue_rows_for_budget<'a>(
+        &self,
+        snapshot: &'a SnapshotEnvelope,
+        issue_budget: usize,
+        show_project_headers: bool,
+        context: &IssueListRenderContext<'a>,
+    ) -> Vec<IssueListRow<'a>> {
+        let (start, end) = issue_window(
+            snapshot.snapshot.issues.len(),
+            self.selected_issue,
+            issue_budget,
+        );
+        let visible = &snapshot.snapshot.issues[start..end];
+        let visible_ids = visible
+            .iter()
+            .map(|issue| issue.identifier.as_str())
+            .collect::<HashSet<_>>();
+        let mut rows = Vec::new();
+        let mut seen_projects = HashSet::new();
+
+        for (offset, issue) in visible.iter().enumerate() {
+            if show_project_headers {
+                let key = project_key_value(issue);
+                if seen_projects.insert(key) {
+                    rows.push(IssueListRow::ProjectHeader(project_header(
+                        issue,
+                        context.project_stats_for(issue),
+                    )));
+                }
+            }
+
+            rows.push(IssueListRow::Issue {
+                index: start + offset,
+                issue,
+                dependencies: context.dependency_summary(&visible_ids, issue),
+            });
+        }
+
+        rows
     }
 
     fn workspace_status_entry(&self, issue: &IssueSnapshot) -> Option<&WorkspaceStatusEntry> {
@@ -1555,6 +1574,7 @@ impl TuiState {
         }
     }
 
+    #[cfg(test)]
     fn pr_text(&self, issue: &IssueSnapshot) -> String {
         match self.pr_display(issue) {
             WorkspacePrDisplay::Loading => "loading...".to_owned(),
@@ -1832,29 +1852,10 @@ pub enum FocusPane {
     Activity,
 }
 
-impl FocusPane {
-    fn label(&self) -> &'static str {
-        match self {
-            FocusPane::Issues => "issues",
-            FocusPane::Detail => "detail",
-            FocusPane::Activity => "activity",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimelineMode {
     Events,
     Metrics,
-}
-
-impl TimelineMode {
-    fn label(&self) -> &'static str {
-        match self {
-            TimelineMode::Events => "events",
-            TimelineMode::Metrics => "metrics",
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3105,73 +3106,7 @@ fn pane_title(title: &str, focused: bool) -> String {
     format!("{marker} {title}")
 }
 
-fn event_lines(events: &[RecentEvent], width: usize) -> Vec<String> {
-    if events.is_empty() {
-        return vec![fit("no recent events", width)];
-    }
-
-    events
-        .iter()
-        .map(|event| {
-            let scope = event.issue_identifier.as_deref().unwrap_or("daemon");
-            fit(
-                &format!(
-                    "{} {} {}",
-                    format_timestamp(event.happened_at),
-                    scope,
-                    event.summary
-                ),
-                width,
-            )
-        })
-        .collect()
-}
-
-fn metric_lines(metrics: &MetricsSnapshot, width: usize) -> Vec<String> {
-    vec![
-        fit(
-            &format!("running issues: {}", metrics.running_issues),
-            width,
-        ),
-        fit(
-            &format!("retry queue depth: {}", metrics.retry_queue_depth),
-            width,
-        ),
-        fit(&format!("total tokens: {}", metrics.total_tokens), width),
-        fit(
-            &format!(
-                "total cost: ${:.4}",
-                metrics.total_cost_micros as f64 / 1_000_000.0
-            ),
-            width,
-        ),
-    ]
-}
-
-fn two_column_block(
-    left: &[String],
-    right: &[String],
-    left_width: usize,
-    right_width: usize,
-) -> Vec<String> {
-    let row_count = max(left.len(), right.len());
-    (0..row_count)
-        .map(|index| {
-            format!(
-                "{} | {}",
-                fit(
-                    left.get(index).map(String::as_str).unwrap_or(""),
-                    left_width
-                ),
-                fit(
-                    right.get(index).map(String::as_str).unwrap_or(""),
-                    right_width
-                ),
-            )
-        })
-        .collect()
-}
-
+#[cfg(test)]
 fn section_layout(height: usize) -> (usize, usize) {
     const HEADER_ROWS: usize = 2;
     const TIMELINE_SEPARATOR_ROWS: usize = 1;
@@ -3194,6 +3129,7 @@ fn section_layout(height: usize) -> (usize, usize) {
     (body_rows, timeline_rows)
 }
 
+#[cfg(test)]
 fn stacked_body_layout(body_rows: usize) -> (usize, usize) {
     const DETAIL_SEPARATOR_ROWS: usize = 1;
     const MIN_ISSUE_ROWS: usize = 4;
@@ -3214,25 +3150,6 @@ fn stacked_body_layout(body_rows: usize) -> (usize, usize) {
     );
     let issue_rows = available.saturating_sub(detail_rows);
     (issue_rows, detail_rows)
-}
-
-fn fit_section(mut lines: Vec<String>, max_rows: usize, width: usize) -> Vec<String> {
-    if max_rows == 0 {
-        return Vec::new();
-    }
-
-    if lines.len() > max_rows {
-        lines.truncate(max_rows);
-        if let Some(last) = lines.last_mut() {
-            *last = fit("...", width);
-        }
-    }
-
-    while lines.len() < max_rows {
-        lines.push(" ".repeat(width));
-    }
-
-    lines
 }
 
 fn visible_issue_count(max_rows: usize) -> usize {
@@ -3256,6 +3173,392 @@ fn issue_window(
     );
     let end = min(start + visible_issue_count, issue_count);
     (start, end)
+}
+
+enum IssueListRow<'a> {
+    ProjectHeader(String),
+    Issue {
+        index: usize,
+        issue: &'a IssueSnapshot,
+        dependencies: DependencySummary,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ProjectHeaderStats {
+    issue_count: usize,
+    running_count: usize,
+    todo_count: usize,
+}
+
+struct IssueListRenderContext<'a> {
+    project_stats: HashMap<&'a str, ProjectHeaderStats>,
+    issue_by_id: HashMap<&'a str, &'a IssueSnapshot>,
+    downstream_by_blocker: HashMap<&'a str, Vec<&'a IssueSnapshot>>,
+}
+
+impl<'a> IssueListRenderContext<'a> {
+    fn new(all_issues: &'a [IssueSnapshot]) -> Self {
+        let mut project_stats = HashMap::<&'a str, ProjectHeaderStats>::new();
+        let mut issue_by_id = HashMap::new();
+        let mut downstream_by_blocker = HashMap::<&'a str, Vec<&'a IssueSnapshot>>::new();
+
+        for issue in all_issues {
+            let stats = project_stats.entry(project_key_value(issue)).or_default();
+            stats.issue_count += 1;
+            if matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Running) {
+                stats.running_count += 1;
+            }
+            if is_todo_issue(issue) {
+                stats.todo_count += 1;
+            }
+
+            issue_by_id.insert(issue.identifier.as_str(), issue);
+            for blocker in &issue.blocked_by {
+                downstream_by_blocker
+                    .entry(blocker.as_str())
+                    .or_default()
+                    .push(issue);
+            }
+        }
+
+        Self {
+            project_stats,
+            issue_by_id,
+            downstream_by_blocker,
+        }
+    }
+
+    fn project_stats_for(&self, issue: &IssueSnapshot) -> ProjectHeaderStats {
+        self.project_stats
+            .get(project_key_value(issue))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn dependency_summary(
+        &self,
+        visible_ids: &HashSet<&str>,
+        issue: &IssueSnapshot,
+    ) -> DependencySummary {
+        list_dependency_summary(self, visible_ids, issue)
+    }
+
+    fn dependency_summary_for_all(
+        &self,
+        issues: &[IssueSnapshot],
+        issue: &IssueSnapshot,
+    ) -> DependencySummary {
+        let visible_ids = issues
+            .iter()
+            .map(|issue| issue.identifier.as_str())
+            .collect::<HashSet<_>>();
+        self.dependency_summary(&visible_ids, issue)
+    }
+}
+
+#[derive(Debug, Default)]
+struct DependencySummary {
+    visible_upstream: Vec<String>,
+    hidden_upstream_count: usize,
+    visible_downstream: Vec<String>,
+    hidden_downstream_count: usize,
+    completed_upstream: Vec<String>,
+    failed_upstream: Vec<String>,
+}
+
+struct IssueRowText {
+    marker: String,
+    gutter_prefix: String,
+    identifier: String,
+    state_prefix: String,
+    runtime: String,
+    tracker: String,
+    title: String,
+    suffix: String,
+}
+
+impl std::fmt::Display for IssueRowText {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}{}{}{}{} / {}] {}{}",
+            self.marker,
+            self.gutter_prefix,
+            self.identifier,
+            self.state_prefix,
+            self.runtime,
+            self.tracker,
+            self.title,
+            self.suffix
+        )
+    }
+}
+
+fn has_project_label(issue: &IssueSnapshot) -> bool {
+    issue
+        .project_slug
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+        || issue
+            .project_name
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+        || issue
+            .project_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+}
+
+fn project_key_value(issue: &IssueSnapshot) -> &str {
+    issue
+        .project_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(issue
+            .project_slug
+            .as_deref()
+            .filter(|value| !value.is_empty()))
+        .or(issue
+            .project_name
+            .as_deref()
+            .filter(|value| !value.is_empty()))
+        .unwrap_or("unknown-project")
+}
+
+fn project_detail_value(issue: &IssueSnapshot) -> &str {
+    issue
+        .project_slug
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(issue
+            .project_name
+            .as_deref()
+            .filter(|value| !value.is_empty()))
+        .or(issue
+            .project_id
+            .as_deref()
+            .filter(|value| !value.is_empty()))
+        .unwrap_or("unknown")
+}
+
+fn project_header(issue: &IssueSnapshot, stats: ProjectHeaderStats) -> String {
+    let key = project_key_value(issue);
+    let mut parts = vec![key.to_owned()];
+
+    if let Some(slug) = issue
+        .project_slug
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        && !parts.iter().any(|part| part == slug)
+    {
+        parts.push(slug.to_owned());
+    }
+
+    if let Some(name) = issue
+        .project_name
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        && !parts.iter().any(|part| part == name)
+    {
+        parts.push(name.to_owned());
+    }
+
+    if let Some(label) = issue
+        .workspace_label
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        && !parts.iter().any(|part| part == label)
+    {
+        parts.push(label.to_owned());
+    }
+
+    parts.push(format!(
+        "issues={} running={} todo={}",
+        stats.issue_count, stats.running_count, stats.todo_count
+    ));
+    format!("== {} ==", parts.join(" | "))
+}
+
+fn dependency_summary(issues: &[IssueSnapshot], issue: &IssueSnapshot) -> DependencySummary {
+    IssueListRenderContext::new(issues).dependency_summary_for_all(issues, issue)
+}
+
+fn list_dependency_summary(
+    context: &IssueListRenderContext<'_>,
+    visible_ids: &HashSet<&str>,
+    issue: &IssueSnapshot,
+) -> DependencySummary {
+    let mut summary = DependencySummary::default();
+
+    for blocker in &issue.blocked_by {
+        match context.issue_by_id.get(blocker.as_str()) {
+            Some(blocker_issue)
+                if is_unfinished_dependency(blocker_issue)
+                    && visible_ids.contains(blocker.as_str()) =>
+            {
+                summary.visible_upstream.push(blocker.clone());
+            }
+            Some(blocker_issue) if is_unfinished_dependency(blocker_issue) => {
+                summary.hidden_upstream_count += 1;
+            }
+            Some(blocker_issue)
+                if matches!(
+                    blocker_issue.runtime_state,
+                    ControlPlaneIssueRuntimeState::Failed
+                ) =>
+            {
+                summary.failed_upstream.push(blocker.clone());
+            }
+            Some(_) => summary.completed_upstream.push(blocker.clone()),
+            None => summary.hidden_upstream_count += 1,
+        }
+    }
+
+    if let Some(downstream_issues) = context.downstream_by_blocker.get(issue.identifier.as_str()) {
+        for candidate in downstream_issues {
+            if is_unfinished_dependency(candidate)
+                && visible_ids.contains(candidate.identifier.as_str())
+            {
+                summary
+                    .visible_downstream
+                    .push(candidate.identifier.clone());
+            } else if is_unfinished_dependency(candidate) {
+                summary.hidden_downstream_count += 1;
+            }
+        }
+    }
+
+    summary
+}
+
+fn is_unfinished_dependency(issue: &IssueSnapshot) -> bool {
+    !matches!(
+        issue.runtime_state,
+        ControlPlaneIssueRuntimeState::Completed | ControlPlaneIssueRuntimeState::Failed
+    ) && !is_terminal_tracker_state(&issue.tracker_state)
+}
+
+fn is_terminal_tracker_state(state: &str) -> bool {
+    ["done", "completed", "closed", "canceled", "cancelled"]
+        .iter()
+        .any(|terminal| state.eq_ignore_ascii_case(terminal))
+}
+
+fn is_todo_issue(issue: &IssueSnapshot) -> bool {
+    matches!(issue.runtime_state, ControlPlaneIssueRuntimeState::Idle)
+        || issue.tracker_state.eq_ignore_ascii_case("todo")
+}
+
+fn dependency_gutter(deps: &DependencySummary) -> &'static str {
+    if !deps.visible_upstream.is_empty() {
+        "|  "
+    } else if !deps.visible_downstream.is_empty() {
+        "+--"
+    } else {
+        "   "
+    }
+}
+
+fn dependency_suffix(deps: &DependencySummary) -> String {
+    let mut parts = Vec::new();
+    if let Some(blocker) = deps.visible_upstream.first() {
+        parts.push(format!("<- {blocker}"));
+    }
+    if deps.hidden_upstream_count > 0 {
+        parts.push(format!("<- {} hidden", deps.hidden_upstream_count));
+    }
+
+    if let Some(downstream) = deps.visible_downstream.first() {
+        parts.push(format!("-> {downstream}"));
+    }
+    if deps.hidden_downstream_count > 0 {
+        parts.push(format!("-> {} hidden", deps.hidden_downstream_count));
+    }
+
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", parts.join(" "))
+    }
+}
+
+fn issue_row_text(
+    issue: &IssueSnapshot,
+    marker: &str,
+    deps: &DependencySummary,
+    width: usize,
+) -> IssueRowText {
+    const MIN_TITLE_RESERVE: usize = 8;
+
+    let suffix = dependency_suffix(deps);
+    let fixed = format!(
+        "{marker}{} {} [{} / {}] ",
+        dependency_gutter(deps),
+        issue.identifier,
+        issue.runtime_state.as_str(),
+        issue.tracker_state
+    );
+    let fixed_width = display_width(&fixed);
+    let suffix_width = display_width(&suffix);
+    let title_width = width.saturating_sub(fixed_width);
+    let suffix_fits = title_width > suffix_width + MIN_TITLE_RESERVE;
+    let title = if suffix_fits {
+        fit(&issue.title, title_width - suffix_width)
+    } else {
+        fit(&issue.title, title_width)
+    };
+    let suffix = if suffix_fits { suffix } else { String::new() };
+
+    IssueRowText {
+        marker: marker.to_owned(),
+        gutter_prefix: format!("{} ", dependency_gutter(deps)),
+        identifier: issue.identifier.clone(),
+        state_prefix: " [".to_owned(),
+        runtime: issue.runtime_state.as_str().to_owned(),
+        tracker: issue.tracker_state.clone(),
+        title,
+        suffix,
+    }
+}
+
+fn dependency_detail_text(issue: &IssueSnapshot, deps: &DependencySummary) -> String {
+    let status = if deps.visible_upstream.is_empty()
+        && deps.hidden_upstream_count == 0
+        && deps.failed_upstream.is_empty()
+    {
+        "ready".to_owned()
+    } else {
+        let mut blockers = deps.visible_upstream.clone();
+        if deps.hidden_upstream_count > 0 {
+            blockers.push(format!("{} hidden", deps.hidden_upstream_count));
+        }
+        blockers.extend(
+            deps.failed_upstream
+                .iter()
+                .map(|blocker| format!("{blocker} failed")),
+        );
+        format!("blocked by {}", blockers.join(", "))
+    };
+    let mut parts = vec![format!("project: {}", project_detail_value(issue))];
+    if let Some(label) = issue.workspace_label.as_deref() {
+        parts.push(format!("repo: {label}"));
+    }
+    parts.push(format!("deps: {status}"));
+    if !deps.completed_upstream.is_empty() {
+        parts.push(format!(
+            "completed blockers {}",
+            deps.completed_upstream.join(", ")
+        ));
+    }
+    if !deps.visible_downstream.is_empty() || deps.hidden_downstream_count > 0 {
+        let mut downstream = deps.visible_downstream.clone();
+        if deps.hidden_downstream_count > 0 {
+            downstream.push(format!("{} hidden", deps.hidden_downstream_count));
+        }
+        parts.push(format!("blocks {}", downstream.join(", ")));
+    }
+    parts.join(" | ")
 }
 
 fn push_snapshot(bridge: &Arc<Mutex<BridgeMailbox>>, snapshot: SnapshotEnvelope) {
@@ -3535,6 +3838,7 @@ fn wrap_conversation_event_styled(
     lines
 }
 
+#[cfg(test)]
 fn wrap_conversation_event_text(
     event: &crate::opensymphony_domain::ControlPlaneConversationEvent,
     width: usize,
@@ -3633,6 +3937,7 @@ fn change_count_text(prefix: char, count: Option<u64>) -> String {
     }
 }
 
+#[cfg(test)]
 fn change_summary_line_text(summary: &WorkspaceChangeSummary) -> String {
     let noun = if summary.files_changed == 1 {
         "file"
@@ -3671,6 +3976,7 @@ fn change_summary_line_styled(summary: &WorkspaceChangeSummary) -> Line {
     ])
 }
 
+#[cfg(test)]
 fn change_target_line_text(
     title: &str,
     additions: Option<u64>,
@@ -3896,11 +4202,12 @@ impl DaemonStateLabel for crate::opensymphony_domain::ControlPlaneDaemonState {
 mod tests {
     use super::{
         AppMessage, BLUE, BridgeHandle, BridgeMailbox, ConnectionState, ControlPlaneClientError,
-        FocusPane, OperatorApp, RunOutcome, TuiAction, TuiState, WorkspaceChangeState,
-        WorkspaceChangeSummary, WorkspaceDiffLine, WorkspaceDiffLineKind, WorkspaceFileChange,
-        WorkspaceFileDiffState, build_workspace_change_summary, display_width, fit,
-        handle_bridge_error, issue_window, load_workspace_diff, section_layout,
-        stacked_body_layout, two_column_block_styled, visible_issue_count,
+        DependencySummary, FocusPane, OperatorApp, RunOutcome, TuiAction, TuiState,
+        WorkspaceChangeState, WorkspaceChangeSummary, WorkspaceDiffLine, WorkspaceDiffLineKind,
+        WorkspaceFileChange, WorkspaceFileDiffState, build_workspace_change_summary,
+        dependency_detail_text, display_width, fit, handle_bridge_error, issue_window,
+        load_workspace_diff, section_layout, stacked_body_layout, two_column_block_styled,
+        visible_issue_count,
     };
     use crate::opensymphony_domain::{
         ControlPlaneAgentServerStatus as AgentServerStatus, ControlPlaneConversationEvent,
@@ -4247,7 +4554,6 @@ mod tests {
         let rendered = state.render_text(72, 22);
         assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
         assert!(rendered.contains("branch: loading..."));
-        assert!(rendered.contains("RECENT EVENTS"));
     }
 
     #[test]
@@ -4321,17 +4627,332 @@ mod tests {
     }
 
     #[test]
+    fn project_metadata_renders_non_selectable_headers_for_visible_projects() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 4);
+        snapshot.snapshot.issues[0].project_slug = Some("alpha".to_owned());
+        snapshot.snapshot.issues[0].project_name = Some("Alpha".to_owned());
+        snapshot.snapshot.issues[1].project_slug = Some("alpha".to_owned());
+        snapshot.snapshot.issues[1].project_name = Some("Alpha".to_owned());
+        snapshot.snapshot.issues[2].project_slug = Some("beta".to_owned());
+        snapshot.snapshot.issues[2].project_name = Some("Beta".to_owned());
+        snapshot.snapshot.issues[3].project_slug = Some("beta".to_owned());
+        snapshot.snapshot.issues[3].project_name = Some("Beta".to_owned());
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 12).join("\n");
+
+        assert!(rendered.contains("== alpha | Alpha | workspace-0 | issues=2 running=2 todo=0 =="));
+        assert!(rendered.contains("== beta | Beta | workspace-2 | issues=2 running=2 todo=0 =="));
+        assert!(rendered.contains(">    COE-255"));
+        assert!(!rendered.contains("> =="));
+        state.reduce(TuiAction::MoveSelectionDown);
+        assert_eq!(
+            state
+                .selected_issue()
+                .expect("selected issue should remain a real issue")
+                .identifier,
+            "COE-256"
+        );
+    }
+
+    #[test]
+    fn project_headers_count_against_issue_pane_row_budget() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 4);
+        for (index, issue) in snapshot.snapshot.issues.iter_mut().enumerate() {
+            issue.project_slug = Some(format!("project-{index}"));
+        }
+        state.selected_issue = 3;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.issue_lines(100, 4);
+        let rendered = lines.join("\n");
+
+        assert!(lines.len() <= 4);
+        assert!(rendered.contains("COE-258"));
+    }
+
+    #[test]
+    fn project_headers_drop_when_only_one_issue_row_fits() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 3);
+        for issue in &mut snapshot.snapshot.issues {
+            issue.project_slug = Some("alpha".to_owned());
+        }
+        state.selected_issue = 1;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.issue_lines(100, 2);
+        let rendered = lines.join("\n");
+
+        assert_eq!(lines.len(), 2);
+        assert!(rendered.contains("COE-256"));
+        assert!(!rendered.contains("== alpha"));
+    }
+
+    #[test]
+    fn project_header_budget_uses_largest_fitting_issue_window() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 4);
+        snapshot.snapshot.issues[0].project_slug = Some("alpha".to_owned());
+        snapshot.snapshot.issues[1].project_slug = Some("alpha".to_owned());
+        snapshot.snapshot.issues[2].project_slug = Some("beta".to_owned());
+        snapshot.snapshot.issues[3].project_slug = Some("gamma".to_owned());
+        state.selected_issue = 1;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.issue_lines(100, 4);
+        let rendered = lines.join("\n");
+
+        assert_eq!(lines.len(), 4);
+        assert!(rendered.contains("COE-255"));
+        assert!(rendered.contains("COE-256"));
+        assert!(!rendered.contains("COE-257"));
+    }
+
+    #[test]
+    fn project_header_counts_use_full_snapshot_not_window() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 5);
+        for issue in &mut snapshot.snapshot.issues {
+            issue.project_slug = Some("alpha".to_owned());
+            issue.project_name = Some("Alpha".to_owned());
+        }
+        snapshot.snapshot.issues[3].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[3].tracker_state = "Todo".to_owned();
+        state.selected_issue = 4;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 3).join("\n");
+
+        assert!(rendered.contains("issues=5 running=4 todo=1"));
+    }
+
+    #[test]
+    fn project_header_uses_project_name_when_name_is_only_metadata() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 1);
+        snapshot.snapshot.issues[0].project_name = Some("Name Only".to_owned());
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 3).join("\n");
+
+        assert!(rendered.contains("== Name Only | workspace-0 | issues=1 running=1 todo=0 =="));
+        assert!(!rendered.contains("unknown-project"));
+    }
+
+    #[test]
+    fn project_key_ignores_empty_primary_metadata() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        snapshot.snapshot.issues[0].project_id = Some(String::new());
+        snapshot.snapshot.issues[0].project_slug = Some("alpha".to_owned());
+        snapshot.snapshot.issues[0].project_name = Some("Alpha".to_owned());
+        snapshot.snapshot.issues[1].project_id = Some(String::new());
+        snapshot.snapshot.issues[1].project_slug = Some("beta".to_owned());
+        snapshot.snapshot.issues[1].project_name = Some("Beta".to_owned());
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 8).join("\n");
+
+        assert!(rendered.contains("== alpha | Alpha | workspace-0 | issues=1 running=1 todo=0 =="));
+        assert!(rendered.contains("== beta | Beta | workspace-1 | issues=1 running=1 todo=0 =="));
+        assert!(!rendered.contains("==  |"));
+    }
+
+    #[test]
+    fn selected_detail_ignores_empty_project_metadata() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 1);
+        snapshot.snapshot.issues[0].project_slug = Some(String::new());
+        snapshot.snapshot.issues[0].project_name = Some("Name Fallback".to_owned());
+        snapshot.snapshot.issues[0].project_id = Some("project-id".to_owned());
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let detail = state.detail_lines(120, 8).join("\n");
+
+        assert!(detail.contains("project: Name Fallback"));
+        assert!(!detail.contains("project:  |"));
+    }
+
+    #[test]
+    fn single_visible_project_with_metadata_still_renders_a_header() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        for issue in &mut snapshot.snapshot.issues {
+            issue.project_slug = Some("alpha".to_owned());
+            issue.project_name = Some("Alpha".to_owned());
+        }
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 8).join("\n");
+
+        assert!(rendered.contains("== alpha | Alpha | workspace-0 | issues=2 running=2 todo=0 =="));
+    }
+
+    #[test]
+    fn dependency_gutter_and_suffix_render_visible_upstream_and_downstream() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 3);
+        snapshot.snapshot.issues[0].runtime_state = IssueRuntimeState::Running;
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[1].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[1].blocked = true;
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 8).join("\n");
+
+        assert!(rendered.contains("+-- COE-255"));
+        assert!(rendered.contains("-> COE-256"));
+        assert!(rendered.contains("|   COE-256"));
+        assert!(rendered.contains("<- COE-255"));
+    }
+
+    #[test]
+    fn dependency_suffix_counts_hidden_unfinished_edges() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 4);
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[1].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned()];
+        snapshot.snapshot.issues[3].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[3].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[3].blocked_by = vec!["COE-255".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 3).join("\n");
+
+        assert!(rendered.contains("-> COE-256"));
+        assert!(rendered.contains("-> 1 hidden"));
+    }
+
+    #[test]
+    fn dependency_suffix_counts_hidden_upstream_with_visible_upstream() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 4);
+        snapshot.snapshot.issues[0].runtime_state = IssueRuntimeState::Running;
+        snapshot.snapshot.issues[2].runtime_state = IssueRuntimeState::Running;
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[1].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned(), "COE-257".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 3).join("\n");
+
+        assert!(rendered.contains("<- COE-255"));
+        assert!(rendered.contains("<- 1 hidden"));
+    }
+
+    #[test]
+    fn completed_blockers_leave_compact_suffix_but_show_in_detail() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        snapshot.snapshot.issues[0].runtime_state = IssueRuntimeState::Completed;
+        snapshot.snapshot.issues[0].tracker_state = "Done".to_owned();
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[1].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+        state.selected_issue = 1;
+
+        let rendered = state.issue_lines(120, 8).join("\n");
+        let detail = state.detail_lines(120, 8).join("\n");
+
+        assert!(!rendered.contains("<- COE-255"));
+        assert!(detail.contains("completed blockers COE-255"));
+    }
+
+    #[test]
+    fn completed_downstream_is_not_labeled_as_completed_blocker() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Completed;
+        snapshot.snapshot.issues[1].tracker_state = "Done".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let detail = state.detail_lines(120, 8).join("\n");
+
+        assert!(!detail.contains("completed blockers COE-256"));
+    }
+
+    #[test]
+    fn dependency_detail_includes_hidden_downstream_count() {
+        let snapshot = fixture(8, 1);
+        let issue = &snapshot.snapshot.issues[0];
+        let deps = DependencySummary {
+            hidden_downstream_count: 2,
+            ..DependencySummary::default()
+        };
+
+        let detail = dependency_detail_text(issue, &deps);
+
+        assert!(detail.contains("blocks 2 hidden"));
+    }
+
+    #[test]
+    fn failed_upstream_is_not_labeled_as_completed_blocker() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        snapshot.snapshot.issues[0].runtime_state = IssueRuntimeState::Failed;
+        snapshot.snapshot.issues[0].tracker_state = "Failed".to_owned();
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[1].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+        state.selected_issue = 1;
+
+        let detail = state.detail_lines(120, 8).join("\n");
+
+        assert!(!detail.contains("completed blockers COE-255"));
+        assert!(!detail.contains("deps: ready"));
+        assert!(detail.contains("deps: blocked by COE-255 failed"));
+        assert!(!detail.contains("failed blockers COE-255"));
+    }
+
+    #[test]
+    fn missing_dependency_data_renders_blank_marker_and_no_suffix() {
+        let mut state = TuiState::default();
+        state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(8, 1))));
+
+        let rendered = state.issue_lines(120, 8).join("\n");
+
+        assert!(rendered.contains(">    COE-255"));
+        assert!(!rendered.contains("->"));
+        assert!(!rendered.contains("<-"));
+    }
+
+    #[test]
+    fn narrow_issue_rows_drop_dependency_suffix_before_crossing_width() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        snapshot.snapshot.issues[0].title =
+            "Long title that must keep readable space before dependency suffix".to_owned();
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[1].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.issue_lines(48, 8);
+
+        assert!(lines.iter().all(|line| display_width(line) <= 48));
+        assert!(lines.iter().any(|line| line.contains("+-- COE-255")));
+        assert!(!lines.join("\n").contains("-> COE-256"));
+    }
+
+    #[test]
     fn header_surfaces_daemon_and_agent_health() {
         let mut state = TuiState::default();
         let mut snapshot = fixture(8, 3);
         snapshot.snapshot.daemon.state = DaemonState::Degraded;
-        snapshot.snapshot.agent_server.reachable = false;
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
         let rendered = state.render_text(140, 22);
         let header = rendered.lines().next().expect("header row");
         assert!(header.contains("daemon=degraded"));
-        assert!(header.contains("agent=down"));
+        assert!(header.contains("agent=up/3"));
     }
 
     #[test]
@@ -4404,10 +5025,12 @@ mod tests {
         snapshot.snapshot.recent_events[0].summary = "多字节 health event".to_owned();
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
-        let rendered = state.render_text(40, 22);
-        assert!(rendered.lines().all(|line| display_width(line) <= 40));
-        assert!(rendered.contains("界面"));
-        assert!(rendered.contains("多字节"));
+        let narrow = state.render_text(40, 22);
+        assert!(narrow.lines().all(|line| display_width(line) <= 40));
+        assert!(narrow.contains("界面"));
+
+        let wide = state.render_text(180, 22);
+        assert!(wide.contains("多字节"));
     }
 
     #[test]
@@ -4418,12 +5041,16 @@ mod tests {
         snapshot.snapshot.recent_events[0].summary = "bell\u{0007}event".to_owned();
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
-        let rendered = state.render_text(40, 22);
-        assert!(rendered.lines().all(|line| display_width(line) <= 40));
-        assert!(!rendered.contains('\t'));
-        assert!(!rendered.contains('\u{0007}'));
-        assert!(rendered.contains("tab separated"));
-        assert!(rendered.contains("bell event"));
+        let narrow = state.render_text(40, 22);
+        assert!(narrow.lines().all(|line| display_width(line) <= 40));
+        assert!(!narrow.contains('\t'));
+        assert!(!narrow.contains('\u{0007}'));
+        assert!(narrow.contains("tab separated"));
+
+        let wide = state.render_text(180, 22);
+        assert!(!wide.contains('\t'));
+        assert!(!wide.contains('\u{0007}'));
+        assert!(wide.contains("bell event"));
     }
 
     #[test]

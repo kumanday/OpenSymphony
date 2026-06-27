@@ -10,6 +10,25 @@ use crate::opensymphony_control::{
 use chrono::{TimeZone, Utc};
 use tokio::net::TcpListener;
 
+fn strip_ansi_controls(value: &str) -> String {
+    let mut stripped = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            stripped.push(ch);
+            continue;
+        }
+
+        stripped.push(' ');
+        for next in chars.by_ref() {
+            if next.is_ascii_alphabetic() || next == '~' {
+                break;
+            }
+        }
+    }
+    stripped
+}
+
 fn fixture_snapshot(step: u64) -> DaemonSnapshot {
     let now = Utc
         .with_ymd_and_hms(2026, 3, 21, 20, 0, 0)
@@ -179,12 +198,13 @@ async fn scripted_tui_exits_zero_after_healthy_attach() {
         String::from_utf8_lossy(&output.stderr),
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let visible_stdout = strip_ansi_controls(&stdout);
     if std::env::var_os("OPENSYMPHONY_PRINT_TUI_CAPTURE").is_some() {
         println!("{stdout}");
     }
     for expected in ["1.0k input (256 cache)", "512 output", "2.0k", "total"] {
         assert!(
-            stdout.contains(expected),
+            visible_stdout.contains(expected),
             "expected scripted TUI capture to include {expected:?}; stdout={stdout}"
         );
     }
