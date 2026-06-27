@@ -3326,6 +3326,22 @@ fn project_key_value(issue: &IssueSnapshot) -> &str {
         .unwrap_or("unknown-project")
 }
 
+fn project_detail_value(issue: &IssueSnapshot) -> &str {
+    issue
+        .project_slug
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .or(issue
+            .project_name
+            .as_deref()
+            .filter(|value| !value.is_empty()))
+        .or(issue
+            .project_id
+            .as_deref()
+            .filter(|value| !value.is_empty()))
+        .unwrap_or("unknown")
+}
+
 fn project_header(issue: &IssueSnapshot, stats: ProjectHeaderStats) -> String {
     let key = project_key_value(issue);
     let mut parts = vec![key.to_owned()];
@@ -3524,15 +3540,7 @@ fn dependency_detail_text(issue: &IssueSnapshot, deps: &DependencySummary) -> St
         );
         format!("blocked by {}", blockers.join(", "))
     };
-    let mut parts = vec![format!(
-        "project: {}",
-        issue
-            .project_slug
-            .as_deref()
-            .or(issue.project_name.as_deref())
-            .or(issue.project_id.as_deref())
-            .unwrap_or("unknown")
-    )];
+    let mut parts = vec![format!("project: {}", project_detail_value(issue))];
     if let Some(label) = issue.workspace_label.as_deref() {
         parts.push(format!("repo: {label}"));
     }
@@ -4751,6 +4759,21 @@ mod tests {
         assert!(rendered.contains("== alpha | Alpha | workspace-0 | issues=1 running=1 todo=0 =="));
         assert!(rendered.contains("== beta | Beta | workspace-1 | issues=1 running=1 todo=0 =="));
         assert!(!rendered.contains("==  |"));
+    }
+
+    #[test]
+    fn selected_detail_ignores_empty_project_metadata() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 1);
+        snapshot.snapshot.issues[0].project_slug = Some(String::new());
+        snapshot.snapshot.issues[0].project_name = Some("Name Fallback".to_owned());
+        snapshot.snapshot.issues[0].project_id = Some("project-id".to_owned());
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let detail = state.detail_lines(120, 8).join("\n");
+
+        assert!(detail.contains("project: Name Fallback"));
+        assert!(!detail.contains("project:  |"));
     }
 
     #[test]
