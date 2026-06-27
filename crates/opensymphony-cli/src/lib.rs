@@ -1876,8 +1876,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cache_read_tokens: 0,
             total_tokens: 1536,
             detached: false,
+            cancel_requested: false,
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
         },
         IssueSnapshot {
             identifier: "OSYM-401".to_owned(),
@@ -1913,8 +1916,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cache_read_tokens: 512,
             total_tokens: 3072,
             detached: false,
+            cancel_requested: false,
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
         },
         IssueSnapshot {
             identifier: "OSYM-402".to_owned(),
@@ -1958,8 +1964,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cache_read_tokens: 0,
             total_tokens: 768,
             detached: false,
+            cancel_requested: false,
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
         },
     ];
     let running_issues = issues

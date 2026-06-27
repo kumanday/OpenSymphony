@@ -18,8 +18,8 @@ use opensymphony::opensymphony_gateway_schema::{
         TaskPackageProjection, TurnRole,
     },
     run::{
-        HarnessSchedulerDisagreement, ReleaseReason, RunDetail, RunEvent, RunEventPage,
-        RunLifecycleState, RunLivenessEnvelope, RunPhase, RunProgress, RunStatus,
+        HarnessSchedulerDisagreement, ReleaseReason, RunDetail, RunDiagnostics, RunEvent,
+        RunEventPage, RunLifecycleState, RunLivenessEnvelope, RunPhase, RunProgress, RunStatus,
         RunStreamLiveness, SafeActions,
     },
     snapshot::{
@@ -431,17 +431,33 @@ fn run_detail_roundtrips() {
         error: None,
         allowed_actions: vec![],
         liveness: None,
-        diagnostics: None,
+        diagnostics: Some(RunDiagnostics {
+            harness_scheduler_disagreement: None,
+            cancel_requested: true,
+            cancel_acknowledged: false,
+            cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: Some("operator_cancel".into()),
+        }),
         safe_actions: SafeActions::default(),
         detached: false,
+        cancel_requested: false,
         cancel_acknowledged: false,
         cancel_failed: false,
+        cancel_timed_out: false,
+        cancel_reason: None,
     };
     let json = must_serialize(&run);
     let back: RunDetail = must_deserialize(&json);
     assert_eq!(back.status, RunStatus::Running);
     assert_eq!(back.issue_identifier, "COE-390");
     assert_eq!(back.turn_count, 3);
+    let diagnostics = back.diagnostics.expect("diagnostics should roundtrip");
+    assert!(diagnostics.cancel_requested);
+    assert_eq!(
+        diagnostics.cancel_reason.as_deref(),
+        Some("operator_cancel")
+    );
 }
 
 #[test]

@@ -11,7 +11,8 @@ use crate::opensymphony_control::{
     RecentEventKind, WorkerOutcome,
 };
 use crate::opensymphony_domain::{
-    HealthStatus, IssueIdentifier, OrchestratorSnapshot, SchedulerStatus, WorkerOutcomeKind,
+    HarnessInterruptStatus, HealthStatus, IssueIdentifier, OrchestratorSnapshot, SchedulerStatus,
+    WorkerOutcomeKind,
 };
 use crate::opensymphony_openhands::LocalServerSupervisor;
 use crate::opensymphony_workflow::ResolvedWorkflow;
@@ -124,6 +125,7 @@ fn map_issue(
         .unwrap_or(generated_at);
     let worker = issue.runtime.worker.as_ref();
     let last_worker_outcome = issue.last_worker_outcome.as_ref();
+    let interrupt = issue.runtime.interrupt.as_ref();
     let started_at = issue
         .runtime
         .started_at
@@ -264,8 +266,23 @@ fn map_issue(
             .map(|conversation| conversation.effective_total_tokens())
             .unwrap_or(0),
         detached: false,
-        cancel_acknowledged: false,
-        cancel_failed: false,
+        cancel_requested: matches!(
+            interrupt.map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Requested)
+        ),
+        cancel_acknowledged: matches!(
+            interrupt.map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Acknowledged)
+        ),
+        cancel_failed: matches!(
+            interrupt.map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Failed)
+        ),
+        cancel_timed_out: matches!(
+            interrupt.map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::TimedOut)
+        ),
+        cancel_reason: interrupt.map(|interrupt| interrupt.command.reason.as_str().to_string()),
     }
 }
 
@@ -534,6 +551,7 @@ tracker:
                     }),
                     last_event_at: Some(ts(1_011)),
                     stalled_at: None,
+                    interrupt: None,
                 },
                 workspace: Some(WorkspaceRecord {
                     path: PathBuf::from("/tmp/workspaces/COE-352"),

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ConversationMetadata, IssueExecution, NormalizedIssue, ReleaseReason, RetryEntry,
-    SchedulerState, SchedulerStatus, TimestampMs, WorkerOutcomeRecord, WorkspaceRecord,
+    ConversationMetadata, HarnessInterruptState, IssueExecution, NormalizedIssue, ReleaseReason,
+    RetryEntry, SchedulerState, SchedulerStatus, TimestampMs, WorkerOutcomeRecord, WorkspaceRecord,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +121,8 @@ pub struct RuntimeStateSnapshot {
     pub worker: Option<WorkerAttemptSnapshot>,
     pub last_event_at: Option<TimestampMs>,
     pub stalled_at: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupt: Option<HarnessInterruptState>,
 }
 
 impl RuntimeStateSnapshot {
@@ -137,6 +139,7 @@ impl RuntimeStateSnapshot {
                 worker: None,
                 last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: None,
+                interrupt: execution.interrupt().cloned(),
             },
             SchedulerState::Claimed { run } => Self {
                 state: SchedulerStatus::Claimed,
@@ -147,6 +150,7 @@ impl RuntimeStateSnapshot {
                 worker: Some(WorkerAttemptSnapshot::from(run)),
                 last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: None,
+                interrupt: execution.interrupt().cloned(),
             },
             SchedulerState::Running { run, stall } => Self {
                 state: SchedulerStatus::Running,
@@ -157,6 +161,7 @@ impl RuntimeStateSnapshot {
                 worker: Some(WorkerAttemptSnapshot::from(run)),
                 last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: Some(stall.stalled_at),
+                interrupt: execution.interrupt().cloned(),
             },
             SchedulerState::RetryQueued { .. } => Self {
                 state: SchedulerStatus::RetryQueued,
@@ -167,6 +172,7 @@ impl RuntimeStateSnapshot {
                 worker: None,
                 last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: None,
+                interrupt: execution.interrupt().cloned(),
             },
             SchedulerState::Released {
                 released_at,
@@ -180,6 +186,7 @@ impl RuntimeStateSnapshot {
                 worker: None,
                 last_event_at: conversation.and_then(|conversation| conversation.last_event_at),
                 stalled_at: None,
+                interrupt: execution.interrupt().cloned(),
             },
         }
     }
