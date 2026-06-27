@@ -66,21 +66,36 @@ entry points live under `apps/`:
 
 ### Running the desktop alpha locally
 
+The desktop app is currently a repo-clone development flow. There is no
+released `opensymphony app` or `opensymphony desktop` installer/launcher yet;
+that work is tracked by COE-488 / OSYM-811. Until then, run the Tauri app from
+this checkout.
+
 ```bash
-# 1. Build the shared frontend first (workspace root).
+# 1. Install frontend dependencies once from the workspace root.
 npm install
-npm run build --workspace=@opensymphony/gateway-schema
-npm run build --workspace=@opensymphony/ui-core
+
+# 2. Rebuild the desktop frontend when apps/desktop or shared packages changed.
 npm run build --workspace=@opensymphony/desktop
 
-# 2. Run the desktop frontend against a loopback gateway.
-#    The bundle auto-attaches via HttpGatewayTransport if the
-#    Rust gateway isn't reachable.
-(cd apps/desktop && npm run dev)            # vite dev server on 127.0.0.1:1420
-# 3. (optional) Launch the Tauri shell once dependencies are installed.
-cargo install --path apps/desktop/src-tauri --locked
-(cd apps/desktop/src-tauri && cargo run)
+# 3. Launch the Tauri shell.
+cd apps/desktop/src-tauri
+cargo run
 ```
+
+The root workspace build command is equivalent to running `npm run build` from
+`apps/desktop`. From `apps/desktop/src-tauri`, use `npm --prefix .. run build`
+if you want to rebuild the frontend without changing directories.
+
+For frontend hot reload, run `npm run dev --workspace=@opensymphony/desktop`
+from the workspace root in one terminal and `cargo run` from
+`apps/desktop/src-tauri` in another. Plain `cargo run` does not run the Vite dev
+server; it reads the current `apps/desktop/dist` bundle.
+
+To see live OpenSymphony state instead of the empty or disconnected UI states,
+run an OpenSymphony control plane separately, usually with `opensymphony run` in
+the target repository. The desktop client connects to the loopback gateway at
+`http://127.0.0.1:2468`.
 
 The desktop entry detects the Tauri runtime via
 `globalThis.__TAURI__` and uses the native `list_profiles`,

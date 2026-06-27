@@ -36,6 +36,36 @@ last_memory_sync: 2026-06-21T19:06:47.514408+00:00
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
 
+## Local Build And Run
+
+The desktop app currently requires a repo checkout. The planned
+`opensymphony app` / `opensymphony desktop` lazy installer is tracked by
+COE-488 / OSYM-811 and is not implemented yet.
+
+From a clone, rebuild the desktop frontend when `apps/desktop` or shared
+frontend packages change:
+
+```bash
+npm install
+npm run build --workspace=@opensymphony/desktop
+```
+
+Then launch the Tauri shell:
+
+```bash
+cd apps/desktop/src-tauri
+cargo run
+```
+
+The workspace build command is the same as running `npm run build` from
+`apps/desktop`. If you are already in `apps/desktop/src-tauri`, use
+`npm --prefix .. run build`.
+
+For frontend hot reload, run `npm run dev --workspace=@opensymphony/desktop`
+in one terminal and `cargo run` from `apps/desktop/src-tauri` in another.
+Plain `cargo run` uses the current `apps/desktop/dist` bundle and does not
+start Vite.
+
 ## Task Graph Project Groups
 
 When the gateway task graph includes Linear project metadata, the desktop task
