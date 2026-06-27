@@ -377,6 +377,9 @@ fn task_graph_node_roundtrips() {
         state: "In Progress".into(),
         state_category: TaskGraphStateCategory::InProgress,
         priority: Some(1),
+        project_id: Some("proj-1".into()),
+        project_slug: Some("opensymphony-bootstrap".into()),
+        project_name: Some("OpenSymphony".into()),
         parent_id: Some("milestone-1".into()),
         children: vec!["sub-1".into()],
         blocked_by: vec![],
@@ -393,6 +396,8 @@ fn task_graph_node_roundtrips() {
     assert_eq!(back.node_id, "node-1");
     assert_eq!(back.kind, TaskGraphNodeKind::Issue);
     assert_eq!(back.state_category, TaskGraphStateCategory::InProgress);
+    assert_eq!(back.project_slug.as_deref(), Some("opensymphony-bootstrap"));
+    assert_eq!(back.project_name.as_deref(), Some("OpenSymphony"));
     assert_eq!(back.children.len(), 1);
 }
 

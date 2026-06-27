@@ -65,6 +65,10 @@ fn fixture_with_identifiers(sequence: u64, identifiers: &[String]) -> SnapshotEn
                     last_event_at: now,
                     conversation_id_suffix: format!("conv-{identifier}"),
                     workspace_path_suffix: format!("workspace-{index}"),
+                    project_id: None,
+                    project_slug: None,
+                    project_name: None,
+                    workspace_label: Some(format!("workspace-{index}")),
                     retry_count: index as u32,
                     claimed_at: None,
                     started_at: None,
@@ -114,6 +118,10 @@ fn reordered_fixture(sequence: u64, identifiers: &[&str]) -> SnapshotEnvelope {
             last_event_at: snapshot.snapshot.generated_at,
             conversation_id_suffix: format!("conv-{index}"),
             workspace_path_suffix: format!("workspace-{index}"),
+            project_id: None,
+            project_slug: None,
+            project_name: None,
+            workspace_label: Some(format!("workspace-{index}")),
             retry_count: index as u32,
             claimed_at: None,
             started_at: None,
@@ -148,9 +156,8 @@ fn applies_snapshot_and_renders_selected_issue() {
     state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 2))));
 
     assert_eq!(state.connection, ConnectionState::Connecting);
-    let rendered = state.render_text(100, 20);
+    let rendered = state.render_text(180, 20);
     assert!(rendered.contains("conn=connecting"));
-    assert!(rendered.contains("focus=issues"));
     assert!(rendered.contains("[x] ISSUES"));
     assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
     assert!(rendered.contains("COE-255"));
@@ -199,8 +206,8 @@ fn preserves_selected_issue_when_snapshot_reorders() {
 
     assert_eq!(state.selected_issue, 2);
 
-    let rendered = state.render_text(100, 20);
-    assert!(rendered.contains("> COE-256 [running / In Progress]"));
+    let rendered = state.render_text(180, 20);
+    assert!(rendered.contains(">    COE-256 [running / In Progress]"));
     assert!(
         rendered.contains("branch:"),
         "rendered output was: {}",
@@ -224,9 +231,8 @@ fn cycles_focus_and_timeline_mode() {
     assert_eq!(state.focus, FocusPane::Issues);
     assert_eq!(state.timeline_mode, TimelineMode::Metrics);
 
-    let rendered = state.render_text(100, 20);
-    assert!(rendered.contains("focus=issues"));
-    assert!(rendered.contains("bottom=metrics"));
+    let rendered = state.render_text(180, 20);
+    assert!(rendered.contains("[x] ISSUES"));
     assert!(rendered.contains("METRICS"));
     assert!(!rendered.contains("[x] METRICS"));
 }
@@ -236,7 +242,7 @@ fn keeps_timeline_visible_with_many_issues_in_inline_layout() {
     let mut state = TuiState::default();
     state.reduce(TuiAction::SnapshotReceived(Box::new(fixture(3, 12))));
 
-    let rendered = state.render_text(100, 22);
+    let rendered = state.render_text(180, 22);
 
     assert!(rendered.contains("RECENT EVENTS"));
     assert!(rendered.contains("snapshot updated"));
@@ -277,9 +283,9 @@ fn keeps_selected_issue_visible_when_issue_list_is_windowed() {
 
     let rendered = state.render_text(70, 22);
 
-    assert!(rendered.contains("> COE-264 [running / In Progress]"));
+    assert!(rendered.contains(">    COE-264 [running / In Progress]"));
     assert!(rendered.contains("branch: loading..."));
-    assert!(!rendered.contains("> COE-255 [running / In Progress]"));
+    assert!(!rendered.contains(">    COE-255 [running / In Progress]"));
 }
 
 #[test]
@@ -289,7 +295,7 @@ fn keeps_rendering_latest_snapshot_while_reconnecting() {
     state.reduce(TuiAction::StreamAttached);
     state.reduce(TuiAction::ConnectionLost("stream closed".to_owned()));
 
-    let rendered = state.render_text(100, 20);
+    let rendered = state.render_text(180, 20);
 
     assert!(rendered.contains("conn=reconnecting"));
     assert!(rendered.contains("COE-255"));
@@ -308,7 +314,7 @@ fn refreshed_snapshots_do_not_claim_live_before_stream_reattaches() {
         state.connection,
         ConnectionState::Reconnecting("stream closed".to_owned())
     );
-    let rendered = state.render_text(100, 20);
+    let rendered = state.render_text(180, 20);
     assert!(rendered.contains("conn=reconnecting"));
     assert!(rendered.contains("seq=4"));
 }
@@ -328,7 +334,7 @@ fn preserves_selected_issue_when_snapshots_reorder() {
     ))));
 
     assert_eq!(state.selected_issue, 2);
-    let rendered = state.render_text(100, 22);
+    let rendered = state.render_text(180, 22);
     assert!(rendered.contains("COE-256 Issue 2"));
 }
 
@@ -340,9 +346,9 @@ fn keeps_selected_issue_visible_in_long_issue_lists() {
         state.reduce(TuiAction::MoveSelectionDown);
     }
 
-    let rendered = state.render_text(100, 22);
+    let rendered = state.render_text(180, 22);
 
-    assert!(rendered.contains("> COE-263 [running / In Progress]"));
+    assert!(rendered.contains(">    COE-263 [running / In Progress]"));
     assert!(rendered.contains("branch: loading..."));
 }
 
@@ -381,7 +387,7 @@ fn renders_loaded_workspace_branch_pr_and_file_changes() {
         }),
     });
 
-    let rendered = state.render_text(180, 24);
+    let rendered = state.render_text(180, 32);
 
     assert!(rendered.contains("branch: codex/tui-workspace-git-status"));
     assert!(rendered.contains("pr: https://github.com/kumanday/OpenSymphony/pull/42"));
@@ -436,7 +442,6 @@ fn detail_focus_moves_changed_file_selection_and_toggles_diff() {
 
     let rendered = state.render_text(120, 24);
 
-    assert!(rendered.contains("focus=activity"));
     assert!(rendered.contains("[ ] ISSUE + WORKSPACE DETAIL"));
     assert!(rendered.contains("[x] FILE DIFF"));
     assert!(rendered.contains("MODIFIED FILES"));

@@ -49,6 +49,10 @@ fn fixture() -> SnapshotEnvelope {
                 last_event_at: now,
                 conversation_id_suffix: "269-live".to_owned(),
                 workspace_path_suffix: "COE-269".to_owned(),
+                project_id: Some("proj-open".to_owned()),
+                project_slug: Some("opensymphony-bootstrap".to_owned()),
+                project_name: Some("OpenSymphony".to_owned()),
+                workspace_label: Some("COE-269".to_owned()),
                 retry_count: 1,
                 claimed_at: None,
                 started_at: None,
@@ -105,6 +109,18 @@ fn snapshot_envelope_round_trips_through_json() {
         encoded["snapshot"]["issues"][0]["transport_target"],
         "remote"
     );
+    assert_eq!(
+        encoded["snapshot"]["issues"][0]["project_slug"],
+        "opensymphony-bootstrap"
+    );
+    assert_eq!(
+        encoded["snapshot"]["issues"][0]["project_name"],
+        "OpenSymphony"
+    );
+    assert_eq!(
+        encoded["snapshot"]["issues"][0]["workspace_label"],
+        "COE-269"
+    );
     assert_eq!(encoded["snapshot"]["issues"][0]["http_auth_mode"], "header");
     assert_eq!(
         encoded["snapshot"]["recent_events"][0]["kind"],
@@ -114,4 +130,25 @@ fn snapshot_envelope_round_trips_through_json() {
     let decoded: SnapshotEnvelope =
         serde_json::from_value(encoded).expect("deserialize snapshot envelope from json");
     assert_eq!(decoded, envelope);
+}
+
+#[test]
+fn older_issue_snapshots_without_project_metadata_still_decode() {
+    let mut encoded = serde_json::to_value(fixture()).expect("serialize fixture");
+    let issue = encoded["snapshot"]["issues"][0]
+        .as_object_mut()
+        .expect("issue object");
+    issue.remove("project_id");
+    issue.remove("project_slug");
+    issue.remove("project_name");
+    issue.remove("workspace_label");
+
+    let decoded: SnapshotEnvelope =
+        serde_json::from_value(encoded).expect("missing project metadata stays optional");
+    let issue = &decoded.snapshot.issues[0];
+    assert_eq!(issue.project_id, None);
+    assert_eq!(issue.project_slug, None);
+    assert_eq!(issue.project_name, None);
+    assert_eq!(issue.workspace_label, None);
+    assert_eq!(issue.blocked_by, Vec::<String>::new());
 }

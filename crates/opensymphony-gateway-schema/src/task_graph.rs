@@ -14,6 +14,12 @@ pub struct TaskGraphNode {
     pub state: String,
     pub state_category: TaskGraphStateCategory,
     pub priority: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
     /// Parent node identifier when the parent is present in this task graph snapshot.
     pub parent_id: Option<String>,
     /// Child node identifiers that are present in this task graph snapshot.

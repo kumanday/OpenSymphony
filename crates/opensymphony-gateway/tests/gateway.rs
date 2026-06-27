@@ -122,6 +122,9 @@ fn tracker_issue_from_snapshot(
         state: issue.tracker_state.clone(),
         state_kind: tracker_state_kind_from_name(&issue.tracker_state),
         labels: Vec::new(),
+        project_id: issue.project_id.clone(),
+        project_slug: issue.project_slug.clone(),
+        project_name: issue.project_name.clone(),
         parent_id: None,
         parent: None,
         project_milestone: None,
@@ -211,6 +214,10 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             last_event_at: now,
             conversation_id_suffix: "c0e255".to_owned(),
             workspace_path_suffix: "COE-255".to_owned(),
+            project_id: Some("proj-open".to_owned()),
+            project_slug: Some("opensymphony-bootstrap".to_owned()),
+            project_name: Some("OpenSymphony".to_owned()),
+            workspace_label: Some("COE-255".to_owned()),
             retry_count: 0,
             claimed_at: Some(now - chrono::Duration::seconds(80)),
             started_at: Some(now - chrono::Duration::seconds(75)),
@@ -292,6 +299,10 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: String::new(),
                 workspace_path_suffix: String::new(),
+                project_id: Some("proj-alpha".to_owned()),
+                project_slug: Some("alpha-project".to_owned()),
+                project_name: Some("Alpha Project".to_owned()),
+                workspace_label: None,
                 retry_count: 0,
                 claimed_at: None,
                 started_at: None,
@@ -326,6 +337,10 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: "c0e301".to_owned(),
                 workspace_path_suffix: "COE-301".to_owned(),
+                project_id: Some("proj-beta".to_owned()),
+                project_slug: Some("beta-project".to_owned()),
+                project_name: Some("Beta Project".to_owned()),
+                workspace_label: Some("COE-301".to_owned()),
                 retry_count: 0,
                 claimed_at: Some(now - chrono::Duration::seconds(90)),
                 started_at: Some(now - chrono::Duration::seconds(80)),
@@ -411,6 +426,10 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: "c0e302".to_owned(),
                 workspace_path_suffix: "COE-302".to_owned(),
+                project_id: None,
+                project_slug: None,
+                project_name: None,
+                workspace_label: Some("COE-302".to_owned()),
                 retry_count: 0,
                 claimed_at: Some(now - chrono::Duration::seconds(30)),
                 started_at: Some(now - chrono::Duration::seconds(25)),
@@ -445,6 +464,10 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: "c0e303".to_owned(),
                 workspace_path_suffix: "COE-303".to_owned(),
+                project_id: Some("proj-beta".to_owned()),
+                project_slug: Some("beta-project".to_owned()),
+                project_name: Some("Beta Project".to_owned()),
+                workspace_label: Some("COE-303".to_owned()),
                 retry_count: 1,
                 claimed_at: None,
                 started_at: None,
@@ -479,6 +502,10 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 last_event_at: now,
                 conversation_id_suffix: String::new(),
                 workspace_path_suffix: String::new(),
+                project_id: Some("proj-alpha".to_owned()),
+                project_slug: Some("alpha-project".to_owned()),
+                project_name: Some("Alpha Project".to_owned()),
+                workspace_label: None,
                 retry_count: 0,
                 claimed_at: None,
                 started_at: None,
@@ -2438,6 +2465,13 @@ async fn gateway_task_graph_eligible_for_idle_issue() {
         .expect("COE-301 node should exist");
     let done_overlay = done_node.runtime_overlay.as_ref().expect("overlay present");
     assert!(!done_overlay.eligible);
+
+    assert_eq!(parent_node.project_slug.as_deref(), Some("alpha-project"));
+    assert_eq!(parent_node.project_name.as_deref(), Some("Alpha Project"));
+    assert_eq!(done_node.project_slug.as_deref(), Some("beta-project"));
+    assert_eq!(done_node.project_name.as_deref(), Some("Beta Project"));
+    assert_eq!(external_parent_node.project_slug, None);
+    assert_eq!(external_parent_node.project_name, None);
 
     assert_eq!(
         response.root_ids,
