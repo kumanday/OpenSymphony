@@ -1487,11 +1487,16 @@ impl TuiState {
         let row_budget = visible_issue_count(max_rows);
         let show_project_headers =
             row_budget > 1 && snapshot.snapshot.issues.iter().any(has_project_label);
+        let context = IssueListRenderContext::new(&snapshot.snapshot.issues);
         let mut issue_budget = row_budget;
 
         loop {
-            let rows =
-                self.visible_issue_rows_for_budget(snapshot, issue_budget, show_project_headers);
+            let rows = self.visible_issue_rows_for_budget(
+                snapshot,
+                issue_budget,
+                show_project_headers,
+                &context,
+            );
             if rows.len() <= row_budget || issue_budget == 0 {
                 return rows;
             }
@@ -1504,6 +1509,7 @@ impl TuiState {
         snapshot: &'a SnapshotEnvelope,
         issue_budget: usize,
         show_project_headers: bool,
+        context: &IssueListRenderContext<'a>,
     ) -> Vec<IssueListRow<'a>> {
         let (start, end) = issue_window(
             snapshot.snapshot.issues.len(),
@@ -1511,7 +1517,10 @@ impl TuiState {
             issue_budget,
         );
         let visible = &snapshot.snapshot.issues[start..end];
-        let context = IssueListRenderContext::new(&snapshot.snapshot.issues, visible);
+        let visible_ids = visible
+            .iter()
+            .map(|issue| issue.identifier.as_str())
+            .collect::<HashSet<_>>();
         let mut rows = Vec::new();
         let mut seen_projects = HashSet::new();
 
@@ -1529,7 +1538,7 @@ impl TuiState {
             rows.push(IssueListRow::Issue {
                 index: start + offset,
                 issue,
-                dependencies: context.dependency_summary(issue),
+                dependencies: context.dependency_summary(&visible_ids, issue),
             });
         }
 
@@ -3184,13 +3193,12 @@ struct ProjectHeaderStats {
 
 struct IssueListRenderContext<'a> {
     project_stats: HashMap<&'a str, ProjectHeaderStats>,
-    visible_ids: HashSet<&'a str>,
     issue_by_id: HashMap<&'a str, &'a IssueSnapshot>,
     downstream_by_blocker: HashMap<&'a str, Vec<&'a IssueSnapshot>>,
 }
 
 impl<'a> IssueListRenderContext<'a> {
-    fn new(all_issues: &'a [IssueSnapshot], visible_issues: &'a [IssueSnapshot]) -> Self {
+    fn new(all_issues: &'a [IssueSnapshot]) -> Self {
         let mut project_stats = HashMap::<&'a str, ProjectHeaderStats>::new();
         let mut issue_by_id = HashMap::new();
         let mut downstream_by_blocker = HashMap::<&'a str, Vec<&'a IssueSnapshot>>::new();
@@ -3214,14 +3222,8 @@ impl<'a> IssueListRenderContext<'a> {
             }
         }
 
-        let visible_ids = visible_issues
-            .iter()
-            .map(|issue| issue.identifier.as_str())
-            .collect();
-
         Self {
             project_stats,
-            visible_ids,
             issue_by_id,
             downstream_by_blocker,
         }
@@ -3234,8 +3236,24 @@ impl<'a> IssueListRenderContext<'a> {
             .unwrap_or_default()
     }
 
-    fn dependency_summary(&self, issue: &IssueSnapshot) -> DependencySummary {
-        list_dependency_summary(self, issue)
+    fn dependency_summary(
+        &self,
+        visible_ids: &HashSet<&str>,
+        issue: &IssueSnapshot,
+    ) -> DependencySummary {
+        list_dependency_summary(self, visible_ids, issue)
+    }
+
+    fn dependency_summary_for_all(
+        &self,
+        issues: &[IssueSnapshot],
+        issue: &IssueSnapshot,
+    ) -> DependencySummary {
+        let visible_ids = issues
+            .iter()
+            .map(|issue| issue.identifier.as_str())
+            .collect::<HashSet<_>>();
+        self.dependency_summary(&visible_ids, issue)
     }
 }
 
@@ -3296,8 +3314,15 @@ fn project_key_value(issue: &IssueSnapshot) -> &str {
     issue
         .project_id
         .as_deref()
-        .or(issue.project_slug.as_deref())
-        .or(issue.project_name.as_deref())
+        .filter(|value| !value.is_empty())
+        .or(issue
+            .project_slug
+            .as_deref()
+            .filter(|value| !value.is_empty()))
+        .or(issue
+            .project_name
+            .as_deref()
+            .filter(|value| !value.is_empty()))
         .unwrap_or("unknown-project")
 }
 
@@ -3340,11 +3365,12 @@ fn project_header(issue: &IssueSnapshot, stats: ProjectHeaderStats) -> String {
 }
 
 fn dependency_summary(issues: &[IssueSnapshot], issue: &IssueSnapshot) -> DependencySummary {
-    IssueListRenderContext::new(issues, issues).dependency_summary(issue)
+    IssueListRenderContext::new(issues).dependency_summary_for_all(issues, issue)
 }
 
 fn list_dependency_summary(
     context: &IssueListRenderContext<'_>,
+    visible_ids: &HashSet<&str>,
     issue: &IssueSnapshot,
 ) -> DependencySummary {
     let mut summary = DependencySummary::default();
@@ -3353,7 +3379,7 @@ fn list_dependency_summary(
         match context.issue_by_id.get(blocker.as_str()) {
             Some(blocker_issue)
                 if is_unfinished_dependency(blocker_issue)
-                    && context.visible_ids.contains(blocker.as_str()) =>
+                    && visible_ids.contains(blocker.as_str()) =>
             {
                 summary.visible_upstream.push(blocker.clone());
             }
@@ -3376,7 +3402,7 @@ fn list_dependency_summary(
     if let Some(downstream_issues) = context.downstream_by_blocker.get(issue.identifier.as_str()) {
         for candidate in downstream_issues {
             if is_unfinished_dependency(candidate)
-                && context.visible_ids.contains(candidate.identifier.as_str())
+                && visible_ids.contains(candidate.identifier.as_str())
             {
                 summary
                     .visible_downstream
@@ -3515,12 +3541,6 @@ fn dependency_detail_text(issue: &IssueSnapshot, deps: &DependencySummary) -> St
         parts.push(format!(
             "completed blockers {}",
             deps.completed_upstream.join(", ")
-        ));
-    }
-    if !deps.failed_upstream.is_empty() {
-        parts.push(format!(
-            "failed blockers {}",
-            deps.failed_upstream.join(", ")
         ));
     }
     if !deps.visible_downstream.is_empty() || deps.hidden_downstream_count > 0 {
@@ -4715,6 +4735,25 @@ mod tests {
     }
 
     #[test]
+    fn project_key_ignores_empty_primary_metadata() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        snapshot.snapshot.issues[0].project_id = Some(String::new());
+        snapshot.snapshot.issues[0].project_slug = Some("alpha".to_owned());
+        snapshot.snapshot.issues[0].project_name = Some("Alpha".to_owned());
+        snapshot.snapshot.issues[1].project_id = Some(String::new());
+        snapshot.snapshot.issues[1].project_slug = Some("beta".to_owned());
+        snapshot.snapshot.issues[1].project_name = Some("Beta".to_owned());
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 8).join("\n");
+
+        assert!(rendered.contains("== alpha | Alpha | workspace-0 | issues=1 running=1 todo=0 =="));
+        assert!(rendered.contains("== beta | Beta | workspace-1 | issues=1 running=1 todo=0 =="));
+        assert!(!rendered.contains("==  |"));
+    }
+
+    #[test]
     fn single_visible_project_with_metadata_still_renders_a_header() {
         let mut state = TuiState::default();
         let mut snapshot = fixture(8, 2);
@@ -4847,7 +4886,7 @@ mod tests {
         assert!(!detail.contains("completed blockers COE-255"));
         assert!(!detail.contains("deps: ready"));
         assert!(detail.contains("deps: blocked by COE-255 failed"));
-        assert!(detail.contains("failed blockers COE-255"));
+        assert!(!detail.contains("failed blockers COE-255"));
     }
 
     #[test]
