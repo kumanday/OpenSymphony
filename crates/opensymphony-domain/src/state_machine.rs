@@ -262,10 +262,6 @@ impl IssueExecution {
         expected_next_state: HarnessInterruptExpectedNextState,
         requested_at: TimestampMs,
     ) -> Result<(HarnessInterruptCommand, bool), StateTransitionError> {
-        if let Some(interrupt) = &self.interrupt {
-            return Ok((interrupt.command.clone(), false));
-        }
-
         let run = match &self.state {
             SchedulerState::Claimed { run } | SchedulerState::Running { run, .. } => run,
             _ => {
@@ -278,6 +274,9 @@ impl IssueExecution {
         let Some(conversation) = &self.conversation else {
             return Err(StateTransitionError::ConversationNotAttached);
         };
+        if let Some(interrupt) = &self.interrupt {
+            return Ok((interrupt.command.clone(), false));
+        }
 
         self.interrupt = Some(HarnessInterruptState::requested(
             HarnessInterruptCommand {
@@ -401,6 +400,7 @@ impl IssueExecution {
         self.state = SchedulerState::Claimed {
             run: run.with_normal_retry_count(normal_retry_count),
         };
+        self.interrupt = None;
         Ok(self)
     }
 

@@ -387,6 +387,58 @@ mod tests {
     }
 
     #[test]
+    fn interrupt_idempotency_does_not_cross_reopened_runs() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let mut execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(10_000),
+            Some(sample_conversation(true)),
+        ));
+
+        let (first_command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-1".to_string()),
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        assert!(queued);
+
+        let execution = must(execution.release(ts(70), ReleaseReason::TrackerInactive, None));
+        let execution = must(execution.reopen(ts(80)));
+
+        let run = sample_run(&issue, &workspace, None, ts(90));
+        let execution = must(execution.claim(run));
+        assert!(execution.interrupt().is_none());
+
+        let mut conversation = sample_conversation(false);
+        conversation.conversation_id = must(super::ConversationId::new("conv_261"));
+        let mut execution = must(execution.start_running(
+            ts(100),
+            super::DurationMs::new(10_000),
+            Some(conversation),
+        ));
+        let (second_command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-2".to_string()),
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(110),
+        ));
+
+        assert!(queued);
+        assert_ne!(second_command, first_command);
+        assert_eq!(second_command.conversation_id.as_str(), "conv_261");
+        assert_eq!(second_command.turn_id.as_deref(), Some("turn-2"));
+    }
+
+    #[test]
     fn interrupt_status_records_acknowledged_failed_and_timeout() {
         let mut acknowledged = running_execution();
         must(acknowledged.request_interrupt(
