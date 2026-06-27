@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -187,7 +186,7 @@ fn extract_symbols(
     let definition_capture = query.capture_index_for_name("definition");
     let name_capture = query.capture_index_for_name("name");
     let mut matches = cursor.matches(query, root, source);
-    let mut symbols = BTreeMap::new();
+    let mut symbols = Vec::new();
 
     while let Some(query_match) = matches.next() {
         let definition = query_match
@@ -209,8 +208,7 @@ fn extract_symbols(
         };
         let name = name.utf8_text(source)?.to_string();
         let span = one_based_span(definition);
-        let key = (definition.start_byte(), definition.end_byte(), name.clone());
-        symbols.entry(key).or_insert_with(|| SymbolRecord {
+        symbols.push(SymbolRecord {
             kind,
             name,
             rendered_span: span.render(),
@@ -220,7 +218,7 @@ fn extract_symbols(
         });
     }
 
-    Ok(symbols.into_values().collect())
+    Ok(symbols)
 }
 
 fn symbol_kind(node: Node<'_>, source: &[u8]) -> Option<SymbolKind> {

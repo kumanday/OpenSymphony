@@ -127,6 +127,9 @@ This keeps one canonical Linear API surface for the agent path.
   - Linear GraphQL read adapter and guarded archive mutation
 - `opensymphony_memory`
   - issue capsules, DuckDB memory index, docs sync, and archive eligibility
+- `opensymphony_code_intel`
+  - built-in Tree-sitter parser provider skeletons, starting with Rust source
+    summaries, one-based spans, symbols, and recoverable AST diagnostics
 - `opensymphony_openhands`
   - OpenHands transport and session runner
 - `opensymphony_codex`
