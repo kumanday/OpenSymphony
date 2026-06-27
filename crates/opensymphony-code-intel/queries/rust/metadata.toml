@@ -1,0 +1,6 @@
+language = "rust"
+version = "rust-definitions-v1"
+grammar_crate = "tree-sitter-rust"
+grammar_version = "0.24.2"
+parser_crate = "tree-sitter"
+parser_version = "0.26.9"

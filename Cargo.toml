@@ -53,6 +53,8 @@ tokio-util.workspace = true
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
 unicode-width.workspace = true
 url.workspace = true
 uuid.workspace = true
@@ -111,6 +113,8 @@ tokio-util = { version = "0.7", features = ["io"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tree-sitter = "0.26.9"
+tree-sitter-rust = "0.24.2"
 unicode-width = "0.2"
 url = "2"
 uuid = { version = "1", features = ["serde", "v4"] }
