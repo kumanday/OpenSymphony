@@ -1782,7 +1782,7 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
       `<div><span>Turns</span><strong>${formatNumber(run.turn_count)}</strong></div>`,
       `<div><span>Runtime</span><strong>${runtime}</strong></div>`,
       run.branch_name ? `<div><span>Branch</span><strong>${escapeHtml(run.branch_name)}</strong></div>` : "",
-      run.pr_url ? `<div><span>PR</span><strong><a href="${escapeAttr(run.pr_url)}" target="_blank" rel="noreferrer">${escapeHtml(run.pr_url)}</a></strong></div>` : "",
+      run.pr_url ? `<div><span>PR</span><strong><a href="${escapeAttr(run.pr_url)}" target="_blank" rel="noreferrer">${escapeHtml(formatPrLinkLabel(run.pr_url))}</a></strong></div>` : "",
       `<div><span>Input</span><strong>${formatNumber(run.input_tokens)}</strong></div>`,
       `<div><span>Cache</span><strong>${formatNumber(run.cache_read_tokens)}</strong></div>`,
       `<div><span>Output</span><strong>${formatNumber(run.output_tokens)}</strong></div>`,
@@ -3106,6 +3106,24 @@ function escapeAttr(value: unknown): string {
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US", { notation: "compact" }).format(value);
+}
+
+function formatPrLinkLabel(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const pullIndex = parts.findIndex((part) => part === "pull");
+    if (
+      parsed.hostname === "github.com"
+      && pullIndex === 2
+      && parts.length > pullIndex + 1
+    ) {
+      return `${parts[0]}/${parts[1]}#${parts[pullIndex + 1]}`;
+    }
+  } catch {
+    // Fall through to the original URL for non-URL values.
+  }
+  return url;
 }
 
 function hasValidationSummary(summary: RunValidationSummary | null): summary is RunValidationSummary {

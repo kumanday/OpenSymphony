@@ -268,6 +268,7 @@ describe("Run detail views", () => {
     const pr = root.querySelector("a[href='https://github.com/kumanday/OpenSymphony/pull/414']") as HTMLAnchorElement;
     expect(pr).not.toBeNull();
     expect(pr.target).toBe("_blank");
+    expect(pr.textContent).toBe("kumanday/OpenSymphony#414");
     expect(root.querySelector(".os-lines-added")?.textContent).toBe("+4");
     expect(root.querySelector(".os-lines-removed")?.textContent).toBe("-1");
 

@@ -79,7 +79,7 @@ fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> O
                 .source_type
                 .as_deref()
                 .map(|source_type| source_type.eq_ignore_ascii_case("github"))
-                .unwrap_or(true)
+                .unwrap_or(false)
         })
         .map(|attachment| attachment.url)
         .find(|url| {
