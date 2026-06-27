@@ -1,11 +1,11 @@
 ---
 type: topic-doc
-area: build
+area: control
 visibility: public
-last_memory_sync: 2026-06-14T22:09:16.647206+00:00
+last_memory_sync: 2026-06-27T15:38:16.487547+00:00
 ---
 
-# Build
+# Control
 
 <!-- BEGIN OPENSYMPHONY MANAGED MEMORY SYNC -->
 

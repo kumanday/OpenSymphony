@@ -11,6 +11,7 @@ This milestone index covers the new rich client, hosted mode, collaborative plan
 - `docs/specs/opensymphony-acp-debugging-spec.md`
 - `docs/specs/desktop-run-detail-operations-spec.md`
 - `docs/specs/tui-dependency-gutter-spec.md`
+- `docs/specs/opensymphony_tree_sitter_ast_spec.md`
 
 ## M6: Gateway And Stream Contract
 
@@ -203,6 +204,19 @@ Tasks:
 - OSYM-843 Tauri Debug-In-Zed Launch Action
 - OSYM-844 Default Debug UX Transition And CLI Compatibility
 - OSYM-845 ACP Debug Integration Tests And Failure Guidance
+
+## M12.6: Tree-sitter Code Intelligence
+
+Goal: Add a trusted Tree-sitter AST layer that gives agents source-cited structural code context through memory, MCP, and optional CLI tools.
+
+Tasks:
+
+- OSYM-850 Tree-sitter Provider Skeleton And Rust Parsing
+- OSYM-851 Memory Context AST Provider Integration
+- OSYM-852 Query Packs For Supported Agent Languages
+- OSYM-853 Code Intelligence Persistence And Ingestion
+- OSYM-854 Read-Only AST MCP And CLI Tools
+- OSYM-855 Code Intelligence Performance Docs And Hardening
 
 ## M13: Hardening And Release Quality
 

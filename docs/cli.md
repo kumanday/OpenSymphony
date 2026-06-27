@@ -11,7 +11,7 @@ last_memory_sync: 2026-05-16T07:06:20.437326+00:00
 
 ## Current model
 
-- COE-463 contributed: PR #149: Add OKF memory admin MCP parity (merge `f5f4809`)
+- COE-494 contributed: PR #150: Expose project metadata in operator snapshots (merge `67f973a`)
 
 ## Important invariants
 
@@ -28,10 +28,10 @@ last_memory_sync: 2026-05-16T07:06:20.437326+00:00
 
 ## Recent changes
 
-- COE-463: Docs Sync And MCP Admin Parity For OKF
+- COE-494: Project Metadata For Operator Issue Snapshots
 
 ## Source refs
 
-- COE-463
+- COE-494
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->
