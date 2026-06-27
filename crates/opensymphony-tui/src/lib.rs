@@ -4384,8 +4384,11 @@ mod tests {
                         output_tokens: 512 + (index as u64 * 50),
                         cache_read_tokens: 256 + (index as u64 * 25),
                         total_tokens: 0,
+                        cancel_requested: false,
                         cancel_acknowledged: false,
                         cancel_failed: false,
+                        cancel_timed_out: false,
+                        cancel_reason: None,
                         detached: false,
                     })
                     .collect(),
