@@ -1582,7 +1582,7 @@ impl TuiState {
             if rows.len() <= row_budget || issue_budget == 0 {
                 return rows;
             }
-            issue_budget = issue_budget.saturating_sub(rows.len() - row_budget);
+            issue_budget = issue_budget.saturating_sub(1);
         }
     }
 
@@ -3634,13 +3634,21 @@ fn issue_row_text(
 }
 
 fn dependency_detail_text(issue: &IssueSnapshot, deps: &DependencySummary) -> String {
-    let status = if deps.visible_upstream.is_empty() && deps.hidden_upstream_count == 0 {
+    let status = if deps.visible_upstream.is_empty()
+        && deps.hidden_upstream_count == 0
+        && deps.failed_upstream.is_empty()
+    {
         "ready".to_owned()
     } else {
         let mut blockers = deps.visible_upstream.clone();
         if deps.hidden_upstream_count > 0 {
             blockers.push(format!("{} hidden", deps.hidden_upstream_count));
         }
+        blockers.extend(
+            deps.failed_upstream
+                .iter()
+                .map(|blocker| format!("{blocker} failed")),
+        );
         format!("blocked by {}", blockers.join(", "))
     };
     let mut parts = vec![format!(
@@ -4802,6 +4810,26 @@ mod tests {
     }
 
     #[test]
+    fn project_header_budget_uses_largest_fitting_issue_window() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 4);
+        snapshot.snapshot.issues[0].project_slug = Some("alpha".to_owned());
+        snapshot.snapshot.issues[1].project_slug = Some("alpha".to_owned());
+        snapshot.snapshot.issues[2].project_slug = Some("beta".to_owned());
+        snapshot.snapshot.issues[3].project_slug = Some("gamma".to_owned());
+        state.selected_issue = 1;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.issue_lines(100, 4);
+        let rendered = lines.join("\n");
+
+        assert_eq!(lines.len(), 4);
+        assert!(rendered.contains("COE-255"));
+        assert!(rendered.contains("COE-256"));
+        assert!(!rendered.contains("COE-257"));
+    }
+
+    #[test]
     fn project_header_counts_use_full_snapshot_not_window() {
         let mut state = TuiState::default();
         let mut snapshot = fixture(8, 5);
@@ -4932,6 +4960,8 @@ mod tests {
         let detail = state.detail_lines(120, 8).join("\n");
 
         assert!(!detail.contains("completed blockers COE-255"));
+        assert!(!detail.contains("deps: ready"));
+        assert!(detail.contains("deps: blocked by COE-255 failed"));
         assert!(detail.contains("failed blockers COE-255"));
     }
 
