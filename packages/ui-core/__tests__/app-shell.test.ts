@@ -41,7 +41,7 @@ interface ProjectGroupingFixtureIssue {
 }
 
 const projectGroupingFixture = JSON.parse(readFileSync(
-  join(process.cwd(), "tests/fixtures/project_grouping_cases.json"),
+  join(__dirname, "../../../tests/fixtures/project_grouping_cases.json"),
   "utf8",
 )) as ProjectGroupingFixtureIssue[];
 

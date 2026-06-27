@@ -4992,7 +4992,17 @@ mod tests {
             !rendered.contains("COE-703 [idle / Todo] Beta completed blocker target <- COE-704")
         );
 
-        state.selected_issue = 3;
+        state.selected_issue = state
+            .latest_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .snapshot
+                    .issues
+                    .iter()
+                    .position(|issue| issue.identifier == "COE-703")
+            })
+            .expect("COE-703 fixture issue should exist");
         let detail = state.detail_lines(140, 8).join("\n");
         assert!(detail.contains("completed blockers COE-704"));
     }
