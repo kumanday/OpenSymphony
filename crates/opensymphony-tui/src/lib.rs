@@ -1572,16 +1572,17 @@ impl TuiState {
         max_rows: usize,
     ) -> Vec<IssueListRow<'a>> {
         let row_budget = visible_issue_count(max_rows);
-        let show_project_headers = snapshot.snapshot.issues.iter().any(has_project_label);
+        let show_project_headers =
+            row_budget > 1 && snapshot.snapshot.issues.iter().any(has_project_label);
         let mut issue_budget = row_budget;
 
         loop {
             let rows =
                 self.visible_issue_rows_for_budget(snapshot, issue_budget, show_project_headers);
-            if rows.len() <= row_budget || issue_budget <= 1 {
+            if rows.len() <= row_budget || issue_budget == 0 {
                 return rows;
             }
-            issue_budget = issue_budget.saturating_sub(rows.len() - row_budget).max(1);
+            issue_budget = issue_budget.saturating_sub(rows.len() - row_budget);
         }
     }
 
@@ -1604,7 +1605,10 @@ impl TuiState {
             if show_project_headers {
                 let key = project_key(issue);
                 if seen_projects.insert(key) {
-                    rows.push(IssueListRow::ProjectHeader(project_header(visible, issue)));
+                    rows.push(IssueListRow::ProjectHeader(project_header(
+                        &snapshot.snapshot.issues,
+                        issue,
+                    )));
                 }
             }
 
@@ -3366,6 +3370,7 @@ struct DependencySummary {
     visible_downstream: Vec<String>,
     hidden_downstream_count: usize,
     completed_upstream: Vec<String>,
+    failed_upstream: Vec<String>,
 }
 
 struct IssueRowText {
@@ -3422,13 +3427,13 @@ fn project_key(issue: &IssueSnapshot) -> String {
     })
 }
 
-fn project_header(visible: &[IssueSnapshot], issue: &IssueSnapshot) -> String {
+fn project_header(all_issues: &[IssueSnapshot], issue: &IssueSnapshot) -> String {
     let key = project_key(issue);
-    let project_issue_count = visible
+    let project_issue_count = all_issues
         .iter()
         .filter(|candidate| project_key(candidate) == key)
         .count();
-    let running_count = visible
+    let running_count = all_issues
         .iter()
         .filter(|candidate| {
             project_key(candidate) == key
@@ -3438,26 +3443,19 @@ fn project_header(visible: &[IssueSnapshot], issue: &IssueSnapshot) -> String {
                 )
         })
         .count();
-    let todo_count = visible
+    let todo_count = all_issues
         .iter()
         .filter(|candidate| project_key(candidate) == key && is_todo_issue(candidate))
         .count();
-    let mut parts = Vec::new();
+    let mut parts = vec![key.clone()];
 
     if let Some(slug) = issue
         .project_slug
         .as_deref()
         .filter(|value| !value.is_empty())
+        && !parts.iter().any(|part| part == slug)
     {
         parts.push(slug.to_owned());
-    } else if let Some(id) = issue
-        .project_id
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        parts.push(id.to_owned());
-    } else {
-        parts.push("unknown-project".to_owned());
     }
 
     if let Some(name) = issue
@@ -3513,6 +3511,14 @@ fn list_dependency_summary(
             }
             Some(blocker_issue) if is_unfinished_dependency(blocker_issue) => {
                 summary.hidden_upstream_count += 1;
+            }
+            Some(blocker_issue)
+                if matches!(
+                    blocker_issue.runtime_state,
+                    ControlPlaneIssueRuntimeState::Failed
+                ) =>
+            {
+                summary.failed_upstream.push(blocker.clone());
             }
             Some(_) => summary.completed_upstream.push(blocker.clone()),
             None => summary.hidden_upstream_count += 1,
@@ -3654,6 +3660,12 @@ fn dependency_detail_text(issue: &IssueSnapshot, deps: &DependencySummary) -> St
         parts.push(format!(
             "completed blockers {}",
             deps.completed_upstream.join(", ")
+        ));
+    }
+    if !deps.failed_upstream.is_empty() {
+        parts.push(format!(
+            "failed blockers {}",
+            deps.failed_upstream.join(", ")
         ));
     }
     if !deps.visible_downstream.is_empty() {
@@ -4772,6 +4784,55 @@ mod tests {
     }
 
     #[test]
+    fn project_headers_drop_when_only_one_issue_row_fits() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 3);
+        for issue in &mut snapshot.snapshot.issues {
+            issue.project_slug = Some("alpha".to_owned());
+        }
+        state.selected_issue = 1;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let lines = state.issue_lines(100, 2);
+        let rendered = lines.join("\n");
+
+        assert_eq!(lines.len(), 2);
+        assert!(rendered.contains("COE-256"));
+        assert!(!rendered.contains("== alpha"));
+    }
+
+    #[test]
+    fn project_header_counts_use_full_snapshot_not_window() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 5);
+        for issue in &mut snapshot.snapshot.issues {
+            issue.project_slug = Some("alpha".to_owned());
+            issue.project_name = Some("Alpha".to_owned());
+        }
+        snapshot.snapshot.issues[3].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[3].tracker_state = "Todo".to_owned();
+        state.selected_issue = 4;
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 3).join("\n");
+
+        assert!(rendered.contains("issues=5 running=4 todo=1"));
+    }
+
+    #[test]
+    fn project_header_uses_project_name_when_name_is_only_metadata() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 1);
+        snapshot.snapshot.issues[0].project_name = Some("Name Only".to_owned());
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+
+        let rendered = state.issue_lines(120, 3).join("\n");
+
+        assert!(rendered.contains("== Name Only | workspace-0 | issues=1 running=1 todo=0 =="));
+        assert!(!rendered.contains("unknown-project"));
+    }
+
+    #[test]
     fn single_visible_project_with_metadata_still_renders_a_header() {
         let mut state = TuiState::default();
         let mut snapshot = fixture(8, 2);
@@ -4854,6 +4915,24 @@ mod tests {
         let detail = state.detail_lines(120, 8).join("\n");
 
         assert!(!detail.contains("completed blockers COE-256"));
+    }
+
+    #[test]
+    fn failed_upstream_is_not_labeled_as_completed_blocker() {
+        let mut state = TuiState::default();
+        let mut snapshot = fixture(8, 2);
+        snapshot.snapshot.issues[0].runtime_state = IssueRuntimeState::Failed;
+        snapshot.snapshot.issues[0].tracker_state = "Failed".to_owned();
+        snapshot.snapshot.issues[1].runtime_state = IssueRuntimeState::Idle;
+        snapshot.snapshot.issues[1].tracker_state = "Todo".to_owned();
+        snapshot.snapshot.issues[1].blocked_by = vec!["COE-255".to_owned()];
+        state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
+        state.selected_issue = 1;
+
+        let detail = state.detail_lines(120, 8).join("\n");
+
+        assert!(!detail.contains("completed blockers COE-255"));
+        assert!(detail.contains("failed blockers COE-255"));
     }
 
     #[test]
