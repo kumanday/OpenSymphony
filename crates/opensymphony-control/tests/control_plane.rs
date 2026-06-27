@@ -78,7 +78,6 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             cache_read_tokens: 256,
             total_tokens: 0,
             cancel_requested: false,
-
             cancel_acknowledged: false,
             cancel_failed: false,
             cancel_timed_out: false,

@@ -1877,7 +1877,6 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             total_tokens: 1536,
             detached: false,
             cancel_requested: false,
-
             cancel_acknowledged: false,
             cancel_failed: false,
             cancel_timed_out: false,
@@ -1918,7 +1917,6 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             total_tokens: 3072,
             detached: false,
             cancel_requested: false,
-
             cancel_acknowledged: false,
             cancel_failed: false,
             cancel_timed_out: false,
@@ -1967,7 +1965,6 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             total_tokens: 768,
             detached: false,
             cancel_requested: false,
-
             cancel_acknowledged: false,
             cancel_failed: false,
             cancel_timed_out: false,

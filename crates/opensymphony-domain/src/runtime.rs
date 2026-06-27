@@ -949,6 +949,21 @@ pub enum HarnessInterruptReason {
     TrackerMergingSupersedesHumanReview,
 }
 
+impl HarnessInterruptReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OperatorCancel => "operator_cancel",
+            Self::TrackerMergingSupersedesHumanReview => "tracker_merging_supersedes_human_review",
+        }
+    }
+}
+
+impl fmt::Display for HarnessInterruptReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessInterruptExpectedNextState {
@@ -1002,18 +1017,27 @@ impl HarnessInterruptState {
     }
 
     pub fn acknowledge(&mut self, observed_at: TimestampMs) {
+        if self.status != HarnessInterruptStatus::Requested {
+            return;
+        }
         self.status = HarnessInterruptStatus::Acknowledged;
         self.updated_at = Some(observed_at);
         self.detail = None;
     }
 
     pub fn fail(&mut self, observed_at: TimestampMs, detail: impl Into<String>) {
+        if self.status != HarnessInterruptStatus::Requested {
+            return;
+        }
         self.status = HarnessInterruptStatus::Failed;
         self.updated_at = Some(observed_at);
         self.detail = Some(detail.into());
     }
 
     pub fn timeout(&mut self, observed_at: TimestampMs, detail: impl Into<String>) {
+        if self.status != HarnessInterruptStatus::Requested {
+            return;
+        }
         self.status = HarnessInterruptStatus::TimedOut;
         self.updated_at = Some(observed_at);
         self.detail = Some(detail.into());

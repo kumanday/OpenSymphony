@@ -282,12 +282,7 @@ fn map_issue(
             interrupt.map(|interrupt| interrupt.status),
             Some(HarnessInterruptStatus::TimedOut)
         ),
-        cancel_reason: interrupt.map(|interrupt| {
-            serde_json::to_value(interrupt.command.reason)
-                .ok()
-                .and_then(|value| value.as_str().map(ToOwned::to_owned))
-                .unwrap_or_else(|| format!("{:?}", interrupt.command.reason))
-        }),
+        cancel_reason: interrupt.map(|interrupt| interrupt.command.reason.as_str().to_string()),
     }
 }
 

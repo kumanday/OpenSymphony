@@ -442,7 +442,6 @@ fn run_detail_roundtrips() {
         safe_actions: SafeActions::default(),
         detached: false,
         cancel_requested: false,
-
         cancel_acknowledged: false,
         cancel_failed: false,
         cancel_timed_out: false,

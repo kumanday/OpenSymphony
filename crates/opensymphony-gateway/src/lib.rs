@@ -4073,7 +4073,6 @@ exit 2
             total_tokens: 0,
             detached: flags.detached,
             cancel_requested: false,
-
             cancel_acknowledged: false,
             cancel_failed: false,
             cancel_timed_out: false,

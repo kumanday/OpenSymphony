@@ -74,7 +74,6 @@ fn fixture() -> SnapshotEnvelope {
                 cache_read_tokens: 512,
                 total_tokens: 3072,
                 cancel_requested: false,
-
                 cancel_acknowledged: false,
                 cancel_failed: false,
                 cancel_timed_out: false,

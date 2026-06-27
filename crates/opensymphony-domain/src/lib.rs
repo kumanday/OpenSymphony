@@ -379,30 +379,45 @@ mod tests {
 
     #[test]
     fn interrupt_status_records_acknowledged_failed_and_timeout() {
-        let mut execution = running_execution();
-        must(execution.request_interrupt(
+        let mut acknowledged = running_execution();
+        must(acknowledged.request_interrupt(
             "openhands_agent_server",
             None,
             HarnessInterruptReason::OperatorCancel,
             HarnessInterruptExpectedNextState::Paused,
             ts(60),
         ));
-
-        must(execution.acknowledge_interrupt(ts(61)));
+        must(acknowledged.acknowledge_interrupt(ts(61)));
         assert_eq!(
-            execution.interrupt().map(|interrupt| interrupt.status),
+            acknowledged.interrupt().map(|interrupt| interrupt.status),
             Some(HarnessInterruptStatus::Acknowledged)
         );
 
-        must(execution.fail_interrupt(ts(62), "adapter refused interrupt"));
+        let mut failed = running_execution();
+        must(failed.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        must(failed.fail_interrupt(ts(62), "adapter refused interrupt"));
         assert_eq!(
-            execution.interrupt().map(|interrupt| interrupt.status),
+            failed.interrupt().map(|interrupt| interrupt.status),
             Some(HarnessInterruptStatus::Failed)
         );
 
-        must(execution.timeout_interrupt(ts(63), "ack timeout"));
+        let mut timed_out = running_execution();
+        must(timed_out.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        must(timed_out.timeout_interrupt(ts(63), "ack timeout"));
         assert_eq!(
-            execution.interrupt().map(|interrupt| interrupt.status),
+            timed_out.interrupt().map(|interrupt| interrupt.status),
             Some(HarnessInterruptStatus::TimedOut)
         );
     }
