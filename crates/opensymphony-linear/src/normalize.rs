@@ -82,10 +82,27 @@ fn normalize_pr_url(attachments: Vec<super::graphql::LinearAttachmentNode>) -> O
                 .unwrap_or(false)
         })
         .map(|attachment| attachment.url)
-        .find(|url| {
-            let normalized = url.trim().to_ascii_lowercase();
-            normalized.starts_with("https://github.com/") && normalized.contains("/pull/")
-        })
+        .find(|url| is_canonical_github_pr_url(url))
+}
+
+fn is_canonical_github_pr_url(url: &str) -> bool {
+    let Some(path) = url.trim().strip_prefix("https://github.com/") else {
+        return false;
+    };
+    let mut parts = path.split('/');
+    let (Some(owner), Some(repo), Some("pull"), Some(number), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    !owner.is_empty()
+        && !repo.is_empty()
+        && !number.is_empty()
+        && number.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn normalize_blockers(relations: Vec<LinearRelationNode>) -> Vec<TrackerIssueBlocker> {
@@ -179,7 +196,7 @@ fn normalize_priority(priority: f64) -> Result<Option<u8>, LinearError> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_priority;
+    use super::{is_canonical_github_pr_url, normalize_priority};
 
     #[test]
     fn priority_zero_becomes_none() {
@@ -209,5 +226,21 @@ mod tests {
     #[test]
     fn undocumented_linear_priority_values_are_rejected() {
         assert!(normalize_priority(5.0).is_err());
+    }
+
+    #[test]
+    fn github_pr_url_matching_requires_canonical_pull_path() {
+        assert!(is_canonical_github_pr_url(
+            "https://github.com/kumanday/OpenSymphony/pull/155"
+        ));
+        assert!(!is_canonical_github_pr_url(
+            "https://github.com/kumanday/OpenSymphony/wiki/pull/155"
+        ));
+        assert!(!is_canonical_github_pr_url(
+            "https://github.com/kumanday/OpenSymphony/pull/not-a-number"
+        ));
+        assert!(!is_canonical_github_pr_url(
+            "https://example.com/kumanday/OpenSymphony/pull/155"
+        ));
     }
 }

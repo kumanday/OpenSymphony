@@ -44,6 +44,13 @@ Important normalization rules:
 - `state_kind` is derived from Linear's stable workflow-state `type`; clients and
   caches must not infer categories from mutable display names such as
   "Human Review"
+- `branch_name` comes from Linear `Issue.branchName` when present and is carried
+  through tracker normalization so run-detail clients can show the same branch
+  known to the scheduler
+- `pr_url` comes from Linear issue attachments only when the attachment has an
+  explicit GitHub `sourceType` and a canonical
+  `https://github.com/<owner>/<repo>/pull/<number>` URL; generic URL
+  attachments are ignored for Run Detail PR metadata
 - `parent_id` comes from `parent.id`
 - `parent` retains the parent identifier when Linear returns it, and gateway
   task graph nodes use that identifier as the client-facing `parent_id`; the

@@ -205,6 +205,9 @@ relationships, then overlays live runtime details from the latest snapshot.
 Runtime token usage in that snapshot carries input, output, cache-read, and
 provider-reported total counters when the selected harness reports them; legacy
 metadata without an explicit total falls back to input plus output.
+Run Detail metadata also carries tracker-backed branch and PR fields when
+Linear provides them: `branchName` becomes `branch_name`, and explicit GitHub PR
+attachments become `pr_url`.
 The gateway emits `root_ids` from the returned Linear parent/child graph so
 clients can render the same forest without inventing hierarchy locally.
 If the optional task graph reader cannot be built, `opensymphony run` still
