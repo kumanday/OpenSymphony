@@ -192,11 +192,30 @@ fn copy_dir_all(from: &Path, to: &Path) -> Result<(), DesktopLauncherError> {
         if metadata.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
         } else {
+            let permissions = metadata.permissions();
             fs::copy(entry.path(), &target).map_err(|source| DesktopLauncherError::Repair {
-                path: target,
+                path: target.clone(),
                 source,
             })?;
+            fs::set_permissions(&target, permissions).map_err(|source| {
+                DesktopLauncherError::Repair {
+                    path: target,
+                    source,
+                }
+            })?;
         }
+    }
+    Ok(())
+}
+
+fn reject_parent_components(path: &Path) -> Result<(), DesktopLauncherError> {
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(DesktopLauncherError::DangerousCacheRoot {
+            path: path.to_path_buf(),
+        });
     }
     Ok(())
 }
@@ -231,6 +250,7 @@ fn default_cache_root() -> Result<PathBuf, DesktopLauncherError> {
 }
 
 fn normalize_cache_root(path: PathBuf) -> Result<PathBuf, DesktopLauncherError> {
+    reject_parent_components(&path)?;
     let absolute = if path.is_absolute() {
         path
     } else {
@@ -238,6 +258,7 @@ fn normalize_cache_root(path: PathBuf) -> Result<PathBuf, DesktopLauncherError> 
             .map_err(DesktopLauncherError::CurrentDir)?
             .join(path)
     };
+    reject_parent_components(&absolute)?;
     if absolute.parent().is_none() {
         return Err(DesktopLauncherError::DangerousCacheRoot { path: absolute });
     }
@@ -245,6 +266,8 @@ fn normalize_cache_root(path: PathBuf) -> Result<PathBuf, DesktopLauncherError> 
 }
 
 fn validate_cache_dir(cache_root: &Path, cache_dir: &Path) -> Result<(), DesktopLauncherError> {
+    reject_parent_components(cache_root)?;
+    reject_parent_components(cache_dir)?;
     if cache_root.parent().is_none()
         || !cache_dir.starts_with(cache_root)
         || cache_dir.file_name().and_then(|name| name.to_str()) != Some(desktop_version())
@@ -536,5 +559,51 @@ mod tests {
             error,
             DesktopLauncherError::DangerousCacheRoot { .. }
         ));
+    }
+
+    #[test]
+    fn cache_root_rejects_parent_directory_components() {
+        let error = normalize_cache_root(PathBuf::from("cache/../outside"))
+            .expect_err("parent-directory cache roots should fail");
+
+        assert!(matches!(
+            error,
+            DesktopLauncherError::DangerousCacheRoot { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_bundle_copy_preserves_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let source = TempDir::new().expect("source tempdir");
+        let cache = TempDir::new().expect("cache tempdir");
+        let executable = source.path().join("OpenSymphony");
+        fs::write(&executable, b"fake desktop").expect("write fake executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("set executable mode");
+        let manifest = DesktopBundleManifest {
+            version: desktop_version().to_string(),
+            platform: current_platform().to_string(),
+            arch: current_arch().to_string(),
+            executable: PathBuf::from("OpenSymphony"),
+            sha256: file_sha256(&executable).expect("hash fake executable"),
+        };
+        fs::write(
+            source.path().join(MANIFEST_FILE),
+            serde_json::to_vec(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let cache_dir = cache.path().join(desktop_version());
+        let verified = ensure_verified_bundle(cache.path(), &cache_dir, Some(source.path()))
+            .expect("bundle should materialize and verify");
+        let mode = fs::metadata(&verified.executable)
+            .expect("copied executable metadata")
+            .permissions()
+            .mode();
+
+        assert_ne!(mode & 0o111, 0);
     }
 }
