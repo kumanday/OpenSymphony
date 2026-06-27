@@ -29,10 +29,11 @@ pub use issue::{BlockerRef, IssueRef, IssueState, IssueStateCategory, Normalized
 pub use journal::{EventJournalBackend, EventStream, InMemoryEventJournal, StreamBroker};
 pub use runtime::{
     ConversationActivityEvent, ConversationMetadata, DetachMetadata, DetachReason,
-    HistorySyncStatus, LivenessState, ReconnectStatus, ReleaseReason, RetryAttempt,
-    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeLivenessPhase,
-    RuntimeProgressSnapshot, RuntimeStreamState, StallMetadata, StreamHealth, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceRecord,
+    HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
+    HarnessInterruptState, HarnessInterruptStatus, HistorySyncStatus, LivenessState,
+    ReconnectStatus, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy,
+    RetryReason, RunAttempt, RuntimeLivenessPhase, RuntimeProgressSnapshot, RuntimeStreamState,
+    StallMetadata, StreamHealth, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
 pub use snapshot::{
     ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, IssueSnapshot, OrchestratorSnapshot,
@@ -63,7 +64,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ComponentHealthSnapshot, ConversationMetadata, HealthStatus, IssueExecution, IssueId,
+        ComponentHealthSnapshot, ConversationMetadata, HarnessInterruptExpectedNextState,
+        HarnessInterruptReason, HarnessInterruptStatus, HealthStatus, IssueExecution, IssueId,
         IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
         OrchestratorSnapshot, ReleaseReason, RetryAttempt, RetryEntry, RetryPolicy, RetryReason,
         RunAttempt, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
@@ -203,6 +205,21 @@ mod tests {
         }
     }
 
+    fn running_execution() -> IssueExecution {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let mut execution = IssueExecution::new(issue, ts(30));
+        must(execution.attach_workspace(workspace));
+        must(execution.claim(run).and_then(|execution| {
+            execution.start_running(
+                ts(50),
+                super::DurationMs::new(10_000),
+                Some(sample_conversation(true)),
+            )
+        }))
+    }
+
     #[test]
     fn state_transitions_are_explicit_and_testable() {
         let issue = sample_issue();
@@ -291,6 +308,103 @@ mod tests {
             Some(ReleaseReason::TrackerInactive)
         );
         assert_eq!(snapshot.recent_worker_outcomes.len(), 1);
+    }
+
+    #[test]
+    fn records_operator_cancel_interrupt_request() {
+        let mut execution = running_execution();
+        let (command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+
+        assert!(queued);
+        assert_eq!(command.run_id, "COE-260");
+        assert_eq!(command.harness_kind, "openhands_agent_server");
+        assert_eq!(command.reason, HarnessInterruptReason::OperatorCancel);
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Requested)
+        );
+    }
+
+    #[test]
+    fn records_tracker_merging_interrupt_request() {
+        let mut execution = running_execution();
+        let (command, queued) = must(execution.request_interrupt(
+            "codex_app_server",
+            Some("turn-1".to_string()),
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            ts(60),
+        ));
+
+        assert!(queued);
+        assert_eq!(command.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            command.reason,
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview
+        );
+    }
+
+    #[test]
+    fn repeated_interrupt_request_is_idempotent_for_active_run() {
+        let mut execution = running_execution();
+        let first_command = {
+            let (command, queued) = must(execution.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::OperatorCancel,
+                HarnessInterruptExpectedNextState::Paused,
+                ts(60),
+            ));
+            assert!(queued);
+            command.clone()
+        };
+
+        let (second_command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("ignored".to_string()),
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            ts(61),
+        ));
+
+        assert!(!queued);
+        assert_eq!(*second_command, first_command);
+    }
+
+    #[test]
+    fn interrupt_status_records_acknowledged_failed_and_timeout() {
+        let mut execution = running_execution();
+        must(execution.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+
+        must(execution.acknowledge_interrupt(ts(61)));
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Acknowledged)
+        );
+
+        must(execution.fail_interrupt(ts(62), "adapter refused interrupt"));
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Failed)
+        );
+
+        must(execution.timeout_interrupt(ts(63), "ack timeout"));
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::TimedOut)
+        );
     }
 
     #[test]

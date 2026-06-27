@@ -238,8 +238,12 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             output_tokens: 512,
             cache_read_tokens: 256,
             total_tokens: 0,
+            cancel_requested: false,
+
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
             detached: false,
         }],
         recent_events: vec![RecentEvent {
@@ -323,8 +327,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 0,
                 cache_read_tokens: 0,
                 total_tokens: 0,
+                cancel_requested: false,
+
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
             // Completed issue with events and modified files
@@ -412,8 +420,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 1024,
                 cache_read_tokens: 256,
                 total_tokens: 0,
+                cancel_requested: false,
+
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
             // Failed issue, first attempt (no retries exhausted)
@@ -450,8 +462,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 128,
                 cache_read_tokens: 0,
                 total_tokens: 0,
+                cancel_requested: false,
+
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
             // RetryQueued issue: queued but NOT eligible (not idle)
@@ -488,8 +504,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 64,
                 cache_read_tokens: 0,
                 total_tokens: 0,
+                cancel_requested: false,
+
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
             // Blocked Idle issue: NOT eligible AND NOT queued
@@ -526,8 +546,12 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 0,
                 cache_read_tokens: 0,
                 total_tokens: 0,
+                cancel_requested: false,
+
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
         ],

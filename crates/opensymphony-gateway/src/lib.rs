@@ -2610,8 +2610,11 @@ async fn get_run_detail(
                     diagnostics: None,
                     safe_actions: SafeActions::default(),
                     detached: false,
+                    cancel_requested: false,
                     cancel_acknowledged: false,
                     cancel_failed: false,
+                    cancel_timed_out: false,
+                    cancel_reason: None,
                 }),
             );
         }
@@ -2689,13 +2692,19 @@ async fn get_run_detail(
             liveness: Some(build_liveness(issue)),
             diagnostics: Some(RunDiagnostics {
                 harness_scheduler_disagreement: None,
+                cancel_requested: issue.cancel_requested,
                 cancel_acknowledged: issue.cancel_acknowledged,
                 cancel_failed: issue.cancel_failed,
+                cancel_timed_out: issue.cancel_timed_out,
+                cancel_reason: issue.cancel_reason.clone(),
             }),
             safe_actions: safe_actions_for_issue(issue),
             detached: issue.detached,
+            cancel_requested: issue.cancel_requested,
             cancel_acknowledged: issue.cancel_acknowledged,
             cancel_failed: issue.cancel_failed,
+            cancel_timed_out: issue.cancel_timed_out,
+            cancel_reason: issue.cancel_reason.clone(),
         }),
     )
 }
@@ -4063,8 +4072,12 @@ exit 2
             cache_read_tokens: 0,
             total_tokens: 0,
             detached: flags.detached,
+            cancel_requested: false,
+
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
         }
     }
 
