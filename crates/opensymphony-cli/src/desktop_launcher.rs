@@ -1,5 +1,7 @@
 use std::{
-    env, fs,
+    env,
+    ffi::OsString,
+    fs,
     fs::File,
     io,
     io::Read,
@@ -243,10 +245,37 @@ fn file_sha256(path: &Path) -> Result<String, DesktopLauncherError> {
 }
 
 fn default_cache_root() -> Result<PathBuf, DesktopLauncherError> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or(DesktopLauncherError::MissingHome)?;
+    let home = home_dir().ok_or(DesktopLauncherError::MissingHome)?;
     Ok(home.join(DEFAULT_CACHE_RELATIVE))
+}
+
+fn home_dir() -> Option<PathBuf> {
+    home_dir_from_vars(
+        env::var_os("HOME"),
+        env::var_os("USERPROFILE"),
+        env::var_os("HOMEDRIVE"),
+        env::var_os("HOMEPATH"),
+    )
+}
+
+fn home_dir_from_vars(
+    home: Option<OsString>,
+    userprofile: Option<OsString>,
+    homedrive: Option<OsString>,
+    homepath: Option<OsString>,
+) -> Option<PathBuf> {
+    home.filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            userprofile
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+        .or_else(|| {
+            let drive = homedrive.filter(|value| !value.is_empty())?;
+            let path = homepath.filter(|value| !value.is_empty())?;
+            Some(PathBuf::from(drive).join(path))
+        })
 }
 
 fn normalize_cache_root(path: PathBuf) -> Result<PathBuf, DesktopLauncherError> {
@@ -441,6 +470,40 @@ mod tests {
     fn platform_selection_uses_current_target() {
         assert_eq!(current_platform(), env::consts::OS);
         assert_eq!(current_arch(), env::consts::ARCH);
+    }
+
+    #[test]
+    fn home_dir_uses_unix_home_first() {
+        let home = home_dir_from_vars(
+            Some(OsString::from("/home/alice")),
+            Some(OsString::from("C:\\Users\\alice")),
+            None,
+            None,
+        )
+        .expect("home should resolve");
+
+        assert_eq!(home, PathBuf::from("/home/alice"));
+    }
+
+    #[test]
+    fn home_dir_falls_back_to_windows_userprofile() {
+        let home = home_dir_from_vars(None, Some(OsString::from("C:\\Users\\alice")), None, None)
+            .expect("home should resolve");
+
+        assert_eq!(home, PathBuf::from("C:\\Users\\alice"));
+    }
+
+    #[test]
+    fn home_dir_falls_back_to_windows_drive_and_path() {
+        let home = home_dir_from_vars(
+            None,
+            None,
+            Some(OsString::from("C:")),
+            Some(OsString::from("\\Users\\alice")),
+        )
+        .expect("home should resolve");
+
+        assert_eq!(home, PathBuf::from("C:").join("\\Users\\alice"));
     }
 
     #[test]
