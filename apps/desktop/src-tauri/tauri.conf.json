@@ -1,5 +1,6 @@
 {
   "productName": "OpenSymphony",
+  "mainBinaryName": "OpenSymphony",
   "version": "1.6.1",
   "identifier": "dev.opensymphony.app",
   "build": {
