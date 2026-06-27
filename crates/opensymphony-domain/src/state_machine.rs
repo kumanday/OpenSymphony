@@ -259,14 +259,9 @@ impl IssueExecution {
         reason: HarnessInterruptReason,
         expected_next_state: HarnessInterruptExpectedNextState,
         requested_at: TimestampMs,
-    ) -> Result<(&HarnessInterruptCommand, bool), StateTransitionError> {
-        if self.interrupt.is_some() {
-            let command = &self
-                .interrupt
-                .as_ref()
-                .expect("checked interrupt presence")
-                .command;
-            return Ok((command, false));
+    ) -> Result<(HarnessInterruptCommand, bool), StateTransitionError> {
+        if let Some(interrupt) = &self.interrupt {
+            return Ok((interrupt.command.clone(), false));
         }
 
         let run = match &self.state {
@@ -295,7 +290,7 @@ impl IssueExecution {
             requested_at,
         ));
         let interrupt = self.interrupt.as_ref().expect("interrupt was just set");
-        Ok((&interrupt.command, true))
+        Ok((interrupt.command.clone(), true))
     }
 
     pub fn acknowledge_interrupt(
@@ -553,12 +548,11 @@ impl IssueExecution {
     }
 
     fn record_outcome(&mut self, outcome: WorkerOutcomeRecord) {
-        if outcome.outcome == super::WorkerOutcomeKind::CancelFailed {
-            if let Some(interrupt) = &mut self.interrupt {
-                if interrupt.status == HarnessInterruptStatus::Requested {
-                    interrupt.fail(outcome.finished_at, "worker reported cancel_failed");
-                }
-            }
+        if outcome.outcome == super::WorkerOutcomeKind::CancelFailed
+            && let Some(interrupt) = &mut self.interrupt
+            && interrupt.status == HarnessInterruptStatus::Requested
+        {
+            interrupt.fail(outcome.finished_at, "worker reported cancel_failed");
         }
         self.last_worker_outcome = Some(outcome.clone());
         if self.recent_worker_outcomes.len() == MAX_RECENT_WORKER_OUTCOMES {

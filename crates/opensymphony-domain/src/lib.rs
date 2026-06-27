@@ -362,7 +362,7 @@ mod tests {
                 ts(60),
             ));
             assert!(queued);
-            command.clone()
+            command
         };
 
         let (second_command, queued) = must(execution.request_interrupt(
@@ -374,7 +374,7 @@ mod tests {
         ));
 
         assert!(!queued);
-        assert_eq!(*second_command, first_command);
+        assert_eq!(second_command, first_command);
     }
 
     #[test]
