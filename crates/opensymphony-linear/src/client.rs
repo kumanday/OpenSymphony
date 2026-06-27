@@ -1065,7 +1065,7 @@ impl From<LinearProjectNode> for LinearProjectOverview {
             id: node.id,
             name: node.name,
             slug_id: node.slug_id,
-            url: node.url,
+            url: node.url.unwrap_or_default(),
             content: node.content,
         }
     }

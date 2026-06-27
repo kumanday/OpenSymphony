@@ -45,6 +45,12 @@ pub struct NormalizedIssue {
     pub url: Option<String>,
     pub labels: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_slug: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<IssueId>,
     pub blocked_by: Vec<BlockerRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

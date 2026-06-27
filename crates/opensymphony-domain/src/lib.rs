@@ -135,6 +135,9 @@ mod tests {
                     .to_owned(),
             ),
             labels: vec!["foundation".to_owned(), "contracts".to_owned()],
+            project_id: None,
+            project_slug: None,
+            project_name: None,
             parent_id: None,
             blocked_by: Vec::new(),
             sub_issues: vec![IssueRef {
