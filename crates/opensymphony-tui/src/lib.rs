@@ -775,8 +775,7 @@ impl TuiState {
                 ]));
 
                 let deps = dependency_summary(
-                    &self
-                        .latest_snapshot
+                    self.latest_snapshot
                         .as_ref()
                         .map(|snapshot| snapshot.snapshot.issues.as_slice())
                         .unwrap_or_default(),
@@ -1325,8 +1324,7 @@ impl TuiState {
             Some(issue) => {
                 lines.push(fit(&format!("{} {}", issue.identifier, issue.title), width));
                 let deps = dependency_summary(
-                    &self
-                        .latest_snapshot
+                    self.latest_snapshot
                         .as_ref()
                         .map(|snapshot| snapshot.snapshot.issues.as_slice())
                         .unwrap_or_default(),
