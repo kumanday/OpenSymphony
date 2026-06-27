@@ -16,6 +16,11 @@
             "name": "In Progress",
             "type": "started"
           },
+          "project": {
+            "id": "proj-open",
+            "name": "OpenSymphony",
+            "slugId": "opensymphony-bootstrap"
+          },
           "parent": null,
           "children": {
             "nodes": []

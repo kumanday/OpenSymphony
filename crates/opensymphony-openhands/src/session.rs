@@ -3779,6 +3779,9 @@ mod tests {
             branch_name: None,
             url: None,
             labels: vec!["area:memory".to_string()],
+            project_id: None,
+            project_slug: None,
+            project_name: None,
             parent_id: None,
             blocked_by: vec![BlockerRef {
                 id: Some(must(IssueId::new("issue-100"))),

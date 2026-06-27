@@ -163,6 +163,14 @@ fn map_issue(
             .as_ref()
             .map(|workspace| suffix_path(&workspace.path))
             .unwrap_or_else(|| "-".to_string()),
+        project_id: issue.issue.project_id.clone(),
+        project_slug: issue.issue.project_slug.clone(),
+        project_name: issue.issue.project_name.clone(),
+        workspace_label: issue
+            .workspace
+            .as_ref()
+            .map(|workspace| suffix_path(&workspace.path))
+            .filter(|label| label != "-"),
         retry_count: issue
             .retry
             .as_ref()
@@ -502,6 +510,9 @@ tracker:
                     branch_name: None,
                     url: None,
                     labels: Vec::new(),
+                    project_id: Some("proj-open".to_owned()),
+                    project_slug: Some("opensymphony-bootstrap".to_owned()),
+                    project_name: Some("OpenSymphony".to_owned()),
                     parent_id: None,
                     blocked_by: Vec::<BlockerRef>::new(),
                     sub_issues: Vec::<IssueRef>::new(),
@@ -592,5 +603,15 @@ tracker:
         assert_eq!(mapped.issues[0].turn_count, 3);
         assert_eq!(mapped.issues[0].max_turns, 8);
         assert_eq!(mapped.issues[0].runtime_seconds, 1);
+        assert_eq!(mapped.issues[0].project_id.as_deref(), Some("proj-open"));
+        assert_eq!(
+            mapped.issues[0].project_slug.as_deref(),
+            Some("opensymphony-bootstrap")
+        );
+        assert_eq!(
+            mapped.issues[0].project_name.as_deref(),
+            Some("OpenSymphony")
+        );
+        assert_eq!(mapped.issues[0].workspace_label.as_deref(), Some("COE-352"));
     }
 }

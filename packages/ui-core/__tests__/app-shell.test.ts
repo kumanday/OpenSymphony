@@ -7,6 +7,8 @@
 import { renderOpenSymphonyApp } from "../src/app-shell.js";
 import { MockGatewayTransport } from "@opensymphony/api-client";
 import { schemaVersionV1 } from "@opensymphony/gateway-schema";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import type {
   EditableProfileInput,
   ModelProfileController,
@@ -25,6 +27,23 @@ import type {
   TaskGraphSnapshot,
 } from "@opensymphony/gateway-schema";
 import { defaultModelProfiles } from "@opensymphony/gateway-schema";
+
+interface ProjectGroupingFixtureIssue {
+  id: string;
+  title: string;
+  runtime_state: string;
+  tracker_state: string;
+  project_id: string | null;
+  project_slug: string | null;
+  project_name: string | null;
+  workspace_label: string | null;
+  blocked_by: string[];
+}
+
+const projectGroupingFixture = JSON.parse(readFileSync(
+  join(__dirname, "../../../tests/fixtures/project_grouping_cases.json"),
+  "utf8",
+)) as ProjectGroupingFixtureIssue[];
 
 const capabilities: GatewayCapabilities = {
   schema_version: schemaVersionV1(),
@@ -198,6 +217,46 @@ const taskGraph: TaskGraphSnapshot = {
   ],
 };
 
+const projectSetTaskGraph: TaskGraphSnapshot = {
+  ...taskGraph,
+  nodes: taskGraph.nodes.map((node) => {
+    const beta = ["hosted-auth", "skip-target"].includes(node.node_id);
+    return {
+      ...node,
+      project_id: beta ? "proj-beta" : "proj-alpha",
+      project_slug: beta ? "beta-project" : "alpha-project",
+      project_name: beta ? "Beta Project" : "Alpha Project",
+    };
+  }),
+};
+
+const sharedProjectGroupingTaskGraph: TaskGraphSnapshot = {
+  schema_version: schemaVersionV1(),
+  project_id: "project-set",
+  generated_at: "2025-09-01T00:00:00Z",
+  root_ids: [],
+  nodes: projectGroupingFixture.map((item) => ({
+    schema_version: schemaVersionV1(),
+    node_id: item.id,
+    kind: "issue",
+    identifier: item.id,
+    title: item.title,
+    state: item.tracker_state,
+    state_category: item.tracker_state === "Done"
+      ? "done"
+      : item.tracker_state === "In Progress"
+        ? "in_progress"
+        : "todo",
+    project_id: item.project_id ?? undefined,
+    project_slug: item.project_slug ?? undefined,
+    project_name: item.project_name ?? undefined,
+    children: [],
+    blocked_by: item.blocked_by,
+    run_id: item.id,
+    labels: item.workspace_label ? [item.workspace_label] : [],
+  })),
+};
+
 const runEvents: RunEventPage = {
   schema_version: schemaVersionV1(),
   run_id: "COE-449",
@@ -271,7 +330,12 @@ const fileDiff: FileDiffPage = {
   total_lines_removed: 3,
 };
 
-function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?: boolean }): MockGatewayTransport {
+function buildTransport(opts?: {
+  failHealth?: boolean;
+  failTaskGraphStructured?: boolean;
+  taskGraph?: TaskGraphSnapshot;
+  runDetails?: RunDetail[];
+}): MockGatewayTransport {
   if (opts?.failHealth) {
     class AlwaysFailHealthTransport extends MockGatewayTransport {
       override async health(): Promise<never> {
@@ -304,12 +368,13 @@ function buildTransport(opts?: { failHealth?: boolean; failTaskGraphStructured?:
     baseUri: "http://127.0.0.1:2468",
     health: capabilities,
     snapshot: dashboard,
-    taskGraph,
+    taskGraph: opts?.taskGraph ?? taskGraph,
     // Map the desktop-alpha task graph node to the COE-449 run detail so
     // the actual mock gateway response drives the run detail panel.
     runDetails: [
       runDetail,
       { ...runDetail, run_id: "desktop-alpha", issue_id: "desktop-alpha" },
+      ...(opts?.runDetails ?? []),
     ],
     runFiles: [
       { runId: "COE-449", files: changedFiles },
@@ -586,6 +651,7 @@ describe("OpenSymphonyApp mount", () => {
     expect(root.querySelector("[data-tg-comment]")).toBeNull();
     expect(root.querySelector("[data-tg-create-child]")).toBeNull();
     expect(root.querySelector("[data-testid='task-graph-visualization']")).not.toBeNull();
+    expect(root.querySelector(".os-project-group-header")).toBeNull();
     expect(root.querySelector("[data-testid='task-graph-link']")).not.toBeNull();
     expect(root.querySelector(".os-task-graph-link-skip")).not.toBeNull();
     expect(root.querySelector(".os-task-graph-link-skip")?.getAttribute("d")).toMatch(/ H \d+ V \d+ H /);
@@ -640,6 +706,217 @@ describe("OpenSymphonyApp mount", () => {
     (root.querySelector("[data-testid='changed-file-item']") as HTMLButtonElement).click();
     await flushUntil(() => root.querySelector(".os-run-evidence-panel [data-testid='file-diff']") !== null);
     expect(root.querySelector("[data-evidence-view='diff']")?.classList.contains("is-selected")).toBe(true);
+
+    await handle.destroy();
+  });
+
+  it("groups desktop task graph rows by explicit project metadata", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: projectSetTaskGraph }),
+    });
+
+    await flushUntil(
+      () => root.querySelector("[data-project-group='alpha-project']") !== null,
+    );
+
+    const headings = Array.from(root.querySelectorAll(".os-project-group-header"));
+    expect(headings.map((heading) => heading.textContent)).toEqual([
+      expect.stringContaining("alpha-project | Alpha Project"),
+      expect.stringContaining("beta-project | Beta Project"),
+    ]);
+    expect(headings[0]?.textContent).toContain("issues=4 running=1 todo=2");
+    expect(headings[0]?.textContent).toContain("blocked=1");
+    expect(headings[1]?.textContent).toContain("issues=2 running=0 todo=2");
+    expect(headings[1]?.textContent).toContain("blocked=2");
+    expect(root.querySelector("[data-project-group='alpha-project'] [data-node-id='desktop-alpha']")).not.toBeNull();
+    expect(root.querySelector("[data-project-group='beta-project'] [data-node-id='hosted-auth']")).not.toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("sorts desktop project groups and keeps mixed-metadata rows grouped", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const alpha = {
+      ...projectSetTaskGraph.nodes.find((node) => node.node_id === "desktop-alpha")!,
+      project_name: undefined,
+    };
+    const alphaNamed = projectSetTaskGraph.nodes.find((node) => node.node_id === "completed-prereq")!;
+    const beta = projectSetTaskGraph.nodes.find((node) => node.node_id === "hosted-auth")!;
+    const unassigned = {
+      ...taskGraph.nodes.find((node) => node.node_id === "follow-up")!,
+      project_id: undefined,
+      project_slug: undefined,
+      project_name: undefined,
+    };
+    const nameOnly = {
+      ...taskGraph.nodes.find((node) => node.node_id === "app-shell")!,
+      project_id: undefined,
+      project_slug: undefined,
+      project_name: "Name Only Project",
+    };
+    const mixedTaskGraph: TaskGraphSnapshot = {
+      ...taskGraph,
+      nodes: [beta, unassigned, alpha, nameOnly, alphaNamed],
+      root_ids: [],
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: mixedTaskGraph }),
+    });
+
+    await flushUntil(
+      () => root.querySelectorAll(".os-project-group-header").length === 4,
+    );
+
+    const headings = Array.from(root.querySelectorAll(".os-project-group-header"))
+      .map((heading) => heading.textContent ?? "");
+    expect(headings[0]).toContain("alpha-project | Alpha Project");
+    expect(headings[1]).toContain("beta-project | Beta Project");
+    expect(headings[2]).toContain("Name Only Project");
+    expect(headings[3]).toContain("unassigned");
+    expect(headings[3]).not.toContain("unassigned | Unassigned");
+    expect(root.querySelector("[data-project-group='Name Only Project'] [data-node-id='app-shell']")).not.toBeNull();
+    expect(root.querySelector("[data-project-group='__opensymphony_unassigned__'] [data-node-id='follow-up']")).not.toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("does not group web task graph rows when project metadata is present", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "web",
+      transport: buildTransport({ taskGraph: projectSetTaskGraph }),
+    });
+
+    await flushUntil(
+      () => root.querySelector("[data-node-id='desktop-alpha']") !== null,
+    );
+
+    expect(root.querySelector(".os-project-group-header")).toBeNull();
+
+    await handle.destroy();
+  });
+
+  it("renders a project heading for explicit single-project snapshots", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const singleProjectTaskGraph: TaskGraphSnapshot = {
+      ...taskGraph,
+      nodes: taskGraph.nodes.map((node) => ({
+        ...node,
+        project_id: "proj-alpha",
+        project_slug: "alpha-project",
+        project_name: "Alpha Project",
+      })),
+    };
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: singleProjectTaskGraph }),
+    });
+
+    await flushUntil(
+      () => root.querySelector(".os-project-group-header") !== null,
+    );
+
+    expect(root.querySelectorAll(".os-project-group-header")).toHaveLength(1);
+    expect(root.querySelector(".os-project-group-header")?.textContent).toContain("alpha-project | Alpha Project");
+
+    await handle.destroy();
+  });
+
+  it("collapses and expands desktop project groups without clearing selected run detail", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({ taskGraph: projectSetTaskGraph }),
+    });
+
+    await flushUntil(() => root.querySelector(".os-run-head strong")?.textContent === "COE-449");
+    const alphaHeader = root.querySelector("[data-project-group-toggle='alpha-project']") as HTMLButtonElement;
+    alphaHeader.click();
+    await flushUntil(
+      () => root.querySelector("[data-project-group='alpha-project'] [data-node-id='desktop-alpha']") === null,
+    );
+
+    expect(root.querySelector("[data-project-group='beta-project'] [data-node-id='hosted-auth']")).not.toBeNull();
+    expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
+    expect(root.querySelector("[data-project-group-toggle='alpha-project']")?.getAttribute("aria-expanded")).toBe("false");
+    expect(root.querySelector("[data-project-group-toggle='alpha-project']")?.getAttribute("aria-controls")).toBe("os-project-group-alpha-project");
+    expect(root.querySelector("#os-project-group-alpha-project")?.getAttribute("role")).toBe("region");
+
+    (root.querySelector("[data-project-group-toggle='alpha-project']") as HTMLButtonElement).click();
+    await flushUntil(
+      () => root.querySelector("[data-project-group='alpha-project'] [data-node-id='desktop-alpha']") !== null,
+    );
+
+    const restoredAlphaNodes = Array.from(
+      root.querySelectorAll("[data-project-group='alpha-project'] [data-node-id]"),
+    ).map((node) => node.getAttribute("data-node-id"));
+    expect(restoredAlphaNodes).toEqual(["m7-milestone", "app-shell", "desktop-alpha", "follow-up", "completed-prereq"]);
+    expect(root.querySelector(".os-run-head strong")?.textContent).toBe("COE-449");
+
+    await handle.destroy();
+  });
+
+  it("uses the shared project grouping fixture for desktop groups and dependency signals", async () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const handle = renderOpenSymphonyApp({
+      root,
+      mode: "desktop",
+      transport: buildTransport({
+        taskGraph: sharedProjectGroupingTaskGraph,
+        runDetails: [
+          { ...runDetail, run_id: "COE-703", issue_id: "COE-703", issue_identifier: "COE-703" },
+        ],
+      }),
+    });
+
+    await flushUntil(
+      () => root.querySelector("[data-project-group='alpha-project']") !== null,
+    );
+
+    const headings = Array.from(root.querySelectorAll(".os-project-group-header"))
+      .map((heading) => heading.textContent ?? "");
+    expect(headings).toEqual([
+      expect.stringContaining("alpha-project | Alpha Project"),
+      expect.stringContaining("beta-project | Beta Project"),
+      expect.stringContaining("unassigned"),
+    ]);
+    expect(headings[0]).toContain("issues=2 running=1 todo=1 blocked=1");
+    expect(headings[1]).toContain("issues=3 running=0 todo=2 blocked=1");
+    expect(headings[2]).toContain("issues=1 running=0 todo=1 blocked=0");
+    expect(root.querySelector("[data-project-group='__opensymphony_unassigned__'] [data-node-id='COE-705']")).not.toBeNull();
+    expect(root.querySelector("[data-node-id='COE-700'] .os-node-line")?.textContent).toContain("blocks COE-701");
+    expect(root.querySelector("[data-node-id='COE-701'] .os-node-line")?.textContent).toContain("blocked by COE-700");
+    expect(root.querySelector("[data-node-id='COE-702'] .os-node-line")?.textContent).toContain("blocked by 1 hidden");
+    expect(root.querySelector("[data-node-id='COE-703'] .os-node-line")?.textContent).not.toContain("blocked by COE-704");
+
+    (root.querySelector("[data-project-group-toggle='beta-project']") as HTMLButtonElement).click();
+    await flushUntil(
+      () => root.querySelector("[data-project-group='beta-project'] [data-node-id='COE-702']") === null,
+    );
+    expect(root.querySelector("[data-project-group-toggle='beta-project']")?.getAttribute("aria-expanded")).toBe("false");
+
+    (root.querySelector("[data-project-group-toggle='beta-project']") as HTMLButtonElement).click();
+    await flushUntil(
+      () => root.querySelector("[data-project-group='beta-project'] [data-node-id='COE-703']") !== null,
+    );
+    (root.querySelector("[data-node-id='COE-703']") as HTMLElement).click();
+    await flushUntil(
+      () => root.querySelector("[data-testid='dependency-detail']")?.textContent?.includes("completed blockers COE-704") ?? false,
+    );
 
     await handle.destroy();
   });

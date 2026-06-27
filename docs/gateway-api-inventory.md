@@ -78,6 +78,11 @@
   "last_event_at": "2026-03-21T20:00:00Z",
   "conversation_id_suffix": "c0e255",
   "workspace_path_suffix": "COE-255",
+  // Optional, omitted when Linear project metadata is unavailable.
+  "project_id": "proj-open",
+  "project_slug": "opensymphony-bootstrap",
+  "project_name": "OpenSymphony",
+  "workspace_label": "COE-255",
   "retry_count": 0,
   "blocked": false,
   "server_base_url": "http://127.0.0.1:3000",
@@ -192,7 +197,7 @@
 | `IssueState` | Optional id, name, category | `src/issue.rs:14` |
 | `BlockerRef` | Blocker id, identifier, state, timestamps | `src/issue.rs:21` |
 | `IssueRef` | Child issue id, identifier, state | `src/issue.rs:30` |
-| `NormalizedIssue` | The canonical issue representation used by the orchestrator | `src/issue.rs:37` |
+| `NormalizedIssue` | The canonical issue representation used by the orchestrator, including optional Linear project id/slug/name metadata for operator grouping | `src/issue.rs:37` |
 
 ### 2.6 State machine (`src/state_machine.rs`)
 

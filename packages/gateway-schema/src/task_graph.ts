@@ -19,6 +19,10 @@ export interface TaskGraphNode {
   state: string;
   state_category: TaskGraphStateCategory;
   priority?: number;
+  /** Linear project metadata, present when a project-set snapshot is available. */
+  project_id?: string;
+  project_slug?: string;
+  project_name?: string;
   /** Parent node identifier when the parent is present in this task graph snapshot. */
   parent_id?: string;
   /** Child node identifiers that are present in this task graph snapshot. */
