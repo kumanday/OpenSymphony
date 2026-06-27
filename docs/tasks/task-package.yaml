@@ -1,13 +1,17 @@
-planningWave: project-grouping-dependency-signals
+planningWave: tree-sitter-code-intelligence
 tasksDir: docs/tasks
 milestones:
-  - "M10.7: Project Grouping And Dependency Signals"
+  - "M12.6: Tree-sitter Code Intelligence"
 tasks:
-  - id: OSYM-813
-    file: docs/tasks/osym-813-project-dependency-snapshot-fields.md
-  - id: OSYM-814
-    file: docs/tasks/osym-814-frankentui-project-headers-and-dependency-gutter.md
-  - id: OSYM-815
-    file: docs/tasks/osym-815-desktop-project-grouping-and-collapse.md
-  - id: OSYM-816
-    file: docs/tasks/osym-816-project-grouping-integration-hardening.md
+  - id: OSYM-850
+    file: docs/tasks/osym-850-tree-sitter-provider-skeleton-and-rust-parsing.md
+  - id: OSYM-851
+    file: docs/tasks/osym-851-memory-context-ast-provider-integration.md
+  - id: OSYM-852
+    file: docs/tasks/osym-852-query-packs-for-supported-agent-languages.md
+  - id: OSYM-853
+    file: docs/tasks/osym-853-code-intelligence-persistence-and-ingestion.md
+  - id: OSYM-854
+    file: docs/tasks/osym-854-read-only-ast-mcp-and-cli-tools.md
+  - id: OSYM-855
+    file: docs/tasks/osym-855-code-intelligence-performance-docs-and-hardening.md

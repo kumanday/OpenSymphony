@@ -184,7 +184,7 @@ If M2 is solid, M3 onward is mostly orchestration work rather than protocol risk
 
 The current Linear roadmap extends the local MVP with rich-client, hosted,
 provider, and release-quality work in M6 through M13. The additional OKF memory,
-LLM wiki graph, and ACP debugging specifications fit best as additive fractional
+LLM wiki graph, ACP debugging, and Tree-sitter code-intelligence specifications fit best as additive fractional
 milestones instead of broadening the existing hardening milestone:
 
 | Milestone | Placement | Scope |
@@ -196,6 +196,7 @@ milestones instead of broadening the existing hardening milestone:
 | M10.7 Project Grouping And Dependency Signals | after M10.6 desktop operations, before M11 hosted alpha | control-plane project/dependency metadata, TUI project headers and dependency gutter, desktop grouping and collapse |
 | M11.5 LLM Wiki Graph View | after M11 hosted identity and visibility foundations, before provider/harness readiness | memory graph DTOs, graph extraction, shared frontend package, Three.js renderer, inspector/accessibility, live privacy gates |
 | M12.5 ACP Debugging And IDE Attach | after M12 harness/model seams, before M13 release hardening | debug attachment refactor, ACP stdio server, Zed setup, Tauri Debug in Zed action, default debug UX transition, integration tests |
+| M12.6 Tree-sitter Code Intelligence | after M12.5 ACP debugging, before M13 release hardening | trusted Tree-sitter provider, memory-context AST integration, query packs, persistence, read-only MCP/CLI AST tools, performance and docs |
 
 M10.3 pulls the shared harness adapter, model/credential settings, OpenHands
 subscription credential adapter, model configuration UI metadata, Codex
@@ -219,8 +220,13 @@ M10.7 follows the TUI dependency gutter spec with project/dependency snapshot
 fields, compact FrankenTUI project headers and dependency signals, desktop
 project grouping with collapse, and a thin cross-client verification pass.
 
+M12.6 follows the Tree-sitter AST specification with the smallest useful
+agent-facing code-intelligence wave: a trusted provider, memory-context
+integration, query packs, optional persistence, read-only AST tools, and
+resource/security hardening.
+
 The current default planning source is `docs/tasks/task-package.yaml` for the
-M10.7 project-grouping-dependency-signals wave. The ACP debugging wave remains
+M12.6 tree-sitter-code-intelligence wave. The ACP debugging wave remains
 in `docs/tasks/advanced-knowledge-debug-task-package.yaml`, and
 `docs/tasks/linear-publish.yaml` records the latest published planning wave.
 

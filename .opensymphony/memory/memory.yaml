@@ -64,10 +64,12 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:control
       - area:desktop
       - area:developer-experience
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -81,6 +83,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
       - 'M10: Web Client And External Gateway'
       - 'M9.5: Developer Build Acceleration'
   cli:
@@ -97,10 +100,12 @@ areas:
       linear_labels:
       - area:cli
       - area:codex
+      - area:control
       - area:desktop
       - area:developer-experience
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -115,6 +120,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
       - 'M9.5: Developer Build Acceleration'
   codex:
     title: Codex
@@ -127,9 +133,11 @@ areas:
     source_refs:
       linear_labels:
       - area:codex
+      - area:control
       - area:desktop
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -142,6 +150,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   codex-app-server:
     title: Codex App-Server Harness
     docs_target: docs/codex-app-server-harness.md
@@ -183,6 +192,21 @@ areas:
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9.5: Developer Build Acceleration'
       - 'M9: Collaborative Planning Alpha'
+  control:
+    title: Control
+    docs_target: docs/control.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - control
+    source_refs:
+      linear_labels:
+      - area:control
+      - area:gateway
+      - area:linear
+      linear_milestones:
+      - 'M10.7: Project Grouping And Dependency Signals'
   deployment-modes:
     title: Deployment Modes
     docs_target: docs/deployment-modes.md
@@ -209,9 +233,11 @@ areas:
     source_refs:
       linear_labels:
       - area:codex
+      - area:control
       - area:desktop
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -224,6 +250,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   developer-experience:
     title: Developer Experience
     docs_target: docs/developer-experience.md
@@ -238,10 +265,12 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:control
       - area:desktop
       - area:developer-experience
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -255,6 +284,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
       - 'M9.5: Developer Build Acceleration'
   development:
     title: Development Guide
@@ -300,12 +330,16 @@ areas:
     - docs
     source_refs:
       linear_labels:
+      - area:control
       - area:docs
+      - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:okf
       linear_milestones:
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   elixir-hierarchy-changes:
     title: Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
     docs_target: docs/elixir-hierarchy-changes.md
@@ -327,9 +361,11 @@ areas:
     - gateway
     source_refs:
       linear_labels:
+      - area:control
       - area:desktop
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:okf
@@ -340,6 +376,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   host-client-architecture:
     title: OpenSymphony Host-Client Architecture
     docs_target: docs/host-client-architecture.md
@@ -417,6 +454,19 @@ areas:
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
       - 'M9: Collaborative Planning Alpha'
+  linear:
+    title: Linear
+    docs_target: docs/linear.md
+    visibility: public
+    status: stable
+    confidence: 95
+    aliases:
+    - linear
+    source_refs:
+      linear_labels:
+      - area:linear
+      linear_milestones:
+      - 'M10.7: Project Grouping And Dependency Signals'
   linear-and-tools:
     title: Linear and Tools
     docs_target: docs/linear-and-tools.md
@@ -441,11 +491,15 @@ areas:
     - mcp
     source_refs:
       linear_labels:
+      - area:control
+      - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:okf
       linear_milestones:
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   memory:
     title: Project Memory
     docs_target: docs/memory.md
@@ -465,10 +519,12 @@ areas:
       - area:build
       - area:cli
       - area:codex
+      - area:control
       - area:desktop
       - area:developer-experience
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -482,6 +538,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -511,7 +568,10 @@ areas:
     - model-configuration
     source_refs:
       linear_labels:
+      - area:control
       - area:docs
+      - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -520,6 +580,7 @@ areas:
       linear_milestones:
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   okf:
     title: Okf
     docs_target: docs/okf.md
@@ -530,13 +591,17 @@ areas:
     - okf
     source_refs:
       linear_labels:
+      - area:control
       - area:docs
+      - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:okf
       - area:security
       linear_milestones:
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   openhands-agent-server:
     title: OpenHands Agent-Server Integration
     docs_target: docs/openhands-agent-server.md
@@ -576,9 +641,11 @@ areas:
       - docs/operations.md
       linear_labels:
       - area:codex
+      - area:control
       - area:desktop
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -593,6 +660,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
       - 'M6: Gateway And Stream Contract'
@@ -642,7 +710,10 @@ areas:
     source_refs:
       linear_labels:
       - area:codex
+      - area:control
       - area:docs
+      - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:okf
@@ -653,6 +724,7 @@ areas:
       linear_milestones:
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   security:
     title: Security
     docs_target: docs/security.md
@@ -663,13 +735,17 @@ areas:
     - security
     source_refs:
       linear_labels:
+      - area:control
       - area:docs
+      - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:okf
       - area:security
       linear_milestones:
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   sources:
     title: Sources and Trust Notes
     docs_target: docs/sources.md
@@ -734,9 +810,11 @@ areas:
     source_refs:
       linear_labels:
       - area:codex
+      - area:control
       - area:desktop
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:model-configuration
@@ -749,6 +827,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   ui:
     title: Ui
     docs_target: docs/ui.md
@@ -759,9 +838,11 @@ areas:
     - ui
     source_refs:
       linear_labels:
+      - area:control
       - area:desktop
       - area:docs
       - area:gateway
+      - area:linear
       - area:mcp
       - area:memory
       - area:okf
@@ -772,6 +853,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.7: Project Grouping And Dependency Signals'
   ui-frankentui:
     title: FrankenTUI Operator UI
     docs_target: docs/ui-frankentui.md

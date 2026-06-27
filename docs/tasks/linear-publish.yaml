@@ -1,28 +1,38 @@
-planningWave: project-grouping-dependency-signals
+planningWave: tree-sitter-code-intelligence
 linearProject: opensymphony-bootstrap-e7b957855cb7
-publishedAt: '2026-06-26T19:57:41.321093+00:00'
+publishedAt: '2026-06-27T00:11:59.812888+00:00'
 milestones:
-  'M10.7: Project Grouping And Dependency Signals':
-    milestoneId: d5d7dbf1-8235-45b5-917b-6794adc940fa
-    name: 'M10.7: Project Grouping And Dependency Signals'
+  'M12.6: Tree-sitter Code Intelligence':
+    milestoneId: 098d0df4-0fd1-49f2-b9a8-fede57843134
+    name: 'M12.6: Tree-sitter Code Intelligence'
 tasks:
-  OSYM-813:
-    issue: COE-494
-    issueId: 227fbb8a-576a-4f0b-bf02-a566de6ec4bd
-    url: https://linear.app/trilogy-ai-coe/issue/COE-494/project-metadata-for-operator-issue-snapshots
-    file: docs/tasks/osym-813-project-dependency-snapshot-fields.md
-  OSYM-814:
-    issue: COE-495
-    issueId: 777157b3-40ea-41fa-b406-4cdcf31574ca
-    url: https://linear.app/trilogy-ai-coe/issue/COE-495/frankentui-project-headers-and-dependency-gutter
-    file: docs/tasks/osym-814-frankentui-project-headers-and-dependency-gutter.md
-  OSYM-815:
-    issue: COE-496
-    issueId: f31c60a1-dcfd-46d0-a549-9b17b2bb46df
-    url: https://linear.app/trilogy-ai-coe/issue/COE-496/desktop-project-grouping-and-collapse
-    file: docs/tasks/osym-815-desktop-project-grouping-and-collapse.md
-  OSYM-816:
-    issue: COE-497
-    issueId: c98de26a-d915-450e-adc3-edfc9af1265b
-    url: https://linear.app/trilogy-ai-coe/issue/COE-497/project-grouping-integration-hardening
-    file: docs/tasks/osym-816-project-grouping-integration-hardening.md
+  OSYM-850:
+    issue: COE-498
+    issueId: b223eedc-972e-4d8c-9cd0-be0731e9dc63
+    url: https://linear.app/trilogy-ai-coe/issue/COE-498/tree-sitter-provider-skeleton-and-rust-parsing
+    file: docs/tasks/osym-850-tree-sitter-provider-skeleton-and-rust-parsing.md
+  OSYM-851:
+    issue: COE-499
+    issueId: 0f78a09c-e98c-4586-b891-f6b6bb05c300
+    url: https://linear.app/trilogy-ai-coe/issue/COE-499/memory-context-ast-provider-integration
+    file: docs/tasks/osym-851-memory-context-ast-provider-integration.md
+  OSYM-852:
+    issue: COE-500
+    issueId: f9194f81-1527-458e-8293-d5298001883d
+    url: https://linear.app/trilogy-ai-coe/issue/COE-500/query-packs-for-supported-agent-languages
+    file: docs/tasks/osym-852-query-packs-for-supported-agent-languages.md
+  OSYM-853:
+    issue: COE-501
+    issueId: b8acf91a-abb5-41ba-9e85-ed355040355e
+    url: https://linear.app/trilogy-ai-coe/issue/COE-501/code-intelligence-persistence-and-ingestion
+    file: docs/tasks/osym-853-code-intelligence-persistence-and-ingestion.md
+  OSYM-854:
+    issue: COE-502
+    issueId: 7a968dff-5d4b-41e8-886d-de5170e3bd52
+    url: https://linear.app/trilogy-ai-coe/issue/COE-502/read-only-ast-mcp-and-cli-tools
+    file: docs/tasks/osym-854-read-only-ast-mcp-and-cli-tools.md
+  OSYM-855:
+    issue: COE-503
+    issueId: 54b5fef3-2c74-4269-9d83-5fb43651b905
+    url: https://linear.app/trilogy-ai-coe/issue/COE-503/code-intelligence-performance-docs-and-hardening
+    file: docs/tasks/osym-855-code-intelligence-performance-docs-and-hardening.md
