@@ -321,6 +321,10 @@ impl TuiState {
     }
 
     pub fn render_text(&self, width: usize, height: usize) -> String {
+        if width == 0 || height == 0 {
+            return String::new();
+        }
+
         self.render_text_styled(width, height)
             .lines()
             .iter()
@@ -495,10 +499,7 @@ impl TuiState {
                     Style::new().fg(BRIGHT_BLACK)
                 }
             };
-            spans.push(Span::styled(
-                format!("daemon={}", daemon.state.as_str()),
-                daemon_style,
-            ));
+            spans.push(Span::styled(daemon_status_summary(snap), daemon_style));
             spans.push(Span::raw(" | "));
 
             let agent = &snap.snapshot.agent_server;
@@ -507,10 +508,7 @@ impl TuiState {
             } else {
                 Style::new().fg(RED)
             };
-            spans.push(Span::styled(
-                format!("agent={}", if agent.reachable { "up" } else { "down" }),
-                agent_style,
-            ));
+            spans.push(Span::styled(agent_server_status_summary(snap), agent_style));
             spans.push(Span::raw(" | "));
 
             if let Some(memory) = memory_server_visible_status_summary(snap) {
@@ -534,10 +532,7 @@ impl TuiState {
             ConnectionState::Connecting => Style::new().fg(YELLOW),
             ConnectionState::Reconnecting(_) => Style::new().fg(RED),
         };
-        spans.push(Span::styled(
-            format!("conn={}", self.connection.label()),
-            conn_style,
-        ));
+        spans.push(Span::styled(connection_status_summary(self), conn_style));
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(format!("seq={sequence}"), Style::new().dim()));
         spans.push(Span::raw(" | "));
@@ -2985,6 +2980,74 @@ fn format_timestamp(timestamp: DateTime<Utc>) -> String {
     timestamp.format("%H:%M:%S").to_string()
 }
 
+fn connection_status_summary(state: &TuiState) -> String {
+    let detail = match &state.connection {
+        ConnectionState::Connecting => {
+            if state.latest_snapshot.is_none() {
+                None
+            } else if state
+                .status_line
+                .eq_ignore_ascii_case("bootstrap snapshot loaded; waiting for live stream")
+            {
+                Some("stream pending")
+            } else {
+                informative_status(&state.status_line, &["connecting to control plane"])
+            }
+        }
+        ConnectionState::Live => {
+            informative_status(&state.status_line, &["live control-plane stream"])
+        }
+        ConnectionState::Reconnecting(reason) => {
+            let reconnect_status_line = format!("reconnecting after: {reason}");
+            if state
+                .status_line
+                .eq_ignore_ascii_case("snapshot refreshed; waiting for live stream")
+            {
+                Some("refreshed; stream pending")
+            } else {
+                informative_status(
+                    &state.status_line,
+                    &["reconnecting", reconnect_status_line.as_str()],
+                )
+                .or_else(|| informative_status(reason, &[]))
+            }
+        }
+    };
+    status_segment(format!("conn={}", state.connection.label()), detail)
+}
+
+fn daemon_status_summary(snapshot: &SnapshotEnvelope) -> String {
+    let daemon = &snapshot.snapshot.daemon;
+    status_segment(
+        format!("daemon={}", daemon.state.as_str()),
+        informative_status(
+            &daemon.status_line,
+            &[
+                daemon.state.as_str(),
+                "ready",
+                "healthy",
+                "scheduler heartbeat healthy",
+            ],
+        ),
+    )
+}
+
+fn agent_server_status_summary(snapshot: &SnapshotEnvelope) -> String {
+    let agent_server = &snapshot.snapshot.agent_server;
+    let base = if agent_server.reachable {
+        format!("agent=up/{}", agent_server.conversation_count)
+    } else {
+        "agent=down".to_owned()
+    };
+    status_segment(
+        base,
+        informative_status(
+            &agent_server.status_line,
+            &["healthy", "local agent-server healthy", "down"],
+        ),
+    )
+}
+
 fn memory_server_status_summary(snapshot: &SnapshotEnvelope) -> String {
     let memory_server = &snapshot.snapshot.memory_server;
     let base = if !memory_server.enabled {
@@ -4822,13 +4885,12 @@ mod tests {
         let mut state = TuiState::default();
         let mut snapshot = fixture(8, 3);
         snapshot.snapshot.daemon.state = DaemonState::Degraded;
-        snapshot.snapshot.agent_server.reachable = false;
         state.reduce(TuiAction::SnapshotReceived(Box::new(snapshot)));
 
         let rendered = state.render_text(140, 22);
         let header = rendered.lines().next().expect("header row");
         assert!(header.contains("daemon=degraded"));
-        assert!(header.contains("agent=down"));
+        assert!(header.contains("agent=up/3"));
     }
 
     #[test]
@@ -4862,9 +4924,9 @@ mod tests {
 
         let rendered = state.render_text(200, 22);
         let header = rendered.lines().next().expect("header row");
-        assert!(header.contains("conn=reconnecting"));
-        assert!(header.contains("daemon=degraded"));
-        assert!(header.contains("agent=down"));
+        assert!(header.contains("conn=reconnecting (sse stalled)"));
+        assert!(header.contains("daemon=degraded (scheduler poll overdue)"));
+        assert!(header.contains("agent=down (agent-server refused connection)"));
     }
 
     #[test]
@@ -4877,7 +4939,8 @@ mod tests {
 
         let rendered = state.render_text(200, 22);
         let header = rendered.lines().next().expect("header row");
-        assert!(header.contains("conn=reconnecting"));
+        assert!(header.contains("conn=reconnecting (refreshed; stream pending)"));
+        assert!(!header.contains("conn=reconnecting (sse stalled)"));
     }
 
     #[test]
