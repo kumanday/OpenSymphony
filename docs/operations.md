@@ -13,6 +13,7 @@ Recommended CLI commands:
 - `opensymphony init`
 - `opensymphony update`
 - `opensymphony run`
+- `opensymphony app` or `opensymphony desktop`
 - `opensymphony debug <issue-id>`
 - `opensymphony tui`
 - `opensymphony doctor`
@@ -33,6 +34,17 @@ opensymphony run
 
 If you already run an external OpenHands agent-server, you can skip
 `opensymphony install openhands`.
+
+The desktop launcher is intentionally lazy. `opensymphony app` and its visible
+alias `opensymphony desktop` verify and launch a cached desktop bundle from
+`~/.opensymphony/desktop/<version>/` without making the normal Cargo install
+compile Tauri, npm, or platform desktop dependencies. For early local testing,
+pass `--bundle-dir <path>` or set `OPENSYMPHONY_DESKTOP_BUNDLE_DIR` to a bundle
+directory containing `opensymphony-desktop-manifest.json`. The manifest records
+the OpenSymphony version, platform, architecture, relative executable path, and
+executable SHA-256. Local bundle materialization copies regular files and
+directories; symlinked bundle entries should be packaged by a future signed or
+downloaded bundle format instead of this local smoke path.
 
 Important `init` behavior:
 
