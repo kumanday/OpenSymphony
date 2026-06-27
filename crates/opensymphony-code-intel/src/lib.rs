@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
 pub const PROVIDER_NAME: &str = "tree-sitter";
+// Keep these in sync with Cargo.toml pins and queries/rust/metadata.toml.
 pub const TREE_SITTER_VERSION: &str = "0.26.9";
 pub const RUST_GRAMMAR_VERSION: &str = "0.24.2";
 pub const RUST_QUERY_PACK_VERSION: &str = "rust-definitions-v1";
@@ -245,6 +246,7 @@ fn has_ancestor(mut node: Node<'_>, kind: &str) -> bool {
 }
 
 fn has_test_attribute(node: Node<'_>, source: &[u8]) -> bool {
+    // Rust MVP: classify only the built-in #[test] attribute as a Test symbol.
     let mut sibling = node.prev_named_sibling();
     while let Some(candidate) = sibling {
         if is_comment(candidate) {
@@ -292,9 +294,10 @@ fn collect_diagnostics_from(node: Node<'_>, diagnostics: &mut Vec<AstDiagnostic>
         });
     }
 
+    let walk_all_children = node.is_error() || node.is_missing();
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if child.has_error() || child.is_error() || child.is_missing() {
+        if walk_all_children || child.has_error() || child.is_error() || child.is_missing() {
             collect_diagnostics_from(child, diagnostics);
         }
     }

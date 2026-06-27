@@ -1,3 +1,6 @@
+; Captures Rust definition nodes and their names for symbol summaries.
+; function_signature_item covers trait method declarations without bodies.
+
 (function_item
   name: (identifier) @name) @definition
 
