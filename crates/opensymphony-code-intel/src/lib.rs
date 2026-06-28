@@ -382,7 +382,7 @@ impl CodeIntelIndex for AstCodeIntelProvider {
         limit: usize,
     ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
         let report = self.code_context_report(paths, scope_refs, limit)?;
-        let trace = report.trace_artifact(scope_refs, false);
+        let trace = report.trace_artifact(scope_refs, PROVIDER_NAME, report.ast_only_fallback());
         let mut artifacts = report.artifacts;
         artifacts.push(trace);
         Ok(artifacts)
@@ -423,7 +423,7 @@ impl CodeIntelIndex for CompositeCodeIntelProvider {
         let fallback_limit = limit.saturating_sub(report.used_symbols);
         let mut fallback_used = false;
 
-        if use_fallback && has_fallback_target && (fallback_limit > 0 || artifacts.is_empty()) {
+        if use_fallback && has_fallback_target {
             artifacts.extend(self.fallback.code_context(
                 fallback_paths,
                 scope_refs,
@@ -431,7 +431,11 @@ impl CodeIntelIndex for CompositeCodeIntelProvider {
             )?);
             fallback_used = true;
         }
-        let trace = report.trace_artifact(scope_refs, fallback_used);
+        let trace = report.trace_artifact(
+            scope_refs,
+            "composite-code-intel",
+            report.composite_fallback(fallback_used),
+        );
         artifacts.push(trace);
         Ok(artifacts)
     }
@@ -451,21 +455,11 @@ impl AstCodeIntelReport {
     fn trace_artifact(
         &self,
         scope_refs: &[KnowledgeScope],
-        fallback_used: bool,
+        provider: &str,
+        fallback: String,
     ) -> CodeIntelArtifact {
-        let fallback = match (self.fallback_reasons.is_empty(), fallback_used) {
-            (true, _) => "fallback: CodebaseAnalyzer not used".to_string(),
-            (false, true) => format!(
-                "fallback: CodebaseAnalyzer used ({})",
-                self.fallback_reasons.join("; ")
-            ),
-            (false, false) => format!(
-                "fallback: CodebaseAnalyzer not used; fallback budget exhausted ({})",
-                self.fallback_reasons.join("; ")
-            ),
-        };
         CodeIntelArtifact {
-            provider: "composite-code-intel".to_string(),
+            provider: provider.to_string(),
             kind: "trace".to_string(),
             scope_refs: scope_refs.to_vec(),
             source_refs: Vec::new(),
@@ -476,6 +470,31 @@ impl AstCodeIntelReport {
                 "- parse: parsed {} file(s)\n- query: ran {} Tree-sitter query pack(s)\n- {fallback}",
                 self.parsed_files, self.query_runs
             ),
+        }
+    }
+
+    fn composite_fallback(&self, fallback_used: bool) -> String {
+        match (self.fallback_reasons.is_empty(), fallback_used) {
+            (true, _) => "fallback: CodebaseAnalyzer not used".to_string(),
+            (false, true) => format!(
+                "fallback: CodebaseAnalyzer used ({})",
+                self.fallback_reasons.join("; ")
+            ),
+            (false, false) => format!(
+                "fallback: CodebaseAnalyzer not used; fallback budget exhausted ({})",
+                self.fallback_reasons.join("; ")
+            ),
+        }
+    }
+
+    fn ast_only_fallback(&self) -> String {
+        if self.fallback_reasons.is_empty() {
+            "fallback: CodebaseAnalyzer not used".to_string()
+        } else {
+            format!(
+                "fallback: AST provider only; CodebaseAnalyzer fallback not available ({})",
+                self.fallback_reasons.join("; ")
+            )
         }
     }
 }
@@ -996,6 +1015,59 @@ mod tests {
                 .iter()
                 .any(|artifact| artifact.kind == "ast-symbols")
         );
+    }
+
+    #[test]
+    fn composite_mixed_paths_with_zero_limit_still_falls_back() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("rust file");
+        fs::write(repo.path().join("README.md"), "# Example\n").expect("readme");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(
+                &[PathBuf::from("src/lib.rs"), PathBuf::from("README.md")],
+                &[],
+                0,
+            )
+            .expect("code context");
+
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-summary")
+        );
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-symbols")
+        );
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.provider == "codebase-analyzer" && artifact.title == "Repository summary"
+        }));
+    }
+
+    #[test]
+    fn ast_provider_trace_says_fallback_is_not_available() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::write(repo.path().join("README.md"), "# Example\n").expect("readme");
+
+        let artifacts = AstCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("README.md")], &[], 20)
+            .expect("code context");
+
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.provider == PROVIDER_NAME
+                && artifact.kind == "trace"
+                && artifact.summary.contains("AST provider only")
+                && artifact
+                    .summary
+                    .contains("CodebaseAnalyzer fallback not available")
+        }));
     }
 
     #[test]
