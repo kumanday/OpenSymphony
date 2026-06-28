@@ -1110,6 +1110,8 @@ fn memory_graph_communities_from_issues(
 }
 
 fn community_key(issue: &IndexedIssue) -> (String, String) {
+    // Assign exactly one stable community per concept. Multiple areas are
+    // ordered before selecting the first; tags keep frontmatter order.
     if let Some(area) = issue.areas().into_iter().next() {
         return (format!("area:{area}"), area);
     }
@@ -1144,6 +1146,8 @@ fn apply_node_metrics(
         })
         .max()
         .unwrap_or(0);
+    // Centrality is global normalized degree across all graph node kinds, not
+    // concept-only centrality.
     let community_by_node = communities
         .iter()
         .flat_map(|community| {

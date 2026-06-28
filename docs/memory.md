@@ -157,8 +157,11 @@ citation, source-ref, and community nodes plus derived containment, Markdown,
 external, citation, tag, resource, scope, source-support, and same-resource
 edges. Broken Markdown links are kept as unresolved edges. Snapshot metrics
 report orphan, broken-link, stale-concept, and warning counts, while node
-metrics report degree, normalized centrality, bridge score, and community ID.
-Community labels prefer concept areas, then tags, directories, and concept type.
+metrics report degree, global normalized centrality across all graph node
+kinds, bridge score, and community ID. Community labels prefer concept areas,
+then tags, directories, and concept type. Each concept is assigned to exactly
+one deterministic community; when multiple areas are present the sorted first
+area wins, and tag fallback uses frontmatter order.
 Tags, citations, and source refs are excluded from community membership by
 default and can be included with the memory graph endpoint query flags. Those
 flags also parameterize node community IDs and bridge scores because the
