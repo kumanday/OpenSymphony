@@ -942,6 +942,108 @@ pub enum WorkerOutcomeKind {
     CancelFailed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessInterruptReason {
+    OperatorCancel,
+    TrackerMergingSupersedesHumanReview,
+}
+
+impl HarnessInterruptReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OperatorCancel => "operator_cancel",
+            Self::TrackerMergingSupersedesHumanReview => "tracker_merging_supersedes_human_review",
+        }
+    }
+}
+
+impl fmt::Display for HarnessInterruptReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessInterruptExpectedNextState {
+    Paused,
+    Interrupted,
+    Released,
+    CloseoutPending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessInterruptStatus {
+    Requested,
+    Acknowledged,
+    Failed,
+    TimedOut,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessInterruptCommand {
+    pub run_id: String,
+    pub issue_id: IssueId,
+    pub harness_kind: String,
+    pub conversation_id: ConversationId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub reason: HarnessInterruptReason,
+    pub expected_next_state: HarnessInterruptExpectedNextState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessInterruptState {
+    pub command: HarnessInterruptCommand,
+    pub status: HarnessInterruptStatus,
+    pub requested_at: TimestampMs,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<TimestampMs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl HarnessInterruptState {
+    pub fn requested(command: HarnessInterruptCommand, requested_at: TimestampMs) -> Self {
+        Self {
+            command,
+            status: HarnessInterruptStatus::Requested,
+            requested_at,
+            updated_at: None,
+            detail: None,
+        }
+    }
+
+    pub fn acknowledge(&mut self, observed_at: TimestampMs) {
+        if self.status != HarnessInterruptStatus::Requested {
+            return;
+        }
+        self.status = HarnessInterruptStatus::Acknowledged;
+        self.updated_at = Some(observed_at);
+        self.detail = None;
+    }
+
+    pub fn fail(&mut self, observed_at: TimestampMs, detail: impl Into<String>) {
+        if self.status != HarnessInterruptStatus::Requested {
+            return;
+        }
+        self.status = HarnessInterruptStatus::Failed;
+        self.updated_at = Some(observed_at);
+        self.detail = Some(detail.into());
+    }
+
+    pub fn timeout(&mut self, observed_at: TimestampMs, detail: impl Into<String>) {
+        if self.status != HarnessInterruptStatus::Requested {
+            return;
+        }
+        self.status = HarnessInterruptStatus::TimedOut;
+        self.updated_at = Some(observed_at);
+        self.detail = Some(detail.into());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerOutcomeRecord {
     pub worker_id: WorkerId,

@@ -175,6 +175,22 @@ For real-time monitoring while the orchestrator is running, run the TUI in a sep
 opensymphony tui
 ```
 
+To launch the alpha desktop shell without adding Tauri or npm dependencies to
+the normal Cargo install path, use the lazy desktop launcher:
+
+```bash
+opensymphony app
+# or
+opensymphony desktop
+```
+
+The launcher verifies a versioned desktop bundle under
+`~/.opensymphony/desktop/<version>/` before starting it. Early local bundles can
+be materialized with `--bundle-dir <path>` or
+`OPENSYMPHONY_DESKTOP_BUNDLE_DIR`; the bundle must include
+`opensymphony-desktop-manifest.json` with `version`, `platform`, `arch`,
+relative `executable`, and `sha256` fields.
+
 ### Further Details
 
 For generated files, environment variables, `config.yaml`, and the template

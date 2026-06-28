@@ -66,10 +66,16 @@ export interface HarnessSchedulerDisagreement {
 /** Diagnostic hints surfaced when multiple subsystems disagree. */
 export interface RunDiagnostics {
   harness_scheduler_disagreement?: HarnessSchedulerDisagreement | null;
+  /** True while a cancel/force-stop request is pending acknowledgement. */
+  cancel_requested?: boolean;
   /** True when the harness acknowledged a cancel/force-stop request. */
   cancel_acknowledged?: boolean;
   /** True when a cancel/force-stop request was not acknowledged. */
   cancel_failed?: boolean;
+  /** True when a cancel/force-stop request timed out before acknowledgement. */
+  cancel_timed_out?: boolean;
+  /** Machine-readable cancel reason supplied by the orchestrator. */
+  cancel_reason?: string | null;
 }
 
 /** Actions the client may safely invoke in the current run state. */
@@ -162,6 +168,12 @@ export interface RunDetail {
   cancel_acknowledged?: boolean;
   /** True when a cancel/force-stop request was not acknowledged. */
   cancel_failed?: boolean;
+  /** True while a cancel/force-stop request is pending acknowledgement. */
+  cancel_requested?: boolean;
+  /** True when a cancel/force-stop request timed out before acknowledgement. */
+  cancel_timed_out?: boolean;
+  /** Machine-readable cancel reason supplied by the orchestrator. */
+  cancel_reason?: string | null;
 }
 
 /** Paged run events. */

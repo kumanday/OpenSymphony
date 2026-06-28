@@ -231,7 +231,28 @@ silently treated as the first page.
 - a missing `LINEAR_API_KEY` blocks Linear operations but should fail clearly
 - UI failures must not affect daemon execution
 
-## 7. Migration boundary
+## 7. Interrupt diagnostics
+
+Interrupt requests are recorded in orchestrator-owned issue execution state
+before any harness-specific protocol call is attempted. The shared command
+captures the run id, Linear issue id, harness kind, conversation or thread id,
+optional turn id, reason, and expected next state. Current reasons are
+`operator_cancel` and `tracker_merging_supersedes_human_review`.
+
+The command is idempotent for the active run: repeated operator clicks or
+tracker observations return the existing command instead of enqueueing another
+harness interrupt. Harness adapters later translate that command to their
+native protocol, but scheduler state does not depend on desktop-local state or
+adapter-private DTOs.
+
+Run Detail diagnostics surface the orchestrator-owned cancel state as
+requested, acknowledged, failed, timed out, and reason fields. Terminal cancel
+states are sticky: late acknowledgements, failures, or timeouts do not overwrite
+an already terminal interrupt status. Non-cancel worker outcomes do not infer a
+harness interrupt acknowledgement or timeout; adapters must still report the
+actual acknowledgement, failure, or timeout path.
+
+## 8. Migration boundary
 
 OpenSymphony 1.0.0 is the compatibility boundary for the GraphQL-only Linear
 rewrite and the provider-agnostic AI review configuration changes.
@@ -348,6 +369,7 @@ Notable removals:
 - COE-476: Codex Production Harness Enablement
 - COE-478: Harden model profile storage and validation follow-ups
 - COE-479: Codex Debug Session Resume
+- COE-504: Linear Polling And Rate-Limit Recovery
 
 ## Source refs
 
@@ -431,5 +453,6 @@ Notable removals:
 - COE-476
 - COE-478
 - COE-479
+- COE-504
 
 <!-- END OPENSYMPHONY MANAGED MEMORY SYNC -->

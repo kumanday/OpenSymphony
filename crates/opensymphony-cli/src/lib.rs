@@ -1,4 +1,5 @@
 mod debug_session;
+mod desktop_launcher;
 mod init_repo;
 mod install_tooling;
 mod memory;
@@ -61,6 +62,11 @@ enum Command {
     Update(update_repo::UpdateArgs),
     #[command(about = "Install app-managed runtimes and integrations")]
     Install(InstallArgs),
+    #[command(
+        about = "Install or launch the cached desktop app bundle",
+        visible_alias = "desktop"
+    )]
+    App(desktop_launcher::AppArgs),
     #[command(about = "Run the real orchestrator against the current project workflow")]
     Run(orchestrator_run::RunArgs),
     #[command(about = "Resume an issue conversation for interactive debugging")]
@@ -312,6 +318,7 @@ pub async fn run() -> ExitCode {
         Command::Init(args) => init_repo::run_command(args).await,
         Command::Update(args) => update_repo::run_command(args).await,
         Command::Install(args) => run_install(args).await,
+        Command::App(args) => desktop_launcher::run_command(args).await,
         Command::Run(args) => orchestrator_run::run_command(args).await,
         Command::Debug(args) => debug_session::run_command(args).await,
         Command::Memory(args) => memory::run_command(args).await,
@@ -1879,8 +1886,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cache_read_tokens: 0,
             total_tokens: 1536,
             detached: false,
+            cancel_requested: false,
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
         },
         IssueSnapshot {
             identifier: "OSYM-401".to_owned(),
@@ -1918,8 +1928,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cache_read_tokens: 512,
             total_tokens: 3072,
             detached: false,
+            cancel_requested: false,
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
         },
         IssueSnapshot {
             identifier: "OSYM-402".to_owned(),
@@ -1965,8 +1978,11 @@ fn sample_snapshot(step: u64) -> DaemonSnapshot {
             cache_read_tokens: 0,
             total_tokens: 768,
             detached: false,
+            cancel_requested: false,
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
         },
     ];
     let running_issues = issues
@@ -2413,6 +2429,7 @@ mod tests {
         match cli.command {
             Command::Init(_) => panic!("expected daemon command"),
             Command::Daemon(args) => assert_eq!(args.sample_interval_ms.get(), 250),
+            Command::App(_) => panic!("expected daemon command"),
             Command::Run(_)
             | Command::Debug(_)
             | Command::Tui(_)

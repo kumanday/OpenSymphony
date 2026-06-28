@@ -147,6 +147,8 @@ pub struct ControlPlaneIssueSnapshot {
     /// host requested disconnect without a clean terminal state).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detached: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_requested: bool,
     /// True when the harness acknowledged a cancel/force-stop request.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancel_acknowledged: bool,
@@ -154,6 +156,10 @@ pub struct ControlPlaneIssueSnapshot {
     /// ended in a cancel-failed state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancel_failed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_timed_out: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

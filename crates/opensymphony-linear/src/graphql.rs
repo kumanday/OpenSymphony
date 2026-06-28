@@ -100,6 +100,69 @@ query IssuesByState($projectSlug: String!, $stateNames: [String!], $includeArchi
 }
 "#;
 
+pub(super) const ISSUE_SUMMARIES_BY_STATE_QUERY: &str = r#"
+query IssueSummariesByState($projectSlug: String!, $stateNames: [String!], $includeArchived: Boolean!, $first: Int!, $after: String, $relationFirst: Int!) {
+  issues(
+    filter: {
+      project: { slugId: { eq: $projectSlug } }
+      state: { name: { in: $stateNames } }
+    }
+    includeArchived: $includeArchived
+    first: $first
+    after: $after
+  ) {
+    nodes {
+      id
+      identifier
+      url
+      title
+      priority
+      createdAt
+      updatedAt
+      state {
+        id
+        name
+        type
+      }
+      children(includeArchived: true, first: 100) {
+        nodes {
+          id
+          identifier
+          url
+          title
+          state {
+            name
+          }
+        }
+      }
+      inverseRelations(first: $relationFirst) {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            title
+            state {
+              id
+              name
+              type
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+"#;
+
 pub(super) const PROJECT_ISSUES_QUERY: &str = r#"
 query ProjectIssues($projectSlug: String!, $includeArchived: Boolean!, $first: Int!, $after: String, $relationFirst: Int!, $labelFirst: Int!) {
   issues(
@@ -619,6 +682,17 @@ pub(super) struct IssuesByStateVariables {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(super) struct IssueSummariesByStateVariables {
+    pub project_slug: String,
+    pub state_names: Vec<String>,
+    pub include_archived: bool,
+    pub first: usize,
+    pub after: Option<String>,
+    pub relation_first: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct IssueStatesByIdsVariables {
     pub project_slug: String,
     pub issue_ids: Vec<String>,
@@ -727,6 +801,11 @@ pub(super) struct ProjectUpdateContentVariables {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct IssuesByStateData {
+    pub issues: IssuesConnection<LinearIssueNode>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueSummariesByStateData {
     pub issues: IssuesConnection<LinearIssueNode>,
 }
 
@@ -843,7 +922,9 @@ pub(super) struct LinearIssueNode {
     pub attachments: LinearAttachmentConnection,
     #[serde(default)]
     pub children: LinearChildConnection,
+    #[serde(default)]
     pub labels: LinearLabelConnection,
+    #[serde(default)]
     pub inverse_relations: LinearRelationConnection,
 }
 
@@ -940,7 +1021,7 @@ pub(super) struct LinearIssueRefState {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub(super) struct LinearLabelConnection {
     pub nodes: Vec<LinearLabelNode>,
     #[serde(default, rename = "pageInfo")]
@@ -969,7 +1050,7 @@ pub(super) struct LinearCommentNode {
     pub resolved_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LinearRelationConnection {
     pub nodes: Vec<LinearRelationNode>,

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     future::Future,
+    time::Duration,
 };
 
 use crate::opensymphony_domain::{
@@ -8,8 +9,10 @@ use crate::opensymphony_domain::{
     IdentifierError, IssueExecution, IssueId, IssueIdentifier, IssueRef, IssueSnapshot, IssueState,
     IssueStateCategory, NormalizedIssue, OrchestratorSnapshot, ReleaseReason,
     RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeUsageTotals,
-    SchedulerStatus, StateTransitionError, TimestampMs, TrackerIssue, TrackerIssueStateSnapshot,
-    TrackerStateId, WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
+    SchedulerStatus, StateTransitionError, TimestampMs, TrackerErrorCategory, TrackerIssue,
+    TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
+    TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerStateId, WorkerId, WorkerOutcomeKind,
+    WorkerOutcomeRecord, WorkspaceRecord,
 };
 use crate::opensymphony_gateway_schema::capability::{HarnessCapability, HarnessKind};
 use crate::opensymphony_workflow::{ResolvedWorkflow, RoutingConfig};
@@ -25,6 +28,10 @@ use super::filter_issues_for_dispatch;
 
 const DISABLED_STALL_TIMEOUT_MS: u64 = u64::MAX / 4;
 const ROUTING_TASK_ISSUE_EXECUTION: &str = "issue_execution";
+const RUNNING_STATE_REFRESH_INTERVAL_MS: u64 = 30_000;
+const DISPATCH_DISCOVERY_INTERVAL_MS: u64 = 60_000;
+const TERMINAL_REFRESH_INTERVAL_MS: u64 = 300_000;
+const FULL_DETAIL_REFRESH_INTERVAL_MS: u64 = 3_600_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchedulerConfig {
@@ -179,11 +186,40 @@ pub trait TrackerBackend {
     type Error: std::fmt::Display + Send + Sync + 'static;
 
     async fn candidate_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error>;
+    async fn candidate_issue_summaries(&mut self) -> Result<Vec<TrackerIssueSummary>, Self::Error> {
+        Ok(self
+            .candidate_issues()
+            .await?
+            .into_iter()
+            .map(tracker_issue_summary_from_issue)
+            .collect())
+    }
     async fn terminal_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error>;
+    async fn issues_by_identifiers(
+        &mut self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, Self::Error> {
+        let requested = identifiers
+            .iter()
+            .map(|identifier| identifier.to_ascii_uppercase())
+            .collect::<HashSet<_>>();
+        Ok(self
+            .candidate_issues()
+            .await?
+            .into_iter()
+            .filter(|issue| requested.contains(&issue.identifier.to_ascii_uppercase()))
+            .collect())
+    }
     async fn issue_states_by_ids(
         &mut self,
         issue_ids: &[String],
     ) -> Result<Vec<TrackerIssueStateSnapshot>, Self::Error>;
+    fn error_category(_error: &Self::Error) -> Option<TrackerErrorCategory> {
+        None
+    }
+    fn retry_after(_error: &Self::Error) -> Option<Duration> {
+        None
+    }
 }
 
 #[allow(async_fn_in_trait)]
@@ -264,7 +300,17 @@ pub struct Scheduler<T, W, M> {
     recovered: bool,
     next_worker_ordinal: u64,
     last_poll_at: Option<TimestampMs>,
+    last_running_state_refresh_at: Option<TimestampMs>,
+    last_dispatch_discovery_at: Option<TimestampMs>,
+    last_terminal_refresh_at: Option<TimestampMs>,
+    last_full_detail_refresh_at: Option<TimestampMs>,
+    linear_blocked_until: Option<TimestampMs>,
     health: HealthStatus,
+}
+
+enum DispatchCandidates {
+    Full(Vec<TrackerIssue>),
+    Summary(Vec<TrackerIssueSummary>),
 }
 
 impl<T, W, M> Scheduler<T, W, M>
@@ -286,6 +332,11 @@ where
             recovered: false,
             next_worker_ordinal: 0,
             last_poll_at: None,
+            last_running_state_refresh_at: None,
+            last_dispatch_discovery_at: None,
+            last_terminal_refresh_at: None,
+            last_full_detail_refresh_at: None,
+            linear_blocked_until: None,
             health: HealthStatus::Starting,
         }
     }
@@ -388,13 +439,16 @@ where
                 })?);
         }
 
-        let tracker_snapshot = self.load_tracker_snapshot().await?;
-        self.bootstrap_recovery(&tracker_snapshot, observed_at)
-            .await?;
-        self.reconcile_tracker_state(&tracker_snapshot, observed_at)
-            .await?;
+        if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
+            self.record_full_detail_refresh(observed_at);
+            self.bootstrap_recovery(&tracker_snapshot, observed_at)
+                .await?;
+            self.reconcile_tracker_state(&tracker_snapshot, observed_at)
+                .await?;
+        }
 
         self.last_poll_at = Some(observed_at);
+        self.refresh_health_from_linear_cooldown(observed_at);
         Ok(self.snapshot(observed_at))
     }
 
@@ -420,17 +474,69 @@ where
             })?;
         self.apply_worker_updates(updates).await?;
 
-        let tracker_snapshot = self.load_tracker_snapshot().await?;
-        self.bootstrap_recovery(&tracker_snapshot, observed_at)
-            .await?;
-        self.reconcile_tracker_state(&tracker_snapshot, observed_at)
-            .await?;
+        self.expire_linear_cooldown(observed_at);
+        let mut dispatch_candidates = None;
+        if !self.linear_cooldown_active(observed_at) {
+            if due(
+                self.last_full_detail_refresh_at,
+                FULL_DETAIL_REFRESH_INTERVAL_MS,
+                observed_at,
+            ) {
+                if let Some(tracker_snapshot) = self.load_tracker_snapshot(observed_at).await? {
+                    self.record_full_detail_refresh(observed_at);
+                    self.bootstrap_recovery(&tracker_snapshot, observed_at)
+                        .await?;
+                    self.reconcile_tracker_state(&tracker_snapshot, observed_at)
+                        .await?;
+                    dispatch_candidates = Some(DispatchCandidates::Full(tracker_snapshot.active));
+                }
+            } else if due(
+                self.last_terminal_refresh_at,
+                TERMINAL_REFRESH_INTERVAL_MS,
+                observed_at,
+            ) {
+                self.refresh_terminal_issues(observed_at).await?;
+            } else if due(
+                self.last_running_state_refresh_at,
+                RUNNING_STATE_REFRESH_INTERVAL_MS,
+                observed_at,
+            ) && self.has_running_executions()
+            {
+                self.refresh_running_issue_states(observed_at).await?;
+            } else if due(
+                self.last_dispatch_discovery_at,
+                DISPATCH_DISCOVERY_INTERVAL_MS,
+                observed_at,
+            ) {
+                dispatch_candidates = self
+                    .load_dispatch_candidates(observed_at)
+                    .await?
+                    .map(DispatchCandidates::Summary);
+            }
+        }
+
+        if let Some(candidates) = dispatch_candidates {
+            match candidates {
+                DispatchCandidates::Full(candidates) => {
+                    self.dispatch_ready_issues(&candidates, observed_at).await?;
+                }
+                DispatchCandidates::Summary(candidates) => {
+                    self.dispatch_summary_candidates(&candidates, observed_at)
+                        .await?;
+                }
+            }
+        }
+
         self.handle_stalls(observed_at).await?;
-        self.dispatch_ready_issues(&tracker_snapshot.active, observed_at)
-            .await?;
+
+        let known_candidates = self.known_dispatch_candidates(observed_at);
+        if !known_candidates.is_empty() {
+            self.dispatch_ready_issues(&known_candidates, observed_at)
+                .await?;
+        }
 
         self.last_poll_at = Some(observed_at);
-        self.health = HealthStatus::Healthy;
+        self.refresh_health_from_linear_cooldown(observed_at);
         Ok(self.snapshot(observed_at))
     }
 
@@ -439,9 +545,7 @@ where
         F: Future<Output = ()>,
     {
         let mut shutdown = std::pin::pin!(shutdown);
-        let mut ticker = interval(std::time::Duration::from_millis(
-            self.config.poll_interval_ms,
-        ));
+        let mut ticker = interval(Duration::from_millis(self.config.poll_interval_ms));
         ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
         loop {
@@ -460,21 +564,32 @@ where
         Ok(())
     }
 
-    async fn load_tracker_snapshot(&mut self) -> Result<TrackerSnapshot, SchedulerError> {
-        let active =
-            self.tracker
-                .candidate_issues()
-                .await
-                .map_err(|error| SchedulerError::Tracker {
+    async fn load_tracker_snapshot(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<Option<TrackerSnapshot>, SchedulerError> {
+        let active = match self.tracker.candidate_issues().await {
+            Ok(active) => active,
+            Err(error) => {
+                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                    return Ok(None);
+                }
+                return Err(SchedulerError::Tracker {
                     detail: error.to_string(),
-                })?;
-        let terminal =
-            self.tracker
-                .terminal_issues()
-                .await
-                .map_err(|error| SchedulerError::Tracker {
+                });
+            }
+        };
+        let terminal = match self.tracker.terminal_issues().await {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                    return Ok(None);
+                }
+                return Err(SchedulerError::Tracker {
                     detail: error.to_string(),
-                })?;
+                });
+            }
+        };
 
         let active_ids = active
             .iter()
@@ -513,23 +628,185 @@ where
         let state_by_id = if lookup_ids.is_empty() {
             HashMap::new()
         } else {
-            self.tracker
+            let snapshots = self
+                .tracker
                 .issue_states_by_ids(&lookup_ids.into_iter().collect::<Vec<_>>())
-                .await
-                .map_err(|error| SchedulerError::Tracker {
-                    detail: error.to_string(),
-                })?
-                .into_iter()
-                .map(|snapshot| (snapshot.id.clone(), snapshot))
-                .collect()
+                .await;
+            match snapshots {
+                Ok(snapshots) => snapshots
+                    .into_iter()
+                    .map(|snapshot| (snapshot.id.clone(), snapshot))
+                    .collect(),
+                Err(error) => {
+                    if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                        return Ok(None);
+                    }
+                    return Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    });
+                }
+            }
         };
 
-        Ok(TrackerSnapshot {
+        Ok(Some(TrackerSnapshot {
             active_index,
             terminal_state_by_id,
             state_by_id,
             active,
-        })
+        }))
+    }
+
+    async fn refresh_running_issue_states(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let issue_ids = self
+            .executions
+            .iter()
+            .filter(|(_, execution)| {
+                matches!(
+                    execution.status(),
+                    SchedulerStatus::Claimed | SchedulerStatus::Running
+                )
+            })
+            .map(|(id, _)| id.as_str().to_string())
+            .collect::<Vec<_>>();
+        if issue_ids.is_empty() {
+            self.last_running_state_refresh_at = Some(observed_at);
+            return Ok(());
+        }
+
+        let snapshots = match self.tracker.issue_states_by_ids(&issue_ids).await {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                    return Ok(());
+                }
+                return Err(SchedulerError::Tracker {
+                    detail: error.to_string(),
+                });
+            }
+        };
+        self.last_running_state_refresh_at = Some(observed_at);
+        let tracker_snapshot = TrackerSnapshot {
+            active: Vec::new(),
+            active_index: HashMap::new(),
+            terminal_state_by_id: HashMap::new(),
+            state_by_id: snapshots
+                .into_iter()
+                .map(|snapshot| (snapshot.id.clone(), snapshot))
+                .collect(),
+        };
+        self.reconcile_tracker_state(&tracker_snapshot, observed_at)
+            .await
+    }
+
+    async fn refresh_terminal_issues(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let terminal = match self.tracker.terminal_issues().await {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                    return Ok(());
+                }
+                return Err(SchedulerError::Tracker {
+                    detail: error.to_string(),
+                });
+            }
+        };
+        self.last_terminal_refresh_at = Some(observed_at);
+        let tracker_snapshot = TrackerSnapshot {
+            active: Vec::new(),
+            active_index: HashMap::new(),
+            terminal_state_by_id: terminal
+                .into_iter()
+                .map(|issue| (issue.id, issue.state))
+                .collect(),
+            state_by_id: HashMap::new(),
+        };
+        self.reconcile_tracker_state(&tracker_snapshot, observed_at)
+            .await
+    }
+
+    async fn load_dispatch_candidates(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<Option<Vec<TrackerIssueSummary>>, SchedulerError> {
+        match self.tracker.candidate_issue_summaries().await {
+            Ok(active) => {
+                self.last_dispatch_discovery_at = Some(observed_at);
+                Ok(Some(active))
+            }
+            Err(error) => {
+                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                    Ok(None)
+                } else {
+                    Err(SchedulerError::Tracker {
+                        detail: error.to_string(),
+                    })
+                }
+            }
+        }
+    }
+
+    fn record_full_detail_refresh(&mut self, observed_at: TimestampMs) {
+        self.last_running_state_refresh_at = Some(observed_at);
+        self.last_dispatch_discovery_at = Some(observed_at);
+        self.last_terminal_refresh_at = Some(observed_at);
+        self.last_full_detail_refresh_at = Some(observed_at);
+    }
+
+    fn expire_linear_cooldown(&mut self, observed_at: TimestampMs) {
+        if self
+            .linear_blocked_until
+            .is_some_and(|blocked_until| blocked_until <= observed_at)
+        {
+            self.linear_blocked_until = None;
+        }
+    }
+
+    fn linear_cooldown_active(&self, observed_at: TimestampMs) -> bool {
+        match self.linear_blocked_until {
+            Some(blocked_until) if blocked_until > observed_at => true,
+            Some(_) | None => false,
+        }
+    }
+
+    fn refresh_health_from_linear_cooldown(&mut self, observed_at: TimestampMs) {
+        self.health = if self.linear_cooldown_active(observed_at) {
+            HealthStatus::Degraded
+        } else {
+            HealthStatus::Healthy
+        };
+    }
+
+    fn set_linear_cooldown_from_tracker_error(
+        &mut self,
+        error: &T::Error,
+        observed_at: TimestampMs,
+    ) -> bool {
+        if T::error_category(error) != Some(TrackerErrorCategory::RateLimited) {
+            return false;
+        }
+
+        let delay_ms = T::retry_after(error)
+            .map(duration_millis_saturating)
+            .unwrap_or(self.config.poll_interval_ms)
+            .max(self.config.poll_interval_ms);
+        let blocked_until = observed_at.saturating_add(DurationMs::new(delay_ms));
+        self.linear_blocked_until = Some(
+            self.linear_blocked_until
+                .map_or(blocked_until, |existing| existing.max(blocked_until)),
+        );
+        self.health = HealthStatus::Degraded;
+        warn!(
+            delay_ms,
+            blocked_until_ms = blocked_until.as_u64(),
+            "Linear tracker is rate limited; deferring Linear reads"
+        );
+        true
     }
 
     async fn bootstrap_recovery(
@@ -618,6 +895,11 @@ where
             if let Some(snapshot) = tracker_snapshot.state_by_id.get(issue_id.as_str()) {
                 let category = state_category_from_name(&snapshot.state.name, &self.config);
                 if category == IssueStateCategory::Active {
+                    if let Some(existing) = self.executions.get(&issue_id) {
+                        let mut issue = existing.issue().clone();
+                        issue.state = issue_state_from_name(&snapshot.state.name, &self.config);
+                        self.refresh_execution_issue(&issue_id, issue)?;
+                    }
                     continue;
                 }
 
@@ -655,6 +937,122 @@ where
         }
 
         Ok(())
+    }
+
+    fn known_dispatch_candidates(&self, observed_at: TimestampMs) -> Vec<TrackerIssue> {
+        self.executions
+            .values()
+            .filter(|execution| {
+                if execution.issue().state.category != IssueStateCategory::Active {
+                    return false;
+                }
+                match execution.status() {
+                    SchedulerStatus::Unclaimed => true,
+                    SchedulerStatus::RetryQueued => execution
+                        .retry()
+                        .is_some_and(|retry| retry.due_at <= observed_at),
+                    SchedulerStatus::Released
+                    | SchedulerStatus::Claimed
+                    | SchedulerStatus::Running => false,
+                }
+            })
+            .map(|execution| tracker_issue_from_normalized(execution.issue()))
+            .collect()
+    }
+
+    fn refresh_execution_issue(
+        &mut self,
+        issue_id: &IssueId,
+        issue: NormalizedIssue,
+    ) -> Result<(), SchedulerError> {
+        if let Some(mut execution) = self.remove_execution(issue_id) {
+            execution.refresh_issue(issue)?;
+            self.insert_execution(issue_id.clone(), execution);
+        }
+        Ok(())
+    }
+
+    fn has_running_executions(&self) -> bool {
+        self.executions.values().any(|execution| {
+            matches!(
+                execution.status(),
+                SchedulerStatus::Claimed | SchedulerStatus::Running
+            )
+        })
+    }
+
+    async fn dispatch_summary_candidates(
+        &mut self,
+        summaries: &[TrackerIssueSummary],
+        observed_at: TimestampMs,
+    ) -> Result<(), SchedulerError> {
+        let ready = filter_issue_summaries_for_dispatch(
+            summaries.to_vec(),
+            &self.config.terminal_state_set(),
+        );
+        let available_capacity = usize::try_from(self.config.max_concurrent_agents)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(self.worker_index.len());
+        if available_capacity == 0 {
+            return Ok(());
+        }
+
+        let identifiers = ready
+            .iter()
+            .take(available_capacity)
+            .map(|issue| issue.identifier.clone())
+            .collect::<Vec<_>>();
+        if identifiers.is_empty() {
+            return Ok(());
+        }
+        let mut detailed_by_identifier = match self
+            .tracker
+            .issues_by_identifiers(&identifiers)
+            .await
+        {
+            Ok(issues) => issues
+                .into_iter()
+                .map(|issue| (issue.identifier.to_ascii_uppercase(), issue))
+                .collect::<HashMap<_, _>>(),
+            Err(error) => {
+                if self.set_linear_cooldown_from_tracker_error(&error, observed_at) {
+                    return Ok(());
+                }
+                if T::error_category(&error) == Some(TrackerErrorCategory::NotFound) {
+                    warn!(
+                        "skipping dispatch discovery because selected issue details were not found"
+                    );
+                    return Ok(());
+                }
+                return Err(SchedulerError::Tracker {
+                    detail: error.to_string(),
+                });
+            }
+        };
+
+        let mut detailed = Vec::new();
+        for summary in ready.into_iter().take(available_capacity) {
+            let key = summary.identifier.to_ascii_uppercase();
+            let Some(detailed_issue) = detailed_by_identifier.remove(&key) else {
+                warn!(
+                    identifier = %summary.identifier,
+                    "skipping stale dispatch candidate missing from detail refresh"
+                );
+                continue;
+            };
+            let normalized = normalize_tracker_issue(&detailed_issue, &self.config)?;
+            if normalized.state.category != IssueStateCategory::Active {
+                warn!(
+                    identifier = %normalized.identifier,
+                    state = %normalized.state.name,
+                    "skipping dispatch candidate no longer in an active state"
+                );
+                continue;
+            }
+            detailed.push(detailed_issue);
+        }
+
+        self.dispatch_ready_issues(&detailed, observed_at).await
     }
 
     async fn dispatch_ready_issues(
@@ -1352,8 +1750,163 @@ fn normalized_state_name(name: &str) -> String {
     name.trim().to_ascii_lowercase()
 }
 
+fn tracker_issue_summary_from_issue(issue: TrackerIssue) -> TrackerIssueSummary {
+    TrackerIssueSummary {
+        id: issue.id,
+        identifier: issue.identifier,
+        url: issue.url,
+        title: issue.title,
+        priority: issue.priority,
+        state: issue.state,
+        state_kind: issue.state_kind,
+        blocked_by: issue.blocked_by,
+        sub_issues: issue.sub_issues,
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
+    }
+}
+
+fn tracker_issue_from_normalized(issue: &NormalizedIssue) -> TrackerIssue {
+    TrackerIssue {
+        id: issue.id.to_string(),
+        identifier: issue.identifier.to_string(),
+        url: issue.url.clone().unwrap_or_default(),
+        title: issue.title.clone(),
+        description: issue.description.clone(),
+        priority: issue.priority,
+        state: issue.state.name.clone(),
+        state_kind: tracker_state_kind_from_issue_state(&issue.state),
+        labels: issue.labels.clone(),
+        project_id: issue.project_id.clone(),
+        project_slug: issue.project_slug.clone(),
+        project_name: issue.project_name.clone(),
+        parent_id: issue.parent_id.as_ref().map(ToString::to_string),
+        parent: None,
+        project_milestone: None,
+        blocked_by: issue
+            .blocked_by
+            .iter()
+            .filter_map(|blocker| {
+                let id = blocker.id.as_ref()?.to_string();
+                let identifier = blocker.identifier.as_ref()?.to_string();
+                let state_name = blocker.state.clone().unwrap_or_default();
+                Some(TrackerIssueBlocker {
+                    id,
+                    identifier: identifier.clone(),
+                    title: identifier,
+                    state: tracker_issue_state_from_name(&state_name),
+                })
+            })
+            .collect(),
+        sub_issues: issue
+            .sub_issues
+            .iter()
+            .map(|child| TrackerIssueRef {
+                id: child.id.to_string(),
+                identifier: child.identifier.to_string(),
+                title: None,
+                url: None,
+                state: child.state.clone(),
+            })
+            .collect(),
+        created_at: timestamp_to_datetime(issue.created_at),
+        updated_at: timestamp_to_datetime(issue.updated_at),
+    }
+}
+
+fn filter_issue_summaries_for_dispatch<I>(
+    summaries: I,
+    terminal_states: &HashSet<String>,
+) -> Vec<TrackerIssueSummary>
+where
+    I: IntoIterator<Item = TrackerIssueSummary>,
+{
+    let mut filtered = summaries
+        .into_iter()
+        .filter(|issue| should_dispatch_issue_summary(issue, terminal_states))
+        .collect::<Vec<_>>();
+    filtered.sort_by(|left, right| {
+        summary_priority_rank(left)
+            .cmp(&summary_priority_rank(right))
+            .then_with(|| left.sub_issues.len().cmp(&right.sub_issues.len()))
+            .then_with(|| left.created_at.cmp(&right.created_at))
+            .then_with(|| left.identifier.cmp(&right.identifier))
+    });
+    filtered
+}
+
+fn should_dispatch_issue_summary(
+    issue: &TrackerIssueSummary,
+    terminal_states: &HashSet<String>,
+) -> bool {
+    !issue
+        .blocked_by
+        .iter()
+        .any(|blocker| !blocker.is_terminal())
+        && (issue.sub_issues.is_empty()
+            || issue
+                .sub_issues
+                .iter()
+                .all(|sub_issue| sub_issue.is_terminal(terminal_states)))
+}
+
+fn summary_priority_rank(issue: &TrackerIssueSummary) -> u8 {
+    issue.priority.unwrap_or(u8::MAX)
+}
+
+fn tracker_issue_state_from_name(name: &str) -> TrackerIssueState {
+    let kind = tracker_state_kind_from_name(name);
+    TrackerIssueState {
+        id: normalized_state_name(name),
+        name: name.to_string(),
+        tracker_type: tracker_type_for_state_kind(&kind).to_string(),
+        kind,
+    }
+}
+
+fn tracker_state_kind_from_issue_state(state: &IssueState) -> TrackerIssueStateKind {
+    match state.category {
+        IssueStateCategory::Active => TrackerIssueStateKind::Started,
+        IssueStateCategory::Terminal => tracker_state_kind_from_name(&state.name),
+        IssueStateCategory::NonActive => tracker_state_kind_from_name(&state.name),
+    }
+}
+
+fn tracker_state_kind_from_name(name: &str) -> TrackerIssueStateKind {
+    match normalized_state_name(name).as_str() {
+        "backlog" => TrackerIssueStateKind::Backlog,
+        "todo" => TrackerIssueStateKind::Unstarted,
+        "done" | "completed" | "closed" => TrackerIssueStateKind::Completed,
+        "canceled" | "cancelled" => TrackerIssueStateKind::Canceled,
+        "triage" | "triaged" => TrackerIssueStateKind::Triage,
+        "in progress" | "review" | "human review" => TrackerIssueStateKind::Started,
+        other => TrackerIssueStateKind::Unknown(other.to_string()),
+    }
+}
+
+fn tracker_type_for_state_kind(kind: &TrackerIssueStateKind) -> &'static str {
+    match kind {
+        TrackerIssueStateKind::Backlog => "backlog",
+        TrackerIssueStateKind::Unstarted => "unstarted",
+        TrackerIssueStateKind::Started => "started",
+        TrackerIssueStateKind::Completed => "completed",
+        TrackerIssueStateKind::Canceled => "canceled",
+        TrackerIssueStateKind::Triage => "triage",
+        TrackerIssueStateKind::Unknown(_) => "unknown",
+    }
+}
+
 fn effective_stall_timeout(stall_timeout_ms: Option<u64>) -> DurationMs {
     DurationMs::new(stall_timeout_ms.unwrap_or(DISABLED_STALL_TIMEOUT_MS))
+}
+
+fn due(last_observed_at: Option<TimestampMs>, interval_ms: u64, observed_at: TimestampMs) -> bool {
+    last_observed_at
+        .is_none_or(|last| observed_at.as_u64() >= last.as_u64().saturating_add(interval_ms))
+}
+
+fn duration_millis_saturating(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn datetime_to_timestamp(datetime: DateTime<Utc>) -> TimestampMs {
@@ -1363,6 +1916,12 @@ fn datetime_to_timestamp(datetime: DateTime<Utc>) -> TimestampMs {
     } else {
         TimestampMs::new(millis as u64)
     }
+}
+
+fn timestamp_to_datetime(timestamp: Option<TimestampMs>) -> DateTime<Utc> {
+    let millis = timestamp.map(|value| value.as_u64()).unwrap_or_default();
+    let millis = i64::try_from(millis).unwrap_or(i64::MAX);
+    DateTime::<Utc>::from_timestamp_millis(millis).unwrap_or_else(Utc::now)
 }
 
 fn current_epoch_millis() -> u64 {

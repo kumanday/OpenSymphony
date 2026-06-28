@@ -1,16 +1,18 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
+    time::Duration,
 };
 
+use crate::opensymphony_domain::TrackerErrorCategory;
 use crate::opensymphony_orchestrator::{
     ConversationId, ConversationMetadata, IssueId, IssueIdentifier, IssueRef, IssueState,
     IssueStateCategory, NormalizedIssue, RecoveryRecord, ReleaseReason, RetryReason,
     RuntimeStreamState, Scheduler, SchedulerConfig, SchedulerStatus, TimestampMs, TrackerBackend,
     TrackerIssue, TrackerIssueState, TrackerIssueStateKind, TrackerIssueStateSnapshot,
-    WorkerAbortReason, WorkerBackend, WorkerId, WorkerLaunch, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend, WorkspaceKey,
-    WorkspaceRecord, decide_issue_route,
+    TrackerIssueSummary, WorkerAbortReason, WorkerBackend, WorkerId, WorkerLaunch,
+    WorkerOutcomeKind, WorkerOutcomeRecord, WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    WorkspaceKey, WorkspaceRecord, decide_issue_route,
 };
 use crate::opensymphony_workflow::RoutingConfig;
 use chrono::{TimeZone, Utc};
@@ -73,6 +75,22 @@ fn tracker_issue(id: &str, identifier: &str, state: &str, created_at: u64) -> Tr
         sub_issues: Vec::new(),
         created_at: dt(created_at),
         updated_at: dt(created_at),
+    }
+}
+
+fn tracker_issue_summary(issue: TrackerIssue) -> TrackerIssueSummary {
+    TrackerIssueSummary {
+        id: issue.id,
+        identifier: issue.identifier,
+        url: issue.url,
+        title: issue.title,
+        priority: issue.priority,
+        state: issue.state,
+        state_kind: issue.state_kind,
+        blocked_by: issue.blocked_by,
+        sub_issues: issue.sub_issues,
+        created_at: issue.created_at,
+        updated_at: issue.updated_at,
     }
 }
 
@@ -232,11 +250,25 @@ fn conversation(worker_id: &WorkerId) -> ConversationMetadata {
 }
 
 #[derive(Debug, Clone)]
-struct FakeError(String);
+struct FakeError {
+    message: String,
+    category: Option<TrackerErrorCategory>,
+    retry_after: Option<Duration>,
+}
+
+impl FakeError {
+    fn rate_limited(retry_after: Duration) -> Self {
+        Self {
+            message: "rate limited".to_string(),
+            category: Some(TrackerErrorCategory::RateLimited),
+            retry_after: Some(retry_after),
+        }
+    }
+}
 
 impl std::fmt::Display for FakeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 
@@ -247,6 +279,16 @@ struct FakeTracker {
     active: Vec<TrackerIssue>,
     terminal: Vec<TrackerIssue>,
     states: HashMap<String, TrackerIssueStateSnapshot>,
+    detail_issues: Option<Vec<TrackerIssue>>,
+    candidate_errors: VecDeque<FakeError>,
+    summary_errors: VecDeque<FakeError>,
+    terminal_errors: VecDeque<FakeError>,
+    detail_errors: VecDeque<FakeError>,
+    state_errors: VecDeque<FakeError>,
+    active_requests: usize,
+    summary_requests: usize,
+    terminal_requests: usize,
+    detail_requests: Vec<Vec<String>>,
     state_requests: Vec<Vec<String>>,
 }
 
@@ -254,11 +296,52 @@ impl TrackerBackend for FakeTracker {
     type Error = FakeError;
 
     async fn candidate_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
+        self.active_requests += 1;
+        if let Some(error) = self.candidate_errors.pop_front() {
+            return Err(error);
+        }
         Ok(self.active.clone())
     }
 
+    async fn candidate_issue_summaries(&mut self) -> Result<Vec<TrackerIssueSummary>, Self::Error> {
+        self.summary_requests += 1;
+        if let Some(error) = self.summary_errors.pop_front() {
+            return Err(error);
+        }
+        Ok(self
+            .active
+            .clone()
+            .into_iter()
+            .map(tracker_issue_summary)
+            .collect())
+    }
+
     async fn terminal_issues(&mut self) -> Result<Vec<TrackerIssue>, Self::Error> {
+        self.terminal_requests += 1;
+        if let Some(error) = self.terminal_errors.pop_front() {
+            return Err(error);
+        }
         Ok(self.terminal.clone())
+    }
+
+    async fn issues_by_identifiers(
+        &mut self,
+        identifiers: &[String],
+    ) -> Result<Vec<TrackerIssue>, Self::Error> {
+        self.detail_requests.push(identifiers.to_vec());
+        if let Some(error) = self.detail_errors.pop_front() {
+            return Err(error);
+        }
+        let requested = identifiers
+            .iter()
+            .map(|identifier| identifier.to_ascii_uppercase())
+            .collect::<std::collections::HashSet<_>>();
+        let source = self.detail_issues.as_ref().unwrap_or(&self.active);
+        Ok(source
+            .iter()
+            .filter(|issue| requested.contains(&issue.identifier.to_ascii_uppercase()))
+            .cloned()
+            .collect())
     }
 
     async fn issue_states_by_ids(
@@ -266,10 +349,21 @@ impl TrackerBackend for FakeTracker {
         issue_ids: &[String],
     ) -> Result<Vec<TrackerIssueStateSnapshot>, Self::Error> {
         self.state_requests.push(issue_ids.to_vec());
+        if let Some(error) = self.state_errors.pop_front() {
+            return Err(error);
+        }
         Ok(issue_ids
             .iter()
             .filter_map(|id| self.states.get(id).cloned())
             .collect())
+    }
+
+    fn error_category(error: &Self::Error) -> Option<TrackerErrorCategory> {
+        error.category
+    }
+
+    fn retry_after(error: &Self::Error) -> Option<Duration> {
+        error.retry_after
     }
 }
 
@@ -354,6 +448,326 @@ impl WorkerBackend for FakeWorker {
         self.aborted.push((worker_id.to_string(), reason));
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn rate_limit_cooldown_skips_linear_reads_but_keeps_worker_updates_flowing() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-500", "COE-500", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should dispatch");
+
+    let first_run = scheduler.worker().launches[0].run.clone();
+    scheduler
+        .tracker_mut()
+        .state_errors
+        .push_back(FakeError::rate_limited(Duration::from_secs(60)));
+    scheduler
+        .worker_mut()
+        .updates
+        .push_back(WorkerUpdate::TokenUsageUpdate {
+            worker_id: first_run.worker_id.clone(),
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 5,
+            total_tokens: 35,
+        });
+
+    let blocked_snapshot = scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("rate-limited state refresh should not fail the tick");
+
+    assert_eq!(
+        blocked_snapshot.daemon.health,
+        crate::opensymphony_domain::HealthStatus::Degraded
+    );
+    assert_eq!(scheduler.tracker().state_requests.len(), 1);
+    let execution = scheduler
+        .execution(&IssueId::new("lin-500").expect("issue id should be valid"))
+        .expect("execution should still exist");
+    assert_eq!(
+        execution
+            .conversation()
+            .expect("conversation metadata should exist")
+            .total_tokens,
+        35
+    );
+
+    let active_requests = scheduler.tracker().active_requests;
+    let summary_requests = scheduler.tracker().summary_requests;
+    let terminal_requests = scheduler.tracker().terminal_requests;
+    let detail_requests = scheduler.tracker().detail_requests.len();
+    let state_requests = scheduler.tracker().state_requests.len();
+
+    let still_blocked = scheduler
+        .tick(ts(35_100))
+        .await
+        .expect("cooldown should skip Linear reads");
+
+    assert_eq!(
+        still_blocked.daemon.health,
+        crate::opensymphony_domain::HealthStatus::Degraded
+    );
+    assert_eq!(scheduler.tracker().active_requests, active_requests);
+    assert_eq!(scheduler.tracker().summary_requests, summary_requests);
+    assert_eq!(scheduler.tracker().terminal_requests, terminal_requests);
+    assert_eq!(scheduler.tracker().detail_requests.len(), detail_requests);
+    assert_eq!(scheduler.tracker().state_requests.len(), state_requests);
+}
+
+#[tokio::test]
+async fn rate_limited_running_state_read_retries_after_cooldown() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-505", "COE-505", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should dispatch");
+    scheduler
+        .tracker_mut()
+        .state_errors
+        .push_back(FakeError::rate_limited(Duration::from_secs(1)));
+
+    scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("rate-limited state refresh should not fail the tick");
+    assert_eq!(scheduler.tracker().state_requests.len(), 1);
+
+    scheduler
+        .tick(ts(31_100))
+        .await
+        .expect("state refresh should retry immediately after cooldown");
+    assert_eq!(scheduler.tracker().state_requests.len(), 2);
+}
+
+#[tokio::test]
+async fn rate_limited_terminal_read_retries_after_cooldown() {
+    let tracker = FakeTracker::default();
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should succeed");
+    scheduler
+        .tracker_mut()
+        .terminal_errors
+        .push_back(FakeError::rate_limited(Duration::from_secs(1)));
+
+    scheduler
+        .tick(ts(300_100))
+        .await
+        .expect("rate-limited terminal refresh should not fail the tick");
+    assert_eq!(scheduler.tracker().terminal_requests, 2);
+
+    scheduler
+        .tick(ts(301_100))
+        .await
+        .expect("terminal refresh should retry immediately after cooldown");
+    assert_eq!(scheduler.tracker().terminal_requests, 3);
+}
+
+#[tokio::test]
+async fn rate_limited_dispatch_discovery_retries_after_cooldown() {
+    let tracker = FakeTracker::default();
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should succeed");
+    scheduler
+        .tracker_mut()
+        .summary_errors
+        .push_back(FakeError::rate_limited(Duration::from_secs(1)));
+
+    scheduler
+        .tick(ts(60_100))
+        .await
+        .expect("rate-limited dispatch discovery should not fail the tick");
+    assert_eq!(scheduler.tracker().summary_requests, 1);
+
+    scheduler
+        .tick(ts(61_100))
+        .await
+        .expect("dispatch discovery should retry immediately after cooldown");
+    assert_eq!(scheduler.tracker().summary_requests, 2);
+}
+
+#[tokio::test]
+async fn dispatch_discovery_uses_sixty_second_cadence_and_selected_detail_reads() {
+    let tracker = FakeTracker::default();
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    config.max_concurrent_agents = 2;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should succeed");
+
+    assert_eq!(scheduler.tracker().active_requests, 1);
+    assert_eq!(scheduler.tracker().summary_requests, 0);
+    assert!(scheduler.tracker().detail_requests.is_empty());
+
+    scheduler.tracker_mut().active = vec![
+        tracker_issue("lin-501", "COE-501", "In Progress", 0),
+        tracker_issue("lin-502", "COE-502", "In Progress", 1),
+    ];
+
+    scheduler
+        .tick(ts(5_100))
+        .await
+        .expect("five-second tick should avoid Linear discovery");
+    assert_eq!(scheduler.tracker().summary_requests, 0);
+    assert!(scheduler.tracker().detail_requests.is_empty());
+    assert!(scheduler.worker().launches.is_empty());
+
+    scheduler
+        .tick(ts(60_100))
+        .await
+        .expect("sixty-second dispatch discovery should run");
+
+    assert_eq!(scheduler.tracker().summary_requests, 1);
+    assert_eq!(
+        scheduler.tracker().detail_requests,
+        vec![vec!["COE-501".to_string(), "COE-502".to_string()]]
+    );
+    assert_eq!(scheduler.worker().launches.len(), 2);
+
+    scheduler
+        .tick(ts(65_100))
+        .await
+        .expect("next five-second tick should avoid another discovery");
+    assert_eq!(scheduler.tracker().summary_requests, 1);
+
+    scheduler
+        .tick(ts(3_600_100))
+        .await
+        .expect("hourly full detail refresh should run");
+    assert_eq!(scheduler.tracker().active_requests, 2);
+}
+
+#[tokio::test]
+async fn running_state_polling_uses_lightweight_state_refresh_interval() {
+    let tracker = FakeTracker {
+        active: vec![tracker_issue("lin-502", "COE-502", "In Progress", 0)],
+        ..Default::default()
+    };
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    config.active_states.push("Human Review".to_string());
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should dispatch");
+    scheduler.tracker_mut().states.insert(
+        "lin-502".to_string(),
+        tracker_state_snapshot("lin-502", "COE-502", "Human Review", "started", 30_000),
+    );
+
+    scheduler
+        .tick(ts(5_100))
+        .await
+        .expect("five-second tick should avoid state refresh");
+    assert!(scheduler.tracker().state_requests.is_empty());
+
+    scheduler
+        .tick(ts(30_100))
+        .await
+        .expect("thirty-second tick should refresh running state");
+
+    assert_eq!(scheduler.tracker().active_requests, 1);
+    assert_eq!(scheduler.tracker().terminal_requests, 1);
+    assert_eq!(scheduler.tracker().summary_requests, 0);
+    assert_eq!(
+        scheduler.tracker().state_requests,
+        vec![vec!["lin-502".to_string()]]
+    );
+    assert_eq!(
+        scheduler
+            .execution(&IssueId::new("lin-502").expect("issue id should be valid"))
+            .expect("execution should exist")
+            .issue()
+            .state
+            .name,
+        "Human Review"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_discovery_skips_candidates_missing_or_inactive_after_detail_refresh() {
+    let tracker = FakeTracker::default();
+    let workspace = FakeWorkspace::default();
+    let worker = FakeWorker::default();
+    let mut config = scheduler_config();
+    config.stall_timeout_ms = None;
+    let mut scheduler = Scheduler::new(tracker, workspace, worker, config);
+
+    scheduler
+        .tick(ts(100))
+        .await
+        .expect("startup full refresh should succeed");
+
+    scheduler.tracker_mut().active = vec![tracker_issue("lin-503", "COE-503", "In Progress", 0)];
+    scheduler.tracker_mut().detail_issues = Some(Vec::new());
+
+    scheduler
+        .tick(ts(60_100))
+        .await
+        .expect("missing detail should skip stale summary candidate");
+
+    assert_eq!(
+        scheduler.tracker().detail_requests,
+        vec![vec!["COE-503".to_string()]]
+    );
+    assert!(scheduler.worker().launches.is_empty());
+
+    scheduler.tracker_mut().detail_issues =
+        Some(vec![tracker_issue("lin-503", "COE-503", "Todo", 0)]);
+
+    scheduler
+        .tick(ts(120_100))
+        .await
+        .expect("inactive detail should skip stale summary candidate");
+
+    assert_eq!(scheduler.tracker().detail_requests.len(), 2);
+    assert!(scheduler.worker().launches.is_empty());
 }
 
 #[tokio::test]
@@ -605,7 +1019,7 @@ async fn terminal_reconciliation_aborts_running_worker_and_cleans_up_workspace()
     scheduler.tracker_mut().terminal = vec![tracker_issue("lin-270", "COE-270", "Done", 0)];
 
     scheduler
-        .tick(ts(200))
+        .tick(ts(300_200))
         .await
         .expect("terminal reconciliation should succeed");
 
@@ -792,9 +1206,9 @@ async fn tracker_inactive_release_frees_the_per_state_slot() {
     );
 
     scheduler
-        .tick(ts(200))
+        .tick(ts(30_200))
         .await
-        .expect("inactive reconciliation should release and replace the running issue");
+        .expect("inactive reconciliation should release the running issue");
 
     let released = scheduler
         .execution(&IssueId::new("lin-277").expect("issue id should be valid"))
@@ -811,6 +1225,11 @@ async fn tracker_inactive_release_frees_the_per_state_slot() {
         scheduler.worker().aborted[0].1,
         WorkerAbortReason::TrackerInactive
     );
+
+    scheduler
+        .tick(ts(60_200))
+        .await
+        .expect("dispatch discovery should replace the released issue");
     assert_eq!(scheduler.worker().launches.len(), 2);
     assert_eq!(
         scheduler.worker().launches[1].issue.identifier.as_str(),
@@ -848,11 +1267,25 @@ async fn running_count_follows_active_state_reconciliation() {
         tracker_issue("lin-281", "COE-281", "In Progress", 1),
         tracker_issue("lin-282", "COE-282", "Code Review", 2),
     ];
+    scheduler.tracker_mut().states.insert(
+        "lin-280".to_string(),
+        tracker_state_snapshot("lin-280", "COE-280", "Code Review", "started", 200),
+    );
 
     scheduler
-        .tick(ts(200))
+        .tick(ts(30_200))
         .await
-        .expect("active-state reconciliation should update running counts");
+        .expect("running-state refresh should update running counts");
+
+    scheduler
+        .tick(ts(60_200))
+        .await
+        .expect("running-state refresh should run before dispatch discovery");
+
+    scheduler
+        .tick(ts(65_200))
+        .await
+        .expect("dispatch discovery should use the updated running counts");
 
     let refreshed = scheduler
         .execution(&IssueId::new("lin-280").expect("issue id should be valid"))
@@ -864,12 +1297,10 @@ async fn running_count_follows_active_state_reconciliation() {
         scheduler.worker().launches[1].issue.identifier.as_str(),
         "COE-281"
     );
-    assert_eq!(
+    assert!(
         scheduler
             .execution(&IssueId::new("lin-282").expect("issue id should be valid"))
-            .expect("reconciled active issue should exist")
-            .status(),
-        SchedulerStatus::Unclaimed
+            .is_none()
     );
 }
 

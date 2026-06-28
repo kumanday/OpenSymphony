@@ -154,6 +154,63 @@ async fn candidate_issues_normalize_fixture_payloads() {
 }
 
 #[tokio::test]
+async fn candidate_issue_summaries_use_lightweight_dispatch_query() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
+        "fixtures/candidate_issues_page.json"
+    ))])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issue_summaries()
+        .await
+        .expect("candidate summary query should succeed");
+
+    assert_eq!(issues.len(), 2);
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 1);
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("query IssueSummariesByState")
+    );
+    assert!(
+        !requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("labels(first:")
+    );
+    assert!(
+        !requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("projectMilestone")
+    );
+    assert!(requests[0].body["variables"].get("labelFirst").is_none());
+}
+
+#[tokio::test]
+async fn candidate_issue_summaries_do_not_expand_relation_pages() {
+    let server = MockGraphqlServer::start(vec![QueuedResponse::json(include_str!(
+        "fixtures/candidate_issues_with_relation_paging.json"
+    ))])
+    .await;
+    let client = LinearClient::new(test_config(server.base_url()))
+        .expect("client configuration should be valid");
+
+    let issues = client
+        .candidate_issue_summaries()
+        .await
+        .expect("candidate summary query should succeed without relation expansion");
+
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].identifier, "COE-264");
+    assert_eq!(server.recorded_requests().await.len(), 1);
+}
+
+#[tokio::test]
 async fn candidate_issues_fetch_all_inverse_relation_pages() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::json(include_str!(
@@ -720,6 +777,64 @@ async fn rate_limited_requests_retry_using_retry_after() {
 }
 
 #[tokio::test]
+async fn rate_limited_429_with_long_retry_after_returns_immediately() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "{\"error\":\"rate limited\"}",
+        )
+        .with_header("retry-after", "3600"),
+        QueuedResponse::json(include_str!("fixtures/candidate_issues_page.json")),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.retry_policy.max_backoff = Duration::from_secs(5);
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+    let start = tokio::time::Instant::now();
+
+    let error = client
+        .candidate_issues()
+        .await
+        .expect_err("long retry-after should return without sleeping");
+
+    assert!(error.is_rate_limited());
+    assert_eq!(server.recorded_requests().await.len(), 1);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "long retry-after should not be slept inside the Linear client"
+    );
+}
+
+#[tokio::test]
+async fn rate_limited_429_above_inline_cap_returns_immediately() {
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "{\"error\":\"rate limited\"}",
+        )
+        .with_header("retry-after", "60"),
+        QueuedResponse::json(include_str!("fixtures/candidate_issues_page.json")),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.retry_policy.max_backoff = Duration::from_secs(120);
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+    let start = tokio::time::Instant::now();
+
+    let error = client
+        .candidate_issues()
+        .await
+        .expect_err("retry-after above inline cap should return without sleeping");
+
+    assert!(error.is_rate_limited());
+    assert_eq!(server.recorded_requests().await.len(), 1);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "retry-after above inline cap should not be slept inside the Linear client"
+    );
+}
+
+#[tokio::test]
 async fn graphql_rate_limited_bad_request_retries() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::new(
@@ -803,6 +918,48 @@ async fn graphql_rate_limited_bad_request_retries_using_reset_header() {
 }
 
 #[tokio::test]
+async fn graphql_rate_limited_bad_request_with_long_reset_returns_immediately() {
+    let reset_ms = (SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("current time should be after epoch")
+        + Duration::from_secs(60 * 60))
+    .as_millis()
+    .to_string();
+    let server = MockGraphqlServer::start(vec![
+        QueuedResponse::new(
+            StatusCode::BAD_REQUEST,
+            r#"{"errors":[{"message":"rate limit exceeded","extensions":{"code":"RATELIMITED"}}]}"#,
+        )
+        .with_header("content-type", "application/json")
+        .with_header("x-ratelimit-requests-reset", &reset_ms),
+        QueuedResponse::json(include_str!("fixtures/candidate_issues_page.json")),
+    ])
+    .await;
+    let mut config = test_config(server.base_url());
+    config.retry_policy.initial_backoff = Duration::from_secs(5);
+    config.retry_policy.max_backoff = Duration::from_secs(5);
+    let client = LinearClient::new(config).expect("client configuration should be valid");
+    let start = tokio::time::Instant::now();
+
+    let error = client
+        .candidate_issues()
+        .await
+        .expect_err("long reset should return a rate-limit error without sleeping");
+
+    assert!(error.is_rate_limited());
+    assert!(
+        error
+            .retry_after()
+            .is_some_and(|delay| delay > Duration::from_secs(5))
+    );
+    assert_eq!(server.recorded_requests().await.len(), 1);
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "long reset header should not be slept inside the Linear client"
+    );
+}
+
+#[tokio::test]
 async fn graphql_internal_server_error_retries_even_with_graphql_envelope() {
     let server = MockGraphqlServer::start(vec![
         QueuedResponse::new(
@@ -823,6 +980,42 @@ async fn graphql_internal_server_error_retries_even_with_graphql_envelope() {
 
     assert_eq!(issues.len(), 2);
     assert_eq!(server.recorded_requests().await.len(), 2);
+}
+
+#[tokio::test]
+#[ignore = "requires LINEAR_API_KEY and live Linear access"]
+async fn live_linear_client_reads_opensymphony_project() {
+    let api_key = std::env::var("LINEAR_API_KEY").expect("LINEAR_API_KEY must be set");
+    let mut config = LinearConfig::new(api_key, "e7b957855cb7");
+    config.active_states = vec![
+        "Todo".to_string(),
+        "In Progress".to_string(),
+        "Human Review".to_string(),
+        "Rework".to_string(),
+    ];
+    config.terminal_states = vec!["Done".to_string(), "Canceled".to_string()];
+    let client = LinearClient::new(config).expect("live client configuration should be valid");
+
+    let summaries = client
+        .candidate_issue_summaries()
+        .await
+        .expect("live summary query should succeed");
+    println!("live candidate summaries fetched: {}", summaries.len());
+
+    let issues = client
+        .project_issues_by_identifiers(&["COE-504"])
+        .await
+        .expect("live project-scoped identifier lookup should succeed");
+    let issue = issues
+        .iter()
+        .find(|issue| issue.identifier == "COE-504")
+        .expect("COE-504 should be visible through the live project detail path");
+    println!(
+        "live issue detail: {} {} {}",
+        issue.identifier, issue.state, issue.title
+    );
+    assert_eq!(issue.identifier, "COE-504");
+    assert_eq!(issue.state, "Done");
 }
 
 #[tokio::test]

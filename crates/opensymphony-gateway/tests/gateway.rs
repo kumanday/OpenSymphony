@@ -242,8 +242,11 @@ fn fixture_snapshot(step: u64) -> DaemonSnapshot {
             output_tokens: 512,
             cache_read_tokens: 256,
             total_tokens: 0,
+            cancel_requested: false,
             cancel_acknowledged: false,
             cancel_failed: false,
+            cancel_timed_out: false,
+            cancel_reason: None,
             detached: false,
         }],
         recent_events: vec![RecentEvent {
@@ -329,8 +332,11 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 0,
                 cache_read_tokens: 0,
                 total_tokens: 0,
+                cancel_requested: false,
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
             // Completed issue with events and modified files
@@ -420,8 +426,11 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 1024,
                 cache_read_tokens: 256,
                 total_tokens: 0,
+                cancel_requested: false,
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
             // Failed issue, first attempt (no retries exhausted)
@@ -460,8 +469,11 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 128,
                 cache_read_tokens: 0,
                 total_tokens: 0,
+                cancel_requested: false,
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
             // RetryQueued issue: queued but NOT eligible (not idle)
@@ -500,8 +512,11 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 64,
                 cache_read_tokens: 0,
                 total_tokens: 0,
+                cancel_requested: false,
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
             // Blocked Idle issue: NOT eligible AND NOT queued
@@ -540,8 +555,11 @@ fn fixture_snapshot_rich(step: u64) -> DaemonSnapshot {
                 output_tokens: 0,
                 cache_read_tokens: 0,
                 total_tokens: 0,
+                cancel_requested: false,
                 cancel_acknowledged: false,
                 cancel_failed: false,
+                cancel_timed_out: false,
+                cancel_reason: None,
                 detached: false,
             },
         ],
@@ -1732,6 +1750,45 @@ async fn gateway_serves_run_detail() {
         response.status,
         opensymphony::opensymphony_gateway_schema::run::RunStatus::Running
     );
+
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn gateway_serves_run_detail_cancel_diagnostics() {
+    let mut snapshot = fixture_snapshot(0);
+    snapshot.issues[0].cancel_requested = true;
+    snapshot.issues[0].cancel_reason = Some("operator_cancel".to_owned());
+    let store = SnapshotStore::new(snapshot);
+    let server = GatewayServer::new(store.clone());
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("test listener address");
+    let server_task = tokio::spawn(async move {
+        server
+            .serve(listener)
+            .await
+            .expect("test gateway server should serve")
+    });
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{address}/api/v1/runs/COE-255"))
+        .send()
+        .await
+        .expect("fetch run detail")
+        .json::<opensymphony::opensymphony_gateway_schema::run::RunDetail>()
+        .await
+        .expect("decode run detail");
+
+    let diagnostics = response.diagnostics.expect("diagnostics");
+    assert!(diagnostics.cancel_requested);
+    assert_eq!(
+        diagnostics.cancel_reason.as_deref(),
+        Some("operator_cancel")
+    );
+    assert!(response.cancel_requested);
+    assert_eq!(response.cancel_reason.as_deref(), Some("operator_cancel"));
 
     server_task.abort();
 }

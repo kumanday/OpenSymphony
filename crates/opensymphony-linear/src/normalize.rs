@@ -1,6 +1,6 @@
 use crate::opensymphony_domain::{
     TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState, TrackerIssueStateKind,
-    TrackerIssueStateSnapshot, TrackerProjectMilestone,
+    TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerProjectMilestone,
 };
 
 use super::error::LinearError;
@@ -29,6 +29,25 @@ pub(super) fn normalize_issue(node: LinearIssueNode) -> Result<TrackerIssue, Lin
         parent_id: normalize_parent_id(node.parent.as_ref()),
         parent: normalize_parent(node.parent),
         project_milestone: normalize_project_milestone(node.project_milestone),
+        blocked_by: normalize_blockers(node.inverse_relations.nodes),
+        sub_issues: normalize_sub_issues(node.children.nodes),
+        created_at: node.created_at,
+        updated_at: node.updated_at,
+    })
+}
+
+pub(super) fn normalize_issue_summary(
+    node: LinearIssueNode,
+) -> Result<TrackerIssueSummary, LinearError> {
+    let state = normalize_state(node.state);
+    Ok(TrackerIssueSummary {
+        id: node.id,
+        identifier: node.identifier,
+        url: node.url,
+        title: node.title,
+        priority: normalize_priority(node.priority)?,
+        state: state.name,
+        state_kind: state.kind,
         blocked_by: normalize_blockers(node.inverse_relations.nodes),
         sub_issues: normalize_sub_issues(node.children.nodes),
         created_at: node.created_at,

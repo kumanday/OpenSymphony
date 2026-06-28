@@ -45,6 +45,7 @@ areas:
       - docs/architecture.md
       linear_milestones:
       - 'M10.3: Codex And Subscription Readiness'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'
@@ -187,6 +188,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10: Web Client And External Gateway'
       - 'M7: Shared Client And Desktop Alpha'
       - 'M8: Task Graph Operations And OpenHands Run UI'
@@ -250,6 +252,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10.7: Project Grouping And Dependency Signals'
   developer-experience:
     title: Developer Experience
@@ -339,6 +342,7 @@ areas:
       - area:okf
       linear_milestones:
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10.7: Project Grouping And Dependency Signals'
   elixir-hierarchy-changes:
     title: Changes Needed in Upstream Elixir Implementation for Hierarchy-Aware Task Selection
@@ -466,6 +470,7 @@ areas:
       linear_labels:
       - area:linear
       linear_milestones:
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10.7: Project Grouping And Dependency Signals'
   linear-and-tools:
     title: Linear and Tools
@@ -480,6 +485,7 @@ areas:
       docs:
       - docs/linear-and-tools.md
       linear_milestones:
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10: Web Client And External Gateway'
   mcp:
     title: Mcp
@@ -660,6 +666,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10.7: Project Grouping And Dependency Signals'
       - 'M10: Web Client And External Gateway'
       - 'M6.5: Memory Server'
@@ -724,6 +731,7 @@ areas:
       linear_milestones:
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10.7: Project Grouping And Dependency Signals'
   security:
     title: Security
@@ -745,6 +753,7 @@ areas:
       - area:security
       linear_milestones:
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10.7: Project Grouping And Dependency Signals'
   sources:
     title: Sources and Trust Notes
@@ -793,6 +802,7 @@ areas:
       - 'M10.3: Codex And Subscription Readiness'
       - 'M10.4: Desktop Live Operations And Model Polish'
       - 'M10.5: OKF Memory Bundle Foundation'
+      - 'M10.6: Desktop Run Detail Operations And Interrupts'
       - 'M10: Web Client And External Gateway'
       - 'M6: Gateway And Stream Contract'
       - 'M7: Shared Client And Desktop Alpha'

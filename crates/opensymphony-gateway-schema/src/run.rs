@@ -87,6 +87,12 @@ pub struct RunDetail {
     /// True when a cancel/force-stop request was not acknowledged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancel_failed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_requested: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_timed_out: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
 }
 
 /// Action a client may dispatch on a run.
@@ -168,6 +174,15 @@ pub struct RunDiagnostics {
     /// True when a cancel/force-stop request was not acknowledged.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cancel_failed: bool,
+    /// True while a cancel/force-stop request is pending acknowledgement.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_requested: bool,
+    /// True when a cancel/force-stop request timed out before acknowledgement.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancel_timed_out: bool,
+    /// Machine-readable cancel reason supplied by the orchestrator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
 }
 
 /// Details of a harness/scheduler disagreement.

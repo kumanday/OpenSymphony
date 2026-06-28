@@ -29,10 +29,11 @@ pub use issue::{BlockerRef, IssueRef, IssueState, IssueStateCategory, Normalized
 pub use journal::{EventJournalBackend, EventStream, InMemoryEventJournal, StreamBroker};
 pub use runtime::{
     ConversationActivityEvent, ConversationMetadata, DetachMetadata, DetachReason,
-    HistorySyncStatus, LivenessState, ReconnectStatus, ReleaseReason, RetryAttempt,
-    RetryCalculationError, RetryEntry, RetryPolicy, RetryReason, RunAttempt, RuntimeLivenessPhase,
-    RuntimeProgressSnapshot, RuntimeStreamState, StallMetadata, StreamHealth, WorkerOutcomeKind,
-    WorkerOutcomeRecord, WorkspaceRecord,
+    HarnessInterruptCommand, HarnessInterruptExpectedNextState, HarnessInterruptReason,
+    HarnessInterruptState, HarnessInterruptStatus, HistorySyncStatus, LivenessState,
+    ReconnectStatus, ReleaseReason, RetryAttempt, RetryCalculationError, RetryEntry, RetryPolicy,
+    RetryReason, RunAttempt, RuntimeLivenessPhase, RuntimeProgressSnapshot, RuntimeStreamState,
+    StallMetadata, StreamHealth, WorkerOutcomeKind, WorkerOutcomeRecord, WorkspaceRecord,
 };
 pub use snapshot::{
     ComponentHealthSnapshot, DaemonSnapshot, HealthStatus, IssueSnapshot, OrchestratorSnapshot,
@@ -46,7 +47,7 @@ pub use time::{DurationMs, TimestampMs};
 pub use timeline::{TimelineBuilder, belongs_to_run, payload_run_id};
 pub use tracker::{
     TrackerErrorCategory, TrackerIssue, TrackerIssueBlocker, TrackerIssueRef, TrackerIssueState,
-    TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerProjectMilestone,
+    TrackerIssueStateKind, TrackerIssueStateSnapshot, TrackerIssueSummary, TrackerProjectMilestone,
 };
 
 #[cfg(test)]
@@ -63,7 +64,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ComponentHealthSnapshot, ConversationMetadata, HealthStatus, IssueExecution, IssueId,
+        ComponentHealthSnapshot, ConversationMetadata, HarnessInterruptExpectedNextState,
+        HarnessInterruptReason, HarnessInterruptStatus, HealthStatus, IssueExecution, IssueId,
         IssueIdentifier, IssueRef, IssueSnapshot, IssueState, IssueStateCategory, NormalizedIssue,
         OrchestratorSnapshot, ReleaseReason, RetryAttempt, RetryEntry, RetryPolicy, RetryReason,
         RunAttempt, RuntimeStreamState, RuntimeUsageTotals, SchedulerStatus, StateTransitionError,
@@ -204,6 +206,30 @@ mod tests {
         }
     }
 
+    fn running_execution() -> IssueExecution {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let mut execution = IssueExecution::new(issue, ts(30));
+        must(execution.attach_workspace(workspace));
+        must(execution.claim(run).and_then(|execution| {
+            execution.start_running(
+                ts(50),
+                super::DurationMs::new(10_000),
+                Some(sample_conversation(true)),
+            )
+        }))
+    }
+
+    fn claimed_execution() -> IssueExecution {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let mut execution = IssueExecution::new(issue, ts(30));
+        must(execution.attach_workspace(workspace));
+        must(execution.claim(run))
+    }
+
     #[test]
     fn state_transitions_are_explicit_and_testable() {
         let issue = sample_issue();
@@ -292,6 +318,354 @@ mod tests {
             Some(ReleaseReason::TrackerInactive)
         );
         assert_eq!(snapshot.recent_worker_outcomes.len(), 1);
+    }
+
+    #[test]
+    fn records_operator_cancel_interrupt_request() {
+        let mut execution = running_execution();
+        let (command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+
+        assert!(queued);
+        assert_eq!(command.run_id, "COE-260");
+        assert_eq!(command.harness_kind, "openhands_agent_server");
+        assert_eq!(command.reason, HarnessInterruptReason::OperatorCancel);
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Requested)
+        );
+    }
+
+    #[test]
+    fn records_tracker_merging_interrupt_request() {
+        let mut execution = running_execution();
+        let (command, queued) = must(execution.request_interrupt(
+            "codex_app_server",
+            Some("turn-1".to_string()),
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            ts(60),
+        ));
+
+        assert!(queued);
+        assert_eq!(command.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            command.reason,
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview
+        );
+    }
+
+    #[test]
+    fn repeated_interrupt_request_is_idempotent_for_active_run() {
+        let mut execution = running_execution();
+        let first_command = {
+            let (command, queued) = must(execution.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::OperatorCancel,
+                HarnessInterruptExpectedNextState::Paused,
+                ts(60),
+            ));
+            assert!(queued);
+            command
+        };
+
+        let (second_command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("ignored".to_string()),
+            HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+            HarnessInterruptExpectedNextState::CloseoutPending,
+            ts(61),
+        ));
+
+        assert!(!queued);
+        assert_eq!(second_command, first_command);
+    }
+
+    #[test]
+    fn interrupt_idempotency_does_not_cross_reopened_runs() {
+        let issue = sample_issue();
+        let workspace = sample_workspace();
+        let mut execution = IssueExecution::new(issue.clone(), ts(30));
+        must(execution.attach_workspace(workspace.clone()));
+
+        let run = sample_run(&issue, &workspace, None, ts(40));
+        let execution = must(execution.claim(run));
+        let mut execution = must(execution.start_running(
+            ts(50),
+            super::DurationMs::new(10_000),
+            Some(sample_conversation(true)),
+        ));
+
+        let (first_command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-1".to_string()),
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        assert!(queued);
+
+        let execution = must(execution.release(ts(70), ReleaseReason::TrackerInactive, None));
+        let execution = must(execution.reopen(ts(80)));
+
+        let run = sample_run(&issue, &workspace, None, ts(90));
+        let execution = must(execution.claim(run));
+        assert!(execution.interrupt().is_none());
+
+        let mut conversation = sample_conversation(false);
+        conversation.conversation_id = must(super::ConversationId::new("conv_261"));
+        let mut execution = must(execution.start_running(
+            ts(100),
+            super::DurationMs::new(10_000),
+            Some(conversation),
+        ));
+        let (second_command, queued) = must(execution.request_interrupt(
+            "openhands_agent_server",
+            Some("turn-2".to_string()),
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(110),
+        ));
+
+        assert!(queued);
+        assert_ne!(second_command, first_command);
+        assert_eq!(second_command.conversation_id.as_str(), "conv_261");
+        assert_eq!(second_command.turn_id.as_deref(), Some("turn-2"));
+    }
+
+    #[test]
+    fn interrupt_status_records_acknowledged_failed_and_timeout() {
+        let mut acknowledged = running_execution();
+        must(acknowledged.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        must(acknowledged.acknowledge_interrupt(ts(61)));
+        assert_eq!(
+            acknowledged.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Acknowledged)
+        );
+
+        let mut failed = running_execution();
+        must(failed.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        must(failed.fail_interrupt(ts(62), "adapter refused interrupt"));
+        assert_eq!(
+            failed.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Failed)
+        );
+
+        let mut timed_out = running_execution();
+        must(timed_out.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        must(timed_out.timeout_interrupt(ts(63), "ack timeout"));
+        assert_eq!(
+            timed_out.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::TimedOut)
+        );
+    }
+
+    #[test]
+    fn cancel_failed_outcome_marks_requested_interrupt_failed() {
+        let mut execution = running_execution();
+        must(execution.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        let run = execution.current_run().expect("active run").clone();
+        let outcome = WorkerOutcomeRecord::from_run(
+            &run,
+            WorkerOutcomeKind::CancelFailed,
+            ts(70),
+            Some("cancel failed".to_owned()),
+            Some("adapter refused interrupt".to_owned()),
+        );
+
+        let execution =
+            must(execution.release(ts(71), ReleaseReason::TrackerInactive, Some(outcome)));
+
+        let interrupt = execution.interrupt().expect("interrupt state");
+        assert_eq!(interrupt.status, HarnessInterruptStatus::Failed);
+        assert_eq!(
+            interrupt.detail.as_deref(),
+            Some("adapter refused interrupt")
+        );
+    }
+
+    #[test]
+    fn non_cancel_outcome_does_not_infer_interrupt_terminal_status() {
+        let mut execution = running_execution();
+        must(execution.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        let run = execution.current_run().expect("active run").clone();
+        let outcome = WorkerOutcomeRecord::from_run(
+            &run,
+            WorkerOutcomeKind::Succeeded,
+            ts(70),
+            Some("worker completed before interrupt acknowledgement".to_owned()),
+            None,
+        );
+
+        let execution = must(execution.release(ts(71), ReleaseReason::Completed, Some(outcome)));
+
+        assert_eq!(
+            execution.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Requested)
+        );
+    }
+
+    #[test]
+    fn request_interrupt_rejects_inactive_states_and_missing_conversation() {
+        let mut unclaimed = IssueExecution::new(sample_issue(), ts(30));
+        assert!(matches!(
+            unclaimed.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::OperatorCancel,
+                HarnessInterruptExpectedNextState::Paused,
+                ts(60),
+            ),
+            Err(StateTransitionError::InvalidTransition {
+                from: SchedulerStatus::Unclaimed,
+                ..
+            })
+        ));
+
+        let mut claimed = claimed_execution();
+        assert!(matches!(
+            claimed.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::OperatorCancel,
+                HarnessInterruptExpectedNextState::Paused,
+                ts(60),
+            ),
+            Err(StateTransitionError::ConversationNotAttached)
+        ));
+
+        let retry_issue = sample_issue();
+        let retry = RetryEntry::failure(
+            &retry_issue,
+            None,
+            1,
+            ts(80),
+            RetryReason::Failure,
+            Some("failed".to_owned()),
+            RetryPolicy::default(),
+        )
+        .expect("retry entry");
+        let outcome = WorkerOutcomeRecord::from_run(
+            claimed.current_run().expect("claimed run"),
+            WorkerOutcomeKind::Failed,
+            ts(70),
+            None,
+            Some("failed".to_owned()),
+        );
+        let mut retry_queued = must(claimed.queue_retry(retry, outcome));
+        assert!(matches!(
+            retry_queued.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::OperatorCancel,
+                HarnessInterruptExpectedNextState::Paused,
+                ts(90),
+            ),
+            Err(StateTransitionError::InvalidTransition {
+                from: SchedulerStatus::RetryQueued,
+                ..
+            })
+        ));
+
+        let mut released =
+            must(running_execution().release(ts(90), ReleaseReason::Cancelled, None));
+        assert!(matches!(
+            released.request_interrupt(
+                "openhands_agent_server",
+                None,
+                HarnessInterruptReason::OperatorCancel,
+                HarnessInterruptExpectedNextState::Paused,
+                ts(91),
+            ),
+            Err(StateTransitionError::InvalidTransition {
+                from: SchedulerStatus::Released,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn terminal_interrupt_status_updates_are_noops() {
+        let mut acknowledged = running_execution();
+        must(acknowledged.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        must(acknowledged.acknowledge_interrupt(ts(61)));
+        must(acknowledged.fail_interrupt(ts(62), "late failure"));
+        assert_eq!(
+            acknowledged.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Acknowledged)
+        );
+
+        let mut failed = running_execution();
+        must(failed.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        must(failed.fail_interrupt(ts(62), "adapter refused interrupt"));
+        must(failed.timeout_interrupt(ts(63), "late timeout"));
+        assert_eq!(
+            failed.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::Failed)
+        );
+
+        let mut timed_out = running_execution();
+        must(timed_out.request_interrupt(
+            "openhands_agent_server",
+            None,
+            HarnessInterruptReason::OperatorCancel,
+            HarnessInterruptExpectedNextState::Paused,
+            ts(60),
+        ));
+        must(timed_out.timeout_interrupt(ts(63), "ack timeout"));
+        must(timed_out.acknowledge_interrupt(ts(64)));
+        assert_eq!(
+            timed_out.interrupt().map(|interrupt| interrupt.status),
+            Some(HarnessInterruptStatus::TimedOut)
+        );
     }
 
     #[test]

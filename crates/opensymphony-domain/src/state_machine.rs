@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
-    ConversationMetadata, DurationMs, IssueId, NormalizedIssue, ReleaseReason, RetryAttempt,
-    RetryEntry, RunAttempt, StallMetadata, TimestampMs, WorkerId, WorkerOutcomeRecord,
-    WorkspaceKey, WorkspaceRecord,
+    ConversationMetadata, DurationMs, HarnessInterruptCommand, HarnessInterruptExpectedNextState,
+    HarnessInterruptReason, HarnessInterruptState, HarnessInterruptStatus, IssueId,
+    NormalizedIssue, ReleaseReason, RetryAttempt, RetryEntry, RunAttempt, StallMetadata,
+    TimestampMs, WorkerId, WorkerOutcomeRecord, WorkspaceKey, WorkspaceRecord,
 };
 
 const MAX_RECENT_WORKER_OUTCOMES: usize = 10;
@@ -52,6 +53,8 @@ pub enum TransitionAction {
     QueueRetry,
     Release,
     Reopen,
+    RequestInterrupt,
+    UpdateInterrupt,
 }
 
 impl TransitionAction {
@@ -64,6 +67,8 @@ impl TransitionAction {
             Self::QueueRetry => "queue_retry",
             Self::Release => "release",
             Self::Reopen => "reopen",
+            Self::RequestInterrupt => "request_interrupt",
+            Self::UpdateInterrupt => "update_interrupt",
         }
     }
 }
@@ -157,6 +162,7 @@ pub struct IssueExecution {
     issue: NormalizedIssue,
     workspace: Option<WorkspaceRecord>,
     conversation: Option<ConversationMetadata>,
+    interrupt: Option<HarnessInterruptState>,
     state: SchedulerState,
     last_worker_outcome: Option<WorkerOutcomeRecord>,
     recent_worker_outcomes: Vec<WorkerOutcomeRecord>,
@@ -168,6 +174,7 @@ impl IssueExecution {
             issue,
             workspace: None,
             conversation: None,
+            interrupt: None,
             state: SchedulerState::Unclaimed { since: observed_at },
             last_worker_outcome: None,
             recent_worker_outcomes: Vec::new(),
@@ -221,6 +228,10 @@ impl IssueExecution {
         self.conversation.as_ref()
     }
 
+    pub fn interrupt(&self) -> Option<&HarnessInterruptState> {
+        self.interrupt.as_ref()
+    }
+
     /// Update the conversation metadata with new values (e.g., token counts after accumulation)
     pub fn update_conversation(&mut self, conversation: ConversationMetadata) {
         self.conversation = Some(conversation);
@@ -241,6 +252,77 @@ impl IssueExecution {
                 total_tokens,
             );
         }
+    }
+
+    pub fn request_interrupt(
+        &mut self,
+        harness_kind: impl Into<String>,
+        turn_id: Option<String>,
+        reason: HarnessInterruptReason,
+        expected_next_state: HarnessInterruptExpectedNextState,
+        requested_at: TimestampMs,
+    ) -> Result<(HarnessInterruptCommand, bool), StateTransitionError> {
+        let run = match &self.state {
+            SchedulerState::Claimed { run } | SchedulerState::Running { run, .. } => run,
+            _ => {
+                return Err(StateTransitionError::InvalidTransition {
+                    from: self.status(),
+                    action: TransitionAction::RequestInterrupt,
+                });
+            }
+        };
+        let Some(conversation) = &self.conversation else {
+            return Err(StateTransitionError::ConversationNotAttached);
+        };
+        if let Some(interrupt) = &self.interrupt {
+            return Ok((interrupt.command.clone(), false));
+        }
+
+        self.interrupt = Some(HarnessInterruptState::requested(
+            HarnessInterruptCommand {
+                run_id: run.issue_identifier.to_string(),
+                issue_id: self.issue.id.clone(),
+                harness_kind: harness_kind.into(),
+                conversation_id: conversation.conversation_id.clone(),
+                turn_id,
+                reason,
+                expected_next_state,
+            },
+            requested_at,
+        ));
+        let interrupt = self.interrupt.as_ref().expect("interrupt was just set");
+        Ok((interrupt.command.clone(), true))
+    }
+
+    pub fn acknowledge_interrupt(
+        &mut self,
+        observed_at: TimestampMs,
+    ) -> Result<(), StateTransitionError> {
+        self.update_interrupt(observed_at, |interrupt, observed_at| {
+            interrupt.acknowledge(observed_at)
+        })
+    }
+
+    pub fn fail_interrupt(
+        &mut self,
+        observed_at: TimestampMs,
+        detail: impl Into<String>,
+    ) -> Result<(), StateTransitionError> {
+        let detail = detail.into();
+        self.update_interrupt(observed_at, |interrupt, observed_at| {
+            interrupt.fail(observed_at, detail)
+        })
+    }
+
+    pub fn timeout_interrupt(
+        &mut self,
+        observed_at: TimestampMs,
+        detail: impl Into<String>,
+    ) -> Result<(), StateTransitionError> {
+        let detail = detail.into();
+        self.update_interrupt(observed_at, |interrupt, observed_at| {
+            interrupt.timeout(observed_at, detail)
+        })
     }
 
     pub fn retry(&self) -> Option<&RetryEntry> {
@@ -318,6 +400,7 @@ impl IssueExecution {
         self.state = SchedulerState::Claimed {
             run: run.with_normal_retry_count(normal_retry_count),
         };
+        self.interrupt = None;
         Ok(self)
     }
 
@@ -450,6 +533,7 @@ impl IssueExecution {
                 if !reason.preserves_reactivation_state() {
                     self.workspace = None;
                     self.conversation = None;
+                    self.interrupt = None;
                 }
                 self.state = SchedulerState::Unclaimed { since: observed_at };
                 Ok(self)
@@ -466,11 +550,37 @@ impl IssueExecution {
     }
 
     fn record_outcome(&mut self, outcome: WorkerOutcomeRecord) {
+        if outcome.outcome == super::WorkerOutcomeKind::CancelFailed
+            && let Some(interrupt) = &mut self.interrupt
+            && interrupt.status == HarnessInterruptStatus::Requested
+        {
+            let detail = outcome
+                .error
+                .clone()
+                .or_else(|| outcome.summary.clone())
+                .unwrap_or_else(|| "worker reported cancel_failed".to_string());
+            interrupt.fail(outcome.finished_at, detail);
+        }
         self.last_worker_outcome = Some(outcome.clone());
         if self.recent_worker_outcomes.len() == MAX_RECENT_WORKER_OUTCOMES {
             self.recent_worker_outcomes.remove(0);
         }
         self.recent_worker_outcomes.push(outcome);
+    }
+
+    fn update_interrupt(
+        &mut self,
+        observed_at: TimestampMs,
+        update: impl FnOnce(&mut HarnessInterruptState, TimestampMs),
+    ) -> Result<(), StateTransitionError> {
+        let Some(interrupt) = &mut self.interrupt else {
+            return Err(StateTransitionError::InvalidTransition {
+                from: self.status(),
+                action: TransitionAction::UpdateInterrupt,
+            });
+        };
+        update(interrupt, observed_at);
+        Ok(())
     }
 
     fn validate_run_binding(&self, run: &RunAttempt) -> Result<(), StateTransitionError> {
