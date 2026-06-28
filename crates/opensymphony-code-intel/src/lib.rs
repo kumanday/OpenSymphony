@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -8,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
+// COE-499 adapts the AST provider to memory's existing CodeIntelIndex contract
+// so memory.context gains AST evidence without adding a new public tool surface.
 use crate::{
     opensymphony_memory::{
         CodeIntelArtifact, CodeIntelIndex, KnowledgeScope, MemoryError, MemorySourceRef,
@@ -149,6 +152,7 @@ impl AstCodeIntelProvider {
         let repo_root = self.canonical_root()?;
         let commit_sha = git_commit_sha(&repo_root);
         let mut report = AstCodeIntelReport::default();
+        let mut remaining_symbols = limit.max(1);
 
         if paths.is_empty() {
             report
@@ -164,47 +168,27 @@ impl AstCodeIntelProvider {
                 .unwrap_or(&resolved)
                 .to_path_buf();
             let relative_display = relative_path.to_string_lossy().to_string();
-            let metadata = match fs::metadata(&resolved) {
-                Ok(metadata) => metadata,
-                Err(source) => {
-                    return Err(MemoryError::ResolvePath {
-                        path: resolved,
-                        source,
-                    });
-                }
-            };
 
-            if !metadata.is_file() {
-                report
-                    .fallback_reasons
-                    .push(format!("{relative_display} is not a file"));
+            let Some(source) =
+                self.read_limited_source(&resolved, &relative_display, &mut report)?
+            else {
                 continue;
-            }
-            if metadata.len() > self.max_file_bytes {
-                report.fallback_reasons.push(format!(
-                    "{relative_display} is {} bytes; max AST file size is {} bytes",
-                    metadata.len(),
-                    self.max_file_bytes
-                ));
-                continue;
-            }
+            };
             if detect_language(&relative_path).is_none() {
                 report
                     .fallback_reasons
                     .push(format!("{relative_display} has unsupported language"));
+                report.fallback_paths.push(relative_path);
                 continue;
             }
 
-            let source = fs::read_to_string(&resolved).map_err(|source| MemoryError::ReadFile {
-                path: resolved.clone(),
-                source,
-            })?;
             let summary = match parse_path(&relative_path, &source) {
                 Ok(summary) => summary,
                 Err(error) => {
                     report
                         .fallback_reasons
                         .push(format!("{relative_display} AST parse failed: {error}"));
+                    report.fallback_paths.push(relative_path);
                     continue;
                 }
             };
@@ -215,18 +199,65 @@ impl AstCodeIntelProvider {
                 report.fallback_reasons.push(format!(
                     "{relative_display} parsed with Tree-sitter diagnostics"
                 ));
+                report.fallback_paths.push(relative_path.clone());
             }
-            report.artifacts.extend(ast_artifacts_for_summary(
+            let (artifacts, used_symbols) = ast_artifacts_for_summary(
                 summary,
                 &relative_path,
                 &relative_display,
                 scope_refs,
                 commit_sha.clone(),
-                limit,
-            ));
+                remaining_symbols,
+            );
+            remaining_symbols = remaining_symbols.saturating_sub(used_symbols);
+            report.artifacts.extend(artifacts);
         }
 
         Ok(report)
+    }
+
+    fn read_limited_source(
+        &self,
+        resolved: &Path,
+        relative_display: &str,
+        report: &mut AstCodeIntelReport,
+    ) -> Result<Option<String>, MemoryError> {
+        let file = fs::File::open(resolved).map_err(|source| MemoryError::ReadFile {
+            path: resolved.to_path_buf(),
+            source,
+        })?;
+        let metadata = file.metadata().map_err(|source| MemoryError::ReadFile {
+            path: resolved.to_path_buf(),
+            source,
+        })?;
+
+        if !metadata.is_file() {
+            report
+                .fallback_reasons
+                .push(format!("{relative_display} is not a file"));
+            report.fallback_paths.push(PathBuf::from(relative_display));
+            return Ok(None);
+        }
+
+        let mut bytes = Vec::new();
+        file.take(self.max_file_bytes + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|source| MemoryError::ReadFile {
+                path: resolved.to_path_buf(),
+                source,
+            })?;
+        if bytes.len() as u64 > self.max_file_bytes {
+            report.fallback_reasons.push(format!(
+                "{relative_display} exceeds max AST file size of {} bytes",
+                self.max_file_bytes
+            ));
+            report.fallback_paths.push(PathBuf::from(relative_display));
+            return Ok(None);
+        }
+
+        String::from_utf8(bytes).map(Some).map_err(|error| {
+            MemoryError::InvalidInput(format!("{relative_display} is not UTF-8: {error}"))
+        })
     }
 
     fn canonical_root(&self) -> Result<PathBuf, MemoryError> {
@@ -307,7 +338,11 @@ impl CodeIntelIndex for CompositeCodeIntelProvider {
         let mut artifacts = report.artifacts;
 
         if use_fallback {
-            artifacts.extend(self.fallback.code_context(paths, scope_refs, limit)?);
+            artifacts.extend(self.fallback.code_context(
+                &report.fallback_paths,
+                scope_refs,
+                limit,
+            )?);
         }
         artifacts.push(trace);
         Ok(artifacts)
@@ -318,6 +353,7 @@ impl CodeIntelIndex for CompositeCodeIntelProvider {
 struct AstCodeIntelReport {
     artifacts: Vec<CodeIntelArtifact>,
     fallback_reasons: Vec<String>,
+    fallback_paths: Vec<PathBuf>,
     parsed_files: usize,
     query_runs: usize,
 }
@@ -354,8 +390,8 @@ fn ast_artifacts_for_summary(
     relative_display: &str,
     scope_refs: &[KnowledgeScope],
     commit_sha: Option<String>,
-    limit: usize,
-) -> Vec<CodeIntelArtifact> {
+    symbol_limit: usize,
+) -> (Vec<CodeIntelArtifact>, usize) {
     let diagnostic_summary = diagnostics_summary(&summary.diagnostics);
     let mut artifacts = vec![CodeIntelArtifact {
         provider: PROVIDER_NAME.to_string(),
@@ -378,8 +414,9 @@ fn ast_artifacts_for_summary(
         ),
     }];
 
-    if !summary.symbols.is_empty() {
-        let max_symbols = limit.max(1);
+    if !summary.symbols.is_empty() && symbol_limit > 0 {
+        let max_symbols = symbol_limit;
+        let used_symbols = summary.symbols.len().min(max_symbols);
         let symbols = summary
             .symbols
             .iter()
@@ -414,9 +451,10 @@ fn ast_artifacts_for_summary(
             title: format!("Symbols in {relative_display}"),
             summary: symbols,
         });
+        return (artifacts, used_symbols);
     }
 
-    artifacts
+    (artifacts, 0)
 }
 
 fn diagnostics_summary(diagnostics: &[AstDiagnostic]) -> String {
