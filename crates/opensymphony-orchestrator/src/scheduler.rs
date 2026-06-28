@@ -198,6 +198,21 @@ pub struct WorkerInterruptAcknowledgement {
     pub detail: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkerMetadata {
+    issue_id: IssueId,
+    harness_kind: Option<String>,
+}
+
+impl WorkerMetadata {
+    fn new(issue_id: IssueId, harness_kind: Option<String>) -> Self {
+        Self {
+            issue_id,
+            harness_kind,
+        }
+    }
+}
+
 #[allow(async_fn_in_trait)]
 pub trait TrackerBackend {
     type Error: std::fmt::Display + Send + Sync + 'static;
@@ -325,8 +340,7 @@ pub struct Scheduler<T, W, M> {
     config: SchedulerConfig,
     executions: BTreeMap<IssueId, IssueExecution>,
     running_counts_by_state: HashMap<String, usize>,
-    worker_index: HashMap<WorkerId, IssueId>,
-    worker_harness_kind: HashMap<WorkerId, String>,
+    worker_metadata: HashMap<WorkerId, WorkerMetadata>,
     pending_recovery: Option<Vec<RecoveryRecord>>,
     recovered: bool,
     next_worker_ordinal: u64,
@@ -358,8 +372,7 @@ where
             config,
             executions: BTreeMap::new(),
             running_counts_by_state: HashMap::new(),
-            worker_index: HashMap::new(),
-            worker_harness_kind: HashMap::new(),
+            worker_metadata: HashMap::new(),
             pending_recovery: None,
             recovered: false,
             next_worker_ordinal: 0,
@@ -1072,9 +1085,9 @@ where
             .expect("execution existed before clone");
         let run = execution.current_run().cloned()?;
         let harness_kind = self
-            .worker_harness_kind
+            .worker_metadata
             .get(&run.worker_id)
-            .cloned()
+            .and_then(|metadata| metadata.harness_kind.clone())
             .unwrap_or_else(|| "<unknown>".to_string());
         if harness_kind == "<unknown>" {
             warn!(
@@ -1201,12 +1214,13 @@ where
             Some(recovered_run.conversation),
         )?;
         execution.record_turn_started(observed_at)?;
-        self.worker_index
-            .insert(run.worker_id.clone(), issue_id.clone());
-        if let Some(harness_kind) = harness_kind.filter(|kind| !kind.trim().is_empty()) {
-            self.worker_harness_kind
-                .insert(run.worker_id.clone(), harness_kind);
-        }
+        self.worker_metadata.insert(
+            run.worker_id.clone(),
+            WorkerMetadata::new(
+                issue_id.clone(),
+                harness_kind.filter(|kind| !kind.trim().is_empty()),
+            ),
+        );
         self.insert_execution(issue_id.clone(), execution);
         Ok(())
     }
@@ -1231,7 +1245,7 @@ where
         );
         let available_capacity = usize::try_from(self.config.max_concurrent_agents)
             .unwrap_or(usize::MAX)
-            .saturating_sub(self.worker_index.len());
+            .saturating_sub(self.worker_metadata.len());
         if available_capacity == 0 {
             return Ok(());
         }
@@ -1303,7 +1317,7 @@ where
             filter_issues_for_dispatch(active_issues.to_vec(), &self.config.terminal_state_set());
         let available_capacity = usize::try_from(self.config.max_concurrent_agents)
             .unwrap_or(usize::MAX)
-            .saturating_sub(self.worker_index.len());
+            .saturating_sub(self.worker_metadata.len());
         if available_capacity == 0 {
             return Ok(());
         }
@@ -1417,11 +1431,12 @@ where
                         Some(launch.conversation),
                     )?;
                     execution.record_turn_started(observed_at)?;
-                    self.worker_index
-                        .insert(claimed_run.worker_id.clone(), issue_id.clone());
-                    self.worker_harness_kind.insert(
+                    self.worker_metadata.insert(
                         claimed_run.worker_id.clone(),
-                        start_request.route.harness_kind,
+                        WorkerMetadata::new(
+                            issue_id.clone(),
+                            Some(start_request.route.harness_kind),
+                        ),
                     );
                     debug!(issue_id = %issue_id, "dispatched scheduler worker");
                 }
@@ -1459,7 +1474,11 @@ where
                     summary,
                     payload,
                 } => {
-                    let Some(issue_id) = self.worker_index.get(&worker_id).cloned() else {
+                    let Some(issue_id) = self
+                        .worker_metadata
+                        .get(&worker_id)
+                        .map(|metadata| metadata.issue_id.clone())
+                    else {
                         continue;
                     };
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
@@ -1473,10 +1492,10 @@ where
                     }
                 }
                 WorkerUpdate::Finished { worker_id, outcome } => {
-                    let Some(issue_id) = self.worker_index.remove(&worker_id) else {
+                    let Some(metadata) = self.worker_metadata.remove(&worker_id) else {
                         continue;
                     };
-                    self.worker_harness_kind.remove(&worker_id);
+                    let issue_id = metadata.issue_id;
                     let Some(execution) = self.remove_execution(&issue_id) else {
                         continue;
                     };
@@ -1489,7 +1508,11 @@ where
                     worker_id,
                     conversation,
                 } => {
-                    let Some(issue_id) = self.worker_index.get(&worker_id).cloned() else {
+                    let Some(issue_id) = self
+                        .worker_metadata
+                        .get(&worker_id)
+                        .map(|metadata| metadata.issue_id.clone())
+                    else {
                         continue;
                     };
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
@@ -1503,7 +1526,11 @@ where
                     cache_read_tokens,
                     total_tokens,
                 } => {
-                    let Some(issue_id) = self.worker_index.get(&worker_id).cloned() else {
+                    let Some(issue_id) = self
+                        .worker_metadata
+                        .get(&worker_id)
+                        .map(|metadata| metadata.issue_id.clone())
+                    else {
                         continue;
                     };
                     if let Some(execution) = self.executions.get_mut(&issue_id) {
@@ -1637,8 +1664,7 @@ where
         worker_id: &WorkerId,
         reason: WorkerAbortReason,
     ) -> Result<(), SchedulerError> {
-        self.worker_index.remove(worker_id);
-        self.worker_harness_kind.remove(worker_id);
+        self.worker_metadata.remove(worker_id);
         self.worker
             .abort_worker(worker_id, reason)
             .await

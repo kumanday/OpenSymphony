@@ -2181,7 +2181,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
         let acknowledgement = runner
             .interrupt(&command)
             .await
-            .map_err(|error| CliWorkerError::InterruptFailed(error.to_string()))?;
+            .map_err(|error| CliWorkerError::InterruptFailed(openhands_error_detail(&error)))?;
         Ok(WorkerInterruptAcknowledgement {
             accepted: true,
             detail: acknowledgement
@@ -2193,6 +2193,49 @@ impl WorkerBackend for RuntimeWorkerBackend {
                 })
                 .or_else(|| Some("OpenHands interrupt acknowledged".to_string())),
         })
+    }
+}
+
+fn openhands_error_detail(error: &OpenHandsError) -> String {
+    match error {
+        OpenHandsError::InvalidConfiguration { detail } => {
+            format!("openhands.invalid_configuration: {detail}")
+        }
+        OpenHandsError::Transport { operation, detail } => {
+            format!("openhands.transport.{operation}: {detail}")
+        }
+        OpenHandsError::HttpStatus {
+            operation,
+            status_code,
+            body,
+        } => format!("openhands.http_status.{operation}.{status_code}: {body}"),
+        OpenHandsError::Protocol { operation, detail } => {
+            format!("openhands.protocol.{operation}: {detail}")
+        }
+        OpenHandsError::WebSocketTransport { operation, detail } => {
+            format!("openhands.websocket.{operation}: {detail}")
+        }
+        OpenHandsError::MalformedWebSocketEvent { detail, snippet } => {
+            format!("openhands.websocket.malformed_event: {detail}; payload prefix: {snippet}")
+        }
+        OpenHandsError::ReadinessTimeout(timeout) => {
+            format!("openhands.websocket.readiness_timeout: {timeout:?}")
+        }
+        OpenHandsError::ProbeActivityTimeout(timeout) => {
+            format!("openhands.probe.activity_timeout: {timeout:?}")
+        }
+        OpenHandsError::ProbeRunUnhealthy(detail) => {
+            format!("openhands.probe.unhealthy: {detail}")
+        }
+        OpenHandsError::WebSocketClosed => {
+            "openhands.websocket.closed_before_readiness".to_string()
+        }
+        OpenHandsError::ReconnectExhausted {
+            attempts,
+            last_error,
+        } => format!(
+            "openhands.websocket.reconnect_exhausted: attempts={attempts}; last_error={last_error}"
+        ),
     }
 }
 
