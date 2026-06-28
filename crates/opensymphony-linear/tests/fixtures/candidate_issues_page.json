@@ -9,6 +9,7 @@
           "title": "Domain model and orchestrator state machine",
           "description": "Implement the shared orchestrator state machine.",
           "priority": 1.0,
+          "branchName": "feat/coe-260-domain-model",
           "createdAt": "2026-03-20T10:00:00Z",
           "updatedAt": "2026-03-21T12:00:00Z",
           "state": {
@@ -22,6 +23,20 @@
             "slugId": "opensymphony-bootstrap"
           },
           "parent": null,
+          "attachments": {
+            "nodes": [
+              {
+                "title": "PR #260",
+                "url": "https://github.com/kumanday/OpenSymphony/pull/260",
+                "sourceType": "github"
+              },
+              {
+                "title": "Design doc",
+                "url": "https://example.com/design-doc",
+                "sourceType": "web"
+              }
+            ]
+          },
           "children": {
             "nodes": []
           },

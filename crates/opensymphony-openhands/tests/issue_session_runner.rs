@@ -50,6 +50,7 @@ fn sample_issue(identifier: &str) -> NormalizedIssue {
             category: IssueStateCategory::Active,
         },
         branch_name: None,
+        pr_url: None,
         url: None,
         labels: vec!["runtime".to_string()],
         project_id: None,

@@ -40,6 +40,14 @@ async fn candidate_issues_normalize_fixture_payloads() {
     );
     assert_eq!(first.priority, Some(1));
     assert_eq!(first.state, "In Progress");
+    assert_eq!(
+        first.branch_name.as_deref(),
+        Some("feat/coe-260-domain-model")
+    );
+    assert_eq!(
+        first.pr_url.as_deref(),
+        Some("https://github.com/kumanday/OpenSymphony/pull/260")
+    );
     assert_eq!(first.labels, vec!["backend", "urgent"]);
     assert_eq!(first.project_id.as_deref(), Some("proj-open"));
     assert_eq!(
@@ -130,6 +138,18 @@ async fn candidate_issues_normalize_fixture_payloads() {
             .as_str()
             .expect("query should be a string")
             .contains("project {")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("branchName")
+    );
+    assert!(
+        requests[0].body["query"]
+            .as_str()
+            .expect("query should be a string")
+            .contains("attachments {")
     );
 }
 

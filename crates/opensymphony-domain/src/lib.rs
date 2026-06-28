@@ -132,6 +132,7 @@ mod tests {
             branch_name: Some(
                 "leonardogonzalez/coe-260-domain-model-and-orchestrator-state-machine".to_owned(),
             ),
+            pr_url: None,
             url: Some(
                 "https://linear.app/trilogy-ai-coe/issue/COE-260/domain-model-and-orchestrator-state-machine"
                     .to_owned(),

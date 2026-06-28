@@ -133,6 +133,8 @@ mod tests {
             priority,
             state: "In Progress".to_string(),
             state_kind: TrackerIssueStateKind::Started,
+            branch_name: None,
+            pr_url: None,
             labels: Vec::new(),
             project_id: None,
             project_slug: None,
