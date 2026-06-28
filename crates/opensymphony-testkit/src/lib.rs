@@ -421,6 +421,11 @@ impl FakeOpenHandsServer {
             .unwrap_or_default()
     }
 
+    pub async fn total_interrupt_request_count(&self) -> usize {
+        let inner = self.state.inner.lock().await;
+        inner.interrupt_requests.values().sum()
+    }
+
     pub async fn fail_next_conversation_gets(
         &self,
         conversation_id: Uuid,
