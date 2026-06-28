@@ -972,10 +972,11 @@ fn codex_lifecycle_requests_cover_start_resume_cancel_and_approval() {
         json!({ "type": "dangerFullAccess" })
     );
 
-    let cancel = adapter.cancel_turn_request(&mut session, "turn-1");
-    assert_eq!(cancel.lifecycle, CodexLifecycleRequest::Cancel);
-    assert_eq!(cancel.request.method, "turn/cancel");
-    assert_eq!(cancel.request.params["turnId"], "turn-1");
+    let interrupt = adapter.interrupt_turn_request(&mut session, "thread-1", "turn-1");
+    assert_eq!(interrupt.lifecycle, CodexLifecycleRequest::Interrupt);
+    assert_eq!(interrupt.request.method, "turn/interrupt");
+    assert_eq!(interrupt.request.params["threadId"], "thread-1");
+    assert_eq!(interrupt.request.params["turnId"], "turn-1");
 
     let approve = adapter.approval_response(
         &mut session,
@@ -1119,6 +1120,20 @@ fn codex_events_map_to_journal_surfaces_with_raw_payload_refs() {
             source_kind: "turn/cancelled".into()
         }
     );
+
+    let interrupted = normalize_server_notification(json!({
+        "jsonrpc": "2.0",
+        "method": "turn/completed",
+        "params": {
+            "threadId": "thread-1",
+            "turnId": "turn-1",
+            "status": "Interrupted"
+        }
+    }))
+    .expect("interrupted turn completion normalizes");
+    let interrupted_record = normalized_event_to_journal_record("COE-476", 11, &interrupted);
+    assert_eq!(interrupted_record.kind, EventKind::RunCancelled);
+    assert_eq!(interrupted_record.summary, "Codex turn interrupted turn-1");
 }
 
 #[test]
