@@ -6,9 +6,9 @@ use std::{
 };
 
 use crate::opensymphony_domain::{
-    ConversationId, ConversationMetadata, DurationMs, HarnessAdapter, IssueId, IssueIdentifier,
-    NormalizedIssue, RunAttempt, RuntimeStreamState, TimestampMs, WorkerId, WorkerOutcomeKind,
-    WorkerOutcomeRecord,
+    ConversationId, ConversationMetadata, DurationMs, HarnessAdapter, HarnessInterruptCommand,
+    IssueId, IssueIdentifier, NormalizedIssue, RunAttempt, RuntimeStreamState, TimestampMs,
+    WorkerId, WorkerOutcomeKind, WorkerOutcomeRecord,
 };
 #[cfg(test)]
 use crate::opensymphony_domain::{RuntimeLivenessPhase, RuntimeProgressSnapshot};
@@ -44,6 +44,7 @@ const OPENAI_SUBSCRIPTION_CREDENTIAL_MODE: &str = "openai_subscription";
 const OPENAI_CODEX_SUBSCRIPTION_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_REUSE_POLICY: &str = "per_issue";
 const FRESH_EACH_RUN_REUSE_POLICY: &str = "fresh_each_run";
+const INTERRUPT_RECENT_EVENT_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueSessionReusePolicy {
@@ -98,6 +99,20 @@ pub struct WorkpadComment {
     pub id: String,
     pub body: String,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenHandsInterruptMethod {
+    Interrupt,
+    PauseFallback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenHandsInterruptAcknowledgement {
+    pub method: OpenHandsInterruptMethod,
+    pub reconciled_events: usize,
+    pub execution_status: Option<String>,
+    pub diagnostic: Option<String>,
 }
 
 #[async_trait]
@@ -1181,6 +1196,103 @@ impl IssueSessionRunner {
 
     pub fn config(&self) -> &IssueSessionRunnerConfig {
         &self.config
+    }
+
+    pub async fn interrupt(
+        &self,
+        command: &HarnessInterruptCommand,
+    ) -> Result<OpenHandsInterruptAcknowledgement, OpenHandsError> {
+        let conversation_id =
+            Uuid::parse_str(command.conversation_id.as_str()).map_err(|error| {
+                OpenHandsError::InvalidConfiguration {
+                    detail: format!(
+                        "interrupt command conversation id `{}` is not a UUID: {error}",
+                        command.conversation_id
+                    ),
+                }
+            })?;
+
+        let (method, diagnostic) = match self.client.interrupt_conversation(conversation_id).await {
+            Ok(_) => (OpenHandsInterruptMethod::Interrupt, None),
+            Err(OpenHandsError::HttpStatus {
+                status_code, body, ..
+            }) if matches!(status_code, 404 | 405 | 501) => {
+                self.client.pause_conversation(conversation_id).await?;
+                (
+                    OpenHandsInterruptMethod::PauseFallback,
+                    Some(format!(
+                        "OpenHands /interrupt unavailable with HTTP {status_code}; fell back to /pause: {body}"
+                    )),
+                )
+            }
+            Err(error) => return Err(error),
+        };
+
+        // OpenHands exposes a broadcast runtime stream, so this short-lived
+        // acknowledgement attachment does not steal events from the main worker
+        // stream. The post-attach reconcile is the authoritative ack signal.
+        let mut stream = self
+            .client
+            .attach_runtime_stream_with_recent_events(
+                conversation_id,
+                self.config.runtime_stream.clone(),
+                INTERRUPT_RECENT_EVENT_LIMIT,
+            )
+            .await?;
+        let deadline = Instant::now() + self.config.runtime_stream.readiness_timeout;
+        let mut reconciled_events = stream
+            .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
+            .await?;
+        loop {
+            if stream
+                .state_mirror()
+                .execution_status()
+                .is_some_and(interrupt_acknowledgement_observed)
+            {
+                return Ok(OpenHandsInterruptAcknowledgement {
+                    method,
+                    reconciled_events,
+                    execution_status: stream.state_mirror().execution_status().map(str::to_owned),
+                    diagnostic,
+                });
+            }
+
+            let wait = timeout_at(deadline, stream.next_event()).await;
+            let reconcile_after_event = match wait {
+                Ok(Ok(Some(_))) => true,
+                Ok(Ok(None)) | Ok(Err(_)) => {
+                    reconciled_events += stream
+                        .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
+                        .await?;
+                    false
+                }
+                Err(_) => {
+                    return Ok(OpenHandsInterruptAcknowledgement {
+                        method,
+                        reconciled_events,
+                        execution_status: stream
+                            .state_mirror()
+                            .execution_status()
+                            .map(str::to_owned),
+                        diagnostic: Some(match diagnostic {
+                            Some(diagnostic) => format!(
+                                "{diagnostic}; timed out waiting for interrupt acknowledgement after {:?}",
+                                self.config.runtime_stream.readiness_timeout
+                            ),
+                            None => format!(
+                                "timed out waiting for interrupt acknowledgement after {:?}",
+                                self.config.runtime_stream.readiness_timeout
+                            ),
+                        }),
+                    });
+                }
+            };
+            if reconcile_after_event {
+                reconciled_events += stream
+                    .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
+                    .await?;
+            }
+        }
     }
 
     pub async fn run(
@@ -2975,6 +3087,10 @@ fn turn_has_stopped(status: &str) -> bool {
     !turn_is_in_progress(status)
 }
 
+fn interrupt_acknowledgement_observed(status: &str) -> bool {
+    status == "paused" || turn_has_stopped(status)
+}
+
 fn build_continuation_guidance(issue: &NormalizedIssue, run: &RunAttempt) -> String {
     let attempt = run
         .attempt
@@ -3571,9 +3687,10 @@ mod tests {
     };
 
     use crate::opensymphony_domain::{
-        BlockerRef, IssueRef, IssueState, IssueStateCategory, WorkerOutcomeKind,
+        BlockerRef, ConversationId, HarnessInterruptExpectedNextState, HarnessInterruptReason,
+        IssueRef, IssueState, IssueStateCategory, WorkerOutcomeKind,
     };
-    use crate::opensymphony_testkit::FakeOpenHandsServer;
+    use crate::opensymphony_testkit::{FakeOpenHandsConfig, FakeOpenHandsServer};
     use axum::{Json, Router, extract::State, routing::post};
     use tokio::{net::TcpListener, sync::Mutex};
 
@@ -3846,6 +3963,160 @@ mod tests {
                 ]
             }
         }))
+    }
+
+    #[tokio::test]
+    async fn interrupt_acknowledges_after_reconciled_paused_state() {
+        let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
+            initial_execution_status: "running",
+            ..FakeOpenHandsConfig::default()
+        })
+        .await
+        .expect("fake server should start");
+        let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+        let conversation = client
+            .create_conversation(&ConversationCreateRequest::doctor_probe(
+                "/tmp/opensymphony-live",
+                "/tmp/opensymphony-live/.opensymphony/openhands",
+                Some("fake-model".to_string()),
+                None,
+            ))
+            .await
+            .expect("conversation should be created");
+        let runner = IssueSessionRunner::new(
+            client,
+            IssueSessionRunnerConfig {
+                runtime_stream: RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_millis(500),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
+                },
+                ..IssueSessionRunnerConfig::default()
+            },
+        );
+
+        let acknowledgement = runner
+            .interrupt(&interrupt_command(conversation.conversation_id))
+            .await
+            .expect("interrupt should acknowledge after reconciliation");
+
+        assert_eq!(acknowledgement.method, OpenHandsInterruptMethod::Interrupt);
+        assert_eq!(acknowledgement.execution_status.as_deref(), Some("paused"));
+        assert!(acknowledgement.diagnostic.is_none());
+    }
+
+    #[tokio::test]
+    async fn interrupt_falls_back_to_pause_when_interrupt_route_is_missing() {
+        let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
+            initial_execution_status: "running",
+            interrupt_supported: false,
+            ..FakeOpenHandsConfig::default()
+        })
+        .await
+        .expect("fake server should start");
+        let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+        let conversation = client
+            .create_conversation(&ConversationCreateRequest::doctor_probe(
+                "/tmp/opensymphony-live",
+                "/tmp/opensymphony-live/.opensymphony/openhands",
+                Some("fake-model".to_string()),
+                None,
+            ))
+            .await
+            .expect("conversation should be created");
+        let runner = IssueSessionRunner::new(
+            client,
+            IssueSessionRunnerConfig {
+                runtime_stream: RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_millis(500),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
+                },
+                ..IssueSessionRunnerConfig::default()
+            },
+        );
+
+        let acknowledgement = runner
+            .interrupt(&interrupt_command(conversation.conversation_id))
+            .await
+            .expect("pause fallback should acknowledge after reconciliation");
+
+        assert_eq!(
+            acknowledgement.method,
+            OpenHandsInterruptMethod::PauseFallback
+        );
+        assert_eq!(acknowledgement.execution_status.as_deref(), Some("paused"));
+        assert!(
+            acknowledgement
+                .diagnostic
+                .as_deref()
+                .is_some_and(|diagnostic| diagnostic.contains("/interrupt unavailable"))
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_reports_timeout_when_reconciliation_never_stops() {
+        let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
+            initial_execution_status: "running",
+            interrupt_execution_status: "running",
+            ..FakeOpenHandsConfig::default()
+        })
+        .await
+        .expect("fake server should start");
+        let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+        let conversation = client
+            .create_conversation(&ConversationCreateRequest::doctor_probe(
+                "/tmp/opensymphony-live",
+                "/tmp/opensymphony-live/.opensymphony/openhands",
+                Some("fake-model".to_string()),
+                None,
+            ))
+            .await
+            .expect("conversation should be created");
+        let runner = IssueSessionRunner::new(
+            client,
+            IssueSessionRunnerConfig {
+                runtime_stream: RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_millis(20),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
+                },
+                ..IssueSessionRunnerConfig::default()
+            },
+        );
+
+        let acknowledgement = runner
+            .interrupt(&interrupt_command(conversation.conversation_id))
+            .await
+            .expect("timeout path should return a diagnostic acknowledgement");
+
+        assert_eq!(acknowledgement.method, OpenHandsInterruptMethod::Interrupt);
+        assert_eq!(acknowledgement.execution_status.as_deref(), Some("running"));
+        assert!(
+            acknowledgement
+                .diagnostic
+                .as_deref()
+                .is_some_and(|diagnostic| diagnostic
+                    .contains("timed out waiting for interrupt acknowledgement"))
+        );
+    }
+
+    fn interrupt_command(conversation_id: Uuid) -> HarnessInterruptCommand {
+        HarnessInterruptCommand {
+            run_id: "COE-489".to_string(),
+            issue_id: must(IssueId::new("issue-489")),
+            harness_kind: "openhands_agent_server".to_string(),
+            conversation_id: must(ConversationId::new(conversation_id.to_string())),
+            turn_id: None,
+            reason: HarnessInterruptReason::OperatorCancel,
+            expected_next_state: HarnessInterruptExpectedNextState::Paused,
+        }
     }
 
     #[tokio::test]

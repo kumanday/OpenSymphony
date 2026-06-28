@@ -33,6 +33,8 @@ pub struct FakeOpenHandsConfig {
     pub search_page_size: usize,
     pub run_terminal_status: &'static str,
     pub initial_execution_status: &'static str,
+    pub interrupt_supported: bool,
+    pub interrupt_execution_status: &'static str,
 }
 
 impl Default for FakeOpenHandsConfig {
@@ -41,6 +43,8 @@ impl Default for FakeOpenHandsConfig {
             search_page_size: 2,
             run_terminal_status: "finished",
             initial_execution_status: "idle",
+            interrupt_supported: true,
+            interrupt_execution_status: "paused",
         }
     }
 }
@@ -263,6 +267,8 @@ struct Inner {
     search_page_size: usize,
     run_terminal_status: String,
     initial_execution_status: String,
+    interrupt_supported: bool,
+    interrupt_execution_status: String,
     next_event_index: u64,
 }
 
@@ -300,6 +306,8 @@ impl FakeOpenHandsServer {
                 search_page_size: config.search_page_size,
                 run_terminal_status: config.run_terminal_status.to_string(),
                 initial_execution_status: config.initial_execution_status.to_string(),
+                interrupt_supported: config.interrupt_supported,
+                interrupt_execution_status: config.interrupt_execution_status.to_string(),
                 next_event_index: 1,
             })),
         };
@@ -318,6 +326,14 @@ impl FakeOpenHandsServer {
             .route(
                 "/api/conversations/{conversation_id}/run",
                 post(run_conversation),
+            )
+            .route(
+                "/api/conversations/{conversation_id}/interrupt",
+                post(interrupt_conversation),
+            )
+            .route(
+                "/api/conversations/{conversation_id}/pause",
+                post(pause_conversation),
             )
             .route(
                 "/api/conversations/{conversation_id}/events/search",
@@ -661,6 +677,51 @@ async fn run_conversation(
     apply_event_to_conversation(conversation, running_event);
     apply_event_to_conversation(conversation, completion_event);
     apply_event_to_conversation(conversation, finished_event);
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn interrupt_conversation(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    let mut inner = state.inner.lock().await;
+    if !inner.interrupt_supported {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let execution_status = inner.interrupt_execution_status.clone();
+    pause_conversation_inner(&mut inner, conversation_id, execution_status)
+}
+
+async fn pause_conversation(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<Json<Value>, StatusCode> {
+    let mut inner = state.inner.lock().await;
+    pause_conversation_inner(&mut inner, conversation_id, "paused".to_string())
+}
+
+fn pause_conversation_inner(
+    inner: &mut Inner,
+    conversation_id: Uuid,
+    execution_status: String,
+) -> Result<Json<Value>, StatusCode> {
+    let paused_event = EventEnvelope::new(
+        next_event_id(inner),
+        Utc::now(),
+        "runtime",
+        "ConversationStateUpdateEvent",
+        json!({
+            "execution_status": execution_status.clone(),
+            "state_delta": {
+                "execution_status": execution_status,
+            },
+        }),
+    );
+    let conversation = inner
+        .conversations
+        .get_mut(&conversation_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    apply_event_to_conversation(conversation, paused_event);
     Ok(Json(json!({ "success": true })))
 }
 
