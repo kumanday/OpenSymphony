@@ -20,6 +20,7 @@ pub const TSX_QUERY_PACK_VERSION: &str = "tsx-query-pack-v1";
 pub const JAVASCRIPT_QUERY_PACK_VERSION: &str = "javascript-query-pack-v1";
 pub const JSX_QUERY_PACK_VERSION: &str = "jsx-query-pack-v1";
 pub const PYTHON_QUERY_PACK_VERSION: &str = "python-query-pack-v1";
+const MARKDOWN_FENCE_QUERY_NAME: &str = "markdown_fences";
 
 const RUST_METADATA: &str = include_str!("../queries/rust/metadata.toml");
 const TYPESCRIPT_METADATA: &str = include_str!("../queries/typescript/metadata.toml");
@@ -312,6 +313,7 @@ pub struct CaptureRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AstDiagnosticKind {
     Error,
     Missing,
@@ -892,7 +894,12 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
 
     for (line_index, line) in source.split_inclusive('\n').enumerate() {
         let line_number = line_index + 1;
-        let trimmed = line.trim_start();
+        let indent = line.len() - line.trim_start().len();
+        if indent > 3 {
+            byte_offset += line.len();
+            continue;
+        }
+        let trimmed = &line[indent..];
         if let Some((fence_tick_count, rest)) = markdown_backtick_fence(trimmed) {
             if open_fence
                 .as_ref()
@@ -908,41 +915,38 @@ fn markdown_fence_captures(source: &str) -> Vec<CaptureRecord> {
                     end_column: 1,
                 };
                 captures.push(CaptureRecord {
-                    query_name: "markdown_fences".to_string(),
+                    query_name: MARKDOWN_FENCE_QUERY_NAME.to_string(),
                     capture_name: "injection.content".to_string(),
                     text: source[fence.content_start_byte..byte_offset].to_string(),
                     rendered_span: span.render(),
                     span,
                 });
-                captures.push(CaptureRecord {
-                    query_name: "markdown_fences".to_string(),
-                    capture_name: "injection.language".to_string(),
-                    text: fence.language,
-                    rendered_span: fence.language_span.render(),
-                    span: fence.language_span,
-                });
+                if let Some((language, language_span)) = fence.language {
+                    captures.push(CaptureRecord {
+                        query_name: MARKDOWN_FENCE_QUERY_NAME.to_string(),
+                        capture_name: "injection.language".to_string(),
+                        text: language,
+                        rendered_span: language_span.render(),
+                        span: language_span,
+                    });
+                }
             } else if open_fence.is_none() {
-                let language = rest.trim().to_string();
-                let indent = line.len() - trimmed.len();
-                let language_start_in_rest = rest.find(language.as_str()).unwrap_or(0);
-                let language_start_byte =
-                    byte_offset + indent + fence_tick_count + language_start_in_rest;
-                let language_span = SourceSpan {
-                    start_byte: language_start_byte,
-                    end_byte: language_start_byte + language.len(),
-                    start_line: line_number,
-                    start_column: indent + fence_tick_count + 1 + language_start_in_rest,
-                    end_line: line_number,
-                    end_column: indent
-                        + fence_tick_count
-                        + 1
-                        + language_start_in_rest
-                        + language.len(),
-                };
+                let language = markdown_fence_language(rest).map(|(language, start_in_rest)| {
+                    let language_start_byte =
+                        byte_offset + indent + fence_tick_count + start_in_rest;
+                    let language_span = SourceSpan {
+                        start_byte: language_start_byte,
+                        end_byte: language_start_byte + language.len(),
+                        start_line: line_number,
+                        start_column: indent + fence_tick_count + 1 + start_in_rest,
+                        end_line: line_number,
+                        end_column: indent + fence_tick_count + 1 + start_in_rest + language.len(),
+                    };
+                    (language.to_string(), language_span)
+                });
                 open_fence = Some(MarkdownFence {
                     tick_count: fence_tick_count,
                     language,
-                    language_span,
                     content_start_byte: byte_offset + line.len(),
                     content_start_line: line_number + 1,
                 });
@@ -963,6 +967,11 @@ fn markdown_backtick_fence(trimmed_line: &str) -> Option<(usize, &str)> {
     (tick_count >= 3).then(|| (tick_count, &trimmed_line[tick_count..]))
 }
 
+fn markdown_fence_language(rest: &str) -> Option<(&str, usize)> {
+    let language = rest.split_whitespace().next()?;
+    rest.find(language).map(|start| (language, start))
+}
+
 fn is_markdown_closing_fence(trimmed_line: &str, opening_tick_count: usize) -> bool {
     markdown_backtick_fence(trimmed_line)
         .map(|(tick_count, rest)| tick_count >= opening_tick_count && rest.trim().is_empty())
@@ -971,8 +980,7 @@ fn is_markdown_closing_fence(trimmed_line: &str, opening_tick_count: usize) -> b
 
 struct MarkdownFence {
     tick_count: usize,
-    language: String,
-    language_span: SourceSpan,
+    language: Option<(String, SourceSpan)>,
     content_start_byte: usize,
     content_start_line: usize,
 }
@@ -1031,6 +1039,9 @@ mod tests {
     const TOML_CONFIG: &str = include_str!("../fixtures/documents/config.toml");
     const MARKDOWN_NOTES: &str = include_str!("../fixtures/documents/notes.md");
     const FOUR_BACKTICK_MARKDOWN: &str = "````ts\n```not close\nvalue()\n````\n";
+    const MARKDOWN_INFO_STRING: &str = "```python not-valid\nprint('ok')\n```\n";
+    const MARKDOWN_UNLABELED: &str = "```\nraw\n```\n";
+    const MARKDOWN_INDENTED: &str = "    ```ignored\nraw\n    ```\n";
 
     #[test]
     fn detects_supported_languages_by_extension_and_name() {
@@ -1298,6 +1309,40 @@ mod tests {
         assert_eq!(content.span.start_byte, 7);
         assert_eq!(content.span.end_byte, 28);
         assert_eq!(content.rendered_span, "2:1-4:1");
+
+        let info_string = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/info_string.md")),
+            MARKDOWN_INFO_STRING,
+        )
+        .expect("markdown parses");
+        let language = find_capture(&info_string, "injection.language", "python");
+        assert_eq!(language.span.start_byte, 3);
+        assert_eq!(language.span.end_byte, 9);
+        assert_eq!(language.rendered_span, "1:4-1:10");
+        assert_capture(&info_string, "injection.content", "print('ok')\n");
+
+        let unlabeled = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/unlabeled.md")),
+            MARKDOWN_UNLABELED,
+        )
+        .expect("markdown parses");
+        assert_capture(&unlabeled, "injection.content", "raw\n");
+        assert!(
+            !unlabeled
+                .captures
+                .iter()
+                .any(|capture| capture.capture_name == "injection.language")
+        );
+
+        let indented = parse_source(
+            SourceLanguage::Markdown,
+            Some(PathBuf::from("fixtures/documents/indented.md")),
+            MARKDOWN_INDENTED,
+        )
+        .expect("markdown parses");
+        assert!(indented.captures.is_empty());
     }
 
     fn symbol_tuples(summary: &ParsedDocumentSummary) -> Vec<(SymbolKind, &str, &str)> {
