@@ -42,6 +42,13 @@ Do not silently invent behavior when the upstream spec or chosen integration con
 - Operations are REST. Runtime streaming is WebSocket.
 - The WebSocket readiness barrier is the first `ConversationStateUpdateEvent`.
 - Always reconcile events after WebSocket readiness and after reconnect.
+- Harness interrupts for OpenHands-backed runs use
+  `POST /api/conversations/{conversation_id}/interrupt` as the primary
+  mid-turn stop request. Use `POST /api/conversations/{conversation_id}/pause`
+  only as an older-server fallback when `/interrupt` is unavailable, and record
+  that fallback in diagnostics. Report acknowledgement only after
+  attach/reconcile observes a stopped state such as `paused`, or after the
+  configured timeout path records a timeout diagnostic.
 - One OpenHands conversation is reused per issue by default.
 - A fresh conversation gets the full workflow prompt. A resumed conversation gets continuation guidance only.
 - Local MVP uses one local agent-server subprocess shared across issues, not one server per issue.

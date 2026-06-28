@@ -44,6 +44,7 @@ const OPENAI_SUBSCRIPTION_CREDENTIAL_MODE: &str = "openai_subscription";
 const OPENAI_CODEX_SUBSCRIPTION_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const DEFAULT_REUSE_POLICY: &str = "per_issue";
 const FRESH_EACH_RUN_REUSE_POLICY: &str = "fresh_each_run";
+const INTERRUPT_RECENT_EVENT_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueSessionReusePolicy {
@@ -1227,16 +1228,21 @@ impl IssueSessionRunner {
             Err(error) => return Err(error),
         };
 
+        // OpenHands exposes a broadcast runtime stream, so this short-lived
+        // acknowledgement attachment does not steal events from the main worker
+        // stream. The post-attach reconcile is the authoritative ack signal.
         let mut stream = self
             .client
             .attach_runtime_stream_with_recent_events(
                 conversation_id,
                 self.config.runtime_stream.clone(),
-                20,
+                INTERRUPT_RECENT_EVENT_LIMIT,
             )
             .await?;
         let deadline = Instant::now() + self.config.runtime_stream.readiness_timeout;
-        let mut reconciled_events = stream.reconcile_recent_events(20).await?;
+        let mut reconciled_events = stream
+            .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
+            .await?;
         loop {
             if stream
                 .state_mirror()
@@ -1255,7 +1261,9 @@ impl IssueSessionRunner {
             match wait {
                 Ok(Ok(Some(_))) => {}
                 Ok(Ok(None)) | Ok(Err(_)) => {
-                    reconciled_events += stream.reconcile_recent_events(20).await?;
+                    reconciled_events += stream
+                        .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
+                        .await?;
                 }
                 Err(_) => {
                     return Ok(OpenHandsInterruptAcknowledgement {
@@ -1278,7 +1286,9 @@ impl IssueSessionRunner {
                     });
                 }
             }
-            reconciled_events += stream.reconcile_recent_events(20).await?;
+            reconciled_events += stream
+                .reconcile_recent_events(INTERRUPT_RECENT_EVENT_LIMIT)
+                .await?;
         }
     }
 
@@ -4037,6 +4047,55 @@ mod tests {
                 .diagnostic
                 .as_deref()
                 .is_some_and(|diagnostic| diagnostic.contains("/interrupt unavailable"))
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_reports_timeout_when_reconciliation_never_stops() {
+        let server = FakeOpenHandsServer::start_with_config(FakeOpenHandsConfig {
+            initial_execution_status: "running",
+            interrupt_execution_status: "running",
+            ..FakeOpenHandsConfig::default()
+        })
+        .await
+        .expect("fake server should start");
+        let client = OpenHandsClient::new(TransportConfig::new(server.base_url()));
+        let conversation = client
+            .create_conversation(&ConversationCreateRequest::doctor_probe(
+                "/tmp/opensymphony-live",
+                "/tmp/opensymphony-live/.opensymphony/openhands",
+                Some("fake-model".to_string()),
+                None,
+            ))
+            .await
+            .expect("conversation should be created");
+        let runner = IssueSessionRunner::new(
+            client,
+            IssueSessionRunnerConfig {
+                runtime_stream: RuntimeStreamConfig {
+                    readiness_timeout: Duration::from_millis(20),
+                    reconnect_initial_backoff: Duration::from_millis(25),
+                    reconnect_max_backoff: Duration::from_millis(25),
+                    max_reconnect_attempts: 1,
+                    replay_existing_events_on_attach: false,
+                },
+                ..IssueSessionRunnerConfig::default()
+            },
+        );
+
+        let acknowledgement = runner
+            .interrupt(&interrupt_command(conversation.conversation_id))
+            .await
+            .expect("timeout path should return a diagnostic acknowledgement");
+
+        assert_eq!(acknowledgement.method, OpenHandsInterruptMethod::Interrupt);
+        assert_eq!(acknowledgement.execution_status.as_deref(), Some("running"));
+        assert!(
+            acknowledgement
+                .diagnostic
+                .as_deref()
+                .is_some_and(|diagnostic| diagnostic
+                    .contains("timed out waiting for interrupt acknowledgement"))
         );
     }
 

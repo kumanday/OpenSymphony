@@ -1070,11 +1070,12 @@ impl OpenHandsClient {
         &self,
         conversation_id: Uuid,
     ) -> Result<AcceptedResponse, OpenHandsError> {
+        let request = serde_json::json!({});
         let response = send(
             self.json_request(
                 self.post_request(&format!("/api/conversations/{conversation_id}/interrupt"))?,
                 "interrupt conversation",
-                &ConversationRunRequest::default(),
+                &request,
             )?,
             "interrupt conversation",
         )
@@ -1086,11 +1087,12 @@ impl OpenHandsClient {
         &self,
         conversation_id: Uuid,
     ) -> Result<AcceptedResponse, OpenHandsError> {
+        let request = serde_json::json!({});
         let response = send(
             self.json_request(
                 self.post_request(&format!("/api/conversations/{conversation_id}/pause"))?,
                 "pause conversation",
-                &ConversationRunRequest::default(),
+                &request,
             )?,
             "pause conversation",
         )

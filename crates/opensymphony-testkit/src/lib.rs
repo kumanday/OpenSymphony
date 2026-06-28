@@ -34,6 +34,7 @@ pub struct FakeOpenHandsConfig {
     pub run_terminal_status: &'static str,
     pub initial_execution_status: &'static str,
     pub interrupt_supported: bool,
+    pub interrupt_execution_status: &'static str,
 }
 
 impl Default for FakeOpenHandsConfig {
@@ -43,6 +44,7 @@ impl Default for FakeOpenHandsConfig {
             run_terminal_status: "finished",
             initial_execution_status: "idle",
             interrupt_supported: true,
+            interrupt_execution_status: "paused",
         }
     }
 }
@@ -266,6 +268,7 @@ struct Inner {
     run_terminal_status: String,
     initial_execution_status: String,
     interrupt_supported: bool,
+    interrupt_execution_status: String,
     next_event_index: u64,
 }
 
@@ -304,6 +307,7 @@ impl FakeOpenHandsServer {
                 run_terminal_status: config.run_terminal_status.to_string(),
                 initial_execution_status: config.initial_execution_status.to_string(),
                 interrupt_supported: config.interrupt_supported,
+                interrupt_execution_status: config.interrupt_execution_status.to_string(),
                 next_event_index: 1,
             })),
         };
@@ -684,7 +688,8 @@ async fn interrupt_conversation(
     if !inner.interrupt_supported {
         return Err(StatusCode::NOT_FOUND);
     }
-    pause_conversation_inner(&mut inner, conversation_id)
+    let execution_status = inner.interrupt_execution_status.clone();
+    pause_conversation_inner(&mut inner, conversation_id, execution_status)
 }
 
 async fn pause_conversation(
@@ -692,12 +697,13 @@ async fn pause_conversation(
     Path(conversation_id): Path<Uuid>,
 ) -> Result<Json<Value>, StatusCode> {
     let mut inner = state.inner.lock().await;
-    pause_conversation_inner(&mut inner, conversation_id)
+    pause_conversation_inner(&mut inner, conversation_id, "paused".to_string())
 }
 
 fn pause_conversation_inner(
     inner: &mut Inner,
     conversation_id: Uuid,
+    execution_status: String,
 ) -> Result<Json<Value>, StatusCode> {
     let paused_event = EventEnvelope::new(
         next_event_id(inner),
@@ -705,9 +711,9 @@ fn pause_conversation_inner(
         "runtime",
         "ConversationStateUpdateEvent",
         json!({
-            "execution_status": "paused",
+            "execution_status": execution_status.clone(),
             "state_delta": {
-                "execution_status": "paused",
+                "execution_status": execution_status,
             },
         }),
     );
