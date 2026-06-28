@@ -5,12 +5,22 @@ use crate::opensymphony_gateway_schema::{
         MemoryFrontmatterView, MemoryGraphCitation, MemoryGraphCommunity, MemoryGraphEdge,
         MemoryGraphEdgeKind, MemoryGraphFreshness, MemoryGraphLink, MemoryGraphNode,
         MemoryGraphNodeKind, MemoryGraphNodeMetrics, MemoryGraphSnapshot, MemoryGraphSourceRef,
-        MemoryGraphVisibility, MemorySearchResponse, MemorySearchResult,
+        MemoryGraphUpdatedEvent, MemoryGraphVisibility, MemorySearchResponse, MemorySearchResult,
     },
     version::SchemaVersion,
 };
 
 pub const DEFAULT_MEMORY_GRAPH_BUNDLE_ID: &str = "local-default";
+
+#[derive(Debug, thiserror::Error)]
+pub enum MemoryGraphProjectionError {
+    #[error("unknown memory bundle `{0}`")]
+    BundleNotFound(String),
+    #[error("no concept found for `{0}`")]
+    ConceptNotFound(String),
+    #[error(transparent)]
+    Memory(#[from] MemoryError),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryGraphAccess {
@@ -21,7 +31,7 @@ pub enum MemoryGraphAccess {
 pub fn memory_graph_bundles(
     config: &MemoryConfig,
     access: MemoryGraphAccess,
-) -> Result<MemoryBundleList, MemoryError> {
+) -> Result<MemoryBundleList, MemoryGraphProjectionError> {
     let issues = accessible_issues(config, access)?;
     Ok(MemoryBundleList {
         schema_version: SchemaVersion::v1(),
@@ -40,8 +50,9 @@ pub fn memory_graph_snapshot(
     config: &MemoryConfig,
     bundle_id: &str,
     access: MemoryGraphAccess,
-) -> Result<MemoryGraphSnapshot, MemoryError> {
+) -> Result<MemoryGraphSnapshot, MemoryGraphProjectionError> {
     ensure_default_memory_bundle(bundle_id)?;
+    let generated_at = Utc::now();
     let issues = accessible_issues(config, access)?;
     let communities = memory_graph_communities_from_issues(&issues);
     let mut nodes = BTreeMap::<String, MemoryGraphNode>::new();
@@ -264,7 +275,11 @@ pub fn memory_graph_snapshot(
         }
 
         for scope_ref in &issue.scope_refs {
-            let scope_node = format!("scope_ref:{:?}:{}", scope_ref.kind, scope_ref.id);
+            let scope_node = format!(
+                "scope_ref:{}:{}",
+                scope_kind_key(&scope_ref.kind),
+                scope_ref.id
+            );
             insert_node(
                 &mut nodes,
                 simple_node(
@@ -294,12 +309,12 @@ pub fn memory_graph_snapshot(
     Ok(MemoryGraphSnapshot {
         schema_version: SchemaVersion::v1(),
         bundle_id: bundle_id.to_string(),
-        cursor: StreamCursor::new(memory_graph_sequence(&issues), format!("memory-graph:{bundle_id}")),
+        cursor: memory_graph_cursor(bundle_id, generated_at),
         nodes,
         edges,
         communities,
         filters_applied: filters_applied(access),
-        generated_at: Utc::now(),
+        generated_at,
     })
 }
 
@@ -308,13 +323,13 @@ pub fn memory_concept_detail(
     bundle_id: &str,
     concept_id: &str,
     access: MemoryGraphAccess,
-) -> Result<MemoryConceptDetail, MemoryError> {
+) -> Result<MemoryConceptDetail, MemoryGraphProjectionError> {
     ensure_default_memory_bundle(bundle_id)?;
     let concept_id = normalize_concept_id(concept_id);
     let issue = accessible_issues(config, access)?
         .into_iter()
         .find(|issue| issue_matches_concept(issue, &concept_id))
-        .ok_or_else(|| MemoryError::InvalidInput(format!("no concept found for `{concept_id}`")))?;
+        .ok_or_else(|| MemoryGraphProjectionError::ConceptNotFound(concept_id.clone()))?;
     let parsed = parsed_okf_concept(config, &issue);
 
     Ok(MemoryConceptDetail {
@@ -359,7 +374,7 @@ pub fn memory_graph_communities(
     config: &MemoryConfig,
     bundle_id: &str,
     access: MemoryGraphAccess,
-) -> Result<MemoryCommunityList, MemoryError> {
+) -> Result<MemoryCommunityList, MemoryGraphProjectionError> {
     ensure_default_memory_bundle(bundle_id)?;
     let issues = accessible_issues(config, access)?;
     Ok(MemoryCommunityList {
@@ -375,7 +390,7 @@ pub fn memory_graph_search(
     query: &str,
     limit: usize,
     access: MemoryGraphAccess,
-) -> Result<MemorySearchResponse, MemoryError> {
+) -> Result<MemorySearchResponse, MemoryGraphProjectionError> {
     let issues = accessible_issues(config, access)?;
     let by_issue = issues
         .iter()
@@ -405,10 +420,26 @@ pub fn memory_graph_search(
     })
 }
 
+pub fn memory_graph_updated_event(
+    config: &MemoryConfig,
+    bundle_id: &str,
+    access: MemoryGraphAccess,
+) -> Result<MemoryGraphUpdatedEvent, MemoryGraphProjectionError> {
+    ensure_default_memory_bundle(bundle_id)?;
+    let _ = accessible_issues(config, access)?;
+    let updated_at = Utc::now();
+    Ok(MemoryGraphUpdatedEvent {
+        schema_version: SchemaVersion::v1(),
+        bundle_id: bundle_id.to_string(),
+        cursor: memory_graph_cursor(bundle_id, updated_at),
+        updated_at,
+    })
+}
+
 fn accessible_issues(
     config: &MemoryConfig,
     access: MemoryGraphAccess,
-) -> Result<Vec<IndexedIssue>, MemoryError> {
+) -> Result<Vec<IndexedIssue>, MemoryGraphProjectionError> {
     let mut issues = load_indexed_issues(config)?;
     if access == MemoryGraphAccess::Public {
         issues.retain(|issue| issue.visibility == MemoryVisibility::Public);
@@ -416,13 +447,11 @@ fn accessible_issues(
     Ok(issues)
 }
 
-fn ensure_default_memory_bundle(bundle_id: &str) -> Result<(), MemoryError> {
+fn ensure_default_memory_bundle(bundle_id: &str) -> Result<(), MemoryGraphProjectionError> {
     if bundle_id == DEFAULT_MEMORY_GRAPH_BUNDLE_ID {
         Ok(())
     } else {
-        Err(MemoryError::InvalidInput(format!(
-            "unknown memory bundle `{bundle_id}`"
-        )))
+        Err(MemoryGraphProjectionError::BundleNotFound(bundle_id.to_string()))
     }
 }
 
@@ -468,20 +497,15 @@ fn indexed_issue_updated_at(issue: &IndexedIssue) -> Option<DateTime<Utc>> {
         .map(|value| value.with_timezone(&Utc))
 }
 
-fn memory_graph_sequence(issues: &[IndexedIssue]) -> u64 {
-    let mut hash = 14_695_981_039_346_656_037u64;
-    for issue in issues {
-        for byte in issue
-            .concept_id
-            .bytes()
-            .chain(issue.source_hash.bytes())
-            .chain(issue.captured_at.bytes())
-        {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(1_099_511_628_211);
-        }
-    }
-    hash
+fn memory_graph_cursor(bundle_id: &str, timestamp: DateTime<Utc>) -> StreamCursor {
+    StreamCursor::new(
+        memory_graph_sequence(timestamp),
+        format!("memory-graph:{bundle_id}"),
+    )
+}
+
+fn memory_graph_sequence(timestamp: DateTime<Utc>) -> u64 {
+    timestamp.timestamp_millis().max(0) as u64
 }
 
 fn concept_node_id(issue: &IndexedIssue) -> String {
@@ -528,7 +552,12 @@ fn insert_edge(
     label: Option<String>,
     unresolved: bool,
 ) {
-    let id = format!("{kind:?}:{source_id}->{target_id}");
+    let label_key = label.as_deref().unwrap_or_default();
+    let id = format!(
+        "{kind:?}:{source_id}->{target_id}:{}:{:016x}",
+        unresolved,
+        stable_edge_hash(label_key)
+    );
     edges.entry(id.clone()).or_insert(MemoryGraphEdge {
         id,
         kind,
@@ -538,6 +567,15 @@ fn insert_edge(
         unresolved,
         metadata: BTreeMap::new(),
     });
+}
+
+fn stable_edge_hash(value: &str) -> u64 {
+    let mut hash = 14_695_981_039_346_656_037u64;
+    for byte in value.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    hash
 }
 
 fn insert_directory_nodes(
@@ -779,6 +817,20 @@ fn issue_matches_concept(issue: &IndexedIssue, concept_id: &str) -> bool {
     issue.concept_id == concept_id
         || issue.issue_key == normalize_issue_key(concept_id)
         || concept_id.ends_with(&issue.issue_key)
+}
+
+fn scope_kind_key(kind: &KnowledgeScopeKind) -> &'static str {
+    match kind {
+        KnowledgeScopeKind::LocalInstance => "local_instance",
+        KnowledgeScopeKind::Organization => "organization",
+        KnowledgeScopeKind::ProjectSet => "project_set",
+        KnowledgeScopeKind::Project => "project",
+        KnowledgeScopeKind::Milestone => "milestone",
+        KnowledgeScopeKind::WorkItem => "work_item",
+        KnowledgeScopeKind::Repository => "repository",
+        KnowledgeScopeKind::CodePath => "code_path",
+        KnowledgeScopeKind::Area => "area",
+    }
 }
 
 fn is_external_target(target: &str) -> bool {

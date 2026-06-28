@@ -1411,7 +1411,8 @@ opensymphony:
 
 Public graph body mentions .opensymphony/memory/issues/COE-999.md and {}.
 
-See [private concept](COE-123.md) and [external](https://example.com/reference).
+See [private concept](COE-123.md), [external](https://example.com/reference),
+and [external mirror](https://example.com/reference).
 "#,
                 repo.path().display()
             ),
@@ -1472,6 +1473,28 @@ See [private concept](COE-123.md) and [external](https://example.com/reference).
         ] {
             assert!(edge_kinds.contains(&kind), "missing edge kind {kind:?}");
         }
+        let parallel_external_edges = all_graph
+            .edges
+            .iter()
+            .filter(|edge| {
+                edge.kind == EdgeKind::ExternalLink
+                    && edge.target_id == "resource:https://example.com/reference"
+            })
+            .count();
+        assert_eq!(parallel_external_edges, 2);
+
+        let update = memory_graph_updated_event(
+            &config,
+            DEFAULT_MEMORY_GRAPH_BUNDLE_ID,
+            MemoryGraphAccess::AllAccessible,
+        )
+        .expect("update event payload");
+        assert_eq!(update.bundle_id, DEFAULT_MEMORY_GRAPH_BUNDLE_ID);
+        assert_eq!(
+            update.cursor.partition,
+            "memory-graph:local-default".to_string()
+        );
+        assert!(update.cursor.sequence > 0);
 
         let public_graph = memory_graph_snapshot(
             &config,

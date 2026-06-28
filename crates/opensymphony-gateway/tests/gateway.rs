@@ -1832,6 +1832,24 @@ async fn gateway_serves_memory_graph_contract_endpoints() {
     assert_eq!(search.results.len(), 1);
     assert_eq!(search.results[0].concept_id, "issues/COE-200");
 
+    let invalid_visibility = client
+        .get(format!("{base}/bundles?visibility=private"))
+        .send()
+        .await
+        .expect("fetch invalid visibility");
+    assert_eq!(
+        invalid_visibility.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
+    let invalid_visibility_body = invalid_visibility
+        .json::<serde_json::Value>()
+        .await
+        .expect("decode invalid visibility response");
+    assert_eq!(
+        invalid_visibility_body.pointer("/error/code"),
+        Some(&serde_json::json!("invalid_visibility"))
+    );
+
     server_task.abort();
 }
 

@@ -220,11 +220,14 @@ All memory graph responses are versioned with `schema_version`. The initial
 local bundle ID is `local-default`; hosted adapters may expose additional bundle
 IDs later without changing the DTO shape.
 
-Read endpoints accept `visibility=public` to return only public concepts. The
-default local loopback mode returns concepts accessible to the local process.
-Hosted gateway adapters must resolve credentials to an equivalent accessible
-scope before calling the DTO boundary. DTOs must not expose absolute local paths
-or `.opensymphony/memory/` paths; concept path fields are bundle-relative display
+Read endpoints accept `visibility=public` to return only public concepts, or
+`visibility=all_accessible` to make the default local-accessible scope explicit.
+The default local loopback mode returns concepts accessible to the local process.
+`visibility=private` is intentionally rejected because it is ambiguous: private
+does not mean "only private concepts" in the local gateway contract. Hosted
+gateway adapters must resolve credentials to an equivalent accessible scope
+before calling the DTO boundary. DTOs must not expose absolute local paths or
+`.opensymphony/memory/` paths; concept path fields are bundle-relative display
 paths only, and body/snippet fields are redacted at the server boundary.
 
 `memory_graph_updated` uses the gateway event journal envelope and carries this
@@ -238,6 +241,11 @@ payload:
   "updated_at": "2026-06-13T17:01:00Z"
 }
 ```
+
+Servers publish `memory_graph_updated` after memory capture, OKF import, or
+catalog reindex operations make a new graph snapshot available. The payload
+cursor uses the same monotonic timestamp sequence as graph snapshots so stream
+consumers can compare `sequence > last_seen` without depending on hash ordering.
 
 The same schemas can be used by a Tauri native adapter, loopback HTTP, or hosted HTTPS.
 

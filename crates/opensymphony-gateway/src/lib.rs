@@ -42,8 +42,9 @@ use crate::opensymphony_gateway_schema::{
     },
 };
 use crate::opensymphony_memory::{
-    MemoryConfig, MemoryError, MemoryGraphAccess, memory_concept_detail, memory_graph_bundles,
-    memory_graph_communities, memory_graph_search as search_memory_graph, memory_graph_snapshot,
+    MemoryConfig, MemoryGraphAccess, MemoryGraphProjectionError, memory_concept_detail,
+    memory_graph_bundles, memory_graph_communities, memory_graph_search as search_memory_graph,
+    memory_graph_snapshot,
 };
 
 pub mod action_handler;
@@ -1104,10 +1105,13 @@ fn memory_graph_access(
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        None | Some("all") | Some("private") | Some("all_accessible") => {
-            Ok(MemoryGraphAccess::AllAccessible)
-        }
+        None | Some("all") | Some("all_accessible") => Ok(MemoryGraphAccess::AllAccessible),
         Some("public") => Ok(MemoryGraphAccess::Public),
+        Some("private") => Err(memory_graph_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_visibility",
+            "`visibility=private` is ambiguous; omit the parameter or use `visibility=all_accessible` for the local accessible catalog",
+        )),
         Some(other) => Err(memory_graph_response(
             StatusCode::BAD_REQUEST,
             "invalid_visibility",
@@ -1116,22 +1120,19 @@ fn memory_graph_access(
     }
 }
 
-fn memory_graph_error(error: MemoryError) -> (StatusCode, Json<serde_json::Value>) {
+fn memory_graph_error(error: MemoryGraphProjectionError) -> (StatusCode, Json<serde_json::Value>) {
     let message = error.to_string();
-    match &error {
-        MemoryError::InvalidInput(_) if message.starts_with("unknown memory bundle") => {
+    match error {
+        MemoryGraphProjectionError::BundleNotFound(_) => {
             memory_graph_response(StatusCode::NOT_FOUND, "bundle_not_found", &message)
         }
-        MemoryError::InvalidInput(_) if message.starts_with("no concept found") => {
+        MemoryGraphProjectionError::ConceptNotFound(_) => {
             memory_graph_response(StatusCode::NOT_FOUND, "concept_not_found", &message)
         }
-        MemoryError::InvalidInput(_) => {
-            memory_graph_response(StatusCode::BAD_REQUEST, "invalid_memory_request", &message)
-        }
-        _ => memory_graph_response(
+        MemoryGraphProjectionError::Memory(source) => memory_graph_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "memory_graph_error",
-            &message,
+            &source.to_string(),
         ),
     }
 }
