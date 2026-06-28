@@ -814,6 +814,65 @@ fn memory_context_code_intelligence_falls_back_for_unsupported_files() {
 }
 
 #[test]
+fn memory_context_code_intelligence_falls_back_without_paths() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::create_dir_all(repo.path().join("src")).expect("src dir should write");
+    fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .expect("source file should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "context",
+            "--issue",
+            "COE-999",
+            "--include-code-intel",
+        ],
+    );
+
+    assert_success(&output, "empty path code intelligence fallback");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Repository summary"));
+    assert!(stdout.contains("no requested paths; repository summary fallback used"));
+}
+
+#[test]
+fn memory_context_code_intelligence_mixes_ast_and_fallback_paths() {
+    let repo = TempDir::new().expect("temp repo should exist");
+    fs::create_dir_all(repo.path().join("src")).expect("src dir should write");
+    fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn answer() -> u8 { 42 }\n",
+    )
+    .expect("source file should write");
+    fs::write(repo.path().join("README.md"), "# Example\n").expect("readme should write");
+
+    let output = run(
+        repo.path(),
+        [
+            "memory",
+            "context",
+            "--issue",
+            "COE-999",
+            "--paths",
+            "src/lib.rs,README.md",
+            "--include-code-intel",
+        ],
+    );
+
+    assert_success(&output, "mixed code intelligence fallback");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ast-summary: src/lib.rs"));
+    assert!(stdout.contains("function `answer`"));
+    assert!(stdout.contains("Repository summary"));
+    assert!(stdout.contains("README.md has unsupported language"));
+}
+
+#[test]
 fn memory_context_code_intelligence_rejects_outside_paths() {
     let repo = TempDir::new().expect("temp repo should exist");
     let outside = TempDir::new().expect("outside repo should exist");

@@ -9,8 +9,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator};
 
-// COE-499 adapts the AST provider to memory's existing CodeIntelIndex contract
-// so memory.context gains AST evidence without adding a new public tool surface.
+// TODO(COE-506): invert this adapter so memory consumes a code-intel owned
+// provider trait after the AST integration is stable.
+// COE-499 keeps the existing memory CodeIntelIndex contract so memory.context
+// gains AST evidence without adding a new public tool surface.
 use crate::{
     opensymphony_memory::{
         CodeIntelArtifact, CodeIntelIndex, KnowledgeScope, MemoryError, MemorySourceRef,
@@ -152,7 +154,7 @@ impl AstCodeIntelProvider {
         let repo_root = self.canonical_root()?;
         let commit_sha = git_commit_sha(&repo_root);
         let mut report = AstCodeIntelReport::default();
-        let mut remaining_symbols = limit.max(1);
+        let mut remaining_symbols = limit;
 
         if paths.is_empty() {
             report
@@ -210,6 +212,7 @@ impl AstCodeIntelProvider {
                 remaining_symbols,
             );
             remaining_symbols = remaining_symbols.saturating_sub(used_symbols);
+            report.used_symbols += used_symbols;
             report.artifacts.extend(artifacts);
         }
 
@@ -303,7 +306,7 @@ impl CodeIntelIndex for AstCodeIntelProvider {
         limit: usize,
     ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
         let report = self.code_context_report(paths, scope_refs, limit)?;
-        let trace = report.trace_artifact(scope_refs);
+        let trace = report.trace_artifact(scope_refs, false);
         let mut artifacts = report.artifacts;
         artifacts.push(trace);
         Ok(artifacts)
@@ -332,18 +335,27 @@ impl CodeIntelIndex for CompositeCodeIntelProvider {
         scope_refs: &[KnowledgeScope],
         limit: usize,
     ) -> Result<Vec<CodeIntelArtifact>, MemoryError> {
-        let report = self.ast.code_context_report(paths, scope_refs, limit)?;
+        let mut report = self.ast.code_context_report(paths, scope_refs, limit)?;
         let use_fallback = !report.fallback_reasons.is_empty();
-        let trace = report.trace_artifact(scope_refs);
-        let mut artifacts = report.artifacts;
+        let mut artifacts = std::mem::take(&mut report.artifacts);
+        let fallback_paths = if paths.is_empty() {
+            paths
+        } else {
+            &report.fallback_paths
+        };
+        let has_fallback_target = paths.is_empty() || !fallback_paths.is_empty();
+        let fallback_limit = limit.saturating_sub(report.used_symbols);
+        let mut fallback_used = false;
 
-        if use_fallback {
+        if use_fallback && has_fallback_target && (fallback_limit > 0 || artifacts.is_empty()) {
             artifacts.extend(self.fallback.code_context(
-                &report.fallback_paths,
+                fallback_paths,
                 scope_refs,
-                limit,
+                fallback_limit,
             )?);
+            fallback_used = true;
         }
+        let trace = report.trace_artifact(scope_refs, fallback_used);
         artifacts.push(trace);
         Ok(artifacts)
     }
@@ -356,17 +368,25 @@ struct AstCodeIntelReport {
     fallback_paths: Vec<PathBuf>,
     parsed_files: usize,
     query_runs: usize,
+    used_symbols: usize,
 }
 
 impl AstCodeIntelReport {
-    fn trace_artifact(&self, scope_refs: &[KnowledgeScope]) -> CodeIntelArtifact {
-        let fallback = if self.fallback_reasons.is_empty() {
-            "fallback: CodebaseAnalyzer not used".to_string()
-        } else {
-            format!(
+    fn trace_artifact(
+        &self,
+        scope_refs: &[KnowledgeScope],
+        fallback_used: bool,
+    ) -> CodeIntelArtifact {
+        let fallback = match (self.fallback_reasons.is_empty(), fallback_used) {
+            (true, _) => "fallback: CodebaseAnalyzer not used".to_string(),
+            (false, true) => format!(
                 "fallback: CodebaseAnalyzer used ({})",
                 self.fallback_reasons.join("; ")
-            )
+            ),
+            (false, false) => format!(
+                "fallback: CodebaseAnalyzer not used; fallback budget exhausted ({})",
+                self.fallback_reasons.join("; ")
+            ),
         };
         CodeIntelArtifact {
             provider: "composite-code-intel".to_string(),
@@ -838,6 +858,90 @@ mod tests {
         }));
         assert!(artifacts.iter().any(|artifact| {
             artifact.kind == "trace" && artifact.summary.contains("max AST file size")
+        }));
+    }
+
+    #[test]
+    fn composite_preserves_zero_symbol_limit() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("rust file");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[PathBuf::from("src/lib.rs")], &[], 0)
+            .expect("code context");
+
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-summary")
+        );
+        assert!(
+            !artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-symbols")
+        );
+    }
+
+    #[test]
+    fn composite_empty_paths_return_repository_summary_fallback() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        fs::write(repo.path().join("src/lib.rs"), "pub fn answer() {}\n").expect("rust file");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(&[], &[], 20)
+            .expect("code context");
+
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.provider == "codebase-analyzer" && artifact.title == "Repository summary"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace" && artifact.summary.contains("no requested paths")
+        }));
+    }
+
+    #[test]
+    fn composite_mixed_paths_partition_fallback_budget() {
+        let repo = TempDir::new().expect("temp repo");
+        fs::create_dir_all(repo.path().join("src")).expect("src dir");
+        fs::write(
+            repo.path().join("src/lib.rs"),
+            "pub fn answer() -> u8 { 42 }\n",
+        )
+        .expect("rust file");
+        fs::write(repo.path().join("README.md"), "# Example\n").expect("readme");
+
+        let artifacts = CompositeCodeIntelProvider::new(repo.path())
+            .code_context(
+                &[PathBuf::from("src/lib.rs"), PathBuf::from("README.md")],
+                &[],
+                2,
+            )
+            .expect("code context");
+
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-summary")
+        );
+        assert!(
+            artifacts
+                .iter()
+                .any(|artifact| artifact.kind == "ast-symbols")
+        );
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.provider == "codebase-analyzer" && artifact.title == "Repository summary"
+        }));
+        assert!(artifacts.iter().any(|artifact| {
+            artifact.kind == "trace"
+                && artifact
+                    .summary
+                    .contains("README.md has unsupported language")
         }));
     }
 }
