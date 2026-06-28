@@ -455,13 +455,15 @@ where
         if event.sequence <= *cursor {
             continue;
         }
-        *cursor = event.sequence;
+        let sequence = event.sequence;
         let Some(target) = gateway_cancel_target(&event) else {
+            *cursor = sequence;
             continue;
         };
         scheduler
             .interrupt_operator_cancel(target, observed_at)
             .await?;
+        *cursor = sequence;
     }
     Ok(())
 }
