@@ -47,6 +47,7 @@ pub fn run() {
             actions::open_repository_folder,
             actions::reveal_workspace,
             actions::copy_to_clipboard,
+            actions::open_deeplink,
             actions::open_linear_link,
             actions::notify,
             commands::daemon_status,
