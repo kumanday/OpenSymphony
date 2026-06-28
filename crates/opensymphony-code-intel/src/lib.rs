@@ -13,6 +13,13 @@ pub const TYPESCRIPT_GRAMMAR_VERSION: &str = "0.23.2";
 pub const JAVASCRIPT_GRAMMAR_VERSION: &str = "0.25.0";
 pub const PYTHON_GRAMMAR_VERSION: &str = "0.25.0";
 pub const LIGHTWEIGHT_PARSER_VERSION: &str = "lightweight-text-v1";
+pub const LIGHTWEIGHT_PROVIDER_NAME: &str = "lightweight";
+pub const LIGHTWEIGHT_TREE_SITTER_VERSION: &str = "n/a";
+pub const TYPESCRIPT_QUERY_PACK_VERSION: &str = "typescript-query-pack-v1";
+pub const TSX_QUERY_PACK_VERSION: &str = "tsx-query-pack-v1";
+pub const JAVASCRIPT_QUERY_PACK_VERSION: &str = "javascript-query-pack-v1";
+pub const JSX_QUERY_PACK_VERSION: &str = "jsx-query-pack-v1";
+pub const PYTHON_QUERY_PACK_VERSION: &str = "python-query-pack-v1";
 
 const RUST_METADATA: &str = include_str!("../queries/rust/metadata.toml");
 const TYPESCRIPT_METADATA: &str = include_str!("../queries/typescript/metadata.toml");
@@ -387,6 +394,7 @@ struct LanguageConfig {
     language: SourceLanguage,
     grammar_crate: &'static str,
     grammar_version: &'static str,
+    query_pack_version: &'static str,
     metadata: &'static str,
     queries: &'static [QueryAsset],
     parser: fn() -> Language,
@@ -485,6 +493,7 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             language,
             grammar_crate: "tree-sitter-rust",
             grammar_version: RUST_GRAMMAR_VERSION,
+            query_pack_version: RUST_QUERY_PACK_VERSION,
             metadata: RUST_METADATA,
             queries: RUST_QUERIES,
             parser: || tree_sitter_rust::LANGUAGE.into(),
@@ -493,6 +502,7 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             language,
             grammar_crate: "tree-sitter-typescript",
             grammar_version: TYPESCRIPT_GRAMMAR_VERSION,
+            query_pack_version: TYPESCRIPT_QUERY_PACK_VERSION,
             metadata: TYPESCRIPT_METADATA,
             queries: TYPESCRIPT_QUERIES,
             parser: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -501,6 +511,7 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             language,
             grammar_crate: "tree-sitter-typescript",
             grammar_version: TYPESCRIPT_GRAMMAR_VERSION,
+            query_pack_version: TSX_QUERY_PACK_VERSION,
             metadata: TSX_METADATA,
             queries: TSX_QUERIES,
             parser: || tree_sitter_typescript::LANGUAGE_TSX.into(),
@@ -509,6 +520,7 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             language,
             grammar_crate: "tree-sitter-javascript",
             grammar_version: JAVASCRIPT_GRAMMAR_VERSION,
+            query_pack_version: JAVASCRIPT_QUERY_PACK_VERSION,
             metadata: JAVASCRIPT_METADATA,
             queries: JAVASCRIPT_QUERIES,
             parser: || tree_sitter_javascript::LANGUAGE.into(),
@@ -517,6 +529,7 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             language,
             grammar_crate: "tree-sitter-javascript",
             grammar_version: JAVASCRIPT_GRAMMAR_VERSION,
+            query_pack_version: JSX_QUERY_PACK_VERSION,
             metadata: JSX_METADATA,
             queries: JSX_QUERIES,
             parser: || tree_sitter_javascript::LANGUAGE.into(),
@@ -525,6 +538,7 @@ fn language_config(language: SourceLanguage) -> LanguageConfig {
             language,
             grammar_crate: "tree-sitter-python",
             grammar_version: PYTHON_GRAMMAR_VERSION,
+            query_pack_version: PYTHON_QUERY_PACK_VERSION,
             metadata: PYTHON_METADATA,
             queries: PYTHON_QUERIES,
             parser: || tree_sitter_python::LANGUAGE.into(),
@@ -551,6 +565,11 @@ fn load_metadata(config: LanguageConfig) -> Result<QueryPackMetadata, CodeIntelE
         TREE_SITTER_VERSION,
         &metadata.parser_version,
         "parser_version",
+    )?;
+    metadata_matches(
+        config.query_pack_version,
+        &metadata.version,
+        "query_pack_version",
     )?;
     Ok(metadata)
 }
@@ -719,9 +738,24 @@ fn symbol_name_for_capture(
 fn is_method(language: SourceLanguage, node: Node<'_>) -> bool {
     match language {
         SourceLanguage::Rust => has_ancestor(node, "impl_item"),
-        SourceLanguage::Python => has_ancestor(node, "class_definition"),
+        SourceLanguage::Python => is_python_class_body_function(node),
         _ => matches!(node.kind(), "method_definition"),
     }
+}
+
+fn is_python_class_body_function(node: Node<'_>) -> bool {
+    let class_body = match node.parent() {
+        Some(parent) if parent.kind() == "block" => parent,
+        Some(parent) if parent.kind() == "decorated_definition" => match parent.parent() {
+            Some(block) if block.kind() == "block" => block,
+            _ => return false,
+        },
+        _ => return false,
+    };
+
+    class_body
+        .parent()
+        .is_some_and(|parent| parent.kind() == "class_definition")
 }
 
 fn is_test_function(language: SourceLanguage, node: Node<'_>, source: &[u8]) -> bool {
@@ -825,8 +859,8 @@ fn parse_lightweight_source(
             sha256: source_sha256(source),
         },
         versions: ParserVersions {
-            provider: PROVIDER_NAME.to_string(),
-            tree_sitter: TREE_SITTER_VERSION.to_string(),
+            provider: LIGHTWEIGHT_PROVIDER_NAME.to_string(),
+            tree_sitter: LIGHTWEIGHT_TREE_SITTER_VERSION.to_string(),
             grammar: "lightweight-text".to_string(),
             query_pack: query_pack.clone(),
         },
@@ -1120,6 +1154,7 @@ mod tests {
         assert_symbols_are_one_based(&summary);
         assert_symbol(&summary, SymbolKind::Class, "Worker");
         assert_symbol(&summary, SymbolKind::Method, "run");
+        assert_symbol(&summary, SymbolKind::Function, "nested");
         assert_symbol(&summary, SymbolKind::Function, "make_queue");
         assert_symbol(&summary, SymbolKind::Test, "test_make_queue");
         assert_capture(&summary, "import.source", "pathlib");
@@ -1158,7 +1193,10 @@ mod tests {
                 .any(|diagnostic| diagnostic.kind == AstDiagnosticKind::Missing)
         );
         assert!(python.has_errors);
-        assert!(!python.diagnostics.is_empty());
+        assert!(python.diagnostics.iter().any(|diagnostic| matches!(
+            diagnostic.kind,
+            AstDiagnosticKind::Error | AstDiagnosticKind::Missing
+        )));
     }
 
     #[test]
@@ -1186,6 +1224,11 @@ mod tests {
             assert_eq!(
                 summary.versions.grammar, "lightweight-text",
                 "lightweight summaries do not use a tree-sitter grammar"
+            );
+            assert_eq!(summary.versions.provider, LIGHTWEIGHT_PROVIDER_NAME);
+            assert_eq!(
+                summary.versions.tree_sitter,
+                LIGHTWEIGHT_TREE_SITTER_VERSION
             );
             assert_eq!(summary.symbols[0].kind, SymbolKind::Document);
             assert_eq!(summary.symbols[0].span.start_line, 1);

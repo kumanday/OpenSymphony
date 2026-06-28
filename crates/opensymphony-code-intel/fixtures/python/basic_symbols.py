@@ -4,7 +4,10 @@ from collections import deque
 
 class Worker:
     def run(self):
-        return pathlib.Path(".").resolve()
+        def nested():
+            return pathlib.Path(".").resolve()
+
+        return nested()
 
 
 def make_queue():
