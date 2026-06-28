@@ -461,7 +461,10 @@ impl WorkerBackend for FakeWorker {
         self.interrupts.push(command);
         self.interrupt_results
             .pop_front()
-            .unwrap_or(Ok(WorkerInterruptAcknowledgement { detail: None }))
+            .unwrap_or(Ok(WorkerInterruptAcknowledgement {
+                accepted: true,
+                detail: None,
+            }))
     }
 }
 

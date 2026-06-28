@@ -194,6 +194,7 @@ pub enum WorkerAbortReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerInterruptAcknowledgement {
+    pub accepted: bool,
     pub detail: Option<String>,
 }
 
@@ -288,7 +289,15 @@ pub trait WorkerBackend {
     async fn interrupt_worker(
         &mut self,
         command: HarnessInterruptCommand,
-    ) -> Result<WorkerInterruptAcknowledgement, Self::Error>;
+    ) -> Result<WorkerInterruptAcknowledgement, Self::Error> {
+        Ok(WorkerInterruptAcknowledgement {
+            accepted: false,
+            detail: Some(format!(
+                "harness `{}` does not expose a scheduler-side interrupt channel",
+                command.harness_kind
+            )),
+        })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1033,8 +1042,10 @@ where
 
         let issue_id = issue.id.clone();
         let mut execution = self
-            .remove_execution(&issue_id)
-            .expect("execution existed before removal");
+            .executions
+            .get(&issue_id)
+            .cloned()
+            .expect("execution existed before clone");
         let Some(run) = execution.current_run().cloned() else {
             self.insert_execution(issue_id, execution);
             return Ok(false);
@@ -1081,7 +1092,7 @@ where
             )?;
             let result = self.worker.interrupt_worker(command).await;
             match result {
-                Ok(acknowledgement) => {
+                Ok(acknowledgement) if acknowledgement.accepted => {
                     execution.acknowledge_interrupt(observed_at)?;
                     if let Some(detail) = acknowledgement.detail {
                         execution.observe_runtime_event(
@@ -1097,6 +1108,14 @@ where
                             })),
                         )?;
                     }
+                }
+                Ok(acknowledgement) => {
+                    execution.fail_interrupt(
+                        observed_at,
+                        acknowledgement.detail.unwrap_or_else(|| {
+                            "worker interrupt request was not accepted".to_string()
+                        }),
+                    )?;
                 }
                 Err(error) => {
                     execution.fail_interrupt(observed_at, error.to_string())?;
@@ -1118,15 +1137,13 @@ where
         let Some(recovered_run) = recovered_run else {
             return Ok(());
         };
-        let Some(mut execution) = self.remove_execution(issue_id) else {
+        let Some(execution) = self.executions.get(issue_id).cloned() else {
             return Ok(());
         };
         if execution.status() != SchedulerStatus::Unclaimed {
-            self.insert_execution(issue_id.clone(), execution);
             return Ok(());
         }
         let Some(workspace) = execution.workspace().cloned() else {
-            self.insert_execution(issue_id.clone(), execution);
             return Ok(());
         };
         let run = RunAttempt::new(
@@ -1138,7 +1155,7 @@ where
             None,
             self.config.max_turns,
         );
-        execution = execution.claim(run.clone())?;
+        let mut execution = execution.claim(run.clone())?;
         execution = execution.start_running(
             observed_at,
             effective_stall_timeout(self.config.stall_timeout_ms),

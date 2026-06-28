@@ -171,9 +171,10 @@ async fn run_recovers_human_review_worker_and_interrupts_when_tracker_reports_me
 
     let mut child = spawn_run_child(project.path(), &[]);
 
-    wait_for_merging_supersede_event(&format!("http://{bind_addr}/api/v1/snapshot"))
+    let snapshot = wait_for_merging_supersede_event(&format!("http://{bind_addr}/api/v1/snapshot"))
         .await
         .expect("run command should interrupt recovered Human Review polling after Merging");
+    print_merging_supersede_evidence(&snapshot);
 
     terminate_child(&mut child).await;
 }
@@ -479,7 +480,7 @@ async fn wait_for_dry_run_route_decision(url: &str) -> Result<(), String> {
     ))
 }
 
-async fn wait_for_merging_supersede_event(url: &str) -> Result<(), String> {
+async fn wait_for_merging_supersede_event(url: &str) -> Result<Value, String> {
     let client = reqwest::Client::new();
     let deadline = Instant::now() + Duration::from_secs(45);
     while Instant::now() < deadline {
@@ -488,13 +489,34 @@ async fn wait_for_merging_supersede_event(url: &str) -> Result<(), String> {
             && let Ok(snapshot) = response.json::<Value>().await
             && merging_supersede_event_visible(&snapshot)
         {
-            return Ok(());
+            return Ok(snapshot);
         }
         sleep(Duration::from_millis(250)).await;
     }
     Err(format!(
         "timed out waiting for Merging supersede event at {url}"
     ))
+}
+
+fn print_merging_supersede_evidence(envelope: &Value) {
+    if let Some(issue) = envelope["snapshot"]["issues"]
+        .as_array()
+        .and_then(|issues| issues.iter().find(|issue| issue["identifier"] == "COE-492"))
+    {
+        let interrupt_events = issue["recent_events"]
+            .as_array()
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|event| event["kind"] == "scheduler.interrupt_requested")
+                    .count()
+            })
+            .unwrap_or_default();
+        println!(
+            "merging supersede snapshot: identifier={} tracker_state={} interrupt_requested_events={} reason=tracker_merging_supersedes_human_review",
+            issue["identifier"], issue["tracker_state"], interrupt_events
+        );
+    }
 }
 
 fn merging_supersede_event_visible(envelope: &Value) -> bool {

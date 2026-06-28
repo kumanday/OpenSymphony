@@ -772,7 +772,10 @@ fn conversation_metadata_from_manifest(
         websocket_query_param_name: manifest.websocket_query_param_name.clone(),
         fresh_conversation: manifest.fresh_conversation,
         runtime_contract_version: manifest.runtime_contract_version.clone(),
-        stream_state: RuntimeStreamState::Ready,
+        // Recovery reconstructs metadata from persisted manifests only. It is
+        // not a live WebSocket attachment, so callers must reattach/reconcile
+        // before treating the stream as ready.
+        stream_state: RuntimeStreamState::Closed,
         last_event_id: manifest.last_event_id.clone(),
         last_event_kind: manifest.last_event_kind.clone(),
         last_event_at: manifest.last_event_at.map(datetime_to_timestamp_ms),
@@ -2180,6 +2183,7 @@ impl WorkerBackend for RuntimeWorkerBackend {
             .await
             .map_err(|error| CliWorkerError::InterruptFailed(error.to_string()))?;
         Ok(WorkerInterruptAcknowledgement {
+            accepted: true,
             detail: acknowledgement
                 .diagnostic
                 .or_else(|| {
@@ -3336,6 +3340,10 @@ mod tests {
         assert_eq!(
             recovered_run.conversation.conversation_id.as_str(),
             "conv-recovery"
+        );
+        assert_eq!(
+            recovered_run.conversation.stream_state,
+            RuntimeStreamState::Closed
         );
         assert_eq!(recovered.workspace.path, ensured.handle.workspace_path());
     }
