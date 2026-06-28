@@ -6,6 +6,7 @@ import {
   type GatewayTransport,
 } from "@opensymphony/api-client";
 import type { ConnectionProfile } from "@opensymphony/gateway-schema";
+import type { RunDetail } from "@opensymphony/gateway-schema";
 import { defaultModelProfiles } from "@opensymphony/gateway-schema";
 import {
   createAsyncModelProfileStore,
@@ -44,6 +45,14 @@ interface NativeProfileResponse {
 
 interface NativeSettingResponse {
   value?: NativeSettingValue | null;
+}
+
+interface NativeCopyResponse {
+  copied: boolean;
+}
+
+interface NativeOpenDeeplinkResponse {
+  opened: boolean;
 }
 
 type NativeSettingValue =
@@ -215,11 +224,11 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
   }
 
   openWorkspace(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.openWorkspace(runId);
+    return this.runDetail(runId).then((run) => this.copyWorkspacePath(run));
   }
 
   debugRun(runId: string): Promise<ActionReceipt> {
-    return this.actionInner.debugRun(runId);
+    return this.runDetail(runId).then((run) => this.openOrCopyDebugTarget(run));
   }
 
   async attach(): Promise<void> {
@@ -246,6 +255,85 @@ class DesktopTransportAdapter implements TauriTransportAdapter {
     }
     return invoke<T>(command, args);
   }
+
+  private async copyWorkspacePath(run: RunDetail): Promise<ActionReceipt> {
+    if (!run.workspace_path) {
+      return desktopActionReceipt("open_workspace", run.run_id, "rejected", "workspace path unavailable");
+    }
+    await copyText(run.workspace_path);
+    return desktopActionReceipt("open_workspace", run.run_id, "accepted", "workspace path copied");
+  }
+
+  private async openOrCopyDebugTarget(run: RunDetail): Promise<ActionReceipt> {
+    if (run.harness_type === "codex_app_server") {
+      if (!run.conversation_id) {
+        return desktopActionReceipt("debug", run.run_id, "rejected", "Codex thread id unavailable");
+      }
+      const url = `codex://threads/${run.conversation_id}`;
+      try {
+        await openDeeplink(url);
+        return desktopActionReceipt("debug", run.run_id, "accepted", "Codex thread opened");
+      } catch (error) {
+        await copyText(url);
+        return desktopActionReceipt("debug", run.run_id, "accepted", `Codex deeplink copied: ${stringifyError(error)}`);
+      }
+    }
+
+    if (!run.workspace_path) {
+      return desktopActionReceipt("debug", run.run_id, "rejected", "workspace path unavailable");
+    }
+    const command = `cd ${shellQuote(run.workspace_path)} && opensymphony debug ${shellQuote(run.issue_identifier)}`;
+    await copyText(command);
+    return desktopActionReceipt("debug", run.run_id, "accepted", "debug command copied");
+  }
+}
+
+async function copyText(text: string): Promise<void> {
+  const invoke = getTauriInvoke();
+  try {
+    if (!invoke) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    await invoke<NativeCopyResponse>("copy_to_clipboard", { req: { text } });
+  } catch (error) {
+    throw new Error(`clipboard copy failed: ${stringifyError(error)}`);
+  }
+}
+
+async function openDeeplink(url: string): Promise<void> {
+  const invoke = getTauriInvoke();
+  if (!invoke) {
+    throw new Error("desktop opener unavailable");
+  }
+  await invoke<NativeOpenDeeplinkResponse>("open_deeplink", { req: { url } });
+}
+
+function desktopActionReceipt(
+  action: ActionDispatch["action_kind"],
+  runId: string,
+  status: ActionReceipt["status"],
+  reason: string,
+): ActionReceipt {
+  return {
+    schema_version: { major: 1, minor: 0, patch: 0 },
+    action_id: `${action}-${runId}`,
+    correlation_id: `${action}-${runId}-${crypto.randomUUID()}`,
+    status,
+    reason,
+    expected_followup: [],
+    issued_at: new Date().toISOString(),
+  };
+}
+
+function shellQuote(value: string): string {
+  // POSIX shell string for the copied debug command. Keep this as data for the
+  // operator to paste; do not reuse it as a run-in-place command executor.
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+function stringifyError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function createDesktopTransport(

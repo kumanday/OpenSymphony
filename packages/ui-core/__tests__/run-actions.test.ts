@@ -41,9 +41,9 @@ const receipt: ActionReceipt = {
 };
 
 describe("buildActionBarItems", () => {
-  it("renders all standard actions when allowed and safe", () => {
+  it("renders only backed run detail actions when allowed and safe", () => {
     const run = runFixture({
-      allowed_actions: ["retry", "cancel", "rehydrate", "detach"],
+      allowed_actions: ["retry", "cancel", "rehydrate", "detach", "comment", "create_followup", "open_workspace", "debug"],
       safe_actions: {
         retry: true,
         cancel: true,
@@ -53,17 +53,11 @@ describe("buildActionBarItems", () => {
     });
     const items = buildActionBarItems(run);
     const actions = items.map((i) => i.action);
-    expect(actions).toContain("retry");
-    expect(actions).toContain("cancel");
-    expect(actions).toContain("rehydrate");
-    expect(actions).toContain("detach");
-    const standardItems = items.filter((i) =>
-      ["retry", "cancel", "rehydrate", "detach"].includes(i.action),
-    );
-    expect(standardItems.every((i) => i.enabled)).toBe(true);
+    expect(actions).toEqual(["cancel", "open_workspace", "debug"]);
+    expect(items.every((i) => i.enabled)).toBe(true);
   });
 
-  it("disables unsafe retry and warns against duplicate-run retries", () => {
+  it("filters out unbacked retry action", () => {
     const run = runFixture({
       allowed_actions: ["retry"],
       safe_actions: {
@@ -74,9 +68,7 @@ describe("buildActionBarItems", () => {
       },
       liveness: { phase: "active", stream: "healthy" },
     });
-    const retry = buildActionBarItems(run).find((i) => i.action === "retry");
-    expect(retry?.enabled).toBe(false);
-    expect(retry?.warning).toMatch(/Prevented duplicate-run retry/);
+    expect(buildActionBarItems(run)).toEqual([]);
   });
 
   it("disables actions not advertised by the gateway", () => {
@@ -90,11 +82,11 @@ describe("buildActionBarItems", () => {
       },
     });
     const items = buildActionBarItems(run);
-    expect(items.find((i) => i.action === "retry")?.enabled).toBe(false);
+    expect(items.find((i) => i.action === "open_workspace")).toBeUndefined();
     expect(items.find((i) => i.action === "cancel")?.enabled).toBe(true);
   });
 
-  it("shows extra actions only when allowed", () => {
+  it("shows Workspace and Debug only when allowed", () => {
     const run = runFixture({
       allowed_actions: ["retry", "comment", "create_followup", "open_workspace", "debug"],
       safe_actions: {
@@ -105,8 +97,8 @@ describe("buildActionBarItems", () => {
       },
     });
     const items = buildActionBarItems(run);
-    expect(items.find((i) => i.action === "comment")?.enabled).toBe(true);
-    expect(items.find((i) => i.action === "create_followup")?.enabled).toBe(true);
+    expect(items.find((i) => i.action === "comment")).toBeUndefined();
+    expect(items.find((i) => i.action === "create_followup")).toBeUndefined();
     expect(items.find((i) => i.action === "open_workspace")?.enabled).toBe(true);
     expect(items.find((i) => i.action === "debug")?.enabled).toBe(true);
   });
@@ -125,6 +117,22 @@ describe("buildActionBarItems", () => {
     const cancel = buildActionBarItems(run).find((i) => i.action === "cancel");
     expect(cancel?.enabled).toBe(false);
     expect(cancel?.warning).toMatch(/stalled/);
+  });
+
+  it("disables cancel while a cancel request is pending", () => {
+    const run = runFixture({
+      allowed_actions: ["cancel"],
+      cancel_requested: true,
+      safe_actions: {
+        retry: false,
+        cancel: true,
+        rehydrate: false,
+        detach: false,
+      },
+    });
+    const cancel = buildActionBarItems(run).find((i) => i.action === "cancel");
+    expect(cancel?.enabled).toBe(false);
+    expect(cancel?.warning).toBe("Cancel request pending acknowledgement");
   });
 });
 
