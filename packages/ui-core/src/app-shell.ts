@@ -843,14 +843,9 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
     if (!runId) return;
     const transport = this.transport as unknown as {
       cancelRun?: (id: string) => Promise<ActionReceipt>;
-      retryRun?: (id: string) => Promise<ActionReceipt>;
-      rehydrateRun?: (id: string) => Promise<ActionReceipt>;
       resumeRun?: (id: string) => Promise<ActionReceipt>;
-      commentRun?: (id: string, text: string) => Promise<ActionReceipt>;
-      createFollowup?: (id: string, payload: unknown) => Promise<ActionReceipt>;
       openWorkspace?: (id: string) => Promise<ActionReceipt>;
       debugRun?: (id: string) => Promise<ActionReceipt>;
-      dispatchAction?: (action: unknown) => Promise<ActionReceipt>;
     };
     let receipt: ActionReceipt | null = null;
     try {
@@ -858,29 +853,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         case "cancel":
           receipt = await (transport.cancelRun?.(runId) ?? unsupportedAction(action));
           break;
-        case "retry":
-          receipt = await (transport.retryRun?.(runId) ?? unsupportedAction(action));
-          break;
-        case "rehydrate":
-          receipt = await (transport.rehydrateRun?.(runId) ?? unsupportedAction(action));
-          break;
         case "resume":
           receipt = await (transport.resumeRun?.(runId) ?? unsupportedAction(action));
-          break;
-        case "detach":
-          receipt = await (transport.dispatchAction?.({
-            schema_version: schemaVersion,
-            correlation_id: `detach-${runId}-${crypto.randomUUID()}`,
-            action_kind: "transition_issue",
-            target_entity: { entity_kind: "run", entity_id: runId },
-            payload: { intent: "detach" },
-          }) ?? unsupportedAction(action));
-          break;
-        case "comment":
-          receipt = await (transport.commentRun?.(runId, "Operator comment") ?? unsupportedAction(action));
-          break;
-        case "create_followup":
-          receipt = await (transport.createFollowup?.(runId, { title: "Follow-up from run" }) ?? unsupportedAction(action));
           break;
         case "open_workspace":
           receipt = await (transport.openWorkspace?.(runId) ?? unsupportedAction(action));
@@ -888,6 +862,8 @@ class OpenSymphonyApp implements OpenSymphonyAppHandle {
         case "debug":
           receipt = await (transport.debugRun?.(runId) ?? unsupportedAction(action));
           break;
+        default:
+          receipt = await unsupportedAction(action);
       }
       if (!receipt) return;
       this.state.lastActionReceipt = receipt;
