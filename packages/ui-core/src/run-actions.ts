@@ -36,11 +36,6 @@ export function buildActionBarItems(run: RunDetail): ActionBarItem[] {
     } else if (!safeAction) {
       warning = `Unsafe to ${action} while run is ${phase ?? run.status}`;
     }
-    // Duplicate-run retry prevention: retry on an active/owned run is unsafe
-    // and should be blocked unless explicitly allowed by the safe_actions gate.
-    if (action === "retry" && allowedAction && !safeAction) {
-      warning = `Prevented duplicate-run retry: run is ${phase ?? run.status}`;
-    }
     items.push({ action, label, enabled, warning });
   };
 

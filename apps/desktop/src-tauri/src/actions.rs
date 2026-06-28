@@ -183,6 +183,9 @@ fn validate_deeplink(url: &str) -> Result<(), DesktopError> {
     if parsed.scheme() != "codex" || parsed.host_str() != Some("threads") {
         return Err(DesktopError::PermissionDenied);
     }
+    if parsed.port().is_some() || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(DesktopError::PermissionDenied);
+    }
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err(DesktopError::PermissionDenied);
     }
@@ -416,6 +419,10 @@ mod tests {
             "codex://threads/thread-123/extra",
             "codex://threads/thread-123?x=1",
             "codex://threads/thread-123#frag",
+            "codex://user@threads/thread-123",
+            "codex://:pass@threads/thread-123",
+            "codex://user:pass@threads/thread-123",
+            "codex://threads:123/thread-123",
         ] {
             assert!(
                 matches!(validate_deeplink(url), Err(DesktopError::PermissionDenied)),

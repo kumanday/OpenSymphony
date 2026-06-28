@@ -321,7 +321,7 @@ function desktopActionReceipt(
     correlation_id: `${action}-${runId}-${crypto.randomUUID()}`,
     status,
     reason,
-    expected_followup: ["journal_update"],
+    expected_followup: [],
     issued_at: new Date().toISOString(),
   };
 }
