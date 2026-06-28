@@ -30,8 +30,9 @@ use crate::opensymphony_openhands::{
     WorkpadComment as SessionWorkpadComment, WorkpadCommentSource,
 };
 use crate::opensymphony_orchestrator::{
-    RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend, WorkerLaunch,
-    WorkerStartRequest, WorkerUpdate, WorkspaceBackend,
+    RecoveredRun, RecoveryRecord, TrackerBackend, WorkerAbortReason, WorkerBackend,
+    WorkerInterruptAcknowledgement, WorkerLaunch, WorkerStartRequest, WorkerUpdate,
+    WorkspaceBackend,
 };
 use crate::opensymphony_workflow::{Environment, ProcessEnvironment, ResolvedWorkflow};
 use crate::opensymphony_workspace::{
@@ -62,6 +63,7 @@ const CODEX_SCHEMA_GENERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const CODEX_TERMINAL_TIMEOUT: Duration = Duration::from_secs(300);
 const CODEX_STDERR_TAIL_LINES: usize = 20;
 const CODEX_SCHEMA_STDERR_PREVIEW_CHARS: usize = 500;
+const OPENHANDS_AGENT_SERVER_KIND: &str = "openhands_agent_server";
 
 #[derive(Debug, Error)]
 pub(super) enum CliWorkspaceError {
@@ -89,6 +91,8 @@ pub(super) enum CliWorkerError {
     LaunchChannelClosed,
     #[error("worker task failed: {0}")]
     Join(#[from] tokio::task::JoinError),
+    #[error("worker interrupt failed: {0}")]
+    InterruptFailed(String),
 }
 
 #[derive(Debug)]
@@ -644,6 +648,13 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                     RunStatus::Preparing | RunStatus::Prepared | RunStatus::Running
                 )
             });
+            let conversation_manifest =
+                recovered_conversation_manifest(&self.manager, &handle).await?;
+            let harness_kind = conversation_manifest
+                .as_ref()
+                .map(recovered_harness_kind_from_manifest);
+            let recovered_run =
+                recovered_run_from_manifests(run_manifest.as_ref(), conversation_manifest.as_ref());
 
             recoveries.push(RecoveryRecord {
                 issue: normalized_issue_from_manifest(
@@ -662,6 +673,8 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
                         .map(datetime_to_timestamp_ms),
                 },
                 had_in_flight_run,
+                harness_kind,
+                recovered_run: had_in_flight_run.then_some(recovered_run).flatten(),
             });
         }
         Ok(recoveries)
@@ -685,6 +698,95 @@ impl WorkspaceBackend for RuntimeWorkspaceBackend {
             }
         }
         Ok(())
+    }
+}
+
+async fn recovered_conversation_manifest(
+    manager: &WorkspaceManager,
+    handle: &WorkspaceHandle,
+) -> Result<Option<IssueConversationManifest>, WorkspaceError> {
+    let manifest_path = handle.conversation_manifest_path();
+    let Some(raw_manifest) = manager.read_text_artifact(handle, &manifest_path).await? else {
+        return Ok(None);
+    };
+    let manifest = match serde_json::from_str::<IssueConversationManifest>(&raw_manifest) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::warn!(
+                manifest = %manifest_path.display(),
+                %error,
+                "skipping recovered scheduler harness kind for invalid conversation manifest"
+            );
+            return Ok(None);
+        }
+    };
+    Ok(Some(manifest))
+}
+
+fn recovered_harness_kind_from_manifest(manifest: &IssueConversationManifest) -> String {
+    if let Some(transport_target) = &manifest.transport_target {
+        return transport_target.clone();
+    }
+    if conversation_manifest_is_codex(manifest) {
+        return CODEX_APP_SERVER_KIND.to_string();
+    }
+    "<unknown>".to_string()
+}
+
+fn recovered_run_from_manifests(
+    run_manifest: Option<&RunManifest>,
+    conversation_manifest: Option<&IssueConversationManifest>,
+) -> Option<RecoveredRun> {
+    let run_manifest = run_manifest?;
+    let conversation_manifest = conversation_manifest?;
+    let worker_id = run_manifest
+        .run_id
+        .strip_prefix("run-")
+        .unwrap_or(run_manifest.run_id.as_str());
+    let worker_id = match crate::opensymphony_domain::WorkerId::new(worker_id.to_string()) {
+        Ok(worker_id) => worker_id,
+        Err(error) => {
+            tracing::warn!(
+                run_id = %run_manifest.run_id,
+                %error,
+                "skipping recovered scheduler run for invalid worker id"
+            );
+            return None;
+        }
+    };
+    Some(RecoveredRun {
+        worker_id,
+        conversation: conversation_metadata_from_manifest(conversation_manifest),
+    })
+}
+
+fn conversation_metadata_from_manifest(
+    manifest: &IssueConversationManifest,
+) -> ConversationMetadata {
+    ConversationMetadata {
+        conversation_id: manifest.conversation_id.clone(),
+        server_base_url: manifest.server_base_url.clone(),
+        transport_target: manifest.transport_target.clone(),
+        http_auth_mode: manifest.http_auth_mode.clone(),
+        websocket_auth_mode: manifest.websocket_auth_mode.clone(),
+        websocket_query_param_name: manifest.websocket_query_param_name.clone(),
+        fresh_conversation: manifest.fresh_conversation,
+        runtime_contract_version: manifest.runtime_contract_version.clone(),
+        // Recovery reconstructs metadata from persisted manifests only. It is
+        // not a live WebSocket attachment, so callers must reattach/reconcile
+        // before treating the stream as ready.
+        stream_state: RuntimeStreamState::Closed,
+        last_event_id: manifest.last_event_id.clone(),
+        last_event_kind: manifest.last_event_kind.clone(),
+        last_event_at: manifest.last_event_at.map(datetime_to_timestamp_ms),
+        last_event_summary: manifest.last_event_summary.clone(),
+        recent_activity: Vec::new(),
+        input_tokens: manifest.input_tokens,
+        output_tokens: manifest.output_tokens,
+        cache_read_tokens: manifest.cache_read_tokens,
+        total_tokens: manifest.input_tokens.saturating_add(manifest.output_tokens),
+        runtime_seconds: 0,
+        next_activity_sequence: 0,
     }
 }
 
@@ -2048,6 +2150,108 @@ impl WorkerBackend for RuntimeWorkerBackend {
         self.abort_tracked_task(worker_id.as_str());
         Ok(())
     }
+
+    async fn interrupt_worker(
+        &mut self,
+        command: crate::opensymphony_domain::HarnessInterruptCommand,
+    ) -> Result<WorkerInterruptAcknowledgement, Self::Error> {
+        if command.harness_kind == CODEX_APP_SERVER_KIND {
+            return Err(CliWorkerError::InterruptFailed(
+                "Codex stdio workers do not yet expose a scheduler-side interrupt channel"
+                    .to_string(),
+            ));
+        }
+        if command.harness_kind != OPENHANDS_AGENT_SERVER_KIND {
+            return Err(CliWorkerError::InterruptFailed(format!(
+                "harness `{}` does not expose a scheduler-side interrupt channel",
+                command.harness_kind
+            )));
+        }
+
+        let mut runner = IssueSessionRunner::with_environment(
+            self.client.clone(),
+            self.runner_config.clone(),
+            OverlayEnvironment {
+                overrides: self.worker_env.clone(),
+            },
+        );
+        if let Some(source) = self.workpad_comment_source.clone() {
+            runner = runner.with_workpad_comment_source(source);
+        }
+        let acknowledgement = runner
+            .interrupt(&command)
+            .await
+            .map_err(|error| CliWorkerError::InterruptFailed(openhands_error_detail(&error)))?;
+        Ok(WorkerInterruptAcknowledgement {
+            accepted: true,
+            detail: acknowledgement
+                .diagnostic
+                .or_else(|| {
+                    acknowledgement
+                        .execution_status
+                        .map(|status| format!("OpenHands interrupt acknowledged with `{status}`"))
+                })
+                .or_else(|| Some("OpenHands interrupt acknowledged".to_string())),
+        })
+    }
+}
+
+fn openhands_error_detail(error: &OpenHandsError) -> String {
+    match error {
+        OpenHandsError::InvalidConfiguration { detail } => {
+            format!("openhands.invalid_configuration: {detail}")
+        }
+        OpenHandsError::Transport { operation, detail } => {
+            format!("openhands.transport.{operation}: {detail}")
+        }
+        OpenHandsError::HttpStatus {
+            operation,
+            status_code,
+            body,
+        } => format!(
+            "openhands.http_status.{operation}.{status_code}: {}",
+            truncated_diagnostic_body(body)
+        ),
+        OpenHandsError::Protocol { operation, detail } => {
+            format!("openhands.protocol.{operation}: {detail}")
+        }
+        OpenHandsError::WebSocketTransport { operation, detail } => {
+            format!("openhands.websocket.{operation}: {detail}")
+        }
+        OpenHandsError::MalformedWebSocketEvent { detail, snippet } => {
+            format!("openhands.websocket.malformed_event: {detail}; payload prefix: {snippet}")
+        }
+        OpenHandsError::ReadinessTimeout(timeout) => {
+            format!("openhands.websocket.readiness_timeout: {timeout:?}")
+        }
+        OpenHandsError::ProbeActivityTimeout(timeout) => {
+            format!("openhands.probe.activity_timeout: {timeout:?}")
+        }
+        OpenHandsError::ProbeRunUnhealthy(detail) => {
+            format!("openhands.probe.unhealthy: {detail}")
+        }
+        OpenHandsError::WebSocketClosed => {
+            "openhands.websocket.closed_before_readiness".to_string()
+        }
+        OpenHandsError::ReconnectExhausted {
+            attempts,
+            last_error,
+        } => format!(
+            "openhands.websocket.reconnect_exhausted: attempts={attempts}; last_error={last_error}"
+        ),
+    }
+}
+
+fn truncated_diagnostic_body(body: &str) -> String {
+    const MAX_CHARS: usize = 240;
+
+    let mut chars = body.chars();
+    let prefix: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{prefix}...")
+    } else {
+        prefix
+    }
 }
 
 fn normalized_state_name(name: &str) -> String {
@@ -2120,8 +2324,9 @@ mod tests {
     };
 
     use crate::opensymphony_domain::{
-        ConversationId, IssueId, IssueIdentifier, IssueState, IssueStateCategory, RunAttempt,
-        TrackerIssueStateKind, WorkerId, WorkspaceKey,
+        ConversationId, HarnessInterruptCommand, HarnessInterruptExpectedNextState,
+        HarnessInterruptReason, IssueId, IssueIdentifier, IssueState, IssueStateCategory,
+        RunAttempt, TrackerIssueStateKind, WorkerId, WorkspaceKey,
     };
     use crate::opensymphony_workflow::WorkflowDefinition;
     use tempfile::TempDir;
@@ -2315,6 +2520,27 @@ mod tests {
         };
 
         assert!(conversation_manifest_is_codex(&manifest));
+    }
+
+    #[test]
+    fn recovered_harness_kind_is_unknown_without_transport_target() {
+        let manifest = sample_conversation_manifest("legacy-openhands");
+
+        assert_eq!(recovered_harness_kind_from_manifest(&manifest), "<unknown>");
+    }
+
+    #[test]
+    fn openhands_http_status_diagnostic_truncates_body() {
+        let error = OpenHandsError::HttpStatus {
+            operation: "interrupt",
+            status_code: 500,
+            body: "x".repeat(300),
+        };
+        let detail = openhands_error_detail(&error);
+
+        assert!(detail.starts_with("openhands.http_status.interrupt.500: "));
+        assert!(detail.ends_with("..."));
+        assert!(detail.len() < 300);
     }
 
     #[test]
@@ -3155,6 +3381,17 @@ mod tests {
             .start_run(&ensured.handle, &RunDescriptor::new("run-recovery", 2))
             .await
             .expect("run manifest should be written");
+        let mut conversation_manifest = sample_conversation_manifest("conv-recovery");
+        conversation_manifest.transport_target = Some(CODEX_APP_SERVER_KIND.to_string());
+        workspace_manager
+            .write_text_artifact(
+                &ensured.handle,
+                &ensured.handle.conversation_manifest_path(),
+                &serde_json::to_string_pretty(&conversation_manifest)
+                    .expect("conversation manifest should encode"),
+            )
+            .await
+            .expect("conversation manifest should be written");
 
         let mut backend = RuntimeWorkspaceBackend::new(workspace_manager, &workflow);
         let recoveries = backend
@@ -3170,6 +3407,23 @@ mod tests {
         );
         assert_eq!(recovered.issue.state.category, IssueStateCategory::Active);
         assert!(recovered.had_in_flight_run);
+        assert_eq!(
+            recovered.harness_kind.as_deref(),
+            Some(CODEX_APP_SERVER_KIND)
+        );
+        let recovered_run = recovered
+            .recovered_run
+            .as_ref()
+            .expect("in-flight run should be recovered");
+        assert_eq!(recovered_run.worker_id.as_str(), "recovery");
+        assert_eq!(
+            recovered_run.conversation.conversation_id.as_str(),
+            "conv-recovery"
+        );
+        assert_eq!(
+            recovered_run.conversation.stream_state,
+            RuntimeStreamState::Closed
+        );
         assert_eq!(recovered.workspace.path, ensured.handle.workspace_path());
     }
 
@@ -3405,6 +3659,85 @@ Run the scheduler.
             Ok(Ok(())) | Ok(Err(_)) => {}
             Err(_) => panic!("dropping the backend should abort tracked tasks"),
         }
+    }
+
+    #[tokio::test]
+    async fn codex_scheduler_interrupt_reports_unavailable_stdio_channel() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+            BTreeMap::new(),
+        );
+
+        let error = backend
+            .interrupt_worker(HarnessInterruptCommand {
+                run_id: "COE-505".to_string(),
+                issue_id: IssueId::new("issue-codex-interrupt").expect("issue id should be valid"),
+                harness_kind: CODEX_APP_SERVER_KIND.to_string(),
+                conversation_id: ConversationId::new("thread-1")
+                    .expect("thread id should be valid"),
+                turn_id: Some("turn-1".to_string()),
+                reason: HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+                expected_next_state: HarnessInterruptExpectedNextState::CloseoutPending,
+            })
+            .await
+            .expect_err("Codex stdio scheduler interrupt should be explicitly unavailable");
+
+        assert!(
+            error.to_string().contains(
+                "Codex stdio workers do not yet expose a scheduler-side interrupt channel"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_scheduler_interrupt_harness_is_rejected_before_openhands() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let workspace_root = tempdir.path().join("workspace-root");
+        fs::create_dir_all(&workspace_root).expect("workspace root should be created");
+
+        let workflow = Arc::new(sample_workflow(tempdir.path(), &workspace_root));
+        let workspace_manager = Arc::new(
+            WorkspaceManager::new(build_workspace_manager_config(&workflow))
+                .expect("workspace manager should be constructed"),
+        );
+        let mut backend = RuntimeWorkerBackend::new(
+            OpenHandsClient::new(TransportConfig::new("http://127.0.0.1:1")),
+            workflow,
+            workspace_manager,
+            None,
+            BTreeMap::new(),
+        );
+
+        let error = backend
+            .interrupt_worker(HarnessInterruptCommand {
+                run_id: "COE-492".to_string(),
+                issue_id: IssueId::new("issue-unknown-interrupt")
+                    .expect("issue id should be valid"),
+                harness_kind: "experimental_worker".to_string(),
+                conversation_id: ConversationId::new("conv-unknown")
+                    .expect("conversation id should be valid"),
+                turn_id: None,
+                reason: HarnessInterruptReason::TrackerMergingSupersedesHumanReview,
+                expected_next_state: HarnessInterruptExpectedNextState::CloseoutPending,
+            })
+            .await
+            .expect_err("unknown harnesses must not be routed to OpenHands");
+
+        assert!(error.to_string().contains(
+            "harness `experimental_worker` does not expose a scheduler-side interrupt channel"
+        ));
     }
 
     #[tokio::test]
