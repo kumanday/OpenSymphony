@@ -154,7 +154,7 @@ export interface MemoryGraphSourceRef {
 }
 
 export interface MemoryGraphNodeMetrics {
-  degree: number;
+  degree?: number;
   indegree: number;
   outdegree: number;
   centrality?: number;
